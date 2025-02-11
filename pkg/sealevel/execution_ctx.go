@@ -38,6 +38,9 @@ type SlotCtx struct {
 	RecentBlockhash      [32]byte
 	SlotBank             SlotBank
 	Features             *features.Features
+	VoteTimestamps       map[solana.PublicKey]BlockTimestamp
+	StakeAccts           map[solana.PublicKey]bool
+	FinalBankhash        []byte
 	Replay               bool
 }
 

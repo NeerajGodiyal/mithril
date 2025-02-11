@@ -33,6 +33,8 @@ type TransactionCtx struct {
 	AllInstructions          []Instruction
 	ComputeBudgetLimits      *ComputeBudgetLimits
 	Signature                solana.Signature
+	ModifiedStakeAccts       bool
+	ModifiedVoteAccts        bool
 }
 
 func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {

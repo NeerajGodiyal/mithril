@@ -202,6 +202,66 @@ func recordModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 	}
 }
 
+func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
+	isEmpty := acct.Lamports == 0
+	isUninitialized := true
+
+	if len(acct.Data) >= 4 {
+		acctType := binary.LittleEndian.Uint32(acct.Data)
+		isUninitialized = acctType == sealevel.StakeStateV2StatusUninitialized
+	}
+
+	if isEmpty || isUninitialized {
+		delete(slotCtx.StakeAccts, acct.Key)
+	} else {
+		slotCtx.StakeAccts[acct.Key] = true
+	}
+}
+
+func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
+	voteStateVersioned := new(sealevel.VoteStateVersions)
+	decoder := bin.NewBinDecoder(acct.Data)
+
+	err := voteStateVersioned.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		panic(fmt.Sprintf("unable to deserialize versioned vote state - shouldn't be possible. %s", err))
+	}
+
+	var timestamp sealevel.BlockTimestamp
+
+	switch voteStateVersioned.Type {
+	case sealevel.VoteStateVersionCurrent:
+		timestamp = voteStateVersioned.Current.LastTimestamp
+
+	case sealevel.VoteStateVersionV0_23_5:
+		timestamp = voteStateVersioned.V0_23_5.LastTimestamp
+
+	case sealevel.VoteStateVersionV1_14_11:
+		timestamp = voteStateVersioned.V1_14_11.LastTimestamp
+	}
+
+	slotCtx.VoteTimestamps[acct.Key] = timestamp
+}
+
+func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, writablePubkeys []solana.PublicKey) {
+	modifiedVoteAccts := execCtx.TransactionContext.ModifiedVoteAccts
+	modifiedStakeAccts := execCtx.TransactionContext.ModifiedStakeAccts
+
+	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
+		if !slices.Contains(writablePubkeys, acct.Key) {
+			continue
+		}
+
+		if modifiedVoteAccts && acct.Owner == sealevel.VoteProgramAddr {
+			recordVoteTimestampAndSlot(slotCtx, acct)
+		}
+
+		if modifiedStakeAccts && acct.Owner == sealevel.StakeProgramAddr {
+			recordStakeDelegation(slotCtx, acct)
+		}
+	}
+}
+
 func handleFailedTxIfDurableTx(instrs []sealevel.Instruction, execCtx *sealevel.ExecutionCtx, slotCtx *sealevel.SlotCtx) (solana.PublicKey, bool) {
 	instr := instrs[0]
 
@@ -415,6 +475,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	recordModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
+
+	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
 
 	return totalFee, writablePubkeys, nil
 }

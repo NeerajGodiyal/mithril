@@ -26,6 +26,49 @@ type StakeHistoryPair struct {
 
 type SysvarStakeHistory []StakeHistoryPair
 
+const SysvarStakeHistoryMaxEntries = 512
+
+func (sh *SysvarStakeHistory) MarshalWithEncoder(encoder *bin.Encoder) error {
+	lenStakeHistory := len(*sh)
+
+	err := encoder.WriteUint64(uint64(lenStakeHistory), bin.LE)
+	if err != nil {
+		err = fmt.Errorf("failed to serialize len of StakeHistory for StakeHistory sysvar: %w", err)
+		panic(err)
+	}
+
+	for count := 0; count < lenStakeHistory; count++ {
+		err = encoder.WriteUint64((*sh)[count].Epoch, bin.LE)
+		if err != nil {
+			return fmt.Errorf("failed to serialize Epoch for StakeHistory sysvar: %w", err)
+		}
+
+		err = encoder.WriteUint64((*sh)[count].Entry.Effective, bin.LE)
+		if err != nil {
+			return fmt.Errorf("failed to serialize Effective for StakeHistory sysvar: %w", err)
+		}
+
+		err = encoder.WriteUint64((*sh)[count].Entry.Activating, bin.LE)
+		if err != nil {
+			return fmt.Errorf("failed to serialize Activating for StakeHistory sysvar: %w", err)
+		}
+
+		err = encoder.WriteUint64((*sh)[count].Entry.Deactivating, bin.LE)
+		if err != nil {
+			return fmt.Errorf("failed to serialize Deactivating for StakeHistory sysvar: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (sh *SysvarStakeHistory) MustMarshalWithEncoder(encoder *bin.Encoder) {
+	err := sh.MarshalWithEncoder(encoder)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (sh *SysvarStakeHistory) UnmarshalWithDecoder(decoder *bin.Decoder) (err error) {
 	entriesLen, err := decoder.ReadUint64(bin.LE)
 	if err != nil {
@@ -79,6 +122,26 @@ func (sh *SysvarStakeHistory) Get(epoch uint64) *StakeHistoryEntry {
 		}
 	}
 	return nil
+}
+
+func (sh *SysvarStakeHistory) Update(epoch uint64, entry StakeHistoryEntry) {
+	var found bool
+
+	for count := 0; count < len(*sh); count++ {
+		if (*sh)[count].Epoch == epoch {
+			(*sh)[count].Entry = entry
+			found = true
+		}
+	}
+
+	if !found {
+		if len(*sh) == SysvarStakeHistoryMaxEntries {
+			*sh = (*sh)[:len(*sh)-1]
+		}
+
+		pair := StakeHistoryPair{Epoch: epoch, Entry: entry}
+		*sh = append([]StakeHistoryPair{pair}, (*sh)...)
+	}
 }
 
 func ReadStakeHistorySysvar(execCtx *ExecutionCtx) (SysvarStakeHistory, error) {

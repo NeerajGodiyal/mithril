@@ -28,18 +28,21 @@ type BlockRewardsInfo struct {
 
 type Block struct {
 	Slot             uint64
+	Epoch            uint64
 	Transactions     []*solana.Transaction
 	BankHash         [32]byte
 	ParentBankhash   [32]byte
 	NumSignatures    uint64
 	Blockhash        [32]byte
 	ExpectedBankhash [32]byte
-	Manifest         *snapshot.SnapshotManifest
 	TxMetas          []*rpc.TransactionMeta
 	Leader           solana.PublicKey
 	Reward           BlockRewardsInfo
 	RecentBlockhash  [32]byte
 	UnixTimestamp    int64
+	StakeAccts       map[solana.PublicKey]bool
+	VoteTimestamps   map[solana.PublicKey]sealevel.BlockTimestamp
+	Features         *features.Features
 }
 
 func numBlockAccts(block *Block) uint64 {
@@ -134,10 +137,10 @@ func isSysvar(pubkey solana.PublicKey) bool {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, uint64, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
@@ -159,7 +162,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				klog.Infof("no account: %s, using empty owned by System program\n", pk)
 			}
 		} else if err != nil {
-			return nil, 0, err
+			return nil, err
 		} else {
 			klog.Infof("found account in loadBlockAccounts for: %s\n", acct.Key)
 		}
@@ -169,11 +172,9 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 		err = accts.SetAccount(&pkBytes, acct)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 	}
-
-	var epoch uint64
 
 	// load sysvar accounts
 	{
@@ -215,10 +216,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 				newClockBytes := clock.MustMarshal()
 				copy(sysvarAcct.Data, newClockBytes)
-				epoch = clock.Epoch
 			}
-
-			// TODO: update stake history and last restart slot sysvars
 
 			var sysvarPkBytes [32]byte
 			copy(sysvarPkBytes[:], sysvarAddr.Bytes())
@@ -229,7 +227,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		}
 	}
 
-	return accts, epoch, nil
+	return accts, nil
 }
 
 func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) *features.Features {
@@ -267,13 +265,43 @@ func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 	return block, nil
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot int64, updateAcctsDb bool) error {
-	var bankHash []byte
+func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot.SnapshotManifest) {
+	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
+	block.StakeAccts = make(map[solana.PublicKey]bool)
 
+	for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
+		ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
+		block.VoteTimestamps[va.Key] = ts
+	}
+
+	for _, sa := range snapshotManifest.Bank.Stakes.StakeDelegations {
+		block.StakeAccts[sa.Account] = true
+	}
+}
+
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, updateAcctsDb bool) error {
 	rpcc := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com")
 
-	for slot := int64(startSlot); slot <= endSlot; slot++ {
-		blockResult, err := rpcc.GetBlockFinalized(uint64(slot))
+	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
+	if err != nil {
+		panic("unable to retrieve epoch schedule sysvar acct when updating clock sysvar")
+	}
+
+	decoder := bin.NewBinDecoder(epochScheduleAcct.Data)
+	var epochSchedule sealevel.SysvarEpochSchedule
+	err = epochSchedule.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		panic(fmt.Sprintf("unable to unmarshal epoch schedule sysvar when updating clock sysvar"))
+	}
+
+	currentEpoch := epochSchedule.GetEpoch(startSlot)
+	var currentFeatures *features.Features
+	var lastSlotCtx *sealevel.SlotCtx
+
+	currentFeatures = scanAndEnableFeatures(acctsDb, startSlot)
+
+	for currentSlot := startSlot; currentSlot <= endSlot; currentSlot++ {
+		blockResult, err := rpcc.GetBlockFinalized(uint64(currentSlot))
 		if err != nil {
 			klog.Fatalf("error fetching block: %s\n", err)
 		}
@@ -283,24 +311,41 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			klog.Fatalf("error creating block from BlockResult: %s\n", err)
 		}
 
-		leader, err := rpcc.GetLeaderForSlot(uint64(slot))
+		leader, err := rpcc.GetLeaderForSlot(uint64(currentSlot))
 		if err != nil {
 			klog.Fatalf("error fetching leader for slot: %s\n", err)
 		}
 
-		block.Slot = uint64(slot)
-
-		if slot == startSlot {
-			block.ParentBankhash = snapshotManifest.Bank.Hash
-		} else {
-			copy(block.ParentBankhash[:], bankHash)
-		}
-
-		block.Manifest = snapshotManifest
 		block.Leader = leader
 		block.Reward = BlockRewardsInfo{Leader: blockResult.Rewards[0].Pubkey, Lamports: uint64(blockResult.Rewards[0].Lamports), PostBalance: blockResult.Rewards[0].PostBalance}
+		block.Slot = currentSlot
 
-		bankHash, err = ProcessBlock(acctsDb, block, updateAcctsDb)
+		if currentSlot == startSlot {
+			block.ParentBankhash = snapshotManifest.Bank.Hash
+			setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
+		} else {
+			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
+			block.StakeAccts = lastSlotCtx.StakeAccts
+			block.VoteTimestamps = lastSlotCtx.VoteTimestamps
+		}
+
+		block.Epoch = epochSchedule.GetEpoch(currentSlot)
+
+		// epoch boundary
+		if block.Epoch != currentEpoch {
+			klog.Infof("epoch boundary")
+			handleEpochTransition(acctsDb, lastSlotCtx, &epochSchedule, blockResult.Rewards, currentEpoch, currentSlot)
+			currentEpoch = block.Epoch
+			currentFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
+		}
+
+		block.Features = currentFeatures
+
+		if len(blockResult.Rewards) != 0 {
+			handlePartitionedEpochRewardsForSlot(acctsDb, rpcc, blockResult.Rewards, currentSlot)
+		}
+
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
 		if err != nil {
 			klog.Errorf("error encountered during block replay: %s\n", err)
 			break
@@ -312,18 +357,20 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	return nil
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) ([]byte, error) {
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
+
+	klog.Infof("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
 	// gather up all accounts referenced in the block
-	accts, epoch, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	if err != nil {
-		return nil, err
+		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 
-	f := scanAndEnableFeatures(acctsDb, block.Slot)
-
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: epoch, ParentSlot: block.Slot - 1, Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: f}
+	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1, Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
+	slotCtx.StakeAccts = block.StakeAccts
+	slotCtx.VoteTimestamps = block.VoteTimestamps
 
 	var totalTxFees uint64
 	acctIsWritable := make(map[solana.PublicKey]bool)
@@ -409,8 +456,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	acctDeltaHash := calculateAcctsDeltaHash(eligibleAccts)
 
 	// calculate bankhash
-	bankHash := calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
-	klog.Infof("calculated bankhash for slot %d was %s", block.Slot, base58.Encode(bankHash))
+	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	klog.Infof("calculated bankhash for slot %d was %s", block.Slot, base58.Encode(slotCtx.FinalBankhash))
 
-	return bankHash, err
+	return slotCtx, err
 }

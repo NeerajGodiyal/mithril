@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 )
 
@@ -105,6 +106,21 @@ func (sr *SysvarEpochRewards) MustUnmarshalWithDecoder(decoder *bin.Decoder) {
 	if err != nil {
 		panic(err.Error())
 	}
+}
+
+func (sr *SysvarEpochRewards) MustMarshalWithEncoder(encoder *bin.Encoder) {
+	err := sr.MarshalWithEncoder(encoder)
+	if err != nil {
+		panic(err.Error())
+	}
+}
+
+func (sr *SysvarEpochRewards) Distribute(amount uint64) {
+	if safemath.SaturatingAddU64(sr.DistributedRewards, amount) > sr.TotalRewards {
+		panic("should be impossible")
+	}
+
+	sr.DistributedRewards += amount
 }
 
 func ReadEpochRewardsSysvar(execCtx *ExecutionCtx) (SysvarEpochRewards, error) {

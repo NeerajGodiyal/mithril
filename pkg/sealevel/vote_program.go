@@ -536,6 +536,8 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 		return InstrErrInvalidAccountOwner
 	}
 
+	txCtx.ModifiedVoteAccts = true
+
 	signers, err := instrCtx.Signers(txCtx)
 	if err != nil {
 		return err

@@ -354,6 +354,8 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 		return InstrErrInvalidInstructionData
 	}
 
+	txCtx.ModifiedStakeAccts = true
+
 	switch instructionType {
 	case StakeProgramInstrTypeInitialize:
 		{
