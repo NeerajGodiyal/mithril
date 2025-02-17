@@ -82,7 +82,12 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 	}
 }
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, rewardDetails []rpc.BlockReward, epoch uint64, slot uint64) {
+const numSlotsPerEpoch = 432000
+
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, rewardDetails []rpc.BlockReward, epoch uint64, slot uint64) uint64 {
 	rewards.HandleVotingRewardDistribution(acctsDb, rewardDetails, slot)
 	updateStakeHistorySysvar(acctsDb, prevSlotCtx, epochSchedule, epoch)
+
+	// return EAH slot, which is the slot that is 1/4 through the epoch
+	return slot + (numSlotsPerEpoch / 4)
 }

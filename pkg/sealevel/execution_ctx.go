@@ -41,6 +41,7 @@ type SlotCtx struct {
 	VoteTimestamps       map[solana.PublicKey]BlockTimestamp
 	StakeAccts           map[solana.PublicKey]bool
 	FinalBankhash        []byte
+	EpochsAcctHash       []byte
 	Replay               bool
 }
 

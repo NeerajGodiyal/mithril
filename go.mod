@@ -81,7 +81,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0 // indirect
 	git.mills.io/prologic/bitcask v1.0.2
-	github.com/Overclock-Validator/sniper v0.0.0-20241123000644-bf011fc699e9
+	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/akrylysov/pogreb v0.10.2
 	github.com/alitto/pond v1.9.2

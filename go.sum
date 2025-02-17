@@ -75,6 +75,8 @@ github.com/Overclock-Validator/sniper v0.0.0-20241116203617-97fc21d77171 h1:fhgy
 github.com/Overclock-Validator/sniper v0.0.0-20241116203617-97fc21d77171/go.mod h1:U/U711QBwQgvQKMcCLg0NZZQGgA3Y/rENTxZG+3ERxs=
 github.com/Overclock-Validator/sniper v0.0.0-20241123000644-bf011fc699e9 h1:I1PDk3og1YZN7Ta/wohDYhexoJZrXbzQgbKw2VdBgG0=
 github.com/Overclock-Validator/sniper v0.0.0-20241123000644-bf011fc699e9/go.mod h1:U/U711QBwQgvQKMcCLg0NZZQGgA3Y/rENTxZG+3ERxs=
+github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54 h1:w3zm/3uI2camw8tByJakoX8L+3A6mkaui8F5j+REIXs=
+github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54/go.mod h1:U/U711QBwQgvQKMcCLg0NZZQGgA3Y/rENTxZG+3ERxs=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
 github.com/VividCortex/ewma v1.2.0/go.mod h1:nz4BbCtbLyFDeC9SUHbtcT5644juEuWfUAUnGx7j5l4=
 github.com/abcum/lcp v0.0.0-20201209214815-7a3f3840be81 h1:uHogIJ9bXH75ZYrXnVShHIyywFiUZ7OOabwd9Sfd8rw=

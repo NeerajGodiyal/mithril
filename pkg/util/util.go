@@ -42,6 +42,17 @@ func PubkeyCmp(a solana.PublicKey, b solana.PublicKey) bool {
 	return false
 }
 
+func PubkeyCmpByteSlice(a []byte, b []byte) bool {
+	for i := uint64(0); i < 4; i++ {
+		a1 := binary.BigEndian.Uint64(a[8*i:])
+		b1 := binary.BigEndian.Uint64(b[8*i:])
+		if a1 != b1 {
+			return a1 < b1
+		}
+	}
+	return false
+}
+
 func DedupePubkeys(pubkeys []solana.PublicKey) []solana.PublicKey {
 	sort.SliceStable(pubkeys, func(i, j int) bool {
 		return PubkeyCmp(pubkeys[i], pubkeys[j])

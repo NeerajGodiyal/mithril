@@ -7,8 +7,10 @@ import (
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
@@ -54,6 +56,34 @@ func calculateSingleAcctHash(acct accounts.Account) acctHash {
 	//fmt.Printf("acct: pubkey %s, lamports %d, owner %s, rent_epoch %d, data hash: %s\n", acct.Key, acct.Lamports, solana.PublicKeyFromBytes(acct.Owner[:]), acct.RentEpoch, solana.HashFromBytes(h.Sum(nil)))
 
 	return newAcctHash(acct.Key, hasher.Sum(nil))
+}
+
+func calculateSingleAcctHashOnly(acct accounts.Account) []byte {
+	hasher := blake3.New()
+
+	var lamportBytes [8]byte
+	binary.LittleEndian.PutUint64(lamportBytes[:], acct.Lamports)
+	_, _ = hasher.Write(lamportBytes[:])
+
+	var rentEpochBytes [8]byte
+	binary.LittleEndian.PutUint64(rentEpochBytes[:], acct.RentEpoch)
+	_, _ = hasher.Write(rentEpochBytes[:])
+
+	_, _ = hasher.Write(acct.Data)
+
+	if acct.Executable {
+		_, _ = hasher.Write([]byte{1})
+	} else {
+		_, _ = hasher.Write([]byte{0})
+	}
+
+	_, _ = hasher.Write(acct.Owner[:])
+	_, _ = hasher.Write(acct.Key[:])
+
+	h := sha256.New()
+	h.Write(acct.Data)
+
+	return hasher.Sum(nil)
 }
 
 func calculateAccountHashes(accts []*accounts.Account) []acctHash {
@@ -145,6 +175,36 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 	return computeMerkleRootLoop(hashes)
 }
 
+func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
+
+	// get all pubkeys in acctsdb
+	allKeys := acctsDb.AllKeys()
+
+	// sort pubkeys
+	sort.SliceStable(allKeys, func(i, j int) bool {
+		return util.PubkeyCmpByteSlice(allKeys[i], allKeys[j])
+	})
+
+	// compute acct hashes
+	hashes := make([][]byte, len(allKeys))
+
+	for i, pk := range allKeys {
+		pkObj := solana.PublicKeyFromBytes(pk)
+
+		acct, err := acctsDb.GetAccount(0, pkObj)
+		if err != nil {
+			panic(fmt.Sprintf("unable to fetch acct in EAH calculation: %s", pkObj))
+		}
+
+		if acct.Lamports != 0 {
+			hashes[i] = calculateSingleAcctHashOnly(*acct)
+		}
+	}
+
+	// merkel root loop
+	return computeMerkleRootLoop(hashes)
+}
+
 const maxLockoutHistory = 31
 const calculateIntervalBuffer = 150
 const minimumCalculationInterval = maxLockoutHistory + calculateIntervalBuffer
@@ -198,6 +258,10 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 
 	if shouldIncludeEah(&epochSchedule, slotCtx) {
 		klog.Infof("**** EAH required for this bankhash")
+		hasher := sha256.New()
+		hasher.Write(bankHash)
+		hasher.Write(slotCtx.EpochsAcctHash)
+		bankHash = hasher.Sum(nil)
 	}
 
 	return bankHash

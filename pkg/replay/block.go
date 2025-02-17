@@ -31,6 +31,7 @@ type Block struct {
 	Epoch            uint64
 	Transactions     []*solana.Transaction
 	BankHash         [32]byte
+	EpochAcctsHash   []byte
 	ParentBankhash   [32]byte
 	NumSignatures    uint64
 	Blockhash        [32]byte
@@ -295,6 +296,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	}
 
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
+	eahSlot := uint64(math.MaxUint64)
 	var currentFeatures *features.Features
 	var lastSlotCtx *sealevel.SlotCtx
 
@@ -334,12 +336,18 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		// epoch boundary
 		if block.Epoch != currentEpoch {
 			klog.Infof("epoch boundary")
-			handleEpochTransition(acctsDb, lastSlotCtx, &epochSchedule, blockResult.Rewards, currentEpoch, currentSlot)
+			eahSlot = handleEpochTransition(acctsDb, lastSlotCtx, &epochSchedule, blockResult.Rewards, currentEpoch, currentSlot)
 			currentEpoch = block.Epoch
 			currentFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
 		}
 
 		block.Features = currentFeatures
+
+		if currentSlot == eahSlot {
+			// calculate accounts hash for *all* on-chain accounts
+			block.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
+			klog.Infof("epoch accts hash: %s", base58.Encode(block.EpochAcctsHash))
+		}
 
 		if len(blockResult.Rewards) != 0 {
 			handlePartitionedEpochRewardsForSlot(acctsDb, rpcc, blockResult.Rewards, currentSlot)
@@ -367,7 +375,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1, Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features}
+	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1, Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, EpochsAcctHash: block.EpochAcctsHash, Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
 	slotCtx.StakeAccts = block.StakeAccts
 	slotCtx.VoteTimestamps = block.VoteTimestamps

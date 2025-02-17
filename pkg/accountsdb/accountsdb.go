@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -159,7 +160,6 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	for _, acct := range accts {
 		if acct.Lamports == 0 {
 			accountsDb.indexDb.Delete(acct.Key[:])
-			accountsDb.indexDb.SyncAll()
 			continue
 		}
 
@@ -218,6 +218,15 @@ func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix 
 	}
 
 	return keyObjs
+}
+
+func (accountsDb *AccountsDb) AllKeys() [][]byte {
+	keys := accountsDb.indexDb.AllKeys()
+	sort.SliceStable(keys, func(i, j int) bool {
+		return util.PubkeyCmpByteSlice(keys[i], keys[j])
+	})
+
+	return keys
 }
 
 func (accountsDb *AccountsDb) BankHash() [32]byte {
