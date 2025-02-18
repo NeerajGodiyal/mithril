@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
@@ -42,7 +43,38 @@ func calculatePriorityFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) (ui
 
 const feePayerIdx = 0
 
-func ApplyTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits) (uint64, uint64, error) {
+type TxFeeInfo struct {
+	ExecutionFee uint64
+	PriorityFee  uint64
+	TotalFee     uint64
+}
+
+type TxFeeInfoAccumulator struct {
+	ExecutionFees uint64
+	PriorityFees  uint64
+	TotalFees     uint64
+}
+
+func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
+	var err error
+
+	txFeeAccumulator.TotalFees, err = safemath.CheckedAddU64(txFeeAccumulator.TotalFees, txFeeInfo.TotalFee)
+	if err != nil {
+		panic("overflow in accumulating total tx fees - should be impossible")
+	}
+
+	txFeeAccumulator.PriorityFees, err = safemath.CheckedAddU64(txFeeAccumulator.PriorityFees, txFeeInfo.PriorityFee)
+	if err != nil {
+		panic("overflow in accumulating priority fees - should be impossible")
+	}
+
+	txFeeAccumulator.ExecutionFees, err = safemath.CheckedAddU64(txFeeAccumulator.ExecutionFees, txFeeInfo.ExecutionFee)
+	if err != nil {
+		panic("overflow in accumulating execution fees - should be impossible")
+	}
+}
+
+func CalculateAndDeductTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {
 		panic("no fee payer")
@@ -70,7 +102,7 @@ func ApplyTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transact
 	if computeBudgetLimits.ComputeUnitPrice != 0 {
 		priorityFee, err = calculatePriorityFee(computeBudgetLimits)
 		if err != nil {
-			return 0, 0, err
+			panic("overflow in calculating priority fee - shouldn't be possible")
 		}
 	}
 
@@ -79,8 +111,10 @@ func ApplyTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transact
 		panic("overflow in calculating total tx fee")
 	}
 
+	feeInfo := &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}
+
 	if feePayerAcct.Lamports < totalTxFee {
-		return totalTxFee, 0, sealevel.InstrErrInsufficientFunds
+		return feeInfo, 0, sealevel.InstrErrInsufficientFunds
 	}
 
 	klog.Infof("tx fee: %d", totalTxFee)
@@ -88,12 +122,21 @@ func ApplyTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transact
 	feePayerAcct.Lamports -= totalTxFee
 	transactionAccts.Touch(feePayerIdx)
 
-	return totalTxFee, feePayerAcct.Lamports, nil
+	return feeInfo, feePayerAcct.Lamports, nil
 }
 
-func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, leader solana.PublicKey, totalFees uint64) {
-	feesToBurn := totalFees / 2
-	feesToLeader := totalFees - feesToBurn
+func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, leader solana.PublicKey, txFeeAccumulator *TxFeeInfoAccumulator) {
+	var feesToBurn uint64
+	var feesToLeader uint64
+
+	if slotCtx.Features.IsActive(features.RewardFullPriorityFee) {
+		halfFee := txFeeAccumulator.ExecutionFees / 2
+		feesToLeader = safemath.SaturatingAddU64(txFeeAccumulator.PriorityFees, txFeeAccumulator.ExecutionFees-halfFee)
+		feesToBurn = halfFee
+	} else {
+		feesToBurn = txFeeAccumulator.TotalFees / 2
+		feesToLeader = txFeeAccumulator.TotalFees - feesToBurn
+	}
 
 	var leaderAcct *accounts.Account
 	var err error

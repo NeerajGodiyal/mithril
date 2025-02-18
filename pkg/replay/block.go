@@ -380,13 +380,13 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	slotCtx.StakeAccts = block.StakeAccts
 	slotCtx.VoteTimestamps = block.VoteTimestamps
 
-	var totalTxFees uint64
 	acctIsWritable := make(map[solana.PublicKey]bool)
+	var txFeeAccumulator fees.TxFeeInfoAccumulator
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		klog.Infof("[+] executing transaction %d, %s", idx+1, tx.Signatures[0])
-		txFee, wpks, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
+		txFeeInfo, wpks, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
 			klog.Infof("tx %d returned error: %s\n", idx+1, txErr)
 		}
@@ -402,12 +402,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 			acctIsWritable[pk] = true
 		}
 
-		totalTxFees += txFee
+		txFeeAccumulator.Add(txFeeInfo)
 	}
 
 	// distribute tx fees to the leader by calculating 50% of the tx fees and adding the sum
 	// to the slot leader's lamports balance, subsequently including it in the accounts delta hash.
-	fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, totalTxFees)
+	fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
 
 	klog.Infof("from RPC fees for leader: %d, post-balance: %d (%s)", block.Reward.Lamports, block.Reward.PostBalance, block.Reward.Leader)
 

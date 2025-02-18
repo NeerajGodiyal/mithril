@@ -176,6 +176,7 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 }
 
 func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
+	klog.Infof("computing EAH")
 
 	// get all pubkeys in acctsdb
 	allKeys := acctsDb.AllKeys()

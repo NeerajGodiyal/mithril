@@ -299,7 +299,7 @@ func handleFailedTxIfDurableTx(instrs []sealevel.Instruction, execCtx *sealevel.
 	return solana.PublicKey{}, false
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (uint64, []solana.PublicKey, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, []solana.PublicKey, error) {
 	/*err := tx.VerifySignatures()
 	if err != nil {
 		return NewTxErrInvalidSignature(err.Error())
@@ -307,22 +307,22 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	instrs, err := instrsFromTx(tx)
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 
 	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 
 	transactionAccts, err := transactionAcctsFromTx(slotCtx, tx)
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 
 	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs)
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 
 	var log sealevel.LogRecorder
@@ -346,14 +346,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		execCtx.TransactionContext.Accounts.Unlock(count)
 	}
 
-	totalFee, payerNewLamports, err := fees.ApplyTxFees(tx, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, payerNewLamports, err := fees.CalculateAndDeductTxFees(tx, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
-		return totalFee, nil, nil
+		return txFeeInfo, nil, nil
 	}
 
 	// check for fee divergences
-	if totalFee != txMeta.Fee {
-		klog.Infof("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], totalFee, txMeta.Fee)
+	if txFeeInfo.TotalFee != txMeta.Fee {
+		klog.Infof("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
 	}
 
 	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
@@ -374,12 +374,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	for instrIdx, instr := range tx.Message.Instructions {
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
-			return totalFee, nil, err
+			return txFeeInfo, nil, err
 		}
 
 		resolvedAccountMetas, err := instr.ResolveInstructionAccounts(&tx.Message)
 		if err != nil {
-			return totalFee, nil, err
+			return txFeeInfo, nil, err
 		}
 
 		var acctMetas []sealevel.AccountMeta
@@ -470,7 +470,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			txErr = instrErr
 		}
 
-		return totalFee, writableAcctsForFailedTx, fmt.Errorf("tx err: %s", txErr)
+		return txFeeInfo, writableAcctsForFailedTx, fmt.Errorf("tx err: %s", txErr)
 	}
 
 	recordModifiedAccounts(slotCtx, execCtx)
@@ -478,5 +478,5 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
 
-	return totalFee, writablePubkeys, nil
+	return txFeeInfo, writablePubkeys, nil
 }
