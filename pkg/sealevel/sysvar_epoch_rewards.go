@@ -7,6 +7,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
 )
 
@@ -20,7 +21,7 @@ type SysvarEpochRewards struct {
 	DistributionStartingBlockHeight uint64
 	NumPartitions                   uint64
 	ParentBlockhash                 [32]byte
-	TotalPoints                     bin.Uint128
+	TotalPoints                     wide.Uint128
 	TotalRewards                    uint64
 	DistributedRewards              uint64
 	Active                          bool
@@ -45,9 +46,14 @@ func (ser *SysvarEpochRewards) UnmarshalWithDecoder(decoder *bin.Decoder) error 
 	}
 	copy(ser.ParentBlockhash[:], parentBlockhash)
 
-	ser.TotalPoints, err = decoder.ReadUint128(bin.LE)
+	ser.TotalPoints.Lo, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
-		return fmt.Errorf("failed to read TotalPoints when decoding SysvarEpochRewards: %w", err)
+		return fmt.Errorf("failed to read lower 8 bytes of TotalPoints when decoding SysvarEpochRewards: %w", err)
+	}
+
+	ser.TotalPoints.Hi, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return fmt.Errorf("failed to read upper 8 bytes of TotalPoints when decoding SysvarEpochRewards: %w", err)
 	}
 
 	ser.TotalRewards, err = decoder.ReadUint64(bin.LE)
@@ -82,9 +88,14 @@ func (ser *SysvarEpochRewards) MarshalWithEncoder(encoder *bin.Encoder) error {
 		return fmt.Errorf("failed to write ParentBlockhash when decoding SysvarEpochRewards: %w", err)
 	}
 
-	err = encoder.WriteUint128(ser.TotalPoints, bin.LE)
+	err = encoder.WriteUint64(ser.TotalPoints.Lo, bin.LE)
 	if err != nil {
-		return fmt.Errorf("failed to write TotalPoints when decoding SysvarEpochRewards: %w", err)
+		return fmt.Errorf("failed to write lower 8 bytes of TotalPoints when decoding SysvarEpochRewards: %w", err)
+	}
+
+	err = encoder.WriteUint64(ser.TotalPoints.Hi, bin.LE)
+	if err != nil {
+		return fmt.Errorf("failed to write upper 8 bytes of TotalPoints when decoding SysvarEpochRewards: %w", err)
 	}
 
 	err = encoder.WriteUint64(ser.TotalRewards, bin.LE)

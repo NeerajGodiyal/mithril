@@ -9,7 +9,7 @@ import (
 	"errors"
 	"math/bits"
 
-	"github.com/ryanavella/wide"
+	"github.com/Overclock-Validator/wide"
 )
 
 var (

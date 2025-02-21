@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/Overclock-Validator/mithril/pkg/util"
 	"k8s.io/klog/v2"
 )
 
@@ -141,7 +142,13 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	binary.Write(buf, binary.LittleEndian, epochRewards.DistributionStartingBlockHeight)
 	binary.Write(buf, binary.LittleEndian, epochRewards.NumPartitions)
 	binary.Write(buf, binary.LittleEndian, epochRewards.ParentBlockhash)
-	binary.Write(buf, binary.LittleEndian, epochRewards.TotalPoints.Bytes())
+
+	totalPointsBuf := make([]byte, 16)
+	binary.LittleEndian.PutUint64(totalPointsBuf[:8], epochRewards.TotalPoints.Lo)
+	binary.LittleEndian.PutUint64(totalPointsBuf[8:], epochRewards.TotalPoints.Hi)
+	util.ReverseBytes(totalPointsBuf)
+	binary.Write(buf, binary.LittleEndian, totalPointsBuf)
+
 	binary.Write(buf, binary.LittleEndian, epochRewards.TotalRewards)
 	binary.Write(buf, binary.LittleEndian, epochRewards.DistributedRewards)
 	binary.Write(buf, binary.LittleEndian, epochRewards.Active)

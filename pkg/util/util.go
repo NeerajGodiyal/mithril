@@ -101,3 +101,9 @@ func VerboseHandleError(err error) (b bool) {
 func PrettyPrintAcct(acct *accounts.Account) string {
 	return fmt.Sprintf("acct - slot: %d, pubkey: %s, owner: %s, lamports: %d, executable: %t, rent epoch: %d, data len: %d, data hash: %s\n", acct.Slot, acct.Key, solana.PublicKeyFromBytes(acct.Owner[:]), acct.Lamports, acct.Executable, acct.RentEpoch, len(acct.Data), solana.HashFromBytes(CalculateAcctHash(*acct)))
 }
+
+func ReverseBytes(s []byte) {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+}

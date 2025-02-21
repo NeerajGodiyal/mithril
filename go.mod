@@ -7,7 +7,7 @@ require (
 	github.com/VividCortex/ewma v1.2.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/gagliardetto/binary v0.8.0
-	github.com/gagliardetto/solana-go v1.11.0
+	github.com/gagliardetto/solana-go v1.12.1-0.20250116180958-3786857b86e5
 	github.com/google/gopacket v1.1.19
 	github.com/google/nftables v0.1.0
 	github.com/linxGnu/grocksdb v1.8.0
@@ -82,6 +82,7 @@ require (
 	filippo.io/edwards25519 v1.0.0 // indirect
 	git.mills.io/prologic/bitcask v1.0.2
 	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
+	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/akrylysov/pogreb v0.10.2
 	github.com/alitto/pond v1.9.2
@@ -158,7 +159,7 @@ require (
 	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
 	github.com/wealdtech/go-merkletree v1.0.0
 	github.com/zeebo/blake3 v0.2.3
-	go.mongodb.org/mongo-driver v1.11.2 // indirect
+	go.mongodb.org/mongo-driver v1.12.2 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/goleak v1.1.12 // indirect
 	go.uber.org/multierr v1.10.0 // indirect

@@ -3,8 +3,8 @@ package sealevel
 import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/wide"
 	"github.com/gagliardetto/solana-go"
-	"github.com/ryanavella/wide"
 	"k8s.io/klog/v2"
 )
 

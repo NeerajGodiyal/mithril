@@ -9,7 +9,7 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/ryanavella/wide"
+	"github.com/Overclock-Validator/wide"
 )
 
 // SaturatingAddU8 adds two uint8's together and saturates at the numerical boundary

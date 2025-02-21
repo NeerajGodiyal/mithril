@@ -297,8 +297,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
 	eahSlot := uint64(math.MaxUint64)
+	var lastRewardsDistributionSlot uint64
 	var currentFeatures *features.Features
 	var lastSlotCtx *sealevel.SlotCtx
+	var partitionedEpochRewards bool
 
 	currentFeatures = scanAndEnableFeatures(acctsDb, startSlot)
 
@@ -336,9 +338,12 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		// epoch boundary
 		if block.Epoch != currentEpoch {
 			klog.Infof("epoch boundary")
-			eahSlot = handleEpochTransition(acctsDb, lastSlotCtx, &epochSchedule, blockResult.Rewards, currentEpoch, currentSlot)
-			currentEpoch = block.Epoch
+
 			currentFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
+			partitionedEpochRewards = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
+
+			eahSlot, lastRewardsDistributionSlot = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewards, lastSlotCtx, &epochSchedule, blockResult, currentEpoch, currentSlot)
+			currentEpoch = block.Epoch
 		}
 
 		block.Features = currentFeatures
@@ -349,8 +354,8 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			klog.Infof("epoch accts hash: %s", base58.Encode(block.EpochAcctsHash))
 		}
 
-		if len(blockResult.Rewards) != 0 {
-			handlePartitionedEpochRewardsForSlot(acctsDb, rpcc, blockResult.Rewards, currentSlot)
+		if len(blockResult.Rewards) != 0 && partitionedEpochRewards {
+			distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, lastRewardsDistributionSlot)
 		}
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
@@ -375,10 +380,11 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1, Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, EpochsAcctHash: block.EpochAcctsHash, Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features}
+	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1,
+		Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, EpochsAcctHash: block.EpochAcctsHash,
+		Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
+		VoteTimestamps: block.VoteTimestamps}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
-	slotCtx.StakeAccts = block.StakeAccts
-	slotCtx.VoteTimestamps = block.VoteTimestamps
 
 	acctIsWritable := make(map[solana.PublicKey]bool)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator

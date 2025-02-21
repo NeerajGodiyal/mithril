@@ -6,9 +6,9 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"github.com/ryanavella/wide"
 	"k8s.io/klog/v2"
 )
 
@@ -810,6 +810,16 @@ func newWarmupCooldownRateEpoch(execCtx *ExecutionCtx) (*uint64, error) {
 
 	epoch := epochSchedule.GetEpoch(slot)
 	return &epoch, nil
+}
+
+func NewWarmupCooldownRateEpochWithSlotCtx(slotCtx *SlotCtx, epochSchedule *SysvarEpochSchedule) *uint64 {
+	slot, existed := slotCtx.Features.ActivationSlot(features.ReduceStakeWarmupCooldown)
+	if !existed {
+		return nil
+	}
+
+	epoch := epochSchedule.GetEpoch(slot)
+	return &epoch
 }
 
 func modifyStakeForRedelegation(execCtx *ExecutionCtx, stake *Stake, stakeLamports uint64, voterPubkey solana.PublicKey, voteState *VoteState, clock SysvarClock, stakeHistory SysvarStakeHistory) error {

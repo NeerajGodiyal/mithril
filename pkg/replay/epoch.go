@@ -6,22 +6,14 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func newWarmupCooldownRateEpoch(slotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule) uint64 {
-	slot, existed := slotCtx.Features.ActivationSlot(features.ReduceStakeWarmupCooldown)
-	if !existed {
-		panic(fmt.Sprintf("feature should be activated"))
-	}
-	return epochSchedule.GetEpoch(slot)
-}
-
-func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, targetEpoch uint64) {
+func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, targetEpoch uint64) *sealevel.SysvarStakeHistory {
 	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
 	if err != nil {
 		stakeHistoryAcct, err = acctsDb.GetAccount(prevSlotCtx.Slot, sealevel.SysvarStakeHistoryAddr)
@@ -34,7 +26,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 	var stakeHistory sealevel.SysvarStakeHistory
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
-	newRateActivationEpoch := newWarmupCooldownRateEpoch(prevSlotCtx, epochSchedule)
+	newRateActivationEpoch := sealevel.NewWarmupCooldownRateEpochWithSlotCtx(prevSlotCtx, epochSchedule)
 	var accumulatorStakeHistoryEntry sealevel.StakeHistoryEntry
 
 	for stakePubkey := range prevSlotCtx.StakeAccts {
@@ -60,7 +52,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 		}
 
 		delegation := stakeState.Stake.Stake.Delegation
-		stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, stakeHistory, &newRateActivationEpoch)
+		stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, stakeHistory, newRateActivationEpoch)
 
 		accumulatorStakeHistoryEntry.Effective += stakeHistoryEntry.Effective
 		accumulatorStakeHistoryEntry.Activating += stakeHistoryEntry.Activating
@@ -80,14 +72,25 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 	if err != nil {
 		panic(fmt.Sprintf("error storing new StakeHistory sysvar to accountsdb: %s", err))
 	}
+
+	return &stakeHistory
 }
 
 const numSlotsPerEpoch = 432000
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, rewardDetails []rpc.BlockReward, epoch uint64, slot uint64) uint64 {
-	rewards.HandleVotingRewardDistribution(acctsDb, rewardDetails, slot)
-	updateStakeHistorySysvar(acctsDb, prevSlotCtx, epochSchedule, epoch)
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, blockResult *rpc.GetBlockResult, epoch uint64, slot uint64) (uint64, uint64) {
+	stakeHistory := updateStakeHistorySysvar(acctsDb, prevSlotCtx, epochSchedule, epoch)
+
+	var lastRewardsDistributionSlot uint64
+
+	if partitionedEpochRewards {
+		lastRewardsDistributionSlot = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochSchedule, rpcc, blockResult, slot, epoch)
+	} else {
+		rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
+		rewards.DistributeStakingRewards(acctsDb, blockResult.Rewards, slot)
+	}
 
 	// return EAH slot, which is the slot that is 1/4 through the epoch
-	return slot + (numSlotsPerEpoch / 4)
+	eahSlot := slot + (numSlotsPerEpoch / 4)
+	return eahSlot, lastRewardsDistributionSlot
 }

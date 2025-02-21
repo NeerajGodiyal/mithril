@@ -48,6 +48,24 @@ func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, e
 	return result, err
 }
 
+func (fetcher *RpcClient) GetRewardsForSlot(slot uint64) ([]rpc.BlockReward, error) {
+	includeRewards := true
+	maxSupportedTxVer := uint64(0)
+
+	result, err := fetcher.client.GetBlockWithOpts(
+		context.TODO(),
+		slot,
+		&rpc.GetBlockOpts{
+			MaxSupportedTransactionVersion: &maxSupportedTxVer,
+			Commitment:                     rpc.CommitmentFinalized,
+			TransactionDetails:             rpc.TransactionDetailsNone,
+			Rewards:                        &includeRewards,
+		},
+	)
+
+	return result.Rewards, err
+}
+
 func (fetcher *RpcClient) GetLatestBlockConfirmed() (*rpc.GetBlockResult, error) {
 	result, err := fetcher.client.GetLatestBlockhash(context.TODO(), rpc.CommitmentConfirmed)
 	if err != nil {

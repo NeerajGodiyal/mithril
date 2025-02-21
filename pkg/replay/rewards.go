@@ -8,14 +8,52 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go/rpc"
-	"k8s.io/klog/v2"
 )
 
-func handlePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rewardInfo []rpc.BlockReward, currentSlot uint64) {
-	distributedLamports := rewards.DistributePartitionedEpochRewards(acctsDb, rewardInfo, currentSlot)
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, slot uint64, epoch uint64) uint64 {
+	voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
+	partitionedRewardsInfo := rewards.RetrievePartitionedStakingRewardsInfo(rpcc, slot+1)
+
+	totalRewards, err := safemath.CheckedAddU64(voteRewardsDistributed, partitionedRewardsInfo.TotalStakingRewards)
+	if err != nil {
+		panic("overflow calculating total rewards")
+	}
+
+	newWarmupCooldownRateEpoch := sealevel.NewWarmupCooldownRateEpochWithSlotCtx(slotCtx, epochSchedule)
+	points := rewards.CalculateRewardPointsPartitioned(acctsDb, slotCtx, slot, stakeHistory, newWarmupCooldownRateEpoch)
+
+	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: slot + 1,
+		NumPartitions: *blockResult.NumRewardPartitions, ParentBlockhash: blockResult.PreviousBlockhash,
+		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
+
+	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
+	if err != nil {
+		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
+	}
+
+	writer := new(bytes.Buffer)
+	encoder := bin.NewBinEncoder(writer)
+	newEpochRewards.MustMarshalWithEncoder(encoder)
+	copy(epochRewardsAcct.Data, writer.Bytes())
+
+	err = acctsDb.StoreAccounts([]*accounts.Account{epochRewardsAcct}, slot)
+	if err != nil {
+		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
+	}
+
+	return partitionedRewardsInfo.LastStakingRewardSlot
+}
+
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, rewardInfo []rpc.BlockReward, currentSlot uint64, lastRewardsDistributionSlot uint64) {
+	distributedLamports := rewards.DistributeStakingRewards(acctsDb, rewardInfo, currentSlot)
+
+	if distributedLamports == 0 {
+		return
+	}
 
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
@@ -29,13 +67,7 @@ func handlePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, rpcc *
 
 	epochRewards.Distribute(distributedLamports)
 
-	// set epoch rewards to inactive after all partitioned rewards are distributed for this epoch
-	nextBlock, err := rpcc.GetBlockFinalized(uint64(currentSlot + 1))
-	if err != nil {
-		klog.Fatalf("error fetching block: %s\n", err)
-	}
-
-	if len(nextBlock.Rewards) == 0 {
+	if currentSlot == lastRewardsDistributionSlot {
 		epochRewards.Active = false
 	}
 
