@@ -34,6 +34,8 @@ const (
 	StakeProgramInstrTypeGetMinimumDelegation
 	StakeProgramInstrTypeDeactivateDelinquent
 	StakeProgramInstrTypeRedelegate
+	StakeProgramInstrTypeMoveStake
+	StakeProgramInstrTypeMoveLamports
 )
 
 // stake errors
@@ -100,6 +102,14 @@ type StakeInstrAuthorizeCheckedWithSeed struct {
 type StakeInstrSetLockupChecked struct {
 	UnixTimestamp *uint64
 	Epoch         *uint64
+}
+
+type StakeInstrMoveStake struct {
+	Lamports uint64
+}
+
+type StakeInstrMoveLamports struct {
+	Lamports uint64
 }
 
 func (initialize *StakeInstrInitialize) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -283,6 +293,18 @@ func (lockup *StakeInstrSetLockupChecked) UnmarshalWithDecoder(decoder *bin.Deco
 	}
 
 	return nil
+}
+
+func (moveStake *StakeInstrMoveStake) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+	moveStake.Lamports, err = decoder.ReadUint64(bin.LE)
+	return err
+}
+
+func (moveLamports *StakeInstrMoveLamports) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+	moveLamports.Lamports, err = decoder.ReadUint64(bin.LE)
+	return err
 }
 
 func getOptionalPubkey(txCtx *TransactionCtx, instrCtx *InstructionCtx, instrAcctIdx uint64, mustBeSigner bool) (*solana.PublicKey, error) {
@@ -1014,6 +1036,47 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			} else {
 				return InstrErrInvalidInstructionData
 			}
+		}
+
+	case StakeProgramInstrTypeMoveStake:
+		{
+			var moveStake StakeInstrMoveStake
+			err = moveStake.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				return err
+			}
+
+			if execCtx.GlobalCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
+				err = instrCtx.CheckNumOfInstructionAccounts(3)
+				if err != nil {
+					return err
+				}
+
+				err = StakeProgramMoveStake(execCtx, instrCtx, 0, moveStake.Lamports, 1, 2)
+			} else {
+				return InstrErrInvalidInstructionData
+			}
+		}
+
+	case StakeProgramInstrTypeMoveLamports:
+		{
+			var moveLamports StakeInstrMoveLamports
+			err = moveLamports.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				return err
+			}
+
+			if execCtx.GlobalCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
+				err = instrCtx.CheckNumOfInstructionAccounts(3)
+				if err != nil {
+					return err
+				}
+
+				err = StakeProgramMoveLamports(execCtx, instrCtx, 0, moveLamports.Lamports, 1, 2)
+			} else {
+				return InstrErrInvalidInstructionData
+			}
+
 		}
 
 	default:
@@ -1841,6 +1904,280 @@ func StakeProgramSetLockup(stakeAcct *BorrowedAccount, lockup StakeInstrSetLocku
 			return InstrErrInvalidAccountData
 		}
 	}
+}
+
+func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcAcctIdx uint64, lamports uint64, dstAcctIdx uint64, stakeAuthorityIdx uint64) error {
+	txCtx := execCtx.TransactionContext
+
+	srcAcct, err := instrCtx.BorrowInstructionAccount(txCtx, srcAcctIdx)
+	if err != nil {
+		return err
+	}
+
+	dstAcct, err := instrCtx.BorrowInstructionAccount(txCtx, dstAcctIdx)
+	if err != nil {
+		return err
+	}
+
+	srcMergeKind, dstMergeKind, err := moveStakeOrLamportsSharedChecks(execCtx, txCtx, instrCtx, srcAcct, lamports, dstAcct, stakeAuthorityIdx)
+	if err != nil {
+		return err
+	}
+
+	if len(srcAcct.Data()) != StakeStateV2Size || len(dstAcct.Data()) != StakeStateV2Size {
+		return InstrErrInvalidAccountData
+	}
+
+	if srcMergeKind.Status != MergeKindStatusFullyActive {
+		return InstrErrInvalidAccountData
+	}
+
+	srcStake := srcMergeKind.FullyActive.Stake
+	srcMeta := srcMergeKind.FullyActive.Meta
+	minimumDelegation := determineMinimumDelegation(execCtx.GlobalCtx.Features)
+	srcEffectiveStake := srcStake.Delegation.StakeLamports
+
+	srcFinalStake, err := safemath.CheckedSubU64(srcEffectiveStake, lamports)
+	if err != nil {
+		return InstrErrInvalidArgument
+	}
+
+	if srcFinalStake != 0 && srcFinalStake < minimumDelegation {
+		return InstrErrInvalidArgument
+	}
+
+	var destinationMeta *Meta
+
+	switch dstMergeKind.Status {
+	case MergeKindStatusFullyActive:
+		{
+			dstMeta := dstMergeKind.FullyActive.Meta
+			dstStake := dstMergeKind.FullyActive.Stake
+
+			if srcStake.Delegation.VoterPubkey != dstStake.Delegation.VoterPubkey {
+				return StakeErrVoteAddressMismatch
+			}
+
+			dstEffectiveStake := dstStake.Delegation.StakeLamports
+			dstFinalStake, err := safemath.CheckedAddU64(dstEffectiveStake, lamports)
+			if err != nil {
+				return InstrErrArithmeticOverflow
+			}
+
+			if dstFinalStake < minimumDelegation {
+				return InstrErrInvalidArgument
+			}
+
+			err = dstStake.MergeDelegationStakeAndCreditsObserved(lamports, srcStake.CreditsObserved)
+			if err != nil {
+				return err
+			}
+
+			newDstStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: dstMeta, Stake: dstStake}}
+			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.GlobalCtx.Features)
+			if err != nil {
+				return err
+			}
+
+			destinationMeta = &dstMeta
+		}
+
+	case MergeKindStatusInactive:
+		{
+			dstMeta := dstMergeKind.Inactive.Meta
+
+			if lamports < minimumDelegation {
+				return InstrErrInvalidArgument
+			}
+
+			dstStake := srcStake
+			dstStake.Delegation.StakeLamports = lamports
+
+			newDstStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: dstMeta, Stake: dstStake}}
+			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.GlobalCtx.Features)
+			if err != nil {
+				return err
+			}
+
+			destinationMeta = &dstMeta
+		}
+
+	default:
+		{
+			return InstrErrInvalidAccountData
+		}
+	}
+
+	if srcFinalStake == 0 {
+		newSrcAcctStakeState := &StakeStateV2{Status: StakeStateV2StatusInitialized, Initialized: StakeStateV2Initialized{srcMeta}}
+		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.GlobalCtx.Features)
+		if err != nil {
+			return err
+		}
+	} else {
+		srcStake.Delegation.StakeLamports = srcFinalStake
+
+		newSrcAcctStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: srcMeta, Stake: srcStake}}
+		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.GlobalCtx.Features)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = srcAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	if err != nil {
+		return err
+	}
+
+	err = dstAcct.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	if err != nil {
+		return err
+	}
+
+	if srcAcct.Lamports() < srcMeta.RentExemptReserve || dstAcct.Lamports() < destinationMeta.RentExemptReserve {
+		klog.Infof("Delegation calculations violated lamport balance assumptions")
+		return InstrErrInvalidArgument
+	}
+
+	return nil
+}
+
+func StakeProgramMoveLamports(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcAcctIdx uint64, lamports uint64, dstAcctIdx uint64, stakeAuthorityIdx uint64) error {
+	txCtx := execCtx.TransactionContext
+
+	srcAcct, err := instrCtx.BorrowInstructionAccount(txCtx, srcAcctIdx)
+	if err != nil {
+		return err
+	}
+
+	dstAcct, err := instrCtx.BorrowInstructionAccount(txCtx, dstAcctIdx)
+	if err != nil {
+		return err
+	}
+
+	srcMergeKind, _, err := moveStakeOrLamportsSharedChecks(execCtx, txCtx, instrCtx, srcAcct, lamports, dstAcct, stakeAuthorityIdx)
+	if err != nil {
+		return err
+	}
+
+	var srcFreeLamports uint64
+
+	switch srcMergeKind.Status {
+	case MergeKindStatusFullyActive:
+		{
+			srcMeta := srcMergeKind.FullyActive.Meta
+			srcStake := srcMergeKind.FullyActive.Stake
+
+			srcFreeLamports = safemath.SaturatingSubU64(safemath.SaturatingSubU64(srcAcct.Lamports(), srcStake.Delegation.StakeLamports), srcMeta.RentExemptReserve)
+		}
+
+	case MergeKindStatusInactive:
+		{
+			srcMeta := srcMergeKind.FullyActive.Meta
+			srcLamports := srcMergeKind.Inactive.StakeLamports
+
+			srcFreeLamports = safemath.SaturatingSubU64(srcLamports, srcMeta.RentExemptReserve)
+		}
+
+	default:
+		{
+			return InstrErrInvalidAccountData
+		}
+	}
+
+	if lamports > srcFreeLamports {
+		return InstrErrInvalidArgument
+	}
+
+	err = srcAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	if err != nil {
+		return err
+	}
+
+	err = dstAcct.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+
+	return err
+}
+
+func moveStakeOrLamportsSharedChecks(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, srcAcct *BorrowedAccount, lamports uint64, dstAcct *BorrowedAccount, stakeAuthorityIdx uint64) (*MergeKind, *MergeKind, error) {
+	stakeAuthPkIdx, err := instrCtx.IndexOfInstructionAccountInTransaction(stakeAuthorityIdx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stakeAuthorityPubkey, err := txCtx.KeyOfAccountAtIndex(stakeAuthPkIdx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	isSigner, err := instrCtx.IsInstructionAccountSigner(stakeAuthorityIdx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if !isSigner {
+		return nil, nil, InstrErrMissingRequiredSignature
+	}
+
+	signers := []solana.PublicKey{stakeAuthorityPubkey}
+
+	if srcAcct.Key() != StakeProgramAddr || dstAcct.Key() != StakeProgramAddr {
+		return nil, nil, InstrErrIncorrectProgramId
+	}
+
+	if srcAcct.Key() == dstAcct.Key() {
+		return nil, nil, InstrErrInvalidInstructionData
+	}
+
+	if !srcAcct.IsWritable() || !dstAcct.IsWritable() {
+		return nil, nil, InstrErrInvalidInstructionData
+	}
+
+	if lamports == 0 {
+		return nil, nil, InstrErrInvalidArgument
+	}
+
+	clock, err := ReadClockSysvar(execCtx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stakeHistory, err := ReadStakeHistorySysvar(execCtx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srcStakeState, err := UnmarshalStakeState(srcAcct.Data())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srcMergeKind, err := getMergeKindIfMergeable(execCtx, srcStakeState, srcAcct.Lamports(), clock, stakeHistory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	err = srcMergeKind.Meta().Authorized.Check(signers, StakeAuthorizeStaker)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dstStakeState, err := UnmarshalStakeState(dstAcct.Data())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dstMergeKind, err := getMergeKindIfMergeable(execCtx, dstStakeState, dstAcct.Lamports(), clock, stakeHistory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	err = metasCanMerge(srcMergeKind.Meta(), dstMergeKind.Meta(), clock)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return srcMergeKind, dstMergeKind, nil
 }
 
 const MinimumDelinquentEpochsForDeactivation = 5

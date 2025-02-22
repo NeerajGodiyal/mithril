@@ -34,6 +34,7 @@ var DisableRentFeesCollection = FeatureGate{Name: "DisableRentFeesCollection", A
 var DeprecateUnusedLegacyVotePlumbing = FeatureGate{Name: "DeprecateUnusedLegacyVotePlumbing", Address: base58.MustDecodeFromString("6Uf8S75PVh91MYgPQSHnjRAPQq6an5BDv9vomrCwDqLe")}
 var RewardFullPriorityFee = FeatureGate{Name: "RewardFullPriorityFee", Address: base58.MustDecodeFromString("3opE3EzAKnUftUDURkzMgwpNgimBAypW1mNDYH4x4Zg7")}
 var StakeMinimumDelegationForRewards = FeatureGate{Name: "StakeMinimumDelegationForRewards", Address: base58.MustDecodeFromString("G6ANXD6ptCSyNd9znZm7j4dEczAJCfx7Cy43oBx3rKHJ")}
+var MoveStakeAndMoveLamportsIxs = FeatureGate{Name: "MoveStakeAndMoveLamportsIxs", Address: base58.MustDecodeFromString("7bTK6Jis8Xpfrs8ZoUfiMDPazTcdPcTWheZFJTA5Z6X4")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, LastRestartSlotSysvar,
 	Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -43,4 +44,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	DeprecateExecutableMetaUpdateInBpfLoader, RelaxAuthoritySignerCheckForLookupTableCreation, DedupeConfigProgramSigners,
 	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
 	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
-	RewardFullPriorityFee, StakeMinimumDelegationForRewards}
+	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs}
