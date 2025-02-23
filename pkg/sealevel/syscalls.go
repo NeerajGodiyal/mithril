@@ -72,5 +72,9 @@ func Syscalls(f *features.Features, isDeploy bool) sbpf.SyscallRegistry {
 	reg.Register("sol_invoke_signed_c", SyscallInvokeSignedC)
 	reg.Register("sol_invoke_signed_rust", SyscallInvokeSignedRust)
 
+	if f.IsActive(features.GetSysvarSyscallEnabled) {
+		reg.Register("sol_get_sysvar", SyscallGetSysvar)
+	}
+
 	return reg
 }

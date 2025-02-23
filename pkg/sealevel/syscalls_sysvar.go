@@ -3,9 +3,13 @@ package sealevel
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"slices"
 
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
+	"github.com/gagliardetto/solana-go"
 	"k8s.io/klog/v2"
 )
 
@@ -185,3 +189,76 @@ func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error
 }
 
 var SyscallGetLastRestartSlotSysvar = sbpf.SyscallFunc1(SyscallGetLastRestartSlotSysvarImpl)
+
+const (
+	offsetLenExceedsSysvar = 1
+	sysvarNotFound         = 2
+)
+
+var permittedSysvarAddrs = []solana.PublicKey{SysvarClockAddr, SysvarEpochScheduleAddr, SysvarEpochRewardsAddr, SysvarRentAddr,
+	SysvarSlotHashesAddr, SysvarStakeHistoryAddr, SysvarLastRestartSlotAddr}
+
+func fetchSysvarBytesForPubkey(execCtx *ExecutionCtx, pubkey solana.PublicKey) ([]byte, error) {
+	if !slices.Contains(permittedSysvarAddrs, pubkey) {
+		return nil, fmt.Errorf("unrecognised sysvar")
+	}
+
+	sysvarAcct, err := execCtx.SlotCtx.AccountsDb.GetAccount(execCtx.SlotCtx.Slot, pubkey)
+	if err != nil {
+		panic(fmt.Sprintf("unable to fetch sysvar %s acct from accountsdb", pubkey))
+	}
+
+	return sysvarAcct.Data, nil
+}
+
+func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offset uint64, length uint64) (uint64, error) {
+	klog.Infof("SyscallGetSysvar")
+
+	execCtx := executionCtx(vm)
+
+	sysvarIdCost := uint64(32 / CUCpiBytesPerUnit)
+	sysvarBufCost := length / CUCpiBytesPerUnit
+	totalCost := safemath.SaturatingAddU64(safemath.SaturatingAddU64(CUSysvarBaseCost, sysvarIdCost), max(sysvarBufCost, CUMemOpBaseCost))
+
+	err := execCtx.ComputeMeter.Consume(totalCost)
+	if err != nil {
+		return syscallCuErr()
+	}
+
+	sysvarIdBytes, err := vm.Translate(sysvarIdAddr, 32, false)
+	if err != nil {
+		return syscallErr(err)
+	}
+
+	sysvarId := solana.PublicKeyFromBytes(sysvarIdBytes)
+
+	varBuf, err := vm.Translate(varAddr, length, true)
+	if err != nil {
+		return syscallErr(err)
+	}
+
+	offsetLen, err := safemath.CheckedAddU64(offset, length)
+	if err != nil {
+		return syscallErr(InstrErrArithmeticOverflow)
+	}
+
+	_, err = safemath.CheckedAddU64(varAddr, length)
+	if err != nil {
+		return syscallErr(InstrErrArithmeticOverflow)
+	}
+
+	sysvarBuf, err := fetchSysvarBytesForPubkey(execCtx, sysvarId)
+	if err != nil {
+		return syscallSuccess(sysvarNotFound)
+	}
+
+	if offsetLen > uint64(len(sysvarBuf)) {
+		return syscallSuccess(offsetLenExceedsSysvar)
+	}
+
+	copy(varBuf, sysvarBuf[offset:])
+
+	return syscallSuccess(0)
+}
+
+var SyscallGetSysvar = sbpf.SyscallFunc4(SyscallGetSysvarImpl)

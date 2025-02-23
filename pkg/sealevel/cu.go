@@ -43,4 +43,5 @@ const (
 	CUBn128MultiplicationCost                 = 3840
 	CUBn128PairingOnePairCostFirst            = 36364
 	CUBn128PairingOnePairCostOther            = 12121
+	CUSysvarBaseCost                          = 100
 )
