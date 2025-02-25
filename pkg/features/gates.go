@@ -36,6 +36,8 @@ var RewardFullPriorityFee = FeatureGate{Name: "RewardFullPriorityFee", Address: 
 var StakeMinimumDelegationForRewards = FeatureGate{Name: "StakeMinimumDelegationForRewards", Address: base58.MustDecodeFromString("G6ANXD6ptCSyNd9znZm7j4dEczAJCfx7Cy43oBx3rKHJ")}
 var MoveStakeAndMoveLamportsIxs = FeatureGate{Name: "MoveStakeAndMoveLamportsIxs", Address: base58.MustDecodeFromString("7bTK6Jis8Xpfrs8ZoUfiMDPazTcdPcTWheZFJTA5Z6X4")}
 var GetSysvarSyscallEnabled = FeatureGate{Name: "GetSysvarSyscallEnabled", Address: base58.MustDecodeFromString("CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq")}
+var AddNewReservedAccountKeys = FeatureGate{Name: "AddNewReservedAccountKeys", Address: base58.MustDecodeFromString("8U4skmMVnF6k2kMvrWbQuRUT3qQSiTYpSjqmhmgfthZu")}
+var EnableSecp256r1Precompile = FeatureGate{Name: "EnableSecp256r1Precompile", Address: base58.MustDecodeFromString("sryYyFwxzJop1Bh9XpyiVWjZP4nfHExiqNp3Dh71W9i")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, LastRestartSlotSysvar,
 	Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,

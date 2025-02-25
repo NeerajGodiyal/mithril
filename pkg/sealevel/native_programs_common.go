@@ -19,6 +19,10 @@ const BpfLoaderDeprecatedAddrStr = "BPFLoader1111111111111111111111111111111111"
 
 var BpfLoaderDeprecatedAddr = base58.MustDecodeFromString(BpfLoaderDeprecatedAddrStr)
 
+const LoaderV4AddrStr = "LoaderV411111111111111111111111111111111111"
+
+var LoaderV4Addr = base58.MustDecodeFromString(LoaderV4AddrStr)
+
 const NativeLoaderAddrStr = "NativeLoader1111111111111111111111111111111"
 
 var NativeLoaderAddr = base58.MustDecodeFromString(NativeLoaderAddrStr)
@@ -30,6 +34,10 @@ var ConfigProgramAddr = base58.MustDecodeFromString(ConfigProgramAddrStr)
 const Secp256kPrecompileAddrStr = "KeccakSecp256k11111111111111111111111111111"
 
 var Secp256kPrecompileAddr = base58.MustDecodeFromString(Secp256kPrecompileAddrStr)
+
+const Secp256r1PrecompileAddrStr = "Secp256r1SigVerify1111111111111111111111111"
+
+var Secp256r1PrecompileAddr = base58.MustDecodeFromString(Secp256r1PrecompileAddrStr)
 
 const Ed25519PrecompileAddrStr = "Ed25519SigVerify111111111111111111111111111"
 
@@ -62,6 +70,14 @@ var ComputeBudgetProgramAddr = base58.MustDecodeFromString(ComputeBudgetProgramA
 var IncineratorAddrStr = "1nc1nerator11111111111111111111111111111111"
 
 var IncineratorAddr = base58.MustDecodeFromString(IncineratorAddrStr)
+
+const ZkTokenProofProgramAddrStr = "ZkTokenProof1111111111111111111111111111111"
+
+var ZkTokenProofProgramAddr = base58.MustDecodeFromString(ZkTokenProofProgramAddrStr)
+
+const ZkElgamalProofProgramAddrStr = "ZkE1Gama1Proof11111111111111111111111111111"
+
+var ZkElgamalProofProgramAddr = base58.MustDecodeFromString(ZkElgamalProofProgramAddrStr)
 
 const SysvarOwnerStr = "Sysvar1111111111111111111111111111111111111"
 

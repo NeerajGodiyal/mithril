@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -101,7 +101,7 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	return execCtx
 }
 
-func instrsFromTx(tx *solana.Transaction) ([]sealevel.Instruction, error) {
+func instrsFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, error) {
 	instrs := make([]sealevel.Instruction, len(tx.Message.Instructions))
 	for idx, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
@@ -116,7 +116,7 @@ func instrsFromTx(tx *solana.Transaction) ([]sealevel.Instruction, error) {
 
 		var acctMetas []sealevel.AccountMeta
 		for _, am := range ams {
-			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am)}
+			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am, f)}
 			acctMetas = append(acctMetas, acctMeta)
 		}
 
@@ -142,13 +142,29 @@ func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16
 	return nil
 }
 
-func isWritable(tx *solana.Transaction, am *solana.AccountMeta) bool {
+var newReservedAccts = []solana.PublicKey{sealevel.AddressLookupTableAddr, sealevel.ComputeBudgetProgramAddr,
+	sealevel.Ed25519PrecompileAddr, sealevel.LoaderV4Addr, sealevel.Secp256kPrecompileAddr, sealevel.ZkElgamalProofProgramAddr,
+	sealevel.ZkTokenProofProgramAddr, sealevel.SysvarEpochRewardsAddr, sealevel.SysvarLastRestartSlotAddr, sealevel.SysvarOwnerAddr}
+
+func isWritable(tx *solana.Transaction, am *solana.AccountMeta, f *features.Features) bool {
 	if !am.IsWritable {
 		return false
 	}
 
 	if isNativeProgram(am.PublicKey) || isSysvar(am.PublicKey) {
 		return false
+	}
+
+	if f.IsActive(features.AddNewReservedAccountKeys) {
+		if slices.Contains(newReservedAccts, am.PublicKey) {
+			return false
+		}
+	}
+
+	if f.IsActive(features.EnableSecp256r1Precompile) {
+		if am.PublicKey == sealevel.Secp256r1PrecompileAddr {
+			return false
+		}
 	}
 
 	programIds, err := tx.GetProgramIDs()
@@ -163,29 +179,6 @@ func isWritable(tx *solana.Transaction, am *solana.AccountMeta) bool {
 	}
 
 	return true
-}
-
-func isProgram(tx *solana.Transaction, am *solana.AccountMeta) bool {
-	programIds, err := tx.GetProgramIDs()
-	if err != nil {
-		panic(err)
-	}
-
-	for _, programId := range programIds {
-		if am.PublicKey == programId {
-			return true
-		}
-	}
-
-	return false
-}
-
-func acctsEqual(acct1 *accounts.Account, acct2 *accounts.Account) bool {
-	return acct1.Lamports == acct2.Lamports &&
-		acct1.Owner == acct2.Owner &&
-		acct1.RentEpoch == acct2.RentEpoch &&
-		acct1.Executable == acct2.Executable &&
-		bytes.Equal(acct1.Data, acct2.Data)
 }
 
 func recordModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
@@ -305,7 +298,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return NewTxErrInvalidSignature(err.Error())
 	}*/
 
-	instrs, err := instrsFromTx(tx)
+	instrs, err := instrsFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -384,7 +377,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 		var acctMetas []sealevel.AccountMeta
 		for _, am := range resolvedAccountMetas {
-			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am)}
+			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am, &execCtx.GlobalCtx.Features)}
 			acctMetas = append(acctMetas, acctMeta)
 			fmt.Printf("instr acct: %+v\n", acctMeta)
 		}
