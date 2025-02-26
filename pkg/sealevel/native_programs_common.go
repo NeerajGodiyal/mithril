@@ -83,6 +83,14 @@ const SysvarOwnerStr = "Sysvar1111111111111111111111111111111111111"
 
 var SysvarOwnerAddr = base58.MustDecodeFromString(SysvarOwnerStr)
 
+const SysvarRewardsAddrStr = "SysvarRewards111111111111111111111111111111"
+
+var SysvarRewardsAddr = base58.MustDecodeFromString(SysvarRewardsAddrStr)
+
+const FeatureAddrStr = "Feature111111111111111111111111111111111111"
+
+var FeatureAddr = base58.MustDecodeFromString(FeatureAddrStr)
+
 var IsPrecompile = errors.New("IsPrecompile")
 
 var invalidEnumValue = errors.New("invalid enum value")

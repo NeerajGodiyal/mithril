@@ -117,8 +117,8 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 	if pubkey == sealevel.SystemProgramAddr || pubkey == sealevel.BpfLoaderUpgradeableAddr ||
 		pubkey == sealevel.BpfLoader2Addr || pubkey == sealevel.BpfLoaderDeprecatedAddr ||
 		pubkey == sealevel.VoteProgramAddr || pubkey == sealevel.StakeProgramAddr ||
-		pubkey == sealevel.AddressLookupTableAddr || pubkey == sealevel.ConfigProgramAddr ||
-		pubkey == sealevel.ComputeBudgetProgramAddr {
+		pubkey == sealevel.ConfigProgramAddr || pubkey == sealevel.StakeProgramConfigAddr ||
+		pubkey == sealevel.NativeLoaderAddr {
 		return true
 	} else {
 		return false
@@ -126,12 +126,11 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 }
 
 func isSysvar(pubkey solana.PublicKey) bool {
-	if pubkey == sealevel.SysvarClockAddr || pubkey == sealevel.SysvarEpochRewardsAddr ||
-		pubkey == sealevel.SysvarEpochScheduleAddr || pubkey == sealevel.SysvarFeesAddr ||
-		pubkey == sealevel.SysvarInstructionsAddr || pubkey == sealevel.SysvarLastRestartSlotAddr ||
+	if pubkey == sealevel.SysvarClockAddr || pubkey == sealevel.SysvarEpochScheduleAddr ||
+		pubkey == sealevel.SysvarFeesAddr || pubkey == sealevel.SysvarInstructionsAddr ||
 		pubkey == sealevel.SysvarRecentBlockHashesAddr || pubkey == sealevel.SysvarRentAddr ||
-		pubkey == sealevel.SysvarSlotHashesAddr || pubkey == sealevel.SysvarSlotHistoryAddr ||
-		pubkey == sealevel.SysvarStakeHistoryAddr {
+		pubkey == sealevel.SysvarRewardsAddr || pubkey == sealevel.SysvarSlotHashesAddr ||
+		pubkey == sealevel.SysvarSlotHistoryAddr || pubkey == sealevel.SysvarStakeHistoryAddr {
 		return true
 	} else {
 		return false
