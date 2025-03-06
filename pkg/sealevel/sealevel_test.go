@@ -1034,7 +1034,10 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	var log LogRecorder
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
-	execCtx.Accounts = accounts.NewMemAccounts()
+	execCtx.SlotCtx = new(SlotCtx)
+	execCtx.SlotCtx.Slot = 1337
+
+	execCtx.SlotCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
 	clock.Slot = 1234
 	clock.Epoch = 1111
@@ -1043,8 +1046,8 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	clock.LeaderScheduleEpoch = 100000
 	clockAcct := accounts.Account{}
 	clockAcct.Lamports = 1
-	execCtx.Accounts.SetAccount(&SysvarClockAddr, &clockAcct)
-	WriteClockSysvar(&execCtx.Accounts, clock)
+	execCtx.SlotCtx.Accounts.SetAccount(&SysvarClockAddr, &clockAcct)
+	WriteClockSysvar(&execCtx.SlotCtx.Accounts, clock)
 
 	var rent SysvarRent
 	rent.LamportsPerUint8Year = 12
@@ -1053,8 +1056,8 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 
 	rentAcct := accounts.Account{}
 	rentAcct.Lamports = 1
-	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
-	WriteRentSysvar(&execCtx.Accounts, rent)
+	execCtx.SlotCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
+	WriteRentSysvar(&execCtx.SlotCtx.Accounts, rent)
 
 	var epochSchedule SysvarEpochSchedule
 	epochSchedule.SlotsPerEpoch = 1111
@@ -1065,15 +1068,15 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 
 	epochScheduleAcct := accounts.Account{}
 	epochScheduleAcct.Lamports = 1
-	execCtx.Accounts.SetAccount(&SysvarEpochScheduleAddr, &epochScheduleAcct)
-	WriteEpochScheduleSysvar(&execCtx.Accounts, epochSchedule)
+	execCtx.SlotCtx.Accounts.SetAccount(&SysvarEpochScheduleAddr, &epochScheduleAcct)
+	WriteEpochScheduleSysvar(&execCtx.SlotCtx.Accounts, epochSchedule)
 
 	var lastRestartSlot SysvarLastRestartSlot
 	lastRestartSlot.LastRestartSlot = 989898
 	lastRestartSlotAcct := accounts.Account{}
 	lastRestartSlotAcct.Lamports = 1
-	execCtx.Accounts.SetAccount(&SysvarLastRestartSlotAddr, &lastRestartSlotAcct)
-	WriteLastRestartSlotSysvar(&execCtx.Accounts, lastRestartSlot)
+	execCtx.SlotCtx.Accounts.SetAccount(&SysvarLastRestartSlotAddr, &lastRestartSlotAcct)
+	WriteLastRestartSlotSysvar(&execCtx.SlotCtx.Accounts, lastRestartSlot)
 
 	var epochRewards SysvarEpochRewards
 	epochRewards.DistributionStartingBlockHeight = 1234
@@ -1086,8 +1089,8 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	epochRewards.Active = false
 	epochRewardsAcct := accounts.Account{}
 	epochRewardsAcct.Lamports = 1
-	execCtx.Accounts.SetAccount(&SysvarEpochRewardsAddr, &epochRewardsAcct)
-	WriteEpochRewardsSysvar(&execCtx.Accounts, epochRewards)
+	execCtx.SlotCtx.Accounts.SetAccount(&SysvarEpochRewardsAddr, &epochRewardsAcct)
+	WriteEpochRewardsSysvar(&execCtx.SlotCtx.Accounts, epochRewards)
 
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.LastRestartSlotSysvar, 0)
@@ -1096,11 +1099,8 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	execCtx.GlobalCtx.Features = *f
 
 	pk := [32]byte(programDataAcct.Key)
-	err = execCtx.Accounts.SetAccount(&pk, &programDataAcct)
+	err = execCtx.SlotCtx.Accounts.SetAccount(&pk, &programDataAcct)
 	assert.NoError(t, err)
-
-	execCtx.SlotCtx = new(SlotCtx)
-	execCtx.SlotCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)

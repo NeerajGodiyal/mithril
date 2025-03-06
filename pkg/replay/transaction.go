@@ -400,6 +400,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	klog.Infof("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
+	fmt.Printf("tx logs:\n")
+	for _, logEntry := range log.Logs {
+		fmt.Printf("%s\n", logEntry)
+	}
+
 	// check for CU consumed divergences
 	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
 		klog.Infof("tx %s CU divergence: used was %d but onchain CU consumed was %d (%d discrepancy)", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, uint64(math.Abs(float64(execCtx.ComputeMeter.Used()-*txMeta.ComputeUnitsConsumed))))

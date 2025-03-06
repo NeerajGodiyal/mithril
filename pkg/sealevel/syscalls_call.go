@@ -2,7 +2,6 @@ package sealevel
 
 import (
 	"bytes"
-	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
@@ -120,10 +119,6 @@ func SyscallSetReturnDataImpl(vm sbpf.VM, addr, length uint64) (uint64, error) {
 }
 
 var SyscallSetReturnData = sbpf.SyscallFunc2(SyscallSetReturnDataImpl)
-
-func castToPtr(obj any) uint64 {
-	return uint64(uintptr(unsafe.Pointer(&obj)))
-}
 
 // SyscallGetProcessedSiblingInstructionImpl is an implementation of the sol_get_processed_sibling_instruction syscall
 func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, programIdAddr, dataAddr, accountsAddr uint64) (uint64, error) {

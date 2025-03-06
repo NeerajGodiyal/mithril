@@ -1645,35 +1645,6 @@ func processNewVoteState(voteState *VoteState, newState *deque.Deque[LandedVote]
 	return nil
 }
 
-func checkAndFilterProposedVoteState(voteState *VoteState, proposedLockouts *deque.Deque[VoteLockout], proposedRoot *uint64, slotHashes SysvarSlotHashes) error {
-
-	if proposedLockouts.IsEmpty() {
-		return VoteErrEmptySlots
-	}
-
-	l, ok := proposedLockouts.Back()
-	if !ok {
-		panic("must be nonempty, checked above")
-	}
-	lastProposedSlot := l.Slot
-
-	var lastVoteSlot uint64
-	lo, ok := voteState.Votes.Back()
-	if ok {
-		lastVoteSlot = lo.Lockout.Slot
-		if lastProposedSlot <= lastVoteSlot {
-			klog.Infof("lastProposedSlot (%d) <= lastVoteSlot (%d)", lastProposedSlot, lastVoteSlot)
-			return VoteErrVoteTooOld
-		}
-	}
-
-	if len(slotHashes) == 0 {
-		return VoteErrSlotsMismatch
-	}
-
-	return nil
-}
-
 func VoteProgramProcessVoteStateUpdate(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, voteStateUpdate *VoteInstrUpdateVoteState, signers []solana.PublicKey, f features.Features) error {
 	klog.Infof("VoteStateUpdate")
 

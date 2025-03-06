@@ -14,7 +14,7 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, slot uint64, epoch uint64) uint64 {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, slot uint64) uint64 {
 	voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
 	partitionedRewardsInfo := rewards.RetrievePartitionedStakingRewardsInfo(rpcc, slot+1)
 

@@ -84,7 +84,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	var lastRewardsDistributionSlot uint64
 
 	if partitionedEpochRewards {
-		lastRewardsDistributionSlot = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochSchedule, rpcc, blockResult, slot, epoch)
+		lastRewardsDistributionSlot = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochSchedule, rpcc, blockResult, slot)
 	} else {
 		rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
 		rewards.DistributeStakingRewards(acctsDb, blockResult.Rewards, slot)

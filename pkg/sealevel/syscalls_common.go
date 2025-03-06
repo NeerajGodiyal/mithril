@@ -15,12 +15,6 @@ func isNonOverlapping(src, srcLen, dst, dstLen uint64) bool {
 	}
 }
 
-var genericSyscallErr = errors.New("syscallError")
-
-func syscallErrGeneric() (uint64, error) {
-	return math.MaxUint64, genericSyscallErr
-}
-
 func syscallErrCustom(msg string) (uint64, error) {
 	return math.MaxUint64, errors.New(msg)
 }

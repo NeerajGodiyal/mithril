@@ -381,16 +381,6 @@ func setAddrTableLookupAccountState(acct *BorrowedAccount, state *AddressLookupT
 	return err
 }
 
-func setAddrTableLookupAccountStateWithExtension(acct *BorrowedAccount, state *AddressLookupTable, f features.Features) error {
-	acctStateBytes, err := marshalAddressLookupTable(state)
-	if err != nil {
-		return err
-	}
-
-	err = acct.ExtendFromSlice(f, acctStateBytes)
-	return err
-}
-
 func overwriteAddrLookupTableMetadata(acct *BorrowedAccount, lookupTableMeta *LookupTableMeta, f features.Features) error {
 	meta, err := acct.DataMutable(f)
 	if err != nil {

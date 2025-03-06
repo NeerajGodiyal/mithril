@@ -150,7 +150,7 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	totalPointsBuf := make([]byte, 16)
 	binary.LittleEndian.PutUint64(totalPointsBuf[:8], epochRewards.TotalPoints.Lo)
 	binary.LittleEndian.PutUint64(totalPointsBuf[8:], epochRewards.TotalPoints.Hi)
-	util.ReverseBytes(totalPointsBuf)
+	util.ReverseBytesInPlace(totalPointsBuf)
 	binary.Write(buf, binary.LittleEndian, totalPointsBuf)
 
 	binary.Write(buf, binary.LittleEndian, epochRewards.TotalRewards)

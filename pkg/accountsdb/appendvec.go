@@ -189,14 +189,6 @@ func (appendVecAcct *AppendVecAccount) ToAccount() *accounts.Account {
 	return acct
 }
 
-func appendVecAcctsMarshaledSize(accts []*accounts.Account) uint64 {
-	var size uint64
-	for _, acct := range accts {
-		size += hdrLen + util.AlignUp(uint64(len(acct.Data)), 8)
-	}
-	return size
-}
-
 func unmarshalAcctFromAppendVecAcctHeader(buf io.Reader) (*accounts.Account, error) {
 	var appendVecAcct AppendVecAccount
 	err := appendVecAcct.Unmarshal(buf)

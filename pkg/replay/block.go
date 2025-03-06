@@ -9,7 +9,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
@@ -44,14 +43,6 @@ type Block struct {
 	StakeAccts       map[solana.PublicKey]bool
 	VoteTimestamps   map[solana.PublicKey]sealevel.BlockTimestamp
 	Features         *features.Features
-}
-
-func numBlockAccts(block *Block) uint64 {
-	var numAccts uint64
-	for _, tx := range block.Transactions {
-		numAccts += uint64(len(tx.Message.AccountKeys))
-	}
-	return numAccts
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
@@ -440,7 +431,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic("unable to deserialize Rent sysvar")
 	}
 
-	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
+	rentAccts := make([]*accounts.Account, 0) //rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
 
 	acctIsWritable[block.Leader] = true
 

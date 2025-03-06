@@ -774,18 +774,6 @@ func MarshalStakeStake(state *StakeStateV2) ([]byte, error) {
 	}
 }
 
-func unmarshalStakeConfig(data []byte) (*StakeConfig, error) {
-	decoder := bin.NewBinDecoder(data)
-
-	config := new(StakeConfig)
-	err := config.UnmarshalWithDecoder(decoder)
-	if err != nil {
-		return nil, err
-	} else {
-		return config, nil
-	}
-}
-
 func setStakeAccountState(acct *BorrowedAccount, stakeState *StakeStateV2, f features.Features) error {
 	stakeStateBytes, err := MarshalStakeStake(stakeState)
 	if err != nil {
