@@ -2,7 +2,6 @@ package sealevel
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 
@@ -723,7 +722,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 			point, success := altbn128.UnmarshalG1(inputSlice, false)
 			if !success {
-				fmt.Printf("failure point 1\n")
 				return syscallSuccess(1)
 			}
 
@@ -741,7 +739,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 			point, success := altbn128.UnmarshalG1(inputSlice, false)
 			if !success {
-				fmt.Printf("failure point 2\n")
 				return syscallSuccess(1)
 			}
 
@@ -759,7 +756,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 			point, success := altbn128.UnmarshalG2(inputSlice, false)
 			if !success {
-				fmt.Printf("failure point 3\n")
 				return syscallSuccess(1)
 			}
 
@@ -782,7 +778,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 			point, success := altbn128.UnmarshalG2(inputSlice, false)
 			if !success {
-				fmt.Printf("failure point 4\n")
 				return syscallSuccess(1)
 			}
 
@@ -812,10 +807,8 @@ func altbn128Addition(input []byte) ([]byte, error) {
 	copy(newInput, input)
 	input = newInput
 
-	fmt.Printf("add input:\n%s\n", hex.Dump(input))
 	point1, success := altbn128.UnmarshalG1(input[:64], false)
 	if !success {
-		fmt.Printf("failure point 5\n")
 		return nil, fmt.Errorf("couldn't unmarshal point 1")
 	}
 
@@ -845,7 +838,6 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 
 	point1, success := altbn128.UnmarshalG1(input[:64], false)
 	if !success {
-		fmt.Printf("failure point 5\n")
 		return nil, fmt.Errorf("couldn't unmarshal point 1")
 	}
 
@@ -866,13 +858,11 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 	for count := uint64(0); count < elementsLen; count++ {
 		point1, success := altbn128.UnmarshalG1(input[count*192:(count*192)+64], false)
 		if !success {
-			fmt.Printf("failure point 10\n")
 			return nil, fmt.Errorf("couldn't unmarshal point 1")
 		}
 
 		point2, success := altbn128.UnmarshalG2(input[(count*192)+64:(count*192)+64+128], false)
 		if !success {
-			fmt.Printf("failure point 11\n")
 			return nil, fmt.Errorf("couldn't unmarshal point 2")
 		}
 
@@ -888,10 +878,7 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 	var callResult [32]byte
 
 	if isPaired || len(g1Vals) == 0 {
-		fmt.Printf("pairing = TRUE\n")
 		callResult[31] = 1
-	} else {
-		fmt.Printf("pairing = FALSE\n")
 	}
 
 	return callResult[:], nil

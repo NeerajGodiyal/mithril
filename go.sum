@@ -83,12 +83,16 @@ github.com/Overclock-Validator/bgls v0.0.0-20250306095441-c26f9270c8e0 h1:vTQnnI
 github.com/Overclock-Validator/bgls v0.0.0-20250306095441-c26f9270c8e0/go.mod h1:anuAtM2m1Hbp7CCGysaEeoi0iYb+60Cd3melRJYxIwM=
 github.com/Overclock-Validator/bgls v0.0.0-20250306234200-427d20821d3e h1:liKj8CdPb4cmwVyjl3LneGf0X54NUdBDoFBeStNjxDA=
 github.com/Overclock-Validator/bgls v0.0.0-20250306234200-427d20821d3e/go.mod h1:NM+Bddcvzx9VY2Pt0gpN49GBpj4z3VlE8J558kT/6J0=
+github.com/Overclock-Validator/bgls v0.0.0-20250307094724-d2c995562dba h1:XoGYAMuieHJlRCOJm1BGqrEaJU1W0exnq3NC2DP5PyI=
+github.com/Overclock-Validator/bgls v0.0.0-20250307094724-d2c995562dba/go.mod h1:oaNwxq8pzzIPDaKP3jnP+3RKw1WE/XYE/XfJ8VEUCjU=
 github.com/Overclock-Validator/crypto v0.0.0-20250305201602-3a1f344cde60 h1:HAHbQ3b1g1cNmaSKHDLWGTljB6leY9HHk/QHr6Hw3xg=
 github.com/Overclock-Validator/crypto v0.0.0-20250305201602-3a1f344cde60/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/crypto v0.0.0-20250306094427-916af9973d6a h1:DOBtXINExRP/DDVGqrnqfQCmkitTMsLw4I85zoQl3Xo=
 github.com/Overclock-Validator/crypto v0.0.0-20250306094427-916af9973d6a/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d h1:Rhu0cTPiA3Kn74bxoZLJ5mKk/kift/CFb6ORpPwsO5s=
 github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
+github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 h1:Y715CmRx2hFfXguU0xSlGkZZ7/RYpKutWffZUiQSPvw=
+github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030 h1:Ca69Bqprgu6rHWdjBaJ11W4DoepKW+m80tMPEJcODWk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030/go.mod h1:Poczuq3dbt+CwyTKgOjGaEwJOMP7YxQobF7QhgNcguk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203115807-4a97a7c1b020 h1:AucEjS2Ki7apr3QAGb9uykeROqwExFIabtMkUa7zdbU=
