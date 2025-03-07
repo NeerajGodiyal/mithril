@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	bn256 "github.com/ethereum/go-ethereum/crypto/bn256/cloudflare"
 	"github.com/gtank/ristretto255"
 	"k8s.io/klog/v2"
 )
@@ -63,8 +64,6 @@ const (
 	AltBn128AdditionOutputLen       = 64
 	AltBn128MultiplicationOutputLen = 64
 	AltBn128PairingOutputLen        = 32
-	AltBn128FieldSize               = 32
-	AltBn128PointSize               = 64
 )
 
 func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint64, error) {
@@ -618,43 +617,6 @@ func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, right
 
 var SyscallCurveGroupOps = sbpf.SyscallFunc5(SyscallCurveGroupOpsImpl)
 
-// gfP2, G2FromInts(), and LeftPadTo32Bytes() are borrowed from https://github.com/keep-network/keep-core
-// because their altbn128 package does not export the gfP2 type, which is needed to call G2FromInts()
-
-type gfP2 struct {
-	x, y *big.Int
-}
-
-func LeftPadTo32Bytes(bytes []byte) ([]byte, error) {
-	expectedByteLen := 32
-	if len(bytes) > expectedByteLen {
-		return nil, fmt.Errorf(
-			"cannot pad %v byte array to %v bytes", len(bytes), expectedByteLen,
-		)
-	}
-
-	result := make([]byte, 0)
-	if len(bytes) < expectedByteLen {
-		result = make([]byte, expectedByteLen-len(bytes))
-	}
-	result = append(result, bytes...)
-
-	return result, nil
-}
-
-const (
-	g2PointSize = 128
-	fieldSize   = 32
-	srcX1Idx    = 0
-	srcX0Idx    = srcX1Idx + fieldSize
-	srcY1Idx    = srcX0Idx + fieldSize
-	srcY0Idx    = srcY1Idx + fieldSize
-	targetX0Idx = 0
-	targetX1Idx = targetX0Idx + fieldSize
-	targetY0Idx = targetX1Idx + fieldSize
-	targetY1Idx = targetY0Idx + fieldSize
-)
-
 var empty64Bytes [64]byte
 var empty128Bytes [128]byte
 
@@ -801,28 +763,27 @@ func altbn128Addition(input []byte) ([]byte, error) {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
 
-	altbn128 := curves.Altbn128
+	paddedInput := make([]byte, AltBn128AdditionInputLen)
+	copy(paddedInput, input)
+	input = paddedInput
 
-	newInput := make([]byte, AltBn128AdditionInputLen)
-	copy(newInput, input)
-	input = newInput
+	point1 := new(bn256.G1)
+	point2 := new(bn256.G1)
 
-	point1, success := altbn128.UnmarshalG1(input[:64], false)
-	if !success {
-		return nil, fmt.Errorf("couldn't unmarshal point 1")
+	_, err := point1.Unmarshal(input[:64])
+	if err != nil {
+		return nil, err
 	}
 
-	point2, success := altbn128.UnmarshalG1(input[64:AltBn128AdditionInputLen], false)
-	if !success {
-		return nil, fmt.Errorf("couldn't unmarshal point 2")
+	_, err = point2.Unmarshal(input[64:AltBn128AdditionInputLen])
+	if err != nil {
+		return nil, err
 	}
 
-	resultPoint, success := point1.Add(point2)
-	if !success {
-		return nil, fmt.Errorf("error calling altbn128 add")
-	}
+	resultPoint := new(bn256.G1)
+	resultPoint.Add(point1, point2)
 
-	return resultPoint.MarshalUncompressed(), nil
+	return resultPoint.Marshal(), nil
 }
 
 func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
@@ -830,40 +791,41 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
 
-	altbn128 := curves.Altbn128
+	paddedInput := make([]byte, expectedLen)
+	copy(paddedInput, input)
+	input = paddedInput
 
-	newInput := make([]byte, expectedLen)
-	copy(newInput, input)
-	input = newInput
-
-	point1, success := altbn128.UnmarshalG1(input[:64], false)
-	if !success {
-		return nil, fmt.Errorf("couldn't unmarshal point 1")
+	point := new(bn256.G1)
+	_, err := point.Unmarshal(input[:64])
+	if err != nil {
+		return nil, err
 	}
 
 	scalar := new(big.Int).SetBytes(input[64:96])
-	resultPoint := point1.Mul(scalar)
+	resultPoint := new(bn256.G1)
+	resultPoint.ScalarMult(point, scalar)
 
-	return resultPoint.MarshalUncompressed(), nil
+	return resultPoint.Marshal(), nil
 }
 
 func altbn128Pairing(input []byte) ([]byte, error) {
 	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
 
-	g1Vals := make([]curves.Point, 0)
-	g2Vals := make([]curves.Point, 0)
-
-	altbn128 := curves.Altbn128
+	g1Vals := make([]*bn256.G1, 0)
+	g2Vals := make([]*bn256.G2, 0)
 
 	for count := uint64(0); count < elementsLen; count++ {
-		point1, success := altbn128.UnmarshalG1(input[count*192:(count*192)+64], false)
-		if !success {
-			return nil, fmt.Errorf("couldn't unmarshal point 1")
+		point1 := new(bn256.G1)
+		point2 := new(bn256.G2)
+
+		_, err := point1.Unmarshal(input[count*192 : (count*192)+64])
+		if err != nil {
+			return nil, err
 		}
 
-		point2, success := altbn128.UnmarshalG2(input[(count*192)+64:(count*192)+64+128], false)
-		if !success {
-			return nil, fmt.Errorf("couldn't unmarshal point 2")
+		_, err = point2.Unmarshal(input[(count*192)+64 : (count*192)+64+128])
+		if err != nil {
+			return nil, err
 		}
 
 		g1Vals = append(g1Vals, point1)
@@ -872,7 +834,7 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 
 	var isPaired bool
 	if len(g1Vals) != 0 {
-		isPaired = altbn128.PairingCheck(g1Vals, g2Vals)
+		isPaired = bn256.PairingCheck(g1Vals, g2Vals)
 	}
 
 	var callResult [32]byte
@@ -942,6 +904,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Addition(inputSlice)
 			if err != nil {
+				klog.Infof("altbn128 addition err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -960,6 +923,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 
 			result, err := altbn128Multiplication(inputSlice, expectedSize)
 			if err != nil {
+				klog.Infof("altbn128 multiplication err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -971,6 +935,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Pairing(inputSlice)
 			if err != nil {
+				klog.Infof("altbn128 pairing err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
