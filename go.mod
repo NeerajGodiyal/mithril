@@ -31,7 +31,7 @@ require (
 require (
 	github.com/DataDog/zstd v1.5.2 // indirect
 	github.com/FiloSottile/powersoftau v0.0.0-20180220134833-e2af11381747 // indirect
-	github.com/Overclock-Validator/crypto v0.0.0-20250306094427-916af9973d6a // indirect
+	github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d // indirect
 	github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203115807-4a97a7c1b020 // indirect
 	github.com/Overclock-Validator/go-bls v0.0.0-20250304162602-9e5d35efdbe8 // indirect
 	github.com/Overclock-Validator/go-ethereum v0.0.0-20250303234049-5cf00fe11343 // indirect
@@ -87,7 +87,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0 // indirect
 	git.mills.io/prologic/bitcask v1.0.2
-	github.com/Overclock-Validator/bgls v0.0.0-20250306095441-c26f9270c8e0
+	github.com/Overclock-Validator/bgls v0.0.0-20250306234200-427d20821d3e
 	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
@@ -140,6 +140,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
+	github.com/nio-net/bls v1.0.0
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1

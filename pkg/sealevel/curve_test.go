@@ -98,3 +98,71 @@ func Test_AltBn128_Decompress_G2(t *testing.T) {
 
 	fmt.Printf("G2 decompression: decompressed G2 out: (%d):\n%s\n", len(decompressedBytes), hex.Dump(decompressedBytes))
 }
+
+var addPayload1 = "18b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f3726607c2b7f58a84bd6145f00c9c2bc0bb1a187f20ff2c92963a88019e7c6a014eed06614e20c147e940f2d70da3f74c9a17df361706a4485c742bd6788478fa17d7"
+var addResult1 = "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915"
+
+var addPayload2 = "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c91518b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266"
+var addResult2 = "2bd3e6d0f3b142924f5ca7b49ce5b9d54c4703d7ae5648e61d02268b1a0a9fb721611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb204"
+
+var addPayload3 = "17c139df0efee0f766bc0204762b774362e4ded88953a39ce849a8a7fa163fa901e0559bacb160664764a357af8a9fe70baa9258e0b959273ffc5718c6d4cc7c039730ea8dff1254c0fee9c0ea777d29a9c710b7e616683f194f18c43b43b869073a5ffcc6fc7a28c30723d6e58ce577356982d65b833a5a5c15bf9024b43d98"
+var addResult3 = "15bf2bb17880144b5d1cd2b1f46eff9d617bffd1ca57c37fb5a49bd84e53cf66049c797f9ce0d17083deb32b5e36f2ea2a212ee036598dd7624c168993d1355f"
+
+func Test_AltBn128_Add1(t *testing.T) {
+	stringTestcase := addPayload1
+	hexTestcase, err := hex.DecodeString(stringTestcase)
+	assert.NoError(t, err)
+
+	result, err := altbn128Addition(hexTestcase)
+	assert.NoError(t, err)
+
+	knownCorrectResultBytes, err := hex.DecodeString(addResult1)
+	assert.NoError(t, err)
+
+	assert.Equal(t, knownCorrectResultBytes, result)
+}
+
+func Test_AltBn128_Add2(t *testing.T) {
+	stringTestcase := addPayload2
+	hexTestcase, err := hex.DecodeString(stringTestcase)
+	assert.NoError(t, err)
+
+	result, err := altbn128Addition(hexTestcase)
+	assert.NoError(t, err)
+
+	knownCorrectResultBytes, err := hex.DecodeString(addResult2)
+	assert.NoError(t, err)
+
+	assert.Equal(t, knownCorrectResultBytes, result)
+}
+
+func Test_AltBn128_Add3(t *testing.T) {
+	stringTestcase := addPayload3
+	hexTestcase, err := hex.DecodeString(stringTestcase)
+	assert.NoError(t, err)
+
+	result, err := altbn128Addition(hexTestcase)
+	assert.NoError(t, err)
+
+	knownCorrectResultBytes, err := hex.DecodeString(addResult3)
+	assert.NoError(t, err)
+
+	assert.Equal(t, knownCorrectResultBytes, result)
+}
+
+var mulPayload1 = "2bd3e6d0f3b142924f5ca7b49ce5b9d54c4703d7ae5648e61d02268b1a0a9fb721611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb20400000000000000000000000000000000000000000000000011138ce750fa15c2"
+var mulResult1 = "070a8d6a982153cae4be29d434e8faef8a47b274a053f5a4ee2a6c9c13c31e5c031b8ce914eba3a9ffb989f9cdd5b0f01943074bf4f0f315690ec3cec6981afc"
+
+func Test_AltBn128_Mul1(t *testing.T) {
+	stringTestcase := mulPayload1
+	hexTestcase, err := hex.DecodeString(stringTestcase)
+	assert.NoError(t, err)
+
+	result, err := altbn128Multiplication(hexTestcase, 128)
+	assert.NoError(t, err)
+
+	knownCorrectResultBytes, err := hex.DecodeString(mulResult1)
+	assert.NoError(t, err)
+
+	assert.Equal(t, knownCorrectResultBytes, result)
+}

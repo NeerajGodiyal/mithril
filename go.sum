@@ -81,10 +81,14 @@ github.com/Overclock-Validator/bgls v0.0.0-20250306085937-0fb9ba80803d h1:I7IbNc
 github.com/Overclock-Validator/bgls v0.0.0-20250306085937-0fb9ba80803d/go.mod h1:gJJgbOIScIuIoa5EylJThP2LJ/g6UDK7ZsbQEuHcchQ=
 github.com/Overclock-Validator/bgls v0.0.0-20250306095441-c26f9270c8e0 h1:vTQnnIO7+XYx1sxEcSASUB3LAcgqh5W6GUrOegsc8zQ=
 github.com/Overclock-Validator/bgls v0.0.0-20250306095441-c26f9270c8e0/go.mod h1:anuAtM2m1Hbp7CCGysaEeoi0iYb+60Cd3melRJYxIwM=
+github.com/Overclock-Validator/bgls v0.0.0-20250306234200-427d20821d3e h1:liKj8CdPb4cmwVyjl3LneGf0X54NUdBDoFBeStNjxDA=
+github.com/Overclock-Validator/bgls v0.0.0-20250306234200-427d20821d3e/go.mod h1:NM+Bddcvzx9VY2Pt0gpN49GBpj4z3VlE8J558kT/6J0=
 github.com/Overclock-Validator/crypto v0.0.0-20250305201602-3a1f344cde60 h1:HAHbQ3b1g1cNmaSKHDLWGTljB6leY9HHk/QHr6Hw3xg=
 github.com/Overclock-Validator/crypto v0.0.0-20250305201602-3a1f344cde60/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/crypto v0.0.0-20250306094427-916af9973d6a h1:DOBtXINExRP/DDVGqrnqfQCmkitTMsLw4I85zoQl3Xo=
 github.com/Overclock-Validator/crypto v0.0.0-20250306094427-916af9973d6a/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
+github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d h1:Rhu0cTPiA3Kn74bxoZLJ5mKk/kift/CFb6ORpPwsO5s=
+github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030 h1:Ca69Bqprgu6rHWdjBaJ11W4DoepKW+m80tMPEJcODWk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030/go.mod h1:Poczuq3dbt+CwyTKgOjGaEwJOMP7YxQobF7QhgNcguk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203115807-4a97a7c1b020 h1:AucEjS2Ki7apr3QAGb9uykeROqwExFIabtMkUa7zdbU=
@@ -564,6 +568,8 @@ github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1/go.mod h
 github.com/mr-tron/base58 v1.2.0 h1:T/HDJBh4ZCPbU39/+c3rRvE0uKBQlU27+QI8LJ4t64o=
 github.com/mr-tron/base58 v1.2.0/go.mod h1:BinMc/sQntlIE1frQmRFPUoPA1Zkr8VRgBdjWI2mNwc=
 github.com/mwitkow/go-conntrack v0.0.0-20161129095857-cc309e4a2223/go.mod h1:qRWi+5nqEBWmkhHvq77mSJWrCKwh8bxhgT7d/eI7P4U=
+github.com/nio-net/bls v1.0.0 h1:W1OplHsyNDQN7t96Hn0mKAOZOo+4QTe34+nZVokiTjY=
+github.com/nio-net/bls v1.0.0/go.mod h1:ohShReMypchYWUimbMh/X+I1t40S/Gzj4MrTOd9mw/c=
 github.com/nkovacs/streamquote v0.0.0-20170412213628-49af9bddb229/go.mod h1:0aYXnNPJ8l7uZxf45rWW1a/uME32OF0rhiYGNQ2oF2E=
 github.com/novifinancial/serde-reflection/serde-generate/runtime/golang v0.0.0-20220519162058-e5cd3c3b3f3a h1:oMG8C4E7DFkat7WQicw4JNa/dYUaqO7RvLPbkFdADIA=
 github.com/novifinancial/serde-reflection/serde-generate/runtime/golang v0.0.0-20220519162058-e5cd3c3b3f3a/go.mod h1:NrRYJCFtaewjIRr4B9V2AyWsAEMW0Zqdjs8Bm+bACbM=

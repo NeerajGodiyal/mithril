@@ -2,6 +2,7 @@ package sealevel
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 
@@ -800,6 +801,102 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 var SyscallAltBn128Compression = sbpf.SyscallFunc4(SyscallAltBn128CompressionImpl)
 
+func altbn128Addition(input []byte) ([]byte, error) {
+	if len(input) > AltBn128AdditionInputLen {
+		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+	}
+
+	altbn128 := curves.Altbn128
+
+	newInput := make([]byte, AltBn128AdditionInputLen)
+	copy(newInput, input)
+	input = newInput
+
+	fmt.Printf("add input:\n%s\n", hex.Dump(input))
+	point1, success := altbn128.UnmarshalG1(input[:64], false)
+	if !success {
+		fmt.Printf("failure point 5\n")
+		return nil, fmt.Errorf("couldn't unmarshal point 1")
+	}
+
+	point2, success := altbn128.UnmarshalG1(input[64:AltBn128AdditionInputLen], false)
+	if !success {
+		return nil, fmt.Errorf("couldn't unmarshal point 2")
+	}
+
+	resultPoint, success := point1.Add(point2)
+	if !success {
+		return nil, fmt.Errorf("error calling altbn128 add")
+	}
+
+	return resultPoint.MarshalUncompressed(), nil
+}
+
+func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
+	if uint64(len(input)) > expectedLen {
+		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+	}
+
+	altbn128 := curves.Altbn128
+
+	newInput := make([]byte, expectedLen)
+	copy(newInput, input)
+	input = newInput
+
+	point1, success := altbn128.UnmarshalG1(input[:64], false)
+	if !success {
+		fmt.Printf("failure point 5\n")
+		return nil, fmt.Errorf("couldn't unmarshal point 1")
+	}
+
+	scalar := new(big.Int).SetBytes(input[64:96])
+	resultPoint := point1.Mul(scalar)
+
+	return resultPoint.MarshalUncompressed(), nil
+}
+
+func altbn128Pairing(input []byte) ([]byte, error) {
+	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
+
+	g1Vals := make([]curves.Point, 0)
+	g2Vals := make([]curves.Point, 0)
+
+	altbn128 := curves.Altbn128
+
+	for count := uint64(0); count < elementsLen; count++ {
+		point1, success := altbn128.UnmarshalG1(input[count*192:(count*192)+64], false)
+		if !success {
+			fmt.Printf("failure point 10\n")
+			return nil, fmt.Errorf("couldn't unmarshal point 1")
+		}
+
+		point2, success := altbn128.UnmarshalG2(input[(count*192)+64:(count*192)+64+128], false)
+		if !success {
+			fmt.Printf("failure point 11\n")
+			return nil, fmt.Errorf("couldn't unmarshal point 2")
+		}
+
+		g1Vals = append(g1Vals, point1)
+		g2Vals = append(g2Vals, point2)
+	}
+
+	var isPaired bool
+	if len(g1Vals) != 0 {
+		isPaired = altbn128.PairingCheck(g1Vals, g2Vals)
+	}
+
+	var callResult [32]byte
+
+	if isPaired || len(g1Vals) == 0 {
+		fmt.Printf("pairing = TRUE\n")
+		callResult[31] = 1
+	} else {
+		fmt.Printf("pairing = FALSE\n")
+	}
+
+	return callResult[:], nil
+}
+
 func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
 	klog.Infof("SyscallAltBn128")
 
@@ -809,14 +906,14 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 	switch groupOp {
 	case AltBn128Add:
 		{
-			klog.Infof("AltBn128Add")
+			klog.Infof("AltBn128Add. inputLen = %d", inputLen)
 			cost = CUBn128AdditionCost
 			outputLen = AltBn128AdditionOutputLen
 		}
 
 	case AltBn128Mul:
 		{
-			klog.Infof("AltBn128Mul")
+			klog.Infof("AltBn128Mul. inputLen = %d", inputLen)
 			cost = CUBn128MultiplicationCost
 			outputLen = AltBn128MultiplicationOutputLen
 		}
@@ -853,37 +950,16 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		return syscallErr(err)
 	}
 
-	altbn128 := curves.Altbn128
-
 	switch groupOp {
 	case AltBn128Add:
 		{
-			if inputLen > AltBn128AdditionInputLen {
+			result, err := altbn128Addition(inputSlice)
+			if err != nil {
 				return syscallSuccess(1)
+			} else {
+				copy(callResult, result)
+				return syscallSuccess(0)
 			}
-
-			point1, success := altbn128.UnmarshalG1(inputSlice[:64], false)
-			if !success {
-				fmt.Printf("failure point 5\n")
-				return syscallSuccess(1)
-			}
-
-			point2, success := altbn128.UnmarshalG1(inputSlice[64:], false)
-			if !success {
-				fmt.Printf("failure point 6\n")
-				return syscallSuccess(1)
-			}
-
-			resultPoint, success := point1.Add(point2)
-			if !success {
-				fmt.Printf("failure point 7\n")
-				return syscallSuccess(1)
-			}
-
-			resultPointBytes := resultPoint.MarshalUncompressed()
-			copy(callResult, resultPointBytes)
-
-			return syscallSuccess(0)
 		}
 
 	case AltBn128Mul:
@@ -895,77 +971,24 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 				expectedSize = 128
 			}
 
-			if inputLen > expectedSize {
+			result, err := altbn128Multiplication(inputSlice, expectedSize)
+			if err != nil {
 				return syscallSuccess(1)
+			} else {
+				copy(callResult, result)
+				return syscallSuccess(0)
 			}
-
-			buf := make([]byte, 96)
-			copy(buf, inputSlice[:min(inputLen, 96)])
-
-			point1, success := altbn128.UnmarshalG1(buf[:64], false)
-			if !success {
-				fmt.Printf("failure point 8\n")
-				return syscallSuccess(1)
-			}
-
-			scalar := new(big.Int).SetBytes(buf[64:])
-
-			resultPoint := point1.Mul(scalar)
-			if !success {
-				fmt.Printf("failure point 9\n")
-				return syscallSuccess(1)
-			}
-
-			resultPointBytes := resultPoint.MarshalUncompressed()
-			copy(callResult, resultPointBytes)
-
-			return syscallSuccess(0)
 		}
 
 	case AltBn128Pairing:
 		{
-			g1Vals := make([]curves.Point, 0)
-			g2Vals := make([]curves.Point, 0)
-
-			for count := uint64(0); count < (inputLen / AltBn128PairingElementLen); count++ {
-				input := make([]byte, 192)
-				copy(input, inputSlice[count*192:(count*192)+192])
-
-				point1, success := altbn128.UnmarshalG1(input[:64], false)
-				if !success {
-					fmt.Printf("failure point 10\n")
-					return syscallSuccess(1)
-				}
-
-				point2, success := altbn128.UnmarshalG2(input[64:], false)
-				if !success {
-					fmt.Printf("failure point 11\n")
-					return syscallSuccess(1)
-				}
-
-				if point1.Equals(altbn128.GetG1Infinity()) || point2.Equals(altbn128.GetG2Infinity()) {
-					continue
-				}
-
-				g1Vals = append(g1Vals, point1)
-				g2Vals = append(g2Vals, point2)
-			}
-
-			var isPaired bool
-			if len(g1Vals) != 0 {
-				isPaired = altbn128.PairingCheck(g1Vals, g2Vals)
-			}
-
-			for i := range 32 {
-				callResult[i] = 0
-			}
-
-			if isPaired || len(g1Vals) == 0 {
-				callResult[31] = 1
+			result, err := altbn128Pairing(inputSlice)
+			if err != nil {
+				return syscallSuccess(1)
+			} else {
+				copy(callResult, result)
 				return syscallSuccess(0)
 			}
-
-			return syscallSuccess(0)
 		}
 
 	default:
