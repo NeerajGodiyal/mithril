@@ -7,6 +7,7 @@ import (
 
 	"filippo.io/edwards25519"
 	"github.com/Overclock-Validator/bgls/curves"
+	"github.com/Overclock-Validator/gnark-crypto/ecc/bn254"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
@@ -617,8 +618,77 @@ func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, right
 
 var SyscallCurveGroupOps = sbpf.SyscallFunc5(SyscallCurveGroupOpsImpl)
 
+var empty32Bytes [32]byte
 var empty64Bytes [64]byte
 var empty128Bytes [128]byte
+
+func g1Compress(input []byte) ([]byte, error) {
+	if len(input) != Bn128G1Len {
+		return nil, fmt.Errorf("wrong input length")
+	}
+
+	altbn128 := curves.Altbn128
+	point, success := altbn128.UnmarshalG1(input, false)
+	if !success {
+		return nil, fmt.Errorf("error unmarshaling G1 point")
+	}
+
+	compressedPointBytes := point.Marshal()
+	return compressedPointBytes, nil
+}
+
+func g1Decompress(input []byte) ([]byte, error) {
+	if len(input) != Bn128G1CompressedLen {
+		return nil, fmt.Errorf("wrong input length")
+	}
+
+	if bytes.Compare(input, empty32Bytes[:]) == 0 {
+		return empty64Bytes[:], nil
+	}
+
+	var g1 bn254.G1Affine
+	err := g1.Unmarshal(input)
+	if err != nil {
+		return nil, err
+	}
+
+	decompressedPointBytes := g1.RawBytes()
+	return decompressedPointBytes[:], nil
+}
+
+func g2Compress(input []byte) ([]byte, error) {
+	if len(input) != Bn128G2Len {
+		return nil, fmt.Errorf("wrong input length")
+	}
+
+	altbn128 := curves.Altbn128
+	point, success := altbn128.UnmarshalG2(input, false)
+	if !success {
+		return nil, fmt.Errorf("error unmarshaling G2 point")
+	}
+
+	compressedPointBytes := point.Marshal()
+	return compressedPointBytes, nil
+}
+
+func g2Decompress(input []byte) ([]byte, error) {
+	if len(input) != Bn128G2CompressedLen {
+		return nil, fmt.Errorf("wrong input length")
+	}
+
+	if bytes.Compare(input, empty64Bytes[:]) == 0 {
+		return empty128Bytes[:], nil
+	}
+
+	var g2 bn254.G2Affine
+	err := g2.Unmarshal(input)
+	if err != nil {
+		return nil, err
+	}
+
+	decompressedBytes := g2.RawBytes()
+	return decompressedBytes[:], nil
+}
 
 func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
 	klog.Infof("SyscallAltBn128Compression")
@@ -673,79 +743,60 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 		return syscallErr(err)
 	}
 
-	altbn128 := curves.Altbn128
-
 	switch op {
 	case AltBn128G1Compress:
 		{
-			if inputLen != Bn128G1Len {
+			klog.Infof("AltBn128G1Compress")
+
+			compressedPointBytes, err := g1Compress(inputSlice)
+			if err != nil {
+				klog.Infof("G1 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
-			point, success := altbn128.UnmarshalG1(inputSlice, false)
-			if !success {
-				return syscallSuccess(1)
-			}
-
-			compressedPointBytes := point.Marshal()
 			copy(callResult, compressedPointBytes)
-
 			return syscallSuccess(0)
 		}
 
 	case AltBn128G1Decompress:
 		{
-			if inputLen != Bn128G1CompressedLen {
+			klog.Infof("AltBn128G1Decompress")
+
+			decompressedPointBytes, err := g1Decompress(inputSlice)
+			if err != nil {
+				klog.Infof("G1 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
-			point, success := altbn128.UnmarshalG1(inputSlice, false)
-			if !success {
-				return syscallSuccess(1)
-			}
-
-			decompressedPointBytes := point.MarshalUncompressed()
 			copy(callResult, decompressedPointBytes)
-
 			return syscallSuccess(0)
 		}
 
 	case AltBn128G2Compress:
 		{
-			if inputLen != Bn128G2Len {
+			klog.Infof("AltBn128G2Compress")
+
+			compressedPointBytes, err := g2Compress(inputSlice)
+			if err != nil {
+				klog.Infof("G2 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
-			point, success := altbn128.UnmarshalG2(inputSlice, false)
-			if !success {
-				return syscallSuccess(1)
-			}
-
-			compressedPointBytes := point.Marshal()
 			copy(callResult, compressedPointBytes)
-
 			return syscallSuccess(0)
 		}
 
 	case AltBn128G2Decompress:
 		{
-			if inputLen != Bn128G2CompressedLen {
+			klog.Infof("AltBn128G2Decompress")
+
+			decompressedPointBytes, err := g2Decompress(inputSlice)
+			if err != nil {
+				klog.Infof("G2 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
-			if bytes.Compare(inputSlice, empty64Bytes[:]) == 0 {
-				copy(callResult, empty128Bytes[:])
-				return syscallSuccess(0)
-			}
-
-			point, success := altbn128.UnmarshalG2(inputSlice, false)
-			if !success {
-				return syscallSuccess(1)
-			}
-
-			decompressedPointBytes := point.MarshalUncompressed()
 			copy(callResult, decompressedPointBytes)
-
 			return syscallSuccess(0)
 		}
 
@@ -782,8 +833,9 @@ func altbn128Addition(input []byte) ([]byte, error) {
 
 	resultPoint := new(bn256.G1)
 	resultPoint.Add(point1, point2)
+	resultBytes := resultPoint.Marshal()
 
-	return resultPoint.Marshal(), nil
+	return resultBytes, nil
 }
 
 func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
@@ -804,8 +856,9 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 	scalar := new(big.Int).SetBytes(input[64:96])
 	resultPoint := new(bn256.G1)
 	resultPoint.ScalarMult(point, scalar)
+	resultBytes := resultPoint.Marshal()
 
-	return resultPoint.Marshal(), nil
+	return resultBytes, nil
 }
 
 func altbn128Pairing(input []byte) ([]byte, error) {
@@ -841,6 +894,8 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 
 	if isPaired || len(g1Vals) == 0 {
 		callResult[31] = 1
+	} else {
+		klog.Infof("PairingCheck fail\n")
 	}
 
 	return callResult[:], nil

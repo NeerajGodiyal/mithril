@@ -28,6 +28,8 @@ const (
 	VoteProgramInstrTypeAuthorizeCheckedWithSeed
 	VoteProgramInstrTypeCompactUpdateVoteState
 	VoteProgramInstrTypeCompactUpdateVoteStateSwitch
+	VoteProgramInstrTypeTowerSync
+	VoteProgramInstrTypeTowerSyncSwitch
 )
 
 var (
@@ -138,6 +140,19 @@ type VoteInstrCompactUpdateVoteState struct {
 type VoteInstrCompactUpdateVoteStateSwitch struct {
 	UpdateVoteState VoteInstrUpdateVoteState
 	Hash            [32]byte
+}
+
+type VoteInstrTowerSync struct {
+	Lockouts  deque.Deque[VoteLockout]
+	Root      *uint64
+	Hash      [32]byte
+	Timestamp *int64
+	BlockId   [32]byte
+}
+
+type VoteInstrTowerSyncSwitch struct {
+	TowerSync VoteInstrTowerSync
+	Hash      [32]byte
 }
 
 func (voteInit *VoteInstrVoteInit) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -515,6 +530,90 @@ func (cuvs *CompactUpdateVoteState) UnmarshalWithDecoder(decoder *bin.Decoder) e
 	return nil
 }
 
+func (towerSync *VoteInstrTowerSync) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	root, err := decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	if root != math.MaxUint64 {
+		towerSync.Root = &root
+	}
+
+	var lockoutOffsetsLen uint16
+	lockoutOffsetsLen, err = decoder.ReadUint16(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	var lastSlot uint64
+	if towerSync.Root != nil {
+		lastSlot = *towerSync.Root
+	}
+
+	lockouts := deque.NewDeque[VoteLockout]()
+	towerSync.Lockouts = *lockouts
+
+	for i := uint64(0); i < uint64(lockoutOffsetsLen); i++ {
+		var lockoutOffset LockoutOffset
+		err = lockoutOffset.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+
+		slot, err := safemath.CheckedAddU64(lastSlot, lockoutOffset.Offset)
+		if err != nil {
+			return err
+		}
+
+		lo := VoteLockout{Slot: slot, ConfirmationCount: uint32(lockoutOffset.ConfirmationCount)}
+		towerSync.Lockouts.PushBack(lo)
+		lastSlot = lo.Slot
+	}
+
+	hashBytes, err := decoder.ReadBytes(32)
+	if err != nil {
+		return err
+	}
+	copy(towerSync.Hash[:], hashBytes)
+
+	hasTimestamp, err := decoder.ReadBool()
+	if err != nil {
+		return err
+	}
+
+	if hasTimestamp {
+		ts, err := decoder.ReadInt64(bin.LE)
+		if err != nil {
+			return err
+		}
+		towerSync.Timestamp = &ts
+	}
+
+	blockIdBytes, err := decoder.ReadBytes(32)
+	if err != nil {
+		return err
+	}
+	copy(towerSync.BlockId[:], blockIdBytes)
+
+	return nil
+}
+
+func (towerSyncSwitch *VoteInstrTowerSyncSwitch) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	err := towerSyncSwitch.TowerSync.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		return err
+	}
+
+	hashBytes, err := decoder.ReadBytes(32)
+	if err != nil {
+		return err
+	}
+	copy(towerSyncSwitch.Hash[:], hashBytes)
+
+	return nil
+}
+
 func VoteProgramExecute(execCtx *ExecutionCtx) error {
 	err := execCtx.ComputeMeter.Consume(CUVoteProgramDefaultComputeUnits)
 	if err != nil {
@@ -553,6 +652,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 
 	var isVoteSwitch bool
 	var isUpdateVoteStateSwitch bool
+	var isTowerSyncSwitch bool
 
 	switch instructionType {
 	case VoteProgramInstrTypeInitializeAccount:
@@ -916,6 +1016,49 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 
 			err = VoteProgramAuthorize(me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.GlobalCtx.Features)
 		}
+
+	case VoteProgramInstrTypeTowerSyncSwitch:
+		isTowerSyncSwitch = true
+		fallthrough
+
+	case VoteProgramInstrTypeTowerSync:
+		{
+			var towerSyncInstr *VoteInstrTowerSync
+			if isTowerSyncSwitch {
+				var towerSyncSwitch VoteInstrTowerSyncSwitch
+				err = towerSyncSwitch.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					return err
+				}
+				towerSyncInstr = &towerSyncSwitch.TowerSync
+			} else {
+				var towerSync VoteInstrTowerSync
+				err = towerSync.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					return err
+				}
+				towerSyncInstr = &towerSync
+			}
+
+			if !execCtx.GlobalCtx.Features.IsActive(features.EnableTowerSyncIx) {
+				return InstrErrInvalidInstructionData
+			}
+
+			var slotHashes SysvarSlotHashes
+			slotHashes, err = ReadSlotHashesSysvar(execCtx)
+			if err != nil {
+				return err
+			}
+
+			var clock SysvarClock
+			clock, err = ReadClockSysvar(execCtx)
+			if err != nil {
+				return err
+			}
+
+			err = VoteProgramProcessTowerSync(me, slotHashes, clock, towerSyncInstr, signers, execCtx.GlobalCtx.Features)
+		}
+
 	default: // invalid instruction
 		{
 			err = InstrErrInvalidInstructionData
@@ -1197,7 +1340,7 @@ func checkSlotsAreValid(voteState *VoteState, voteSlots []uint64, voteHash [32]b
 
 	klog.Infof("Slothashes.Hash = %v", slotHashes[j].Hash)
 	if slotHashes[j].Hash != voteHash {
-		klog.Infof("%s dropped vote slots. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteHash, slotHashes[j].Hash)
+		klog.Infof("%s dropped vote slots. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteHash, slotHashes[j].Hash[:])
 		return VoteErrSlotHashMismatch
 	}
 
@@ -1427,10 +1570,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 		panic("lastVoteStateUpdateSlot != slotHashes[slotHashesIndex].Slot not true")
 	}
 
-	klog.Infof("Slothashes.Hash = %v", slotHashes[slotHashesIndex].Hash)
+	klog.Infof("SlotHashes.Hash = %v", slotHashes[slotHashesIndex].Hash)
 
 	if slotHashes[slotHashesIndex].Hash != voteStateUpdate.Hash {
-		klog.Infof("%s dropped vote. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteStateUpdate.Hash, slotHashes[slotHashesIndex].Slot)
+		klog.Infof("%s dropped vote. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteStateUpdate.Hash, slotHashes[slotHashesIndex].Hash)
 		return VoteErrSlotHashMismatch
 	}
 
@@ -1742,4 +1885,13 @@ func VoteProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAc
 	err = toAcct.CheckedAddLamports(lamports, f)
 
 	return err
+}
+
+func processTowerSync(voteState *VoteState, slotHashes SysvarSlotHashes, epoch uint64, slot uint64, towerSync *VoteInstrTowerSync, f features.Features) error {
+	return nil
+}
+
+func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
+	//voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	return nil
 }
