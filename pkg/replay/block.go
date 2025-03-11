@@ -28,25 +28,25 @@ type BlockRewardsInfo struct {
 }
 
 type Block struct {
-	Slot                         uint64
-	Epoch                        uint64
-	Transactions                 []*solana.Transaction
-	BankHash                     [32]byte
-	EpochAcctsHash               []byte
-	ParentBankhash               [32]byte
-	NumSignatures                uint64
-	Blockhash                    [32]byte
-	ExpectedBankhash             [32]byte
-	TxMetas                      []*rpc.TransactionMeta
-	Leader                       solana.PublicKey
-	Reward                       BlockRewardsInfo
-	RecentBlockhash              [32]byte
-	UnixTimestamp                int64
-	StakeAccts                   map[solana.PublicKey]bool
-	VoteTimestamps               map[solana.PublicKey]sealevel.BlockTimestamp
-	Features                     *features.Features
-	PartitionedRewardsUpdatedPks []solana.PublicKey
-	PartitionedRewardsInfo       *rewards.PartitionedRewardDistributionInfo
+	Slot                   uint64
+	Epoch                  uint64
+	Transactions           []*solana.Transaction
+	BankHash               [32]byte
+	EpochAcctsHash         []byte
+	ParentBankhash         [32]byte
+	NumSignatures          uint64
+	Blockhash              [32]byte
+	ExpectedBankhash       [32]byte
+	TxMetas                []*rpc.TransactionMeta
+	Leader                 solana.PublicKey
+	Reward                 BlockRewardsInfo
+	RecentBlockhash        [32]byte
+	UnixTimestamp          int64
+	StakeAccts             map[solana.PublicKey]bool
+	VoteTimestamps         map[solana.PublicKey]sealevel.BlockTimestamp
+	Features               *features.Features
+	UpdatedAccts           []solana.PublicKey
+	PartitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
@@ -103,7 +103,7 @@ func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
 		}
 	}
 
-	for _, pubkey := range block.PartitionedRewardsUpdatedPks {
+	for _, pubkey := range block.UpdatedAccts {
 		pubkeys = append(pubkeys, pubkey)
 	}
 
@@ -228,16 +228,50 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	return accts, nil
 }
 
-func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) *features.Features {
+func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*features.Features, []solana.PublicKey) {
+	newlyActivatedFeatures := make([]solana.PublicKey, 0)
+	acctsToStore := make([]*accounts.Account, 0)
+
 	f := features.NewFeaturesDefault()
+
 	for _, featureGate := range features.AllFeatureGates {
-		_, err := acctsDb.GetAccount(slot, featureGate.Address)
+		acct, err := acctsDb.GetAccount(slot, featureGate.Address)
 		if err == nil {
-			klog.Infof("enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
-			f.EnableFeature(featureGate, slot)
+			if acct.Owner != sealevel.FeatureAddr {
+				continue
+			}
+
+			featureAcct := features.UnmarshalFeatureAcct(acct.Data)
+
+			// already activated
+			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
+				f.EnableFeature(featureGate, slot)
+				klog.Infof("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+			}
+
+			if featureAcct.ActivatedAt == nil {
+				newFeatureAcct := &features.FeatureAcct{ActivatedAt: &slot}
+				newFeatureAcctBytes, err := features.MarshalFeatureAcct(newFeatureAcct)
+				if err != nil {
+					panic(err)
+				}
+
+				acct.Data = newFeatureAcctBytes
+				acctsToStore = append(acctsToStore, acct)
+
+				newlyActivatedFeatures = append(newlyActivatedFeatures, acct.Key)
+				f.EnableFeature(featureGate, slot)
+				klog.Infof("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+			}
 		}
 	}
-	return f
+
+	err := acctsDb.StoreAccounts(acctsToStore, slot)
+	if err != nil {
+		panic(err)
+	}
+
+	return f, newlyActivatedFeatures
 }
 
 func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
@@ -298,7 +332,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 
-	currentFeatures = scanAndEnableFeatures(acctsDb, startSlot)
+	currentFeatures, _ = scanAndEnableFeatures(acctsDb, startSlot)
 	partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	for currentSlot := startSlot; currentSlot <= endSlot; currentSlot++ {
@@ -337,14 +371,16 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		if block.Epoch != currentEpoch {
 			klog.Infof("epoch boundary")
 
-			currentFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
+			var newlyActivatedFeatures []solana.PublicKey
+			currentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
 			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 			var updatedPks []solana.PublicKey
 			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, &epochSchedule, blockResult, currentEpoch)
 			if partitionedEpochRewardsEnabled {
-				block.PartitionedRewardsUpdatedPks = append(block.PartitionedRewardsUpdatedPks, updatedPks...)
+				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
 			}
+			block.UpdatedAccts = append(block.UpdatedAccts, newlyActivatedFeatures...)
 
 			currentEpoch = block.Epoch
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
@@ -362,7 +398,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, partitionedRewardsInfo.LastStakingRewardSlot)
-			block.PartitionedRewardsUpdatedPks = append(block.PartitionedRewardsUpdatedPks, rewardPks...)
+			block.UpdatedAccts = append(block.UpdatedAccts, rewardPks...)
 		}
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
@@ -462,7 +498,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		eligibleAccts = append(eligibleAccts, acct)
 	}
 
-	for _, pk := range block.PartitionedRewardsUpdatedPks {
+	for _, pk := range block.UpdatedAccts {
 		acct, _ := slotCtx.GetAccount(pk)
 		eligibleAccts = append(eligibleAccts, acct)
 	}
