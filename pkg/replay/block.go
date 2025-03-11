@@ -452,7 +452,6 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic("unable to deserialize Rent sysvar")
 	}
 
-	// XXX: disabling addition of rent accounts into bankhash for speed during testing
 	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
 
 	acctIsWritable[block.Leader] = true

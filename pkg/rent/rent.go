@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -236,7 +237,13 @@ func collectRent(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, pubkey so
 }
 
 func CollectRentEagerly(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, epochSchedule *sealevel.SysvarEpochSchedule) []*accounts.Account {
-	fmt.Printf("CollectRentEagerly ParentSlot = %d\n", slotCtx.ParentSlot)
+	klog.Infof("CollectRentEagerly ParentSlot = %d\n", slotCtx.ParentSlot)
+
+	if slotCtx.Features.IsActive(features.SkipRentRewrites) {
+		klog.Infof("SkipRentRewrites enabled - skipping.")
+		return nil
+	}
+
 	partitions := RentCollectionPartitions(slotCtx.ParentSlot, slotCtx.Slot, epochSchedule)
 	pkRange := pubkeyRangeFromPartition(partitions[0])
 
@@ -247,8 +254,6 @@ func CollectRentEagerly(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, ep
 
 	for _, pk := range rentPubkeys {
 		acct, _ := collectRent(slotCtx, rent, pk)
-
-		// TODO: logic for skip_rent_rewrites feature gate
 		if acct != nil {
 			accts = append(accts, acct)
 		}

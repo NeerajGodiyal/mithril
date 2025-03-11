@@ -40,6 +40,7 @@ var AddNewReservedAccountKeys = FeatureGate{Name: "AddNewReservedAccountKeys", A
 var EnableSecp256r1Precompile = FeatureGate{Name: "EnableSecp256r1Precompile", Address: base58.MustDecodeFromString("sryYyFwxzJop1Bh9XpyiVWjZP4nfHExiqNp3Dh71W9i")}
 var FixAltBn128MultiplicationInputLength = FeatureGate{Name: "FixAltBn128MultiplicationInputLength", Address: base58.MustDecodeFromString("bn2puAyxUx6JUabAxYdKdJ5QHbNNmKw8dCGuGCyRrFN")}
 var EnableTowerSyncIx = FeatureGate{Name: "EnableTowerSyncIx", Address: base58.MustDecodeFromString("tSynMCspg4xFiCj1v3TDb4c7crMR5tSBhLz4sF7rrNA")}
+var SkipRentRewrites = FeatureGate{Name: "SkipRentRewrites", Address: base58.MustDecodeFromString("CGB2jM8pwZkeeiXQ66kBMyBR6Np61mggL7XUsmLjVcrw")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, LastRestartSlotSysvar,
 	Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
