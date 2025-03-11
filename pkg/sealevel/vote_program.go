@@ -1421,12 +1421,12 @@ func VoteProgramProcessVote(voteAcct *BorrowedAccount, slotHashes SysvarSlotHash
 	return err
 }
 
-func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate *VoteInstrUpdateVoteState, slotHashes SysvarSlotHashes) error {
-	if voteStateUpdate.Lockouts.IsEmpty() {
+func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts *deque.Deque[VoteLockout], proposedRoot **uint64, proposedHash [32]byte, slotHashes SysvarSlotHashes) error {
+	if proposedLockouts.IsEmpty() {
 		return VoteErrEmptySlots
 	}
 
-	lastVoteStateUpdateLockout, ok := voteStateUpdate.Lockouts.Back()
+	lastVoteStateUpdateLockout, ok := proposedLockouts.Back()
 	if !ok {
 		panic("must be nonempty, checked above")
 	}
@@ -1453,10 +1453,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 		return VoteErrVoteTooOld
 	}
 
-	if voteStateUpdate.Root != nil {
-		proposedRoot := *voteStateUpdate.Root
-		if proposedRoot < earliestSlotHashInHistory {
-			voteStateUpdate.Root = voteState.RootSlot
+	if proposedRoot != nil {
+		pRoot := **proposedRoot
+		if pRoot < earliestSlotHashInHistory {
+			*proposedRoot = voteState.RootSlot
 
 			// Agave iterates in reverse, so we collect all entries into a slice
 			// and then reverse the order
@@ -1470,25 +1470,25 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 			}*/
 
 			for _, vote := range landedVotes {
-				if vote.Lockout.Slot <= proposedRoot {
-					voteStateUpdate.Root = &vote.Lockout.Slot
+				if vote.Lockout.Slot <= pRoot {
+					*proposedRoot = &vote.Lockout.Slot
 					break
 				}
 			}
 		}
 	}
 
-	rootToCheck := voteStateUpdate.Root
+	rootToCheck := *proposedRoot
 	voteStateUpdateIndex := uint64(0)
 	slotHashesIndex := uint64(len(slotHashes))
 	var voteStateUpdateIndicesToFilter []uint64
 
-	for voteStateUpdateIndex < uint64(voteStateUpdate.Lockouts.Len()) && slotHashesIndex > 0 {
+	for voteStateUpdateIndex < uint64(proposedLockouts.Len()) && slotHashesIndex > 0 {
 		var proposedVoteSlot uint64
 		if rootToCheck != nil {
 			proposedVoteSlot = *rootToCheck
 		} else {
-			proposedVoteSlot = voteStateUpdate.Lockouts.Peek(int(voteStateUpdateIndex)).Slot
+			proposedVoteSlot = proposedLockouts.Peek(int(voteStateUpdateIndex)).Slot
 		}
 
 		if rootToCheck == nil && voteStateUpdateIndex > 0 {
@@ -1496,7 +1496,7 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 			if err != nil {
 				panic("`vote_state_update_index` is positive when checking `SlotsNotOrdered`")
 			}
-			if proposedVoteSlot <= voteStateUpdate.Lockouts.Peek(int(i)).Slot {
+			if proposedVoteSlot <= proposedLockouts.Peek(int(i)).Slot {
 				return VoteErrSlotsNotOrdered
 			}
 		}
@@ -1562,7 +1562,7 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 		}
 	}
 
-	if voteStateUpdateIndex != uint64(voteStateUpdate.Lockouts.Len()) {
+	if voteStateUpdateIndex != uint64(proposedLockouts.Len()) {
 		return VoteErrSlotsMismatch
 	}
 
@@ -1570,10 +1570,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 		panic("lastVoteStateUpdateSlot != slotHashes[slotHashesIndex].Slot not true")
 	}
 
-	klog.Infof("SlotHashes.Hash = %v", slotHashes[slotHashesIndex].Hash)
+	klog.Infof("SlotHashes.Hash = %s, SlotHashes.Slot = %d", solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]), slotHashes[slotHashesIndex].Slot)
 
-	if slotHashes[slotHashesIndex].Hash != voteStateUpdate.Hash {
-		klog.Infof("%s dropped vote. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteStateUpdate.Hash, slotHashes[slotHashesIndex].Hash)
+	if slotHashes[slotHashesIndex].Hash != proposedHash {
+		klog.Infof("%s dropped vote. failed to match hash %s vs. %s", voteState.NodePubkey, solana.HashFromBytes(proposedHash[:]), solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]))
 		return VoteErrSlotHashMismatch
 	}
 
@@ -1581,7 +1581,7 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 	filterVotesIndex := uint64(0)
 	var lockoutsToKeep []VoteLockout
 
-	voteStateUpdate.Lockouts.Range(func(i int, lockout VoteLockout) bool {
+	proposedLockouts.Range(func(i int, lockout VoteLockout) bool {
 		var err error
 		if filterVotesIndex == uint64(len(voteStateUpdateIndicesToFilter)) {
 			lockoutsToKeep = append(lockoutsToKeep, lockout)
@@ -1597,10 +1597,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, voteStateUpdate 
 		return true
 	})
 
-	voteStateUpdate.Lockouts.Clear()
+	proposedLockouts.Clear()
 
 	for _, lockout := range lockoutsToKeep {
-		voteStateUpdate.Lockouts.PushBack(lockout)
+		proposedLockouts.PushBack(lockout)
 	}
 
 	return nil
@@ -1796,7 +1796,7 @@ func VoteProgramProcessVoteStateUpdate(voteAcct *BorrowedAccount, slotHashes Sys
 		return err
 	}
 
-	err = checkUpdateVoteStateAndSlotsAreValid(voteState, voteStateUpdate, slotHashes)
+	err = checkUpdateVoteStateAndSlotsAreValid(voteState, &voteStateUpdate.Lockouts, &voteStateUpdate.Root, voteStateUpdate.Hash, slotHashes)
 	if err != nil {
 		return err
 	}
@@ -1887,11 +1887,29 @@ func VoteProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAc
 	return err
 }
 
-func processTowerSync(voteState *VoteState, slotHashes SysvarSlotHashes, epoch uint64, slot uint64, towerSync *VoteInstrTowerSync, f features.Features) error {
-	return nil
-}
-
 func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
-	//voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
-	return nil
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	if err != nil {
+		return err
+	}
+
+	err = checkUpdateVoteStateAndSlotsAreValid(voteState, &towerSync.Lockouts, &towerSync.Root, towerSync.Hash, slotHashes)
+	if err != nil {
+		return err
+	}
+
+	newState := deque.NewDeque[LandedVote]()
+	towerSync.Lockouts.Range(func(i int, lockout VoteLockout) bool {
+		newState.PushBack(LandedVote{Latency: 0, Lockout: lockout})
+		return true
+	})
+
+	err = processNewVoteState(voteState, newState, towerSync.Root, towerSync.Timestamp, clock.Epoch, clock.Slot, f)
+	if err != nil {
+		return err
+	}
+
+	err = setVoteAccountState(voteAcct, voteState, f)
+
+	return err
 }

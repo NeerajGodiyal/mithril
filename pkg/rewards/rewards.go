@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
+	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"k8s.io/klog/v2"
 )
@@ -22,40 +23,57 @@ const (
 )
 
 type PartitionedRewardDistributionInfo struct {
-	TotalStakingRewards   uint64
-	LastStakingRewardSlot uint64
+	TotalStakingRewards    uint64
+	FirstStakingRewardSlot uint64
+	LastStakingRewardSlot  uint64
+	EahCalcSlot            uint64
+	EahInclusionSlot       uint64
 }
 
-func RetrievePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, startingSlot uint64) *PartitionedRewardDistributionInfo {
+func RetrievePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSchedule *sealevel.SysvarEpochSchedule, epoch uint64, slot uint64) *PartitionedRewardDistributionInfo {
 	var totalStakingRewards uint64
-	var finalStakingRewardSlot uint64
 
-	currentSlot := startingSlot
-	for {
-		rewards, err := rpcc.GetRewardsForSlot(currentSlot)
-		if err != nil {
-			panic(fmt.Sprintf("error retrieving reward data from rpc: %s", err))
-		}
-
-		if len(rewards) == 0 {
-			finalStakingRewardSlot = currentSlot - 1
-			break
-		}
-
-		for _, reward := range rewards {
-			if string(reward.RewardType) == RewardTypeStaking {
-				totalStakingRewards, err = safemath.CheckedAddU64(totalStakingRewards, uint64(reward.Lamports))
-			}
-		}
-
-		currentSlot++
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	numRewardPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
+	if err != nil {
+		panic(err)
 	}
 
-	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, LastStakingRewardSlot: finalStakingRewardSlot}
+	rewardSlots, err := rpcc.GetStakingRewardSlots(firstSlotInEpoch, numRewardPartitions)
+	if err != nil {
+		panic(err)
+	}
+
+	finalStakingRewardSlot := rewardSlots[len(rewardSlots)-1]
+
+	// we only need number for total staking reward at the beginning of a new epoch
+	// (for setting up the EpochRewards sysvar)
+	if slot == firstSlotInEpoch {
+		for _, rewardSlot := range rewardSlots {
+			rewards, err := rpcc.GetRewardsForSlot(rewardSlot)
+			if err != nil {
+				panic(fmt.Sprintf("error retrieving reward data from rpc: %s", err))
+			}
+
+			for _, reward := range rewards {
+				klog.Infof("reward: %+v", reward)
+				if string(reward.RewardType) == RewardTypeStaking {
+					totalStakingRewards, err = safemath.CheckedAddU64(totalStakingRewards, uint64(reward.Lamports))
+				}
+			}
+		}
+	}
+
+	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
+	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
+
+	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch,
+		LastStakingRewardSlot: finalStakingRewardSlot, EahCalcSlot: eahCalcSlot, EahInclusionSlot: eahInclusionSlot}
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) uint64 {
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]solana.PublicKey, uint64) {
 	accts := make([]*accounts.Account, 0)
+	rewardPks := make([]solana.PublicKey, 0)
 	var totalVotingRewards uint64
 
 	for _, reward := range rewards {
@@ -80,6 +98,8 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 			if err != nil {
 				panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
 			}
+
+			rewardPks = append(rewardPks, reward.Pubkey)
 		}
 	}
 
@@ -88,12 +108,13 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
 	}
 
-	return totalVotingRewards
+	return rewardPks, totalVotingRewards
 }
 
-func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) uint64 {
+func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]solana.PublicKey, uint64) {
 	var distributedLamports uint64
 	accts := make([]*accounts.Account, 0)
+	rewardPks := make([]solana.PublicKey, 0)
 
 	for _, reward := range rewards {
 		if string(reward.RewardType) == RewardTypeStaking {
@@ -127,8 +148,10 @@ func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Bloc
 			}
 
 			accts = append(accts, stakeAcct)
+			rewardPks = append(rewardPks, reward.Pubkey)
 
 			distributedLamports += uint64(reward.Lamports)
+			klog.Infof("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
 		}
 	}
 
@@ -139,7 +162,7 @@ func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Bloc
 		}
 	}
 
-	return distributedLamports
+	return rewardPks, distributedLamports
 }
 
 type CalculatedStakePoints struct {

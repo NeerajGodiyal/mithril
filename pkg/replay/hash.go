@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -257,7 +258,8 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 		panic("unable to deserialize epochschedule sysvar")
 	}
 
-	if shouldIncludeEah(&epochSchedule, slotCtx) {
+	// EAH must be worked into the bankhash for the slot that is 3/4 through the epoch
+	if slotCtx.EpochAcctHashInclusionSlot != math.MaxUint64 && slotCtx.Slot == slotCtx.EpochAcctHashInclusionSlot {
 		klog.Infof("**** EAH required for this bankhash")
 		hasher := sha256.New()
 		hasher.Write(bankHash)

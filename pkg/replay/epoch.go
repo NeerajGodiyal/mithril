@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
@@ -78,19 +79,23 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 
 const numSlotsPerEpoch = 432000
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, blockResult *rpc.GetBlockResult, epoch uint64, slot uint64) (uint64, uint64) {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, blockResult *rpc.GetBlockResult, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
 	stakeHistory := updateStakeHistorySysvar(acctsDb, prevSlotCtx, epochSchedule, epoch)
 
-	var lastRewardsDistributionSlot uint64
+	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
+	newEpoch := epoch + 1
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
+
+	var updatedAcctsPks []solana.PublicKey
 
 	if partitionedEpochRewards {
-		lastRewardsDistributionSlot = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochSchedule, rpcc, blockResult, slot)
+		partitionedRewardsInfo, updatedAcctsPks = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochSchedule, rpcc, blockResult, newEpoch, firstSlotInEpoch)
 	} else {
-		rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
-		rewards.DistributeStakingRewards(acctsDb, blockResult.Rewards, slot)
+		rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, firstSlotInEpoch)
+		rewards.DistributeStakingRewards(acctsDb, blockResult.Rewards, firstSlotInEpoch)
 	}
 
-	// return EAH slot, which is the slot that is 1/4 through the epoch
-	eahSlot := slot + (numSlotsPerEpoch / 4)
-	return eahSlot, lastRewardsDistributionSlot
+	updatedAcctsPks = append(updatedAcctsPks, sealevel.SysvarStakeHistoryAddr)
+
+	return partitionedRewardsInfo, updatedAcctsPks
 }

@@ -97,6 +97,7 @@ func (sr *SysvarEpochSchedule) Slot0(epoch uint64) uint64 {
 	nSlot := nEpoch * sr.SlotsPerEpoch
 
 	return sr.FirstNormalSlot + nSlot
+
 }
 
 func (sr *SysvarEpochSchedule) GetEpochAndSlotIndex(slot uint64) (uint64, uint64) {

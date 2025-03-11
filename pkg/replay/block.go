@@ -9,6 +9,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/rent"
+	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
@@ -26,23 +28,25 @@ type BlockRewardsInfo struct {
 }
 
 type Block struct {
-	Slot             uint64
-	Epoch            uint64
-	Transactions     []*solana.Transaction
-	BankHash         [32]byte
-	EpochAcctsHash   []byte
-	ParentBankhash   [32]byte
-	NumSignatures    uint64
-	Blockhash        [32]byte
-	ExpectedBankhash [32]byte
-	TxMetas          []*rpc.TransactionMeta
-	Leader           solana.PublicKey
-	Reward           BlockRewardsInfo
-	RecentBlockhash  [32]byte
-	UnixTimestamp    int64
-	StakeAccts       map[solana.PublicKey]bool
-	VoteTimestamps   map[solana.PublicKey]sealevel.BlockTimestamp
-	Features         *features.Features
+	Slot                         uint64
+	Epoch                        uint64
+	Transactions                 []*solana.Transaction
+	BankHash                     [32]byte
+	EpochAcctsHash               []byte
+	ParentBankhash               [32]byte
+	NumSignatures                uint64
+	Blockhash                    [32]byte
+	ExpectedBankhash             [32]byte
+	TxMetas                      []*rpc.TransactionMeta
+	Leader                       solana.PublicKey
+	Reward                       BlockRewardsInfo
+	RecentBlockhash              [32]byte
+	UnixTimestamp                int64
+	StakeAccts                   map[solana.PublicKey]bool
+	VoteTimestamps               map[solana.PublicKey]sealevel.BlockTimestamp
+	Features                     *features.Features
+	PartitionedRewardsUpdatedPks []solana.PublicKey
+	PartitionedRewardsInfo       *rewards.PartitionedRewardDistributionInfo
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
@@ -99,8 +103,11 @@ func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
 		}
 	}
 
-	pubkeys = util.DedupePubkeys(pubkeys)
+	for _, pubkey := range block.PartitionedRewardsUpdatedPks {
+		pubkeys = append(pubkeys, pubkey)
+	}
 
+	pubkeys = util.DedupePubkeys(pubkeys)
 	return pubkeys
 }
 
@@ -286,13 +293,13 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	}
 
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
-	eahSlot := uint64(math.MaxUint64)
-	var lastRewardsDistributionSlot uint64
 	var currentFeatures *features.Features
 	var lastSlotCtx *sealevel.SlotCtx
-	var partitionedEpochRewards bool
+	var partitionedEpochRewardsEnabled bool
+	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 
 	currentFeatures = scanAndEnableFeatures(acctsDb, startSlot)
+	partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	for currentSlot := startSlot; currentSlot <= endSlot; currentSlot++ {
 		blockResult, err := rpcc.GetBlockFinalized(uint64(currentSlot))
@@ -317,6 +324,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		if currentSlot == startSlot {
 			block.ParentBankhash = snapshotManifest.Bank.Hash
 			setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
+
 		} else {
 			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 			block.StakeAccts = lastSlotCtx.StakeAccts
@@ -330,22 +338,31 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			klog.Infof("epoch boundary")
 
 			currentFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
-			partitionedEpochRewards = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
+			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-			eahSlot, lastRewardsDistributionSlot = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewards, lastSlotCtx, &epochSchedule, blockResult, currentEpoch, currentSlot)
+			var updatedPks []solana.PublicKey
+			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, &epochSchedule, blockResult, currentEpoch)
+			if partitionedEpochRewardsEnabled {
+				block.PartitionedRewardsUpdatedPks = append(block.PartitionedRewardsUpdatedPks, updatedPks...)
+			}
+
 			currentEpoch = block.Epoch
+		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
+			partitionedRewardsInfo = rewards.RetrievePartitionedStakingRewardsInfo(rpcc, &epochSchedule, block.Epoch, currentSlot)
 		}
 
 		block.Features = currentFeatures
+		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if currentSlot == eahSlot {
+		if currentSlot == partitionedRewardsInfo.EahCalcSlot {
 			// calculate accounts hash for *all* on-chain accounts
 			block.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
 			klog.Infof("epoch accts hash: %s", base58.Encode(block.EpochAcctsHash))
 		}
 
-		if len(blockResult.Rewards) != 0 && partitionedEpochRewards {
-			distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, lastRewardsDistributionSlot)
+		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
+			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, partitionedRewardsInfo.LastStakingRewardSlot)
+			block.PartitionedRewardsUpdatedPks = append(block.PartitionedRewardsUpdatedPks, rewardPks...)
 		}
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
@@ -373,15 +390,19 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1,
 		Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, EpochsAcctHash: block.EpochAcctsHash,
 		Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
-		VoteTimestamps: block.VoteTimestamps}
+		VoteTimestamps: block.VoteTimestamps, EpochAcctHashInclusionSlot: math.MaxUint64}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
+
+	if block.PartitionedRewardsInfo != nil {
+		slotCtx.EpochAcctHashInclusionSlot = block.PartitionedRewardsInfo.EahInclusionSlot
+	}
 
 	acctIsWritable := make(map[solana.PublicKey]bool)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-		klog.Infof("[+] executing transaction %d, %s", idx+1, tx.Signatures[0])
+		klog.Infof("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 		txFeeInfo, wpks, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
 			klog.Infof("tx %d returned error: %s\n", idx+1, txErr)
@@ -431,12 +452,18 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic("unable to deserialize Rent sysvar")
 	}
 
-	rentAccts := make([]*accounts.Account, 0) //rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
+	// XXX: disabling addition of rent accounts into bankhash for speed during testing
+	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
 
 	acctIsWritable[block.Leader] = true
 
 	eligibleAccts := make([]*accounts.Account, 0)
 	for pk := range acctIsWritable {
+		acct, _ := slotCtx.GetAccount(pk)
+		eligibleAccts = append(eligibleAccts, acct)
+	}
+
+	for _, pk := range block.PartitionedRewardsUpdatedPks {
 		acct, _ := slotCtx.GetAccount(pk)
 		eligibleAccts = append(eligibleAccts, acct)
 	}

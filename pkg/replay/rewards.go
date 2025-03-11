@@ -11,12 +11,13 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, slot uint64) uint64 {
-	voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
-	partitionedRewardsInfo := rewards.RetrievePartitionedStakingRewardsInfo(rpcc, slot+1)
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
+	rewardPks, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
+	partitionedRewardsInfo := rewards.RetrievePartitionedStakingRewardsInfo(rpcc, epochSchedule, epoch, slot)
 
 	totalRewards, err := safemath.CheckedAddU64(voteRewardsDistributed, partitionedRewardsInfo.TotalStakingRewards)
 	if err != nil {
@@ -45,14 +46,16 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
 	}
 
-	return partitionedRewardsInfo.LastStakingRewardSlot
+	rewardPks = append(rewardPks, sealevel.SysvarEpochRewardsAddr)
+
+	return partitionedRewardsInfo, rewardPks
 }
 
-func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, rewardInfo []rpc.BlockReward, currentSlot uint64, lastRewardsDistributionSlot uint64) {
-	distributedLamports := rewards.DistributeStakingRewards(acctsDb, rewardInfo, currentSlot)
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, rewardInfo []rpc.BlockReward, currentSlot uint64, lastRewardsDistributionSlot uint64) []solana.PublicKey {
+	rewardPks, distributedLamports := rewards.DistributeStakingRewards(acctsDb, rewardInfo, currentSlot)
 
 	if distributedLamports == 0 {
-		return
+		return nil
 	}
 
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
@@ -80,4 +83,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, re
 	if err != nil {
 		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
 	}
+
+	rewardPks = append(rewardPks, sealevel.SysvarEpochRewardsAddr)
+	return rewardPks
 }

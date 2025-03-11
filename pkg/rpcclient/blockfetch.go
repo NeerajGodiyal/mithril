@@ -2,6 +2,7 @@ package rpcclient
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -62,8 +63,72 @@ func (fetcher *RpcClient) GetRewardsForSlot(slot uint64) ([]rpc.BlockReward, err
 			Rewards:                        &includeRewards,
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	return result.Rewards, err
+}
+
+func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
+	includeRewards := true
+	maxSupportedTxVer := uint64(0)
+
+	result, err := fetcher.client.GetBlockWithOpts(
+		context.TODO(),
+		slot,
+		&rpc.GetBlockOpts{
+			MaxSupportedTransactionVersion: &maxSupportedTxVer,
+			Commitment:                     rpc.CommitmentFinalized,
+			TransactionDetails:             rpc.TransactionDetailsNone,
+			Rewards:                        &includeRewards,
+		},
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	if result.NumRewardPartitions == nil {
+		return 0, fmt.Errorf("no numRewardPartitions field present")
+	}
+
+	return *result.NumRewardPartitions, nil
+}
+
+func (fetcher *RpcClient) GetStakingRewardSlots(startSlot uint64, numPartitions uint64) ([]uint64, error) {
+	result, err := fetcher.client.GetBlocksWithLimit(
+		context.TODO(),
+		startSlot,
+		numPartitions+1,
+		rpc.CommitmentFinalized)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return *result, nil
+}
+
+func (fetcher *RpcClient) GetRewardSlots(slot uint64) ([]rpc.BlockReward, *uint64, error) {
+	includeRewards := true
+	maxSupportedTxVer := uint64(0)
+
+	result, err := fetcher.client.GetBlockWithOpts(
+		context.TODO(),
+		slot,
+		&rpc.GetBlockOpts{
+			MaxSupportedTransactionVersion: &maxSupportedTxVer,
+			Commitment:                     rpc.CommitmentFinalized,
+			TransactionDetails:             rpc.TransactionDetailsNone,
+			Rewards:                        &includeRewards,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return result.Rewards, result.NumRewardPartitions, err
 }
 
 func (fetcher *RpcClient) GetLatestBlockConfirmed() (*rpc.GetBlockResult, error) {
