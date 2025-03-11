@@ -51,4 +51,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
 	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
-	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx}
+	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites}
