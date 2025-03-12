@@ -540,8 +540,8 @@ func (towerSync *VoteInstrTowerSync) UnmarshalWithDecoder(decoder *bin.Decoder) 
 		towerSync.Root = &root
 	}
 
-	var lockoutOffsetsLen uint16
-	lockoutOffsetsLen, err = decoder.ReadUint16(bin.LE)
+	var lockoutOffsetsLen int
+	lockoutOffsetsLen, err = decoder.ReadCompactU16()
 	if err != nil {
 		return err
 	}

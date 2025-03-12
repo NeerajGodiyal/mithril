@@ -390,7 +390,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if currentSlot == partitionedRewardsInfo.EahCalcSlot {
+		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahCalcSlot {
 			// calculate accounts hash for *all* on-chain accounts
 			block.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
 			klog.Infof("epoch accts hash: %s", base58.Encode(block.EpochAcctsHash))

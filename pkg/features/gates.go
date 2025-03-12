@@ -42,8 +42,8 @@ var FixAltBn128MultiplicationInputLength = FeatureGate{Name: "FixAltBn128Multipl
 var EnableTowerSyncIx = FeatureGate{Name: "EnableTowerSyncIx", Address: base58.MustDecodeFromString("tSynMCspg4xFiCj1v3TDb4c7crMR5tSBhLz4sF7rrNA")}
 var SkipRentRewrites = FeatureGate{Name: "SkipRentRewrites", Address: base58.MustDecodeFromString("CGB2jM8pwZkeeiXQ66kBMyBR6Np61mggL7XUsmLjVcrw")}
 
-var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, LastRestartSlotSysvar,
-	Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
+var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
+	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
 	LoosenCpiSizeRestriction, IncreaseTxAccountLockLimit, VoteStateAddVoteLatency, AllowCommissionDecreaseAtAnyTime,
 	CommissionUpdatesOnlyAllowedInFirstHalfOfEpoch, TimelyVoteCredits, ReduceStakeWarmupCooldown,
 	StakeRaiseMinimumDelegationTo1Sol, StakeRedelegateInstruction, RequireRentExemptSplitDestination,

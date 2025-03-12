@@ -6,6 +6,7 @@ import (
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"k8s.io/klog/v2"
 )
 
 func (fetcher *RpcClient) GetBlock(slot uint64) (*rpc.GetBlockResult, error) {
@@ -35,16 +36,27 @@ func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, e
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
-	result, err := fetcher.client.GetBlockWithOpts(
-		context.TODO(),
-		slot,
-		&rpc.GetBlockOpts{
-			MaxSupportedTransactionVersion: &maxSupportedTxVer,
-			Commitment:                     rpc.CommitmentFinalized,
-			TransactionDetails:             rpc.TransactionDetailsFull,
-			Rewards:                        &includeRewards,
-		},
-	)
+	var result *rpc.GetBlockResult
+	var err error
+
+	for count := 0; count < 10; count++ {
+		result, err = fetcher.client.GetBlockWithOpts(
+			context.TODO(),
+			slot,
+			&rpc.GetBlockOpts{
+				MaxSupportedTransactionVersion: &maxSupportedTxVer,
+				Commitment:                     rpc.CommitmentFinalized,
+				TransactionDetails:             rpc.TransactionDetailsFull,
+				Rewards:                        &includeRewards,
+			},
+		)
+
+		if err == nil {
+			break
+		} else {
+			klog.Infof("getBlock failed: %s", err)
+		}
+	}
 
 	return result, err
 }
