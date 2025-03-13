@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/blockstore"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/VividCortex/ewma"
 	"github.com/linxGnu/grocksdb"
 	"github.com/mattn/go-isatty"
@@ -70,7 +71,7 @@ func run(c *cobra.Command, args []string) {
 		panic("wtf: slotLo > slotHi")
 	}
 	total := slotHi - slotLo
-	klog.Infof("Verifying %d slots", total)
+	mlog.Log.Debugf("Verifying %d slots", total)
 
 	// per-worker amount of slots
 	step := total / uint64(workers)
@@ -78,7 +79,7 @@ func run(c *cobra.Command, args []string) {
 		step = 1
 	}
 	cursor := slotLo
-	klog.Infof("Slots per worker: %d", step)
+	mlog.Log.Debugf("Slots per worker: %d", step)
 
 	// stats trackers
 	var numSuccess atomic.Uint64
@@ -107,7 +108,7 @@ func run(c *cobra.Command, args []string) {
 		lastStatsUpdate = now
 	}
 	stats := func() {
-		klog.Infof("[stats] good=%d skipped=%d bad=%d tps=%.0f",
+		mlog.Log.Debugf("[stats] good=%d skipped=%d bad=%d tps=%.0f",
 			numSuccess.Load(), numSkipped.Load(), numFailure.Load(), txRate.Value())
 	}
 
@@ -169,7 +170,7 @@ func run(c *cobra.Command, args []string) {
 			break
 		}
 
-		klog.Infof("[worker %d]: range=[%d:%d]", i, wLo, wHi)
+		mlog.Log.Debugf("[worker %d]: range=[%d:%d]", i, wLo, wHi)
 		w := &worker{
 			id:          i,
 			bar:         bar,
@@ -202,15 +203,15 @@ func run(c *cobra.Command, args []string) {
 		klog.Info("Done!")
 		exitCode = 0
 	} else {
-		klog.Infof("Aborted: %s", err)
+		mlog.Log.Debugf("Aborted: %s", err)
 		exitCode = 1
 	}
 
 	stats()
 	timeTaken := time.Since(start)
-	klog.Infof("Time taken: %s", timeTaken)
-	klog.Infof("Bytes Read: %d (%.2f MB/s)", numBytes.Load(), float64(numBytes.Load())/timeTaken.Seconds()/1000000)
-	klog.Infof("Transaction Count: %d (%.2f tps)", numTxns.Load(), float64(numTxns.Load())/timeTaken.Seconds())
+	mlog.Log.Debugf("Time taken: %s", timeTaken)
+	mlog.Log.Debugf("Bytes Read: %d (%.2f MB/s)", numBytes.Load(), float64(numBytes.Load())/timeTaken.Seconds()/1000000)
+	mlog.Log.Debugf("Transaction Count: %d (%.2f tps)", numTxns.Load(), float64(numTxns.Load())/timeTaken.Seconds())
 	os.Exit(exitCode)
 }
 

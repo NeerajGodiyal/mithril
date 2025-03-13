@@ -9,11 +9,11 @@ import (
 	"github.com/Overclock-Validator/bgls/curves"
 	"github.com/Overclock-Validator/gnark-crypto/ecc/bn254"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	bn256 "github.com/ethereum/go-ethereum/crypto/bn256/cloudflare"
 	"github.com/gtank/ristretto255"
-	"k8s.io/klog/v2"
 )
 
 // curve types
@@ -68,7 +68,7 @@ const (
 )
 
 func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint64, error) {
-	klog.Infof("SyscallCurveValidatePoint")
+	mlog.Log.Debugf("SyscallCurveValidatePoint")
 
 	execCtx := executionCtx(vm)
 
@@ -224,7 +224,7 @@ func unmarshalRistrettoElements(elementsBytes []byte) ([]*ristretto255.Element, 
 }
 
 func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr, pointsAddr, pointsLen, resultPointAddr uint64) (uint64, error) {
-	klog.Infof("SyscallCurveMultiscalarMultiplication")
+	mlog.Log.Debugf("SyscallCurveMultiscalarMultiplication")
 
 	execCtx := executionCtx(vm)
 
@@ -591,7 +591,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 }
 
 func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, rightInputAddr, resultPointAddr uint64) (uint64, error) {
-	klog.Infof("SyscallCurveGroupOps")
+	mlog.Log.Debugf("SyscallCurveGroupOps")
 
 	switch curveId {
 	case Curve25519Edwards:
@@ -691,7 +691,7 @@ func g2Decompress(input []byte) ([]byte, error) {
 }
 
 func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
-	klog.Infof("SyscallAltBn128Compression")
+	mlog.Log.Debugf("SyscallAltBn128Compression")
 
 	var cost uint64
 	var outputLen uint64
@@ -746,11 +746,11 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 	switch op {
 	case AltBn128G1Compress:
 		{
-			klog.Infof("AltBn128G1Compress")
+			mlog.Log.Debugf("AltBn128G1Compress")
 
 			compressedPointBytes, err := g1Compress(inputSlice)
 			if err != nil {
-				klog.Infof("G1 compress error: %s", err)
+				mlog.Log.Debugf("G1 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -760,11 +760,11 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 	case AltBn128G1Decompress:
 		{
-			klog.Infof("AltBn128G1Decompress")
+			mlog.Log.Debugf("AltBn128G1Decompress")
 
 			decompressedPointBytes, err := g1Decompress(inputSlice)
 			if err != nil {
-				klog.Infof("G1 decompress error: %s", err)
+				mlog.Log.Debugf("G1 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -774,11 +774,11 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 	case AltBn128G2Compress:
 		{
-			klog.Infof("AltBn128G2Compress")
+			mlog.Log.Debugf("AltBn128G2Compress")
 
 			compressedPointBytes, err := g2Compress(inputSlice)
 			if err != nil {
-				klog.Infof("G2 compress error: %s", err)
+				mlog.Log.Debugf("G2 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -788,11 +788,11 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 	case AltBn128G2Decompress:
 		{
-			klog.Infof("AltBn128G2Decompress")
+			mlog.Log.Debugf("AltBn128G2Decompress")
 
 			decompressedPointBytes, err := g2Decompress(inputSlice)
 			if err != nil {
-				klog.Infof("G2 decompress error: %s", err)
+				mlog.Log.Debugf("G2 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -895,14 +895,14 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 	if isPaired || len(g1Vals) == 0 {
 		callResult[31] = 1
 	} else {
-		klog.Infof("PairingCheck fail\n")
+		mlog.Log.Debugf("PairingCheck fail\n")
 	}
 
 	return callResult[:], nil
 }
 
 func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
-	klog.Infof("SyscallAltBn128")
+	mlog.Log.Debugf("SyscallAltBn128")
 
 	var cost uint64
 	var outputLen uint64
@@ -910,21 +910,21 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 	switch groupOp {
 	case AltBn128Add:
 		{
-			klog.Infof("AltBn128Add. inputLen = %d", inputLen)
+			mlog.Log.Debugf("AltBn128Add. inputLen = %d", inputLen)
 			cost = CUBn128AdditionCost
 			outputLen = AltBn128AdditionOutputLen
 		}
 
 	case AltBn128Mul:
 		{
-			klog.Infof("AltBn128Mul. inputLen = %d", inputLen)
+			mlog.Log.Debugf("AltBn128Mul. inputLen = %d", inputLen)
 			cost = CUBn128MultiplicationCost
 			outputLen = AltBn128MultiplicationOutputLen
 		}
 
 	case AltBn128Pairing:
 		{
-			klog.Infof("AltBn128Pairing. inputLen = %d", inputLen)
+			mlog.Log.Debugf("AltBn128Pairing. inputLen = %d", inputLen)
 			elementLen := inputLen / AltBn128PairingElementLen
 			cost = CUBn128PairingOnePairCostFirst + CUSha256BaseCost + AltBn128PairingOutputLen
 			cost = safemath.SaturatingAddU64(cost, safemath.SaturatingMulU64(CUBn128PairingOnePairCostOther, safemath.SaturatingSubU64(elementLen, 1)))
@@ -959,7 +959,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Addition(inputSlice)
 			if err != nil {
-				klog.Infof("altbn128 addition err: %s", err)
+				mlog.Log.Debugf("altbn128 addition err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -978,7 +978,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 
 			result, err := altbn128Multiplication(inputSlice, expectedSize)
 			if err != nil {
-				klog.Infof("altbn128 multiplication err: %s", err)
+				mlog.Log.Debugf("altbn128 multiplication err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -990,7 +990,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Pairing(inputSlice)
 			if err != nil {
-				klog.Infof("altbn128 pairing err: %s", err)
+				mlog.Log.Debugf("altbn128 pairing err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)

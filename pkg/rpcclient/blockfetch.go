@@ -2,11 +2,13 @@ package rpcclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
-	"k8s.io/klog/v2"
 )
 
 func (fetcher *RpcClient) GetBlock(slot uint64) (*rpc.GetBlockResult, error) {
@@ -32,6 +34,8 @@ func (fetcher *RpcClient) GetBlockConfirmed(slot uint64) (*rpc.GetBlockResult, e
 	return result, err
 }
 
+var SlotSkipped = errors.New("slot skipped")
+
 func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
@@ -54,7 +58,11 @@ func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, e
 		if err == nil {
 			break
 		} else {
-			klog.Infof("getBlock failed: %s", err)
+			if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot)) {
+				return nil, SlotSkipped
+			} else {
+				mlog.Log.Debugf("fetch block %d failed - retrying", slot)
+			}
 		}
 	}
 

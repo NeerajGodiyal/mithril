@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/Overclock-Validator/sniper"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 type AccountsDb struct {
@@ -42,17 +42,17 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	largestFileIdFn := fmt.Sprintf("%s/largest_file_id", accountsDbDir)
 	lfi, err := os.Open(largestFileIdFn)
 	if err != nil {
-		fmt.Printf("failed to open %s\n", largestFileIdFn)
+		mlog.Log.Infof("failed to open %s\n", largestFileIdFn)
 		return nil, err
 	}
 
 	largestFileIdBytes := make([]byte, 8)
 	bytesRead, err := lfi.Read(largestFileIdBytes)
 	if err != nil {
-		fmt.Printf("error reading %s: %s\n", largestFileIdFn, err)
+		mlog.Log.Infof("error reading %s: %s\n", largestFileIdFn, err)
 		return nil, err
 	} else if bytesRead != 8 {
-		fmt.Printf("error reading %s: expected 8 bytes, got %d\n", largestFileIdFn, bytesRead)
+		mlog.Log.Infof("error reading %s: expected 8 bytes, got %d\n", largestFileIdFn, bytesRead)
 		return nil, fmt.Errorf("only got %d bytes", bytesRead)
 	}
 
@@ -61,17 +61,17 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	bankHashFn := fmt.Sprintf("%s/bank_hash", accountsDbDir)
 	bhf, err := os.Open(bankHashFn)
 	if err != nil {
-		fmt.Printf("failed to open %s\n", bankHashFn)
+		mlog.Log.Infof("failed to open %s\n", bankHashFn)
 		return nil, err
 	}
 
 	bankHashBytes := make([]byte, 32)
 	bytesRead, err = bhf.Read(bankHashBytes)
 	if err != nil {
-		fmt.Printf("error reading %s: %s\n", bankHashFn, err)
+		mlog.Log.Infof("error reading %s: %s\n", bankHashFn, err)
 		return nil, err
 	} else if bytesRead != 32 {
-		fmt.Printf("error reading %s: expected 8 bytes, got %d\n", bankHashFn, bytesRead)
+		mlog.Log.Infof("error reading %s: expected 8 bytes, got %d\n", bankHashFn, bytesRead)
 		return nil, fmt.Errorf("only got %d bytes", bytesRead)
 	}
 
@@ -79,7 +79,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	indexDir := fmt.Sprintf("%s/index", accountsDbDir)
 	db, err := sniper.Open(sniper.Dir(indexDir), sniper.ChunksCollision(32))
 	if err != nil {
-		fmt.Printf("failed to open database: %s\n", err)
+		mlog.Log.Infof("failed to open database: %s\n", err)
 		return nil, err
 	}
 
@@ -97,7 +97,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	acctIdxEntryBytes, err := accountsDb.indexDb.Get(pubkey[:])
 	if err != nil {
-		klog.Infof("no account found in accountsdb for pubkey %s: %s", pubkey, err)
+		mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
 		return nil, ErrNoAccount
 	}
 
@@ -109,7 +109,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.acctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 	appendVecFile, err := os.Open(appendVecFileName)
 	if err != nil {
-		klog.Infof("failed to open appendvec file %s")
+		mlog.Log.Debugf("failed to open appendvec file %s")
 		return nil, err
 	}
 	defer appendVecFile.Close()
@@ -134,7 +134,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	acct.Slot = acctIdxEntry.Slot
 
 	msg := util.PrettyPrintAcct(acct)
-	klog.Infof("SLOT %d - accountsdb.Get() found acct in %s for %s: %s", slot, appendVecFileName, pubkey, msg)
+	mlog.Log.Debugf("SLOT %d - accountsdb.Get() found acct in %s for %s: %s", slot, appendVecFileName, pubkey, msg)
 
 	return acct, err
 }
@@ -145,7 +145,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.acctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		klog.Infof("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
+		mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
 		return err
 	}
 	defer appendVecFile.Close()
@@ -174,18 +174,18 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 
 		err = indexEntry.MarshalWithEncoder(encoder)
 		if err != nil {
-			klog.Infof("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
+			mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
 			return err
 		}
 
 		err = accountsDb.indexDb.SetIfSlotHigher(acct.Key[:], writer.Bytes(), 0)
 		if err != nil {
-			klog.Infof("error calling SetIfSlotHigher on accountsdb for pubkey %s", acct.Key)
+			mlog.Log.Debugf("error calling SetIfSlotHigher on accountsdb for pubkey %s", acct.Key)
 			return err
 		}
 
 		msg := util.PrettyPrintAcct(acct)
-		klog.Infof("SLOT %d - wrote account %s to %s in StoreAccounts: %s", slot, acct.Key, appendVecFileName, msg)
+		mlog.Log.Debugf("SLOT %d - wrote account %s to %s in StoreAccounts: %s", slot, acct.Key, appendVecFileName, msg)
 
 		// marshal up the account as an appendvec style account and write it to the buffer
 		appendVecAcct := AppendVecAccount{DataLen: uint64(len(acct.Data)), Pubkey: acct.Key, Lamports: acct.Lamports,

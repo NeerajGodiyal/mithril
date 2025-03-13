@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/sniper"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -325,13 +326,13 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 		}
 	}
 
-	fmt.Printf("done in %s. waiting for all tasks to complete.\n", time.Since(start))
+	mlog.Log.Infof("done in %s. waiting for all tasks to complete.\n", time.Since(start))
 
 	wg.Wait()
 
 	//fmt.Printf("accts processed: %d, in %s. numTimesAppendVecCopyingPoolCalled: %d, numTimesIndexEntryBuilderPool: %d, numTimesIndexEntryCommiterPool: %d\n", numEntriesCommitted.Load(), time.Since(start), numTimesAppendVecCopyingPoolCalled.Load(), numTimesIndexEntryBuilderPool.Load(), numTimesIndexEntryCommiterPool.Load())
 
-	fmt.Printf("snapshot processed in %s.\n", time.Since(start))
+	mlog.Log.Infof("snapshot processed in %s.\n", time.Since(start))
 
 	largestFileIdFile, err := os.Create(fmt.Sprintf("%s/largest_file_id", accountsDbDir))
 	if err != nil {

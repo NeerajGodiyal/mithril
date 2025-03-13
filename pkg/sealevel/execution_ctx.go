@@ -6,6 +6,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"k8s.io/klog/v2"
 )
@@ -27,23 +28,23 @@ type SlotBank struct {
 }
 
 type SlotCtx struct {
-	Accounts                   accounts.Accounts
-	AccountsDb                 *accountsdb.AccountsDb
-	Slot                       uint64
-	ParentSlot                 uint64
-	Epoch                      uint64
-	LamportsPerSignature       uint64
-	ModifiedAccts              map[solana.PublicKey]bool
-	Blockhash                  [32]byte
-	RecentBlockhash            [32]byte
-	SlotBank                   SlotBank
-	Features                   *features.Features
-	VoteTimestamps             map[solana.PublicKey]BlockTimestamp
-	StakeAccts                 map[solana.PublicKey]bool
-	FinalBankhash              []byte
-	EpochsAcctHash             []byte
-	EpochAcctHashInclusionSlot uint64
-	Replay                     bool
+	Accounts                    accounts.Accounts
+	AccountsDb                  *accountsdb.AccountsDb
+	Slot                        uint64
+	ParentSlot                  uint64
+	Epoch                       uint64
+	LamportsPerSignature        uint64
+	ModifiedAccts               map[solana.PublicKey]bool
+	Blockhash                   [32]byte
+	RecentBlockhash             [32]byte
+	SlotBank                    SlotBank
+	Features                    *features.Features
+	VoteTimestamps              map[solana.PublicKey]BlockTimestamp
+	StakeAccts                  map[solana.PublicKey]bool
+	FinalBankhash               []byte
+	EpochsAcctHash              []byte
+	EpochAcctHashStopOffsetSlot uint64
+	Replay                      bool
 }
 
 func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana.PublicKey) ([]InstructionAccount, []uint64, error) {
@@ -135,7 +136,7 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	calleeProgramId := ix.ProgramId
 	programAcctIdx, err := ixCtx.IndexOfInstructionAccount(txCtx, calleeProgramId)
 	if err != nil {
-		klog.Errorf("unknown program %s", calleeProgramId)
+		mlog.Log.Debugf("unknown program %s", calleeProgramId)
 		return nil, nil, err
 	}
 
@@ -146,7 +147,7 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	defer borrowedProgramAcct.Drop()
 
 	if !borrowedProgramAcct.IsExecutable() {
-		klog.Errorf("account %s is not executable", calleeProgramId)
+		mlog.Log.Debugf("account %s is not executable", calleeProgramId)
 		return nil, nil, InstrErrAccountNotExecutable
 	}
 
@@ -180,7 +181,7 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 }
 
 func (execCtx *ExecutionCtx) ExecuteInstruction() error {
-	klog.Infof("ExecuteInstruction")
+	mlog.Log.Debugf("ExecuteInstruction")
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
@@ -190,11 +191,11 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 
 	borrowedRootAccount, err := instrCtx.BorrowProgramAccount(txCtx, 0)
 	if err != nil {
-		klog.Infof("BorrowProgramAccount failed: %s", err)
+		mlog.Log.Debugf("BorrowProgramAccount failed: %s", err)
 		return InstrErrUnsupportedProgramId
 	}
 
-	klog.Infof("ExecuteInstruction, account: %s, owner: %s\n", borrowedRootAccount.Key(), borrowedRootAccount.Owner())
+	mlog.Log.Debugf("ExecuteInstruction, account: %s, owner: %s\n", borrowedRootAccount.Key(), borrowedRootAccount.Owner())
 
 	ownerId := borrowedRootAccount.Owner()
 	borrowedRootAccount.Drop()
@@ -203,17 +204,17 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	if ownerId == NativeLoaderAddr {
 		builtinId = borrowedRootAccount.Key()
 	} else {
-		klog.Infof("invoking bpf program")
+		mlog.Log.Debugf("invoking bpf program")
 		builtinId = ownerId
 	}
 
-	klog.Infof("resolving native program (%s)", builtinId)
+	mlog.Log.Debugf("resolving native program (%s)", builtinId)
 	nativeProgramFn, err := resolveNativeProgramById(builtinId)
 	if err != nil { // unrecognised builtin
 		return err
 	}
 
-	klog.Infof("calling native program %s", builtinId)
+	mlog.Log.Debugf("calling native program %s", builtinId)
 	err = nativeProgramFn(execCtx)
 
 	return err
@@ -280,7 +281,7 @@ func (execCtx *ExecutionCtx) StackHeight() uint64 {
 }
 
 func (execCtx *ExecutionCtx) NativeInvoke(instruction Instruction, signers []solana.PublicKey) error {
-	klog.Infof("NativeInvoke")
+	mlog.Log.Debugf("NativeInvoke")
 	instrAccts, programIndices, err := execCtx.PrepareInstruction(instruction, signers)
 	if err != nil {
 		return err

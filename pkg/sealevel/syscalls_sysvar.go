@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 // SyscallGetClockSysvarImpl is an implementation of the sol_get_clock_sysvar syscall
 func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	klog.Infof("SyscallGetClock for addr %x, len = %d", addr, SysvarClockStructLen)
+	mlog.Log.Debugf("SyscallGetClock for addr %x, len = %d", addr, SysvarClockStructLen)
 
 	execCtx := executionCtx(vm)
 
@@ -43,6 +43,10 @@ func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	binary.LittleEndian.PutUint64(clockDst[24:32], clock.LeaderScheduleEpoch)
 	binary.LittleEndian.PutUint64(clockDst[32:40], uint64(clock.UnixTimestamp))
 
+	if execCtx.TransactionContext.Signature == solana.MustSignatureFromBase58("5AqRfK1ZisHhSk8Pawrxve6ZvVAus5mA2vXYLic2YvHpU2yjFBdKGozNBCQNb5kbA2g2iWexVGZ2m78VyE2ENNvZ") {
+		mlog.Log.Infof("clock (slot %d) %s: %+v", execCtx.SlotCtx.Slot, execCtx.TransactionContext.Signature, clock)
+	}
+
 	return syscallSuccess(0)
 }
 
@@ -50,7 +54,7 @@ var SyscallGetClockSysvar = sbpf.SyscallFunc1(SyscallGetClockSysvarImpl)
 
 // SyscallGetRentSysvarImpl is an implementation of the sol_get_rent_sysvar syscall
 func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	klog.Infof("SyscallGetRentSysvarImpl")
+	mlog.Log.Debugf("SyscallGetRentSysvarImpl")
 
 	execCtx := executionCtx(vm)
 
@@ -85,7 +89,7 @@ var SyscallGetRentSysvar = sbpf.SyscallFunc1(SyscallGetRentSysvarImpl)
 
 // SyscallGetEpochScheduleSysvarImpl is an implementation of the sol_get_epoch_schedule_sysvar syscall
 func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	klog.Infof("SyscallGetEpochSchedule")
+	mlog.Log.Debugf("SyscallGetEpochSchedule")
 
 	execCtx := executionCtx(vm)
 
@@ -115,6 +119,10 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 
 	copy(epochScheduleDst, buf.Bytes())
 
+	if execCtx.TransactionContext.Signature == solana.MustSignatureFromBase58("5AqRfK1ZisHhSk8Pawrxve6ZvVAus5mA2vXYLic2YvHpU2yjFBdKGozNBCQNb5kbA2g2iWexVGZ2m78VyE2ENNvZ") {
+		mlog.Log.Infof("epoch schedule (slot %d) %s: %+v", execCtx.SlotCtx.Slot, execCtx.TransactionContext.Signature, epochSchedule)
+	}
+
 	return syscallSuccess(0)
 }
 
@@ -122,7 +130,7 @@ var SyscallGetEpochScheduleSysvar = sbpf.SyscallFunc1(SyscallGetEpochScheduleSys
 
 // SyscallGetEpochRewardsSysvarImpl is an implementation of the sol_get_epoch_rewards_sysvar syscall
 func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	klog.Infof("SyscallGetEpochRewards")
+	mlog.Log.Debugf("SyscallGetEpochRewards")
 
 	execCtx := executionCtx(vm)
 
@@ -166,7 +174,7 @@ var SyscallGetEpochRewardsSysvar = sbpf.SyscallFunc1(SyscallGetEpochRewardsSysva
 
 // SyscallGetLastRestartSlotSysvarImpl is an implementation of the sol_get_last_restart_slot_sysvar syscall
 func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	klog.Infof("SyscallGetLastRestartSlotSysvar")
+	mlog.Log.Debugf("SyscallGetLastRestartSlotSysvar")
 
 	execCtx := executionCtx(vm)
 
@@ -212,7 +220,7 @@ func fetchSysvarBytesForPubkey(execCtx *ExecutionCtx, pubkey solana.PublicKey) (
 }
 
 func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offset uint64, length uint64) (uint64, error) {
-	klog.Infof("SyscallGetSysvar")
+	mlog.Log.Debugf("SyscallGetSysvar")
 
 	execCtx := executionCtx(vm)
 

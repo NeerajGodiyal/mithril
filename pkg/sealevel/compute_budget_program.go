@@ -3,9 +3,9 @@ package sealevel
 import (
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -282,7 +282,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction) (*ComputeBudge
 }
 
 func ComputeBudgetExecute(execCtx *ExecutionCtx) error {
-	klog.Infof("ComputeBudget program")
+	mlog.Log.Debugf("ComputeBudget program")
 	err := execCtx.ComputeMeter.Consume(CUComputeBudgetProgramDefaultComputeUnits)
 	return err
 }

@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/iden3/go-iden3-crypto/poseidon"
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/sha3"
-	"k8s.io/klog/v2"
 )
 
 // SyscallSha256Impl is the implementation for the sol_sha256 syscall
 func SyscallSha256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
-	klog.Infof("SyscallSha256Impl")
+	mlog.Log.Debugf("SyscallSha256Impl")
 
 	if valsLen > CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
@@ -79,7 +79,7 @@ var SyscallSha256 = sbpf.SyscallFunc3(SyscallSha256Impl)
 
 // SyscallKeccak256Impl is the implementation for the sol_keccak256 syscall
 func SyscallKeccak256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
-	klog.Infof("SyscallKeccak256")
+	mlog.Log.Debugf("SyscallKeccak256")
 
 	if valsLen > CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
@@ -141,7 +141,7 @@ var SyscallKeccak256 = sbpf.SyscallFunc3(SyscallKeccak256Impl)
 
 // SyscallBlake3Impl is the implementation for the sol_blake3 syscall
 func SyscallBlake3Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
-	klog.Infof("SyscallBlake3")
+	mlog.Log.Debugf("SyscallBlake3")
 
 	if valsLen > CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
@@ -203,7 +203,7 @@ var SyscallBlake3 = sbpf.SyscallFunc3(SyscallBlake3Impl)
 
 // SyscallSecp256k1Recover is an implementation of the sol_secp256k1_recover syscall
 func SyscallSecp256k1RecoverImpl(vm sbpf.VM, hashAddr, recoveryIdVal, signatureAddr, resultAddr uint64) (uint64, error) {
-	klog.Infof("SyscallSecp256k1Recover")
+	mlog.Log.Debugf("SyscallSecp256k1Recover")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSecP256k1RecoverCost)
@@ -300,7 +300,7 @@ func PoseidonHash(input [][]byte, isBigEndian bool) ([]byte, error) {
 }
 
 func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, resultAddr uint64) (uint64, error) {
-	klog.Infof("SyscallPoseidon")
+	mlog.Log.Debugf("SyscallPoseidon")
 
 	execCtx := executionCtx(vm)
 
@@ -313,7 +313,7 @@ func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, 
 	}
 
 	if valsLen > 12 {
-		klog.Infof("Poseidon hashing %d sequences is not supported", valsLen)
+		mlog.Log.Debugf("Poseidon hashing %d sequences is not supported", valsLen)
 		return syscallErrCustom("PoseidonSyscallError::InvalidLength")
 	}
 

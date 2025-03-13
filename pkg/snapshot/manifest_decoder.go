@@ -3,11 +3,11 @@ package snapshot
 import (
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 type HashAge struct {
@@ -1325,14 +1325,14 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	}
 
 	if hasIncrementalSnapshotPersistence {
-		klog.Infof("hasIncrementalSnapshotPersistence")
+		mlog.Log.Debugf("hasIncrementalSnapshotPersistence")
 		err = snapshot.BankIncrementalSnapshotPersistence.UnmarshalWithDecoder(decoder)
 		if err != nil {
-			klog.Infof("error decoding BankIncrementalSnapshotPersistence: %s", err)
+			mlog.Log.Debugf("error decoding BankIncrementalSnapshotPersistence: %s", err)
 			return nil
 		}
 	} else {
-		klog.Infof("!hasIncrementalSnapshotPersistence")
+		mlog.Log.Debugf("!hasIncrementalSnapshotPersistence")
 	}
 
 	if !decoder.HasRemaining() {
@@ -1346,7 +1346,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	}
 
 	if hashEpochAcctHash {
-		klog.Infof("hashEpochAcctHash")
+		mlog.Log.Debugf("hashEpochAcctHash")
 		var pkBytes []byte
 		pkBytes, err = decoder.ReadBytes(32)
 		if err != nil {
@@ -1354,7 +1354,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 		}
 		snapshot.EpochAccountHash = solana.PublicKeyFromBytes(pkBytes)
 	} else {
-		klog.Infof("!hashEpochAcctHash")
+		mlog.Log.Debugf("!hashEpochAcctHash")
 	}
 
 	if !decoder.HasRemaining() {

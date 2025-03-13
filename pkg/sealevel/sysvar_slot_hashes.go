@@ -122,7 +122,7 @@ func (sh *SysvarSlotHashes) UpdateWithSlotCtx(slotCtx *SlotCtx) {
 	}
 }
 
-func (sh *SysvarSlotHashes) Update(slot uint64, hash [32]byte) {
+func (sh *SysvarSlotHashes) Update(slot uint64, parentSlot uint64, hash [32]byte) {
 	var found bool
 
 	for count := 0; count < len(*sh); count++ {
@@ -133,7 +133,7 @@ func (sh *SysvarSlotHashes) Update(slot uint64, hash [32]byte) {
 	}
 
 	if !found {
-		slotHashEntry := SlotHash{Hash: hash, Slot: slot - 1}
+		slotHashEntry := SlotHash{Hash: hash, Slot: parentSlot}
 		if len(*sh) == SlotHashesMaxEntries {
 			*sh = (*sh)[:len(*sh)-1]
 		}

@@ -6,12 +6,12 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/edwingeng/deque/v2"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/tidwall/btree"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -1264,7 +1264,7 @@ func (voteStateVersions *VoteStateVersions) UnmarshalWithDecoder(decoder *bin.De
 		}
 	default:
 		{
-			klog.Infof("invalid vote state type: %d", voteStateVersions.Type)
+			mlog.Log.Debugf("invalid vote state type: %d", voteStateVersions.Type)
 			err = InstrErrInvalidAccountData
 		}
 	}

@@ -4,18 +4,17 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
-	"k8s.io/klog/v2"
 )
 
 type acctHash struct {
@@ -162,9 +161,9 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 		return pubkeyCmp(acctHashes[i].Pubkey, acctHashes[j].Pubkey)
 	})
 
-	fmt.Printf("accounts modified, sorted by pubkey:\n")
+	mlog.Log.Infof("accounts modified, sorted by pubkey:\n")
 	for _, ah := range acctHashes {
-		fmt.Printf("pubkey: %s, hash: %s\n", ah.Pubkey, solana.PublicKeyFromBytes(ah.Hash[:]))
+		mlog.Log.Infof("pubkey: %s, hash: %s\n", ah.Pubkey, solana.PublicKeyFromBytes(ah.Hash[:]))
 	}
 
 	hashes := make([][]byte, len(acctHashes))
@@ -177,7 +176,7 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 }
 
 func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
-	klog.Infof("computing EAH")
+	mlog.Log.Debugf("computing EAH")
 
 	// get all pubkeys in acctsdb
 	allKeys := acctsDb.AllKeys()
@@ -259,8 +258,8 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 	}
 
 	// EAH must be worked into the bankhash for the slot that is 3/4 through the epoch
-	if slotCtx.EpochAcctHashInclusionSlot != math.MaxUint64 && slotCtx.Slot == slotCtx.EpochAcctHashInclusionSlot {
-		klog.Infof("**** EAH required for this bankhash")
+	if shouldIncludeEah(&epochSchedule, slotCtx) && slotCtx.Slot >= slotCtx.EpochAcctHashStopOffsetSlot {
+		mlog.Log.Infof("**** EAH required for this bankhash")
 		hasher := sha256.New()
 		hasher.Write(bankHash)
 		hasher.Write(slotCtx.EpochsAcctHash)

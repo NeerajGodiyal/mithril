@@ -5,14 +5,14 @@ import (
 	"encoding/base64"
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 func SyscallLogImpl(vm sbpf.VM, ptr, strlen uint64) (uint64, error) {
-	klog.Infof("SyscallLog")
+	mlog.Log.Debugf("SyscallLog")
 
 	execCtx := executionCtx(vm)
 
@@ -33,7 +33,7 @@ func SyscallLogImpl(vm sbpf.VM, ptr, strlen uint64) (uint64, error) {
 var SyscallLog = sbpf.SyscallFunc2(SyscallLogImpl)
 
 func SyscallLog64Impl(vm sbpf.VM, r1, r2, r3, r4, r5 uint64) (uint64, error) {
-	klog.Infof("SyscallLog64")
+	mlog.Log.Debugf("SyscallLog64")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CULog64Units)
@@ -49,7 +49,7 @@ func SyscallLog64Impl(vm sbpf.VM, r1, r2, r3, r4, r5 uint64) (uint64, error) {
 var SyscallLog64 = sbpf.SyscallFunc5(SyscallLog64Impl)
 
 func SyscallLogCUsImpl(vm sbpf.VM) (uint64, error) {
-	klog.Infof("SyscallLogCUs")
+	mlog.Log.Debugf("SyscallLogCUs")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
@@ -65,7 +65,7 @@ func SyscallLogCUsImpl(vm sbpf.VM) (uint64, error) {
 var SyscallLogCUs = sbpf.SyscallFunc0(SyscallLogCUsImpl)
 
 func SyscallLogPubkeyImpl(vm sbpf.VM, pubkeyAddr uint64) (uint64, error) {
-	klog.Infof("SyscallLogPubkey")
+	mlog.Log.Debugf("SyscallLogPubkey")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CULogPubkeyUnits)
@@ -85,7 +85,7 @@ func SyscallLogPubkeyImpl(vm sbpf.VM, pubkeyAddr uint64) (uint64, error) {
 var SyscallLogPubkey = sbpf.SyscallFunc1(SyscallLogPubkeyImpl)
 
 func SyscallLogDataImpl(vm sbpf.VM, addr uint64, len uint64) (uint64, error) {
-	klog.Infof("SyscallLogData")
+	mlog.Log.Debugf("SyscallLogData")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)

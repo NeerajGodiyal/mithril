@@ -3,6 +3,7 @@
 package compact
 
 import (
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/linxGnu/grocksdb"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -36,18 +37,18 @@ func run(_ *cobra.Command, args []string) {
 	}
 	defer db.Close()
 
-	klog.Infof("Flushing WAL")
+	mlog.Log.Debugf("Flushing WAL")
 	if err := db.FlushWAL(true); err != nil {
 		klog.Exitf("Failed to flush WAL: %s", err)
 	}
-	klog.Infof("Flushed WAL")
+	mlog.Log.Debugf("Flushed WAL")
 
 	for _, cf := range cfs {
 		name := cf.Name()
-		klog.Infof("Compacting %s", name)
+		mlog.Log.Debugf("Compacting %s", name)
 		db.CompactRangeCF(cf, grocksdb.Range{})
-		klog.Infof("Compacted %s", name)
+		mlog.Log.Debugf("Compacted %s", name)
 	}
 
-	klog.Infof("Done")
+	mlog.Log.Debugf("Done")
 }

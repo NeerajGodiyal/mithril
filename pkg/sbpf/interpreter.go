@@ -11,7 +11,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/global"
-	"k8s.io/klog/v2"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
 // Interpreter implements the SBF core in pure Go.
@@ -625,7 +625,7 @@ func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, 
 	ptr, err := ip.translateInternal(addr, size, write)
 	if err != nil {
 		pc, filename, line, _ := runtime.Caller(1)
-		klog.Infof("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
+		mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		return nil, err
 	}
 

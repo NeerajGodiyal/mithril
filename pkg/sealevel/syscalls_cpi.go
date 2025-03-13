@@ -7,10 +7,10 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -747,7 +747,7 @@ func translateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, pr
 
 // SyscallInvokeSignedCImpl is an implementation of the sol_invoke_signed_c syscall
 func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
-	klog.Infof("SyscallInvokeSignedC")
+	mlog.Log.Debugf("SyscallInvokeSignedC")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUInvokeUnits)
@@ -827,7 +827,7 @@ func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, acc
 
 // SyscallInvokeSignedRustImpl is an implementation of the sol_invoke_signed_rust syscall
 func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
-	klog.Infof("SyscallInvokeSignedRust")
+	mlog.Log.Debugf("SyscallInvokeSignedRust")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUInvokeUnits)
@@ -890,7 +890,7 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 			var calleeAcct *BorrowedAccount
 			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
 			if err != nil {
-				klog.Infof("calling BorrowInstructionAccount for updateCallerAccount failed! %s", err)
+				mlog.Log.Debugf("calling BorrowInstructionAccount for updateCallerAccount failed! %s", err)
 				return syscallErr(err)
 			}
 			calleeAcct.Drop()

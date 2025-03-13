@@ -8,12 +8,12 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/loader"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -378,7 +378,7 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 
 	writeEnd := safemath.SaturatingAddU64(programDataOffset, uint64(len(bytes)))
 	if uint64(len(program.Data())) < writeEnd {
-		klog.Infof("write overflow. acct data len = %d, writeOffset = %d", len(program.Data()), writeEnd)
+		mlog.Log.Debugf("write overflow. acct data len = %d, writeOffset = %d", len(program.Data()), writeEnd)
 		return InstrErrAccountDataTooSmall
 	}
 
@@ -396,19 +396,19 @@ func deployProgram(execCtx *ExecutionCtx, programData []byte) error {
 
 	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, true)
 	if err != nil {
-		klog.Infof("failed to create loader")
+		mlog.Log.Debugf("failed to create loader")
 		return err
 	}
 
 	program, err := loader.Load()
 	if err != nil {
-		klog.Infof("failed to load program")
+		mlog.Log.Debugf("failed to load program")
 		return err
 	}
 
 	err = program.Verify()
 	if err != nil {
-		klog.Infof("failed to verify program")
+		mlog.Log.Debugf("failed to verify program")
 		return err
 	}
 
@@ -678,7 +678,7 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 
 			if safemath.SaturatingSubU64(postLen, preLen) > MaxPermittedDataIncrease ||
 				postLen > MaxPermittedDataLength {
-				klog.Infof("preLen = %d, postLen = %d, max increase = %d", preLen, postLen, MaxPermittedDataIncrease)
+				mlog.Log.Debugf("preLen = %d, postLen = %d, max increase = %d", preLen, postLen, MaxPermittedDataIncrease)
 				return InstrErrInvalidRealloc
 			}
 
@@ -947,7 +947,7 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 }
 
 func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
-	klog.Infof("bpf loader - executeProgram")
+	mlog.Log.Debugf("bpf loader - executeProgram")
 
 	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, false)
 
@@ -1000,36 +1000,33 @@ func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
 		}
 	}
 
-	enableTracing := solana.MustSignatureFromBase58("2mViK88syNCTJBnF28Kt5huf9BCrvCZhwQgRVtjTEydvTMgVXnvaG9oUfPoxaLmtMGCwVV1UTVHeqSEm3xWJMYaV") == execCtx.TransactionContext.Signature
-
 	opts := &sbpf.VMOpts{
-		HeapMax:       int(heapSize),
-		Input:         parameterBytes,
-		Syscalls:      syscallRegistry,
-		MaxCU:         int(execCtx.ComputeMeter.Remaining()),
-		ComputeMeter:  &execCtx.ComputeMeter,
-		Context:       execCtx,
-		EnableTracing: enableTracing,
+		HeapMax:      int(heapSize),
+		Input:        parameterBytes,
+		Syscalls:     syscallRegistry,
+		MaxCU:        int(execCtx.ComputeMeter.Remaining()),
+		ComputeMeter: &execCtx.ComputeMeter,
+		Context:      execCtx,
 	}
 
 	interpreter := sbpf.NewInterpreter(nil, program, opts)
 	ret, _, runErr := interpreter.Run()
 
-	klog.Infof("Program %s consumed %d of %d compute units", programId, computeRemainingPrev-execCtx.ComputeMeter.Remaining(), computeRemainingPrev)
+	mlog.Log.Debugf("Program %s consumed %d of %d compute units", programId, computeRemainingPrev-execCtx.ComputeMeter.Remaining(), computeRemainingPrev)
 
 	if runErr != nil {
-		klog.Infof("program execution result: %s", runErr)
+		mlog.Log.Debugf("program execution result: %s", runErr)
 	} else if ret != 0 {
 		runErr = fmt.Errorf("program execution (%s) returned failure: %d", programId, ret)
-		klog.Infof("program execution (%s) returned failure: %d", programId, ret)
+		mlog.Log.Debugf("program execution (%s) returned failure: %d", programId, ret)
 	} else {
-		klog.Infof("program execution (%s) returned success", programId)
+		mlog.Log.Debugf("program execution (%s) returned success", programId)
 	}
 
 	returnedDataProgId, returnData := execCtx.TransactionContext.ReturnData()
 	if len(returnData) != 0 {
 		encodedStr := base64.StdEncoding.EncodeToString(returnData)
-		klog.Infof("Program return %s %s", returnedDataProgId, encodedStr)
+		mlog.Log.Debugf("Program return %s %s", returnedDataProgId, encodedStr)
 	}
 
 	// deserialize data
@@ -1037,13 +1034,13 @@ func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
 		if isLoaderDeprecated {
 			err = deserializeParametersUnaligned(execCtx, parameterBytes, preLens)
 			if err != nil {
-				klog.Infof("failed to deserialize (unaligned), %s", err)
+				mlog.Log.Debugf("failed to deserialize (unaligned), %s", err)
 				return InstrErrInvalidArgument
 			}
 		} else {
 			err = deserializeParametersAligned(execCtx, parameterBytes, preLens)
 			if err != nil {
-				klog.Infof("failed to deserialize (aligned), %s", err)
+				mlog.Log.Debugf("failed to deserialize (aligned), %s", err)
 				return InstrErrInvalidArgument
 			}
 		}
@@ -1053,7 +1050,7 @@ func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
 }
 
 func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
-	klog.Infof("BpfLoaderProgramExecute")
+	mlog.Log.Debugf("BpfLoaderProgramExecute")
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
@@ -1084,7 +1081,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				return err
 			}
-			klog.Infof("BPF loader 2 mgmt no longer supported")
+			mlog.Log.Debugf("BPF loader 2 mgmt no longer supported")
 			return InstrErrUnsupportedProgramId
 		} else if programId == BpfLoaderDeprecatedAddr {
 			err = execCtx.ComputeMeter.Consume(CUDeprecatedLoaderComputeUnits)
@@ -1098,7 +1095,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	}
 
 	if !programAcct.IsExecutable() {
-		klog.Infof("program %s is not executable", programAcct)
+		mlog.Log.Debugf("program %s is not executable", programAcct)
 		return InstrErrUnsupportedProgramId
 	}
 
@@ -1114,7 +1111,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
 				if err != nil {
-					klog.Infof("unable to get account %s from accountsdb", programAcct.Key())
+					mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
 					return InstrErrUnsupportedProgramId
 				}
 			}
@@ -1134,7 +1131,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
 				if err != nil {
-					klog.Infof("unable to get account %s from accountsdb", programAcct.Key())
+					mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
 					return InstrErrUnsupportedProgramId
 				}
 			}
@@ -1155,7 +1152,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 		if err != nil {
 			programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcctState.Program.ProgramDataAddress)
 			if err != nil {
-				klog.Infof("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
+				mlog.Log.Debugf("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
 				return InstrErrUnsupportedProgramId
 			}
 		}
@@ -1171,7 +1168,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 		programDataSlot := programDataAcctState.ProgramData.Slot
 		if programDataSlot >= execCtx.SlotCtx.Slot {
-			klog.Infof("programDataSlot (%d) >= execCtx.SlotCtx.Slot (%d)", programDataSlot, execCtx.SlotCtx.Slot)
+			mlog.Log.Debugf("programDataSlot (%d) >= execCtx.SlotCtx.Slot (%d)", programDataSlot, execCtx.SlotCtx.Slot)
 			return InstrErrInvalidAccountData
 		}
 
@@ -1186,7 +1183,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 }
 
 func UpgradeableLoaderInitializeBuffer(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
-	klog.Infof("InitializeBuffer instr")
+	mlog.Log.Debugf("InitializeBuffer instr")
 	err := instrCtx.CheckNumOfInstructionAccounts(2)
 	if err != nil {
 		return err
@@ -1204,7 +1201,7 @@ func UpgradeableLoaderInitializeBuffer(execCtx *ExecutionCtx, txCtx *Transaction
 	}
 
 	if state.Type != UpgradeableLoaderStateTypeUninitialized {
-		klog.Infof("Buffer account already initialized")
+		mlog.Log.Debugf("Buffer account already initialized")
 		return InstrErrAccountAlreadyInitialized
 	}
 
@@ -1227,7 +1224,7 @@ func UpgradeableLoaderInitializeBuffer(execCtx *ExecutionCtx, txCtx *Transaction
 }
 
 func UpgradeableLoaderWrite(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, write UpgradeableLoaderInstrWrite) error {
-	klog.Infof("Write instr")
+	mlog.Log.Debugf("Write instr")
 
 	err := instrCtx.CheckNumOfInstructionAccounts(2)
 	if err != nil {
@@ -1247,7 +1244,7 @@ func UpgradeableLoaderWrite(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 
 	if state.Type == UpgradeableLoaderStateTypeBuffer {
 		if state.Buffer.AuthorityAddress == nil {
-			klog.Infof("Buffer is immutable")
+			mlog.Log.Debugf("Buffer is immutable")
 			return InstrErrImmutable
 		}
 
@@ -1260,13 +1257,13 @@ func UpgradeableLoaderWrite(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			return err
 		}
 		if *state.Buffer.AuthorityAddress != authorityKey {
-			klog.Errorf("Incorrect buffer authority provided")
+			mlog.Log.Debugf("Incorrect buffer authority provided")
 			return InstrErrIncorrectAuthority
 		}
 
 		isSigner, err := instrCtx.IsInstructionAccountSigner(1)
 		if err != nil {
-			klog.Infof("Buffer authority did not sign")
+			mlog.Log.Debugf("Buffer authority did not sign")
 			return err
 		}
 
@@ -1274,7 +1271,7 @@ func UpgradeableLoaderWrite(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			return InstrErrMissingRequiredSignature
 		}
 	} else {
-		klog.Infof("Invalid buffer account")
+		mlog.Log.Debugf("Invalid buffer account")
 		return InstrErrInvalidAccountData
 	}
 
@@ -1564,7 +1561,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 		}
 	}
 
-	klog.Infof("deployed program: %s", newProgramId)
+	mlog.Log.Debugf("deployed program: %s", newProgramId)
 
 	return nil
 }
@@ -1815,12 +1812,12 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return err
 	}
 
-	klog.Infof("upgraded program %s", program.Key())
+	mlog.Log.Debugf("upgraded program %s", program.Key())
 	return nil
 }
 
 func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
-	klog.Infof("SetAuthority instr")
+	mlog.Log.Debugf("SetAuthority instr")
 
 	err := instrCtx.CheckNumOfInstructionAccounts(2)
 	if err != nil {
@@ -1860,19 +1857,19 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 	switch accountState.Type {
 	case UpgradeableLoaderStateTypeBuffer:
 		{
-			klog.Infof("buffer account")
+			mlog.Log.Debugf("buffer account")
 			if newAuthority == nil {
-				klog.Infof("buffer authority not optional")
+				mlog.Log.Debugf("buffer authority not optional")
 				return InstrErrIncorrectAuthority
 			}
 
 			if accountState.Buffer.AuthorityAddress == nil {
-				klog.Infof("buffer is immutable")
+				mlog.Log.Debugf("buffer is immutable")
 				return InstrErrImmutable
 			}
 
 			if *accountState.Buffer.AuthorityAddress != presentAuthorityKey {
-				klog.Infof("incorrect buffer authority provided")
+				mlog.Log.Debugf("incorrect buffer authority provided")
 				return InstrErrIncorrectAuthority
 			}
 
@@ -1882,7 +1879,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 			}
 
 			if !isSigner {
-				klog.Infof("upgrade authority did not sign")
+				mlog.Log.Debugf("upgrade authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -1895,14 +1892,14 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 
 	case UpgradeableLoaderStateTypeProgramData:
 		{
-			klog.Infof("ProgramData account")
+			mlog.Log.Debugf("ProgramData account")
 			if accountState.ProgramData.UpgradeAuthorityAddress == nil {
-				klog.Infof("program not upgradeable")
+				mlog.Log.Debugf("program not upgradeable")
 				return InstrErrImmutable
 			}
 
 			if *accountState.ProgramData.UpgradeAuthorityAddress != presentAuthorityKey {
-				klog.Infof("incorrect upgrade authority provided")
+				mlog.Log.Debugf("incorrect upgrade authority provided")
 				return InstrErrIncorrectAuthority
 			}
 
@@ -1912,7 +1909,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 			}
 
 			if !isSigner {
-				klog.Infof("upgrade authority did not sign")
+				mlog.Log.Debugf("upgrade authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -1925,7 +1922,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 
 	default:
 		{
-			klog.Infof("account does not support authorities")
+			mlog.Log.Debugf("account does not support authorities")
 			return InstrErrInvalidArgument
 		}
 	}
@@ -1936,13 +1933,13 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 	} else {
 		na = "nil"
 	}
-	klog.Infof("new authority: %s", na)
+	mlog.Log.Debugf("new authority: %s", na)
 
 	return nil
 }
 
 func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
-	klog.Infof("SetAuthorityChecked instr")
+	mlog.Log.Debugf("SetAuthorityChecked instr")
 
 	if !execCtx.GlobalCtx.Features.IsActive(features.EnableBpfLoaderSetAuthorityCheckedIx) {
 		return InstrErrInvalidInstructionData
@@ -1988,12 +1985,12 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 	case UpgradeableLoaderStateTypeBuffer:
 		{
 			if accountState.Buffer.AuthorityAddress == nil {
-				klog.Infof("buffer is immutable")
+				mlog.Log.Debugf("buffer is immutable")
 				return InstrErrImmutable
 			}
 
 			if *accountState.Buffer.AuthorityAddress != presentAuthorityKey {
-				klog.Infof("incorrect buffer authority provided")
+				mlog.Log.Debugf("incorrect buffer authority provided")
 				return InstrErrIncorrectAuthority
 			}
 
@@ -2003,7 +2000,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			if !isSigner {
-				klog.Infof("buffer authority did not sign")
+				mlog.Log.Debugf("buffer authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -2013,7 +2010,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			if !isSigner {
-				klog.Infof("new authority did not sign")
+				mlog.Log.Debugf("new authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -2027,12 +2024,12 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 	case UpgradeableLoaderStateTypeProgramData:
 		{
 			if accountState.ProgramData.UpgradeAuthorityAddress == nil {
-				klog.Infof("program not upgradeable")
+				mlog.Log.Debugf("program not upgradeable")
 				return InstrErrImmutable
 			}
 
 			if *accountState.ProgramData.UpgradeAuthorityAddress != presentAuthorityKey {
-				klog.Infof("incorrect upgrade authority provided")
+				mlog.Log.Debugf("incorrect upgrade authority provided")
 				return InstrErrIncorrectAuthority
 			}
 
@@ -2042,7 +2039,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			if !isSigner {
-				klog.Infof("buffer authority did not sign")
+				mlog.Log.Debugf("buffer authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -2052,7 +2049,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			if !isSigner {
-				klog.Infof("new authority did not sign")
+				mlog.Log.Debugf("new authority did not sign")
 				return InstrErrMissingRequiredSignature
 			}
 
@@ -2065,19 +2062,19 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 
 	default:
 		{
-			klog.Infof("account does not support authorities")
+			mlog.Log.Debugf("account does not support authorities")
 			return InstrErrInvalidArgument
 		}
 	}
 
-	klog.Infof("new authority: %s", newAuthority)
+	mlog.Log.Debugf("new authority: %s", newAuthority)
 
 	return nil
 }
 
 func closeAcctCommon(authorityAddr *solana.PublicKey, txCtx *TransactionCtx, instrCtx *InstructionCtx, f features.Features) error {
 	if authorityAddr == nil {
-		klog.Infof("Account is immutable")
+		mlog.Log.Debugf("Account is immutable")
 		return InstrErrImmutable
 	}
 
@@ -2092,7 +2089,7 @@ func closeAcctCommon(authorityAddr *solana.PublicKey, txCtx *TransactionCtx, ins
 	}
 
 	if *authorityAddr != auth {
-		klog.Infof("Incorrect authority provided")
+		mlog.Log.Debugf("Incorrect authority provided")
 		return InstrErrIncorrectAuthority
 	}
 
@@ -2102,7 +2099,7 @@ func closeAcctCommon(authorityAddr *solana.PublicKey, txCtx *TransactionCtx, ins
 	}
 
 	if !isSigner {
-		klog.Infof("Authority did not sign")
+		mlog.Log.Debugf("Authority did not sign")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -2135,7 +2132,7 @@ func closeAcctCommon(authorityAddr *solana.PublicKey, txCtx *TransactionCtx, ins
 }
 
 func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
-	klog.Infof("Close instr")
+	mlog.Log.Debugf("Close instr")
 
 	err := instrCtx.CheckNumOfInstructionAccounts(2)
 	if err != nil {
@@ -2153,7 +2150,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 	}
 
 	if idx1 == idx2 {
-		klog.Infof("recipient is the same as the account being closed")
+		mlog.Log.Debugf("recipient is the same as the account being closed")
 		return InstrErrInvalidArgument
 	}
 
@@ -2194,14 +2191,14 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 				return err
 			}
 
-			klog.Infof("closed uninitialized %s", closeKey)
+			mlog.Log.Debugf("closed uninitialized %s", closeKey)
 		}
 
 	case UpgradeableLoaderStateTypeBuffer:
 		{
 			err = instrCtx.CheckNumOfInstructionAccounts(3)
 			if err != nil {
-				klog.Infof("(buffer) not enough instruction accounts (%d)", instrCtx.NumberOfInstructionAccounts())
+				mlog.Log.Debugf("(buffer) not enough instruction accounts (%d)", instrCtx.NumberOfInstructionAccounts())
 				return err
 			}
 
@@ -2212,14 +2209,14 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 				return err
 			}
 
-			klog.Infof("closed buffer %s", closeKey)
+			mlog.Log.Debugf("closed buffer %s", closeKey)
 		}
 
 	case UpgradeableLoaderStateTypeProgramData:
 		{
 			err = instrCtx.CheckNumOfInstructionAccounts(4)
 			if err != nil {
-				klog.Infof("(ProgramData) not enough instruction accounts (%d)", instrCtx.NumberOfInstructionAccounts())
+				mlog.Log.Debugf("(ProgramData) not enough instruction accounts (%d)", instrCtx.NumberOfInstructionAccounts())
 				return err
 			}
 
@@ -2234,7 +2231,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			programKey := programAcct.Key()
 
 			if !programAcct.IsWritable() {
-				klog.Infof("program account is not writable")
+				mlog.Log.Debugf("program account is not writable")
 				return InstrErrInvalidArgument
 			}
 
@@ -2244,7 +2241,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			}
 
 			if programAcct.Owner() != programId {
-				klog.Infof("program account not owned by loader")
+				mlog.Log.Debugf("program account not owned by loader")
 				return InstrErrIncorrectProgramId
 			}
 
@@ -2254,7 +2251,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			}
 
 			if clock.Slot == closeAcctState.ProgramData.Slot {
-				klog.Infof("program was deployed in this block already")
+				mlog.Log.Debugf("program was deployed in this block already")
 				return InstrErrInvalidArgument
 			}
 
@@ -2267,7 +2264,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			case UpgradeableLoaderStateTypeProgram:
 				{
 					if programAcctState.Program.ProgramDataAddress != closeKey {
-						klog.Infof("ProgramData account does not match ProgramData account")
+						mlog.Log.Debugf("ProgramData account does not match ProgramData account")
 						return InstrErrInvalidArgument
 					}
 
@@ -2292,17 +2289,17 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 
 			default:
 				{
-					klog.Infof("Invalid Program account")
+					mlog.Log.Debugf("Invalid Program account")
 					return InstrErrInvalidArgument
 				}
 			}
 
-			klog.Infof("Closed program %s", programKey)
+			mlog.Log.Debugf("Closed program %s", programKey)
 		}
 
 	default:
 		{
-			klog.Infof("Account does not support closing")
+			mlog.Log.Debugf("Account does not support closing")
 			return InstrErrInvalidArgument
 		}
 	}
@@ -2311,10 +2308,10 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 }
 
 func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, additionalBytes uint32) error {
-	klog.Infof("ExtendProgram instr")
+	mlog.Log.Debugf("ExtendProgram instr")
 
 	if additionalBytes == 0 {
-		klog.Infof("Additional bytes must be greater than 0")
+		mlog.Log.Debugf("Additional bytes must be greater than 0")
 		return InstrErrInvalidInstructionData
 	}
 
@@ -2336,12 +2333,12 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	}
 
 	if programId != programDataAcct.Owner() {
-		klog.Infof("ProgramData owner is invalid")
+		mlog.Log.Debugf("ProgramData owner is invalid")
 		return InstrErrInvalidAccountOwner
 	}
 
 	if !programDataAcct.IsWritable() {
-		klog.Infof("ProgramData is not writable")
+		mlog.Log.Debugf("ProgramData is not writable")
 		return InstrErrInvalidArgument
 	}
 
@@ -2352,12 +2349,12 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	defer programAcct.Drop()
 
 	if !programAcct.IsWritable() {
-		klog.Infof("Program account is not writable")
+		mlog.Log.Debugf("Program account is not writable")
 		return InstrErrInvalidArgument
 	}
 
 	if programAcct.Owner() != programId {
-		klog.Infof("Program account is not owned by the loader")
+		mlog.Log.Debugf("Program account is not owned by the loader")
 		return InstrErrInvalidAccountOwner
 	}
 
@@ -2372,13 +2369,13 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	case UpgradeableLoaderStateTypeProgram:
 		{
 			if programAcctState.Program.ProgramDataAddress != programDataKey {
-				klog.Infof("Program account does not match ProgramData account")
+				mlog.Log.Debugf("Program account does not match ProgramData account")
 				return InstrErrInvalidArgument
 			}
 		}
 	default:
 		{
-			klog.Infof("Invalid Program account")
+			mlog.Log.Debugf("Invalid Program account")
 			return InstrErrInvalidAccountData
 		}
 	}
@@ -2388,7 +2385,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	oldLen := uint64(len(programDataAcct.Data()))
 	newLen := safemath.SaturatingAddU64(oldLen, uint64(additionalBytes))
 	if newLen > MaxPermittedDataLength {
-		klog.Infof("Extended ProgramData length of %d bytes exceeds max account data length of %d bytes", newLen, MaxPermittedDataLength)
+		mlog.Log.Debugf("Extended ProgramData length of %d bytes exceeds max account data length of %d bytes", newLen, MaxPermittedDataLength)
 		return InstrErrInvalidRealloc
 	}
 
@@ -2406,16 +2403,16 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 
 	if programDataAcctState.Type == UpgradeableLoaderStateTypeProgramData {
 		if clockSlot == programDataAcctState.ProgramData.Slot {
-			klog.Infof("Program was extended in this block already")
+			mlog.Log.Debugf("Program was extended in this block already")
 			return InstrErrInvalidArgument
 		}
 
 		if programDataAcctState.ProgramData.UpgradeAuthorityAddress == nil {
-			klog.Infof("Cannot extend ProgramData accounts that are not upgradeable")
+			mlog.Log.Debugf("Cannot extend ProgramData accounts that are not upgradeable")
 			return InstrErrImmutable
 		}
 	} else {
-		klog.Infof("ProgramData state is invalid")
+		mlog.Log.Debugf("ProgramData state is invalid")
 		return InstrErrInvalidAccountData
 	}
 
@@ -2466,7 +2463,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	}
 	err = deployProgram(execCtx, programBytes[upgradeableLoaderSizeOfProgramDataMetaData:])
 	if err != nil {
-		klog.Infof("deploy program failed")
+		mlog.Log.Debugf("deploy program failed")
 		return InstrErrInvalidAccountData
 	}
 
@@ -2476,13 +2473,13 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 		return err
 	}
 
-	klog.Infof("Extended ProgramData account by %d bytes", additionalBytes)
+	mlog.Log.Debugf("Extended ProgramData account by %d bytes", additionalBytes)
 
 	return nil
 }
 
 func ProcessUpgradeableLoaderInstruction(execCtx *ExecutionCtx) error {
-	klog.Infof("BPF loader program mgmt")
+	mlog.Log.Debugf("BPF loader program mgmt")
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()

@@ -9,9 +9,9 @@ import (
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
-	"k8s.io/klog/v2"
 )
 
 // Got to be a valid hostname as per Let's Encrypt, ie 'localhost' is not valid.
@@ -92,7 +92,7 @@ func VerboseHandleError(err error) (b bool) {
 	if err != nil {
 		pc, filename, line, _ := runtime.Caller(1)
 
-		klog.Infof("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
+		mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		b = true
 	}
 	return

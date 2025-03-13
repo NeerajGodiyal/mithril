@@ -3,15 +3,15 @@ package sealevel
 import (
 	"bytes"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 // SyscallGetStackHeightImpl is an implementation of the sol_get_stack_height syscall
 func SyscallGetStackHeightImpl(vm sbpf.VM) (uint64, error) {
-	klog.Infof("SyscallGetStackHeight")
+	mlog.Log.Debugf("SyscallGetStackHeight")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
@@ -26,7 +26,7 @@ var SyscallGetStackHeight = sbpf.SyscallFunc0(SyscallGetStackHeightImpl)
 
 // SyscallGetReturnDataImpl is an implementation of the sol_get_return_data syscall
 func SyscallGetReturnDataImpl(vm sbpf.VM, returnDataAddr, length, programIdAddr uint64) (uint64, error) {
-	klog.Infof("SyscallGetReturnData")
+	mlog.Log.Debugf("SyscallGetReturnData")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
@@ -79,7 +79,7 @@ const MaxReturnData = 1024
 
 // SyscallSetReturnDataImpl is an implementation of the sol_set_return_data syscall
 func SyscallSetReturnDataImpl(vm sbpf.VM, addr, length uint64) (uint64, error) {
-	klog.Infof("SyscallSetReturnData")
+	mlog.Log.Debugf("SyscallSetReturnData")
 
 	execCtx := executionCtx(vm)
 	cost := safemath.SaturatingAddU64(length/CUCpiBytesPerUnit, CUSyscallBaseCost)
@@ -122,7 +122,7 @@ var SyscallSetReturnData = sbpf.SyscallFunc2(SyscallSetReturnDataImpl)
 
 // SyscallGetProcessedSiblingInstructionImpl is an implementation of the sol_get_processed_sibling_instruction syscall
 func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, programIdAddr, dataAddr, accountsAddr uint64) (uint64, error) {
-	klog.Infof("SyscallGetProcessedSiblingInstruction")
+	mlog.Log.Debugf("SyscallGetProcessedSiblingInstruction")
 
 	execCtx := executionCtx(vm)
 	txCtx := transactionCtx(vm)

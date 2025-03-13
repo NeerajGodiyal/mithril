@@ -3,10 +3,10 @@ package sealevel
 import (
 	"bytes"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/solana"
 	"github.com/ethereum/go-ethereum/common/math"
-	"k8s.io/klog/v2"
 )
 
 const MaxSeeds = 16
@@ -48,13 +48,13 @@ func translateAndValidateSeeds(vm sbpf.VM, seedsAddr, seedsLen uint64) ([][]byte
 }
 
 func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr uint64) (uint64, error) {
-	klog.Infof("SyscallCreateProgramAddress")
+	mlog.Log.Debugf("SyscallCreateProgramAddress")
 
 	execCtx := executionCtx(vm)
 	origCu := execCtx.ComputeMeter.Remaining()
 	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
 	if err != nil {
-		klog.Infof("******** ran out of CUs in SyscallCreateProgramAddress")
+		mlog.Log.Debugf("******** ran out of CUs in SyscallCreateProgramAddress")
 		return syscallCuErr()
 	}
 
@@ -79,7 +79,7 @@ func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdA
 	}
 
 	used := origCu - execCtx.ComputeMeter.Remaining()
-	klog.Infof("******** SyscallCreateProgramAddress used %d CUs", used)
+	mlog.Log.Debugf("******** SyscallCreateProgramAddress used %d CUs", used)
 
 	copy(address, newAddress)
 	return syscallSuccess(0)
@@ -88,7 +88,7 @@ func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdA
 var SyscallCreateProgramAddress = sbpf.SyscallFunc4(SyscallCreateProgramAddressImpl)
 
 func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr, bumpSeedAddr uint64) (uint64, error) {
-	klog.Infof("SyscallTryFindProgramAddress")
+	mlog.Log.Debugf("SyscallTryFindProgramAddress")
 
 	execCtx := executionCtx(vm)
 	origCu := execCtx.ComputeMeter.Remaining()
@@ -136,14 +136,14 @@ func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programId
 			copy(addressOut, newAddress)
 
 			used := origCu - execCtx.ComputeMeter.Remaining()
-			klog.Infof("******** SyscallTryFindProgramAddress used %d CUs. bumpSeed = %d", used, bumpSeed)
+			mlog.Log.Debugf("******** SyscallTryFindProgramAddress used %d CUs. bumpSeed = %d", used, bumpSeed)
 
 			// address found
 			return syscallSuccess(0)
 		}
 		err = execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
 		if err != nil {
-			klog.Infof("******** ran out of CUs in TryFindProgramAddress")
+			mlog.Log.Debugf("******** ran out of CUs in TryFindProgramAddress")
 			return syscallCuErr()
 		}
 	}

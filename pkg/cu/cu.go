@@ -3,8 +3,8 @@ package cu
 import (
 	"errors"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
-	"k8s.io/klog/v2"
 )
 
 var ErrComputeExceeded = errors.New("Compute exceeded")
@@ -30,7 +30,7 @@ func (cm *ComputeMeter) Consume(cost uint64) error {
 
 	if cm.exceeded {
 		if cm.disable {
-			klog.Infof("CU limit exceeded in Consume, but skipping")
+			mlog.Log.Debugf("CU limit exceeded in Consume, but skipping")
 		} else {
 			return ErrComputeExceeded
 		}

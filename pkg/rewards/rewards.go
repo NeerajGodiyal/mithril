@@ -6,13 +6,13 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -23,11 +23,13 @@ const (
 )
 
 type PartitionedRewardDistributionInfo struct {
-	TotalStakingRewards    uint64
-	FirstStakingRewardSlot uint64
-	LastStakingRewardSlot  uint64
-	EahCalcSlot            uint64
-	EahInclusionSlot       uint64
+	TotalStakingRewards         uint64
+	FirstStakingRewardSlot      uint64
+	LastStakingRewardSlot       uint64
+	EahStartOffsetSlot          uint64
+	EahStopOffsetSlot           uint64
+	StartedAfterStartOffsetSlot bool
+	EpochAcctsHash              []byte
 }
 
 func RetrievePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSchedule *sealevel.SysvarEpochSchedule, epoch uint64, slot uint64) *PartitionedRewardDistributionInfo {
@@ -56,7 +58,7 @@ func RetrievePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSched
 			}
 
 			for _, reward := range rewards {
-				klog.Infof("reward: %+v", reward)
+				mlog.Log.Debugf("reward: %+v", reward)
 				if string(reward.RewardType) == RewardTypeStaking {
 					totalStakingRewards, err = safemath.CheckedAddU64(totalStakingRewards, uint64(reward.Lamports))
 				}
@@ -68,7 +70,7 @@ func RetrievePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSched
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
 
 	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch,
-		LastStakingRewardSlot: finalStakingRewardSlot, EahCalcSlot: eahCalcSlot, EahInclusionSlot: eahInclusionSlot}
+		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot}
 }
 
 func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]solana.PublicKey, uint64) {
@@ -151,7 +153,7 @@ func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Bloc
 			rewardPks = append(rewardPks, reward.Pubkey)
 
 			distributedLamports += uint64(reward.Lamports)
-			klog.Infof("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
+			mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
 		}
 	}
 
@@ -213,7 +215,7 @@ func CalculateRewardPointsPartitioned(acctsDb *accountsdb.AccountsDb, slotCtx *s
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			klog.Infof("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
 

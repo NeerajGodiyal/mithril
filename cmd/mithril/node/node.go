@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/spf13/cobra"
@@ -77,7 +78,7 @@ func run(c *cobra.Command, args []string) {
 			return
 		}
 
-		klog.Infof("building AccountsDB from snapshot at %s\n", path)
+		mlog.Log.Debugf("building AccountsDB from snapshot at %s\n", path)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
 		err = snapshot.BuildAccountsIndexFromSnapshot(path, outputDir)
@@ -85,7 +86,7 @@ func run(c *cobra.Command, args []string) {
 			klog.Exitf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}
 
-		klog.Infof("successfully created accounts db from snapshot %s", path)
+		mlog.Log.Debugf("successfully created accounts db from snapshot %s", path)
 
 		// just processing the snapshot - not executing blocks.
 		if startSlot < 0 {
@@ -101,7 +102,7 @@ func run(c *cobra.Command, args []string) {
 		accountsDbDir = path
 	}
 
-	klog.Infof("loading from AccountsDB at %s", accountsDbDir)
+	mlog.Log.Infof("loading from AccountsDB at %s", accountsDbDir)
 
 	accountsDb, err := accountsdb.OpenDb(accountsDbDir)
 	if err != nil {

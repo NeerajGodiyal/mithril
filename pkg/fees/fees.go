@@ -7,11 +7,11 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 const microLamportsPerLamport = 1000000
@@ -117,7 +117,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, instrs []sealevel.Instruct
 		return feeInfo, 0, sealevel.InstrErrInsufficientFunds
 	}
 
-	klog.Infof("tx fee: %d", totalTxFee)
+	mlog.Log.Debugf("tx fee: %d", totalTxFee)
 
 	feePayerAcct.Lamports -= totalTxFee
 	transactionAccts.Touch(feePayerIdx)
@@ -160,5 +160,5 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 		panic(fmt.Sprintf("failed to SetAccount for leader acct %s when distributing tx fees", leader))
 	}
 
-	klog.Infof("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
+	mlog.Log.Debugf("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
 }

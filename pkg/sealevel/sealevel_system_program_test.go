@@ -6,10 +6,10 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/klog/v2"
 )
 
 func TestExecute_Tx_System_Program_CreateAccount_Success(t *testing.T) {
@@ -69,7 +69,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Success(t *testing.T) {
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.NoError(t, err)
 
@@ -199,7 +199,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Lamports_Failure(t
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, SystemProgErrAccountAlreadyInUse, err)
 }
@@ -261,7 +261,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Signer_Failure(t *
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }
@@ -323,7 +323,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Too_Much_Space_Allocated_Failur
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, SystemProgErrInvalidAccountDataLength, err)
 }
@@ -385,7 +385,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Data_Failure(t *te
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, SystemProgErrAccountAlreadyInUse, err)
 }
@@ -447,7 +447,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Owned_By_System_Fa
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, SystemProgErrAccountAlreadyInUse, err)
 }
@@ -509,7 +509,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Funding_Acct_Not_Signer(t *test
 	execCtx.Accounts.SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(&execCtx.Accounts, rent)
 
-	klog.Infof("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
+	mlog.Log.Debugf("pubkey: %s, %s", fundingAcct.Key, newAcct.Key)
 	err = execCtx.ProcessInstruction(instrBytes, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }

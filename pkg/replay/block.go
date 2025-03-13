@@ -3,12 +3,14 @@ package replay
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
@@ -29,6 +31,7 @@ type BlockRewardsInfo struct {
 
 type Block struct {
 	Slot                   uint64
+	ParentSlot             uint64
 	Epoch                  uint64
 	Transactions           []*solana.Transaction
 	BankHash               [32]byte
@@ -53,7 +56,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for idx, tx := range block.Transactions {
-		klog.Infof("resolveAddrTableLookups for transaction %d", idx)
+		mlog.Log.Debugf("resolveAddrTableLookups for transaction %d", idx)
 
 		if !tx.Message.IsVersioned() {
 			continue
@@ -63,7 +66,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
 			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
 			if err != nil {
-				klog.Infof("unable to get address lookup table account: %s", addrTableKey)
+				mlog.Log.Debugf("unable to get address lookup table account: %s", addrTableKey)
 				skipLookup = true
 				break
 			}
@@ -154,15 +157,15 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		if err == accountsdb.ErrNoAccount {
 			if isNativeProgram(pk) {
 				acct = &accounts.Account{Key: pk, Owner: sealevel.NativeLoaderAddr, Executable: true, Lamports: 1}
-				klog.Infof("no account: %s, using empty owned by Native Loader\n", pk)
+				mlog.Log.Debugf("no account: %s, using empty owned by Native Loader\n", pk)
 			} else {
 				acct = &accounts.Account{Key: pk, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
-				klog.Infof("no account: %s, using empty owned by System program\n", pk)
+				mlog.Log.Debugf("no account: %s, using empty owned by System program\n", pk)
 			}
 		} else if err != nil {
 			return nil, err
 		} else {
-			klog.Infof("found account in loadBlockAccounts for: %s\n", acct.Key)
+			mlog.Log.Debugf("found account in loadBlockAccounts for: %s\n", acct.Key)
 		}
 
 		var pkBytes [32]byte
@@ -195,7 +198,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 					panic(fmt.Sprintf("unable to unmarshal slothashes sysvar"))
 				}
 
-				slotHashes.Update(block.Slot, block.ParentBankhash)
+				slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
 				newSlotHashesBytes := slotHashes.MustMarshal()
 				copy(sysvarAcct.Data, newSlotHashesBytes)
 			} else if sysvarAcct.Key == sealevel.SysvarClockAddr {
@@ -246,7 +249,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*featur
 			// already activated
 			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
 				f.EnableFeature(featureGate, slot)
-				klog.Infof("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+				mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 
 			if featureAcct.ActivatedAt == nil {
@@ -261,7 +264,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*featur
 
 				newlyActivatedFeatures = append(newlyActivatedFeatures, acct.Key)
 				f.EnableFeature(featureGate, slot)
-				klog.Infof("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+				mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 		}
 	}
@@ -337,7 +340,9 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 	for currentSlot := startSlot; currentSlot <= endSlot; currentSlot++ {
 		blockResult, err := rpcc.GetBlockFinalized(uint64(currentSlot))
-		if err != nil {
+		if err == rpcclient.SlotSkipped {
+			continue
+		} else if err != nil {
 			klog.Fatalf("error fetching block: %s\n", err)
 		}
 
@@ -357,19 +362,21 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		if currentSlot == startSlot {
 			block.ParentBankhash = snapshotManifest.Bank.Hash
+			block.ParentSlot = snapshotManifest.Bank.Slot
 			setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
 
 		} else {
 			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 			block.StakeAccts = lastSlotCtx.StakeAccts
 			block.VoteTimestamps = lastSlotCtx.VoteTimestamps
+			block.ParentSlot = lastSlotCtx.Slot
 		}
 
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
-			klog.Infof("epoch boundary")
+			mlog.Log.Infof("epoch boundary")
 
 			var newlyActivatedFeatures []solana.PublicKey
 			currentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
@@ -385,15 +392,19 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			currentEpoch = block.Epoch
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
 			partitionedRewardsInfo = rewards.RetrievePartitionedStakingRewardsInfo(rpcc, &epochSchedule, block.Epoch, currentSlot)
+			if startSlot > partitionedRewardsInfo.EahStartOffsetSlot {
+				partitionedRewardsInfo.StartedAfterStartOffsetSlot = true
+				partitionedRewardsInfo.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
+			}
 		}
 
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahCalcSlot {
+		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
 			// calculate accounts hash for *all* on-chain accounts
-			block.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
-			klog.Infof("epoch accts hash: %s", base58.Encode(block.EpochAcctsHash))
+			partitionedRewardsInfo.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
+			mlog.Log.Infof("epoch accts hash: %s", base58.Encode(partitionedRewardsInfo.EpochAcctsHash))
 		}
 
 		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
@@ -403,10 +414,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
 		if err != nil {
-			klog.Errorf("error encountered during block replay: %s\n", err)
+			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
 		} else {
-			klog.Infof("block replayed successfully.\n")
+			mlog.Log.Debugf("block replayed successfully.\n")
 		}
 	}
 
@@ -414,8 +425,8 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
-
-	klog.Infof("replaying slot %d, epoch %d", block.Slot, block.Epoch)
+	start := time.Now()
+	mlog.Log.Infof("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
 	// gather up all accounts referenced in the block
 	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
@@ -423,14 +434,15 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.Slot - 1,
-		Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, EpochsAcctHash: block.EpochAcctsHash,
-		Accounts: accts, AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
-		VoteTimestamps: block.VoteTimestamps, EpochAcctHashInclusionSlot: math.MaxUint64}
+	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
+		Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, Accounts: accts,
+		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
+		VoteTimestamps: block.VoteTimestamps, EpochAcctHashStopOffsetSlot: math.MaxUint64}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
 
 	if block.PartitionedRewardsInfo != nil {
-		slotCtx.EpochAcctHashInclusionSlot = block.PartitionedRewardsInfo.EahInclusionSlot
+		slotCtx.EpochAcctHashStopOffsetSlot = block.PartitionedRewardsInfo.EahStopOffsetSlot
+		slotCtx.EpochsAcctHash = block.PartitionedRewardsInfo.EpochAcctsHash
 	}
 
 	acctIsWritable := make(map[solana.PublicKey]bool)
@@ -438,17 +450,17 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-		klog.Infof("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
+		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 		txFeeInfo, wpks, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
-			klog.Infof("tx %d returned error: %s\n", idx+1, txErr)
+			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
 
 		// check for success-failure return value divergences
 		if txErr == nil && block.TxMetas[idx].Err != nil {
-			klog.Infof("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
+			mlog.Log.Infof("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
 		} else if txErr != nil && block.TxMetas[idx].Err == nil {
-			klog.Infof("tx %s return value divergence: txErr was %+v, but onchain err was nil", tx.Signatures[0], txErr)
+			mlog.Log.Infof("tx %s return value divergence: txErr was %+v, but onchain err was nil", tx.Signatures[0], txErr)
 		}
 
 		for _, pk := range wpks {
@@ -462,7 +474,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	// to the slot leader's lamports balance, subsequently including it in the accounts delta hash.
 	fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
 
-	klog.Infof("from RPC fees for leader: %d, post-balance: %d (%s)", block.Reward.Lamports, block.Reward.PostBalance, block.Reward.Leader)
+	mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.Reward.Lamports, block.Reward.PostBalance, block.Reward.Leader)
 
 	epochScheduleAcct, err := slotCtx.Accounts.GetAccount(&sealevel.SysvarEpochScheduleAddr)
 	if err != nil {
@@ -508,22 +520,22 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	eligibleAccts = append(eligibleAccts, sysvarAccts...)
 
 	if len(eligibleAccts) > 0 && updateAcctsDb {
-		klog.Infof("updating accountsdb")
+		mlog.Log.Debugf("updating accountsdb")
 		err = acctsDb.StoreAccounts(eligibleAccts, slotCtx.Slot)
 		for _, acctToStore := range eligibleAccts {
-			fmt.Printf("updated account: %s\n", util.PrettyPrintAcct(acctToStore))
+			mlog.Log.Debugf("updated account: %s\n", util.PrettyPrintAcct(acctToStore))
 		}
 	} else {
-		klog.Infof("accountsdb not updated")
+		mlog.Log.Debugf("accountsdb not updated")
 	}
 
-	klog.Infof("calculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(eligibleAccts), len(rentAccts))
+	mlog.Log.Infof("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(eligibleAccts), len(rentAccts))
 
 	acctDeltaHash := calculateAcctsDeltaHash(eligibleAccts)
 
 	// calculate bankhash
 	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
-	klog.Infof("calculated bankhash for slot %d was %s", block.Slot, base58.Encode(slotCtx.FinalBankhash))
+	mlog.Log.Infof("calculated bankhash for slot %d was %s. slot replay time: %d", block.Slot, base58.Encode(slotCtx.FinalBankhash), time.Since(start).Seconds())
 
 	return slotCtx, err
 }
