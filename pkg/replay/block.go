@@ -165,7 +165,11 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		} else if err != nil {
 			return nil, err
 		} else {
-			mlog.Log.Debugf("found account in loadBlockAccounts for: %s\n", acct.Key)
+			if acct.Lamports == 0 {
+				acct = &accounts.Account{Key: pk, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
+			} else {
+				mlog.Log.Debugf("found account in loadBlockAccounts for: %s\n", acct.Key)
+			}
 		}
 
 		var pkBytes [32]byte
@@ -315,6 +319,8 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 }
 
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, updateAcctsDb bool) error {
+	//mlog.Log.EnableInfLogging()
+
 	rpcc := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com")
 
 	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
@@ -388,7 +394,6 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
 			}
 			block.UpdatedAccts = append(block.UpdatedAccts, newlyActivatedFeatures...)
-
 			currentEpoch = block.Epoch
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
 			partitionedRewardsInfo = rewards.RetrievePartitionedStakingRewardsInfo(rpcc, &epochSchedule, block.Epoch, currentSlot)
@@ -401,8 +406,9 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
+		if partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.EahStartOffsetSlot {
 			// calculate accounts hash for *all* on-chain accounts
+			partitionedRewardsInfo.EahStartOffsetSlot = math.MaxUint64
 			partitionedRewardsInfo.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
 			mlog.Log.Infof("epoch accts hash: %s", base58.Encode(partitionedRewardsInfo.EpochAcctsHash))
 		}

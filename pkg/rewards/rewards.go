@@ -107,7 +107,9 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 
 	if len(accts) != 0 {
 		err := acctsDb.StoreAccounts(accts, slot)
-		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
+		if err != nil {
+			panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
+		}
 	}
 
 	return rewardPks, totalVotingRewards

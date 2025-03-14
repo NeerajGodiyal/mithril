@@ -411,11 +411,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	if instrErr != nil && tx.Signatures[0] == solana.MustSignatureFromBase58("5AqRfK1ZisHhSk8Pawrxve6ZvVAus5mA2vXYLic2YvHpU2yjFBdKGozNBCQNb5kbA2g2iWexVGZ2m78VyE2ENNvZ") {
-		mlog.Log.Infof("\ntx logs:\n")
-		for _, logEntry := range log.Logs {
-			mlog.Log.Infof("%s\n", logEntry)
-		}
+	mlog.Log.Infof("\ntx logs:\n")
+	for _, logEntry := range log.Logs {
+		mlog.Log.Infof("%s\n", logEntry)
 	}
 
 	// check for CU consumed divergences

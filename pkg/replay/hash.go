@@ -258,8 +258,8 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 	}
 
 	// EAH must be worked into the bankhash for the slot that is 3/4 through the epoch
-	if shouldIncludeEah(&epochSchedule, slotCtx) && slotCtx.Slot >= slotCtx.EpochAcctHashStopOffsetSlot {
-		mlog.Log.Infof("**** EAH required for this bankhash")
+	if shouldIncludeEah(&epochSchedule, slotCtx) {
+		mlog.Log.Infof("EAH required for this bankhash")
 		hasher := sha256.New()
 		hasher.Write(bankHash)
 		hasher.Write(slotCtx.EpochsAcctHash)

@@ -43,10 +43,6 @@ func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	binary.LittleEndian.PutUint64(clockDst[24:32], clock.LeaderScheduleEpoch)
 	binary.LittleEndian.PutUint64(clockDst[32:40], uint64(clock.UnixTimestamp))
 
-	if execCtx.TransactionContext.Signature == solana.MustSignatureFromBase58("5AqRfK1ZisHhSk8Pawrxve6ZvVAus5mA2vXYLic2YvHpU2yjFBdKGozNBCQNb5kbA2g2iWexVGZ2m78VyE2ENNvZ") {
-		mlog.Log.Infof("clock (slot %d) %s: %+v", execCtx.SlotCtx.Slot, execCtx.TransactionContext.Signature, clock)
-	}
-
 	return syscallSuccess(0)
 }
 
@@ -118,10 +114,6 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 	binary.Write(buf, binary.LittleEndian, epochSchedule.FirstNormalSlot)
 
 	copy(epochScheduleDst, buf.Bytes())
-
-	if execCtx.TransactionContext.Signature == solana.MustSignatureFromBase58("5AqRfK1ZisHhSk8Pawrxve6ZvVAus5mA2vXYLic2YvHpU2yjFBdKGozNBCQNb5kbA2g2iWexVGZ2m78VyE2ENNvZ") {
-		mlog.Log.Infof("epoch schedule (slot %d) %s: %+v", execCtx.SlotCtx.Slot, execCtx.TransactionContext.Signature, epochSchedule)
-	}
 
 	return syscallSuccess(0)
 }
