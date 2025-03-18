@@ -198,12 +198,14 @@ func CalculateRewardPointsPartitioned(acctsDb *accountsdb.AccountsDb, slotCtx *s
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			panic(fmt.Sprintf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err))
+			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			continue
 		}
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			panic(fmt.Sprintf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err))
+			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			continue
 		}
 
 		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
@@ -213,7 +215,8 @@ func CalculateRewardPointsPartitioned(acctsDb *accountsdb.AccountsDb, slotCtx *s
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			panic(fmt.Sprintf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err))
+			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			continue
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
@@ -223,7 +226,8 @@ func CalculateRewardPointsPartitioned(acctsDb *accountsdb.AccountsDb, slotCtx *s
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			panic(fmt.Sprintf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err))
+			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			continue
 		}
 
 		acctPoints := calculatePoints(stakeHistory, stakeState, voteStateVersioned, newWarmupCooldownRateEpoch)

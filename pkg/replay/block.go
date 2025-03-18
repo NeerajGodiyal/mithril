@@ -42,7 +42,7 @@ type Block struct {
 	ExpectedBankhash       [32]byte
 	TxMetas                []*rpc.TransactionMeta
 	Leader                 solana.PublicKey
-	Reward                 BlockRewardsInfo
+	BlockReward            *BlockRewardsInfo
 	RecentBlockhash        [32]byte
 	UnixTimestamp          int64
 	StakeAccts             map[solana.PublicKey]bool
@@ -235,7 +235,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	return accts, nil
 }
 
-func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*features.Features, []solana.PublicKey) {
+func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []solana.PublicKey) {
 	newlyActivatedFeatures := make([]solana.PublicKey, 0)
 	acctsToStore := make([]*accounts.Account, 0)
 
@@ -256,7 +256,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*featur
 				mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 
-			if featureAcct.ActivatedAt == nil {
+			if featureAcct.ActivatedAt == nil && startOfEpoch {
 				newFeatureAcct := &features.FeatureAcct{ActivatedAt: &slot}
 				newFeatureAcctBytes, err := features.MarshalFeatureAcct(newFeatureAcct)
 				if err != nil {
@@ -266,19 +266,36 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64) (*featur
 				acct.Data = newFeatureAcctBytes
 				acctsToStore = append(acctsToStore, acct)
 
-				newlyActivatedFeatures = append(newlyActivatedFeatures, acct.Key)
+				newlyActivatedFeatures = append(newlyActivatedFeatures, featureGate.Address)
 				f.EnableFeature(featureGate, slot)
 				mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 		}
 	}
 
-	err := acctsDb.StoreAccounts(acctsToStore, slot)
-	if err != nil {
-		panic(err)
+	if len(acctsToStore) != 0 {
+		err := acctsDb.StoreAccounts(acctsToStore, slot)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	mlog.Log.Debugf("scanAndEnableFeatures, modified features:\n")
+	for _, feat := range newlyActivatedFeatures {
+		mlog.Log.Debugf("feature: %s", feat)
 	}
 
 	return f, newlyActivatedFeatures
+}
+
+func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {
+	for _, reward := range rewards {
+		if string(reward.RewardType) == "Fee" {
+			return &reward
+		}
+	}
+
+	return nil
 }
 
 func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
@@ -296,6 +313,11 @@ func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 	block.Blockhash = blockResult.Blockhash
 	block.RecentBlockhash = blockResult.PreviousBlockhash
 	block.UnixTimestamp = int64(*blockResult.BlockTime)
+
+	blockReward := blockRewardRewards(blockResult.Rewards)
+	if blockReward != nil {
+		block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
+	}
 
 	for _, tx := range block.Transactions {
 		block.NumSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
@@ -319,9 +341,9 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 }
 
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, updateAcctsDb bool) error {
-	//mlog.Log.EnableInfLogging()
+	mlog.Log.EnableInfLogging()
 
-	rpcc := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com")
+	rpcc := rpcclient.NewRpcClient("http://91.242.214.247:19845")
 
 	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
 	if err != nil {
@@ -340,8 +362,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var lastSlotCtx *sealevel.SlotCtx
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
+	var featuresActivatedInFirstSlot []solana.PublicKey
 
-	currentFeatures, _ = scanAndEnableFeatures(acctsDb, startSlot)
+	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
+	currentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	for currentSlot := startSlot; currentSlot <= endSlot; currentSlot++ {
@@ -356,14 +380,6 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		if err != nil {
 			klog.Fatalf("error creating block from BlockResult: %s\n", err)
 		}
-
-		leader, err := rpcc.GetLeaderForSlot(uint64(currentSlot))
-		if err != nil {
-			klog.Fatalf("error fetching leader for slot: %s\n", err)
-		}
-
-		block.Leader = leader
-		block.Reward = BlockRewardsInfo{Leader: blockResult.Rewards[0].Pubkey, Lamports: uint64(blockResult.Rewards[0].Lamports), PostBalance: blockResult.Rewards[0].PostBalance}
 		block.Slot = currentSlot
 
 		if currentSlot == startSlot {
@@ -385,7 +401,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			mlog.Log.Infof("epoch boundary")
 
 			var newlyActivatedFeatures []solana.PublicKey
-			currentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot)
+			currentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 			var updatedPks []solana.PublicKey
@@ -406,7 +422,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.EahStartOffsetSlot {
+		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
 			// calculate accounts hash for *all* on-chain accounts
 			partitionedRewardsInfo.EahStartOffsetSlot = math.MaxUint64
 			partitionedRewardsInfo.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
@@ -416,6 +432,11 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, partitionedRewardsInfo.LastStakingRewardSlot)
 			block.UpdatedAccts = append(block.UpdatedAccts, rewardPks...)
+		}
+
+		if len(featuresActivatedInFirstSlot) != 0 {
+			block.UpdatedAccts = append(block.UpdatedAccts, featuresActivatedInFirstSlot...)
+			featuresActivatedInFirstSlot = make([]solana.PublicKey, 0)
 		}
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
@@ -476,11 +497,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 
-	// distribute tx fees to the leader by calculating 50% of the tx fees and adding the sum
-	// to the slot leader's lamports balance, subsequently including it in the accounts delta hash.
-	fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
-
-	mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.Reward.Lamports, block.Reward.PostBalance, block.Reward.Leader)
+	if block.BlockReward != nil {
+		// distribute tx fees to the slot leader
+		fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
+		acctIsWritable[block.BlockReward.Leader] = true
+		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
+	}
 
 	epochScheduleAcct, err := slotCtx.Accounts.GetAccount(&sealevel.SysvarEpochScheduleAddr)
 	if err != nil {
@@ -508,8 +530,6 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
 
-	acctIsWritable[block.Leader] = true
-
 	eligibleAccts := make([]*accounts.Account, 0)
 	for pk := range acctIsWritable {
 		acct, _ := slotCtx.GetAccount(pk)
@@ -517,7 +537,11 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	for _, pk := range block.UpdatedAccts {
-		acct, _ := slotCtx.GetAccount(pk)
+		mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
+		acct, err := slotCtx.GetAccount(pk)
+		if err != nil {
+			panic(fmt.Sprintf("unable to fetch %s from accountsdb for inclusion in bankhash", pk))
+		}
 		eligibleAccts = append(eligibleAccts, acct)
 	}
 

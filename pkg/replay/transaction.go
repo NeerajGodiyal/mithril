@@ -207,6 +207,7 @@ func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
 	if isEmpty || isUninitialized {
 		delete(slotCtx.StakeAccts, acct.Key)
 	} else {
+		mlog.Log.Debugf("added stake delegation record for %s: %v", acct.Key, acct)
 		slotCtx.StakeAccts[acct.Key] = true
 	}
 }
