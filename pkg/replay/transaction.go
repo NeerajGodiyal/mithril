@@ -256,7 +256,20 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 	}
 }
 
-func handleFailedTxIfDurableTx(instrs []sealevel.Instruction, execCtx *sealevel.ExecutionCtx, slotCtx *sealevel.SlotCtx) (solana.PublicKey, bool) {
+func handleDurableNonceIfEligibleFailedTx(instrs []sealevel.Instruction, tx *solana.Transaction, execCtx *sealevel.ExecutionCtx, slotCtx *sealevel.SlotCtx) (solana.PublicKey, bool) {
+	if !execCtx.TransactionContext.NonceAcctAdvanced {
+		return solana.PublicKey{}, false
+	}
+
+	recentBlockhashes, err := sealevel.ReadRecentBlockHashesSysvar(execCtx)
+	if err != nil {
+		panic(fmt.Sprintf("unable to decode recentblockhashes sysvar: %s", err))
+	}
+
+	if recentBlockhashes.IsBlockhashAgeValid(tx.Message.RecentBlockhash) {
+		return solana.PublicKey{}, false
+	}
+
 	instr := instrs[0]
 
 	if instr.ProgramId == sealevel.SystemProgramAddr && len(instr.Data) >= 4 {
@@ -412,9 +425,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	mlog.Log.Infof("\ntx logs:\n")
-	for _, logEntry := range log.Logs {
-		mlog.Log.Infof("%s\n", logEntry)
+	if len(log.Logs) != 0 {
+		mlog.Log.Debugf("\ntx logs:\n")
+		for _, logEntry := range log.Logs {
+			mlog.Log.Debugf("%s\n", logEntry)
+		}
 	}
 
 	// check for CU consumed divergences
@@ -468,8 +483,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		writableAcctsForFailedTx := make([]solana.PublicKey, 0)
 		writableAcctsForFailedTx = append(writableAcctsForFailedTx, payerAcct.Key)
 
-		noncePubkey, isDurableTx := handleFailedTxIfDurableTx(instrs, execCtx, slotCtx)
-		if isDurableTx {
+		noncePubkey, isEligibleDurableTx := handleDurableNonceIfEligibleFailedTx(instrs, tx, execCtx, slotCtx)
+		if isEligibleDurableTx {
 			writableAcctsForFailedTx = append(writableAcctsForFailedTx, noncePubkey)
 		}
 

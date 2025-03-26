@@ -125,6 +125,18 @@ func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte) {
 	*recentBlockhashes = rbh
 }
 
+func (recentBlockhashes *SysvarRecentBlockhashes) IsBlockhashAgeValid(hash [32]byte) bool {
+	rbh := *recentBlockhashes
+
+	for _, r := range rbh {
+		if hash == r.Blockhash {
+			return true
+		}
+	}
+
+	return false
+}
+
 func ReadRecentBlockHashesSysvar(execCtx *ExecutionCtx) (SysvarRecentBlockhashes, error) {
 	accts := addrObjectForLookup(execCtx)
 

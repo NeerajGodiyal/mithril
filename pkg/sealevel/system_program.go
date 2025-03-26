@@ -1304,7 +1304,7 @@ func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAc
 		return InstrErrInsufficientFunds
 	}
 
-	rbh := execCtx.SlotCtx.RecentBlockhash
+	rbh := execCtx.SlotCtx.LastBlockhash
 	durableNonce := durableNonce(rbh)
 
 	newNonceStateVersions := NonceStateVersions{Type: NonceVersionCurrent, Current: NonceData{
@@ -1407,7 +1407,7 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 	if state.IsInitialized {
 		signer = state.Authority
 		if lamports == from.Lamports() {
-			durableNonce := durableNonce(execCtx.SlotCtx.RecentBlockhash)
+			durableNonce := durableNonce(execCtx.SlotCtx.LastBlockhash)
 			if durableNonce == state.DurableNonce {
 				mlog.Log.Debugf("Withdraw nonce account: nonce can only advance once per slot")
 				return SystemProgErrNonceBlockhashNotExpired
@@ -1500,7 +1500,7 @@ func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 		return InstrErrMissingRequiredSignature
 	}
 
-	rbh := execCtx.SlotCtx.RecentBlockhash
+	rbh := execCtx.SlotCtx.LastBlockhash
 	nextDurableNonce := durableNonce(rbh)
 	if state.DurableNonce == nextDurableNonce {
 		mlog.Log.Debugf("Advance nonce account: nonce can only advance once per slot")
@@ -1522,5 +1522,11 @@ func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 		return err
 	}
 
-	return acct.SetState(execCtx.GlobalCtx.Features, newData)
+	err = acct.SetState(execCtx.GlobalCtx.Features, newData)
+	if err != nil {
+		return err
+	}
+
+	execCtx.TransactionContext.NonceAcctAdvanced = true
+	return nil
 }

@@ -14,18 +14,15 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-const microLamportsPerLamport = 1000000
+var microLamportsPerLamport = wide.Uint128FromUint64(1000000)
+var microLamportsPerLamportMinus1 = wide.Uint128FromUint64(1000000 - 1)
 
-func calculatePriorityFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) (uint64, error) {
+func calculatePriorityFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) uint64 {
 	computeUnitPrice := wide.Uint128FromUint64(computeBudgetLimits.ComputeUnitPrice)
 	computeUnitLimit := wide.Uint128FromUint64(uint64(computeBudgetLimits.ComputeUnitLimit))
 
-	microLamportFee, err := safemath.CheckedMulU128(computeUnitPrice, computeUnitLimit)
-	if err != nil {
-		return 0, err
-	}
-
-	fee := safemath.SaturatingAddU128(microLamportFee, wide.Uint128FromUint64(microLamportsPerLamport-1)).Div(wide.Uint128FromUint64(microLamportsPerLamport))
+	microLamportFee := computeUnitPrice.Mul(computeUnitLimit)
+	fee := microLamportFee.Add(microLamportsPerLamportMinus1).Div(microLamportsPerLamport)
 
 	var priorityFee uint64
 	if fee.IsUint64() {
@@ -34,7 +31,7 @@ func calculatePriorityFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) (ui
 		priorityFee = math.MaxUint64
 	}
 
-	return priorityFee, nil
+	return priorityFee
 }
 
 // There are currently two aspects of the tx fee cost model on Solana
@@ -100,17 +97,10 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, instrs []sealevel.Instruct
 	// prioritization fees
 	var priorityFee uint64
 	if computeBudgetLimits.ComputeUnitPrice != 0 {
-		priorityFee, err = calculatePriorityFee(computeBudgetLimits)
-		if err != nil {
-			panic("overflow in calculating priority fee - shouldn't be possible")
-		}
+		priorityFee = calculatePriorityFee(computeBudgetLimits)
 	}
 
-	totalTxFee, err := safemath.CheckedAddU64(baseTxFee, priorityFee)
-	if err != nil {
-		panic("overflow in calculating total tx fee")
-	}
-
+	totalTxFee := safemath.SaturatingAddU64(baseTxFee, priorityFee)
 	feeInfo := &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}
 
 	if feePayerAcct.Lamports < totalTxFee {
@@ -125,7 +115,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, instrs []sealevel.Instruct
 	return feeInfo, feePayerAcct.Lamports, nil
 }
 
-func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, leader solana.PublicKey, txFeeAccumulator *TxFeeInfoAccumulator) {
+func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, leader solana.PublicKey, txFeeAccumulator *TxFeeInfoAccumulator) uint64 {
 	var feesToBurn uint64
 	var feesToLeader uint64
 
@@ -161,4 +151,6 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 	}
 
 	mlog.Log.Debugf("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
+
+	return feesToBurn
 }

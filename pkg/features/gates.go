@@ -41,6 +41,10 @@ var EnableSecp256r1Precompile = FeatureGate{Name: "EnableSecp256r1Precompile", A
 var FixAltBn128MultiplicationInputLength = FeatureGate{Name: "FixAltBn128MultiplicationInputLength", Address: base58.MustDecodeFromString("bn2puAyxUx6JUabAxYdKdJ5QHbNNmKw8dCGuGCyRrFN")}
 var EnableTowerSyncIx = FeatureGate{Name: "EnableTowerSyncIx", Address: base58.MustDecodeFromString("tSynMCspg4xFiCj1v3TDb4c7crMR5tSBhLz4sF7rrNA")}
 var SkipRentRewrites = FeatureGate{Name: "SkipRentRewrites", Address: base58.MustDecodeFromString("CGB2jM8pwZkeeiXQ66kBMyBR6Np61mggL7XUsmLjVcrw")}
+var FullInflationVote = FeatureGate{Name: "FullInflationVote", Address: base58.MustDecodeFromString("BzBBveUDymEYoYzcMWNQCx3cd4jQs7puaVFHLtsbB6fm")}
+var FullInflationEnable = FeatureGate{Name: "FullInflationEnable", Address: base58.MustDecodeFromString("7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx")}
+var FullInflationDevnetAndTestnet = FeatureGate{Name: "FullInflationDevnetAndTestnet", Address: base58.MustDecodeFromString("DT4n6ABDqs6w4bnfwrXT9rsprcPf6cdDga1egctaPkLC")}
+var PicoInflation = FeatureGate{Name: "PicoInflation", Address: base58.MustDecodeFromString("4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -51,4 +55,5 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
 	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
-	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites}
+	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
+	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation}

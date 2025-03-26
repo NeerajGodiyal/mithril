@@ -158,11 +158,6 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	writer := new(bytes.Buffer)
 
 	for _, acct := range accts {
-		if acct.Lamports == 0 {
-			accountsDb.indexDb.Delete(acct.Key[:])
-			continue
-		}
-
 		acct.Slot = slot
 
 		// create index entry, encode it and write it to the index kv store

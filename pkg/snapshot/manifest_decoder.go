@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -46,15 +47,6 @@ type RentCollector struct {
 	EpochSchedule sealevel.SysvarEpochSchedule
 	SlotsPerYear  float64
 	Rent          sealevel.SysvarRent
-}
-
-type Inflation struct {
-	Initial        float64
-	Terminal       float64
-	Taper          float64
-	Foundation     float64
-	FoundationTerm float64
-	Unused         float64
 }
 
 type VoteAccount struct {
@@ -160,7 +152,7 @@ type DeserializableVersionedBank struct {
 	CollectedRent       uint64
 	RentCollector       RentCollector
 	EpochSchedule       sealevel.SysvarEpochSchedule
-	Inflation           Inflation
+	Inflation           rewards.Inflation
 	Stakes              Stakes
 	UnusedAccounts      UnusedAccounts
 	EpochStakes         []EpochStakesPair
@@ -372,38 +364,6 @@ func (rentCollector *RentCollector) UnmarshalWithDecoder(decoder *bin.Decoder) e
 	}
 
 	err = rentCollector.Rent.UnmarshalWithDecoder(decoder)
-	return err
-}
-
-func (inflation *Inflation) UnmarshalWithDecoder(decoder *bin.Decoder) error {
-	var err error
-
-	inflation.Initial, err = decoder.ReadFloat64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	inflation.Terminal, err = decoder.ReadFloat64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	inflation.Taper, err = decoder.ReadFloat64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	inflation.Foundation, err = decoder.ReadFloat64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	inflation.FoundationTerm, err = decoder.ReadFloat64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	inflation.Unused, err = decoder.ReadFloat64(bin.LE)
 	return err
 }
 

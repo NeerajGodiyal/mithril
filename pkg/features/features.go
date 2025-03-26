@@ -53,3 +53,17 @@ func (f *Features) AllEnabled() []string {
 	}
 	return enabledFeatureStrs
 }
+
+func (f *Features) FullInflationFeaturesEnabled() []FeatureGate {
+	var enabledFeatures []FeatureGate
+
+	if f.IsActive(FullInflationVote) && f.IsActive(FullInflationEnable) {
+		enabledFeatures = append(enabledFeatures, FullInflationEnable)
+	}
+
+	if f.IsActive(FullInflationDevnetAndTestnet) {
+		enabledFeatures = append(enabledFeatures, FullInflationDevnetAndTestnet)
+	}
+
+	return enabledFeatures
+}

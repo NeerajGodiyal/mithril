@@ -32,6 +32,7 @@ type BlockRewardsInfo struct {
 type Block struct {
 	Slot                   uint64
 	ParentSlot             uint64
+	BlockHeight            uint64
 	Epoch                  uint64
 	Transactions           []*solana.Transaction
 	BankHash               [32]byte
@@ -43,7 +44,7 @@ type Block struct {
 	TxMetas                []*rpc.TransactionMeta
 	Leader                 solana.PublicKey
 	BlockReward            *BlockRewardsInfo
-	RecentBlockhash        [32]byte
+	LastBlockhash          [32]byte
 	UnixTimestamp          int64
 	StakeAccts             map[solana.PublicKey]bool
 	VoteTimestamps         map[solana.PublicKey]sealevel.BlockTimestamp
@@ -252,7 +253,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 
 			// already activated
 			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
-				f.EnableFeature(featureGate, slot)
+				f.EnableFeature(featureGate, *featureAcct.ActivatedAt)
 				mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 
@@ -311,8 +312,9 @@ func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 	}
 
 	block.Blockhash = blockResult.Blockhash
-	block.RecentBlockhash = blockResult.PreviousBlockhash
+	block.LastBlockhash = blockResult.PreviousBlockhash
 	block.UnixTimestamp = int64(*blockResult.BlockTime)
+	block.BlockHeight = *blockResult.BlockHeight
 
 	blockReward := blockRewardRewards(blockResult.Rewards)
 	if blockReward != nil {
@@ -340,10 +342,10 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 	}
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, updateAcctsDb bool) error {
-	mlog.Log.EnableInfLogging()
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
+	//mlog.Log.EnableInfLogging()
 
-	rpcc := rpcclient.NewRpcClient("http://91.242.214.247:19845")
+	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 
 	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
 	if err != nil {
@@ -363,6 +365,11 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	var featuresActivatedInFirstSlot []solana.PublicKey
+
+	epochCtx := new(EpochCtx)
+	epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
+	epochCtx.Inflation = snapshotManifest.Bank.Inflation
+	epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
 
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
 	currentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
@@ -405,14 +412,19 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 			var updatedPks []solana.PublicKey
-			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, &epochSchedule, blockResult, currentEpoch)
+			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, epochCtx, &epochSchedule, currentFeatures, blockResult, currentEpoch)
 			if partitionedEpochRewardsEnabled {
 				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
 			}
 			block.UpdatedAccts = append(block.UpdatedAccts, newlyActivatedFeatures...)
 			currentEpoch = block.Epoch
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
-			partitionedRewardsInfo = rewards.RetrievePartitionedStakingRewardsInfo(rpcc, &epochSchedule, block.Epoch, currentSlot)
+			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, &epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, epochCtx.SlotsPerYear, currentFeatures)
+
+			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
+				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, &epochSchedule, startSlot, currentEpoch, currentFeatures)
+			}
+
 			if startSlot > partitionedRewardsInfo.EahStartOffsetSlot {
 				partitionedRewardsInfo.StartedAfterStartOffsetSlot = true
 				partitionedRewardsInfo.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
@@ -429,8 +441,8 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			mlog.Log.Infof("epoch accts hash: %s", base58.Encode(partitionedRewardsInfo.EpochAcctsHash))
 		}
 
-		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, blockResult.Rewards, currentSlot, partitionedRewardsInfo.LastStakingRewardSlot)
+		if len(blockResult.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
+			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, epochCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
 			block.UpdatedAccts = append(block.UpdatedAccts, rewardPks...)
 		}
 
@@ -446,9 +458,20 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		} else {
 			mlog.Log.Debugf("block replayed successfully.\n")
 		}
+		epochCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 	}
 
 	return nil
+}
+
+func runIncinerator(slotCtx *sealevel.SlotCtx) {
+	incineratorAcct, err := slotCtx.GetAccount(sealevel.IncineratorAddr)
+	if err != nil {
+		return
+	}
+	newIncineratorAcct := &accounts.Account{Key: sealevel.IncineratorAddr, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
+	slotCtx.SetAccount(sealevel.IncineratorAddr, newIncineratorAcct)
+	slotCtx.LamportsBurnt += incineratorAcct.Lamports
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
@@ -462,7 +485,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
-		Blockhash: block.Blockhash, RecentBlockhash: block.RecentBlockhash, Accounts: accts,
+		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
 		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
 		VoteTimestamps: block.VoteTimestamps, EpochAcctHashStopOffsetSlot: math.MaxUint64}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
@@ -499,7 +522,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	if block.BlockReward != nil {
 		// distribute tx fees to the slot leader
-		fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
+		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
 		acctIsWritable[block.BlockReward.Leader] = true
 		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
@@ -529,6 +552,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
+	runIncinerator(slotCtx)
 
 	eligibleAccts := make([]*accounts.Account, 0)
 	for pk := range acctIsWritable {

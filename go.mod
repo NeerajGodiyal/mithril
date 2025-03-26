@@ -38,6 +38,7 @@ require (
 	github.com/Overclock-Validator/go-ethereum v0.0.0-20250303234049-5cf00fe11343 // indirect
 	github.com/Overclock-Validator/sm9 v0.0.0-20250309104404-1792339eb247 // indirect
 	github.com/abcum/lcp v0.0.0-20201209214815-7a3f3840be81 // indirect
+	github.com/astaxie/beego v1.12.3 // indirect
 	github.com/bits-and-blooms/bitset v1.17.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.2.0 // indirect
 	github.com/bwmarrin/snowflake v0.3.0 // indirect
@@ -49,6 +50,7 @@ require (
 	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
 	github.com/consensys/bavard v0.1.22 // indirect
 	github.com/consensys/gnark-crypto v0.14.0 // indirect
+	github.com/copernet/copernicus v0.0.7 // indirect
 	github.com/dchest/blake2b v1.0.0 // indirect
 	github.com/decred/base58 v1.0.5 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.1 // indirect
@@ -57,32 +59,48 @@ require (
 	github.com/dgraph-io/ristretto v0.1.2-0.20240116140435-c67e07994f91 // indirect
 	github.com/dis2/bls12 v0.0.0-20210118063312-e2c12a28055c // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/glog v1.2.0 // indirect
-	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
+	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
 	github.com/google/flatbuffers v1.12.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
+	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
+	github.com/jessevdk/go-flags v1.6.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/magiconair/properties v1.8.6 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
+	github.com/pelletier/go-toml v1.9.5 // indirect
+	github.com/pelletier/go-toml/v2 v2.0.5 // indirect
 	github.com/philsippl/bls12 v0.0.0-20210305152037-695a40105eda // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/plar/go-adaptive-radix-tree v1.0.4 // indirect
 	github.com/recoilme/sortedset v0.0.0-20200825100557-fdc6fff0bc87 // indirect
 	github.com/rosedblabs/diskhash v0.0.0-20230910084041-289755737e2a // indirect
 	github.com/rosedblabs/wal v1.3.6 // indirect
+	github.com/shiena/ansicolor v0.0.0-20151119151921-a422bbe96644 // indirect
 	github.com/simplespy/bls12 v0.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.0 // indirect
+	github.com/spf13/afero v1.8.2 // indirect
+	github.com/spf13/cast v1.5.0 // indirect
+	github.com/spf13/jwalterweatherman v1.1.0 // indirect
+	github.com/spf13/viper v1.12.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/subosito/gotenv v1.3.0 // indirect
 	github.com/tidwall/interval v0.0.0-20191207210631-da4d74c2f07b // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.8 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
+	gopkg.in/go-playground/validator.v8 v8.18.2 // indirect
+	gopkg.in/ini.v1 v1.67.0 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
@@ -90,9 +108,11 @@ require (
 	filippo.io/edwards25519 v1.0.0 // indirect
 	git.mills.io/prologic/bitcask v1.0.2
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
+	github.com/Overclock-Validator/neostd v0.0.0-20250321114349-815aed984986
 	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
+	github.com/aead/siphash v1.0.1
 	github.com/akrylysov/pogreb v0.10.2
 	github.com/alitto/pond v1.9.2
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
@@ -103,6 +123,7 @@ require (
 	github.com/clearmatics/bn256 v0.0.0-20190516154049-c6c2a2b131e6
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgryski/go-sip13 v0.0.0-20200911182023-62edffca9245
 	github.com/dusk-network/bn256 v0.5.1-lattices
 	github.com/dustinxie/ecc v0.0.0-20210511000915-959544187564
 	github.com/edwingeng/deque/v2 v2.1.1
@@ -123,6 +144,7 @@ require (
 	github.com/gtank/ristretto255 v0.1.2
 	github.com/icza/kvcache v0.0.0-20230330133025-f5eb6361aef6
 	github.com/iden3/go-iden3-crypto v0.0.16
+	github.com/ielm/neostd v0.0.0-20240911190201-d89b0d99b9b3
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/native v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -160,6 +182,7 @@ require (
 	github.com/ryanavella/wide v0.0.0-20190709032049-e93517939246
 	github.com/samber/lo v1.49.1
 	github.com/simplespy/bgls v0.7.0
+	github.com/skycccu/copernicus v0.0.0-20180825092906-a24b6ab9ee2f
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7

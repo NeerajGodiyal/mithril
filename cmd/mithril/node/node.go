@@ -25,6 +25,7 @@ var (
 	updateAccountsDb   bool
 	path               string
 	outputDir          string
+	rpcEndpoint        string
 	startSlot          int64
 	endSlot            int64
 )
@@ -35,6 +36,7 @@ func init() {
 	Cmd.Flags().BoolVarP(&updateAccountsDb, "update-accounts-db", "u", false, "Update accountsdb after execution")
 	Cmd.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
 	Cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
+	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
 	Cmd.Flags().Int64VarP(&startSlot, "startslot", "b", -1, "Block at which to begin replaying")
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
 }
@@ -102,6 +104,10 @@ func run(c *cobra.Command, args []string) {
 		accountsDbDir = path
 	}
 
+	if rpcEndpoint == "" {
+		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	}
+
 	mlog.Log.Infof("loading from AccountsDB at %s", accountsDbDir)
 
 	accountsDb, err := accountsdb.OpenDb(accountsDbDir)
@@ -115,5 +121,5 @@ func run(c *cobra.Command, args []string) {
 		klog.Fatalf("unable to open manifest file")
 	}
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), updateAccountsDb)
+	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb)
 }

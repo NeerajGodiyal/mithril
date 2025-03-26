@@ -36,7 +36,7 @@ type SlotCtx struct {
 	LamportsPerSignature        uint64
 	ModifiedAccts               map[solana.PublicKey]bool
 	Blockhash                   [32]byte
-	RecentBlockhash             [32]byte
+	LastBlockhash               [32]byte
 	SlotBank                    SlotBank
 	Features                    *features.Features
 	VoteTimestamps              map[solana.PublicKey]BlockTimestamp
@@ -45,6 +45,7 @@ type SlotCtx struct {
 	EpochsAcctHash              []byte
 	EpochAcctHashStopOffsetSlot uint64
 	Replay                      bool
+	LamportsBurnt               uint64
 }
 
 func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana.PublicKey) ([]InstructionAccount, []uint64, error) {

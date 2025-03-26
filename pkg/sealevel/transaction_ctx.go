@@ -35,6 +35,7 @@ type TransactionCtx struct {
 	Signature                solana.Signature
 	ModifiedStakeAccts       bool
 	ModifiedVoteAccts        bool
+	NonceAcctAdvanced        bool
 }
 
 func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {

@@ -119,8 +119,8 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 func (fetcher *RpcClient) GetStakingRewardSlots(startSlot uint64, numPartitions uint64) ([]uint64, error) {
 	result, err := fetcher.client.GetBlocksWithLimit(
 		context.TODO(),
-		startSlot,
-		numPartitions+1,
+		startSlot+1,
+		numPartitions,
 		rpc.CommitmentFinalized)
 
 	if err != nil {

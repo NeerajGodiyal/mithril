@@ -9,6 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 )
 
 const SysvarEpochRewardsAddrStr = "SysvarEpochRewards1111111111111111111111111"
@@ -173,4 +174,11 @@ func WriteEpochRewardsSysvar(accts *accounts.Accounts, epochRewards SysvarEpochR
 		err = fmt.Errorf("failed write newly serialized EpochRewards sysvar to sysvar account: %w", err)
 		panic(err)
 	}
+}
+
+func (sr SysvarEpochRewards) String() string {
+	fmtStr := "EpochRewards { distribution_starting_block_height: %d, num_partitions: %d, parent_blockhash: %s, total_points: %d (%s), total_rewards: %d, distributed_rewards: %d, active: %t"
+	totalPoints := fmt.Sprintf("%d%d", sr.TotalPoints.Hi, sr.TotalPoints.Lo)
+	str := fmt.Sprintf(fmtStr, sr.DistributionStartingBlockHeight, sr.NumPartitions, solana.HashFromBytes(sr.ParentBlockhash[:]), totalPoints, sr.TotalPoints, sr.TotalRewards, sr.DistributedRewards, sr.Active)
+	return str
 }
