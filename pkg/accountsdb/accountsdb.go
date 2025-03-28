@@ -18,11 +18,11 @@ import (
 )
 
 type AccountsDb struct {
-	indexDb       *sniper.Store
-	acctsDir      string
-	indexDir      string
-	largestFileId atomic.Uint64
-	bankHash      [32]byte
+	IndexDb       *sniper.Store
+	AcctsDir      string
+	IndexDir      string
+	LargestFileId atomic.Uint64
+	BankHashBytes [32]byte
 }
 
 var (
@@ -83,19 +83,19 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		return nil, err
 	}
 
-	accountsDb := &AccountsDb{indexDb: db, acctsDir: appendVecsDir, indexDir: indexDir}
-	accountsDb.largestFileId.Store(largestFileId)
-	copy(accountsDb.bankHash[:], bankHashBytes)
+	accountsDb := &AccountsDb{IndexDb: db, AcctsDir: appendVecsDir, IndexDir: indexDir}
+	accountsDb.LargestFileId.Store(largestFileId)
+	copy(accountsDb.BankHashBytes[:], bankHashBytes)
 
 	return accountsDb, nil
 }
 
 func (accountsDb *AccountsDb) CloseDb() {
-	accountsDb.indexDb.Close()
+	accountsDb.IndexDb.Close()
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
-	acctIdxEntryBytes, err := accountsDb.indexDb.Get(pubkey[:])
+	acctIdxEntryBytes, err := accountsDb.IndexDb.Get(pubkey[:])
 	if err != nil {
 		mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
 		return nil, ErrNoAccount
@@ -106,7 +106,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		panic("failed to unmarshal AccountIndexEntry from index kv database")
 	}
 
-	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.acctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
+	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 	appendVecFile, err := os.Open(appendVecFileName)
 	if err != nil {
 		mlog.Log.Debugf("failed to open appendvec file %s")
@@ -140,9 +140,9 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 }
 
 func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint64) error {
-	fileId := accountsDb.largestFileId.Add(1)
+	fileId := accountsDb.LargestFileId.Add(1)
 
-	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.acctsDir, slot, fileId)
+	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
@@ -173,7 +173,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			return err
 		}
 
-		err = accountsDb.indexDb.SetIfSlotHigher(acct.Key[:], writer.Bytes(), 0)
+		err = accountsDb.IndexDb.SetIfSlotHigher(acct.Key[:], writer.Bytes(), 0)
 		if err != nil {
 			mlog.Log.Debugf("error calling SetIfSlotHigher on accountsdb for pubkey %s", acct.Key)
 			return err
@@ -204,7 +204,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 }
 
 func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix uint64) []solana.PublicKey {
-	keys := accountsDb.indexDb.KeysBetweenPrefixes(startPrefix, endPrefix)
+	keys := accountsDb.IndexDb.KeysBetweenPrefixes(startPrefix, endPrefix)
 
 	keyObjs := make([]solana.PublicKey, 0)
 	for _, key := range keys {
@@ -216,7 +216,7 @@ func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix 
 }
 
 func (accountsDb *AccountsDb) AllKeys() [][]byte {
-	keys := accountsDb.indexDb.AllKeys()
+	keys := accountsDb.IndexDb.AllKeys()
 	sort.SliceStable(keys, func(i, j int) bool {
 		return util.PubkeyCmpByteSlice(keys[i], keys[j])
 	})
@@ -225,5 +225,5 @@ func (accountsDb *AccountsDb) AllKeys() [][]byte {
 }
 
 func (accountsDb *AccountsDb) BankHash() [32]byte {
-	return accountsDb.bankHash
+	return accountsDb.BankHashBytes
 }

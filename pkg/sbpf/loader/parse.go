@@ -2,7 +2,6 @@ package loader
 
 import (
 	"bufio"
-	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
@@ -72,7 +71,23 @@ func (l *Loader) readHeader() error {
 	if _, err := io.ReadFull(io.NewSectionReader(l.rd, 0, ehLen), hdrBuf[:]); err != nil {
 		return err
 	}
-	return binary.Read(bytes.NewReader(hdrBuf[:]), binary.LittleEndian, &l.eh)
+
+	copy(l.eh.Ident[:], hdrBuf[:16])
+	l.eh.Type = binary.LittleEndian.Uint16(hdrBuf[16:18])
+	l.eh.Machine = binary.LittleEndian.Uint16(hdrBuf[18:20])
+	l.eh.Version = binary.LittleEndian.Uint32(hdrBuf[20:24])
+	l.eh.Entry = binary.LittleEndian.Uint64(hdrBuf[24:32])
+	l.eh.Phoff = binary.LittleEndian.Uint64(hdrBuf[32:40])
+	l.eh.Shoff = binary.LittleEndian.Uint64(hdrBuf[40:48])
+	l.eh.Flags = binary.LittleEndian.Uint32(hdrBuf[48:52])
+	l.eh.Ehsize = binary.LittleEndian.Uint16(hdrBuf[52:54])
+	l.eh.Phentsize = binary.LittleEndian.Uint16(hdrBuf[54:56])
+	l.eh.Phnum = binary.LittleEndian.Uint16(hdrBuf[56:58])
+	l.eh.Shentsize = binary.LittleEndian.Uint16(hdrBuf[58:60])
+	l.eh.Shnum = binary.LittleEndian.Uint16(hdrBuf[60:62])
+	l.eh.Shstrndx = binary.LittleEndian.Uint16(hdrBuf[62:64])
+
+	return nil
 }
 
 func isAligned(val uint64, alignment uint64) bool {

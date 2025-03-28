@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -17,6 +18,7 @@ import (
 	"github.com/dgryski/go-sip13"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/panjf2000/ants/v2"
 )
 
 const (
@@ -395,7 +397,7 @@ func CalculateRewardPartitionForPubkey(pubkey solana.PublicKey, blockhash [32]by
 	partitionIdx := wide.Uint128FromUint64(numPartitions).Mul(wide.Uint128FromUint64(hash)).Div(ulongMaxPlus1)
 	partitionIdx64 := partitionIdx.Uint64()
 
-	mlog.Log.Debugf("******** using blockhash %s in epoch rewards hasher, and num_partitions %d: hash = %d, partitionIdx = %d", solana.HashFromBytes(blockhash[:]), numPartitions, hash, partitionIdx64)
+	mlog.Log.Debugf("using blockhash %s in epoch rewards hasher, and num_partitions %d: hash = %d, partitionIdx = %d", solana.HashFromBytes(blockhash[:]), numPartitions, hash, partitionIdx64)
 
 	return partitionIdx64
 }
@@ -679,62 +681,81 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 	var totalPoints wide.Uint128
 	partitions := make(map[uint64][]solana.PublicKey)
 
-	for stakePk, valid := range slotCtx.StakeAccts {
-		if !valid {
-			continue
-		}
+	var wg sync.WaitGroup
+	var partitionsMutex sync.Mutex
+	var totalPointsMutex sync.Mutex
+
+	workerPool, _ := ants.NewPoolWithFunc(10000, func(i interface{}) {
+		defer wg.Done()
+		stakePk := i.(solana.PublicKey)
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
 			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
-			continue
+			return
 		}
 
 		if stakeAcct.Lamports == 0 {
-			continue
+			return
 		}
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
 			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			continue
+			return
 		}
 
 		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			continue
+			return
 		}
 
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
 			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			continue
+			return
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
 			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			continue
+			return
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
 			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			continue
+			return
 		}
 
 		pointsAndCredits := calculateStakePointsAndCredits(stakeHistory, stakeState, voteStateVersioned, newWarmupCooldownRateEpoch)
+
+		totalPointsMutex.Lock()
 		totalPoints = totalPoints.Add(pointsAndCredits.Points)
+		totalPointsMutex.Unlock()
 
 		if numPartitions != 0 {
 			partitionIdx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
+			partitionsMutex.Lock()
 			_, exists := partitions[partitionIdx]
 			if !exists {
 				partitions[partitionIdx] = make([]solana.PublicKey, 0)
 			}
 			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
+			partitionsMutex.Unlock()
 			mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
 		}
+	})
+
+	for stakePk, valid := range slotCtx.StakeAccts {
+		if !valid {
+			continue
+		}
+		wg.Add(1)
+		workerPool.Invoke(stakePk)
 	}
+
+	wg.Wait()
+	workerPool.Release()
 
 	return totalPoints, partitions
 }

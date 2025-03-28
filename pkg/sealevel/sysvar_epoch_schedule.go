@@ -16,7 +16,7 @@ const SysvarEpochScheduleAddrStr = "SysvarEpochSchedu1e111111111111111111111111"
 
 var SysvarEpochScheduleAddr = base58.MustDecodeFromString(SysvarEpochScheduleAddrStr)
 
-const SysvarEpochScheduleStructLen = 40
+const SysvarEpochScheduleStructLen = 33
 
 const MinimumSlotsPerEpoch = 32
 

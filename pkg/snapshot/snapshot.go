@@ -67,7 +67,7 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string, snapsh
 				}
 				_, err = io.Copy(manifestOut, bytes.NewBuffer(writer.Bytes()))
 				if err != nil {
-					fmt.Printf("err copying manifest file out: %s\n", err)
+					mlog.Log.Errorf("err copying manifest file out: %s\n", err)
 					return nil, nil, err
 				}
 				break
@@ -136,12 +136,12 @@ func parseSnapshotType(snapshotFileName string) int {
 	return snapshotType
 }
 
-func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) error {
+func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	snapshotType := parseSnapshotType(snapshotFile)
 
 	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir, snapshotType)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	defer file.Close()
@@ -153,71 +153,55 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 	}
 
 	tarReader := tar.NewReader(reader)
-
 	start := time.Now()
 
 	appendVecsOutputDir := fmt.Sprintf("%s/accounts", accountsDbDir)
 	if err = os.MkdirAll(appendVecsOutputDir, 0775); err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	indexOutputDir := fmt.Sprintf("%s/index", accountsDbDir)
 	if err = os.MkdirAll(indexOutputDir, 0775); err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	db, err := sniper.Open(sniper.Dir(indexOutputDir), sniper.ChunksCollision(32))
 	if err != nil {
-		fmt.Printf("failed to open database: %s\n", err)
-		return err
+		mlog.Log.Errorf("failed to open database: %s\n", err)
+		return nil, nil, err
 	}
-	defer db.Close()
-
 	defer ants.Release()
 
-	//var numEntriesCommitted atomic.Uint64
-	//var numTimesAppendVecCopyingPoolCalled atomic.Uint64
-	//var numTimesIndexEntryBuilderPool atomic.Uint64
-	//var numTimesIndexEntryCommiterPool atomic.Uint64
-
 	var largestFileId atomic.Uint64
-
 	wg := sync.WaitGroup{}
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
 		defer wg.Done()
-		//numTimesIndexEntryCommiterPool.Add(1)
-
 		task := i.(indexEntryCommitterTask)
-
 		writer := new(bytes.Buffer)
 
 		for idx, entry := range task.IndexEntries {
 			writer.Reset()
 			encoder := bin.NewBinEncoder(writer)
-
 			err = entry.MarshalWithEncoder(encoder)
 			if err != nil {
-				fmt.Printf("failed to encode index entry: %s\n", err)
+				mlog.Log.Errorf("failed to encode index entry: %s\n", err)
 				return
 			}
 
 			err = db.SetIfSlotHigher(task.Pubkeys[idx][:], writer.Bytes(), 0)
 			if err != nil {
-				fmt.Printf("error calling SetIfHigherSlot for %s: %s\n", task.Pubkeys[idx], err)
+				mlog.Log.Errorf("error calling SetIfHigherSlot for %s: %s\n", task.Pubkeys[idx], err)
 			}
-			//numEntriesCommitted.Add(1)
 		}
 	})
 
 	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
 		defer wg.Done()
-		//numTimesIndexEntryBuilderPool.Add(1)
-
 		task := i.(indexEntryBuilderTask)
 		pubkeys, entries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
 		if err != nil {
-			fmt.Printf("%s\n", err)
+			mlog.Log.Errorf("%s\n", err)
 			return
 		}
 
@@ -225,14 +209,12 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 		wg.Add(1)
 		err = indexEntryCommiterPool.Invoke(commitTask)
 		if err != nil {
-			fmt.Printf("error calling indexEntryCommiterPool.Invoke\n")
+			mlog.Log.Errorf("error calling indexEntryCommiterPool.Invoke\n")
 		}
 	})
 
 	appendVecCopyingPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
 		defer wg.Done()
-		//numTimesAppendVecCopyingPoolCalled.Add(1)
-
 		task := i.(appendVecCopyingTask)
 		filename := task.Filename
 		writer := task.TarBuffer
@@ -245,15 +227,14 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 
 			outFile, err := os.Create(fmt.Sprintf("%s/%s", accountsDbDir, filename))
 			if err != nil {
-				fmt.Printf("err creating new: %s\n", err)
+				mlog.Log.Errorf("err creating new: %s\n", err)
 				return
 			}
 
 			appendVecBytes := writer.Bytes()
-
 			_, err = io.Copy(outFile, bytes.NewReader(appendVecBytes))
 			if err != nil {
-				fmt.Printf("err copying file out: %s\n", err)
+				mlog.Log.Errorf("err copying file out: %s\n", err)
 				return
 			}
 
@@ -266,7 +247,7 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 			slotStr, idStr, found := strings.Cut(after, ".")
 			slot, err := strconv.ParseUint(slotStr, 10, 64)
 			if err != nil {
-				fmt.Printf("invalid snapshot - unable to convert string to slot\n")
+				mlog.Log.Errorf("invalid snapshot - unable to convert string to slot\n")
 				panic("")
 			}
 
@@ -293,11 +274,10 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 			}
 
 			task := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
-
 			wg.Add(1)
 			err = indexEntryBuilderPool.Invoke(task)
 			if err != nil {
-				fmt.Printf("error calling indexEntryBuilderPool.Invoke\n")
+				mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
 			}
 		}
 	})
@@ -307,37 +287,33 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			fmt.Printf("err reading next tar: %s\n", err)
-			return err
+			mlog.Log.Errorf("err reading next tar: %s\n", err)
+			return nil, nil, err
 		}
 
 		writer := new(bytes.Buffer)
 		_, err = io.Copy(writer, tarReader)
 		if err != nil {
-			fmt.Printf("err copying data to reader: %s\n", err)
-			return err
+			mlog.Log.Errorf("err copying data to reader: %s\n", err)
+			return nil, nil, err
 		}
 
 		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
 		wg.Add(1)
 		err = appendVecCopyingPool.Invoke(task)
 		if err != nil {
-			fmt.Printf("error calling appendVecCopyingPool.Invoke\n")
+			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke\n")
 		}
 	}
 
 	mlog.Log.Infof("done in %s. waiting for all tasks to complete.\n", time.Since(start))
-
 	wg.Wait()
-
-	//fmt.Printf("accts processed: %d, in %s. numTimesAppendVecCopyingPoolCalled: %d, numTimesIndexEntryBuilderPool: %d, numTimesIndexEntryCommiterPool: %d\n", numEntriesCommitted.Load(), time.Since(start), numTimesAppendVecCopyingPoolCalled.Load(), numTimesIndexEntryBuilderPool.Load(), numTimesIndexEntryCommiterPool.Load())
-
 	mlog.Log.Infof("snapshot processed in %s.\n", time.Since(start))
 
 	largestFileIdFile, err := os.Create(fmt.Sprintf("%s/largest_file_id", accountsDbDir))
 	if err != nil {
-		fmt.Printf("err creating new: %s\n", err)
-		return err
+		mlog.Log.Errorf("err creating new: %s\n", err)
+		return nil, nil, err
 	}
 
 	largestFileIdBytes := make([]byte, 8)
@@ -345,11 +321,11 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 
 	numBytesWritten, err := largestFileIdFile.Write(largestFileIdBytes[:])
 	if err != nil {
-		fmt.Printf("error writing largest file ID to file: %s\n", err)
-		return err
+		mlog.Log.Errorf("error writing largest file ID to file: %s\n", err)
+		return nil, nil, err
 	} else if numBytesWritten != 8 {
-		fmt.Printf("error writing largest file ID to file\n")
-		return fmt.Errorf("error writing largest file ID to file, wrote %d bytes", numBytesWritten)
+		mlog.Log.Errorf("error writing largest file ID to file\n")
+		return nil, nil, fmt.Errorf("error writing largest file ID to file, wrote %d bytes", numBytesWritten)
 	}
 
 	largestFileIdFile.Close()
@@ -357,28 +333,32 @@ func BuildAccountsIndexFromSnapshot(snapshotFile string, accountsDbDir string) e
 	bankHashOutputFileName := fmt.Sprintf("%s/bank_hash", accountsDbDir)
 	bankHashFile, err := os.Create(bankHashOutputFileName)
 	if err != nil {
-		fmt.Printf("err creating new: %s\n", err)
-		return err
+		mlog.Log.Errorf("err creating new: %s\n", err)
+		return nil, nil, err
 	}
 
 	numBytesWritten, err = bankHashFile.Write(manifest.Bank.Hash[:])
 	if err != nil {
-		fmt.Printf("error writing bank hash to file: %s\n", err)
-		return err
+		mlog.Log.Errorf("error writing bank hash to file: %s\n", err)
+		return nil, nil, err
 	} else if numBytesWritten != 32 {
-		fmt.Printf("error writing bank hash to file\n")
-		return fmt.Errorf("error writing bank hash to file, wrote %d bytes", numBytesWritten)
+		mlog.Log.Errorf("error writing bank hash to file\n")
+		return nil, nil, fmt.Errorf("error writing bank hash to file, wrote %d bytes", numBytesWritten)
 	}
 
 	bankHashFile.Close()
 
-	return nil
+	accountsDb := &accountsdb.AccountsDb{IndexDb: db, AcctsDir: appendVecsOutputDir, IndexDir: indexOutputDir}
+	accountsDb.LargestFileId.Store(largestFileId.Load())
+	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
+
+	return accountsDb, manifest, nil
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {
 	manifestFile, err := os.Open(filename)
 	if err != nil {
-		fmt.Printf("failed to open %s\n", filename)
+		mlog.Log.Errorf("failed to open %s\n", filename)
 		return nil, err
 	}
 	manifestBytes, err := ioutil.ReadAll(manifestFile)

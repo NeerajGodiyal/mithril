@@ -73,6 +73,8 @@ func run(c *cobra.Command, args []string) {
 
 	var err error
 	var accountsDbDir string
+	var accountsDb *accountsdb.AccountsDb
+	var manifest *snapshot.SnapshotManifest
 
 	if loadFromSnapshot {
 		if path == "" || outputDir == "" {
@@ -83,7 +85,7 @@ func run(c *cobra.Command, args []string) {
 		mlog.Log.Debugf("building AccountsDB from snapshot at %s\n", path)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		err = snapshot.BuildAccountsIndexFromSnapshot(path, outputDir)
+		accountsDb, manifest, err = snapshot.BuildAccountsIndexFromSnapshot(path, outputDir)
 		if err != nil {
 			klog.Exitf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}
@@ -108,18 +110,20 @@ func run(c *cobra.Command, args []string) {
 		rpcEndpoint = "https://api.mainnet-beta.solana.com"
 	}
 
-	mlog.Log.Infof("loading from AccountsDB at %s", accountsDbDir)
+	if accountsDb == nil || manifest == nil {
+		mlog.Log.Infof("loading from AccountsDB at %s", accountsDbDir)
 
-	accountsDb, err := accountsdb.OpenDb(accountsDbDir)
-	if err != nil {
-		klog.Fatalf("unable to open accounts db %s\n", accountsDbDir)
-	}
-	defer accountsDb.CloseDb()
+		accountsDb, err = accountsdb.OpenDb(accountsDbDir)
+		if err != nil {
+			klog.Fatalf("unable to open accounts db %s\n", accountsDbDir)
+		}
 
-	manifest, err := snapshot.LoadManifestFromFile(fmt.Sprintf("%s/manifest", accountsDbDir))
-	if err != nil {
-		klog.Fatalf("unable to open manifest file")
+		manifest, err = snapshot.LoadManifestFromFile(fmt.Sprintf("%s/manifest", accountsDbDir))
+		if err != nil {
+			klog.Fatalf("unable to open manifest file")
+		}
 	}
 
 	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb)
+	accountsDb.CloseDb()
 }

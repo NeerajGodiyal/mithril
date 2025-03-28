@@ -59,113 +59,58 @@ func (parser *appendVecParser) ParseNextAcct() (solana.PublicKey, *AccountIndexE
 	return pubkey, entry, nil
 }
 
-// TODO: optimise by rewriting without binary.Read(), which uses fairly expensive reflection
 func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {
 	var err error
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.WriteVersion)
+	var hdrBytes [hdrLen]byte
+	_, err = buf.Read(hdrBytes[:])
 	if err != nil {
 		return err
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &acct.DataLen)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Pubkey)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Lamports)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.RentEpoch)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Owner)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Executable)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Padding)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &acct.Hash)
-	if err != nil {
-		return err
-	}
+	acct.WriteVersion = binary.LittleEndian.Uint64(hdrBytes[:8])
+	acct.DataLen = binary.LittleEndian.Uint64(hdrBytes[8:16])
+	copy(acct.Pubkey[:], hdrBytes[16:48])
+	acct.Lamports = binary.LittleEndian.Uint64(hdrBytes[48:56])
+	acct.RentEpoch = binary.LittleEndian.Uint64(hdrBytes[56:64])
+	copy(acct.Owner[:], hdrBytes[64:96])
+	acct.Executable = hdrBytes[96] != 0
+	copy(acct.Padding[:], hdrBytes[97:104])
+	copy(acct.Hash[:], hdrBytes[104:136])
 
 	acct.Data = make([]byte, acct.DataLen)
-	err = binary.Read(buf, binary.LittleEndian, &acct.Data)
+	_, err = buf.Read(acct.Data)
 
 	return err
 }
 
 var padding [2048]byte
 
-// TODO: optimise by rewriting without binary.Write(), which uses fairly expensive reflection
 func (acct *AppendVecAccount) Marshal(buf io.Writer) error {
 	var err error
+	var hdrBytes [hdrLen]byte
 
-	err = binary.Write(buf, binary.LittleEndian, &acct.WriteVersion)
+	binary.LittleEndian.PutUint64(hdrBytes[:8], acct.WriteVersion)
+	binary.LittleEndian.PutUint64(hdrBytes[8:16], acct.DataLen)
+	copy(hdrBytes[16:48], acct.Pubkey[:])
+	binary.LittleEndian.PutUint64(hdrBytes[48:56], acct.Lamports)
+	binary.LittleEndian.PutUint64(hdrBytes[56:64], acct.RentEpoch)
+	copy(hdrBytes[64:96], acct.Owner[:])
+
+	if acct.Executable {
+		hdrBytes[96] = 1
+	} else {
+		hdrBytes[96] = 0
+	}
+
+	copy(hdrBytes[97:104], acct.Padding[:])
+	copy(hdrBytes[104:136], acct.Hash[:])
+
+	_, err = buf.Write(hdrBytes[:])
 	if err != nil {
 		return err
 	}
 
-	err = binary.Write(buf, binary.LittleEndian, &acct.DataLen)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Pubkey)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Lamports)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.RentEpoch)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Owner)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Executable)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Padding)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Hash)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(buf, binary.LittleEndian, &acct.Data)
+	_, err = buf.Write(acct.Data)
 	if err != nil {
 		return err
 	}

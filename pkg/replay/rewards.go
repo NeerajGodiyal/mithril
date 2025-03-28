@@ -16,7 +16,6 @@ import (
 	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 )
 
 func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) *uint64 {
@@ -58,8 +57,8 @@ func calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo 
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewardsDuringRewardsWindow(acctsDb, block.StakeAccts, &stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, f)
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *EpochCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, blockResult *rpc.GetBlockResult, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
-	rewardPks, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, slot)
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *EpochCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, block *Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
+	rewardPks, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 
 	var totalRewards uint64
@@ -75,13 +74,13 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	var points wide.Uint128
-	points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, *blockResult.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch)
+	points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, block.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(acctsDb, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
-	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: *blockResult.BlockHeight + 1,
-		NumPartitions: *blockResult.NumRewardPartitions, ParentBlockhash: blockResult.PreviousBlockhash,
+	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
+		NumPartitions: block.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,
 		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
 
 	mlog.Log.Debugf("epoch rewards initial: %s", newEpochRewards)

@@ -12,7 +12,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 )
 
 type EpochCtx struct {
@@ -87,7 +86,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 
 const numSlotsPerEpoch = 432000
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, epochCtx *EpochCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, blockResult *rpc.GetBlockResult, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, epochCtx *EpochCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
 	stakeHistory := updateStakeHistorySysvar(acctsDb, prevSlotCtx, epoch)
 
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
@@ -97,12 +96,12 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	var updatedAcctsPks []solana.PublicKey
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, updatedAcctsPks = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochCtx, epochSchedule, rpcc, blockResult, f, newEpoch, firstSlotInEpoch)
+		partitionedRewardsInfo, updatedAcctsPks = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, epochCtx, epochSchedule, rpcc, block, f, newEpoch, firstSlotInEpoch)
 	} else {
-		rewards.DistributeVotingRewards(acctsDb, blockResult.Rewards, firstSlotInEpoch)
+		rewards.DistributeVotingRewards(acctsDb, block.Rewards, firstSlotInEpoch)
 		newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 		_, credits, _ := rewards.CalculateRewardPointsCreditsAndPartitions(acctsDb, prevSlotCtx, firstSlotInEpoch, 0, stakeHistory, newWarmupCooldownRateEpoch)
-		rewards.DistributeStakingRewards(acctsDb, blockResult.Rewards, credits, firstSlotInEpoch)
+		rewards.DistributeStakingRewards(acctsDb, block.Rewards, credits, firstSlotInEpoch)
 	}
 
 	updatedAcctsPks = append(updatedAcctsPks, sealevel.SysvarStakeHistoryAddr)
