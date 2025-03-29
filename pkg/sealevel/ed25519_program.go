@@ -17,6 +17,8 @@ const SignatureOffsetsSerializedSize = 14
 const SignatureSerializedSize = 64
 const PubkeySerializedSize = 32
 
+const Ed25519SignatureOffsetsSize = 14
+
 type Ed25519SignatureOffsets struct {
 	SignatureOffset           uint16
 	SignatureInstructionIndex uint16
@@ -28,40 +30,20 @@ type Ed25519SignatureOffsets struct {
 }
 
 func (offsets *Ed25519SignatureOffsets) UnmarshalWithDecoder(buf io.Reader) error {
-	err := binary.Read(buf, binary.LittleEndian, &offsets.SignatureOffset)
+	var structBytes [Ed25519SignatureOffsetsSize]byte
+
+	_, err := buf.Read(structBytes[:])
 	if err != nil {
 		return err
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &offsets.SignatureInstructionIndex)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &offsets.PublicKeyOffset)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &offsets.PublicKeyInstructionIndex)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &offsets.MessageDataOffset)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &offsets.MessageDataSize)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(buf, binary.LittleEndian, &offsets.MessageInstructionIndex)
-	if err != nil {
-		return err
-	}
+	offsets.SignatureOffset = binary.LittleEndian.Uint16(structBytes[:2])
+	offsets.SignatureInstructionIndex = binary.LittleEndian.Uint16(structBytes[2:4])
+	offsets.PublicKeyOffset = binary.LittleEndian.Uint16(structBytes[4:6])
+	offsets.PublicKeyInstructionIndex = binary.LittleEndian.Uint16(structBytes[6:8])
+	offsets.MessageDataOffset = binary.LittleEndian.Uint16(structBytes[8:10])
+	offsets.MessageDataSize = binary.LittleEndian.Uint16(structBytes[10:12])
+	offsets.MessageInstructionIndex = binary.LittleEndian.Uint16(structBytes[12:14])
 
 	return nil
 }

@@ -1,9 +1,9 @@
 package sealevel
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -70,13 +70,9 @@ func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 		return syscallErr(err)
 	}
 
-	buf := new(bytes.Buffer)
-
-	binary.Write(buf, binary.LittleEndian, rent.LamportsPerUint8Year)
-	binary.Write(buf, binary.LittleEndian, rent.ExemptionThreshold)
-	binary.Write(buf, binary.LittleEndian, rent.BurnPercent)
-
-	copy(rentDst, buf.Bytes())
+	binary.LittleEndian.PutUint64(rentDst[0:8], rent.LamportsPerUint8Year)
+	binary.LittleEndian.PutUint64(rentDst[8:16], math.Float64bits(rent.ExemptionThreshold))
+	rentDst[16] = rent.BurnPercent
 
 	return syscallSuccess(0)
 }
@@ -105,15 +101,17 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 		return syscallErr(err)
 	}
 
-	buf := new(bytes.Buffer)
+	binary.LittleEndian.PutUint64(epochScheduleDst[0:8], epochSchedule.SlotsPerEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleDst[8:16], epochSchedule.LeaderScheduleSlotOffset)
 
-	binary.Write(buf, binary.LittleEndian, epochSchedule.SlotsPerEpoch)
-	binary.Write(buf, binary.LittleEndian, epochSchedule.LeaderScheduleSlotOffset)
-	binary.Write(buf, binary.LittleEndian, epochSchedule.Warmup)
-	binary.Write(buf, binary.LittleEndian, epochSchedule.FirstNormalEpoch)
-	binary.Write(buf, binary.LittleEndian, epochSchedule.FirstNormalSlot)
+	if epochSchedule.Warmup {
+		epochScheduleDst[16] = 1
+	} else {
+		epochScheduleDst[16] = 0
+	}
 
-	copy(epochScheduleDst, buf.Bytes())
+	binary.LittleEndian.PutUint64(epochScheduleDst[17:25], epochSchedule.FirstNormalEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleDst[25:33], epochSchedule.FirstNormalSlot)
 
 	return syscallSuccess(0)
 }
@@ -142,22 +140,22 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 		return syscallErr(err)
 	}
 
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.LittleEndian, epochRewards.DistributionStartingBlockHeight)
-	binary.Write(buf, binary.LittleEndian, epochRewards.NumPartitions)
-	binary.Write(buf, binary.LittleEndian, epochRewards.ParentBlockhash)
+	binary.LittleEndian.PutUint64(epochRewardsDst[:8], epochRewards.DistributionStartingBlockHeight)
+	binary.LittleEndian.PutUint64(epochRewardsDst[8:16], epochRewards.NumPartitions)
+	copy(epochRewardsDst[16:48], epochRewards.ParentBlockhash[:])
 
-	totalPointsBuf := make([]byte, 16)
-	binary.LittleEndian.PutUint64(totalPointsBuf[:8], epochRewards.TotalPoints.Lo)
-	binary.LittleEndian.PutUint64(totalPointsBuf[8:], epochRewards.TotalPoints.Hi)
-	util.ReverseBytesInPlace(totalPointsBuf)
-	binary.Write(buf, binary.LittleEndian, totalPointsBuf)
+	binary.LittleEndian.PutUint64(epochRewardsDst[48:56], epochRewards.TotalPoints.Lo)
+	binary.LittleEndian.PutUint64(epochRewardsDst[56:64], epochRewards.TotalPoints.Hi)
+	util.ReverseBytesInPlace(epochRewardsDst[48:64])
 
-	binary.Write(buf, binary.LittleEndian, epochRewards.TotalRewards)
-	binary.Write(buf, binary.LittleEndian, epochRewards.DistributedRewards)
-	binary.Write(buf, binary.LittleEndian, epochRewards.Active)
+	binary.LittleEndian.PutUint64(epochRewardsDst[64:72], epochRewards.TotalRewards)
+	binary.LittleEndian.PutUint64(epochRewardsDst[72:80], epochRewards.DistributedRewards)
 
-	copy(epochRewardsDst, buf.Bytes())
+	if epochRewards.Active {
+		epochRewardsDst[80] = 1
+	} else {
+		epochRewardsDst[80] = 0
+	}
 
 	return syscallSuccess(0)
 }

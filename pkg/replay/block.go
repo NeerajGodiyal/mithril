@@ -239,7 +239,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic(fmt.Sprintf("unable to unmarshal clock sysvar"))
 			}
 
-			err = updateClockSysvar(&clock, accountsDb, block)
+			err = updateClockSysvar(&clock, block)
 			if err != nil {
 				panic(fmt.Sprintf("failed to update clock sysvar: %s", err))
 			}
@@ -490,18 +490,9 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 	cacheConstantSysvars(acctsDb)
 
-	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
-	if err != nil {
-		panic("unable to retrieve epoch schedule sysvar acct when updating clock sysvar")
-	}
+	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
-	decoder := bin.NewBinDecoder(epochScheduleAcct.Data)
-	var epochSchedule sealevel.SysvarEpochSchedule
-	err = epochSchedule.UnmarshalWithDecoder(decoder)
-	if err != nil {
-		panic(fmt.Sprintf("unable to unmarshal epoch schedule sysvar when updating clock sysvar"))
-	}
-
+	var err error
 	var currentSlot uint64
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
 	var currentFeatures *features.Features
@@ -555,7 +546,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 			var updatedPks []solana.PublicKey
-			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, epochCtx, &epochSchedule, currentFeatures, block, currentEpoch)
+			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, epochCtx, epochSchedule, currentFeatures, block, currentEpoch)
 			if partitionedEpochRewardsEnabled {
 				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
 			}
@@ -563,9 +554,9 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
-			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, &epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, epochCtx.SlotsPerYear, currentFeatures)
+			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, epochCtx.SlotsPerYear, currentFeatures)
 			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, &epochSchedule, startSlot, currentEpoch, currentFeatures)
+				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, epochSchedule, startSlot, currentEpoch, currentFeatures)
 			}
 
 			if startSlot > partitionedRewardsInfo.EahStartOffsetSlot {
