@@ -66,8 +66,11 @@ func (sr *SysvarRent) InitializeDefault() {
 }
 
 func ReadRentSysvar(execCtx *ExecutionCtx) (SysvarRent, error) {
-	accts := addrObjectForLookup(execCtx)
+	if SysvarCache.Rent.Sysvar != nil {
+		return *SysvarCache.Rent.Sysvar, nil
+	}
 
+	accts := addrObjectForLookup(execCtx)
 	rentAcct, err := (*accts).GetAccount(&SysvarRentAddr)
 	if err != nil {
 		panic("failed to read rent sysvar account")

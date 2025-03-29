@@ -145,8 +145,11 @@ func (sh *SysvarStakeHistory) Update(epoch uint64, entry StakeHistoryEntry) {
 }
 
 func ReadStakeHistorySysvar(execCtx *ExecutionCtx) (SysvarStakeHistory, error) {
-	accts := addrObjectForLookup(execCtx)
+	if SysvarCache.StakeHistory.Sysvar != nil {
+		return *SysvarCache.StakeHistory.Sysvar, nil
+	}
 
+	accts := addrObjectForLookup(execCtx)
 	stakeHistorySysvarAcct, err := (*accts).GetAccount(&SysvarStakeHistoryAddr)
 	if err != nil {
 		return SysvarStakeHistory{}, InstrErrUnsupportedSysvar
@@ -165,7 +168,6 @@ func ReadStakeHistorySysvar(execCtx *ExecutionCtx) (SysvarStakeHistory, error) {
 }
 
 func WriteStakeHistorySysvar(accts *accounts.Accounts, stakeHistory SysvarStakeHistory) {
-
 	stakeHistSysvarAcct, err := (*accts).GetAccount(&SysvarStakeHistoryAddr)
 	if err != nil {
 		panic("failed to read StakeHistory sysvar account")

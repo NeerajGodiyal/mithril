@@ -43,6 +43,10 @@ func (sf *SysvarFees) Update(lamportsPerSignature uint64) {
 }
 
 func ReadFeesSysvar(accts *accounts.Accounts) SysvarFees {
+	if SysvarCache.Fees.Sysvar != nil {
+		return *SysvarCache.Fees.Sysvar
+	}
+
 	feesSysvarAcct, err := (*accts).GetAccount(&SysvarFeesAddr)
 	if err != nil {
 		panic("failed to read fees sysvar account")

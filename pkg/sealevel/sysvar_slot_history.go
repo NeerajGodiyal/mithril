@@ -121,21 +121,6 @@ func (sr *SysvarSlotHistory) MustMarshal() []byte {
 	return data.Bytes()
 }
 
-/*  // Corrupt history, zero everything out
-if ( i > history->next_slot && i - history->next_slot >= slot_history_max_entries ) {
-  for ( ulong j = 0; j < history->bits.bits->blocks_len; j++) {
-    history->bits.bits->blocks[ j ] = 0;
-  }
-} else {
-  // Skipped slots, delete them from history
-  for (ulong j = history->next_slot; j < i; j++) {
-    ulong block_idx = (j / bits_per_block) % (history->bits.bits->blocks_len);
-    history->bits.bits->blocks[ block_idx ] &= ~( 1UL << ( j % bits_per_block ) );
-  }
-}
-ulong block_idx = (i / bits_per_block) % (history->bits.bits->blocks_len);
-history->bits.bits->blocks[ block_idx ] |= ( 1UL << ( i % bits_per_block ) );*/
-
 func (sr *SysvarSlotHistory) Add(slot uint64) {
 	slotHistory := *sr
 
@@ -159,8 +144,11 @@ func (sr *SysvarSlotHistory) SetNextSlot(nextSlot uint64) {
 }
 
 func ReadSlotHistorySysvar(execCtx *ExecutionCtx) SysvarSlotHistory {
-	accts := addrObjectForLookup(execCtx)
+	if SysvarCache.SlotHistory.Sysvar != nil {
+		return *SysvarCache.SlotHistory.Sysvar
+	}
 
+	accts := addrObjectForLookup(execCtx)
 	slotHistorySysvarAcct, err := (*accts).GetAccount(&SysvarSlotHistoryAddr)
 	if err != nil {
 		panic("failed to read SlotHistory sysvar account")

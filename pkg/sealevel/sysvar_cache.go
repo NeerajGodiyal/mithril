@@ -1,60 +1,67 @@
 package sealevel
 
 import (
-	"crypto/rand"
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 )
 
-type SysvarCache struct {
-	RecentBlockHashes *SysvarRecentBlockhashes
-	Rent              SysvarRent
-	Clock             SysvarClock
-	Fees              SysvarFees
-	SlotHashes        SysvarSlotHashes
+type sysvarCache struct {
+	RecentBlockHashes recentBlockhashesCache
+	Rent              rentCache
+	Clock             clockCache
+	Fees              feesCache
+	SlotHashes        slotHashesCache
+	SlotHistory       slotHistoryCache
+	EpochSchedule     epochScheduleCache
+	EpochRewards      epochRewardsCache
+	StakeHistory      stakeHistoryCache
+	LastRestartSlot   lastRestartSlotCache
 }
 
-func (sysvarCache *SysvarCache) GetRecentBlockHashes() *SysvarRecentBlockhashes {
-	return sysvarCache.RecentBlockHashes
+type recentBlockhashesCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarRecentBlockhashes
 }
 
-func (sysvarCache *SysvarCache) UpdateForSlot(slotCtx *SlotCtx) {
-	if sysvarCache.RecentBlockHashes == nil {
-		sysvarCache.RecentBlockHashes = new(SysvarRecentBlockhashes)
-	}
-
-	sysvarCache.Rent.InitializeDefault()
-	//sysvarCache.Clock.Update()
-	sysvarCache.Fees.Update(slotCtx.LamportsPerSignature)
-	sysvarCache.SlotHashes.UpdateWithSlotCtx(slotCtx)
-
+type rentCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarRent
+}
+type clockCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarClock
+}
+type feesCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarFees
+}
+type slotHashesCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarSlotHashes
 }
 
-func (sysvarCache *SysvarCache) AddRecentBlockHashEntry(entry RecentBlockHashesEntry) {
-	if sysvarCache.RecentBlockHashes == nil {
-		sysvarCache.RecentBlockHashes = new(SysvarRecentBlockhashes)
-	}
-
-	*sysvarCache.RecentBlockHashes = append(*sysvarCache.RecentBlockHashes, entry)
+type slotHistoryCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarSlotHistory
 }
 
-func (sysvarCache *SysvarCache) PopulateRecentBlockHashesForTesting() {
-	var blockhash1 [32]byte
-	var blockhash2 [32]byte
-	var blockhash3 [32]byte
-	var blockhash4 [32]byte
-
-	rand.Read(blockhash1[:])
-	rand.Read(blockhash2[:])
-	rand.Read(blockhash3[:])
-	rand.Read(blockhash4[:])
-
-	feeCalculator := FeeCalculator{LamportsPerSignature: 1}
-	entry1 := RecentBlockHashesEntry{Blockhash: blockhash1, FeeCalculator: feeCalculator}
-	entry2 := RecentBlockHashesEntry{Blockhash: blockhash2, FeeCalculator: feeCalculator}
-	entry3 := RecentBlockHashesEntry{Blockhash: blockhash3, FeeCalculator: feeCalculator}
-	entry4 := RecentBlockHashesEntry{Blockhash: blockhash4, FeeCalculator: feeCalculator}
-
-	sysvarCache.AddRecentBlockHashEntry(entry1)
-	sysvarCache.AddRecentBlockHashEntry(entry2)
-	sysvarCache.AddRecentBlockHashEntry(entry3)
-	sysvarCache.AddRecentBlockHashEntry(entry4)
+type epochScheduleCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarEpochSchedule
 }
+
+type epochRewardsCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarEpochRewards
+}
+
+type stakeHistoryCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarStakeHistory
+}
+
+type lastRestartSlotCache struct {
+	Acct   *accounts.Account
+	Sysvar *SysvarLastRestartSlot
+}
+
+var SysvarCache = sysvarCache{}

@@ -12,7 +12,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
-	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
 )
@@ -245,20 +244,9 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 
 	bankHash := hasher.Sum(nil)
 
-	epochScheduleAcct, err := slotCtx.Accounts.GetAccount(&sealevel.SysvarEpochScheduleAddr)
-	if err != nil {
-		panic("unable to get epochschedule sysvar acct")
-	}
-
-	dec := bin.NewBinDecoder(epochScheduleAcct.Data)
-	var epochSchedule sealevel.SysvarEpochSchedule
-	err = epochSchedule.UnmarshalWithDecoder(dec)
-	if err != nil {
-		panic("unable to deserialize epochschedule sysvar")
-	}
-
 	// EAH must be worked into the bankhash for the slot that is 3/4 through the epoch
-	if shouldIncludeEah(&epochSchedule, slotCtx) {
+	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+	if shouldIncludeEah(epochSchedule, slotCtx) {
 		mlog.Log.Infof("EAH required for this bankhash")
 		hasher := sha256.New()
 		hasher.Write(bankHash)

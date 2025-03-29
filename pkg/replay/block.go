@@ -142,6 +142,44 @@ func isSysvar(pubkey solana.PublicKey) bool {
 	}
 }
 
+func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
+	{
+		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochScheduleAddr)
+		if err != nil {
+			panic("unable to get epochschedule when caching sysvars")
+		}
+		decoder := bin.NewBinDecoder(acct.Data)
+		var epochSchedule sealevel.SysvarEpochSchedule
+		epochSchedule.MustUnmarshalWithDecoder(decoder)
+		sealevel.SysvarCache.EpochSchedule.Sysvar = &epochSchedule
+		sealevel.SysvarCache.EpochSchedule.Acct = acct
+	}
+
+	{
+		acct, err := acctsDb.GetAccount(0, sealevel.SysvarRentAddr)
+		if err != nil {
+			panic("unable to get rent sysvar when caching sysvars")
+		}
+		var rent sealevel.SysvarRent
+		decoder := bin.NewBinDecoder(acct.Data)
+		rent.MustUnmarshalWithDecoder(decoder)
+		sealevel.SysvarCache.Rent.Sysvar = &rent
+		sealevel.SysvarCache.Rent.Acct = acct
+	}
+
+	{
+		acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
+		if err != nil {
+			panic("nable to get fees sysvar when caching sysvars")
+		}
+		var fees sealevel.SysvarFees
+		decoder := bin.NewBinDecoder(acct.Data)
+		fees.MustUnmarshalWithDecoder(decoder)
+		sealevel.SysvarCache.Fees.Sysvar = &fees
+		sealevel.SysvarCache.Fees.Acct = acct
+	}
+}
+
 func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
@@ -185,53 +223,146 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		}
 	}
 
-	// load sysvar accounts
+	// load sysvar accounts and assign them to the sysvar cache
 	{
-		sysvarAddrs := []solana.PublicKey{sealevel.SysvarClockAddr /*sealevel.SysvarEpochRewardsAddr,*/, sealevel.SysvarEpochScheduleAddr,
-			sealevel.SysvarFeesAddr, sealevel.SysvarRecentBlockHashesAddr, sealevel.SysvarRentAddr, sealevel.SysvarSlotHashesAddr,
-			sealevel.SysvarSlotHistoryAddr, sealevel.SysvarStakeHistoryAddr, sealevel.SysvarLastRestartSlotAddr}
-
-		for _, sysvarAddr := range sysvarAddrs {
-			sysvarAcct, err := accountsDb.GetAccount(block.Slot, sysvarAddr)
+		// update and cache clock sysvar
+		{
+			clockAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
 			if err != nil {
-				panic(fmt.Sprintf("unable to retrieve sysvar %s from accountsdb", sysvarAddr))
+				panic("unable to retrieve clock sysvar when updating clock")
+			}
+			decoder := bin.NewBinDecoder(clockAcct.Data)
+			var clock sealevel.SysvarClock
+
+			err = clock.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				panic(fmt.Sprintf("unable to unmarshal clock sysvar"))
 			}
 
-			if sysvarAcct.Key == sealevel.SysvarSlotHashesAddr {
-				decoder := bin.NewBinDecoder(sysvarAcct.Data)
-				var slotHashes sealevel.SysvarSlotHashes
-
-				err = slotHashes.UnmarshalWithDecoder(decoder)
-				if err != nil {
-					panic(fmt.Sprintf("unable to unmarshal slothashes sysvar"))
-				}
-
-				slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
-				newSlotHashesBytes := slotHashes.MustMarshal()
-				copy(sysvarAcct.Data, newSlotHashesBytes)
-			} else if sysvarAcct.Key == sealevel.SysvarClockAddr {
-				decoder := bin.NewBinDecoder(sysvarAcct.Data)
-				var clock sealevel.SysvarClock
-
-				err = clock.UnmarshalWithDecoder(decoder)
-				if err != nil {
-					panic(fmt.Sprintf("unable to unmarshal clock sysvar"))
-				}
-
-				err = updateClockSysvar(&clock, accountsDb, block)
-				if err != nil {
-					panic(fmt.Sprintf("failed to update clock sysvar: %s", err))
-				}
-
-				newClockBytes := clock.MustMarshal()
-				copy(sysvarAcct.Data, newClockBytes)
+			err = updateClockSysvar(&clock, accountsDb, block)
+			if err != nil {
+				panic(fmt.Sprintf("failed to update clock sysvar: %s", err))
 			}
+
+			newClockBytes := clock.MustMarshal()
+			copy(clockAcct.Data, newClockBytes)
+			sealevel.SysvarCache.Clock.Sysvar = &clock
+			sealevel.SysvarCache.Clock.Acct = clockAcct
 
 			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sysvarAddr.Bytes())
-			err = accts.SetAccount(&sysvarPkBytes, sysvarAcct)
+			copy(sysvarPkBytes[:], sealevel.SysvarClockAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, clockAcct)
 			if err != nil {
-				panic(fmt.Sprintf("unable to set sysvar %s to accountsdb", sysvarAddr))
+				panic("unable to set clock sysvar to accts")
+			}
+		}
+
+		// update and cache SlotHashes sysvar
+		{
+			slotHashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHashesAddr)
+			if err != nil {
+				panic("unable to retrieve slothashes sysvar from acctsdb")
+			}
+
+			decoder := bin.NewBinDecoder(slotHashesAcct.Data)
+			var slotHashes sealevel.SysvarSlotHashes
+
+			err = slotHashes.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				panic(fmt.Sprintf("unable to unmarshal slothashes sysvar"))
+			}
+
+			slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
+			newSlotHashesBytes := slotHashes.MustMarshal()
+			copy(slotHashesAcct.Data, newSlotHashesBytes)
+			sealevel.SysvarCache.SlotHashes.Sysvar = &slotHashes
+			sealevel.SysvarCache.SlotHashes.Acct = slotHashesAcct
+
+			var sysvarPkBytes [32]byte
+			copy(sysvarPkBytes[:], sealevel.SysvarSlotHashesAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, slotHashesAcct)
+			if err != nil {
+				panic("unable to set slothashes sysvar to accountsdb")
+			}
+		}
+
+		// cache RecentBlockhashes sysvar
+		{
+			recentBlockhashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarRecentBlockHashesAddr)
+			if err != nil {
+				panic("unable to get recentblockhashes")
+			}
+			decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
+			var recentBlockhashes sealevel.SysvarRecentBlockhashes
+			recentBlockhashes.MustUnmarshalWithDecoder(decoder)
+			sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
+			sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+
+			var sysvarPkBytes [32]byte
+			copy(sysvarPkBytes[:], sealevel.SysvarRecentBlockHashesAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, recentBlockhashesAcct)
+			if err != nil {
+				panic("unable to set recentblockhashes sysvar to accts")
+			}
+		}
+
+		// cache SlotHistory sysvar
+		{
+			slotHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHistoryAddr)
+			if err != nil {
+				panic("unable to get slothistory")
+			}
+			decoder := bin.NewBinDecoder(slotHistoryAcct.Data)
+			var slotHistory sealevel.SysvarSlotHistory
+			slotHistory.MustUnmarshalWithDecoder(decoder)
+			sealevel.SysvarCache.SlotHistory.Sysvar = &slotHistory
+			sealevel.SysvarCache.SlotHistory.Acct = slotHistoryAcct
+
+			var sysvarPkBytes [32]byte
+			copy(sysvarPkBytes[:], sealevel.SysvarSlotHistoryAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, slotHistoryAcct)
+			if err != nil {
+				panic("unable to set clock sysvar to accts")
+			}
+		}
+
+		// cache StakeHistory sysvar
+		{
+			stakeHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarStakeHistoryAddr)
+			if err != nil {
+				panic("unable to get stakehistory")
+			}
+			decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
+			var stakeHistory sealevel.SysvarStakeHistory
+			stakeHistory.MustUnmarshalWithDecoder(decoder)
+			sealevel.SysvarCache.StakeHistory.Sysvar = &stakeHistory
+			sealevel.SysvarCache.StakeHistory.Acct = stakeHistoryAcct
+
+			var sysvarPkBytes [32]byte
+			copy(sysvarPkBytes[:], sealevel.SysvarStakeHistoryAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, stakeHistoryAcct)
+			if err != nil {
+				panic("unable to set stakehistory sysvar to accts")
+			}
+		}
+
+		// cache LastRestartSlot sysvar
+		{
+			lastRestartSlotAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarLastRestartSlotAddr)
+			if err != nil {
+				panic("unable to get last restart slot sysvar acct")
+			}
+			decoder := bin.NewBinDecoder(lastRestartSlotAcct.Data)
+			var lastRestartSlot sealevel.SysvarLastRestartSlot
+			lastRestartSlot.MustUnmarshalWithDecoder(decoder)
+			sealevel.SysvarCache.LastRestartSlot.Sysvar = &lastRestartSlot
+			sealevel.SysvarCache.LastRestartSlot.Acct = lastRestartSlotAcct
+
+			var sysvarPkBytes [32]byte
+			copy(sysvarPkBytes[:], sealevel.SysvarLastRestartSlotAddr[:])
+			err = accts.SetAccount(&sysvarPkBytes, lastRestartSlotAcct)
+			if err != nil {
+				panic("unable to set last restart slot sysvar to accts")
 			}
 		}
 	}
@@ -356,6 +487,8 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	//mlog.Log.EnableInfLogging()
 	//profileFile := installProfilerAndSignalHandler(acctsDb)
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
+
+	cacheConstantSysvars(acctsDb)
 
 	epochScheduleAcct, err := acctsDb.GetAccount(startSlot, sealevel.SysvarEpochScheduleAddr)
 	if err != nil {
@@ -555,31 +688,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
 
-	epochScheduleAcct, err := slotCtx.Accounts.GetAccount(&sealevel.SysvarEpochScheduleAddr)
-	if err != nil {
-		panic("unable to fetch EpochSchedule sysvar account")
-	}
+	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
 
-	dec := bin.NewBinDecoder(epochScheduleAcct.Data)
-	var epochSchedule sealevel.SysvarEpochSchedule
-	err = epochSchedule.UnmarshalWithDecoder(dec)
-	if err != nil {
-		panic("unable to deserialize EpochSchedule sysvar")
-	}
-
-	rentSysvarAcct, err := slotCtx.Accounts.GetAccount(&sealevel.SysvarRentAddr)
-	if err != nil {
-		panic("unable to fetch EpochSchedule sysvar account")
-	}
-
-	dec = bin.NewBinDecoder(rentSysvarAcct.Data)
-	var rentSysvar sealevel.SysvarRent
-	err = rentSysvar.UnmarshalWithDecoder(dec)
-	if err != nil {
-		panic("unable to deserialize Rent sysvar")
-	}
-
-	rentAccts := rent.CollectRentEagerly(slotCtx, &rentSysvar, &epochSchedule)
+	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	runIncinerator(slotCtx)
 
 	eligibleAccts := make([]*accounts.Account, 0)

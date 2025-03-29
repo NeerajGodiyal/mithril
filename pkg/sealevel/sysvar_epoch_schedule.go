@@ -146,6 +146,10 @@ func (sr *SysvarEpochSchedule) LeaderScheduleEpoch(slot uint64) uint64 {
 }
 
 func ReadEpochScheduleSysvar(execCtx *ExecutionCtx) (SysvarEpochSchedule, error) {
+	if SysvarCache.EpochSchedule.Sysvar != nil {
+		return *SysvarCache.EpochSchedule.Sysvar, nil
+	}
+
 	accts := addrObjectForLookup(execCtx)
 
 	epochScheduleSysvarAcct, err := (*accts).GetAccount(&SysvarEpochScheduleAddr)
