@@ -93,7 +93,7 @@ func translateInstructionC(vm sbpf.VM, addr uint64) (Instruction, error) {
 		}
 	}
 
-	var accounts []AccountMeta
+	accounts := make([]AccountMeta, 0, len(accountMetas))
 	for _, accountMeta := range accountMetas {
 		if accountMeta.IsSigner > 1 || accountMeta.IsWritable > 1 {
 			return Instruction{}, SyscallErrInvalidArgument
@@ -145,8 +145,8 @@ func translateInstructionRust(vm sbpf.VM, addr uint64) (Instruction, error) {
 		return Instruction{}, err
 	}
 
-	var accountMetas []AccountMeta
 	byteReader.Reset(accountMetasData)
+	accountMetas := make([]AccountMeta, 0, ix.Accounts.Len)
 
 	for i := uint64(0); i < ix.Accounts.Len; i++ {
 		var accountMeta AccountMeta
@@ -314,8 +314,8 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 		return nil, nil, err
 	}
 
-	var accountInfos []SolAccountInfoC
 	reader := bytes.NewReader(accountInfosData)
+	accountInfos := make([]SolAccountInfoC, 0, accountInfosLen)
 
 	for count := uint64(0); count < accountInfosLen; count++ {
 		var acctInfo SolAccountInfoC
@@ -331,7 +331,7 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 		return nil, nil, err
 	}
 
-	var accountInfoKeys []solana.PublicKey
+	accountInfoKeys := make([]solana.PublicKey, 0, len(accountInfos))
 	for _, acctInfo := range accountInfos {
 		keyData, err := vm.Translate(acctInfo.KeyAddr, 32, false)
 		if err != nil {
@@ -351,8 +351,8 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 		return nil, nil, err
 	}
 
-	var accountInfos []SolAccountInfoRust
 	reader := bytes.NewReader(accountInfosData)
+	accountInfos := make([]SolAccountInfoRust, 0, accountInfosLen)
 
 	for count := uint64(0); count < accountInfosLen; count++ {
 		var acctInfo SolAccountInfoRust
@@ -368,7 +368,7 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 		return nil, nil, err
 	}
 
-	var accountInfoKeys []solana.PublicKey
+	accountInfoKeys := make([]solana.PublicKey, 0, len(accountInfos))
 	for _, acctInfo := range accountInfos {
 		keyData, err := vm.Translate(acctInfo.PubkeyAddr, 32, false)
 		if err != nil {

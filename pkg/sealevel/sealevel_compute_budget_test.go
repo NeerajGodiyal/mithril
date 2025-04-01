@@ -25,7 +25,7 @@ func TestExecute_Tx_ComputeBudget_Program_Entry_Point(t *testing.T) {
 		{IndexInTransaction: 0, IndexInCaller: 0, IndexInCallee: 0, IsSigner: true, IsWritable: true},
 	}
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err := execCtx.ProcessInstruction([]byte{}, instructionAccts, []uint64{0})

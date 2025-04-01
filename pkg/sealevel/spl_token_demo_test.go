@@ -199,7 +199,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 	acctMetas := []AccountMeta{{Pubkey: mintAcct.Key, IsSigner: false, IsWritable: true},
 		{Pubkey: SysvarRentAddr, IsSigner: false, IsWritable: false}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-	execCtx.TransactionContext = NewTestTransactionCtx(*transactionAccts, 5, 64)
+	execCtx.TransactionContext = NewTransactionCtx(*transactionAccts, 5, 64)
 
 	// InitializeMint: execute SPL token InitializeMint instruction
 	err := execCtx.ProcessInstruction(initMintInstrData, instructionAccts, []uint64{0})
@@ -229,7 +229,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 		{Pubkey: SysvarRentAddr, IsSigner: false, IsWritable: false}}
 
 	instructionAccts = InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-	execCtx.TransactionContext = NewTestTransactionCtx(*transactionAccts, 5, 64)
+	execCtx.TransactionContext = NewTransactionCtx(*transactionAccts, 5, 64)
 
 	// InitializeAccount: execute SPL token InitializeMint instruction
 	err = execCtx.ProcessInstruction(initAccountInstrData, instructionAccts, []uint64{0})
@@ -258,7 +258,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 		{Pubkey: SysvarRentAddr, IsSigner: false, IsWritable: false}}
 
 	instructionAccts = InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-	execCtx.TransactionContext = NewTestTransactionCtx(*transactionAccts, 5, 64)
+	execCtx.TransactionContext = NewTransactionCtx(*transactionAccts, 5, 64)
 
 	// InitializeAccount: execute SPL token InitializeMint instruction
 	err = execCtx.ProcessInstruction(initAccountInstrData, instructionAccts, []uint64{0})
@@ -279,7 +279,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 		{Pubkey: mintAuthority.Key, IsSigner: true, IsWritable: true}}
 
 	instructionAccts = InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-	execCtx.TransactionContext = NewTestTransactionCtx(*transactionAccts, 5, 64)
+	execCtx.TransactionContext = NewTransactionCtx(*transactionAccts, 5, 64)
 
 	// MintTo: serialize up a MintTo instruction
 	numTokensToMint := uint64(61616161)
@@ -304,7 +304,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 		{Pubkey: tokenOwner.Key, IsSigner: true, IsWritable: true}}
 
 	instructionAccts = InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-	execCtx.TransactionContext = NewTestTransactionCtx(*transactionAccts, 5, 64)
+	execCtx.TransactionContext = NewTransactionCtx(*transactionAccts, 5, 64)
 
 	// Transfer: serialize up a Transfer instruction
 	numTokensToTransfer := uint64(1337)

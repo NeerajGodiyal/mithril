@@ -221,7 +221,7 @@ func newExecCtxAndInstrAcctsFromFixture(fixture *InstrFixture) (*sealevel.Execut
 	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
 	instrAccts := instructionAcctsFromFixture(fixture, *transactionAccts)
 
-	txCtx := sealevel.NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := sealevel.NewTransactionCtx(*transactionAccts, 5, 64)
 	instr := sealevel.Instruction{Data: fixture.Input.Data}
 	txCtx.AllInstructions = append(txCtx.AllInstructions, instr)
 

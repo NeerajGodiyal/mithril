@@ -263,6 +263,7 @@ func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
+	bhv.Ages = make([]HashAgePair, 0, numAges)
 	for count := uint64(0); count < numAges; count++ {
 		var age HashAgePair
 		err = age.UnmarshalWithDecoder(decoder)
@@ -466,6 +467,7 @@ func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
+	stakes.VoteAccounts = make([]VoteAccountsPair, 0, numVoteAccts)
 	for count := uint64(0); count < numVoteAccts; count++ {
 		var pair VoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -481,6 +483,7 @@ func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
+	stakes.StakeDelegations = make([]DelegationPair, 0, numStakeDelegations)
 	for count := uint64(0); count < numStakeDelegations; count++ {
 		var dp DelegationPair
 		err = dp.UnmarshalWithDecoder(decoder)
@@ -557,7 +560,6 @@ func (pair *UnusedAccountsU64Pair) UnmarshalWithDecoder(decoder *bin.Decoder) er
 		return err
 	}
 	pair._0 = solana.PublicKeyFromBytes(pkBytes)
-
 	pair._1, err = decoder.ReadUint64(bin.LE)
 	return err
 }
@@ -572,14 +574,13 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	}
 
 	for count := uint64(0); count < numUnused1; count++ {
-		var unused1PkBytes []byte
-		unused1PkBytes, err = decoder.ReadBytes(32)
+		_, err = decoder.ReadBytes(32)
 		if err != nil {
 			return err
 		}
 
-		pk := solana.PublicKeyFromBytes(unused1PkBytes)
-		unusedAccts.Unused1 = append(unusedAccts.Unused1, pk)
+		/*pk := solana.PublicKeyFromBytes(unused1PkBytes)
+		unusedAccts.Unused1 = append(unusedAccts.Unused1, pk)*/
 	}
 
 	var numUnused2 uint64
@@ -589,14 +590,13 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	}
 
 	for count := uint64(0); count < numUnused2; count++ {
-		var unused2PkBytes []byte
-		unused2PkBytes, err = decoder.ReadBytes(32)
+		_, err = decoder.ReadBytes(32)
 		if err != nil {
 			return err
 		}
 
-		pk := solana.PublicKeyFromBytes(unused2PkBytes)
-		unusedAccts.Unused2 = append(unusedAccts.Unused2, pk)
+		/*pk := solana.PublicKeyFromBytes(unused2PkBytes)
+		unusedAccts.Unused2 = append(unusedAccts.Unused2, pk)*/
 	}
 
 	var numUnused3 uint64
@@ -611,7 +611,7 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 		if err != nil {
 			return err
 		}
-		unusedAccts.Unused3 = append(unusedAccts.Unused3, unused3)
+		//unusedAccts.Unused3 = append(unusedAccts.Unused3, unused3)
 	}
 
 	return nil
@@ -626,6 +626,7 @@ func (nodeVoteAccts *NodeVoteAccounts) UnmarshalWithDecoder(decoder *bin.Decoder
 		return err
 	}
 
+	nodeVoteAccts.VoteAccounts = make([]solana.PublicKey, 0, numVoteAccts)
 	for count := uint64(0); count < numVoteAccts; count++ {
 		var pkBytes []byte
 		pkBytes, err = decoder.ReadBytes(32)
@@ -693,6 +694,7 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 		return err
 	}
 
+	epochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
 	for count := uint64(0); count < numAccts; count++ {
 		var pair NodeVoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -708,6 +710,7 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 		return err
 	}
 
+	epochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, numEpochAuthVoters)
 	for count := uint64(0); count < numEpochAuthVoters; count++ {
 		var pair PubkeyPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -746,6 +749,7 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
+	dsv.Ancestors = make([]SlotPair, 0, numAncestors)
 	for count := uint64(0); count < numAncestors; count++ {
 		var ancestor SlotPair
 		err = ancestor.UnmarshalWithDecoder(decoder)
@@ -779,6 +783,7 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
+	dsv.HardForks = make([]SlotPair, 0, numHardForks)
 	for count := uint64(0); count < numHardForks; count++ {
 		var hardFork SlotPair
 		err = hardFork.UnmarshalWithDecoder(decoder)
@@ -926,6 +931,7 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
+	dsv.EpochStakes = make([]EpochStakesPair, 0, numEpochStakes)
 	for count := uint64(0); count < numEpochStakes; count++ {
 		var epochStakesPair EpochStakesPair
 		err = epochStakesPair.UnmarshalWithDecoder(decoder)
@@ -966,6 +972,7 @@ func (slotAcctVecs *SlotAcctVecs) UnmarshalWithDecoder(decoder *bin.Decoder) err
 		return err
 	}
 
+	slotAcctVecs.AcctVecs = make([]AcctVec, 0, numAcctVecs)
 	for count := uint64(0); count < numAcctVecs; count++ {
 		var acctVec AcctVec
 		err = acctVec.UnmarshalWithDecoder(decoder)
@@ -1121,6 +1128,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		return nil
 	}
 
+	acctDbFields.HistoricalRoots = make([]uint64, 0, numHistoricalRoots)
 	for count := uint64(0); count < numHistoricalRoots; count++ {
 		var historicalRoot uint64
 		historicalRoot, err = decoder.ReadUint64(bin.LE)
@@ -1138,6 +1146,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		return nil
 	}
 
+	acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0, numHistoricalRootsWithHash)
 	for count := uint64(0); count < numHistoricalRootsWithHash; count++ {
 		var pair SlotMapPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -1193,6 +1202,7 @@ func (startBlockHeightAndRewards *StartBlockHeightAndRewards) UnmarshalWithDecod
 		return err
 	}
 
+	startBlockHeightAndRewards.StakeRewardsByPartition = make([]SerializableStakeRewards, 0, numStakeRewardsByPartition)
 	for count := uint64(0); count < numStakeRewardsByPartition; count++ {
 		var stakeRewards SerializableStakeRewards
 		err = stakeRewards.UnmarshalWithDecoder(decoder)

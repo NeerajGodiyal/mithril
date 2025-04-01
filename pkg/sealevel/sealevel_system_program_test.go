@@ -48,7 +48,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -117,7 +117,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Not_Enough_Accts_Failure(t *tes
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -178,7 +178,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Lamports_Failure(t
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -240,7 +240,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Signer_Failure(t *
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -302,7 +302,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Too_Much_Space_Allocated_Failur
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -364,7 +364,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Data_Failure(t *te
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -426,7 +426,7 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Owned_By_System_Fa
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -488,7 +488,7 @@ func TestExecute_Tx_System_Program_CreateAccount_Funding_Acct_Not_Signer(t *test
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -540,7 +540,7 @@ func TestExecute_Tx_System_Program_Assign_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -596,7 +596,7 @@ func TestExecute_Tx_System_Program_Assign_Not_Signer_Failure(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -655,7 +655,7 @@ func TestExecute_Tx_System_Program_Transfer_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -722,7 +722,7 @@ func TestExecute_Tx_System_Program_Transfer_From_Not_Signer_Failure(t *testing.T
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -781,7 +781,7 @@ func TestExecute_Tx_System_Program_Transfer_From_Has_Data_Failure(t *testing.T) 
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -840,7 +840,7 @@ func TestExecute_Tx_System_Program_Transfer_Not_Enough_Lamports_In_From_Acct(t *
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -900,7 +900,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Success(t *testing.T) {
 
 	instrBytes := instrWriter.Bytes()
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -966,7 +966,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Addr_Doesnt_Match_Derived_Addr
 
 	instrBytes := instrWriter.Bytes()
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -1026,7 +1026,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Base_Not_Signer_Failure(t *tes
 
 	instrBytes := instrWriter.Bytes()
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()

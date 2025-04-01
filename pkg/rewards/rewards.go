@@ -118,7 +118,6 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 					mlog.Log.Debugf("reward: %+v", reward)
 					if string(reward.RewardType) == RewardTypeStaking {
 						totalStakingRewards += uint64(reward.Lamports)
-						//totalStakingRewards, err = safemath.CheckedAddU64(totalStakingRewards, uint64(reward.Lamports))
 					}
 				}
 			}
@@ -249,8 +248,8 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, credits map[solana.PublicKey]CalculatedStakePoints, slot uint64) ([]solana.PublicKey, uint64) {
 	var distributedLamports uint64
-	accts := make([]*accounts.Account, 0)
-	rewardPks := make([]solana.PublicKey, 0)
+	accts := make([]*accounts.Account, 0, len(rewards))
+	rewardPks := make([]solana.PublicKey, 0, len(rewards))
 
 	for _, reward := range rewards {
 		if string(reward.RewardType) == RewardTypeStaking {

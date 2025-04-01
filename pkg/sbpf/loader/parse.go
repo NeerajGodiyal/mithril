@@ -56,14 +56,33 @@ const (
 	EF_SBPF_V2 = 32
 )
 
-func (l *Loader) newPhTableIter() *tableIter[elf.Prog64] {
+func (l *Loader) newShTableIter() *shTableIter {
 	eh := &l.eh
-	return newTableIterator[elf.Prog64](l, eh.Phoff, uint32(eh.Phnum), phEntLen)
+	return &shTableIter{
+		l:        l,
+		off:      eh.Shoff,
+		count:    uint32(eh.Shnum),
+		elemSize: shEntLen,
+	}
 }
 
-func (l *Loader) newShTableIter() *tableIter[elf.Section64] {
+func (l *Loader) newPhTableIter() *phTableIter {
 	eh := &l.eh
-	return newTableIterator[elf.Section64](l, eh.Shoff, uint32(eh.Shnum), shEntLen)
+	return &phTableIter{
+		l:        l,
+		off:      eh.Phoff,
+		count:    uint32(eh.Phnum),
+		elemSize: phEntLen,
+	}
+}
+
+func (l *Loader) newSymTableIter(sh *elf.Section64) (*symTableIter, error) {
+	return &symTableIter{
+		l:        l,
+		off:      sh.Off,
+		count:    uint32(sh.Size / symLen),
+		elemSize: symLen,
+	}, nil
 }
 
 func (l *Loader) readHeader() error {
@@ -319,7 +338,7 @@ func (l *Loader) parseSections() error {
 	return iter.Err()
 }
 
-func (l *Loader) newDynamicIter() (*tableIter[elf.Dyn64], error) {
+func (l *Loader) newDynIter() (*dynTableIter, error) {
 	var off uint64
 	var size uint64
 	if ph := l.phDynamic; ph != nil {
@@ -338,12 +357,18 @@ func (l *Loader) newDynamicIter() (*tableIter[elf.Dyn64], error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 
-	iter := newTableIterator[elf.Dyn64](l, off, uint32(off/dynLen), dynLen)
+	iter := &dynTableIter{
+		l:        l,
+		off:      off,
+		count:    uint32(off / dynLen),
+		elemSize: dynLen,
+	}
+
 	return iter, nil
 }
 
 func (l *Loader) parseDynamicTable() error {
-	iter, err := l.newDynamicIter()
+	iter, err := l.newDynIter()
 	if err != nil {
 		return err
 	}
@@ -430,21 +455,22 @@ func (l *Loader) parseRelocs() error {
 		}
 		offset = sh.Off
 	}
-	l.relocsIter, err = newTableIteratorChecked[elf.Rel64](l, offset, offset+size, relLen)
+	l.relocsIter, err = newRelTableIter(l, offset, offset+size, relLen)
 	return err
 }
 
 // getSymtab returns an iterator over the symbols in a symtab-like section.
 //
 // Performs necessary bounds checking.
-func (l *Loader) getSymtab(sh *elf.Section64) (*tableIter[elf.Sym64], error) {
+func (l *Loader) getSymtab(sh *elf.Section64) (*symTableIter, error) {
 	switch elf.SectionType(sh.Type) {
 	case elf.SHT_SYMTAB, elf.SHT_DYNSYM:
 		break
 	default:
 		return nil, fmt.Errorf("not a symtab section")
 	}
-	return newTableIteratorChecked[elf.Sym64](l, sh.Off, sh.Off+sh.Size, symLen)
+
+	return l.newSymTableIter(sh)
 }
 
 func (l *Loader) parseDynSymtab() (err error) {
@@ -499,20 +525,58 @@ func (l *Loader) checkEntrypoint() bool {
 	return start <= entry && entry < end && (entry-start)%8 == 0
 }
 
-// tableIter is a memory-efficient iterator over densely packed tables of statically sized items.
-// Such as the ELF program header and section header tables.
-type tableIter[T any] struct {
+type shTableIter struct {
 	l        *Loader
 	off      uint64
 	i        uint32 // one ahead
 	count    uint32
 	elemSize uint16
-	elem     T
+	elem     elf.Section64
 	err      error
 }
 
-// newTableIteratorChecked is like newTableIterator, but with all necessary bounds checks.
-func newTableIteratorChecked[T any](l *Loader, start uint64, end uint64, elemSize uint16) (*tableIter[T], error) {
+type phTableIter struct {
+	l        *Loader
+	off      uint64
+	i        uint32 // one ahead
+	count    uint32
+	elemSize uint16
+	elem     elf.Prog64
+	err      error
+}
+
+type dynTableIter struct {
+	l        *Loader
+	off      uint64
+	i        uint32 // one ahead
+	count    uint32
+	elemSize uint16
+	elem     elf.Dyn64
+	err      error
+}
+
+type symTableIter struct {
+	l        *Loader
+	off      uint64
+	i        uint32 // one ahead
+	count    uint32
+	elemSize uint16
+	elem     elf.Sym64
+	err      error
+}
+
+type relTableIter struct {
+	l        *Loader
+	off      uint64
+	i        uint32 // one ahead
+	count    uint32
+	elemSize uint16
+	elem     elf.Rel64
+	err      error
+}
+
+// newRelTableIter is like newTableIterator, but with all necessary bounds checks.
+func newRelTableIter(l *Loader, start uint64, end uint64, elemSize uint16) (*relTableIter, error) {
 	if end < start || end > l.fileSize {
 		return nil, io.ErrUnexpectedEOF
 	}
@@ -523,25 +587,17 @@ func newTableIteratorChecked[T any](l *Loader, start uint64, end uint64, elemSiz
 	if size > math.MaxInt32 {
 		return nil, io.ErrUnexpectedEOF
 	}
-	iter := newTableIterator[T](l, start, uint32(size/uint64(elemSize)), elemSize)
+
+	iter := &relTableIter{
+		l:        l,
+		off:      start,
+		count:    uint32(size / uint64(elemSize)),
+		elemSize: elemSize,
+	}
 	return iter, nil
 }
 
-// newTableIterator creates a new tableIter at `off` for `count` elements of `elemSize` len.
-func newTableIterator[T any](l *Loader, off uint64, count uint32, elemSize uint16) *tableIter[T] {
-	return &tableIter[T]{
-		l:        l,
-		off:      off,
-		count:    count,
-		elemSize: elemSize,
-	}
-}
-
-// Next reads one element.
-//
-// Returns true on success, false if table end has been reached or error occurred.
-// The caller should abort iteration on error.
-func (it *tableIter[T]) Next() (ok bool) {
+func (it *shTableIter) Next() (ok bool) {
 	ok, it.err = it.getNext()
 	if ok && it.err != nil {
 		panic("unreachable")
@@ -549,24 +605,19 @@ func (it *tableIter[T]) Next() (ok bool) {
 	return
 }
 
-// Index returns the current table index.
-func (it *tableIter[T]) Index() uint32 {
+func (it *shTableIter) Index() uint32 {
 	return it.i - 1
 }
 
-// Err returns the current error.
-func (it *tableIter[T]) Err() error {
+func (it *shTableIter) Err() error {
 	return it.err
 }
 
-// Item returns the current element read.
-//
-// Next must be called before.
-func (it *tableIter[T]) Item() T {
+func (it *shTableIter) Item() elf.Section64 {
 	return it.elem
 }
 
-func (it *tableIter[T]) getNext() (bool, error) {
+func (it *shTableIter) getNext() (bool, error) {
 	if it.i >= it.count {
 		return false, nil
 	}
@@ -575,29 +626,198 @@ func (it *tableIter[T]) getNext() (bool, error) {
 	}
 
 	rd := io.NewSectionReader(it.l.rd, int64(it.off), int64(it.elemSize))
-	if err := binary.Read(rd, binary.LittleEndian, &it.elem); err != nil {
+
+	var entryBytes [shEntLen]byte
+	_, err := rd.Read(entryBytes[:])
+	if err != nil {
 		return false, err
 	}
 
+	it.elem.Name = binary.LittleEndian.Uint32(entryBytes[:4])
+	it.elem.Type = binary.LittleEndian.Uint32(entryBytes[4:8])
+	it.elem.Flags = binary.LittleEndian.Uint64(entryBytes[8:16])
+	it.elem.Addr = binary.LittleEndian.Uint64(entryBytes[16:24])
+	it.elem.Off = binary.LittleEndian.Uint64(entryBytes[24:32])
+	it.elem.Size = binary.LittleEndian.Uint64(entryBytes[32:40])
+	it.elem.Link = binary.LittleEndian.Uint32(entryBytes[40:44])
+	it.elem.Info = binary.LittleEndian.Uint32(entryBytes[44:48])
+	it.elem.Addralign = binary.LittleEndian.Uint64(entryBytes[48:56])
+	it.elem.Entsize = binary.LittleEndian.Uint64(entryBytes[56:64])
+
 	it.off += uint64(it.elemSize)
 	it.i++
+
+	return true, nil
+}
+
+func (it *phTableIter) Next() (ok bool) {
+	ok, it.err = it.getNext()
+	if ok && it.err != nil {
+		panic("unreachable")
+	}
+	return
+}
+
+func (it *phTableIter) Index() uint32 {
+	return it.i - 1
+}
+
+func (it *phTableIter) Err() error {
+	return it.err
+}
+
+func (it *phTableIter) Item() elf.Prog64 {
+	return it.elem
+}
+
+func (it *phTableIter) getNext() (bool, error) {
+	if it.i >= it.count {
+		return false, nil
+	}
+	if it.off >= math.MaxInt64 || it.off+uint64(it.elemSize) > math.MaxInt64 {
+		return false, io.ErrUnexpectedEOF
+	}
+
+	rd := io.NewSectionReader(it.l.rd, int64(it.off), int64(it.elemSize))
+
+	var entryBytes [phEntLen]byte
+	_, err := rd.Read(entryBytes[:])
+	if err != nil {
+		return false, err
+	}
+
+	it.elem.Type = binary.LittleEndian.Uint32(entryBytes[:4])
+	it.elem.Flags = binary.LittleEndian.Uint32(entryBytes[4:8])
+	it.elem.Off = binary.LittleEndian.Uint64(entryBytes[8:16])
+	it.elem.Vaddr = binary.LittleEndian.Uint64(entryBytes[16:24])
+	it.elem.Paddr = binary.LittleEndian.Uint64(entryBytes[24:32])
+	it.elem.Filesz = binary.LittleEndian.Uint64(entryBytes[32:40])
+	it.elem.Memsz = binary.LittleEndian.Uint64(entryBytes[40:48])
+	it.elem.Align = binary.LittleEndian.Uint64(entryBytes[48:56])
+
+	it.off += uint64(it.elemSize)
+	it.i++
+
+	return true, nil
+}
+
+func (it *dynTableIter) Next() (ok bool) {
+	ok, it.err = it.getNext()
+	if ok && it.err != nil {
+		panic("unreachable")
+	}
+	return
+}
+
+func (it *dynTableIter) Index() uint32 {
+	return it.i - 1
+}
+
+func (it *dynTableIter) Err() error {
+	return it.err
+}
+
+func (it *dynTableIter) Item() elf.Dyn64 {
+	return it.elem
+}
+
+func (it *dynTableIter) getNext() (bool, error) {
+	if it.i >= it.count {
+		return false, nil
+	}
+	if it.off >= math.MaxInt64 || it.off+uint64(it.elemSize) > math.MaxInt64 {
+		return false, io.ErrUnexpectedEOF
+	}
+
+	rd := io.NewSectionReader(it.l.rd, int64(it.off), int64(it.elemSize))
+
+	var entryBytes [dynLen]byte
+	_, err := rd.Read(entryBytes[:])
+	if err != nil {
+		return false, err
+	}
+
+	it.elem.Tag = int64(binary.LittleEndian.Uint64(entryBytes[:8]))
+	it.elem.Val = binary.LittleEndian.Uint64(entryBytes[8:16])
+
+	it.off += uint64(it.elemSize)
+	it.i++
+
+	return true, nil
+}
+
+func (it *relTableIter) Next() (ok bool) {
+	ok, it.err = it.getNext()
+	if ok && it.err != nil {
+		panic("unreachable")
+	}
+	return
+}
+
+func (it *relTableIter) Index() uint32 {
+	return it.i - 1
+}
+
+func (it *relTableIter) Err() error {
+	return it.err
+}
+
+func (it *relTableIter) Item() elf.Rel64 {
+	return it.elem
+}
+
+func (it *relTableIter) getNext() (bool, error) {
+	if it.i >= it.count {
+		return false, nil
+	}
+	if it.off >= math.MaxInt64 || it.off+uint64(it.elemSize) > math.MaxInt64 {
+		return false, io.ErrUnexpectedEOF
+	}
+
+	rd := io.NewSectionReader(it.l.rd, int64(it.off), int64(it.elemSize))
+
+	var entryBytes [relLen]byte
+	_, err := rd.Read(entryBytes[:])
+	if err != nil {
+		return false, err
+	}
+
+	it.elem.Off = binary.LittleEndian.Uint64(entryBytes[:8])
+	it.elem.Info = binary.LittleEndian.Uint64(entryBytes[8:16])
+
+	it.off += uint64(it.elemSize)
+	it.i++
+
 	return true, nil
 }
 
 // lookupFromTable does a point select in a densely packed table.
-func lookupFromTable[T any](l *Loader, section *elf.Section64, i uint32, elemSize uint16) (ret T, err error) {
+func lookupFromTable(l *Loader, section *elf.Section64, i uint32, elemSize uint16) (ret elf.Sym64, err error) {
 	off := uint64(i) * uint64(elemSize)
 	if off > section.Size {
 		return ret, io.ErrUnexpectedEOF
 	}
+
 	rd := io.NewSectionReader(l.rd, int64(section.Off+off), int64(elemSize))
-	err = binary.Read(rd, binary.LittleEndian, &ret)
-	return
+	var symBytes [24]byte
+	_, err = rd.Read(symBytes[:])
+	if err != nil {
+		return
+	}
+
+	ret.Name = binary.LittleEndian.Uint32(symBytes[:4])
+	ret.Info = symBytes[4]
+	ret.Other = symBytes[5]
+	ret.Shndx = binary.LittleEndian.Uint16(symBytes[6:8])
+	ret.Value = binary.LittleEndian.Uint64(symBytes[8:16])
+	ret.Size = binary.LittleEndian.Uint64(symBytes[16:24])
+
+	return ret, nil
 }
 
 func (l *Loader) getDynsym(idx uint32) (elf.Sym64, error) {
 	// TODO is shDynsym.Off checked?
-	return lookupFromTable[elf.Sym64](l, l.shDynsym, idx, symLen)
+	return lookupFromTable(l, l.shDynsym, idx, symLen)
 }
 
 func (l *Loader) getDynstr(name uint32) (string, error) {

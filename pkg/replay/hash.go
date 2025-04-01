@@ -86,7 +86,7 @@ func calculateSingleAcctHashOnly(acct accounts.Account) []byte {
 }
 
 func calculateAccountHashes(accts []*accounts.Account) []acctHash {
-	pairs := make([]acctHash, 0)
+	pairs := make([]acctHash, 0, len(accts))
 	for _, acct := range accts {
 		if acct.Lamports == 0 {
 			pairs = append(pairs, newAcctHash(acct.Key, nil))

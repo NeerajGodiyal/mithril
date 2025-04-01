@@ -124,6 +124,8 @@ func run(c *cobra.Command, args []string) {
 		}
 	}
 
+	accountsDb.InitCaches()
+
 	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb)
 	accountsDb.CloseDb()
 }

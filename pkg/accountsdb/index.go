@@ -58,8 +58,8 @@ func unmarshalAcctIdxEntry(data []byte) (*AccountIndexEntry, error) {
 }
 
 func BuildIndexEntriesFromAppendVecs(data []byte, fileSize uint64, slot uint64, fileId uint64) ([]solana.PublicKey, []*AccountIndexEntry, error) {
-	var offsetAndPubkeys []*AccountIndexEntry
-	var pubkeys []solana.PublicKey
+	offsetAndPubkeys := make([]*AccountIndexEntry, 0, 20000)
+	pubkeys := make([]solana.PublicKey, 0, 20000)
 
 	parser := &appendVecParser{Buf: data, FileSize: fileSize, FileId: fileId, Slot: slot}
 

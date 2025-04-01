@@ -56,8 +56,8 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 		return nil, nil, err
 	}
 
-	dedupInstructionAccounts := make([]InstructionAccount, 0)
-	duplicateIndices := make([]uint64, 0)
+	dedupInstructionAccounts := make([]InstructionAccount, 0, len(ix.Accounts))
+	duplicateIndices := make([]uint64, 0, len(ix.Accounts))
 
 	for instructionAcctIndex, accountMeta := range ix.Accounts {
 		indexInTx, err := txCtx.IndexOfAccount(accountMeta.Pubkey)

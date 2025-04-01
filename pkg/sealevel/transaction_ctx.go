@@ -41,6 +41,7 @@ type TransactionCtx struct {
 func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {
 	transactionAccts := new(TransactionAccounts)
 
+	transactionAccts.Accounts = make([]*accounts.Account, 0, len(accts))
 	for _, acct := range accts {
 		a := acct
 		transactionAccts.Accounts = append(transactionAccts.Accounts, &a)
@@ -51,7 +52,7 @@ func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {
 	return transactionAccts
 }
 
-func NewTestTransactionCtx(txAccts TransactionAccounts, instrStackCapacity uint64, instrTraceCapacity uint64) *TransactionCtx {
+func NewTransactionCtx(txAccts TransactionAccounts, instrStackCapacity uint64, instrTraceCapacity uint64) *TransactionCtx {
 	txCtx := new(TransactionCtx)
 
 	txCtx.Accounts = txAccts
@@ -60,6 +61,7 @@ func NewTestTransactionCtx(txAccts TransactionAccounts, instrStackCapacity uint6
 	txCtx.InstructionTrace = append(txCtx.InstructionTrace, InstructionCtx{})
 	txCtx.HeapSize = 32 * 1024
 
+	txCtx.AccountKeys = make([]solana.PublicKey, 0, len(txAccts.Accounts))
 	for _, acct := range txAccts.Accounts {
 		txCtx.AccountKeys = append(txCtx.AccountKeys, acct.Key)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/sniper"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
+	"github.com/maypok86/otter"
 )
 
 type AccountsDb struct {
@@ -23,6 +24,7 @@ type AccountsDb struct {
 	IndexDir      string
 	LargestFileId atomic.Uint64
 	BankHashBytes [32]byte
+	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
 }
 
 var (
@@ -94,7 +96,24 @@ func (accountsDb *AccountsDb) CloseDb() {
 	accountsDb.IndexDb.Close()
 }
 
+func (accountsDb *AccountsDb) InitCaches() {
+	var err error
+	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10_000).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
+	if hasAcct {
+		return cachedAcct, nil
+	}
+
 	acctIdxEntryBytes, err := accountsDb.IndexDb.Get(pubkey[:])
 	if err != nil {
 		mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
@@ -139,6 +158,8 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	return acct, err
 }
 
+var voteAcct = solana.MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111")
+
 func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint64) error {
 	fileId := accountsDb.LargestFileId.Add(1)
 
@@ -150,15 +171,17 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	}
 	defer appendVecFile.Close()
 
-	// allocate required memory all at once to avoid constant reallocs
-	//marshaledSize := appendVecAcctsMarshaledSize(accts)
 	appendVecAcctsBuf := new(bytes.Buffer)
-	//appendVecAcctsBuf.Grow(int(marshaledSize))
-
 	writer := new(bytes.Buffer)
 
 	for _, acct := range accts {
 		acct.Slot = slot
+
+		// if vote account, do not serialize up and write into accountsdb - just save it in cache
+		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
+			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+			continue
+		}
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.

@@ -30,7 +30,7 @@ func newExecCtxAndInstrAcctsFromFixtureForVote(fixture *InstrFixture) (*sealevel
 	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
 	instrAccts := instructionAcctsFromFixture(fixture, *transactionAccts)
 
-	txCtx := sealevel.NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := sealevel.NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := sealevel.ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(fixture.Input.CuAvail)}
 	execCtx.Accounts = accounts.NewMemAccounts()

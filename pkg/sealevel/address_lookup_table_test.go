@@ -63,7 +63,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Idempotent(t *
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -173,7 +173,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Idempotent
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -274,7 +274,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Use_Payer_As_A
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -378,7 +378,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Missing_Signer
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -460,7 +460,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Recent_Slo
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -550,7 +550,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_PDA_Mismatch(t
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -629,7 +629,7 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Success(t *testin
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -718,7 +718,7 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Table_Not_Deactiv
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -796,7 +796,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Deactivated
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -874,7 +874,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Recently_De
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -946,7 +946,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Immutable_F
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1031,7 +1031,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Wrong_Autho
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1110,7 +1110,7 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Authority_Didnt_S
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1181,7 +1181,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Success(t *t
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1256,7 +1256,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Immutable_Fa
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1327,7 +1327,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Already_Deac
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1403,7 +1403,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Wrong_Author
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1474,7 +1474,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Authority_Di
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1548,7 +1548,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Success(t *testi
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1630,7 +1630,7 @@ func getBytesForFrozenLookupTable(t *testing.T) []byte {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1705,7 +1705,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Immutable_Failur
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1779,7 +1779,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Deactivated_Fail
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1858,7 +1858,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Wrong_Authority_
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -1932,7 +1932,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Authority_Didnt_
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2003,7 +2003,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Empty_Table_Fail
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2091,7 +2091,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Success(t *testi
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2199,7 +2199,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2287,7 +2287,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Authority_Didnt_
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2375,7 +2375,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Deactivated_Tabl
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2456,7 +2456,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Immutable_Failur
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2535,7 +2535,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2614,7 +2614,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)
@@ -2703,7 +2703,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Too_Many_Address
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.RelaxAuthoritySignerCheckForLookupTableCreation, 0)

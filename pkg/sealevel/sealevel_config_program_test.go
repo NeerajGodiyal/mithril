@@ -44,7 +44,7 @@ func TestExecute_Tx_Config_Program_Success(t *testing.T) {
 	acctMetas := []AccountMeta{{Pubkey: configAcct.Key, IsSigner: true, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
@@ -94,7 +94,7 @@ func TestExecute_Tx_Config_Program_With_Additional_Signer_Success(t *testing.T) 
 		{Pubkey: authSignerAcct.Key, IsSigner: true, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
@@ -138,7 +138,7 @@ func TestExecute_Tx_Config_Program_With_Additional_Account_But_Not_As_Signer_Fai
 		{Pubkey: authSignerAcct.Key, IsSigner: false, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
@@ -178,7 +178,7 @@ func TestExecute_Tx_Config_Program_Without_Config_Signer_Failure(t *testing.T) {
 	acctMetas := []AccountMeta{{Pubkey: configAcct.Key, IsSigner: false, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
@@ -226,7 +226,7 @@ func TestExecute_Tx_Config_Program_Without_Additional_Signer_Failure(t *testing.
 		{Pubkey: randomPubKeyAcct.Key, IsSigner: true, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
@@ -274,7 +274,7 @@ func TestExecute_Tx_Config_Program_Duplicate_New_Keys_Failure(t *testing.T) {
 		{Pubkey: authSignerAcct.Key, IsSigner: true, IsWritable: true}}
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})

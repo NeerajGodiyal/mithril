@@ -43,7 +43,7 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Success(t *testing.T) {
 		{Pubkey: authorityAcct.Key, IsSigner: true, IsWritable: true}} // authority account
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.AppendUint32(instrData, UpgradeableLoaderInstrTypeInitializeBuffer)
@@ -86,7 +86,7 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Buffer_Acct_Already_Initialize_Fa
 		{Pubkey: authorityAcct.Key, IsSigner: true, IsWritable: true}} // authority account
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.AppendUint32(instrData, UpgradeableLoaderInstrTypeInitializeBuffer)
@@ -141,7 +141,7 @@ func TestExecute_Tx_BpfLoader_Write_Success(t *testing.T) {
 		{Pubkey: authorityAcct.Key, IsSigner: true, IsWritable: true}} // authority account
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -201,7 +201,7 @@ func TestExecute_Tx_BpfLoader_Write_Offset_Too_Large_Failure(t *testing.T) {
 		{Pubkey: authorityAcct.Key, IsSigner: true, IsWritable: true}} // authority account
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrAccountDataTooSmall, err)
@@ -252,7 +252,7 @@ func TestExecute_Tx_BpfLoader_Write_Buffer_Authority_Didnt_Sign_Failure(t *testi
 		{Pubkey: authorityAcct.Key, IsSigner: false, IsWritable: true}} // authority account, not a signer
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
@@ -308,7 +308,7 @@ func TestExecute_Tx_BpfLoader_Write_Incorrect_Authority_Failure(t *testing.T) {
 		{Pubkey: incorrectAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // incorrec authority account for the buffer
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
@@ -344,7 +344,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Not_Enough_Instr_Accts_Failure(t *tes
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrNotEnoughAccountKeys, err)
@@ -389,7 +389,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Success(t *testing.T) {
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -443,7 +443,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Success(t *testing.T) {
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -497,7 +497,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Immutable_Failure(t *testing.T
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrImmutable, err)
@@ -547,7 +547,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Wrong_Upgrade_Authority_Failur
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}}       // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
@@ -592,7 +592,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Authority_Didnt_Sign_Failure(t
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
@@ -631,7 +631,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_No_New_Authority_Failure(t *te
 	} // no new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
@@ -676,7 +676,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Uninitialized_Account_Failure(
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrInvalidArgument, err)
@@ -721,7 +721,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Immutable_Failure(t *test
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrImmutable, err)
@@ -766,7 +766,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Authority_Didnt_Sign_Fail
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
@@ -816,7 +816,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Wrong_Authority_Failure(t
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}}        // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
@@ -852,7 +852,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Not_Enough_Instr_Accts_Failure
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -899,7 +899,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -955,7 +955,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1011,7 +1011,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Immutable_Failure(t *te
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1063,7 +1063,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}}       // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1110,7 +1110,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Authority_Didnt_Sign_Fa
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1157,7 +1157,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_New_Authority_Didnt_Sig
 		{Pubkey: newAuthorityAcct.Key, IsSigner: false, IsWritable: true}} // new authority but not a signer
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1204,7 +1204,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Uninitialized_Account_F
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1251,7 +1251,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Immutable_Failure(
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1298,7 +1298,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Authority_Didnt_Si
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}} // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1345,7 +1345,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_New_Authority_Didn
 		{Pubkey: newAuthorityAcct.Key, IsSigner: false, IsWritable: true}} // new authority, but not a signer
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1397,7 +1397,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Fa
 		{Pubkey: newAuthorityAcct.Key, IsSigner: true, IsWritable: true}}        // new authority
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
@@ -1444,7 +1444,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1500,7 +1500,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Immutable_Failure(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrImmutable, err)
@@ -1545,7 +1545,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Authority_Didnt_Sign_Failure(t *testi
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
@@ -1596,7 +1596,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Wrong_Authority_Failure(t *testing.T)
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
@@ -1634,7 +1634,7 @@ func TestExecute_Tx_BpfLoader_Close_Uninitialized_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1678,7 +1678,7 @@ func TestExecute_Tx_BpfLoader_Close_Recipient_Same_As_Account_Being_Closed_Failu
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrInvalidArgument, err)
@@ -1721,7 +1721,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Not_Enough_Accounts(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrNotEnoughAccountKeys, err)
@@ -1778,7 +1778,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -1852,7 +1852,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Not_Enough_Accounts_Failure(t *t
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -1916,7 +1916,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Not_Writable_Failur
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -1981,7 +1981,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Wrong_Owner_Failure
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -2046,7 +2046,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Already_Deployed_In_This_Block_F
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -2111,7 +2111,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_ProgramData_Not_A_Program_Acct_F
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -2176,7 +2176,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Nonclosable_Account_Failure(t *t
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	var clock SysvarClock
@@ -2244,7 +2244,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2346,7 +2346,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Extend_By_Zero_Bytes_Failure(t *test
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2426,7 +2426,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Not_Enou
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2519,7 +2519,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2650,7 +2650,7 @@ func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2762,7 +2762,7 @@ func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2864,7 +2864,7 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 
 	execCtx.Accounts = accounts.NewMemAccounts()
@@ -2942,7 +2942,7 @@ func TestExecute_Tx_BpfLoader_Invoke_Bpf_Program_Success(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 
 	execCtx.Accounts = accounts.NewMemAccounts()

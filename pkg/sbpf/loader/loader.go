@@ -36,8 +36,8 @@ type Loader struct {
 	shDynamic  *elf.Section64
 	shDynsym   *elf.Section64
 	dynamic    [DT_NUM]uint64
-	relocsIter *tableIter[elf.Rel64]
-	dynSymIter *tableIter[elf.Sym64]
+	relocsIter *relTableIter
+	dynSymIter *symTableIter
 
 	// Program section/segment mappings
 	// Uses physical addressing

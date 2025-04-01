@@ -478,7 +478,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	instrData := instrCtx.Data
 	var preLens []uint64
 
-	accts := make([]serializeAcct, 0)
+	accts := make([]serializeAcct, 0, instrCtx.NumberOfInstructionAccounts())
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
@@ -528,7 +528,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	size += 8 + uint64(len(instrData)) // data len
 	size += solana.PublicKeyLength     // program id
 
-	var serializedData []byte
+	serializedData := make([]byte, 0, size)
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
 	for _, acct := range accts {
@@ -751,7 +751,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	instrData := instrCtx.Data
 	var preLens []uint64
 
-	accts := make([]serializeAcct, 0)
+	accts := make([]serializeAcct, 0, instrCtx.NumberOfInstructionAccounts())
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
@@ -795,7 +795,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	size += 8 + uint64(len(instrData)) // data len
 	size += solana.PublicKeyLength     // program id
 
-	var serializedData []byte
+	serializedData := make([]byte, 0, size)
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
 	for _, acct := range accts {

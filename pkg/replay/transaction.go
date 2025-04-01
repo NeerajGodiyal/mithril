@@ -37,15 +37,13 @@ var (
 )
 
 func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) (*sealevel.TransactionAccounts, error) {
-	acctsForTx := make([]accounts.Account, 0)
-
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
 		return nil, err
 	}
 
 	var programIdIdxs []uint64
-	var instructionAccts []solana.PublicKey
+	var instructionAcctPubkeys []solana.PublicKey
 
 	for _, instr := range tx.Message.Instructions {
 		programIdIdxs = append(programIdIdxs, uint64(instr.ProgramIDIndex))
@@ -54,16 +52,16 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) (
 			panic("unable to resolve instruction accts")
 		}
 		for _, ia := range ias {
-			instructionAccts = append(instructionAccts, ia.PublicKey)
+			instructionAcctPubkeys = append(instructionAcctPubkeys, ia.PublicKey)
 		}
 	}
+	instructionAcctPubkeys = util.DedupePubkeys(instructionAcctPubkeys)
 
-	instructionAccts = util.DedupePubkeys(instructionAccts)
-
+	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
-		if slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAccts, acctMeta.PublicKey) {
+		if slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
 			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
 			if err != nil {
 				return nil, err
@@ -89,7 +87,7 @@ func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
 }
 
 func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, log *sealevel.LogRecorder) *sealevel.ExecutionCtx {
-	txCtx := sealevel.NewTestTransactionCtx(*transactionAccts, 64, 64)
+	txCtx := sealevel.NewTransactionCtx(*transactionAccts, 64, 64)
 	execCtx := &sealevel.ExecutionCtx{Log: log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(uint64(computeBudgetLimits.ComputeUnitLimit))}
 
 	execCtx.GlobalCtx.Features = *slotCtx.Features
@@ -376,7 +374,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	}
 
 	var instrErr error
-	writablePubkeys := make([]solana.PublicKey, 0)
+	writablePubkeys := make([]solana.PublicKey, 0, 64)
 
 	for instrIdx, instr := range tx.Message.Instructions {
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))

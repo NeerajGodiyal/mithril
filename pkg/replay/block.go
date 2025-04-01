@@ -102,8 +102,14 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 }
 
 func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
-	pubkeys := make([]solana.PublicKey, 0)
+	var numPubkeys int
+	for _, tx := range block.Transactions {
+		numPubkeys += len(tx.Message.AccountKeys)
+	}
 
+	numPubkeys += len(block.UpdatedAccts)
+
+	pubkeys := make([]solana.PublicKey, 0, numPubkeys)
 	for _, tx := range block.Transactions {
 		for _, pubkey := range tx.Message.AccountKeys {
 			pubkeys = append(pubkeys, pubkey)
@@ -685,7 +691,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	runIncinerator(slotCtx)
 
-	eligibleAccts := make([]*accounts.Account, 0)
+	eligibleAccts := make([]*accounts.Account, 0, len(acctIsWritable)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	for pk := range acctIsWritable {
 		acct, _ := slotCtx.GetAccount(pk)
 		eligibleAccts = append(eligibleAccts, acct)

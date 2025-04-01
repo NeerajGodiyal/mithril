@@ -95,7 +95,7 @@ func TestExecute_Tx_Sysvar_Instructions_Bpf_Test(t *testing.T) {
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
-	txCtx := NewTestTransactionCtx(*transactionAccts, 5, 64)
+	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	var log LogRecorder
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()

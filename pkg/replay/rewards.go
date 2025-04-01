@@ -139,7 +139,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	}
 
 	mlog.Log.Debugf("distributePartitionedEpochRewards: slot %d, using partitionIdx %d (partitionedEpochRewardsInfo.FirstStakingRewardSlot = %d)", currentSlot, partitionIdx, partitionedEpochRewardsInfo.FirstStakingRewardSlot)
-	rewardPks := make([]solana.PublicKey, 0)
+	rewardPks := make([]solana.PublicKey, 0, len(distributedPks)+1)
 	rewardPks = append(rewardPks, distributedPks...)
 	rewardPks = append(rewardPks, sealevel.SysvarEpochRewardsAddr)
 	rewardPks = util.DedupePubkeys(rewardPks)
