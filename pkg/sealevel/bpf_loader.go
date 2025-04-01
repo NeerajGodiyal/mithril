@@ -391,28 +391,28 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 	return nil
 }
 
-func deployProgram(execCtx *ExecutionCtx, programData []byte) error {
+func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, error) {
 	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, true)
 
 	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, true)
 	if err != nil {
 		mlog.Log.Debugf("failed to create loader")
-		return err
+		return nil, err
 	}
 
 	program, err := loader.Load()
 	if err != nil {
 		mlog.Log.Debugf("failed to load program")
-		return err
+		return nil, err
 	}
 
 	err = program.Verify()
 	if err != nil {
 		mlog.Log.Debugf("failed to verify program")
-		return err
+		return nil, err
 	}
 
-	return nil
+	return program, nil
 }
 
 const (
@@ -946,19 +946,10 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 	return nil
 }
 
-func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
-	mlog.Log.Debugf("bpf loader - executeProgram")
-
-	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, false)
-
-	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, false)
-	if err != nil {
-		return err
-	}
-
-	program, err := loader.Load()
-	if err != nil {
-		return err
+func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallRegistry *sbpf.SyscallRegistry) error {
+	if syscallRegistry == nil {
+		s := Syscalls(&execCtx.GlobalCtx.Features, false)
+		syscallRegistry = &s
 	}
 
 	txCtx := execCtx.TransactionContext
@@ -1003,7 +994,7 @@ func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
 	opts := &sbpf.VMOpts{
 		HeapMax:      int(heapSize),
 		Input:        parameterBytes,
-		Syscalls:     syscallRegistry,
+		Syscalls:     *syscallRegistry,
 		MaxCU:        int(execCtx.ComputeMeter.Remaining()),
 		ComputeMeter: &execCtx.ComputeMeter,
 		Context:      execCtx,
@@ -1047,6 +1038,26 @@ func executeProgram(execCtx *ExecutionCtx, programData []byte) error {
 	}
 
 	return runErr
+}
+
+func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte) error {
+	mlog.Log.Debugf("bpf loader - executeProgram")
+
+	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, false)
+
+	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, false)
+	if err != nil {
+		return err
+	}
+
+	program, err := loader.Load()
+	if err != nil {
+		return err
+	}
+
+	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, program)
+
+	return executeLoadedProgram(execCtx, program, &syscallRegistry)
 }
 
 func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
@@ -1100,27 +1111,34 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	}
 
 	var programBytes []byte
+	var loadedProgram *sbpf.Program
+	var hasLoadedProgram bool
+	var programAcctKey solana.PublicKey
 
 	programOwner := programAcct.Owner()
 
 	if programOwner == BpfLoader2Addr || programOwner == BpfLoaderDeprecatedAddr {
-		if len(programAcct.Data()) == 0 {
-			var paTmp *accounts.Account
-			paTmp, err = execCtx.SlotCtx.GetAccount(programAcct.Key())
+		loadedProgram, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcct.Key())
+		if hasLoadedProgram {
+			programAcctKey = programAcct.Key()
+		} else { // program is not cached
+			if len(programAcct.Data()) == 0 {
+				var paTmp *accounts.Account
+				paTmp, err = execCtx.SlotCtx.GetAccount(programAcct.Key())
 
-			if err != nil {
-				paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
 				if err != nil {
-					mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
-					return InstrErrUnsupportedProgramId
+					paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
+					if err != nil {
+						mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
+						return InstrErrUnsupportedProgramId
+					}
 				}
+				programBytes = paTmp.Data
+			} else {
+				programBytes = programAcct.Data()
 			}
-			programBytes = paTmp.Data
-		} else {
-			programBytes = programAcct.Data()
+			programAcctKey = programAcct.Key()
 		}
-		programAcct.Drop()
-
 	} else if programOwner == BpfLoaderUpgradeableAddr {
 		var programAcctState *UpgradeableLoaderState
 
@@ -1146,38 +1164,51 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 		}
 
-		programAcct.Drop()
-
-		programDataAcct, err := execCtx.SlotCtx.GetAccount(programAcctState.Program.ProgramDataAddress)
-		if err != nil {
-			programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcctState.Program.ProgramDataAddress)
+		loadedProgram, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcctState.Program.ProgramDataAddress)
+		if hasLoadedProgram {
+			programAcctKey = programAcctState.Program.ProgramDataAddress
+		} else { // program is not cached
+			programDataAcct, err := execCtx.SlotCtx.GetAccount(programAcctState.Program.ProgramDataAddress)
 			if err != nil {
-				mlog.Log.Debugf("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
-				return InstrErrUnsupportedProgramId
+				programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcctState.Program.ProgramDataAddress)
+				if err != nil {
+					mlog.Log.Debugf("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
+					return InstrErrUnsupportedProgramId
+				}
 			}
-		}
 
-		programDataAcctState, err := unmarshalUpgradeableLoaderState(programDataAcct.Data)
-		if err != nil {
-			return err
-		}
+			programDataAcctState, err := unmarshalUpgradeableLoaderState(programDataAcct.Data)
+			if err != nil {
+				return err
+			}
 
-		if programDataAcctState.Type == UpgradeableLoaderStateTypeUninitialized {
-			return InstrErrInvalidAccountData
-		}
+			if programDataAcctState.Type == UpgradeableLoaderStateTypeUninitialized {
+				return InstrErrInvalidAccountData
+			}
 
-		programDataSlot := programDataAcctState.ProgramData.Slot
-		if programDataSlot >= execCtx.SlotCtx.Slot {
-			mlog.Log.Debugf("programDataSlot (%d) >= execCtx.SlotCtx.Slot (%d)", programDataSlot, execCtx.SlotCtx.Slot)
-			return InstrErrInvalidAccountData
-		}
+			programDataSlot := programDataAcctState.ProgramData.Slot
+			if programDataSlot >= execCtx.SlotCtx.Slot {
+				mlog.Log.Debugf("programDataSlot (%d) >= execCtx.SlotCtx.Slot (%d)", programDataSlot, execCtx.SlotCtx.Slot)
+				return InstrErrInvalidAccountData
+			}
 
-		programBytes = programDataAcct.Data[upgradeableLoaderSizeOfProgramDataMetaData:]
+			programAcctKey = programAcctState.Program.ProgramDataAddress
+			programBytes = programDataAcct.Data[upgradeableLoaderSizeOfProgramDataMetaData:]
+		}
 	} else {
 		return InstrErrUnsupportedProgramId
 	}
 
-	err = executeProgram(execCtx, programBytes)
+	programAcct.Drop()
+
+	// two cases here: we're either executing from the program cache, so from a pre-parsed/loaded program, or from bytes if
+	// the the program was not found in the cache.
+	if hasLoadedProgram {
+		//mlog.Log.Infof("(executing program %s from cache)", programAcctKey)
+		err = executeLoadedProgram(execCtx, loadedProgram, nil)
+	} else {
+		err = executeProgramFromBytes(execCtx, programAcctKey, programBytes)
+	}
 
 	return err
 }
@@ -1491,7 +1522,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 		return err
 	}
 
-	err = deployProgram(execCtx, bufferData[bufferDataOffset:])
+	loadedProgram, err := deployProgram(execCtx, bufferData[bufferDataOffset:])
 	if err != nil {
 		return InstrErrInvalidAccountData
 	}
@@ -1563,6 +1594,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 
 	mlog.Log.Debugf("deployed program: %s", newProgramId)
 
+	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataKey, loadedProgram)
 	return nil
 }
 
@@ -1745,7 +1777,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	if uint64(len(bufferData)) < bufferDataOffset {
 		return InstrErrAccountDataTooSmall
 	}
-	err = deployProgram(execCtx, bufferData[bufferDataOffset:])
+	loadedProgram, err := deployProgram(execCtx, bufferData[bufferDataOffset:])
 	if err != nil {
 		return InstrErrInvalidAccountData
 	}
@@ -1813,6 +1845,8 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	}
 
 	mlog.Log.Debugf("upgraded program %s", program.Key())
+
+	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programData.Key(), loadedProgram)
 	return nil
 }
 
@@ -2461,7 +2495,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	if uint64(len(programBytes)) < upgradeableLoaderSizeOfProgramDataMetaData {
 		return InstrErrAccountDataTooSmall
 	}
-	err = deployProgram(execCtx, programBytes[upgradeableLoaderSizeOfProgramDataMetaData:])
+	loadedProgram, err := deployProgram(execCtx, programBytes[upgradeableLoaderSizeOfProgramDataMetaData:])
 	if err != nil {
 		mlog.Log.Debugf("deploy program failed")
 		return InstrErrInvalidAccountData
@@ -2475,6 +2509,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 
 	mlog.Log.Debugf("Extended ProgramData account by %d bytes", additionalBytes)
 
+	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataAcct.Key(), loadedProgram)
 	return nil
 }
 

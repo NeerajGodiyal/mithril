@@ -11,6 +11,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/Overclock-Validator/sniper"
 	bin "github.com/gagliardetto/binary"
@@ -25,6 +26,7 @@ type AccountsDb struct {
 	LargestFileId atomic.Uint64
 	BankHashBytes [32]byte
 	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache  otter.Cache[solana.PublicKey, *sbpf.Program]
 }
 
 var (
@@ -32,7 +34,6 @@ var (
 )
 
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
-
 	// check for existence of the 'accounts' directory, which holds the appendvecs
 	appendVecsDir := fmt.Sprintf("%s/accounts", accountsDbDir)
 	_, err := os.Stat(appendVecsDir)
@@ -106,6 +107,23 @@ func (accountsDb *AccountsDb) InitCaches() {
 	if err != nil {
 		panic(err)
 	}
+
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *sbpf.Program](10_000).
+		Cost(func(key solana.PublicKey, prog *sbpf.Program) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*sbpf.Program, bool) {
+	return accountsDb.ProgramCache.Get(pubkey)
+}
+
+func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program *sbpf.Program) {
+	accountsDb.ProgramCache.Set(pubkey, program)
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
