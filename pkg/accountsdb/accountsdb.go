@@ -20,13 +20,14 @@ import (
 )
 
 type AccountsDb struct {
-	IndexDb       *sniper.Store
-	AcctsDir      string
-	IndexDir      string
-	LargestFileId atomic.Uint64
-	BankHashBytes [32]byte
-	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache  otter.Cache[solana.PublicKey, *sbpf.Program]
+	IndexDb         *sniper.Store
+	AcctsDir        string
+	IndexDir        string
+	LargestFileId   atomic.Uint64
+	BankHashBytes   [32]byte
+	VoteAcctCache   otter.Cache[solana.PublicKey, *accounts.Account]
+	CommonAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache    otter.Cache[solana.PublicKey, *sbpf.Program]
 }
 
 var (
@@ -108,8 +109,19 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
+	// TODO: review size of program cache
 	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *sbpf.Program](10_000).
 		Cost(func(key solana.PublicKey, prog *sbpf.Program) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
+
+	// TODO: review size of common accounts cache
+	accountsDb.CommonAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](250_000).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
 		Build()
@@ -128,6 +140,11 @@ func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
+	if hasAcct {
+		return cachedAcct, nil
+	}
+
+	cachedAcct, hasAcct = accountsDb.CommonAcctCache.Get(pubkey)
 	if hasAcct {
 		return cachedAcct, nil
 	}
@@ -195,11 +212,13 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	for _, acct := range accts {
 		acct.Slot = slot
 
-		// if vote account, do not serialize up and write into accountsdb - just save it in cache
+		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
 		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 			continue
 		}
+
+		accountsDb.CommonAcctCache.Set(acct.Key, acct)
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.

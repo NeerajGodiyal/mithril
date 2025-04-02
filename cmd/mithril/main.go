@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 
@@ -32,7 +32,7 @@ func init() {
 }
 
 func main() {
-	fmt.Printf("mithril verifying node\n")
+	mlog.Log.Infof("mithril verifying node\n")
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	cobra.CheckErr(cmd.ExecuteContext(ctx))

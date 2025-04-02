@@ -82,7 +82,7 @@ func run(c *cobra.Command, args []string) {
 			return
 		}
 
-		mlog.Log.Debugf("building AccountsDB from snapshot at %s\n", path)
+		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", path)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
 		accountsDb, manifest, err = snapshot.BuildAccountsIndexFromSnapshot(path, outputDir)
