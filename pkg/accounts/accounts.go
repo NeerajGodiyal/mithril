@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -89,6 +90,7 @@ func (a *Account) UnmarshalWithDecoder(decoder *bin.Decoder) (err error) {
 		return err
 	}
 	if dataLen > uint64(decoder.Remaining()) {
+		mlog.Log.Infof("err in Account.UnmarshalWithDecoder - dataLen = %d, decoder.Remaining() = %d", dataLen, uint64(decoder.Remaining()))
 		return io.ErrUnexpectedEOF
 	}
 	a.Data, err = decoder.ReadNBytes(int(dataLen))

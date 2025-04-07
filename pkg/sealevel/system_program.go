@@ -853,7 +853,6 @@ func SystemProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			// TODO: replace with reading rent sysvar from sysvar cache
 			err = checkAcctForRentSysvar(txCtx, instrCtx, 3)
 			if err != nil {
 				return err
@@ -902,7 +901,6 @@ func SystemProgramExecute(execCtx *ExecutionCtx) error {
 				return SystemProgErrNonceNoRecentBlockhashes
 			}
 
-			// TODO: replace with reading rent sysvar from sysvar cache
 			err = checkAcctForRentSysvar(txCtx, instrCtx, 2)
 			if err != nil {
 				return err

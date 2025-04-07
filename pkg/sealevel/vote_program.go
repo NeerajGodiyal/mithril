@@ -664,7 +664,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrInvalidInstructionData
 			}
 
-			// TODO: switch to using a sysvar cache
 			err = checkAcctForRentSysvar(txCtx, instrCtx, 1)
 			if err != nil {
 				return err
@@ -679,7 +678,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrInsufficientFunds
 			}
 
-			// TODO: switch to using a sysvar cache
 			err = checkAcctForClockSysvar(txCtx, instrCtx, 2)
 			if err != nil {
 				return err
@@ -702,7 +700,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrInvalidInstructionData
 			}
 
-			// TODO: switch to using a sysvar cache
 			err = checkAcctForClockSysvar(txCtx, instrCtx, 1)
 			if err != nil {
 				return err
@@ -801,7 +798,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrInvalidInstructionData
 			}
 
-			// TODO: switch to using a sysvar cache
 			var clock SysvarClock
 			clock, err = ReadClockSysvar(execCtx)
 			if err != nil {
@@ -837,7 +833,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				}
 			}
 
-			// TODO: switch to using a sysvar cache
 			err = checkAcctForSlotHashesSysvar(txCtx, instrCtx, 1)
 			if err != nil {
 				return err
@@ -881,8 +876,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				}
 			}
 
-			// TODO: switch to using a sysvar cache
-
 			var slotHashes SysvarSlotHashes
 			slotHashes, err = ReadSlotHashesSysvar(execCtx)
 			if err != nil {
@@ -920,8 +913,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				}
 				updateVoteState = &compactUpdateVoteState.UpdateVoteState
 			}
-
-			// TODO: switch to using a sysvar cache
 
 			var slotHashes SysvarSlotHashes
 			slotHashes, err = ReadSlotHashesSysvar(execCtx)
@@ -1003,7 +994,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrMissingRequiredSignature
 			}
 
-			// TODO: switch to using a sysvar cache
 			err = checkAcctForClockSysvar(txCtx, instrCtx, 1)
 			if err != nil {
 				return err
@@ -1147,7 +1137,6 @@ func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCt
 
 	txCtx := execCtx.TransactionContext
 
-	// TODO: switch to using a sysvar cache
 	err := checkAcctForClockSysvar(txCtx, instrCtx, 1)
 	if err != nil {
 		return err

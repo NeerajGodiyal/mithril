@@ -664,8 +664,6 @@ func (ip *Interpreter) Read8(addr uint64) (uint8, error) {
 	return *(*uint8)(ptr), nil
 }
 
-// TODO is it safe and portable to deref unaligned integer types?
-
 func (ip *Interpreter) Read16(addr uint64) (uint16, error) {
 	ptr, err := ip.translateInternal(addr, 2, false)
 	if err != nil {

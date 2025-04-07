@@ -48,7 +48,7 @@ const (
 
 const (
 	maxSectionNameLen = 16
-	maxSymbolNameLen  = 1024
+	maxSymbolNameLen  = 64
 )
 
 const (
