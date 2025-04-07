@@ -371,16 +371,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	var instrErr error
 	writablePubkeys := make([]solana.PublicKey, 0, 64)
 
-	foundAcct := false
-	if tx.Signatures[0] == solana.MustSignatureFromBase58("5PhE791wXTUf5TEhDUGFJV3tTfUwjYbjQLBBS57RPq3472dh1LFzhwNphHxZUjqk2dcaqZAY9mbPPTxEuFkPuPYJ") {
-		for _, txAcct := range execCtx.TransactionContext.Accounts.Accounts {
-			mlog.Log.Infof("pre-tx acct: %s", util.PrettyPrintAcct(txAcct))
-			if txAcct.Key == solana.MustPublicKeyFromBase58("SysvarS1otHistory11111111111111111111111111") && foundAcct {
-				mlog.Log.Infof("slothistory data: %d", txAcct.Data)
-			}
-		}
-	}
-
 	for instrIdx, instr := range tx.Message.Instructions {
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
@@ -396,9 +386,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		for _, am := range resolvedAccountMetas {
 			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am, &execCtx.GlobalCtx.Features)}
 			acctMetas = append(acctMetas, acctMeta)
-			if tx.Signatures[0] == solana.MustSignatureFromBase58("5PhE791wXTUf5TEhDUGFJV3tTfUwjYbjQLBBS57RPq3472dh1LFzhwNphHxZUjqk2dcaqZAY9mbPPTxEuFkPuPYJ") {
-				mlog.Log.Infof("instr acct: %+v\n", acctMeta)
-			}
 		}
 
 		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
@@ -430,11 +417,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	if len(log.Logs) != 0 && tx.Signatures[0] == solana.MustSignatureFromBase58("5PhE791wXTUf5TEhDUGFJV3tTfUwjYbjQLBBS57RPq3472dh1LFzhwNphHxZUjqk2dcaqZAY9mbPPTxEuFkPuPYJ") {
-		mlog.Log.Infof("\ntx logs:\n")
-		for _, logEntry := range log.Logs {
-			mlog.Log.Infof("%s\n", logEntry)
-		}
+	mlog.Log.Debugf("\ntx logs:\n")
+	for _, logEntry := range log.Logs {
+		mlog.Log.Debugf("%s\n", logEntry)
 	}
 
 	// check for CU consumed divergences
@@ -444,15 +429,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
-
-	if tx.Signatures[0] == solana.MustSignatureFromBase58("5PhE791wXTUf5TEhDUGFJV3tTfUwjYbjQLBBS57RPq3472dh1LFzhwNphHxZUjqk2dcaqZAY9mbPPTxEuFkPuPYJ") {
-		for _, txAcct := range execCtx.TransactionContext.Accounts.Accounts {
-			mlog.Log.Infof("post-tx acct: %s", util.PrettyPrintAcct(txAcct))
-			if txAcct.Key == solana.MustPublicKeyFromBase58("SysvarS1otHistory11111111111111111111111111") && foundAcct {
-				mlog.Log.Infof("slothistory data: %d", txAcct.Data)
-			}
-		}
-	}
 
 	// check for post-balances divergences (but only if the tx succeeded)
 	if instrErr == nil && rentStateErr == nil {
