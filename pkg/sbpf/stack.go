@@ -74,6 +74,7 @@ func (s *Stack) GetFrame(addr uint32) []byte {
 	}
 	pos := hi / 2
 	off := pos * StackFrameSize
+
 	return s.mem[off+lo: /*off+StackFrameSize*/]
 }
 

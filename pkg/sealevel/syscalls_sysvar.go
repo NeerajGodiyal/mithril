@@ -101,17 +101,19 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 		return syscallErr(err)
 	}
 
-	binary.LittleEndian.PutUint64(epochScheduleDst[0:8], epochSchedule.SlotsPerEpoch)
-	binary.LittleEndian.PutUint64(epochScheduleDst[8:16], epochSchedule.LeaderScheduleSlotOffset)
+	var epochScheduleBytes [SysvarEpochScheduleStructLen]byte
+	binary.LittleEndian.PutUint64(epochScheduleBytes[0:8], epochSchedule.SlotsPerEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleBytes[8:16], epochSchedule.LeaderScheduleSlotOffset)
 
 	if epochSchedule.Warmup {
-		epochScheduleDst[16] = 1
+		epochScheduleBytes[16] = 1
 	} else {
-		epochScheduleDst[16] = 0
+		epochScheduleBytes[16] = 0
 	}
 
-	binary.LittleEndian.PutUint64(epochScheduleDst[17:25], epochSchedule.FirstNormalEpoch)
-	binary.LittleEndian.PutUint64(epochScheduleDst[25:33], epochSchedule.FirstNormalSlot)
+	binary.LittleEndian.PutUint64(epochScheduleBytes[17:25], epochSchedule.FirstNormalEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleBytes[25:33], epochSchedule.FirstNormalSlot)
+	copy(epochScheduleDst, epochScheduleBytes[:])
 
 	return syscallSuccess(0)
 }
@@ -180,7 +182,6 @@ func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error
 	}
 
 	lrs := ReadLastRestartSlotSysvar(execCtx)
-
 	binary.LittleEndian.PutUint64(lastRestartSlotDst[:8], lrs.LastRestartSlot)
 
 	return syscallSuccess(0)

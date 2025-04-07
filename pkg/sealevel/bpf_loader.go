@@ -12,6 +12,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/loader"
+	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -586,11 +587,9 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 			// data in account
 			serializedData = append(serializedData, borrowedAcct.Data()...)
 
-			padding := ReallocSpace
-			if offset := len(serializedData) % ReallocAlign; offset != 0 {
-				padding += ReallocAlign - offset
-			}
-			for count := 0; count < padding; count++ {
+			alignOffset := util.AlignUp(dataLen, 8) - dataLen
+			numPaddingBytes := ReallocSpace + alignOffset
+			for count := uint64(0); count < numPaddingBytes; count++ {
 				serializedData = append(serializedData, 0)
 			}
 
@@ -682,8 +681,8 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 				return InstrErrInvalidRealloc
 			}
 
-			alignmentMask := uint64(7) // (alignment - 1)
-			alignmentOffset := -preLen & alignmentMask
+			//alignmentMask := uint64(7) // (alignment - 1)
+			alignmentOffset := util.AlignUp(preLen, 8) - preLen
 
 			if uint64(len(parameterBytes)) < (off + postLen) {
 				return InstrErrInvalidArgument

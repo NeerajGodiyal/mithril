@@ -1,7 +1,6 @@
 package sbpf
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"math/bits"
@@ -271,10 +270,10 @@ mainLoop:
 			r[ins.Dst()] &= r[ins.Src()]
 			pc++
 		case OpLsh32Imm:
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) << (ins.Uimm() & 0x1f))
+			r[ins.Dst()] <<= ins.Uimm() & 0x1f
 			pc++
 		case OpLsh32Reg:
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) << uint32(r[ins.Src()]&0x1f))
+			r[ins.Dst()] <<= r[ins.Src()] & 0x1f
 			pc++
 		case OpLsh64Imm:
 			r[ins.Dst()] <<= uint64(ins.Imm()) & 0x3f
@@ -283,10 +282,10 @@ mainLoop:
 			r[ins.Dst()] <<= r[ins.Src()] & 0x3f
 			pc++
 		case OpRsh32Imm:
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) >> (ins.Uimm() & 0x1f))
+			r[ins.Dst()] >>= ins.Uimm() & 0x1f
 			pc++
 		case OpRsh32Reg:
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) >> uint32(r[ins.Src()]&0x1f))
+			r[ins.Dst()] >>= r[ins.Src()] & 0x1f
 			pc++
 		case OpRsh64Imm:
 			r[ins.Dst()] >>= uint64(ins.Imm()) & 0x3f
@@ -381,9 +380,7 @@ mainLoop:
 			}
 			pc++
 		case OpLddw:
-			i := (pc+1)*SlotSize + 4
-			msh := int32(binary.LittleEndian.Uint32(ip.text[i : i+4]))
-			r[ins.Dst()] = uint64(ins.Uimm()) | (uint64(msh) << 32)
+			r[ins.Dst()] = uint64(ins.Uimm()) | (uint64(ip.getSlot(pc+1).Uimm()) << 32)
 			pc += 2
 		case OpJa:
 			pc += int64(ins.Off())
