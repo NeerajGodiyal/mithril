@@ -2307,17 +2307,6 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 					if err != nil {
 						return err
 					}
-
-					/* TODO?:
-						let clock = invoke_context.get_sysvar_cache().get_clock()?;
-					    invoke_context.programs_modified_by_tx.replenish(
-					            program_key,
-					            Arc::new(LoadedProgram::new_tombstone(
-					                            clock.slot,
-					                            LoadedProgramType::Closed,
-					            )),
-					    );
-					*/
 				}
 
 			default:

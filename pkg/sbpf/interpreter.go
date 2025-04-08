@@ -5,7 +5,6 @@ import (
 	"math"
 	"math/bits"
 	"runtime"
-	"strings"
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -88,10 +87,10 @@ mainLoop:
 		// Fetch
 		ins := ip.getSlot(pc)
 		if ip.enableTracing {
-			regsDump := fmt.Sprintf("%016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x",
+			/*regsDump := fmt.Sprintf("%016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x",
 				r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10])
 			fmt.Printf("% 5d [%s]: %s\n",
-				i, strings.ToUpper(regsDump), disassemble(ins /*todo*/, 0))
+				i, strings.ToUpper(regsDump), disassemble(ins, 0))*/
 		}
 
 		err = ip.computeMeter.Consume(1)

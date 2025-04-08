@@ -46,7 +46,7 @@ const StackDepth = 64
 
 func NewStack() Stack {
 	s := Stack{
-		mem:    make([]byte, (StackDepth+1)*StackFrameSize),
+		mem:    make([]byte, StackDepth*StackFrameSize),
 		sp:     VaddrStack,
 		shadow: make([]Frame, 1, StackDepth),
 	}
@@ -69,9 +69,10 @@ func (s *Stack) GetFramePtr() uint64 {
 // Returns nil if the program tries to address a gap or out-of-bounds memory.
 func (s *Stack) GetFrame(addr uint32) []byte {
 	hi, lo := addr/StackFrameSize, addr%StackFrameSize
-	if hi > StackDepth || hi%2 == 1 {
+	if hi%2 == 1 {
 		return nil
 	}
+
 	pos := hi / 2
 	off := pos * StackFrameSize
 
