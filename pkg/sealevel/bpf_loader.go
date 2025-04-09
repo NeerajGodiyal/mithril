@@ -243,7 +243,6 @@ func (programData *UpgradeableLoaderStateProgramData) MarshalWithEncoder(encoder
 		if err != nil {
 			return err
 		}
-
 		upgradeAuthAddr := *programData.UpgradeAuthorityAddress
 		err = encoder.WriteBytes(upgradeAuthAddr.Bytes(), false)
 	} else {
@@ -1598,6 +1597,8 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 }
 
 func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
+	mlog.Log.Debugf("UpgradeableLoaderUpgrade")
+
 	err := instrCtx.CheckNumOfInstructionAccounts(3)
 	if err != nil {
 		return err
@@ -1726,11 +1727,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 
 	var programDataBalanceRequired uint64
 	minBalance := rent.MinimumBalance(uint64(len(programData.Data())))
-	if minBalance > 1 {
-		programDataBalanceRequired = minBalance
-	} else {
-		programDataBalanceRequired = 1
-	}
+	programDataBalanceRequired = max(minBalance, 1)
 
 	if len(programData.Data()) < int(upgradeableLoaderSizeOfProgramData(bufferDataLen)) {
 		return InstrErrAccountDataTooSmall
@@ -1787,7 +1784,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return err
 	}
 
-	programDataNewState := &UpgradeableLoaderState{ProgramData: UpgradeableLoaderStateProgramData{Slot: clock.Slot, UpgradeAuthorityAddress: &authorityKey}}
+	programDataNewState := &UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgramData, ProgramData: UpgradeableLoaderStateProgramData{Slot: clock.Slot, UpgradeAuthorityAddress: &authorityKey}}
 	err = setUpgradeableLoaderAccountState(programData, programDataNewState, execCtx.GlobalCtx.Features)
 	if err != nil {
 		return err
@@ -1802,19 +1799,19 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return InstrErrAccountDataTooSmall
 	}
 
-	dstSlice := programData.Account.Data[programDataDataOffset:dstEnd]
-
 	buffer, err = instrCtx.BorrowInstructionAccount(txCtx, 2)
 	if err != nil {
 		return err
 	}
 
-	srcSlice := buffer.Account.Data[bufferDataOffset:]
-	copy(dstSlice, srcSlice)
+	dstSlice, err := programData.DataMutable(execCtx.GlobalCtx.Features)
+	if err != nil {
+		return err
+	}
 
-	programDataFillSlice := programData.Account.Data[dstEnd:]
-	for i := range programDataFillSlice {
-		programDataFillSlice[i] = 0
+	copy(dstSlice[programDataDataOffset:dstEnd], buffer.Account.Data[bufferDataOffset:])
+	for idx := dstEnd; idx < uint64(len(programData.Account.Data)); idx++ {
+		programData.Account.Data[idx] = 0
 	}
 
 	spill, err := instrCtx.BorrowInstructionAccount(txCtx, 3)
@@ -2379,8 +2376,6 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 		mlog.Log.Debugf("Program account is not owned by the loader")
 		return InstrErrInvalidAccountOwner
 	}
-
-	//programKey := programAcct.Key()
 
 	programAcctState, err := unmarshalUpgradeableLoaderState(programAcct.Data())
 	if err != nil {
