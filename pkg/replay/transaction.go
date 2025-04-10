@@ -35,7 +35,7 @@ var (
 	TxErrInsufficientFundsForRent = errors.New("TxErrInsufficientFundsForRent")
 )
 
-func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) (*sealevel.TransactionAccounts, error) {
+func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction) (*sealevel.TransactionAccounts, error) {
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
 		return nil, err
@@ -44,19 +44,17 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) (
 	var programIdIdxs []uint64
 	var instructionAcctPubkeys []solana.PublicKey
 
-	for _, instr := range tx.Message.Instructions {
+	for instrIdx, instr := range tx.Message.Instructions {
 		programIdIdxs = append(programIdIdxs, uint64(instr.ProgramIDIndex))
-		ias, err := instr.ResolveInstructionAccounts(&tx.Message)
-		if err != nil {
-			panic("unable to resolve instruction accts")
-		}
+		ias := acctMetasPerInstr[instrIdx]
 		for _, ia := range ias {
-			instructionAcctPubkeys = append(instructionAcctPubkeys, ia.PublicKey)
+			instructionAcctPubkeys = append(instructionAcctPubkeys, ia.Pubkey)
 		}
 	}
 	instructionAcctPubkeys = util.DedupePubkeys(instructionAcctPubkeys)
 
 	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
+	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
@@ -74,9 +72,13 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) (
 		}
 
 		acctsForTx = append(acctsForTx, *acct)
+		convertedAcctMeta := &sealevel.AccountMeta{Pubkey: acctMeta.PublicKey, IsSigner: acctMeta.IsSigner, IsWritable: acctMeta.IsWritable}
+		convertedAcctMetas = append(convertedAcctMetas, convertedAcctMeta)
 	}
 
 	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
+	transactionAccts.AcctMetas = convertedAcctMetas
+
 	return transactionAccts, nil
 }
 
@@ -98,17 +100,19 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	return execCtx
 }
 
-func instrsFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, error) {
-	instrs := make([]sealevel.Instruction, len(tx.Message.Instructions))
-	for idx, compiledInstr := range tx.Message.Instructions {
+func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
+	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
+	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
+
+	for _, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		ams, err := compiledInstr.ResolveInstructionAccounts(&tx.Message)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		var acctMetas []sealevel.AccountMeta
@@ -118,10 +122,11 @@ func instrsFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Inst
 		}
 
 		instr := sealevel.Instruction{Accounts: acctMetas, ProgramId: programId, Data: compiledInstr.Data}
-		instrs[idx] = instr
+		instrs = append(instrs, instr)
+		acctMetasPerInstr = append(acctMetasPerInstr, acctMetas)
 	}
 
-	return instrs, nil
+	return instrs, acctMetasPerInstr, nil
 }
 
 func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16) error {
@@ -309,7 +314,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return NewTxErrInvalidSignature(err.Error())
 	}*/
 
-	instrs, err := instrsFromTx(tx, slotCtx.Features)
+	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -319,7 +324,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return nil, nil, err
 	}
 
-	transactionAccts, err := transactionAcctsFromTx(slotCtx, tx)
+	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -366,7 +371,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	}
 
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.GlobalCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
 
 	var instrErr error
 	writablePubkeys := make([]solana.PublicKey, 0, 64)
@@ -377,17 +382,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			return txFeeInfo, nil, err
 		}
 
-		resolvedAccountMetas, err := instr.ResolveInstructionAccounts(&tx.Message)
-		if err != nil {
-			return txFeeInfo, nil, err
-		}
-
-		var acctMetas []sealevel.AccountMeta
-		for _, am := range resolvedAccountMetas {
-			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(tx, am, &execCtx.GlobalCtx.Features)}
-			acctMetas = append(acctMetas, acctMeta)
-		}
-
+		acctMetas := acctMetasPerInstr[instrIdx]
 		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 
 		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
@@ -427,7 +422,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%d discrepancy)", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)-min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed))
 	}
 
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx)
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
 
 	// check for post-balances divergences (but only if the tx succeeded)

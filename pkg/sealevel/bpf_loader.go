@@ -2439,10 +2439,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	}
 
 	balance := programDataAcct.Lamports()
-	minBalance := rent.MinimumBalance(newLen)
-	if minBalance > 1 {
-		minBalance = 1
-	}
+	minBalance := max(rent.MinimumBalance(newLen), 1)
 	requiredPayment := safemath.SaturatingSubU64(minBalance, balance)
 
 	programDataAcct.Drop()

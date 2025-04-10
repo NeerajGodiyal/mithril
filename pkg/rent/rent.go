@@ -22,6 +22,7 @@ const (
 type RentPayingInfo struct {
 	Lamports uint64
 	DataSize uint64
+	Pk       solana.PublicKey
 }
 
 type RentStateInfo struct {
@@ -31,25 +32,20 @@ type RentStateInfo struct {
 
 func rentStateFromAcct(acct *accounts.Account, rent *sealevel.SysvarRent) *RentStateInfo {
 	if acct.Lamports == 0 {
-		return &RentStateInfo{RentState: RentStateUninitialized}
+		return &RentStateInfo{RentState: RentStateUninitialized, RentPayingInfo: RentPayingInfo{Lamports: acct.Lamports, DataSize: uint64(len(acct.Data)), Pk: acct.Key}}
 	} else if rent.IsExempt(acct.Lamports, uint64(len(acct.Data))) {
-		return &RentStateInfo{RentState: RentStateRentExempt}
+		return &RentStateInfo{RentState: RentStateRentExempt, RentPayingInfo: RentPayingInfo{Lamports: acct.Lamports, DataSize: uint64(len(acct.Data)), Pk: acct.Key}}
 	} else {
-		return &RentStateInfo{RentState: RentStateRentPaying, RentPayingInfo: RentPayingInfo{Lamports: acct.Lamports, DataSize: uint64(len(acct.Data))}}
+		return &RentStateInfo{RentState: RentStateRentPaying, RentPayingInfo: RentPayingInfo{Lamports: acct.Lamports, DataSize: uint64(len(acct.Data)), Pk: acct.Key}}
 	}
 }
 
-func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, tx *solana.Transaction) []*RentStateInfo {
-	rentStateInfos := make([]*RentStateInfo, 0)
+func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, tx *solana.Transaction, f *features.Features) []*RentStateInfo {
+	rentStateInfos := make([]*RentStateInfo, 0, len(txCtx.Accounts.Accounts))
+	acctsMetas := txCtx.Accounts.AcctMetas
 
-	for idx, pk := range tx.Message.AccountKeys {
-		isWritable, _ := tx.Message.IsWritable(pk)
-		if isWritable {
-			acct, err := txCtx.AccountAtIndex(uint64(idx))
-			if err != nil {
-				panic("error getting acct")
-			}
-
+	for idx, acct := range txCtx.Accounts.Accounts {
+		if sealevel.IsWritable(tx, acctsMetas[idx], f) {
 			rentStateInfo := rentStateFromAcct(acct, rent)
 			rentStateInfos = append(rentStateInfos, rentStateInfo)
 		} else {
@@ -81,14 +77,14 @@ func checkRentStateTransitionAllowed(preRentState *RentStateInfo, postRentState 
 			return nil
 		} else if postRentState.RentState == RentStateRentPaying {
 			if preRentState.RentState == RentStateUninitialized {
-				return fmt.Errorf("rent state transition not allowed")
+				return fmt.Errorf("[1] rent state transition not allowed. pre: %+v, post: %+v", preRentState, postRentState)
 			} else if preRentState.RentState == RentStateRentExempt {
-				return fmt.Errorf("rent state transition not allowed")
+				return fmt.Errorf("[2] rent state transition not allowed. pre: %+v, post: %+v", preRentState, postRentState)
 			} else if preRentState.RentState == RentStateRentPaying {
 				if postRentState.RentPayingInfo.DataSize == preRentState.RentPayingInfo.DataSize && postRentState.RentPayingInfo.Lamports <= preRentState.RentPayingInfo.Lamports {
 					return nil
 				} else {
-					return fmt.Errorf("rent state transition not allowed")
+					return fmt.Errorf("[3] rent state transition not allowed. pre: %+v, post: %+v", preRentState, postRentState)
 				}
 			}
 		}
@@ -191,10 +187,7 @@ func calculateRentResult(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, a
 	return RentExempt
 }
 
-// TODO: implement actual rent collection logic for networks other than mainnet-beta, since clusters like testnet and
-// devnet still have rent paying accounts.
 func collectRentFromAcct(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, acct *accounts.Account) (*accounts.Account, bool) {
-
 	if !slotCtx.Features.IsActive(features.DisableRentFeesCollection) {
 		result := calculateRentResult(slotCtx, rent, acct)
 

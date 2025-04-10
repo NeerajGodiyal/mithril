@@ -14,9 +14,10 @@ type TxReturnData struct {
 }
 
 type TransactionAccounts struct {
-	Accounts []*accounts.Account
-	Locked   []bool
-	Touched  []bool
+	Accounts  []*accounts.Account
+	Locked    []bool
+	Touched   []bool
+	AcctMetas []*AccountMeta
 }
 
 type TransactionCtx struct {
@@ -49,6 +50,7 @@ func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {
 
 	transactionAccts.Locked = make([]bool, len(accts), len(accts))
 	transactionAccts.Touched = make([]bool, len(accts), len(accts))
+
 	return transactionAccts
 }
 

@@ -283,6 +283,7 @@ func (execCtx *ExecutionCtx) StackHeight() uint64 {
 
 func (execCtx *ExecutionCtx) NativeInvoke(instruction Instruction, signers []solana.PublicKey) error {
 	mlog.Log.Debugf("NativeInvoke")
+
 	instrAccts, programIndices, err := execCtx.PrepareInstruction(instruction, signers)
 	if err != nil {
 		return err
