@@ -1146,7 +1146,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		return nil
 	}
 
-	acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0, numHistoricalRootsWithHash)
+	acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0)
 	for count := uint64(0); count < numHistoricalRootsWithHash; count++ {
 		var pair SlotMapPair
 		err = pair.UnmarshalWithDecoder(decoder)

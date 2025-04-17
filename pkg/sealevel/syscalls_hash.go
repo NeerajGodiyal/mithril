@@ -268,27 +268,32 @@ func SwapEndianness(xs []byte) []byte {
 }
 
 func PoseidonHash(input [][]byte, isBigEndian bool) ([]byte, error) {
-	inputBigInts := make([]*big.Int, 0)
+	inputBigInts := make([]*big.Int, 0, len(input))
 
 	for _, inputSlice := range input {
 		if len(inputSlice) > 32 {
 			return nil, fmt.Errorf("input too long")
 		}
-		bigInt := new(big.Int).SetBytes(inputSlice)
+		var bigInt *big.Int
+		if isBigEndian {
+			bigInt = new(big.Int).SetBytes(inputSlice)
+		} else {
+			bigInt = new(big.Int).SetBytes(SwapEndianness(inputSlice))
+		}
 		inputBigInts = append(inputBigInts, bigInt)
 	}
 
 	initState := new(big.Int)
 	output, err := poseidon.HashWithState(inputBigInts, initState)
 	if err != nil {
-		return nil, fmt.Errorf("hashing error")
+		return nil, err
 	}
 
 	hashBytes := output.Bytes()
 
-	if len(hashBytes) == 31 {
+	if len(hashBytes) < 32 {
 		fixed := make([]byte, 32)
-		copy(fixed[1:], hashBytes)
+		copy(fixed[32-len(hashBytes):], hashBytes)
 		hashBytes = fixed
 	}
 
@@ -305,10 +310,12 @@ func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, 
 	execCtx := executionCtx(vm)
 
 	if parameters != 0 {
+		mlog.Log.Debugf("sol_poseidon err: PoseidonSyscallError::InvalidParameters")
 		return syscallErrCustom("PoseidonSyscallError::InvalidParameters")
 	}
 
 	if endianness != 0 && endianness != 1 {
+		mlog.Log.Debugf("sol_poseidon err: PoseidonSyscallError::InvalidEndianness")
 		return syscallErrCustom("PoseidonSyscallError::InvalidEndianness")
 	}
 
@@ -319,7 +326,6 @@ func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, 
 
 	// no need to use saturating math here; this can't overflow anyway, as per the valsLen check above
 	cost := (valsLen * valsLen * PoseidonCostCoefficientA) + PoseidonCostCoefficientC
-
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -339,12 +345,16 @@ func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, 
 		return syscallErr(err)
 	}
 
-	inputs := make([][]byte, 0)
+	inputs := make([][]byte, 0, valsLen)
 	reader := bytes.NewReader(inputBytes)
 
 	for count := uint64(0); count < valsLen; count++ {
 		var vec VectorDescrC
-		vec.Unmarshal(reader)
+		err = vec.Unmarshal(reader)
+		if err != nil {
+			return syscallErr(err)
+		}
+
 		inputSlice, err := vm.Translate(vec.Addr, vec.Len, false)
 		if err != nil {
 			return syscallErr(err)
