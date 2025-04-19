@@ -16,7 +16,8 @@ This project is under active development. Our aim is to move rapidly with Mithri
 - Incorporate the AccountsDB and Blockstore facilitie that are necessary for data storage and retrieval.
 - Work on minimal RPC interface.
 - Development and intensive use of a robust and comprehensive ‘conformance suite’ for verification of compliance of the VM, interpreter, and runtime as a complete unit. Differential fuzzing will be used to detect differences versus relevant versions of the Labs client, and guided fuzzing will be used generally to uncover security and loss-of-availability issues. Any bugs identified during this phase will be remediated.
-
+- End result will be that Mithril can be used to retrieve and replay current MainnetBeta blocks without hiccups
+  
 ### Milestone 3 (Future): Intensive Work on System Optimization
 - Thorough optimization work on entire system, including on components such as the Virtual Machine and AccountsDB.
 - Implementation of block batch processing with configurable block window size.
