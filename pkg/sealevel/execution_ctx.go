@@ -319,7 +319,7 @@ func (slotCtx *SlotCtx) GetAccount(pubkey solana.PublicKey) (*accounts.Account, 
 	if err != nil {
 		return nil, err
 	} else {
-		return acct, nil
+		return acct.Clone(), nil
 	}
 }
 

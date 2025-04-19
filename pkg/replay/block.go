@@ -492,6 +492,7 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
 	//mlog.Log.EnableInfLogging()
 	//profileFile := installProfilerAndSignalHandler(acctsDb)
+
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 
 	cacheConstantSysvars(acctsDb)

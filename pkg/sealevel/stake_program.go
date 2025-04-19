@@ -1422,7 +1422,6 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	switch stakeState.Status {
 	case StakeStateV2StatusStake:
 		{
-			mlog.Log.Debugf("StakeStateV2StatusStake")
 			err = stakeState.Stake.Meta.Authorized.Check(signers, StakeAuthorizeStaker)
 			if err != nil {
 				return err
@@ -1512,7 +1511,6 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 
 	case StakeStateV2StatusInitialized:
 		{
-			mlog.Log.Debugf("StakeStateV2StatusInitialized")
 			err = stakeState.Initialized.Meta.Authorized.Check(signers, StakeAuthorizeStaker)
 			if err != nil {
 				return err

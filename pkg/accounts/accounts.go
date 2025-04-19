@@ -66,6 +66,16 @@ func (a *Account) Resize(newLen uint64, fillVal byte) {
 	}
 }
 
+// This makes a fresh copy of the account's data in 'newCopy' by allocating a new slice and copying the
+// existing data into it. Without this, 'newCopy' would be a shallow copy, and its 'Data' member would point
+// into the same underlying data slice as 'a'.
+func (a *Account) Clone() *Account {
+	newCopy := *a
+	newCopy.Data = make([]byte, len(a.Data))
+	copy(newCopy.Data, a.Data)
+	return &newCopy
+}
+
 func (a *Account) UnmarshalWithDecoder(decoder *bin.Decoder) (err error) {
 	a.Slot, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
