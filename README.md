@@ -10,7 +10,7 @@ This project is under active development. Our aim is to move rapidly with Mithri
 - Reimplementation of all native programs, with a comprehensive test suite developed and exercised; bugs found as a result fixed.
 - Implementation of the remainder of the runtime and VM, with a comprehensive test suite also developed. Any bugs found as a result of testing and review to be fixed.
 
-### Milestone 2 (In progress): Block Replay and Simple RPC Interface
+### Milestone 2 (Near Completion): Block Replay and Simple RPC Interface
 - Snaphot retrieval and loading (Completed).
 - Full implementation of transaction (and therefore block) handling.
 - Incorporate the AccountsDB and Blockstore facilitie that are necessary for data storage and retrieval.
@@ -20,7 +20,7 @@ This project is under active development. Our aim is to move rapidly with Mithri
 ### Milestone 3 (Future): Intensive Work on System Optimization
 - Thorough optimization work on entire system, including on components such as the Virtual Machine and AccountsDB.
 - Implementation of block batch processing with configurable block window size.
+- [Overcast integration](https://github.com/Overclock-Validator/overcast)
 
 ### Potential Future Directions
-- Broaden block retrieval sources beyond gossip and RPC node services (TBD how this is implemented).
 - Implementation of ‘archival node’ features which would include building out historical replay compatibility.
