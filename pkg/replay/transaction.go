@@ -58,7 +58,7 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
-		if slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
+		if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
 			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
 			if err != nil {
 				return nil, err
@@ -419,7 +419,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	// check for CU consumed divergences
 	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
-		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%d discrepancy)", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)-min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed))
+		discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
+		var sign byte
+		if execCtx.ComputeMeter.Used() > *txMeta.ComputeUnitsConsumed {
+			sign = '+'
+		} else {
+			sign = '-'
+		}
+		mlog.Log.Infof("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 	}
 
 	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)

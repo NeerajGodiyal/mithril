@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 
+	//"runtime/debug"
+
 	//"runtime/pprof"
 	"time"
 
@@ -492,6 +494,8 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
 	//mlog.Log.EnableInfLogging()
 	//profileFile := installProfilerAndSignalHandler(acctsDb)
+	//debug.SetMemoryLimit(200000000000)
+	//debug.SetGCPercent(-1)
 
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 

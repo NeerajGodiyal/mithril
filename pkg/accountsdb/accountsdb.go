@@ -166,7 +166,6 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		mlog.Log.Debugf("failed to open appendvec file %s")
 		return nil, err
 	}
-	defer appendVecFile.Close()
 
 	offset, err := appendVecFile.Seek(int64(acctIdxEntry.Offset), 0)
 	if err != nil {
@@ -189,6 +188,8 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 	msg := util.PrettyPrintAcct(acct)
 	mlog.Log.Debugf("SLOT %d - accountsdb.Get() found acct in %s for %s: %s", slot, appendVecFileName, pubkey, msg)
+
+	appendVecFile.Close()
 
 	return acct, err
 }
