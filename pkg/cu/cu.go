@@ -3,7 +3,6 @@ package cu
 import (
 	"errors"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 )
 
@@ -28,12 +27,8 @@ func (cm *ComputeMeter) Consume(cost uint64) error {
 	cm.exceeded = cm.computeMeter < cost
 	cm.computeMeter = safemath.SaturatingSubU64(cm.computeMeter, cost)
 
-	if cm.exceeded {
-		if cm.disable {
-			mlog.Log.Debugf("CU limit exceeded in Consume, but skipping")
-		} else {
-			return ErrComputeExceeded
-		}
+	if cm.exceeded && !cm.disable {
+		return ErrComputeExceeded
 	}
 
 	return nil

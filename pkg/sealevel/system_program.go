@@ -1472,6 +1472,76 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 	return nil
 }
 
+func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, bool) {
+	if instr.ProgramId != SystemProgramAddr {
+		return solana.PublicKey{}, false
+	}
+	if len(instr.Data) < 4 {
+		return solana.PublicKey{}, false
+	}
+
+	decoder := bin.NewBinDecoder(instr.Data)
+	instructionType, err := decoder.ReadUint32(bin.LE)
+	if err != nil {
+		return solana.PublicKey{}, false
+	}
+	if instructionType != SystemProgramInstrTypeAdvanceNonceAccount {
+		return solana.PublicKey{}, false
+	}
+
+	recentBlockhashes := SysvarCache.RecentBlockHashes.Sysvar
+	if recentBlockhashes.IsBlockhashAgeValid(tx.Message.RecentBlockhash) {
+		return solana.PublicKey{}, false
+	}
+
+	noncePk := instr.Accounts[0].Pubkey
+	nonceAcct, err := slotCtx.GetAccount(noncePk)
+	if err != nil {
+		return solana.PublicKey{}, false
+	}
+
+	nonceStateVersions, err := UnmarshalNonceStateVersions(nonceAcct.Data)
+	if err != nil {
+		return solana.PublicKey{}, false
+	}
+
+	state := nonceStateVersions.State()
+	if !state.IsInitialized {
+		return solana.PublicKey{}, false
+	}
+
+	if !state.IsSignerAuthority(tx.Message.Signers()) {
+		mlog.Log.Debugf("Advance nonce account: Account %s must be a signer", state.Authority)
+		return solana.PublicKey{}, false
+	}
+
+	rbh := slotCtx.LastBlockhash
+	nextDurableNonce := durableNonce(rbh)
+	if state.DurableNonce == nextDurableNonce {
+		return solana.PublicKey{}, false
+	}
+
+	if nonceStateVersions.Type == NonceVersionCurrent {
+		state.DurableNonce = nextDurableNonce
+		state.FeeCalculator.LamportsPerSignature = 5000 //rbh.FeeCalculator.LamportsPerSignature
+	} else {
+		nonceStateVersions.Upgrade()
+		upgradedState := nonceStateVersions.State()
+		upgradedState.DurableNonce = nextDurableNonce
+		upgradedState.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature*/
+	}
+
+	newData, err := nonceStateVersions.Marshal()
+	if err != nil {
+		return solana.PublicKey{}, false
+	}
+
+	copy(nonceAcct.Data, newData)
+	slotCtx.SetAccount(noncePk, nonceAcct)
+
+	return noncePk, true
+}
+
 func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount, signers []solana.PublicKey, recentBlockhashes *SysvarRecentBlockhashes) error {
 	mlog.Log.Debugf("AdvanceNonceAccount")
 

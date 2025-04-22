@@ -71,6 +71,33 @@ func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
 	}
 }
 
+func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) *TxFeeInfo {
+	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
+
+	// have to pay fees per signatures to these precompiles as well
+	for _, instr := range instrs {
+		if instr.ProgramId == sealevel.Secp256kPrecompileAddr || instr.ProgramId == sealevel.Ed25519PrecompileAddr {
+			if len(instr.Data) == 0 {
+				continue
+			} else {
+				numSignatures += uint64(instr.Data[0])
+			}
+		}
+	}
+
+	// basic tx fee. 5000 lamports per signature.
+	baseTxFee := numSignatures * 5000
+
+	// prioritization fees
+	var priorityFee uint64
+	if computeBudgetLimits.ComputeUnitPrice != 0 {
+		priorityFee = calculatePriorityFee(computeBudgetLimits)
+	}
+
+	totalTxFee := safemath.SaturatingAddU64(baseTxFee, priorityFee)
+	return &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}
+}
+
 func CalculateAndDeductTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {

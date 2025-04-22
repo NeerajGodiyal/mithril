@@ -95,7 +95,7 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
-	//execCtx.ComputeMeter.Disable()
+	execCtx.ComputeMeter.Disable()
 
 	return execCtx
 }
@@ -308,6 +308,40 @@ func handleDurableNonceIfEligibleFailedTx(instrs []sealevel.Instruction, tx *sol
 	return solana.PublicKey{}, false
 }
 
+func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, []solana.PublicKey, error) {
+	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits)
+
+	payerAcctKey := tx.Message.AccountKeys[0]
+	p, err := slotCtx.GetAccount(payerAcctKey)
+	if err != nil {
+		panic(fmt.Sprintf("unable to get slot account to update payer acct state after failed tx: %s", err))
+	}
+
+	if txFeeInfo.TotalFee > p.Lamports {
+		return nil, nil, sealevel.InstrErrInsufficientFunds
+	}
+
+	p.Lamports -= txFeeInfo.TotalFee
+	err = slotCtx.SetAccount(payerAcctKey, p)
+	if err != nil {
+		panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
+	}
+	slotCtx.ModifiedAccts[payerAcctKey] = true
+
+	writableAcctsForFailedTx := make([]solana.PublicKey, 0, 2)
+	writableAcctsForFailedTx = append(writableAcctsForFailedTx, payerAcctKey)
+
+	if len(instrs) >= 1 {
+		instr := instrs[0]
+		noncePubkey, advancedNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
+		if advancedNonceAcct {
+			writableAcctsForFailedTx = append(writableAcctsForFailedTx, noncePubkey)
+		}
+	}
+
+	return txFeeInfo, writableAcctsForFailedTx, fmt.Errorf("%s", txMeta.Err)
+}
+
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, []solana.PublicKey, error) {
 	/*err := tx.VerifySignatures()
 	if err != nil {
@@ -319,17 +353,22 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return nil, nil, err
 	}
 
+	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// fast path for failed tx's
+	if txMeta.Err != nil {
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
+	}
+
 	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -426,7 +465,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		} else {
 			sign = '-'
 		}
-		mlog.Log.Infof("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
+		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 	}
 
 	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
