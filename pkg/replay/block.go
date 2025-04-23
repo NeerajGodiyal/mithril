@@ -50,7 +50,9 @@ type Block struct {
 	LastBlockhash          [32]byte
 	UnixTimestamp          int64
 	StakeAccts             map[solana.PublicKey]bool
+	VoteAccts              map[solana.PublicKey]uint64
 	VoteTimestamps         map[solana.PublicKey]sealevel.BlockTimestamp
+	TotalEpochStake        uint64
 	Features               *features.Features
 	UpdatedAccts           []solana.PublicKey
 	PartitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
@@ -480,10 +482,13 @@ func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot.SnapshotManifest) {
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.StakeAccts = make(map[solana.PublicKey]bool)
+	block.VoteAccts = make(map[solana.PublicKey]uint64)
 
 	for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
 		ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
 		block.VoteTimestamps[va.Key] = ts
+		block.VoteAccts[va.Key] = va.Stake
+		block.TotalEpochStake += va.Stake
 	}
 
 	for _, sa := range snapshotManifest.Bank.Stakes.StakeDelegations {
@@ -543,6 +548,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 			block.StakeAccts = lastSlotCtx.StakeAccts
 			block.VoteTimestamps = lastSlotCtx.VoteTimestamps
+			block.VoteAccts = lastSlotCtx.VoteAccts
 			block.ParentSlot = lastSlotCtx.Slot
 		}
 
@@ -650,7 +656,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
 		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
 		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
-		VoteTimestamps: block.VoteTimestamps, EpochAcctHashStopOffsetSlot: math.MaxUint64}
+		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
+		EpochAcctHashStopOffsetSlot: math.MaxUint64}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
 
 	if block.PartitionedRewardsInfo != nil {

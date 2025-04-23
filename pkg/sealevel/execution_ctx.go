@@ -41,6 +41,8 @@ type SlotCtx struct {
 	Features                    *features.Features
 	VoteTimestamps              map[solana.PublicKey]BlockTimestamp
 	StakeAccts                  map[solana.PublicKey]bool
+	VoteAccts                   map[solana.PublicKey]uint64
+	TotalEpochStake             uint64
 	FinalBankhash               []byte
 	EpochsAcctHash              []byte
 	EpochAcctHashStopOffsetSlot uint64

@@ -76,5 +76,9 @@ func Syscalls(f *features.Features, isDeploy bool) sbpf.SyscallRegistry {
 		reg.Register("sol_get_sysvar", SyscallGetSysvar)
 	}
 
+	if f.IsActive(features.EnableGetEpochStakeSyscall) {
+		reg.Register("sol_get_epoch_stake", SyscallGetEpochStake)
+	}
+
 	return reg
 }
