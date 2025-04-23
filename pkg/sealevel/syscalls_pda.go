@@ -54,7 +54,6 @@ func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdA
 	origCu := execCtx.ComputeMeter.Remaining()
 	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
 	if err != nil {
-		mlog.Log.Debugf("******** ran out of CUs in SyscallCreateProgramAddress")
 		return syscallCuErr()
 	}
 
@@ -143,7 +142,6 @@ func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programId
 		}
 		err = execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
 		if err != nil {
-			mlog.Log.Debugf("******** ran out of CUs in TryFindProgramAddress")
 			return syscallCuErr()
 		}
 	}

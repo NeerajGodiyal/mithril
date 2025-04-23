@@ -531,7 +531,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var justCrossedEpochBoundary bool
 
 	streamChan := make(chan *Block, endSlot-startSlot)
-	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, 500)
+	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, 1000)
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 

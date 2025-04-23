@@ -1324,9 +1324,7 @@ func checkSlotsAreValid(voteState *VoteState, voteSlots []uint64, voteHash [32]b
 	}
 
 	if i != uint64(len(voteSlots)) {
-		mlog.Log.Infof("VoteErrSlotsMismatch 1")
 		mlog.Log.Infof("%s dropped vote slots %#v failed to match slot hashes: %#v", voteState.NodePubkey, voteSlots, slotHashes)
-		mlog.Log.Infof("%+v", slotHashes)
 		return VoteErrSlotsMismatch
 	}
 
@@ -1435,8 +1433,6 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	}
 
 	if len(slotHashes) == 0 {
-		mlog.Log.Infof("VoteErrSlotsMismatch 2")
-		mlog.Log.Infof("%+v", slotHashes)
 		return VoteErrSlotsMismatch
 	}
 
@@ -1530,8 +1526,6 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 				if rootToCheck != nil {
 					return VoteErrRootOnDifferentFork
 				} else {
-					mlog.Log.Infof("VoteErrSlotsMismatch 3")
-					mlog.Log.Infof("%+v", slotHashes)
 					return VoteErrSlotsMismatch
 				}
 			}
@@ -1559,8 +1553,6 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	}
 
 	if voteStateUpdateIndex != uint64(proposedLockouts.Len()) {
-		mlog.Log.Infof("VoteErrSlotsMismatch 4")
-		mlog.Log.Infof("%+v", slotHashes)
 		return VoteErrSlotsMismatch
 	}
 
@@ -1763,7 +1755,7 @@ func processNewVoteState(voteState *VoteState, newState *deque.Deque[LandedVote]
 		}
 	}
 
-	if voteState.RootSlot != nil && newRoot != nil && *voteState.RootSlot != *newRoot {
+	if (voteState.RootSlot == nil && newRoot != nil) || (voteState.RootSlot != nil && newRoot == nil) || (voteState.RootSlot != nil && newRoot != nil && *voteState.RootSlot != *newRoot) {
 		voteState.IncrementCredits(epoch, earnedCredits)
 	}
 

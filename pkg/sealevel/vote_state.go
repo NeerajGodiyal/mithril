@@ -1181,7 +1181,7 @@ func (voteState *VoteState) CreditsForVoteAtIndex(index uint64, timelyVoteCredit
 
 func (voteState *VoteState) IncrementCredits(epoch uint64, credits uint64) {
 	if len(voteState.EpochCredits) == 0 {
-		voteState.EpochCredits = append(voteState.EpochCredits, EpochCredits{Epoch: 0, Credits: 0, PrevCredits: 0})
+		voteState.EpochCredits = append(voteState.EpochCredits, EpochCredits{Epoch: epoch, Credits: 0, PrevCredits: 0})
 	} else if epoch != voteState.EpochCredits[len(voteState.EpochCredits)-1].Epoch {
 		ec := voteState.EpochCredits[len(voteState.EpochCredits)-1]
 		if ec.Credits != ec.PrevCredits {
