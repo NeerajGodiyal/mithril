@@ -123,7 +123,7 @@ var SyscallSetReturnData = sbpf.SyscallFunc2(SyscallSetReturnDataImpl)
 
 // SyscallGetProcessedSiblingInstructionImpl is an implementation of the sol_get_processed_sibling_instruction syscall
 func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, programIdAddr, dataAddr, accountsAddr uint64) (uint64, error) {
-	mlog.Log.Infof("SyscallGetProcessedSiblingInstruction")
+	mlog.Log.Debugf("SyscallGetProcessedSiblingInstruction")
 
 	execCtx := executionCtx(vm)
 	txCtx := transactionCtx(vm)
