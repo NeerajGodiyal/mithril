@@ -451,9 +451,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	mlog.Log.Debugf("\ntx logs:\n")
-	for _, logEntry := range log.Logs {
-		mlog.Log.Debugf("%s\n", logEntry)
+	if instrErr != nil {
+		mlog.Log.Infof("\ntx logs:\n")
+		for _, logEntry := range log.Logs {
+			mlog.Log.Infof("%s\n", logEntry)
+		}
 	}
 
 	// check for CU consumed divergences

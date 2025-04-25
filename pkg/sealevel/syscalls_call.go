@@ -2,6 +2,7 @@ package sealevel
 
 import (
 	"bytes"
+	"slices"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -122,7 +123,7 @@ var SyscallSetReturnData = sbpf.SyscallFunc2(SyscallSetReturnDataImpl)
 
 // SyscallGetProcessedSiblingInstructionImpl is an implementation of the sol_get_processed_sibling_instruction syscall
 func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, programIdAddr, dataAddr, accountsAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetProcessedSiblingInstruction")
+	mlog.Log.Infof("SyscallGetProcessedSiblingInstruction")
 
 	execCtx := executionCtx(vm)
 	txCtx := transactionCtx(vm)
@@ -142,7 +143,13 @@ func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, prog
 	var reverseIndexAtStackHeight uint64
 	var instrCtxFound *InstructionCtx
 
-	for indexInTrace := instrTraceLen; indexInTrace >= 0; indexInTrace-- {
+	traceIdxs := make([]uint64, 0)
+	for i := range instrTraceLen {
+		traceIdxs = append(traceIdxs, i)
+	}
+	slices.Reverse(traceIdxs)
+
+	for _, indexInTrace := range traceIdxs {
 		instrCtx, err := txCtx.InstructionCtxAtIndexInTrace(indexInTrace)
 		if err != nil {
 			return syscallErr(err)
@@ -194,18 +201,6 @@ func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, prog
 				return syscallErr(err)
 			}
 
-			reader.Reset(accountMetaSliceBytes)
-
-			var accounts []AccountMeta
-			for i := uint64(0); i < resultHeader.AccountsLen; i++ {
-				var account AccountMeta
-				err = account.Unmarshal(reader)
-				if err != nil {
-					return syscallErr(err)
-				}
-				accounts = append(accounts, account)
-			}
-
 			if !isNonOverlapping(metaAddr, ProcessedSiblingInstructionSize, programIdAddr, solana.PublicKeyLength) ||
 				!isNonOverlapping(metaAddr, ProcessedSiblingInstructionSize, accountsAddr, accountMetaDataSize) ||
 				!isNonOverlapping(metaAddr, ProcessedSiblingInstructionSize, dataAddr, resultHeader.DataLen) ||
@@ -227,7 +222,7 @@ func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, prog
 			copy(data, instrCtxFound.Data)
 
 			// build AccountMetas, serialize them and then copy them out
-			writer := bytes.NewBuffer(accountMetaSliceBytes)
+			writer := new(bytes.Buffer)
 
 			for instrAcctIdx := uint64(0); instrAcctIdx < instrCtxFound.NumberOfInstructionAccounts(); instrAcctIdx++ {
 				idx, err := instrCtxFound.IndexOfInstructionAccountInTransaction(instrAcctIdx)
@@ -253,6 +248,9 @@ func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, prog
 				acctBytes := acctMeta.Marshal()
 				writer.Write(acctBytes)
 			}
+
+			// copy AccountMetas serialized above out
+			copy(accountMetaSliceBytes, writer.Bytes())
 		}
 
 		// build a new result header, serialize it & copy it out
@@ -260,7 +258,6 @@ func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, prog
 		resultHeaderOut.DataLen = uint64(len(instrCtxFound.Data))
 		resultHeaderOut.AccountsLen = instrCtxFound.NumberOfInstructionAccounts()
 		resultHeaderOutBytes := resultHeaderOut.Marshal()
-
 		copy(resultsHeaderBytes, resultHeaderOutBytes)
 
 		return syscallSuccess(1) // true
