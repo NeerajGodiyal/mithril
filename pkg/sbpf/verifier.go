@@ -41,6 +41,7 @@ func (v *Verifier) Verify() error {
 		case OpDiv32Reg, OpDiv64Reg:
 		case OpMod32Reg, OpMod64Reg:
 		case OpSdiv32Reg, OpSdiv64Reg:
+		case OpArsh64Reg, OpArsh32Reg:
 		case OpCall, OpExit:
 			// nothing
 		case OpStb, OpSth, OpStw, OpStdw,

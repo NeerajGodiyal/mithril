@@ -396,19 +396,19 @@ func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, er
 
 	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, true)
 	if err != nil {
-		mlog.Log.Debugf("failed to create loader")
+		mlog.Log.Debugf("failed to create loader: %s", err)
 		return nil, err
 	}
 
 	program, err := loader.Load()
 	if err != nil {
-		mlog.Log.Debugf("failed to load program")
+		mlog.Log.Debugf("failed to load program: %s", err)
 		return nil, err
 	}
 
 	err = program.Verify()
 	if err != nil {
-		mlog.Log.Debugf("failed to verify program")
+		mlog.Log.Debugf("failed to verify program: %s", err)
 		return nil, err
 	}
 
