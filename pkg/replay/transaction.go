@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -183,10 +184,15 @@ func isWritable(tx *solana.Transaction, am *solana.AccountMeta, f *features.Feat
 	return true
 }
 
-func recordModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
+func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
 	// update account states in slotCtx for all accounts 'touched' during the tx's execution
 	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
 		if execCtx.TransactionContext.Accounts.Touched[idx] {
+			// clean up accounts closed during the tx (garbage collection)
+			if newAcctState.Lamports == 0 {
+				newAcctState = &accounts.Account{Key: newAcctState.Key, RentEpoch: math.MaxUint64}
+			}
+
 			err := slotCtx.SetAccount(newAcctState.Key, newAcctState)
 			if err != nil {
 				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
@@ -530,7 +536,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return txFeeInfo, writableAcctsForFailedTx, fmt.Errorf("tx err: %s", txErr)
 	}
 
-	recordModifiedAccounts(slotCtx, execCtx)
+	handleModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
 
