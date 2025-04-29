@@ -447,7 +447,7 @@ func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, account
 		return CallerAccount{}, err
 	}
 
-	dataBoxBytes, err := vm.Translate(accountInfo.DataBoxAddr, RefCellRustSize, false)
+	dataBoxBytes, err := vm.Translate(accountInfo.DataBoxAddr, RefCellVecRustSize, false)
 	if err != nil {
 		return CallerAccount{}, err
 	}

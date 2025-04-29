@@ -309,7 +309,7 @@ func handleDurableNonceIfEligibleFailedTx(instrs []sealevel.Instruction, tx *sol
 }
 
 func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, []solana.PublicKey, error) {
-	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits)
+	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
 	p, err := slotCtx.GetAccount(payerAcctKey)
@@ -353,7 +353,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return nil, nil, err
 	}
 
-	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs)
+	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -394,7 +394,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		execCtx.TransactionContext.Accounts.Unlock(count)
 	}
 
-	txFeeInfo, payerNewLamports, err := fees.CalculateAndDeductTxFees(tx, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, payerNewLamports, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
 		return txFeeInfo, nil, nil
 	}

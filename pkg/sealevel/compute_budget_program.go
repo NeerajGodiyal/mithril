@@ -3,18 +3,20 @@ package sealevel
 import (
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
-	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 )
 
 const (
-	MinHeapFrameBytes                  = (32 * 1024)
-	MaxHeapFrameBytes                  = (256 * 1024)
-	HeapFrameBytesMultiple             = 1024
-	DefaultInstructionComputeUnitLimit = 200000
-	MaxComputeUnitLimit                = 1400000
-	MaxLoadedAccountsDataSizeBytes     = (64 * 1024 * 1024)
+	MinHeapFrameBytes                    = (32 * 1024)
+	MaxHeapFrameBytes                    = (256 * 1024)
+	HeapFrameBytesMultiple               = 1024
+	DefaultInstructionComputeUnitLimit   = 200000
+	MaxComputeUnitLimit                  = 1400000
+	MaxLoadedAccountsDataSizeBytes       = (64 * 1024 * 1024)
+	MaxBuiltinAllocationComputeUnitLimit = 3000
 )
 
 type ComputeBudgetLimits struct {
@@ -131,19 +133,80 @@ func duplicateInstructionErr(idx int) error {
 	return fmt.Errorf("Transaction contains a duplicate instruction (%d) that is not allowed", idx)
 }
 
-func ComputeBudgetExecuteInstructions(instructions []Instruction) (*ComputeBudgetLimits, error) {
+func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uint32, numNonBuiltinInstrs uint32, numNonComputeBudgetInstrs uint32) uint32 {
+	if f != nil && f.IsActive(features.ReserveMinimalCUsForBuiltinInstructions) {
+		return numBuiltinInstrs*MaxBuiltinAllocationComputeUnitLimit + numNonBuiltinInstrs*DefaultInstructionComputeUnitLimit
+	} else {
+		return numNonComputeBudgetInstrs * DefaultInstructionComputeUnitLimit
+	}
+}
+
+var migratingBuiltinPubkeys = []solana.PublicKey{StakeProgramAddr, ConfigProgramAddr, AddressLookupTableAddr}
+
+var nonMigratingBuiltinPubkeys = []solana.PublicKey{VoteProgramAddr, SystemProgramAddr, ComputeBudgetProgramAddr, BpfLoaderUpgradeableAddr,
+	BpfLoader2Addr, BpfLoaderDeprecatedAddr, LoaderV4Addr, Secp256kPrecompileAddr, Ed25519PrecompileAddr}
+
+func isNonMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
+	for _, pk := range nonMigratingBuiltinPubkeys {
+		if pubkey == pk {
+			return true
+		}
+	}
+	return false
+}
+
+func isMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
+	for _, pk := range migratingBuiltinPubkeys {
+		if pk == pubkey {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBuiltinMigratedYet(pubkey solana.PublicKey) bool {
+	if pubkey == ConfigProgramAddr || pubkey == AddressLookupTableAddr {
+		return true
+	} else {
+		return false
+	}
+}
+
+func isBuiltin(instr Instruction) bool {
+	programPubkey := instr.ProgramId
+	if isNonMigratingBuiltinProgram(programPubkey) {
+		return true
+	}
+
+	if isMigratingBuiltinProgram(programPubkey) && !hasBuiltinMigratedYet(programPubkey) {
+		return true
+	}
+
+	return false
+}
+
+func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Features) (*ComputeBudgetLimits, error) {
 	var hasRequestedHeapSize bool
 	var hasComputeUnitLimit bool
 	var hasComputeUnitPrice bool
 	var hasUpdatedLoadedAccountsDataSizeLimit bool
 
 	var numNonComputeBudgetInstrs uint32
+	var numBuiltinInstrs uint32
+	var numNonBuiltinInstrs uint32
+
 	var requestedHeapSize uint32
 	var updatedComputeUnitLimit uint32
 	var updatedLoadedAccountsDataSizeLimit uint32
 	var updatedComputeUnitPrice uint64
 
 	for idx, instr := range instructions {
+		if isBuiltin(instr) {
+			numBuiltinInstrs++
+		} else {
+			numNonBuiltinInstrs++
+		}
+
 		if instr.ProgramId != ComputeBudgetProgramAddr {
 			numNonComputeBudgetInstrs++
 			continue
@@ -247,16 +310,9 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction) (*ComputeBudge
 
 	var computeUnitLimit uint32
 	if hasComputeUnitLimit {
-		if updatedComputeUnitLimit < MaxComputeUnitLimit {
-			computeUnitLimit = updatedComputeUnitLimit
-		} else {
-			computeUnitLimit = MaxComputeUnitLimit
-		}
+		computeUnitLimit = min(updatedComputeUnitLimit, MaxComputeUnitLimit)
 	} else {
-		computeUnitLimit = safemath.SaturatingMulU32(numNonComputeBudgetInstrs, DefaultInstructionComputeUnitLimit)
-		if computeUnitLimit > MaxComputeUnitLimit {
-			computeUnitLimit = MaxComputeUnitLimit
-		}
+		computeUnitLimit = min(calculateDefaultComputeUnitLimit(f, numBuiltinInstrs, numNonBuiltinInstrs, numNonComputeBudgetInstrs), MaxComputeUnitLimit)
 	}
 
 	var computeUnitPrice uint64
@@ -266,11 +322,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction) (*ComputeBudge
 
 	var loadedAccountBytes uint32
 	if hasUpdatedLoadedAccountsDataSizeLimit {
-		if updatedLoadedAccountsDataSizeLimit < MaxLoadedAccountsDataSizeBytes {
-			loadedAccountBytes = updatedLoadedAccountsDataSizeLimit
-		} else {
-			loadedAccountBytes = MaxLoadedAccountsDataSizeBytes
-		}
+		loadedAccountBytes = min(updatedLoadedAccountsDataSizeLimit, MaxLoadedAccountsDataSizeBytes)
 	} else {
 		loadedAccountBytes = MaxLoadedAccountsDataSizeBytes
 	}

@@ -106,7 +106,7 @@ type SolAccountInfoRust struct {
 	Executable      byte
 }
 
-const RefCellRustSize = 40
+const RefCellRustSize = 32
 
 type RefCellRust struct {
 	Strong uint64
@@ -114,6 +114,8 @@ type RefCellRust struct {
 	Borrow uint64
 	Addr   uint64
 }
+
+const RefCellVecRustSize = 40
 
 type RefCellVecRust struct {
 	Strong uint64
@@ -363,7 +365,7 @@ func (accountInfo *SolAccountInfoRust) Unmarshal(buf io.Reader) error {
 }
 
 func (refCell *RefCellRust) Unmarshal(buf io.Reader) error {
-	var refCellBytes [32]byte
+	var refCellBytes [RefCellRustSize]byte
 
 	_, err := buf.Read(refCellBytes[:])
 	if err != nil {
@@ -380,7 +382,7 @@ func (refCell *RefCellRust) Unmarshal(buf io.Reader) error {
 
 func (refCellVec *RefCellVecRust) Unmarshal(buf io.Reader) error {
 	var err error
-	var refCellVecBytes [40]byte
+	var refCellVecBytes [RefCellVecRustSize]byte
 
 	_, err = buf.Read(refCellVecBytes[:])
 	if err != nil {

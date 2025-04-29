@@ -47,6 +47,7 @@ var FullInflationDevnetAndTestnet = FeatureGate{Name: "FullInflationDevnetAndTes
 var PicoInflation = FeatureGate{Name: "PicoInflation", Address: base58.MustDecodeFromString("4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m")}
 var DisableAccountLoaderSpecialCase = FeatureGate{Name: "DisableAccountLoaderSpecialCase", Address: base58.MustDecodeFromString("EQUMpNFr7Nacb1sva56xn1aLfBxppEoSBH8RRVdkcD1x")}
 var EnableGetEpochStakeSyscall = FeatureGate{Name: "EnableGetEpochStakeSyscall", Address: base58.MustDecodeFromString("FKe75t4LXxGaQnVHdUKM6DSFifVVraGZ8LyNo7oPwy1Z")}
+var ReserveMinimalCUsForBuiltinInstructions = FeatureGate{Name: "ReserveMinimalCUsForBuiltinInstructions", Address: base58.MustDecodeFromString("C9oAhLxDBm3ssWtJx1yBGzPY55r2rArHmN1pbQn6HogH")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -58,4 +59,5 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
-	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall}
+	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
+	ReserveMinimalCUsForBuiltinInstructions}

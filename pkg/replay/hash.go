@@ -11,7 +11,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
 )
@@ -175,19 +174,13 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 }
 
 func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
-	mlog.Log.Debugf("computing EAH")
+	mlog.Log.Infof("computing EAH")
 
 	// get all pubkeys in acctsdb
 	allKeys := acctsDb.AllKeys()
 
-	// sort pubkeys
-	sort.SliceStable(allKeys, func(i, j int) bool {
-		return util.PubkeyCmpByteSlice(allKeys[i], allKeys[j])
-	})
-
 	// compute acct hashes
 	hashes := make([][]byte, len(allKeys))
-
 	for i, pk := range allKeys {
 		pkObj := solana.PublicKeyFromBytes(pk)
 
@@ -195,7 +188,6 @@ func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
 		if err != nil {
 			panic(fmt.Sprintf("unable to fetch acct in EAH calculation: %s", pkObj))
 		}
-
 		if acct.Lamports != 0 {
 			hashes[i] = calculateSingleAcctHashOnly(*acct)
 		}

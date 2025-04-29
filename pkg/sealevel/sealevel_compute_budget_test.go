@@ -92,7 +92,7 @@ func newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(numBytes uint32) (I
 func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 
 	// 1
-	cbl, err := ComputeBudgetExecuteInstructions([]Instruction{})
+	cbl, err := ComputeBudgetExecuteInstructions([]Instruction{}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(0), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -103,7 +103,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	instr, err := newTestSetComputeUnitLimit(1)
 	assert.NoError(t, err)
 	blankInstr := Instruction{Data: []byte{0}}
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr, blankInstr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(1), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -114,7 +114,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	instr, err = newTestSetComputeUnitLimit(MaxComputeUnitLimit + 1)
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr, blankInstr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(MaxComputeUnitLimit), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -125,7 +125,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	instr, err = newTestSetComputeUnitLimit(MaxComputeUnitLimit)
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, instr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, instr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(MaxComputeUnitLimit), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -136,7 +136,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	instr, err = newTestSetComputeUnitLimit(1)
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(1), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -148,7 +148,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	instr2, err := newTestSetComputeUnitPrice(42)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, instr2})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, instr2}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(1), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint64(42), cbl.ComputeUnitPrice)
@@ -160,7 +160,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(DefaultInstructionComputeUnitLimit), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint64(0), cbl.ComputeUnitPrice)
@@ -172,7 +172,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr}, nil)
 	assert.Equal(t, invalidInstructionDataErr(0), err)
 
 	// 9
@@ -180,7 +180,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr}, nil)
 	assert.Equal(t, invalidInstructionDataErr(0), err)
 
 	// 10
@@ -188,7 +188,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1, blankInstr}, nil)
 	assert.Equal(t, invalidInstructionDataErr(0), err)
 
 	// 11
@@ -196,7 +196,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, instr1})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, instr1}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(DefaultInstructionComputeUnitLimit), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MaxHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -208,12 +208,12 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	blankInstr = Instruction{Data: []byte{0}}
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr1})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr1}, nil)
 	assert.Equal(t, invalidInstructionDataErr(3), err)
 
 	// 13
 	blankInstr = Instruction{Data: []byte{0}}
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, blankInstr, blankInstr, blankInstr, blankInstr})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, blankInstr, blankInstr, blankInstr, blankInstr}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(DefaultInstructionComputeUnitLimit*7), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -228,7 +228,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	scup, err := newTestSetComputeUnitPrice(math.MaxUint64)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, rhf, scul, scup})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, rhf, scul, scup}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(math.MaxUint64), cbl.ComputeUnitPrice)
 	assert.Equal(t, uint32(MaxComputeUnitLimit), cbl.ComputeUnitLimit)
@@ -243,7 +243,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	scup, err = newTestSetComputeUnitPrice(math.MaxUint64)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scul, rhf, scup})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scul, rhf, scup}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(math.MaxUint64), cbl.ComputeUnitPrice)
 	assert.Equal(t, uint32(1), cbl.ComputeUnitLimit)
@@ -256,7 +256,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	scul2, err := newTestSetComputeUnitLimit(MaxComputeUnitLimit - 1)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scul, scul2})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scul, scul2}, nil)
 	assert.Equal(t, duplicateInstructionErr(2), err)
 
 	// 17
@@ -265,7 +265,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	rhf2, err := newTestRequestHeapFrame(MaxHeapFrameBytes)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, rhf1, rhf2})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, rhf1, rhf2}, nil)
 	assert.Equal(t, duplicateInstructionErr(2), err)
 
 	// 18
@@ -274,12 +274,12 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	scup2, err := newTestSetComputeUnitPrice(math.MaxUint64)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scup, scup2})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, scup, scup2}, nil)
 	assert.Equal(t, duplicateInstructionErr(2), err)
 
 	// 19
 	instr1, err = newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(1234)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(0), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -289,7 +289,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	// 20
 	instr1, err = newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(MaxLoadedAccountsDataSizeBytes + 1)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{instr1}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(0), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
@@ -301,7 +301,7 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.NoError(t, err)
 	instr2, err = newTestSetComputeUnitLimit(1234)
 	assert.NoError(t, err)
-	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr1, instr2})
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, blankInstr, blankInstr, instr1, instr2}, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(1234), cbl.ComputeUnitLimit)
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
