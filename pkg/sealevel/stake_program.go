@@ -1911,11 +1911,13 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 	if err != nil {
 		return err
 	}
+	defer srcAcct.Drop()
 
 	dstAcct, err := instrCtx.BorrowInstructionAccount(txCtx, dstAcctIdx)
 	if err != nil {
 		return err
 	}
+	defer dstAcct.Drop()
 
 	srcMergeKind, dstMergeKind, err := moveStakeOrLamportsSharedChecks(execCtx, txCtx, instrCtx, srcAcct, lamports, dstAcct, stakeAuthorityIdx)
 	if err != nil {
@@ -2047,11 +2049,13 @@ func StakeProgramMoveLamports(execCtx *ExecutionCtx, instrCtx *InstructionCtx, s
 	if err != nil {
 		return err
 	}
+	defer srcAcct.Drop()
 
 	dstAcct, err := instrCtx.BorrowInstructionAccount(txCtx, dstAcctIdx)
 	if err != nil {
 		return err
 	}
+	defer dstAcct.Drop()
 
 	srcMergeKind, _, err := moveStakeOrLamportsSharedChecks(execCtx, txCtx, instrCtx, srcAcct, lamports, dstAcct, stakeAuthorityIdx)
 	if err != nil {
