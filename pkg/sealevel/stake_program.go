@@ -2119,7 +2119,7 @@ func moveStakeOrLamportsSharedChecks(execCtx *ExecutionCtx, txCtx *TransactionCt
 
 	signers := []solana.PublicKey{stakeAuthorityPubkey}
 
-	if srcAcct.Key() != StakeProgramAddr || dstAcct.Key() != StakeProgramAddr {
+	if srcAcct.Owner() != StakeProgramAddr || dstAcct.Owner() != StakeProgramAddr {
 		return nil, nil, InstrErrIncorrectProgramId
 	}
 
