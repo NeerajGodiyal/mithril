@@ -39,6 +39,7 @@ func init() {
 	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
 	Cmd.Flags().Int64VarP(&startSlot, "startslot", "b", -1, "Block at which to begin replaying")
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
+
 }
 
 func run(c *cobra.Command, args []string) {
@@ -124,8 +125,10 @@ func run(c *cobra.Command, args []string) {
 		}
 	}
 
+	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
 	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb)
+	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
