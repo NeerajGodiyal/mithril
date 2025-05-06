@@ -40,6 +40,7 @@ type Block struct {
 	Transactions           []*solana.Transaction
 	BankHash               [32]byte
 	EpochAcctsHash         []byte
+	HasEpochAcctsHash      bool
 	ParentBankhash         [32]byte
 	NumSignatures          uint64
 	Blockhash              [32]byte
@@ -496,6 +497,25 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 	}
 }
 
+func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *EpochCtx) {
+	block.ParentBankhash = snapshotManifest.Bank.Hash
+	block.ParentSlot = snapshotManifest.Bank.Slot
+	block.HasEpochAcctsHash = epochCtx.HasEpochAcctsHash
+	block.EpochAcctsHash = epochCtx.EpochAcctsHash
+	setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
+	snapshotManifest = nil
+}
+
+func configureBlock(block *Block, epochCtx *EpochCtx, lastSlotCtx *sealevel.SlotCtx) {
+	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
+	block.StakeAccts = lastSlotCtx.StakeAccts
+	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
+	block.VoteAccts = lastSlotCtx.VoteAccts
+	block.ParentSlot = lastSlotCtx.Slot
+	block.HasEpochAcctsHash = epochCtx.HasEpochAcctsHash
+	block.EpochAcctsHash = epochCtx.EpochAcctsHash
+}
+
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
 	//mlog.Log.EnableInfLogging()
 	//profileFile := installProfilerAndSignalHandler(acctsDb)
@@ -517,10 +537,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	var featuresActivatedInFirstSlot []solana.PublicKey
 
-	epochCtx := new(EpochCtx)
-	epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
-	epochCtx.Inflation = snapshotManifest.Bank.Inflation
-	epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+	epochCtx := newEpochCtx(snapshotManifest)
 
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
 	currentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
@@ -540,17 +557,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		currentSlot = block.Slot
 		if currentSlot == startSlot {
-			block.ParentBankhash = snapshotManifest.Bank.Hash
-			block.ParentSlot = snapshotManifest.Bank.Slot
-			setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
-			snapshotManifest = nil
+			configureInitialBlock(block, snapshotManifest, epochCtx)
 
 		} else {
-			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
-			block.StakeAccts = lastSlotCtx.StakeAccts
-			block.VoteTimestamps = lastSlotCtx.VoteTimestamps
-			block.VoteAccts = lastSlotCtx.VoteAccts
-			block.ParentSlot = lastSlotCtx.Slot
+			configureBlock(block, epochCtx, lastSlotCtx)
 		}
 
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
@@ -679,6 +689,19 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 	return writableAccts, modifiedAccts
 }
 
+func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
+	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
+		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
+		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
+		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
+		EpochAcctHashStopOffsetSlot: math.MaxUint64}
+
+	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
+	slotCtx.WritableAccts = make(map[solana.PublicKey]bool)
+
+	return slotCtx
+}
+
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
 	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
@@ -688,13 +711,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
-		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
-		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
-		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
-		EpochAcctHashStopOffsetSlot: math.MaxUint64}
-	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
-	slotCtx.WritableAccts = make(map[solana.PublicKey]bool)
+	slotCtx := newSlotCtx(block, accts, acctsDb)
 
 	if block.PartitionedRewardsInfo != nil {
 		slotCtx.EpochAcctHashStopOffsetSlot = block.PartitionedRewardsInfo.EahStopOffsetSlot

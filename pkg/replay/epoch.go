@@ -10,15 +10,32 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
 
 type EpochCtx struct {
-	CurrentFeatures *features.Features
-	Capitalization  uint64
-	Inflation       rewards.Inflation
-	SlotsPerYear    float64
+	CurrentFeatures   *features.Features
+	Capitalization    uint64
+	Inflation         rewards.Inflation
+	SlotsPerYear      float64
+	EpochAcctsHash    []byte
+	HasEpochAcctsHash bool
+}
+
+func newEpochCtx(snapshotManifest *snapshot.SnapshotManifest) *EpochCtx {
+	epochCtx := new(EpochCtx)
+	epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
+	epochCtx.Inflation = snapshotManifest.Bank.Inflation
+	epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+
+	if snapshotManifest.EpochAccountHash != [32]byte{} {
+		epochCtx.HasEpochAcctsHash = true
+		epochCtx.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
+	}
+
+	return epochCtx
 }
 
 func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64) *sealevel.SysvarStakeHistory {
