@@ -263,14 +263,14 @@ func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
-	bhv.Ages = make([]HashAgePair, 0, numAges)
+	//bhv.Ages = make([]HashAgePair, 0, numAges)
 	for count := uint64(0); count < numAges; count++ {
 		var age HashAgePair
 		err = age.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		bhv.Ages = append(bhv.Ages, age)
+		//bhv.Ages = append(bhv.Ages, age)
 	}
 
 	bhv.MaxAge, err = decoder.ReadUint64(bin.LE)
@@ -626,15 +626,16 @@ func (nodeVoteAccts *NodeVoteAccounts) UnmarshalWithDecoder(decoder *bin.Decoder
 		return err
 	}
 
-	nodeVoteAccts.VoteAccounts = make([]solana.PublicKey, 0, numVoteAccts)
+	//nodeVoteAccts.VoteAccounts = make([]solana.PublicKey, 0, numVoteAccts)
 	for count := uint64(0); count < numVoteAccts; count++ {
-		var pkBytes []byte
-		pkBytes, err = decoder.ReadBytes(32)
+		//var pkBytes []byte
+		/*pkBytes*/
+		_, err = decoder.ReadBytes(32)
 		if err != nil {
 			return err
 		}
-		pk := solana.PublicKeyFromBytes(pkBytes)
-		nodeVoteAccts.VoteAccounts = append(nodeVoteAccts.VoteAccounts, pk)
+		//pk := solana.PublicKeyFromBytes(pkBytes)
+		//nodeVoteAccts.VoteAccounts = append(nodeVoteAccts.VoteAccounts, pk)
 	}
 
 	nodeVoteAccts.TotalStake, err = decoder.ReadUint64(bin.LE)
@@ -694,14 +695,14 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 		return err
 	}
 
-	epochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
+	//epochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
 	for count := uint64(0); count < numAccts; count++ {
 		var pair NodeVoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		epochStakes.NodeIdToVoteAccounts = append(epochStakes.NodeIdToVoteAccounts, pair)
+		//epochStakes.NodeIdToVoteAccounts = append(epochStakes.NodeIdToVoteAccounts, pair)
 	}
 
 	var numEpochAuthVoters uint64
@@ -710,14 +711,14 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 		return err
 	}
 
-	epochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, numEpochAuthVoters)
+	//epochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, numEpochAuthVoters)
 	for count := uint64(0); count < numEpochAuthVoters; count++ {
 		var pair PubkeyPair
 		err = pair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		epochStakes.EpochAuthorizedVoters = append(epochStakes.EpochAuthorizedVoters, pair)
+		//epochStakes.EpochAuthorizedVoters = append(epochStakes.EpochAuthorizedVoters, pair)
 	}
 
 	return nil
@@ -749,14 +750,14 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
-	dsv.Ancestors = make([]SlotPair, 0, numAncestors)
+	//dsv.Ancestors = make([]SlotPair, 0, numAncestors)
 	for count := uint64(0); count < numAncestors; count++ {
 		var ancestor SlotPair
 		err = ancestor.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		dsv.Ancestors = append(dsv.Ancestors, ancestor)
+		//dsv.Ancestors = append(dsv.Ancestors, ancestor)
 	}
 
 	var hash []byte
@@ -783,14 +784,14 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
-	dsv.HardForks = make([]SlotPair, 0, numHardForks)
+	//dsv.HardForks = make([]SlotPair, 0, numHardForks)
 	for count := uint64(0); count < numHardForks; count++ {
 		var hardFork SlotPair
 		err = hardFork.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		dsv.HardForks = append(dsv.HardForks, hardFork)
+		//dsv.HardForks = append(dsv.HardForks, hardFork)
 	}
 
 	dsv.TransactionCount, err = decoder.ReadUint64(bin.LE)
@@ -931,14 +932,14 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 		return err
 	}
 
-	dsv.EpochStakes = make([]EpochStakesPair, 0, numEpochStakes)
+	//dsv.EpochStakes = make([]EpochStakesPair, 0, numEpochStakes)
 	for count := uint64(0); count < numEpochStakes; count++ {
 		var epochStakesPair EpochStakesPair
 		err = epochStakesPair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		dsv.EpochStakes = append(dsv.EpochStakes, epochStakesPair)
+		//dsv.EpochStakes = append(dsv.EpochStakes, epochStakesPair)
 	}
 
 	dsv.IsDelta, err = decoder.ReadBool()
@@ -1128,15 +1129,16 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		return nil
 	}
 
-	acctDbFields.HistoricalRoots = make([]uint64, 0, numHistoricalRoots)
+	//acctDbFields.HistoricalRoots = make([]uint64, 0, numHistoricalRoots)
 	for count := uint64(0); count < numHistoricalRoots; count++ {
-		var historicalRoot uint64
-		historicalRoot, err = decoder.ReadUint64(bin.LE)
+		//var historicalRoot uint64
+		/*historicalRoot*/
+		_, err = decoder.ReadUint64(bin.LE)
 		if err != nil {
 			util.VerboseHandleError(err)
 			return nil
 		}
-		acctDbFields.HistoricalRoots = append(acctDbFields.HistoricalRoots, historicalRoot)
+		//acctDbFields.HistoricalRoots = append(acctDbFields.HistoricalRoots, historicalRoot)
 	}
 
 	var numHistoricalRootsWithHash uint64
@@ -1146,7 +1148,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		return nil
 	}
 
-	acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0)
+	//acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0)
 	for count := uint64(0); count < numHistoricalRootsWithHash; count++ {
 		var pair SlotMapPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -1154,7 +1156,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 			util.VerboseHandleError(err)
 			return nil
 		}
-		acctDbFields.HistoricalRootsWithHash = append(acctDbFields.HistoricalRootsWithHash, pair)
+		//acctDbFields.HistoricalRootsWithHash = append(acctDbFields.HistoricalRootsWithHash, pair)
 	}
 
 	return nil
@@ -1202,14 +1204,14 @@ func (startBlockHeightAndRewards *StartBlockHeightAndRewards) UnmarshalWithDecod
 		return err
 	}
 
-	startBlockHeightAndRewards.StakeRewardsByPartition = make([]SerializableStakeRewards, 0, numStakeRewardsByPartition)
+	//startBlockHeightAndRewards.StakeRewardsByPartition = make([]SerializableStakeRewards, 0, numStakeRewardsByPartition)
 	for count := uint64(0); count < numStakeRewardsByPartition; count++ {
 		var stakeRewards SerializableStakeRewards
 		err = stakeRewards.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		startBlockHeightAndRewards.StakeRewardsByPartition = append(startBlockHeightAndRewards.StakeRewardsByPartition, stakeRewards)
+		//startBlockHeightAndRewards.StakeRewardsByPartition = append(startBlockHeightAndRewards.StakeRewardsByPartition, stakeRewards)
 	}
 
 	return nil

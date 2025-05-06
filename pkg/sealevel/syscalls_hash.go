@@ -268,6 +268,7 @@ func SwapEndianness(xs []byte) []byte {
 }
 
 func PoseidonHash(input [][]byte, isBigEndian bool) ([]byte, error) {
+	mlog.Log.Debugf("PoseidonHash: len(input) = %d, isBigEndian = %t", len(input), isBigEndian)
 	inputBigInts := make([]*big.Int, 0, len(input))
 
 	for _, inputSlice := range input {

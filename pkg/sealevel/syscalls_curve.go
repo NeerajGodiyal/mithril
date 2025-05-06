@@ -843,17 +843,16 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
 
-	paddedInput := make([]byte, expectedLen)
+	paddedInput := make([]byte, 96)
 	copy(paddedInput, input)
-	input = paddedInput
 
 	point := new(bn256.G1)
-	_, err := point.Unmarshal(input[:64])
+	_, err := point.Unmarshal(paddedInput[:64])
 	if err != nil {
 		return nil, err
 	}
 
-	scalar := new(big.Int).SetBytes(input[64:96])
+	scalar := new(big.Int).SetBytes(paddedInput[64:96])
 	resultPoint := new(bn256.G1)
 	resultPoint.ScalarMult(point, scalar)
 	resultBytes := resultPoint.Marshal()

@@ -531,7 +531,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var justCrossedEpochBoundary bool
 
 	streamChan := make(chan *Block, endSlot-startSlot)
-	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, 1000)
+	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, 2000)
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 
@@ -543,6 +543,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			block.ParentBankhash = snapshotManifest.Bank.Hash
 			block.ParentSlot = snapshotManifest.Bank.Slot
 			setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
+			snapshotManifest = nil
 
 		} else {
 			copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
@@ -578,19 +579,19 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 			if startSlot > partitionedRewardsInfo.EahStartOffsetSlot {
 				partitionedRewardsInfo.StartedAfterStartOffsetSlot = true
-				partitionedRewardsInfo.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
+				//partitionedRewardsInfo.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
 			}
 		}
 
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
-		if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
+		/*if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
 			// calculate accounts hash for *all* on-chain accounts
 			partitionedRewardsInfo.EahStartOffsetSlot = math.MaxUint64
 			partitionedRewardsInfo.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
 			mlog.Log.Infof("epoch accts hash: %s", base58.Encode(partitionedRewardsInfo.EpochAcctsHash))
-		}
+		}*/
 
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, epochCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
@@ -671,7 +672,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
-		txFeeInfo, wpks, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
+		txFeeInfo, writable, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
 			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
@@ -683,7 +684,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 			mlog.Log.Infof("tx %s return value divergence: txErr was %+v, but onchain err was nil", tx.Signatures[0], txErr)
 		}
 
-		for _, pk := range wpks {
+		for _, pk := range writable {
 			acctIsWritable[pk] = true
 		}
 
