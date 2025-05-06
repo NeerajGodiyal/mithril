@@ -197,7 +197,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 			if err != nil {
 				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
 			}
-			slotCtx.ModifiedAccts[newAcctState.Key] = true
+			slotCtx.RecordModifiedAcct(newAcctState.Key)
 			mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
 		}
 	}
@@ -314,7 +314,7 @@ func handleDurableNonceIfEligibleFailedTx(instrs []sealevel.Instruction, tx *sol
 	return solana.PublicKey{}, false
 }
 
-func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, []solana.PublicKey, error) {
+func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, error) {
 	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
@@ -324,7 +324,7 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	}
 
 	if txFeeInfo.TotalFee > p.Lamports {
-		return nil, nil, sealevel.InstrErrInsufficientFunds
+		return nil, sealevel.InstrErrInsufficientFunds
 	}
 
 	p.Lamports -= txFeeInfo.TotalFee
@@ -332,23 +332,20 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	if err != nil {
 		panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
 	}
-	slotCtx.ModifiedAccts[payerAcctKey] = true
-
-	writableAcctsForFailedTx := make([]solana.PublicKey, 0, 2)
-	writableAcctsForFailedTx = append(writableAcctsForFailedTx, payerAcctKey)
+	slotCtx.RecordModifiedAcct(payerAcctKey)
 
 	if len(instrs) >= 1 {
 		instr := instrs[0]
 		noncePubkey, advancedNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
 		if advancedNonceAcct {
-			writableAcctsForFailedTx = append(writableAcctsForFailedTx, noncePubkey)
+			slotCtx.RecordModifiedAcct(noncePubkey)
 		}
 	}
 
-	return txFeeInfo, writableAcctsForFailedTx, fmt.Errorf("%s", txMeta.Err)
+	return txFeeInfo, fmt.Errorf("%s", txMeta.Err)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, []solana.PublicKey, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, error) {
 	/*err := tx.VerifySignatures()
 	if err != nil {
 		return NewTxErrInvalidSignature(err.Error())
@@ -356,12 +353,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// fast path for failed tx's
@@ -371,12 +368,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var log sealevel.LogRecorder
@@ -402,7 +399,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	txFeeInfo, payerNewLamports, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
-		return txFeeInfo, nil, nil
+		return txFeeInfo, nil
 	}
 
 	// check for fee divergences
@@ -424,7 +421,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	for instrIdx, instr := range tx.Message.Instructions {
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
-			return txFeeInfo, nil, err
+			return txFeeInfo, err
 		}
 
 		acctMetas := acctMetasPerInstr[instrIdx]
@@ -434,6 +431,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		if err == nil {
 			for _, am := range acctMetas {
 				if am.IsWritable {
+					slotCtx.RecordWritableAcct(am.Pubkey)
 					writablePubkeys = append(writablePubkeys, am.Pubkey)
 				}
 			}
@@ -451,6 +449,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	for _, txAcctMeta := range txAcctMetas {
 		if isWritable(tx, txAcctMeta, &execCtx.GlobalCtx.Features) {
+			slotCtx.RecordWritableAcct(txAcctMeta.PublicKey)
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
 		}
 	}
@@ -515,15 +514,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
 		}
 
-		slotCtx.ModifiedAccts[payerAcct.Key] = true
+		slotCtx.RecordModifiedAcct(payerAcct.Key)
 		execCtx.TransactionContext.Accounts.Unlock(0)
-
-		writableAcctsForFailedTx := make([]solana.PublicKey, 0)
-		writableAcctsForFailedTx = append(writableAcctsForFailedTx, payerAcct.Key)
 
 		noncePubkey, isEligibleDurableTx := handleDurableNonceIfEligibleFailedTx(instrs, tx, execCtx, slotCtx)
 		if isEligibleDurableTx {
-			writableAcctsForFailedTx = append(writableAcctsForFailedTx, noncePubkey)
+			slotCtx.RecordModifiedAcct(noncePubkey)
 		}
 
 		var txErr error
@@ -533,12 +529,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			txErr = instrErr
 		}
 
-		return txFeeInfo, writableAcctsForFailedTx, fmt.Errorf("tx err: %s", txErr)
+		return txFeeInfo, fmt.Errorf("tx err: %s", txErr)
 	}
 
 	handleModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
 
-	return txFeeInfo, writablePubkeys, nil
+	return txFeeInfo, nil
 }

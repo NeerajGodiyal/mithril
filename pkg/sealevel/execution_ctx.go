@@ -35,6 +35,7 @@ type SlotCtx struct {
 	Epoch                       uint64
 	LamportsPerSignature        uint64
 	ModifiedAccts               map[solana.PublicKey]bool
+	WritableAccts               map[solana.PublicKey]bool
 	Blockhash                   [32]byte
 	LastBlockhash               [32]byte
 	SlotBank                    SlotBank
@@ -340,5 +341,11 @@ func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Accou
 	return err
 }
 
-func (slotCtx *SlotCtx) SetupSysvarCache(slot uint64) {
+func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
+	slotCtx.WritableAccts[pubkey] = true
+	slotCtx.ModifiedAccts[pubkey] = true
+}
+
+func (slotCtx *SlotCtx) RecordWritableAcct(pubkey solana.PublicKey) {
+	slotCtx.WritableAccts[pubkey] = true
 }

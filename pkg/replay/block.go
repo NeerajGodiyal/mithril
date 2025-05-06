@@ -645,6 +645,40 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 	slotCtx.LamportsBurnt += incineratorAcct.Lamports
 }
 
+func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
+	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
+	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
+
+	for pk := range slotCtx.WritableAccts {
+		acct, _ := slotCtx.GetAccount(pk)
+		writableAccts = append(writableAccts, acct)
+	}
+
+	for pk := range slotCtx.ModifiedAccts {
+		acct, _ := slotCtx.GetAccount(pk)
+		modifiedAccts = append(modifiedAccts, acct)
+	}
+
+	for _, pk := range block.UpdatedAccts {
+		//mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
+		acct, err := slotCtx.GetAccount(pk)
+		if err != nil {
+			panic(fmt.Sprintf("unable to fetch %s from accountsdb for inclusion in bankhash", pk))
+		}
+		writableAccts = append(writableAccts, acct)
+		modifiedAccts = append(modifiedAccts, acct)
+	}
+
+	writableAccts = append(writableAccts, rentAccts...)
+	modifiedAccts = append(modifiedAccts, rentAccts...)
+
+	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
+	writableAccts = append(writableAccts, sysvarAccts...)
+	modifiedAccts = append(modifiedAccts, sysvarAccts...)
+
+	return writableAccts, modifiedAccts
+}
+
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
 	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
@@ -660,19 +694,20 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
 		EpochAcctHashStopOffsetSlot: math.MaxUint64}
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
+	slotCtx.WritableAccts = make(map[solana.PublicKey]bool)
 
 	if block.PartitionedRewardsInfo != nil {
 		slotCtx.EpochAcctHashStopOffsetSlot = block.PartitionedRewardsInfo.EahStopOffsetSlot
 		slotCtx.EpochsAcctHash = block.PartitionedRewardsInfo.EpochAcctsHash
 	}
 
-	acctIsWritable := make(map[solana.PublicKey]bool)
+	//acctIsWritable := make(map[solana.PublicKey]bool)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
-		txFeeInfo, writable, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
 			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
@@ -684,17 +719,13 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 			mlog.Log.Infof("tx %s return value divergence: txErr was %+v, but onchain err was nil", tx.Signatures[0], txErr)
 		}
 
-		for _, pk := range writable {
-			acctIsWritable[pk] = true
-		}
-
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 
 	if block.BlockReward != nil {
 		// distribute tx fees to the slot leader
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
-		acctIsWritable[block.BlockReward.Leader] = true
+		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
 		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
 
@@ -704,39 +735,19 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	runIncinerator(slotCtx)
 
-	eligibleAccts := make([]*accounts.Account, 0, len(acctIsWritable)+len(block.UpdatedAccts)+len(rentAccts)+4)
-	for pk := range acctIsWritable {
-		acct, _ := slotCtx.GetAccount(pk)
-		eligibleAccts = append(eligibleAccts, acct)
-	}
+	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 
-	for _, pk := range block.UpdatedAccts {
-		mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
-		acct, err := slotCtx.GetAccount(pk)
-		if err != nil {
-			panic(fmt.Sprintf("unable to fetch %s from accountsdb for inclusion in bankhash", pk))
-		}
-		eligibleAccts = append(eligibleAccts, acct)
-	}
-
-	eligibleAccts = append(eligibleAccts, rentAccts...)
-	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
-	eligibleAccts = append(eligibleAccts, sysvarAccts...)
-
-	if len(eligibleAccts) > 0 && updateAcctsDb {
+	if len(modifiedAccts) > 0 && updateAcctsDb {
 		mlog.Log.Debugf("updating accountsdb")
-		err = acctsDb.StoreAccounts(eligibleAccts, slotCtx.Slot)
-		for _, acctToStore := range eligibleAccts {
-			mlog.Log.Debugf("updated account: %s\n", util.PrettyPrintAcct(acctToStore))
-		}
+		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 	} else {
 		mlog.Log.Debugf("accountsdb not updated")
 	}
 
-	mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(eligibleAccts), len(rentAccts))
+	mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
 	// calculate ADH and bankhash
-	acctDeltaHash := calculateAcctsDeltaHash(eligibleAccts)
+	acctDeltaHash := calculateAcctsDeltaHash(writableAccts)
 	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 
 	return slotCtx, err
