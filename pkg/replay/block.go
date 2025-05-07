@@ -498,7 +498,7 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 	}
 }
 
-func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *EpochCtx) {
+func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
@@ -506,7 +506,7 @@ func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotMani
 	snapshotManifest = nil
 }
 
-func configureBlock(block *Block, epochCtx *EpochCtx, lastSlotCtx *sealevel.SlotCtx) {
+func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.StakeAccts = lastSlotCtx.StakeAccts
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
@@ -523,17 +523,16 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var err error
 	var currentSlot uint64
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
-	var currentFeatures *features.Features
 	var lastSlotCtx *sealevel.SlotCtx
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	var featuresActivatedInFirstSlot []solana.PublicKey
 
-	epochCtx := newEpochCtx(snapshotManifest)
+	replayCtx := newReplayCtx(snapshotManifest)
 
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
-	currentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
-	partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
+	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
+	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	var statsCounter uint64
 	var timeAccumulator float64
@@ -549,10 +548,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		currentSlot = block.Slot
 		if currentSlot == startSlot {
-			configureInitialBlock(block, snapshotManifest, epochCtx)
+			configureInitialBlock(block, snapshotManifest, replayCtx)
 
 		} else {
-			configureBlock(block, epochCtx, lastSlotCtx)
+			configureBlock(block, replayCtx, lastSlotCtx)
 		}
 
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
@@ -562,11 +561,11 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			mlog.Log.Infof("epoch boundary")
 
 			var newlyActivatedFeatures []solana.PublicKey
-			currentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
-			partitionedEpochRewardsEnabled = currentFeatures.IsActive(features.EnablePartitionedEpochReward) || currentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
+			replayCtx.CurrentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
+			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 			var updatedPks []solana.PublicKey
-			partitionedRewardsInfo, updatedPks = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, epochCtx, epochSchedule, currentFeatures, block, currentEpoch)
+			partitionedRewardsInfo, updatedPks, block.VoteAccts = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			if partitionedEpochRewardsEnabled {
 				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
 			}
@@ -574,17 +573,17 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
-			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, epochCtx.SlotsPerYear, currentFeatures)
+			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &replayCtx.Inflation, replayCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, replayCtx.SlotsPerYear, replayCtx.CurrentFeatures)
 			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, epochSchedule, startSlot, currentEpoch, currentFeatures)
+				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, epochSchedule, startSlot, currentEpoch, replayCtx.CurrentFeatures)
 			}
 		}
 
-		block.Features = currentFeatures
+		block.Features = replayCtx.CurrentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, epochCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
+			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
 			block.UpdatedAccts = append(block.UpdatedAccts, rewardPks...)
 		}
 
@@ -595,8 +594,8 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 
 		// workaround for skipping the soon-to-be obsolete EAH
 		if block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
-			if epochCtx.HasEpochAcctsHash {
-				block.EpochAcctsHash = epochCtx.EpochAcctsHash
+			if replayCtx.HasEpochAcctsHash {
+				block.EpochAcctsHash = replayCtx.EpochAcctsHash
 			} else {
 				block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
 				if err != nil {
@@ -613,7 +612,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		} else {
 			mlog.Log.Debugf("block replayed successfully.\n")
 		}
-		epochCtx.Capitalization -= lastSlotCtx.LamportsBurnt
+		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
 		slotReplayTime := time.Since(start).Seconds()
 		mlog.Log.Infof("replayed slot %d - bankhash: %s  (slot replay time: %fs)", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash), slotReplayTime)

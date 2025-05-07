@@ -57,7 +57,7 @@ func calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo 
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewardsDuringRewardsWindow(acctsDb, block.StakeAccts, &stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, f)
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *EpochCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, block *Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, block *Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
 	rewardPks, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 
@@ -106,7 +106,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	return partitionedRewardsInfo, rewardPks
 }
 
-func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *EpochCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64, lastRewardsDistributionSlot uint64) []solana.PublicKey {
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64, lastRewardsDistributionSlot uint64) []solana.PublicKey {
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
 		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
