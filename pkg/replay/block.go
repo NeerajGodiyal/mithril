@@ -40,7 +40,8 @@ type Block struct {
 	Transactions           []*solana.Transaction
 	BankHash               [32]byte
 	EpochAcctsHash         []byte
-	HasEpochAcctsHash      bool
+	EahWorkaroundBankhash  []byte
+	HasEahWorkaround       bool
 	ParentBankhash         [32]byte
 	NumSignatures          uint64
 	Blockhash              [32]byte
@@ -500,7 +501,6 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *EpochCtx) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
-	block.HasEpochAcctsHash = epochCtx.HasEpochAcctsHash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 	setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
 	snapshotManifest = nil
@@ -512,20 +512,12 @@ func configureBlock(block *Block, epochCtx *EpochCtx, lastSlotCtx *sealevel.Slot
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
 	block.VoteAccts = lastSlotCtx.VoteAccts
 	block.ParentSlot = lastSlotCtx.Slot
-	block.HasEpochAcctsHash = epochCtx.HasEpochAcctsHash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
 func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
-	//mlog.Log.EnableInfLogging()
-	//profileFile := installProfilerAndSignalHandler(acctsDb)
-	//debug.SetMemoryLimit(200000000000)
-	//debug.SetGCPercent(-1)
-
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
-
 	cacheConstantSysvars(acctsDb)
-
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
 	var err error
@@ -586,22 +578,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, epochSchedule, startSlot, currentEpoch, currentFeatures)
 			}
-
-			if startSlot > partitionedRewardsInfo.EahStartOffsetSlot {
-				partitionedRewardsInfo.StartedAfterStartOffsetSlot = true
-				//partitionedRewardsInfo.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
-			}
 		}
 
 		block.Features = currentFeatures
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
-
-		/*if partitionedEpochRewardsEnabled && currentSlot == partitionedRewardsInfo.EahStartOffsetSlot {
-			// calculate accounts hash for *all* on-chain accounts
-			partitionedRewardsInfo.EahStartOffsetSlot = math.MaxUint64
-			partitionedRewardsInfo.EpochAcctsHash = calculateEpochAcctsHash(acctsDb)
-			mlog.Log.Infof("epoch accts hash: %s", base58.Encode(partitionedRewardsInfo.EpochAcctsHash))
-		}*/
 
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, epochCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
@@ -611,6 +591,19 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		if len(featuresActivatedInFirstSlot) != 0 {
 			block.UpdatedAccts = append(block.UpdatedAccts, featuresActivatedInFirstSlot...)
 			featuresActivatedInFirstSlot = make([]solana.PublicKey, 0)
+		}
+
+		// workaround for skipping the soon-to-be obsolete EAH
+		if block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
+			if epochCtx.HasEpochAcctsHash {
+				block.EpochAcctsHash = epochCtx.EpochAcctsHash
+			} else {
+				block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
+				if err != nil {
+					panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+				}
+				block.HasEahWorkaround = true
+			}
 		}
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
@@ -638,9 +631,6 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			justCrossedEpochBoundary = false
 		}
 	}
-
-	//pprof.StopCPUProfile()
-	//profileFile.Close()
 
 	return nil
 }
@@ -694,7 +684,8 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
 		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
 		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
-		EpochAcctHashStopOffsetSlot: math.MaxUint64}
+		EpochsAcctHash: block.EpochAcctsHash, EahWorkaroundBankhash: block.EahWorkaroundBankhash,
+		HasEahWorkaround: block.HasEahWorkaround}
 
 	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
 	slotCtx.WritableAccts = make(map[solana.PublicKey]bool)
@@ -712,13 +703,6 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	slotCtx := newSlotCtx(block, accts, acctsDb)
-
-	if block.PartitionedRewardsInfo != nil {
-		slotCtx.EpochAcctHashStopOffsetSlot = block.PartitionedRewardsInfo.EahStopOffsetSlot
-		slotCtx.EpochsAcctHash = block.PartitionedRewardsInfo.EpochAcctsHash
-	}
-
-	//acctIsWritable := make(map[solana.PublicKey]bool)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 
 	// process & execute each transaction in turn
@@ -748,12 +732,11 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
-
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
+
 	runIncinerator(slotCtx)
 
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
-
 	if len(modifiedAccts) > 0 && updateAcctsDb {
 		mlog.Log.Debugf("updating accountsdb")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
@@ -762,6 +745,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
+
+	// EAH workaround
+	if slotCtx.HasEahWorkaround {
+		slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
+		return slotCtx, err
+	}
 
 	// calculate ADH and bankhash
 	acctDeltaHash := calculateAcctsDeltaHash(writableAccts)

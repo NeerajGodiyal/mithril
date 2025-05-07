@@ -28,27 +28,28 @@ type SlotBank struct {
 }
 
 type SlotCtx struct {
-	Accounts                    accounts.Accounts
-	AccountsDb                  *accountsdb.AccountsDb
-	Slot                        uint64
-	ParentSlot                  uint64
-	Epoch                       uint64
-	LamportsPerSignature        uint64
-	ModifiedAccts               map[solana.PublicKey]bool
-	WritableAccts               map[solana.PublicKey]bool
-	Blockhash                   [32]byte
-	LastBlockhash               [32]byte
-	SlotBank                    SlotBank
-	Features                    *features.Features
-	VoteTimestamps              map[solana.PublicKey]BlockTimestamp
-	StakeAccts                  map[solana.PublicKey]bool
-	VoteAccts                   map[solana.PublicKey]uint64
-	TotalEpochStake             uint64
-	FinalBankhash               []byte
-	EpochsAcctHash              []byte
-	EpochAcctHashStopOffsetSlot uint64
-	Replay                      bool
-	LamportsBurnt               uint64
+	Accounts              accounts.Accounts
+	AccountsDb            *accountsdb.AccountsDb
+	Slot                  uint64
+	ParentSlot            uint64
+	Epoch                 uint64
+	LamportsPerSignature  uint64
+	ModifiedAccts         map[solana.PublicKey]bool
+	WritableAccts         map[solana.PublicKey]bool
+	Blockhash             [32]byte
+	LastBlockhash         [32]byte
+	SlotBank              SlotBank
+	Features              *features.Features
+	VoteTimestamps        map[solana.PublicKey]BlockTimestamp
+	StakeAccts            map[solana.PublicKey]bool
+	VoteAccts             map[solana.PublicKey]uint64
+	TotalEpochStake       uint64
+	FinalBankhash         []byte
+	EpochsAcctHash        []byte
+	Replay                bool
+	LamportsBurnt         uint64
+	EahWorkaroundBankhash []byte
+	HasEahWorkaround      bool
 }
 
 func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana.PublicKey) ([]InstructionAccount, []uint64, error) {

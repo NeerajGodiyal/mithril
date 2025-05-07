@@ -9,9 +9,12 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/zeebo/blake3"
 )
 
@@ -247,4 +250,91 @@ func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentB
 	}
 
 	return bankHash
+}
+
+var maxBlockfetchAttempts = 10
+
+func fetchBankhashForSlot(rpcc *rpcclient.RpcClient, slot uint64) ([]byte, error) {
+	var blockResult *rpc.GetBlockResult
+	var err error
+	var errCount uint64
+
+	slotToFetch := slot + 1
+	for {
+		blockResult, err = rpcc.GetBlockFinalized(uint64(slotToFetch))
+		if err == nil {
+			break
+		} else if err == rpcclient.SlotSkipped {
+			slotToFetch++
+		} else {
+			if errCount == 10 {
+				return nil, fmt.Errorf("unable to get block: %s", err)
+			}
+			errCount++
+		}
+	}
+
+	block, err := newBlockFromBlockResult(blockResult)
+	if err != nil {
+		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))
+	}
+
+	var count uint64
+	for _, tx := range block.Transactions {
+		if tx.IsVote() {
+
+			// skip first 400 votes. most of the first load of votes in a slot usually pertain to two slots back rather than
+			// the most recent parent slot.
+			count++
+			if count < 400 {
+				continue
+			}
+
+			if len(tx.Message.Instructions) < 1 {
+				continue
+			}
+
+			instrData := tx.Message.Instructions[0].Data
+			decoder := bin.NewBinDecoder(instrData)
+			instructionType, err := decoder.ReadUint32(bin.LE)
+			if err != nil {
+				continue
+			}
+
+			if instructionType != sealevel.VoteProgramInstrTypeTowerSync && instructionType != sealevel.VoteProgramInstrTypeTowerSyncSwitch {
+				continue
+			}
+
+			var towerSyncInstr *sealevel.VoteInstrTowerSync
+
+			if instructionType == sealevel.VoteProgramInstrTypeTowerSync {
+				var vote sealevel.VoteInstrTowerSync
+				err = vote.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					continue
+				}
+				towerSyncInstr = &vote
+
+			} else if instructionType == sealevel.VoteProgramInstrTypeTowerSyncSwitch {
+				var vote sealevel.VoteInstrTowerSyncSwitch
+				err = vote.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					continue
+				}
+				towerSyncInstr = &vote.TowerSync
+			}
+
+			lockoutsLen := towerSyncInstr.Lockouts.Len()
+			if lockoutsLen == 0 {
+				continue
+			}
+
+			lockout := towerSyncInstr.Lockouts.PopBack()
+			if lockout.Slot == slot {
+				return towerSyncInstr.Hash[:], nil
+			}
+		}
+	}
+
+	panic("unable to find a vote for the relevant slot")
 }

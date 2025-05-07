@@ -28,17 +28,15 @@ const (
 )
 
 type PartitionedRewardDistributionInfo struct {
-	TotalStakingRewards         uint64
-	FirstStakingRewardSlot      uint64
-	LastStakingRewardSlot       uint64
-	EahStartOffsetSlot          uint64
-	EahStopOffsetSlot           uint64
-	NumRewardPartitions         uint64
-	StartedAfterStartOffsetSlot bool
-	Credits                     map[solana.PublicKey]CalculatedStakePoints
-	RewardPartitions            map[uint64][]solana.PublicKey
-	StakingRewards              map[solana.PublicKey]*CalculatedStakeRewards
-	EpochAcctsHash              []byte
+	TotalStakingRewards    uint64
+	FirstStakingRewardSlot uint64
+	LastStakingRewardSlot  uint64
+	EahStartOffsetSlot     uint64
+	EahStopOffsetSlot      uint64
+	NumRewardPartitions    uint64
+	Credits                map[solana.PublicKey]CalculatedStakePoints
+	RewardPartitions       map[uint64][]solana.PublicKey
+	StakingRewards         map[solana.PublicKey]*CalculatedStakeRewards
 }
 
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
