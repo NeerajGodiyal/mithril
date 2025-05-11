@@ -61,6 +61,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	}
 
 	largestFileId := binary.LittleEndian.Uint64(largestFileIdBytes)
+	mlog.Log.Infof("accountsdb.OpenDb: largestFileId=%d", largestFileId)
 
 	bankHashFn := fmt.Sprintf("%s/bank_hash", accountsDbDir)
 	bhf, err := os.Open(bankHashFn)
@@ -78,6 +79,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		mlog.Log.Infof("error reading %s: expected 8 bytes, got %d\n", bankHashFn, bytesRead)
 		return nil, fmt.Errorf("only got %d bytes", bytesRead)
 	}
+	mlog.Log.Infof("accountsdb.OpenDb: bankHashBytes=%x", bankHashBytes)
 
 	// attempt to open the index kv store
 	indexDir := fmt.Sprintf("%s/index", accountsDbDir)
@@ -86,6 +88,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		mlog.Log.Infof("failed to open database: %s\n", err)
 		return nil, err
 	}
+	mlog.Log.Infof("accountsdb.OpenDb: done opening indexDir=%s", indexDir)
 
 	accountsDb := &AccountsDb{IndexDb: db, AcctsDir: appendVecsDir, IndexDir: indexDir}
 	accountsDb.LargestFileId.Store(largestFileId)

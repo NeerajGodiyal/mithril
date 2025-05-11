@@ -82,4 +82,5 @@ func (blockStream *blockStream) startAsyncBlockStream() {
 			blockStream.streamChan <- newBlock
 		}
 	}
+	close(blockStream.streamChan)
 }
