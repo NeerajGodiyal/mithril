@@ -32,6 +32,7 @@ var (
 	startSlot          int64
 	endSlot            int64
 	pprofPort          int64
+	blockDir           string
 )
 
 func init() {
@@ -44,6 +45,7 @@ func init() {
 	Cmd.Flags().Int64VarP(&startSlot, "startslot", "b", -1, "Block at which to begin replaying")
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
 	Cmd.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
+	Cmd.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
 }
 
 func run(c *cobra.Command, args []string) {
@@ -139,7 +141,7 @@ func run(c *cobra.Command, args []string) {
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb)
+	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

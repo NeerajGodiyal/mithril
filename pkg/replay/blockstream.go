@@ -1,10 +1,15 @@
 package replay
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
+	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -16,6 +21,10 @@ type blockStream struct {
 	currentSlot       uint64
 	totalSlotsToFetch uint64
 	numInitialSlots   uint64
+	// A directory containing files named SLOT.json that have
+	// JSON marshaled *rpc.BlockResult in them. If nonempty,
+	// will check for blocks here before using RPC.
+	blockDir string
 }
 
 type blockStreamTaskInfo struct {
@@ -23,19 +32,56 @@ type blockStreamTaskInfo struct {
 	idx  uint64
 }
 
-func NewBlockStream(rpcClient *rpcclient.RpcClient, streamChan chan *Block, startSlot, endSlot uint64, numInitialSlots uint64) *blockStream {
-	return &blockStream{rpcClient: rpcClient, streamChan: streamChan, totalSlotsToFetch: endSlot - startSlot,
-		currentSlot: startSlot, startSlot: startSlot, endSlot: endSlot, numInitialSlots: min(numInitialSlots, endSlot-startSlot)}
+func NewBlockStream(rpcClient *rpcclient.RpcClient, streamChan chan *Block, startSlot, endSlot uint64, numInitialSlots uint64, blockDir string) *blockStream {
+	return &blockStream{
+		rpcClient:         rpcClient,
+		streamChan:        streamChan,
+		totalSlotsToFetch: endSlot - startSlot,
+		currentSlot:       startSlot,
+		startSlot:         startSlot,
+		endSlot:           endSlot,
+		numInitialSlots:   min(numInitialSlots, endSlot-startSlot),
+		blockDir:          blockDir,
+	}
+}
+
+func (blockStream *blockStream) tryGetBlockResultFromFile(slot uint64) (*rpc.GetBlockResult, error) {
+	if blockStream.blockDir == "" {
+		return nil, fmt.Errorf("no block directory specified")
+	}
+	blockFilename := filepath.Join(filepath.Clean(blockStream.blockDir), fmt.Sprintf("%d.json", slot))
+	file, err := os.Open(blockFilename)
+	if err != nil {
+		return nil, fmt.Errorf("error opening blockFilename=%s: %w", blockFilename, err)
+	}
+	defer file.Close()
+
+	// Create a decoder
+	decoder := json.NewDecoder(file)
+
+	out := &rpc.GetBlockResult{}
+	// Decode JSON into target
+	err = decoder.Decode(out)
+	if err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	return out, nil
 }
 
 func (blockStream *blockStream) fetchAndParseBlock(slot uint64) *Block {
-	blockResult, err := blockStream.rpcClient.GetBlockFinalized(uint64(slot))
-	if err == rpcclient.SlotSkipped {
-		return nil
-	} else if err != nil {
-		panic(fmt.Sprintf("error fetching block: %s\n", err))
+	var blockResult *rpc.GetBlockResult
+	var err error
+	blockResult, err = blockStream.tryGetBlockResultFromFile(slot)
+	if err != nil {
+		mlog.Log.Errorf("block cache miss for slot=%d: %v", slot, err)
+		blockResult, err = blockStream.rpcClient.GetBlockFinalized(uint64(slot))
+		if err == rpcclient.SlotSkipped {
+			return nil
+		} else if err != nil {
+			panic(fmt.Sprintf("error fetching block: %s\n", err))
+		}
 	}
-
 	block, err := newBlockFromBlockResult(blockResult)
 	if err != nil {
 		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))

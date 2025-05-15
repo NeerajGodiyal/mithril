@@ -516,7 +516,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -539,8 +539,9 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	var timeAccumulator float64
 	var justCrossedEpochBoundary bool
 
-	streamChan := make(chan *Block, endSlot-startSlot)
-	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, 2000)
+	blockBuffer := 25
+	streamChan := make(chan *Block, blockBuffer)
+	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 
