@@ -295,11 +295,13 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	return txFeeInfo, fmt.Errorf("%s", txMeta.Err)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, error) {
-	/*err := tx.VerifySignatures()
-	if err != nil {
-		return NewTxErrInvalidSignature(err.Error())
-	}*/
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, enableSigverify bool) (*fees.TxFeeInfo, error) {
+	if enableSigverify {
+		err := tx.VerifySignatures()
+		if err != nil {
+			return nil, NewTxErrInvalidSignature(err.Error())
+		}
+	}
 
 	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
