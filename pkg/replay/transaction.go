@@ -295,13 +295,15 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	return txFeeInfo, fmt.Errorf("%s", txMeta.Err)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, enableSigverify bool) (*fees.TxFeeInfo, error) {
-	if enableSigverify {
-		err := tx.VerifySignatures()
-		if err != nil {
-			return nil, NewTxErrInvalidSignature(err.Error())
-		}
+func verifySignatures(tx *solana.Transaction) {
+	err := tx.VerifySignatures()
+	if err != nil {
+		panic(fmt.Sprintf("error - tx %s had an invalid signature", tx.Signatures[0]))
 	}
+}
+
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, error) {
+	go verifySignatures(tx)
 
 	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {

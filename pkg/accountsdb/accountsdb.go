@@ -132,6 +132,10 @@ func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program
 	accountsDb.ProgramCache.Set(pubkey, program)
 }
 
+func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
+	accountsDb.ProgramCache.Delete(pubkey)
+}
+
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {

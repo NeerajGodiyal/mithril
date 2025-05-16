@@ -420,6 +420,7 @@ func processVerifyProof(execCtx *ExecutionCtx) error {
 	instrData := instrCtx.Data
 	instrType := instrCtx.Data[0]
 	proofDataLen := proofLens[instrType]
+	contextLen := ctxObjLens[instrType]
 
 	zkDispatchFn := getZkVerificationFn(instrType)
 
@@ -453,6 +454,45 @@ func processVerifyProof(execCtx *ExecutionCtx) error {
 	}
 
 	err = zkDispatchFn(proofData)
+
+	if instrCtx.NumberOfInstructionAccounts() > numAccessedAccts {
+		contextStateAuthorityAcct, err := instrCtx.BorrowInstructionAccount(txCtx, numAccessedAccts+1)
+		if err != nil {
+			return err
+		}
+		contextStateAuthorityPubkey := contextStateAuthorityAcct.Key()
+
+		proofContextAcct, err := instrCtx.BorrowInstructionAccount(txCtx, numAccessedAccts)
+		if err != nil {
+			return err
+		}
+
+		if proofContextAcct.Owner() != ZkElgamalProofProgramAddr {
+			return InstrErrInvalidAccountOwner
+		}
+
+		if len(proofContextAcct.Data()) >= ctxHdrLen && proofContextAcct.Data()[32] != 0 {
+			return InstrErrAccountAlreadyInitialized
+		}
+
+		contextBufferLen := ctxHdrLen + contextLen
+		if uint64(len(proofContextAcct.Data())) != contextBufferLen {
+			return InstrErrInvalidAccountData
+		}
+
+		buf := make([]byte, contextBufferLen)
+		copy(buf, contextStateAuthorityPubkey[:])
+		buf[32] = instrType
+
+		if len(instrData) != 5 {
+			copy(buf[ctxHdrLen:], proofData[:contextLen])
+		}
+
+		err = proofContextAcct.SetData(execCtx.GlobalCtx.Features, buf)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
