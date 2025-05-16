@@ -25,6 +25,7 @@ type blockStream struct {
 	// JSON marshaled *rpc.BlockResult in them. If nonempty,
 	// will check for blocks here before using RPC.
 	blockDir string
+	useRpc   bool
 }
 
 type blockStreamTaskInfo struct {
@@ -42,6 +43,7 @@ func NewBlockStream(rpcClient *rpcclient.RpcClient, streamChan chan *Block, star
 		endSlot:           endSlot,
 		numInitialSlots:   min(numInitialSlots, endSlot-startSlot),
 		blockDir:          blockDir,
+		useRpc:            blockDir == "",
 	}
 }
 
@@ -72,16 +74,27 @@ func (blockStream *blockStream) tryGetBlockResultFromFile(slot uint64) (*rpc.Get
 func (blockStream *blockStream) fetchAndParseBlock(slot uint64) *Block {
 	var blockResult *rpc.GetBlockResult
 	var err error
-	blockResult, err = blockStream.tryGetBlockResultFromFile(slot)
-	if err != nil {
-		mlog.Log.Errorf("block cache miss for slot=%d: %v", slot, err)
+
+	if blockStream.useRpc {
 		blockResult, err = blockStream.rpcClient.GetBlockFinalized(uint64(slot))
 		if err == rpcclient.SlotSkipped {
 			return nil
 		} else if err != nil {
 			panic(fmt.Sprintf("error fetching block: %s\n", err))
 		}
+	} else {
+		blockResult, err = blockStream.tryGetBlockResultFromFile(slot)
+		if err != nil {
+			mlog.Log.Errorf("block cache miss for slot=%d: %v", slot, err)
+			blockResult, err = blockStream.rpcClient.GetBlockFinalized(uint64(slot))
+			if err == rpcclient.SlotSkipped {
+				return nil
+			} else if err != nil {
+				panic(fmt.Sprintf("error fetching block: %s\n", err))
+			}
+		}
 	}
+
 	block, err := newBlockFromBlockResult(blockResult)
 	if err != nil {
 		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))

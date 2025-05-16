@@ -90,7 +90,6 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	if err != nil {
 		panic(err)
 	}
-	mlog.Log.Infof("accountsdb.OpenDb: done opening indexDir=%s", indexDir)
 
 	accountsDb := &AccountsDb{Index: db, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
@@ -123,16 +122,6 @@ func (accountsDb *AccountsDb) InitCaches() {
 	if err != nil {
 		panic(err)
 	}
-
-	// TODO: review size of common accounts cache
-	/*accountsDb.CommonAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](0).
-		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
-	}*/
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*sbpf.Program, bool) {
@@ -148,11 +137,6 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	if hasAcct {
 		return cachedAcct, nil
 	}
-
-	/*cachedAcct, hasAcct = accountsDb.CommonAcctCache.Get(pubkey)
-	if hasAcct {
-		return cachedAcct, nil
-	}*/
 
 	acctIdxEntryBytes, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {

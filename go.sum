@@ -111,6 +111,8 @@ github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d h1:Rhu0
 github.com/Overclock-Validator/crypto v0.0.0-20250306233942-23fd7478ec8d/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 h1:Y715CmRx2hFfXguU0xSlGkZZ7/RYpKutWffZUiQSPvw=
 github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
+github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5 h1:I1yDEdgKFwsA4BR7zfY6BGzUVxf04MhHNm/6OoD/Y44=
+github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5/go.mod h1:3Vxi+ox/6cbjwyjmAnwdf8TSXWjPJKsIhEGb8opPIuw=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030 h1:Ca69Bqprgu6rHWdjBaJ11W4DoepKW+m80tMPEJcODWk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030/go.mod h1:Poczuq3dbt+CwyTKgOjGaEwJOMP7YxQobF7QhgNcguk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203115807-4a97a7c1b020 h1:AucEjS2Ki7apr3QAGb9uykeROqwExFIabtMkUa7zdbU=

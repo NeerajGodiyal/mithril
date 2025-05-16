@@ -264,56 +264,6 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 	}
 }
 
-func handleDurableNonceIfEligibleFailedTx(instrs []sealevel.Instruction, tx *solana.Transaction, execCtx *sealevel.ExecutionCtx, slotCtx *sealevel.SlotCtx) (solana.PublicKey, bool) {
-	if !execCtx.TransactionContext.NonceAcctAdvanced {
-		return solana.PublicKey{}, false
-	}
-
-	recentBlockhashes, err := sealevel.ReadRecentBlockHashesSysvar(execCtx)
-	if err != nil {
-		panic(fmt.Sprintf("unable to decode recentblockhashes sysvar: %s", err))
-	}
-
-	if recentBlockhashes.IsBlockhashAgeValid(tx.Message.RecentBlockhash) {
-		return solana.PublicKey{}, false
-	}
-
-	instr := instrs[0]
-
-	if instr.ProgramId == sealevel.SystemProgramAddr && len(instr.Data) >= 4 {
-		decoder := bin.NewBinDecoder(instr.Data)
-
-		instructionType, err := decoder.ReadUint32(bin.LE)
-		if err != nil {
-			return solana.PublicKey{}, false
-		}
-
-		if instructionType == sealevel.SystemProgramInstrTypeAdvanceNonceAccount {
-			nonceAcctPk := instr.Accounts[0].Pubkey
-			var nonceAcct *accounts.Account
-			for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
-				if acct.Key == nonceAcctPk {
-					nonceAcct = acct
-					break
-				}
-			}
-
-			if nonceAcct == nil {
-				panic("nonce account not found in transaction accounts")
-			}
-
-			err = slotCtx.SetAccount(nonceAcctPk, nonceAcct)
-			if err != nil {
-				panic(fmt.Sprintf("error setting nonce account state after failed tx: %s\n", err))
-			}
-
-			return instr.Accounts[0].Pubkey, true
-		}
-	}
-
-	return solana.PublicKey{}, false
-}
-
 func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, error) {
 	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits)
 
@@ -443,13 +393,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	if tx.Signatures[0] == solana.MustSignatureFromBase58("BW2ftaCK3vnYStgPFiVpserS1a3p1ofKpRXkjfPgNoznDdQDSCCJ2FkagaprpWg59xEdHCzDJ3DkuAV3DJXRCnD") {
-		mlog.Log.Infof("\ntx logs (%s):\n", tx.Signatures[0])
-		for _, logEntry := range log.Logs {
-			mlog.Log.Infof("%s\n", logEntry)
-		}
-	}
-
 	// check for CU consumed divergences
 	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
 		discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
@@ -488,36 +431,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	}
 
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
-	// from the payer account
+	// from the payer account and advancing the nonce account if applicable
 	if instrErr != nil || rentStateErr != nil {
 		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
-		/*p, err := slotCtx.GetAccount(payerAcct.Key)
-		if err != nil {
-			panic(fmt.Sprintf("unable to get slot account to update payer acct state after failed tx: %s", err))
-		}
-
-		p.Lamports = payerNewLamports
-		err = slotCtx.SetAccount(payerAcct.Key, p)
-		if err != nil {
-			panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
-		}
-
-		slotCtx.RecordModifiedAcct(payerAcct.Key)
-		execCtx.TransactionContext.Accounts.Unlock(0)
-
-		noncePubkey, isEligibleDurableTx := handleDurableNonceIfEligibleFailedTx(instrs, tx, execCtx, slotCtx)
-		if isEligibleDurableTx {
-			slotCtx.RecordModifiedAcct(noncePubkey)
-		}
-
-		var txErr error
-		if rentStateErr != nil {
-			txErr = rentStateErr
-		} else {
-			txErr = instrErr
-		}
-
-		return txFeeInfo, fmt.Errorf("tx err: %s", txErr)*/
 	}
 
 	txAcctMetas, err := tx.AccountMetaList()

@@ -2,8 +2,6 @@ module github.com/Overclock-Validator/mithril
 
 go 1.23.4
 
-replace github.com/leslie-fei/fastcache => /mnt/fastcache
-
 require (
 	github.com/LiamHaworth/go-tproxy v0.0.0-20190726054950-ef7efd7f24ed
 	github.com/VividCortex/ewma v1.2.0
@@ -37,6 +35,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Overclock-Validator/bn256-go/plugin/bn256 v0.0.0-20250309134322-d0c680ad9f5f // indirect
 	github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 // indirect
+	github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5 // indirect
 	github.com/Overclock-Validator/gnark-crypto v0.0.0-20250309203346-2a67ed08a105 // indirect
 	github.com/Overclock-Validator/go-bls v0.0.0-20250304162602-9e5d35efdbe8 // indirect
 	github.com/Overclock-Validator/go-ethereum v0.0.0-20250303234049-5cf00fe11343 // indirect
@@ -140,13 +139,13 @@ require (
 	github.com/distributed-lab/bulletproofs v0.0.0-20240620125235-111e1d7a508f
 	github.com/dusk-network/bn256 v0.5.1-lattices
 	github.com/dustinxie/ecc v0.0.0-20210511000915-959544187564
-	github.com/ethereum/go-ethereum v1.12.0
+	github.com/ethereum/go-ethereum v1.13.13
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/fengyoulin/shm v0.0.0-20200305015033-287e184bdf0a
 	github.com/filosottile/powersoftau v0.0.0-20180220134833-e2af11381747
 	github.com/gagliardetto/treeout v0.1.4 // indirect
 	github.com/gammazero/deque v1.0.0
-	github.com/go-logr/logr v1.2.4 // indirect
+	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-mmap/mmap v0.7.0
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/golang/leveldb v0.0.0-20170107010102-259d9253d719
