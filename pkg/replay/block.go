@@ -516,7 +516,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, enableSigverify bool) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -607,7 +607,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			}
 		}
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, enableSigverify)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
@@ -698,7 +698,7 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 	return slotCtx
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, enableSigverify bool) (*sealevel.SlotCtx, error) {
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
 	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
 	// gather up all accounts referenced in the block
@@ -714,7 +714,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	for idx, tx := range block.Transactions {
 
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx], enableSigverify)
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
 			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}

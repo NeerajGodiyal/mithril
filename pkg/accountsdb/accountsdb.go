@@ -24,8 +24,7 @@ type AccountsDb struct {
 	LargestFileId atomic.Uint64
 	BankHashBytes [32]byte
 	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	//CommonAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache otter.Cache[solana.PublicKey, *sbpf.Program]
+	ProgramCache  otter.Cache[solana.PublicKey, *sbpf.Program]
 }
 
 var (
@@ -211,8 +210,6 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 			continue
 		}
-
-		//accountsDb.CommonAcctCache.Set(acct.Key, acct)
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.

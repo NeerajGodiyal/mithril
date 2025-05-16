@@ -33,7 +33,6 @@ var (
 	endSlot            int64
 	pprofPort          int64
 	blockDir           string
-	enableSigverify    bool
 )
 
 func init() {
@@ -47,7 +46,6 @@ func init() {
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
 	Cmd.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
 	Cmd.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
-	Cmd.Flags().BoolVar(&enableSigverify, "enable-sigverify", false, "Enable sigverify")
 }
 
 func run(c *cobra.Command, args []string) {
@@ -143,7 +141,7 @@ func run(c *cobra.Command, args []string) {
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, enableSigverify)
+	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
