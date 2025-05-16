@@ -6,28 +6,26 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
-	"github.com/Overclock-Validator/sniper"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
+	"github.com/leslie-fei/fastcache"
 	"github.com/maypok86/otter"
 )
 
 type AccountsDb struct {
-	IndexDb         *sniper.Store
-	AcctsDir        string
-	IndexDir        string
-	LargestFileId   atomic.Uint64
-	BankHashBytes   [32]byte
-	VoteAcctCache   otter.Cache[solana.PublicKey, *accounts.Account]
-	CommonAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache    otter.Cache[solana.PublicKey, *sbpf.Program]
+	Index         fastcache.Cache
+	AcctsDir      string
+	LargestFileId atomic.Uint64
+	BankHashBytes [32]byte
+	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
+	//CommonAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache otter.Cache[solana.PublicKey, *sbpf.Program]
 }
 
 var (
@@ -82,15 +80,19 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	mlog.Log.Infof("accountsdb.OpenDb: bankHashBytes=%x", bankHashBytes)
 
 	// attempt to open the index kv store
-	indexDir := fmt.Sprintf("%s/index", accountsDbDir)
-	db, err := sniper.Open(sniper.Dir(indexDir), sniper.ChunksCollision(32))
+	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
+	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
+		Shards: 256,
+		//MaxElementLen: 2000000000,
+		MemoryType: fastcache.MMAP,
+		MemoryKey:  dbFn,
+	})
 	if err != nil {
-		mlog.Log.Infof("failed to open database: %s\n", err)
-		return nil, err
+		panic(err)
 	}
 	mlog.Log.Infof("accountsdb.OpenDb: done opening indexDir=%s", indexDir)
 
-	accountsDb := &AccountsDb{IndexDb: db, AcctsDir: appendVecsDir, IndexDir: indexDir}
+	accountsDb := &AccountsDb{Index: db, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
 	copy(accountsDb.BankHashBytes[:], bankHashBytes)
 
@@ -98,7 +100,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 }
 
 func (accountsDb *AccountsDb) CloseDb() {
-	accountsDb.IndexDb.Close()
+	accountsDb.Index.Close()
 }
 
 func (accountsDb *AccountsDb) InitCaches() {
@@ -123,14 +125,14 @@ func (accountsDb *AccountsDb) InitCaches() {
 	}
 
 	// TODO: review size of common accounts cache
-	accountsDb.CommonAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](250_000).
+	/*accountsDb.CommonAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](0).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
 		Build()
 	if err != nil {
 		panic(err)
-	}
+	}*/
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*sbpf.Program, bool) {
@@ -147,12 +149,12 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		return cachedAcct, nil
 	}
 
-	cachedAcct, hasAcct = accountsDb.CommonAcctCache.Get(pubkey)
+	/*cachedAcct, hasAcct = accountsDb.CommonAcctCache.Get(pubkey)
 	if hasAcct {
 		return cachedAcct, nil
-	}
+	}*/
 
-	acctIdxEntryBytes, err := accountsDb.IndexDb.Get(pubkey[:])
+	acctIdxEntryBytes, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {
 		mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
 		return nil, ErrNoAccount
@@ -222,7 +224,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			continue
 		}
 
-		accountsDb.CommonAcctCache.Set(acct.Key, acct)
+		//accountsDb.CommonAcctCache.Set(acct.Key, acct)
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.
@@ -237,10 +239,9 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			return err
 		}
 
-		err = accountsDb.IndexDb.SetIfSlotHigher(acct.Key[:], writer.Bytes(), 0)
+		err = accountsDb.Index.Set(acct.Key[:], writer.Bytes())
 		if err != nil {
-			mlog.Log.Debugf("error calling SetIfSlotHigher on accountsdb for pubkey %s", acct.Key)
-			return err
+			panic(fmt.Sprintf("unable to add acct for %s to acctsdb", acct.Key))
 		}
 
 		msg := util.PrettyPrintAcct(acct)
@@ -268,7 +269,8 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 }
 
 func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix uint64) []solana.PublicKey {
-	keys := accountsDb.IndexDb.KeysBetweenPrefixes(startPrefix, endPrefix)
+	return nil
+	/*keys := accountsDb.IndexDb.KeysBetweenPrefixes(startPrefix, endPrefix)
 
 	keyObjs := make([]solana.PublicKey, 0)
 	for _, key := range keys {
@@ -276,16 +278,11 @@ func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix 
 		keyObjs = append(keyObjs, keyObject)
 	}
 
-	return keyObjs
+	return keyObjs*/
 }
 
 func (accountsDb *AccountsDb) AllKeys() [][]byte {
-	keys := accountsDb.IndexDb.AllKeys()
-	sort.SliceStable(keys, func(i, j int) bool {
-		return util.PubkeyCmpByteSlice(keys[i], keys[j])
-	})
-
-	return keys
+	return nil
 }
 
 func (accountsDb *AccountsDb) BankHash() [32]byte {

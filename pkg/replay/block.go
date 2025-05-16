@@ -595,7 +595,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		}
 
 		// workaround for skipping the soon-to-be obsolete EAH
-		if block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
+		if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
 			if replayCtx.HasEpochAcctsHash {
 				block.EpochAcctsHash = replayCtx.EpochAcctsHash
 			} else {
@@ -712,6 +712,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
+		if tx.Signatures[0] == solana.MustSignatureFromBase58("BW2ftaCK3vnYStgPFiVpserS1a3p1ofKpRXkjfPgNoznDdQDSCCJ2FkagaprpWg59xEdHCzDJ3DkuAV3DJXRCnD") {
+			mlog.Log.EnableInfLogging()
+		}
+
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
 		if txErr != nil {
@@ -722,8 +726,11 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		if txErr == nil && block.TxMetas[idx].Err != nil {
 			mlog.Log.Infof("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
 		} else if txErr != nil && block.TxMetas[idx].Err == nil {
-			mlog.Log.Infof("tx %s return value divergence: txErr was %+v, but onchain err was nil", tx.Signatures[0], txErr)
+			fmt.Printf("******** tx %s, txErr = %s", tx.Signatures[0], txErr)
+			mlog.Log.Infof("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil (%s)", tx.Signatures[0], txErr, txErr)
 		}
+
+		mlog.Log.DisableInfLogging()
 
 		txFeeAccumulator.Add(txFeeInfo)
 	}

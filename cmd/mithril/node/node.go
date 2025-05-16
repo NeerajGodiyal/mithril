@@ -39,8 +39,11 @@ func init() {
 	Cmd.Flags().BoolVarP(&loadFromSnapshot, "snapshot", "s", false, "Load from a full snapshot")
 	Cmd.Flags().BoolVarP(&loadFromAccountsDb, "accountsdb", "a", false, "Load from AccountsDB")
 	Cmd.Flags().BoolVarP(&updateAccountsDb, "update-accounts-db", "u", false, "Update accountsdb after execution")
+	Cmd.Flags().BoolVarP(&newSnapshotLoadingTest, "snapshottest", "x", false, "Run new snapshot loading test")
 	Cmd.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
 	Cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
+	Cmd.Flags().StringVarP(&testOutputDir, "testout", "z", "", "New snapshot testing output dir")
+	Cmd.Flags().StringVarP(&testSnapshotPath, "testin", "y", "", "Output path for writing AccountsDB data to")
 	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
 	Cmd.Flags().Int64VarP(&startSlot, "startslot", "b", -1, "Block at which to begin replaying")
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
@@ -99,7 +102,7 @@ func run(c *cobra.Command, args []string) {
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", path)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsIndexFromSnapshot(path, outputDir)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(path, outputDir)
 		if err != nil {
 			klog.Exitf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}

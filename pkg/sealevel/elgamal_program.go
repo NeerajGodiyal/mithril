@@ -1,7 +1,10 @@
 package sealevel
 
 import (
+	"encoding/binary"
+
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/zksdk"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -74,7 +77,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyZeroCiphertext")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyCiphertextCiphertextEquality:
@@ -86,7 +89,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyCiphertextCiphertextEquality")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyCiphertextCommitmentEquality:
@@ -98,7 +101,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyCiphertextCommitmentEquality")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyPubkeyValidity:
@@ -110,7 +113,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyPubkeyValidity")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyPercentageWithCap:
@@ -122,7 +125,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyPercentageWithCap")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyBatchedRangeProofU64:
@@ -134,7 +137,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyBatchedRangeProofU64")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyBatchedRangeProofU128:
@@ -295,4 +298,161 @@ func processCloseProofContext(execCtx *ExecutionCtx) error {
 	destinationAcct.Drop()
 
 	return err
+}
+
+const (
+	instrDataLenWithProofAcct = 5
+)
+
+var ctxObjLens []uint64 = []uint64{
+	0,
+	96,
+	128,
+	128,
+	32,
+	104,
+	264,
+	264,
+	264,
+	160,
+	256,
+	224,
+	352}
+
+var proofLens []uint64 = []uint64{
+	0,
+	96,
+	224,
+	192,
+	64,
+	256,
+	672,
+	736,
+	800,
+	160,
+	160,
+	192,
+	192,
+}
+
+const (
+	ctxHdrLen = 33
+)
+
+type ZkVerificationFn func([]byte) error
+
+func getZkVerificationFn(instrType byte) ZkVerificationFn {
+	switch instrType {
+	case ProofInstrVerifyZeroCiphertext:
+		{
+			return zksdk.VerifyZeroCiphertext
+		}
+
+	case ProofInstrVerifyCiphertextCiphertextEquality:
+		{
+			return zksdk.VerifyCiphertextCiphertextEquality
+		}
+
+	case ProofInstrVerifyCiphertextCommitmentEquality:
+		{
+			return zksdk.VerifyCiphertextCommitmentEquality
+		}
+
+	case ProofInstrVerifyPubkeyValidity:
+		{
+			return zksdk.VerifyPubkeyValidity
+		}
+
+	case ProofInstrVerifyPercentageWithCap:
+		{
+			return zksdk.VerifyPercentageWithCap
+		}
+
+	case ProofInstrVerifyBatchedRangeProofU64:
+		{
+			return zksdk.VerifyBatchedRangeProofU64
+		}
+
+	case ProofInstrVerifyBatchedRangeProofU128:
+		{
+			return zksdk.VerifyBatchedRangeProofU128
+		}
+
+	case ProofInstrVerifyBatchedRangeProofU256:
+		{
+			return zksdk.VerifyBatchedRangeProofU256
+		}
+
+	case ProofInstrVerifyGroupedCiphertext2HandlesValidity:
+		{
+			return zksdk.VerifyGroupedCiphertext2HandlesValidity
+		}
+
+	case ProofInstrVerifyBatchedGroupedCiphertext2HandlesValidity:
+		{
+			return zksdk.VerifyBatchedGroupedCiphertext2HandlesValidity
+		}
+
+	case ProofInstrVerifyGroupedCiphertext3HandlesValidity:
+		{
+			return zksdk.VerifyGroupedCiphertext3HandlesValidity
+		}
+
+	case ProofInstrVerifyBatchedGroupedCiphertext3HandlesValidity:
+		{
+			return zksdk.VerifyBatchedGroupedCiphertext3HandlesValidity
+		}
+
+	default:
+		{
+			panic("shouldn't be possible - programming error")
+		}
+	}
+}
+
+func processVerifyProof(execCtx *ExecutionCtx) error {
+	txCtx := execCtx.TransactionContext
+	instrCtx, err := txCtx.CurrentInstructionCtx()
+	if err != nil {
+		return err
+	}
+
+	instrData := instrCtx.Data
+	instrType := instrCtx.Data[0]
+	proofDataLen := proofLens[instrType]
+
+	zkDispatchFn := getZkVerificationFn(instrType)
+
+	var numAccessedAccts uint64
+	var proofData []byte
+
+	if len(instrData) == instrDataLenWithProofAcct {
+		// case 1. proof data from account data
+		proofDataAcct, err := instrCtx.BorrowInstructionAccount(txCtx, numAccessedAccts)
+		if err != nil {
+			return err
+		}
+		defer proofDataAcct.Drop()
+
+		numAccessedAccts++
+
+		proofDataOffset := binary.LittleEndian.Uint32(instrData[1:instrDataLenWithProofAcct])
+		if uint64(proofDataOffset)+proofDataLen > uint64(len(proofDataAcct.Data())) {
+			return InstrErrInvalidAccountData
+		}
+
+		proofData = make([]byte, proofDataLen)
+		copy(proofData, proofDataAcct.Data()[proofDataOffset:])
+		proofDataAcct.Drop()
+	} else {
+		// case 2. proof data from instruction data
+		if uint64(len(instrData)) != (1 + proofDataLen) {
+			return InstrErrInvalidInstructionData
+		}
+		proofData = instrData[1:]
+	}
+
+	err = zkDispatchFn(proofData)
+
+	return nil
 }

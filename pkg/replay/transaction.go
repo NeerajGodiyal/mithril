@@ -96,7 +96,7 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
-	execCtx.ComputeMeter.Disable()
+	//execCtx.ComputeMeter.Disable()
 
 	return execCtx
 }
@@ -362,9 +362,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	}
 
 	// fast path for failed tx's
-	if txMeta.Err != nil {
+	/*if txMeta.Err != nil {
 		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
-	}
+	}*/
 
 	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
 	if err != nil {
@@ -397,7 +397,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		execCtx.TransactionContext.Accounts.Unlock(count)
 	}
 
-	txFeeInfo, payerNewLamports, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
 		return txFeeInfo, nil
 	}
@@ -431,7 +431,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		if err == nil {
 			for _, am := range acctMetas {
 				if am.IsWritable {
-					slotCtx.RecordWritableAcct(am.Pubkey)
 					writablePubkeys = append(writablePubkeys, am.Pubkey)
 				}
 			}
@@ -442,22 +441,10 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		}
 	}
 
-	txAcctMetas, err := tx.AccountMetaList()
-	if err != nil {
-		panic(err)
-	}
-
-	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(tx, txAcctMeta, &execCtx.GlobalCtx.Features) {
-			slotCtx.RecordWritableAcct(txAcctMeta.PublicKey)
-			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
-		}
-	}
-
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
-	if instrErr != nil {
-		mlog.Log.Infof("\ntx logs:\n")
+	if tx.Signatures[0] == solana.MustSignatureFromBase58("BW2ftaCK3vnYStgPFiVpserS1a3p1ofKpRXkjfPgNoznDdQDSCCJ2FkagaprpWg59xEdHCzDJ3DkuAV3DJXRCnD") {
+		mlog.Log.Infof("\ntx logs (%s):\n", tx.Signatures[0])
 		for _, logEntry := range log.Logs {
 			mlog.Log.Infof("%s\n", logEntry)
 		}
@@ -503,7 +490,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account
 	if instrErr != nil || rentStateErr != nil {
-		p, err := slotCtx.GetAccount(payerAcct.Key)
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
+		/*p, err := slotCtx.GetAccount(payerAcct.Key)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get slot account to update payer acct state after failed tx: %s", err))
 		}
@@ -529,7 +517,22 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			txErr = instrErr
 		}
 
-		return txFeeInfo, fmt.Errorf("tx err: %s", txErr)
+		return txFeeInfo, fmt.Errorf("tx err: %s", txErr)*/
+	}
+
+	txAcctMetas, err := tx.AccountMetaList()
+	if err != nil {
+		panic(err)
+	}
+
+	for _, txAcctMeta := range txAcctMetas {
+		if isWritable(tx, txAcctMeta, &execCtx.GlobalCtx.Features) {
+			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
+		}
+	}
+
+	for _, pk := range writablePubkeys {
+		slotCtx.RecordWritableAcct(pk)
 	}
 
 	handleModifiedAccounts(slotCtx, execCtx)
