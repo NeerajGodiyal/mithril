@@ -49,8 +49,6 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
-const numShards = 256
-
 func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
