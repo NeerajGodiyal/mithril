@@ -80,7 +80,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 
 	// attempt to open the index kv store
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
-	db, err := fastcache.NewCache(fastcache.GB*512, &fastcache.Config{
+	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards: 256,
 		//MaxElementLen: 2000000000,
 		MemoryType: fastcache.MMAP,
