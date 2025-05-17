@@ -19,7 +19,7 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string, snapshotType int) (*SnapshotManifest, *os.File, error) {
+func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*SnapshotManifest, *os.File, error) {
 	manifest := new(SnapshotManifest)
 
 	file, err := os.Open(filename)
@@ -37,12 +37,11 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string, snapsh
 	}
 	defer manifestOut.Close()
 
-	reader, err := readerForCompressionType(snapshotType, file)
+	tarReader, err := newSnapshotReader(file)
 	if err != nil {
 		panic(err)
 	}
 
-	tarReader := tar.NewReader(reader)
 	writer := new(bytes.Buffer)
 
 	for {
@@ -131,6 +130,16 @@ func parseSnapshotType(snapshotFileName string) int {
 	}
 
 	return snapshotType
+}
+
+func newSnapshotReader(snapshotFile *os.File) (*tar.Reader, error) {
+	snapshotFile.Seek(0, io.SeekStart)
+	snapshotType := parseSnapshotType(snapshotFile.Name())
+	reader, err := readerForCompressionType(snapshotType, snapshotFile)
+	if err != nil {
+		return nil, err
+	}
+	return tar.NewReader(reader), nil
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {

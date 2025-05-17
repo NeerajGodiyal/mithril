@@ -42,6 +42,13 @@ func Gauge(name string, value float64, tags []string, rate float64) error {
 	return statsdClient.Gauge(name, value, tags, rate)
 }
 
+func Timing(name string, value time.Duration, tags []string, rate float64) error {
+	if statsdClient == nil {
+		return nil
+	}
+	return statsdClient.Timing(name, value, tags, rate)
+}
+
 func periodicallySendRuntimeMetrics() {
 	descs := metrics.All()
 	var samples []metrics.Sample

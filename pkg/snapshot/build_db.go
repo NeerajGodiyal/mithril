@@ -15,6 +15,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
@@ -44,25 +45,64 @@ func (pp *pubkeyLock) UnlockPubkey(pubkey solana.PublicKey) {
 	pp.pubkeyMap.Delete(pubkey)
 }
 
+// identify appendvec files, whose path is of the form "accounts/SLOT.ID"
+func isAppendVec(filename string) bool {
+	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
+}
+
+type appendVecStats struct {
+	count int
+	bytes int
+}
+
+func countAppendVecs(f *os.File) (out *appendVecStats, err error) {
+	var r *tar.Reader
+	r, err = newSnapshotReader(f)
+	if err != nil {
+		return
+	}
+
+	out = &appendVecStats{0, 0}
+	for {
+		var hdr *tar.Header
+		hdr, err = r.Next()
+		if err != nil {
+			return
+		}
+		if !isAppendVec(hdr.Name) {
+			continue
+		}
+		out.count++
+		out.bytes += int(hdr.Size)
+	}
+}
+
+func (av *appendVecStats) Update(completedBytes int) {
+	av.count--
+	av.bytes -= completedBytes
+	statsd.Gauge("tasks.append_vec_copying.files_remaining", float64(av.count), nil, 1)
+	statsd.Gauge("tasks.append_vec_copying.bytes_remaining", float64(av.bytes), nil, 1)
+}
+
 const numShards = 256
 
 func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
-	snapshotType := parseSnapshotType(snapshotFile)
+	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
 
-	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir, snapshotType)
+	avStats, err := countAppendVecs(file)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	defer file.Close()
-	file.Seek(0, io.SeekStart)
-
-	reader, err := readerForCompressionType(snapshotType, file)
+	tarReader, err := newSnapshotReader(file)
 	if err != nil {
-		panic(err)
+		return nil, nil, err
 	}
 
-	tarReader := tar.NewReader(reader)
 	start := time.Now()
 
 	appendVecsOutputDir := fmt.Sprintf("%s/accounts", accountsDbDir)
@@ -89,6 +129,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	var pp pubkeyLock
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(20, func(i interface{}) {
+		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
 		writer := new(bytes.Buffer)
@@ -120,9 +161,11 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			}
 			pp.UnlockPubkey(task.Pubkeys[idx])
 		}
+		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
 	})
 
 	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
+		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
 		pubkeys, entries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
@@ -133,6 +176,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 
 		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
 		wg.Add(1)
+		statsd.Timing("tasks.index_entry_builder.latency", time.Since(start), nil, 1)
 		err = indexEntryCommiterPool.Invoke(commitTask)
 		if err != nil {
 			mlog.Log.Errorf("error calling indexEntryCommiterPool.Invoke\n")
@@ -140,71 +184,71 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	})
 
 	appendVecCopyingPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
+		start := time.Now()
 		defer wg.Done()
 		task := i.(appendVecCopyingTask)
 		filename := task.Filename
 		writer := task.TarBuffer
 
-		// identify appendvec files, whose path is of the form "accounts/SLOT.ID"
-		if strings.Contains(filename, "accounts/") {
-			if !strings.Contains(filename, ".") {
-				return
-			}
+		if !isAppendVec(filename) {
+			return
+		}
 
-			outFile, err := os.Create(fmt.Sprintf("%s/%s", accountsDbDir, filename))
-			if err != nil {
-				mlog.Log.Errorf("err creating new: %s\n", err)
-				return
-			}
+		outFile, err := os.Create(fmt.Sprintf("%s/%s", accountsDbDir, filename))
+		if err != nil {
+			mlog.Log.Errorf("err creating new: %s\n", err)
+			return
+		}
 
-			appendVecBytes := writer.Bytes()
-			_, err = io.Copy(outFile, bytes.NewReader(appendVecBytes))
-			if err != nil {
-				mlog.Log.Errorf("err copying file out: %s\n", err)
-				return
-			}
+		appendVecBytes := writer.Bytes()
+		_, err = io.Copy(outFile, bytes.NewReader(appendVecBytes))
+		if err != nil {
+			mlog.Log.Errorf("err copying file out: %s\n", err)
+			return
+		}
 
-			// parse slot and file ID out of filename
-			_, after, found := strings.Cut(filename, "/")
-			if !found {
-				panic(fmt.Sprintf("invalid appendvec path format: %s", filename))
-			}
+		// parse slot and file ID out of filename
+		_, after, found := strings.Cut(filename, "/")
+		if !found {
+			panic(fmt.Sprintf("invalid appendvec path format: %s", filename))
+		}
 
-			slotStr, idStr, found := strings.Cut(after, ".")
-			slot, err := strconv.ParseUint(slotStr, 10, 64)
-			if err != nil {
-				mlog.Log.Errorf("invalid snapshot - unable to convert string to slot\n")
-				panic("")
-			}
+		slotStr, idStr, found := strings.Cut(after, ".")
+		slot, err := strconv.ParseUint(slotStr, 10, 64)
+		if err != nil {
+			mlog.Log.Errorf("invalid snapshot - unable to convert string to slot\n")
+			panic("")
+		}
 
-			fileId, err := strconv.ParseUint(idStr, 10, 64)
-			if err != nil {
-				panic("invalid snapshot - unable to convert string to file id\n")
-			}
+		fileId, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			panic("invalid snapshot - unable to convert string to file id\n")
+		}
 
-			if fileId > largestFileId.Load() {
-				largestFileId.Store(fileId)
-			}
+		if fileId > largestFileId.Load() {
+			largestFileId.Store(fileId)
+		}
 
-			// find the relevant appendvec storage info
-			var fileSize uint64
-			for _, av := range manifest.AccountsDb.Storages[slot].AcctVecs {
-				if av.Id == fileId {
-					fileSize = av.FileSize
-					break
-				}
+		// find the relevant appendvec storage info
+		var fileSize uint64
+		for _, av := range manifest.AccountsDb.Storages[slot].AcctVecs {
+			if av.Id == fileId {
+				fileSize = av.FileSize
+				break
 			}
+		}
 
-			if fileSize == 0 {
-				panic("programming error - fileSize for appendvec was 0")
-			}
+		if fileSize == 0 {
+			panic("programming error - fileSize for appendvec was 0")
+		}
 
-			task := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
-			wg.Add(1)
-			err = indexEntryBuilderPool.Invoke(task)
-			if err != nil {
-				mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
-			}
+		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
+		wg.Add(1)
+		statsd.Timing("tasks.append_vec_copying.latency", time.Since(start), nil, 1)
+		avStats.Update(len(writer.Bytes()))
+		err = indexEntryBuilderPool.Invoke(nextTask)
+		if err != nil {
+			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
 		}
 	})
 
