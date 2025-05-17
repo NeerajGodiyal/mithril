@@ -4,10 +4,6 @@ package node
 
 import (
 	"fmt"
-	"net/http"
-	"runtime"
-	"strconv"
-	"time"
 
 	_ "net/http/pprof"
 
@@ -53,42 +49,7 @@ func init() {
 
 func run(c *cobra.Command, args []string) {
 	if pprofPort != -1 {
-		pprofAddr := fmt.Sprintf("localhost:%d", pprofPort)
-		mlog.Log.Infof("Starting HTTP server for pprof on %s", pprofAddr)
-		go func() {
-			http.HandleFunc("/setblockprofilerate", func(w http.ResponseWriter, r *http.Request) {
-				// Parse query parameters
-				rateStr := r.URL.Query().Get("rate")
-				secondsStr := r.URL.Query().Get("seconds")
-
-				// Convert rate parameter to int
-				rate, err := strconv.Atoi(rateStr)
-				if err != nil {
-					http.Error(w, "Invalid rate parameter", http.StatusBadRequest)
-					return
-				}
-
-				// Convert seconds parameter to int
-				seconds, err := strconv.Atoi(secondsStr)
-				if err != nil {
-					http.Error(w, "Invalid seconds parameter", http.StatusBadRequest)
-					return
-				}
-
-				runtime.SetBlockProfileRate(rate)
-				mlog.Log.Infof("Set block profile rate to %d for %d seconds", rate, seconds)
-
-				go func() {
-					time.Sleep(time.Duration(seconds) * time.Second)
-					runtime.SetBlockProfileRate(0)
-					mlog.Log.Infof("Block profiling disabled after %d seconds", seconds)
-				}()
-
-				// Respond to the client
-				fmt.Fprintf(w, "Block profile rate set to %d for %d seconds\n", rate, seconds)
-			})
-			mlog.Log.Errorf("HTTP pprof server exited: %v", http.ListenAndServe(pprofAddr, nil))
-		}()
+		startPprofHandlers(int(pprofPort))
 	}
 
 	if !loadFromSnapshot && !loadFromAccountsDb {
