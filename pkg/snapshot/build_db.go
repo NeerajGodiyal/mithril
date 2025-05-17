@@ -76,7 +76,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	wg := sync.WaitGroup{}
 
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
-	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
+	db, err := fastcache.NewCache(fastcache.GB*512, &fastcache.Config{
 		Shards: 256,
 		//MaxElementLen: 2000000000,
 		MemoryType: fastcache.MMAP,

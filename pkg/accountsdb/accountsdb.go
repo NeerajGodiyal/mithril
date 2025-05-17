@@ -24,7 +24,7 @@ type AccountsDb struct {
 	LargestFileId atomic.Uint64
 	BankHashBytes [32]byte
 	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache  otter.Cache[solana.PublicKey, *sbpf.Program]
+	ProgramCache  otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 }
 
 var (
@@ -80,7 +80,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 
 	// attempt to open the index kv store
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
-	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
+	db, err := fastcache.NewCache(fastcache.GB*512, &fastcache.Config{
 		Shards: 256,
 		//MaxElementLen: 2000000000,
 		MemoryType: fastcache.MMAP,
@@ -113,8 +113,8 @@ func (accountsDb *AccountsDb) InitCaches() {
 	}
 
 	// TODO: review size of program cache
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *sbpf.Program](10_000).
-		Cost(func(key solana.PublicKey, prog *sbpf.Program) uint32 {
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](10_000).
+		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
 			return 1
 		}).
 		Build()
@@ -123,12 +123,17 @@ func (accountsDb *AccountsDb) InitCaches() {
 	}
 }
 
-func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*sbpf.Program, bool) {
+type ProgramCacheEntry struct {
+	Program        *sbpf.Program
+	DeploymentSlot uint64
+}
+
+func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
 	return accountsDb.ProgramCache.Get(pubkey)
 }
 
-func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program *sbpf.Program) {
-	accountsDb.ProgramCache.Set(pubkey, program)
+func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, programEntry *ProgramCacheEntry) {
+	accountsDb.ProgramCache.Set(pubkey, programEntry)
 }
 
 func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
