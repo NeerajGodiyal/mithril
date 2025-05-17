@@ -97,14 +97,18 @@ const (
 func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error) {
 	var reader io.Reader
 
+	bmr, err := NewBufMonReader(file)
+	if err != nil {
+		return nil, err
+	}
 	if snapshotType == snapshotTypeZst {
-		zstdReader, err := zstd.NewReader(file)
+		zstdReader, err := zstd.NewReader(bmr)
 		if err != nil {
 			return nil, err
 		}
 		reader = zstdReader
 	} else if snapshotType == snapshotTypeLz4 {
-		reader = lz4.NewReader(file)
+		reader = lz4.NewReader(bmr)
 	} else {
 		panic(fmt.Sprintf("unknown snapshot type"))
 	}
