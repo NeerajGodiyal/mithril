@@ -1,7 +1,6 @@
 package snapshot
 
 import (
-	"archive/tar"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -50,40 +49,6 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
-type appendVecStats struct {
-	count int
-	bytes int
-}
-
-func countAppendVecs(f *os.File) (out *appendVecStats, err error) {
-	var r *tar.Reader
-	r, err = newSnapshotReader(f)
-	if err != nil {
-		return
-	}
-
-	out = &appendVecStats{0, 0}
-	for {
-		var hdr *tar.Header
-		hdr, err = r.Next()
-		if err != nil {
-			return
-		}
-		if !isAppendVec(hdr.Name) {
-			continue
-		}
-		out.count++
-		out.bytes += int(hdr.Size)
-	}
-}
-
-func (av *appendVecStats) Update(completedBytes int) {
-	av.count--
-	av.bytes -= completedBytes
-	statsd.Gauge("tasks.append_vec_copying.files_remaining", float64(av.count), nil, 1)
-	statsd.Gauge("tasks.append_vec_copying.bytes_remaining", float64(av.bytes), nil, 1)
-}
-
 const numShards = 256
 
 func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
@@ -92,11 +57,6 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		return nil, nil, err
 	}
 	defer file.Close()
-
-	avStats, err := countAppendVecs(file)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	tarReader, err := newSnapshotReader(file)
 	if err != nil {
@@ -245,7 +205,6 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
 		wg.Add(1)
 		statsd.Timing("tasks.append_vec_copying.latency", time.Since(start), nil, 1)
-		avStats.Update(len(writer.Bytes()))
 		err = indexEntryBuilderPool.Invoke(nextTask)
 		if err != nil {
 			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")

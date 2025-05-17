@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -93,10 +92,6 @@ type indexEntryCommitterTask struct {
 const (
 	snapshotTypeZst = iota
 	snapshotTypeLz4
-)
-
-var (
-	tarBufferBytes = &atomic.Int64{}
 )
 
 func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error) {
