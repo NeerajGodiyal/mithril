@@ -16,33 +16,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	bin "github.com/gagliardetto/binary"
-	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
 
 	"github.com/Overclock-Validator/fastcache"
 )
-
-// This struct effectively acts as a mutex on a per-pubkey basis.
-// The purpose of this is to prevent entries for the same pubkey being
-// processed at the same time to ensure that we end up with the account
-// entry for the most recent slot.
-
-type pubkeyLock struct {
-	pubkeyMap sync.Map
-}
-
-func (pp *pubkeyLock) LockPubkey(pubkey solana.PublicKey) {
-	for {
-		_, shouldWait := pp.pubkeyMap.LoadOrStore(pubkey, 1)
-		if !shouldWait {
-			return
-		}
-	}
-}
-
-func (pp *pubkeyLock) UnlockPubkey(pubkey solana.PublicKey) {
-	pp.pubkeyMap.Delete(pubkey)
-}
 
 // identify appendvec files, whose path is of the form "accounts/SLOT.ID"
 func isAppendVec(filename string) bool {
@@ -75,8 +52,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
 	db, err := fastcache.NewCache(fastcache.GB*512, &fastcache.Config{
-		Shards: 256,
-		//MaxElementLen: 2000000000,
+		Shards:     256,
 		MemoryType: fastcache.MMAP,
 		MemoryKey:  dbFn,
 	})
@@ -84,9 +60,9 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		panic(err)
 	}
 
-	var pp pubkeyLock
+	ss := NewShardedSetter(db, 256, 100)
 
-	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(20, func(i interface{}) {
+	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(512, func(i interface{}) {
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
@@ -97,27 +73,11 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			encoder := bin.NewBinEncoder(writer)
 			err = entry.MarshalWithEncoder(encoder)
 
-			shouldSet := true
-			var dst []byte
-
-			pp.LockPubkey(task.Pubkeys[idx])
-			dst, err = db.Get(task.Pubkeys[idx][:])
-			if err == nil {
-				if len(dst) >= 8 {
-					currentSlot := binary.LittleEndian.Uint64(dst[:8])
-					if currentSlot >= entry.Slot {
-						shouldSet = false
-					}
-				}
-			}
-
-			if shouldSet {
-				err = db.Set(task.Pubkeys[idx][:], writer.Bytes())
-				if err != nil {
-					mlog.Log.Infof("failed to set value for %s: %s", task.Pubkeys[idx], err)
-				}
-			}
-			pp.UnlockPubkey(task.Pubkeys[idx])
+			k := make([]byte, len(task.Pubkeys[idx]))
+			copy(k, task.Pubkeys[idx][:])
+			v := make([]byte, writer.Len())
+			copy(v, writer.Bytes())
+			ss.EnqueueRequest(k, v, entry.Slot)
 		}
 		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
 	})
