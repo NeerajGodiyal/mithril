@@ -12,7 +12,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
-	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/maypok86/otter"
@@ -183,11 +182,6 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 	acct.Slot = acctIdxEntry.Slot
 
-	msg := util.PrettyPrintAcct(acct)
-	mlog.Log.Debugf("SLOT %d - accountsdb.Get() found acct in %s for %s: %s", slot, appendVecFileName, pubkey, msg)
-
-	appendVecFile.Close()
-
 	return acct, err
 }
 
@@ -233,9 +227,6 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		if err != nil {
 			panic(fmt.Sprintf("unable to add acct for %s to acctsdb", acct.Key))
 		}
-
-		msg := util.PrettyPrintAcct(acct)
-		mlog.Log.Debugf("SLOT %d - wrote account %s to %s in StoreAccounts: %s", slot, acct.Key, appendVecFileName, msg)
 
 		// marshal up the account as an appendvec style account and write it to the buffer
 		appendVecAcct := AppendVecAccount{DataLen: uint64(len(acct.Data)), Pubkey: acct.Key, Lamports: acct.Lamports,

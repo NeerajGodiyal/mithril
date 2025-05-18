@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -75,6 +76,10 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 
 		var skipLookup bool
 		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
+			if _, alreadyLoaded := tables[addrTableKey]; alreadyLoaded {
+				continue
+			}
+
 			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
 			if err != nil {
 				mlog.Log.Debugf("unable to get address lookup table account: %s", addrTableKey)
@@ -117,17 +122,14 @@ func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
 	numPubkeys += len(block.UpdatedAccts)
 
 	pubkeys := make([]solana.PublicKey, 0, numPubkeys)
+
 	for _, tx := range block.Transactions {
-		for _, pubkey := range tx.Message.AccountKeys {
-			pubkeys = append(pubkeys, pubkey)
-		}
+		pubkeys = append(pubkeys, tx.Message.AccountKeys...)
 	}
 
-	for _, pubkey := range block.UpdatedAccts {
-		pubkeys = append(pubkeys, pubkey)
-	}
-
+	pubkeys = append(pubkeys, block.UpdatedAccts...)
 	pubkeys = util.DedupePubkeys(pubkeys)
+
 	return pubkeys
 }
 
@@ -202,33 +204,15 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
 	accts := accounts.NewMemAccounts()
 
-	for _, pk := range dedupedAccts {
+	ctx := context.Background()
+	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
+	if err != nil {
+		return nil, err
+	}
 
-		// retrieve account from accountsdb
-		acct, err := accountsDb.GetAccount(block.Slot, pk)
-
-		// add the account to the slice, add a 'blank' account if the account doesn't exist,
-		// or return an error
-		if err == accountsdb.ErrNoAccount {
-			if isNativeProgram(pk) {
-				acct = &accounts.Account{Key: pk, Owner: sealevel.NativeLoaderAddr, Executable: true, Lamports: 1}
-				mlog.Log.Debugf("no account: %s, using empty owned by Native Loader\n", pk)
-			} else {
-				acct = &accounts.Account{Key: pk, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
-				mlog.Log.Debugf("no account: %s, using empty owned by System program\n", pk)
-			}
-		} else if err != nil {
-			return nil, err
-		} else {
-			if acct.Lamports == 0 {
-				acct = &accounts.Account{Key: pk, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
-			} else {
-				mlog.Log.Debugf("found account in loadBlockAccounts for: %s\n", acct.Key)
-			}
-		}
-
+	for _, acct := range slotAccts {
 		var pkBytes [32]byte
-		copy(pkBytes[:], pk.Bytes())
+		copy(pkBytes[:], acct.Key[:])
 
 		err = accts.SetAccount(&pkBytes, acct)
 		if err != nil {
@@ -712,18 +696,23 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, block.TxMetas[idx])
+
+		txMeta := block.TxMetas[idx]
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, txMeta)
+
 		if txErr != nil {
+			if txMeta.Err == nil && tx.IsVote() {
+				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
+			}
 			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
 
 		// check for success-failure return value divergences
-		if txErr == nil && block.TxMetas[idx].Err != nil {
-			mlog.Log.Infof("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
-		} else if txErr != nil && block.TxMetas[idx].Err == nil {
-			mlog.Log.Infof("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil (%s)", tx.Signatures[0], txErr, txErr)
+		if txErr == nil && txMeta.Err != nil {
+			panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
+		} else if txErr != nil && txMeta.Err == nil {
+			panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 		}
 
 		txFeeAccumulator.Add(txFeeInfo)

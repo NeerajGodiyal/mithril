@@ -149,7 +149,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyBatchedRangeProofU128")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyBatchedRangeProofU256:
@@ -161,7 +161,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyBatchedRangeProofU256")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyGroupedCiphertext2HandlesValidity:
@@ -173,7 +173,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyGroupedCiphertext2HandlesValidity")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyBatchedGroupedCiphertext2HandlesValidity:
@@ -185,7 +185,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyBatchedGroupedCiphertext2HandlesValidity")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyGroupedCiphertext3HandlesValidity:
@@ -197,7 +197,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyGroupedCiphertext3HandlesValidity")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 
 	case ProofInstrVerifyBatchedGroupedCiphertext3HandlesValidity:
@@ -209,7 +209,7 @@ func ElGamalExecute(execCtx *ExecutionCtx) error {
 
 			mlog.Log.Infof("VerifyBatchedGroupedCiphertext3HandlesValidity")
 
-			// process_verify_proof
+			err = processVerifyProof(execCtx)
 		}
 	}
 
@@ -302,6 +302,7 @@ func processCloseProofContext(execCtx *ExecutionCtx) error {
 
 const (
 	instrDataLenWithProofAcct = 5
+	ctxHdrLen                 = 33
 )
 
 var ctxObjLens []uint64 = []uint64{
@@ -334,10 +335,6 @@ var proofLens []uint64 = []uint64{
 	192,
 	192,
 }
-
-const (
-	ctxHdrLen = 33
-)
 
 type ZkVerificationFn func([]byte) error
 
@@ -419,8 +416,8 @@ func processVerifyProof(execCtx *ExecutionCtx) error {
 
 	instrData := instrCtx.Data
 	instrType := instrCtx.Data[0]
-	proofDataLen := proofLens[instrType]
 	contextLen := ctxObjLens[instrType]
+	proofDataLen := proofLens[instrType] + contextLen
 
 	zkDispatchFn := getZkVerificationFn(instrType)
 

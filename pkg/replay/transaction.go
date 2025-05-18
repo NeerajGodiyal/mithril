@@ -264,7 +264,7 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 	}
 }
 
-func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*fees.TxFeeInfo, error) {
+func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
 	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
@@ -292,7 +292,14 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 		}
 	}
 
-	return txFeeInfo, fmt.Errorf("%s", txMeta.Err)
+	var relevantErr error
+	if instrErr != nil {
+		relevantErr = instrErr
+	} else {
+		relevantErr = rentStateErr
+	}
+
+	return txFeeInfo, relevantErr
 }
 
 func verifySignatures(tx *solana.Transaction) {
@@ -344,7 +351,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 			if txAcct.Lamports != txMeta.PreBalances[count] {
-				mlog.Log.Infof("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct))
+				panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
 			}
 		}
 
@@ -358,7 +365,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	// check for fee divergences
 	if txFeeInfo.TotalFee != txMeta.Fee {
-		mlog.Log.Infof("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
+		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
 	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
@@ -422,7 +429,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PostBalances[count] {
-					mlog.Log.Infof("tx %s post-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s\n", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PostBalances[count], util.PrettyPrintAcct(txAcct))
+					panic(fmt.Sprintf("tx %s post-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s\n", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PostBalances[count], util.PrettyPrintAcct(txAcct)))
 				}
 			}
 			execCtx.TransactionContext.Accounts.Unlock(count)
@@ -437,7 +444,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account and advancing the nonce account if applicable
 	if instrErr != nil || rentStateErr != nil {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, instrErr, rentStateErr)
 	}
 
 	txAcctMetas, err := tx.AccountMetaList()
