@@ -411,13 +411,17 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 	start = time.Now()
 	for instrIdx, instr := range tx.Message.Instructions {
+		ixStart := time.Now()
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
 			return txFeeInfo, err
 		}
+		statsd.Timing("replay.ix.fixup_instr_sysvar_acct.latency", time.Since(ixStart), nil, 1)
 
+		ixStart = time.Now()
 		acctMetas := acctMetasPerInstr[instrIdx]
 		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
+		statsd.Timing("replay.ix.instr_accts_from_acct_metas.latency", time.Since(ixStart), nil, 1)
 
 		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
 		if err == nil {

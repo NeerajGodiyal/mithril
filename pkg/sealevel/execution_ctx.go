@@ -1,12 +1,16 @@
 package sealevel
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/gagliardetto/solana-go"
 	"k8s.io/klog/v2"
 )
@@ -160,21 +164,29 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 }
 
 func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAccts []InstructionAccount, programIndices []uint64) error {
+	start := time.Now()
 	nextInstrCtx, err := execCtx.TransactionContext.NextInstructionCtx()
 	if err != nil {
 		return err
 	}
+	statsd.Timing("replay.ix.get_next_ix_ctx.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	nextInstrCtx.Configure(programIndices, instructionAccts, instrData)
+	statsd.Timing("replay.ix.next_ix_ctx_configure.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	err = execCtx.Push()
 	if err != nil {
 		return err
 	}
+	statsd.Timing("replay.ix.push.latency", time.Since(start), nil, 1)
 
 	err1 := execCtx.ExecuteInstruction()
 
+	start = time.Now()
 	err2 := execCtx.Pop()
+	statsd.Timing("replay.ix.pop.latency", time.Since(start), nil, 1)
 
 	if err1 != nil {
 		return err1
@@ -186,6 +198,7 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 }
 
 func (execCtx *ExecutionCtx) ExecuteInstruction() error {
+	start := time.Now()
 	mlog.Log.Debugf("ExecuteInstruction")
 
 	txCtx := execCtx.TransactionContext
@@ -214,13 +227,16 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	}
 
 	mlog.Log.Debugf("resolving native program (%s)", builtinId)
-	nativeProgramFn, err := resolveNativeProgramById(builtinId)
+	nativeProgramFn, nativeProgramStr, err := resolveNativeProgramById(builtinId)
 	if err != nil { // unrecognised builtin
 		return err
 	}
+	statsd.Timing("replay.ix.exec_ix_resolve_native_program.latency", time.Since(start), nil, 1)
 
 	mlog.Log.Debugf("calling native program %s", builtinId)
+	start = time.Now()
 	err = nativeProgramFn(execCtx)
+	statsd.Timing("replay.ix.exec_ix_native_program.latency", time.Since(start), []string{fmt.Sprintf("program:%s", nativeProgramStr)}, 1)
 
 	return err
 }

@@ -95,32 +95,32 @@ var IsPrecompile = errors.New("IsPrecompile")
 
 var invalidEnumValue = errors.New("invalid enum value")
 
-func resolveNativeProgramById(programId [32]byte) (func(ctx *ExecutionCtx) error, error) {
+func resolveNativeProgramById(programId [32]byte) (func(ctx *ExecutionCtx) error, string, error) {
 
 	switch programId {
 	case SystemProgramAddr:
-		return SystemProgramExecute, nil
+		return SystemProgramExecute, SystemProgramAddrStr, nil
 	case StakeProgramAddr:
-		return StakeProgramExecute, nil
+		return StakeProgramExecute, StakeProgramAddrStr, nil
 	case VoteProgramAddr:
-		return VoteProgramExecute, nil
+		return VoteProgramExecute, VoteProgramAddrStr, nil
 	case ComputeBudgetProgramAddr:
-		return ComputeBudgetExecute, nil
+		return ComputeBudgetExecute, ComputeBudgetProgramAddrStr, nil
 	case BpfLoader2Addr:
-		return BpfLoaderProgramExecute, nil
+		return BpfLoaderProgramExecute, BpfLoader2AddrStr, nil
 	case BpfLoaderDeprecatedAddr:
-		return BpfLoaderProgramExecute, nil
+		return BpfLoaderProgramExecute, BpfLoaderDeprecatedAddrStr, nil
 	case BpfLoaderUpgradeableAddr:
-		return BpfLoaderProgramExecute, nil
+		return BpfLoaderProgramExecute, BpfLoaderUpgradeableAddrStr, nil
 	case ZkElgamalProofProgramAddr:
-		return ElGamalExecute, nil
+		return ElGamalExecute, ZkElgamalProofProgramAddrStr, nil
 	case Ed25519PrecompileAddr:
-		return Ed25519ProgramExecute, nil
+		return Ed25519ProgramExecute, Ed25519PrecompileAddrStr, nil
 	case Secp256kPrecompileAddr:
-		return Secp256k1ProgramExecute, nil
+		return Secp256k1ProgramExecute, Secp256kPrecompileAddrStr, nil
 	}
 
-	return nil, InstrErrUnsupportedProgramId
+	return nil, "UNSUPPORTED", InstrErrUnsupportedProgramId
 }
 
 func verifySigner(authorized solana.PublicKey, signers []solana.PublicKey) error {
