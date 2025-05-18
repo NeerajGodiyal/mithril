@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -14,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -303,13 +305,16 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 }
 
 func verifySignatures(tx *solana.Transaction) {
+	start := time.Now()
 	err := tx.VerifySignatures()
 	if err != nil {
 		panic(fmt.Sprintf("error - tx %s had an invalid signature", tx.Signatures[0]))
 	}
+	statsd.Timing("replay.tx_async.sigverify.latency", time.Since(start), nil, 1)
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
+	start := time.Now()
 	go verifySignatures(tx)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
@@ -322,32 +327,40 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	if err != nil {
 		return nil, err
 	}
+	statsd.Timing("replay.tx.instrs_and_acct_metas.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
 	if err != nil {
 		return nil, err
 	}
+	statsd.Timing("replay.tx.compute_budget_exec_instrs.latency", time.Since(start), nil, 1)
 
 	// fast path for failed tx's
 	/*if txMeta.Err != nil {
 		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
 	}*/
 
+	start = time.Now()
 	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
 	if err != nil {
 		return nil, err
 	}
+	statsd.Timing("replay.tx.write_instrs_sysvar.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx)
 	if err != nil {
 		return nil, err
 	}
+	statsd.Timing("replay.tx.accts_from_tx.latency", time.Since(start), nil, 1)
 
 	var log sealevel.LogRecorder
 	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
 	execCtx.TransactionContext.AllInstructions = instrs
 	execCtx.TransactionContext.Signature = tx.Signatures[0]
 
+	start = time.Now()
 	// check for pre-balance divergences
 	for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 		txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
@@ -367,28 +380,36 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 		execCtx.TransactionContext.Accounts.Unlock(count)
 	}
+	statsd.Timing("replay.tx.pre_balance_divergence_check.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
 		return txFeeInfo, nil
 	}
+	statsd.Timing("replay.tx.calc_and_deduct_fees.latency", time.Since(start), nil, 1)
 
 	// check for fee divergences
 	if txFeeInfo.TotalFee != txMeta.Fee {
 		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
+	start = time.Now()
 	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
 	if err != nil {
 		panic("failed to get and deserialize rent sysvar")
 	}
+	statsd.Timing("replay.tx.read_rent_sysvar.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.GlobalCtx.Features, &execCtx.TransactionContext.Accounts)
 	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
+	statsd.Timing("replay.tx.pre_tx_rent_states.latency", time.Since(start), nil, 1)
 
 	var instrErr error
 	writablePubkeys := make([]solana.PublicKey, 0, 64)
 
+	start = time.Now()
 	for instrIdx, instr := range tx.Message.Instructions {
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
@@ -410,6 +431,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			break
 		}
 	}
+	statsd.Timing("replay.tx.ix_loop.latency", time.Since(start), nil, 1)
 
 	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
@@ -425,9 +447,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 	}
 
+	start = time.Now()
 	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
+	statsd.Timing("replay.tx.post_tx_rent_states.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	// check for post-balances divergences (but only if the tx succeeded)
 	if instrErr == nil && rentStateErr == nil {
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
@@ -444,7 +469,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			execCtx.TransactionContext.Accounts.Unlock(count)
 		}
 	}
+	statsd.Timing("replay.tx.post_balance_divergence_check.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	payerAcct, err := execCtx.TransactionContext.Accounts.GetAccount(0)
 	if err != nil {
 		panic(fmt.Sprintf("unable to get tx account to update payer acct state after failed tx: %s", err))
@@ -474,6 +501,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	handleModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
+	statsd.Timing("replay.tx.update_accts.latency", time.Since(start), nil, 1)
 
 	return txFeeInfo, nil
 }

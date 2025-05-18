@@ -531,7 +531,6 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		currentSlot = block.Slot
 		if currentSlot == startSlot {
 			configureInitialBlock(block, snapshotManifest, replayCtx)
-
 		} else {
 			configureBlock(block, replayCtx, lastSlotCtx)
 		}
@@ -586,6 +585,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 				block.HasEahWorkaround = true
 			}
 		}
+		statsd.Timing("replay.blocks.preprocessblock_latency", time.Since(start), nil, 1)
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, dbgOpts)
 		if err != nil {
@@ -679,6 +679,7 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	start := time.Now()
 	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
 	// gather up all accounts referenced in the block
@@ -686,10 +687,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
+	statsd.Timing("replay.block.load_block_accts.latency", time.Since(start), nil, 1)
 
 	slotCtx := newSlotCtx(block, accts, acctsDb)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 
+	start = time.Now()
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
@@ -713,20 +716,28 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 		txFeeAccumulator.Add(txFeeInfo)
 	}
+	statsd.Timing("replay.block.txloop.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	if block.BlockReward != nil {
 		// distribute tx fees to the slot leader
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
 		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
 		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
+	statsd.Timing("replay.block.reward.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
+	statsd.Timing("replay.block.rent.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	runIncinerator(slotCtx)
+	statsd.Timing("replay.block.run_incinerator.latency", time.Since(start), nil, 1)
 
+	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 	if len(modifiedAccts) > 0 && updateAcctsDb {
 		mlog.Log.Debugf("updating accountsdb")
@@ -734,6 +745,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	} else {
 		mlog.Log.Debugf("accountsdb not updated")
 	}
+	statsd.Timing("replay.block.update_accounts.latency", time.Since(start), nil, 1)
 
 	mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
@@ -744,8 +756,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	}
 
 	// calculate ADH and bankhash
+	start = time.Now()
 	acctDeltaHash := calculateAcctsDeltaHash(writableAccts)
+	statsd.Timing("replay.block.accts_delta_hash.latency", time.Since(start), nil, 1)
+	start = time.Now()
 	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	statsd.Timing("replay.block.bank_hash.latency", time.Since(start), nil, 1)
 
 	return slotCtx, err
 }
