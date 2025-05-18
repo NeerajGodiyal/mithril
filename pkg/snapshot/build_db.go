@@ -15,7 +15,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
-	bin "github.com/gagliardetto/binary"
 	"github.com/panjf2000/ants/v2"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -50,9 +49,10 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	var largestFileId atomic.Uint64
 	wg := sync.WaitGroup{}
 
+	numShards := 256
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
 	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
-		Shards:     256,
+		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
 		MemoryKey:  dbFn,
 	})
@@ -60,24 +60,20 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		panic(err)
 	}
 
-	ss := NewShardedSetter(db, 256, 100)
+	ss := NewShardedSetter(db, numShards, 100)
+	logsDir := fmt.Sprintf("%s/mithril_db_log_shards/", accountsDbDir)
+	if err = os.MkdirAll(logsDir, 0775); err != nil {
+		return nil, nil, err
+	}
+	sl := NewShardLogger(numShards, logsDir, ss, 16)
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(512, func(i interface{}) {
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
-		writer := new(bytes.Buffer)
 
 		for idx, entry := range task.IndexEntries {
-			writer.Reset()
-			encoder := bin.NewBinEncoder(writer)
-			err = entry.MarshalWithEncoder(encoder)
-
-			k := make([]byte, len(task.Pubkeys[idx]))
-			copy(k, task.Pubkeys[idx][:])
-			v := make([]byte, writer.Len())
-			copy(v, writer.Bytes())
-			ss.EnqueueRequest(k, v, entry.Slot)
+			sl.EnqueueRequest(task.Pubkeys[idx], *entry)
 		}
 		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
 	})
@@ -193,8 +189,13 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		}
 	}
 
-	mlog.Log.Infof("done in %s. waiting for all tasks to complete.\n", time.Since(start))
+	mlog.Log.Infof("done in %s. waiting for all tasks to complete.", time.Since(start))
 	wg.Wait()
+	mlog.Log.Infof("Closing shard logger.")
+	sl.Close()
+	mlog.Log.Infof("Stopping shard setter.")
+	ss.Stop()
+
 	mlog.Log.Infof("snapshot processed in %s.\n", time.Since(start))
 
 	largestFileIdFile, err := os.Create(fmt.Sprintf("%s/largest_file_id", accountsDbDir))
