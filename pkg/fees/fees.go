@@ -105,6 +105,8 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	if err != nil {
 		panic("no fee payer")
 	}
+	mlog.Log.Debugf("feePayerAcct=%+v", feePayerAcct)
+
 	defer transactionAccts.Unlock(feePayerIdx)
 
 	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
@@ -135,6 +137,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	if feePayerAcct.Lamports < totalTxFee {
 		return feeInfo, 0, sealevel.InstrErrInsufficientFunds
 	}
+	mlog.Log.Debugf("feePayerAcct.Lamports=%d totalTxFee=%d", feePayerAcct.Lamports, totalTxFee)
 
 	feePayerAcct.Lamports -= totalTxFee
 	transactionAccts.Touch(feePayerIdx)

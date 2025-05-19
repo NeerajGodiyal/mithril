@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -383,10 +384,18 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	statsd.Timing("replay.tx.pre_balance_divergence_check.latency", time.Since(start), nil, 1)
 
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, newPayerBalance, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
 		return txFeeInfo, nil
 	}
+
+	mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
+	mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
+	/*
+		txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+		if err != nil {
+			return txFeeInfo, nil
+		}*/
 	statsd.Timing("replay.tx.calc_and_deduct_fees.latency", time.Since(start), nil, 1)
 
 	// check for fee divergences
@@ -459,18 +468,26 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	start = time.Now()
 	// check for post-balances divergences (but only if the tx succeeded)
 	if instrErr == nil && rentStateErr == nil {
+		var errBuf strings.Builder
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
 			if err != nil {
 				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for post-balances divergences", count))
 			}
+			mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PostBalances[count] {
-					panic(fmt.Sprintf("tx %s post-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s\n", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PostBalances[count], util.PrettyPrintAcct(txAcct)))
+					errBuf.WriteString(fmt.Sprintf(
+						" - lamport balance for %s was %d but onchain lamport balance was %d\n%s\n",
+						txAcct.Key, txAcct.Lamports, txMeta.PostBalances[count], util.PrettyPrintAcct(txAcct)))
 				}
 			}
 			execCtx.TransactionContext.Accounts.Unlock(count)
+		}
+		if errBuf.Len() > 0 {
+			msg := fmt.Sprintf("tx %s post-balance divergences:", tx.Signatures[0]) + errBuf.String()
+			panic(msg)
 		}
 	}
 	statsd.Timing("replay.tx.post_balance_divergence_check.latency", time.Since(start), nil, 1)
