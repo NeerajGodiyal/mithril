@@ -426,7 +426,7 @@ func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {
 	return nil
 }
 
-func newBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
+func NewBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 	block := new(Block)
 
 	for _, tx := range blockResult.Transactions {
