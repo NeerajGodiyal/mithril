@@ -396,7 +396,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 				}
 			}
 		} else {
-			mlog.Log.Debugf("%+v", tx)
 			instrErr = err
 			break
 		}

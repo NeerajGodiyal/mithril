@@ -18,12 +18,13 @@ import (
 )
 
 type AccountsDb struct {
-	Index         fastcache.Cache
-	AcctsDir      string
-	LargestFileId atomic.Uint64
-	BankHashBytes [32]byte
-	VoteAcctCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache  otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+	Index            fastcache.Cache
+	AcctsDir         string
+	LargestFileId    atomic.Uint64
+	BankHashBytes    [32]byte
+	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
+	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 }
 
 var (
@@ -120,6 +121,15 @@ func (accountsDb *AccountsDb) InitCaches() {
 	if err != nil {
 		panic(err)
 	}
+
+	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](100000).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
 }
 
 type ProgramCacheEntry struct {
@@ -141,6 +151,11 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
+	if hasAcct {
+		return cachedAcct, nil
+	}
+
+	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
 	if hasAcct {
 		return cachedAcct, nil
 	}
@@ -181,6 +196,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	}
 
 	acct.Slot = acctIdxEntry.Slot
+	accountsDb.CommonAcctsCache.Set(pubkey, acct)
 
 	return acct, err
 }
@@ -188,6 +204,71 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 var voteAcct = solana.MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111")
 
 func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint64) error {
+	/*fileId := accountsDb.LargestFileId.Add(1)
+
+	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
+	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
+		return err
+	}
+	defer appendVecFile.Close()*/
+
+	//appendVecAcctsBuf := new(bytes.Buffer)
+	//writer := new(bytes.Buffer)
+
+	go accountsDb.storeAccountsInternal(accts, slot)
+
+	for _, acct := range accts {
+		acct.Slot = slot
+
+		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
+		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
+			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+		} else {
+			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+		}
+
+		// create index entry, encode it and write it to the index kv store
+		// offset field is specified as the current num of bytes written to the appendvec buffer.
+		/*writer.Reset()
+		encoder := bin.NewBinEncoder(writer)
+
+		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: uint64(appendVecAcctsBuf.Len())}
+
+		err = indexEntry.MarshalWithEncoder(encoder)
+		if err != nil {
+			mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
+			return err
+		}
+
+		err = accountsDb.Index.Set(acct.Key[:], writer.Bytes())
+		if err != nil {
+			panic(fmt.Sprintf("unable to add acct for %s to acctsdb", acct.Key))
+		}
+
+		// marshal up the account as an appendvec style account and write it to the buffer
+		appendVecAcct := AppendVecAccount{DataLen: uint64(len(acct.Data)), Pubkey: acct.Key, Lamports: acct.Lamports,
+			RentEpoch: acct.RentEpoch, Owner: acct.Owner, Executable: acct.Executable, Data: acct.Data}
+
+		err = appendVecAcct.Marshal(appendVecAcctsBuf)
+		if err != nil {
+			return err
+		}*/
+	}
+
+	// write the appendvecs data into the file
+	/*n, err := appendVecFile.Write(appendVecAcctsBuf.Bytes())
+	if err != nil {
+		return err
+	} else if n != appendVecAcctsBuf.Len() {
+		return fmt.Errorf("only wrote %d appendvec account bytes, rather than %d", n, appendVecAcctsBuf.Len())
+	}*/
+
+	return nil
+}
+
+func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64) error {
 	fileId := accountsDb.LargestFileId.Add(1)
 
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
@@ -204,19 +285,12 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	for _, acct := range accts {
 		acct.Slot = slot
 
-		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
-		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
-			accountsDb.VoteAcctCache.Set(acct.Key, acct)
-			continue
-		}
-
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.
 		writer.Reset()
 		encoder := bin.NewBinEncoder(writer)
 
 		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: uint64(appendVecAcctsBuf.Len())}
-
 		err = indexEntry.MarshalWithEncoder(encoder)
 		if err != nil {
 			mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
