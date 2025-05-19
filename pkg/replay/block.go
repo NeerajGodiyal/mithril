@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -496,7 +497,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, dbgOpts *DebugOptions) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, txParallelism int, dbgOpts *DebugOptions) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -587,7 +588,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		}
 		statsd.Timing("replay.blocks.preprocessblock_latency", time.Since(start), nil, 1)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, dbgOpts)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, txParallelism, dbgOpts)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
@@ -678,21 +679,8 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 	return slotCtx
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
-	start := time.Now()
-	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
-
-	// gather up all accounts referenced in the block
-	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
-	if err != nil {
-		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
-	}
-	statsd.Timing("replay.block.load_block_accts.latency", time.Since(start), nil, 1)
-
-	slotCtx := newSlotCtx(block, accts, acctsDb)
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
-
-	start = time.Now()
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
@@ -716,7 +704,74 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 		txFeeAccumulator.Add(txFeeInfo)
 	}
+	return txFeeAccumulator
+}
+
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
+	errs := make([]error, len(block.Transactions))
+
+	for _, txs := range txPlan {
+
+		// start workers for this level
+		txIdxs := make(chan int)
+		wg := &sync.WaitGroup{}
+		wg.Add(txParallelism)
+		for i := 0; i < txParallelism; i++ {
+			go func() {
+				defer wg.Done()
+				for idx := range txIdxs {
+					tx := block.Transactions[idx]
+					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
+					// check for success-failure return value divergences
+					if errs[idx] == nil && block.TxMetas[idx].Err != nil {
+						mlog.Log.Infof("tx %s return value divergence1: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
+					} else if errs[idx] != nil && block.TxMetas[idx].Err == nil {
+						mlog.Log.Infof("tx %s return value divergence2: txErr was %s, but onchain err was nil", tx.Signatures[0], errs[idx].Error())
+					}
+				}
+			}()
+		}
+
+		// feed workers
+		for _, tx := range txs {
+			txIdxs <- tx
+		}
+		close(txIdxs)
+		wg.Wait()
+	}
+	for _, txFeeInfo := range txFeeInfos {
+		txFeeAccumulator.Add(txFeeInfo)
+	}
+	return txFeeAccumulator
+}
+
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	start := time.Now()
+	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
+	var txPlan [][]int
+	if txParallelism > 0 {
+		txPlan = TopsortPlanner(block)
+	}
+
+	// gather up all accounts referenced in the block
+	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	if err != nil {
+		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
+	}
+	statsd.Timing("replay.block.load_block_accts.latency", time.Since(start), nil, 1)
+
+	slotCtx := newSlotCtx(block, accts, acctsDb)
+
+	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	start = time.Now()
 	statsd.Timing("replay.block.txloop.latency", time.Since(start), nil, 1)
+	if txParallelism > 0 {
+		txFeeAccumulator = parallelTxLoop(slotCtx, block, txPlan, txParallelism, dbgOpts)
+	} else {
+		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
+	}
 
 	start = time.Now()
 	if block.BlockReward != nil {
