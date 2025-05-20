@@ -3,7 +3,7 @@ package sbpf
 import (
 	"encoding/binary"
 
-	"github.com/spaolacci/murmur3"
+	"github.com/twmb/murmur3"
 )
 
 const (
