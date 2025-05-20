@@ -353,9 +353,6 @@ func (slotCtx *SlotCtx) GetAccountFromAccountsDb(pubkey solana.PublicKey) (*acco
 }
 
 func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Account) error {
-	if pubkey.String() == "J4HJYz4p7TRP96WVFky3vh7XryxoFehHjoRySUTeSeXw" {
-		mlog.Log.Infof("%s is being set!", pubkey.String())
-	}
 	pk := [32]byte(pubkey)
 	err := slotCtx.Accounts.SetAccount(&pk, acct)
 	return err

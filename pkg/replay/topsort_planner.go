@@ -98,12 +98,6 @@ func TopsortPlanner(b *Block) [][]int {
 		t := tx(txIdx)
 
 		txSig := b.Transactions[txIdx].Signatures[0]
-		if txSig.String() == "5xeRhZN4rXh4L6hYrfM5uu88VfghqnFZikvAL7kE1eVjRzgpHdcNnjbknXZfamxwEvQ1cSeRDGHjswgykZTi6ACs" {
-			mlog.Log.EnableInfLogging()
-		} else {
-			mlog.Log.DisableInfLogging()
-		}
-
 		mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
 		readonlyAccounts := getReadonlyAccounts(b.Transactions[txIdx], txMeta)
 		for _, roAcct := range readonlyAccounts {
@@ -127,9 +121,7 @@ func TopsortPlanner(b *Block) [][]int {
 
 		writableAccts := getWritableAccounts(b.Transactions[txIdx], txMeta)
 		for _, writeAcct := range writableAccts {
-			if writeAcct.String() == "J4HJYz4p7TRP96WVFky3vh7XryxoFehHjoRySUTeSeXw" {
-				mlog.Log.Infof("txIdx=%d txSig=%s writes to %s", txIdx, txSig, writeAcct.String())
-			}
+			mlog.Log.Debugf("- writeAcct=%s", writeAcct.String())
 			acct, exists := pkToAcct[writeAcct]
 			if !exists {
 				panic(fmt.Sprintf("invariant error: expected pkToAcct to contain all public keys of accounts used in block; missing public key=%s", writeAcct.String()))
