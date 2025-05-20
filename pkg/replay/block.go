@@ -784,12 +784,12 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
-	statsd.Timing("replay.block.txloop.latency", time.Since(start), nil, 1)
 	if txParallelism > 0 {
 		txFeeAccumulator = parallelTxLoop(slotCtx, block, txPlan, txParallelism, dbgOpts)
 	} else {
 		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
 	}
+	statsd.Timing("replay.block.txloop.latency", time.Since(start), nil, 1)
 
 	start = time.Now()
 	if block.BlockReward != nil {
