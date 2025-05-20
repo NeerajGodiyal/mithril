@@ -251,7 +251,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 		err = accountsDb.Index.Set(acct.Key[:], writer.Bytes())
 		if err != nil {
-			panic(fmt.Sprintf("unable to add acct for %s to acctsdb", acct.Key))
+			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
 		}
 
 		// marshal up the account as an appendvec style account and write it to the buffer
