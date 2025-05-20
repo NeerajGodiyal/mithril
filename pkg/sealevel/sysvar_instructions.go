@@ -92,7 +92,7 @@ func marshalInstructions(instructions []Instruction) []byte {
 	return data
 }
 
-func WriteInstructionsSysvar(accts *accounts.Accounts, instructions []Instruction) error {
+func MakeInstructionsAccount(instructions []Instruction) *accounts.Account {
 	serializedData := marshalInstructions(instructions)
 
 	instructionsAcct := accounts.Account{}
@@ -103,5 +103,5 @@ func WriteInstructionsSysvar(accts *accounts.Accounts, instructions []Instructio
 	instructionsAcct.Executable = false
 	instructionsAcct.Owner = SysvarOwnerAddr
 
-	return (*accts).SetAccount(&SysvarInstructionsAddr, &instructionsAcct)
+	return &instructionsAcct
 }

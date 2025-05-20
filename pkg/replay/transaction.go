@@ -39,7 +39,7 @@ var (
 	TxErrInsufficientFundsForRent = errors.New("TxErrInsufficientFundsForRent")
 )
 
-func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction) (*sealevel.TransactionAccounts, error) {
+func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrsAcct *accounts.Account) (*sealevel.TransactionAccounts, error) {
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
 		return nil, err
@@ -62,7 +62,9 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
-		if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
+		if acctMeta.PublicKey == sealevel.SysvarInstructionsAddr {
+			acct = instrsAcct
+		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
 			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
 			if err != nil {
 				return nil, err
@@ -344,15 +346,10 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
 	}*/
 
-	start = time.Now()
-	err = sealevel.WriteInstructionsSysvar(&slotCtx.Accounts, instrs)
-	if err != nil {
-		return nil, err
-	}
-	statsd.Timing("replay.tx.write_instrs_sysvar.latency", time.Since(start), nil, 1)
+	instrsAcct := sealevel.MakeInstructionsAccount(instrs)
 
 	start = time.Now()
-	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx)
+	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx, instrsAcct)
 	if err != nil {
 		return nil, err
 	}
