@@ -729,7 +729,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
+	txDurations := make([]time.Duration, txParallelism)
 
+	start := time.Now()
 	for _, txs := range txPlan {
 
 		// start workers for this level
@@ -740,6 +742,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 			go func() {
 				defer wg.Done()
 				for idx := range txIdxs {
+					txStart := time.Now()
 					tx := block.Transactions[idx]
 					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
 					// check for success-failure return value divergences
@@ -748,6 +751,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 					} else if errs[idx] != nil && block.TxMetas[idx].Err == nil {
 						mlog.Log.Infof("tx %s return value divergence2: txErr was %s, but onchain err was nil", tx.Signatures[0], errs[idx].Error())
 					}
+					txDurations[i] += time.Since(txStart)
 				}
 			}()
 		}
@@ -762,6 +766,13 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 	for _, txFeeInfo := range txFeeInfos {
 		txFeeAccumulator.Add(txFeeInfo)
 	}
+	wallDuration := time.Since(start)
+	var txDuration time.Duration
+	for _, workerTxDuration := range txDurations {
+		txDuration += workerTxDuration
+	}
+	mlog.Log.Infof("completed %s parallel tx execution time in %s wall time.", txDuration, wallDuration)
+
 	return txFeeAccumulator
 }
 
@@ -771,8 +782,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	var txPlan [][]int
 	if txParallelism > 0 {
 		txPlan = TopsortPlanner(block)
+		statsd.Timing("replay.block.topsort_planner.latency", time.Since(start), nil, 1)
 	}
 
+	start = time.Now()
 	// gather up all accounts referenced in the block
 	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	if err != nil {
