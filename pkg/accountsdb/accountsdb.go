@@ -204,10 +204,12 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 var voteAcct = solana.MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111")
 
 func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint64) error {
+	for _, acct := range accts {
+		acct.Slot = slot
+	}
 	go accountsDb.storeAccountsInternal(accts, slot)
 
 	for _, acct := range accts {
-		acct.Slot = slot
 
 		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
 		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
@@ -235,7 +237,6 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 	writer := new(bytes.Buffer)
 
 	for _, acct := range accts {
-		acct.Slot = slot
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.
