@@ -309,8 +309,14 @@ func verifySignatures(tx *solana.Transaction) {
 	}
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta) (*fees.TxFeeInfo, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
 	go verifySignatures(tx)
+
+	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
+		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
+		mlog.Log.EnableInfLogging()
+		defer mlog.Log.DisableInfLogging()
+	}
 
 	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
@@ -347,6 +353,10 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get tx acct %d whilst checking for pre-balances divergences", count))
+		}
+		if dbgOpts.IsDebugTx(tx.Signatures[0]) {
+			// Avoid calling util.PrettyPrintAcct when not debug logging.
+			mlog.Log.Debugf("pre-balance account: %s", util.PrettyPrintAcct(txAcct))
 		}
 
 		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {

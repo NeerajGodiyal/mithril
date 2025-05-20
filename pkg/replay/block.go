@@ -4,10 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-
-	//"runtime/debug"
-
-	//"runtime/pprof"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -500,7 +496,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, dbgOpts *DebugOptions) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -591,7 +587,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			}
 		}
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, dbgOpts)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
@@ -682,7 +678,7 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 	return slotCtx
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool) (*sealevel.SlotCtx, error) {
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 
 	// gather up all accounts referenced in the block
@@ -699,7 +695,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 
 		txMeta := block.TxMetas[idx]
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, txMeta)
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, txMeta, dbgOpts)
 
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {

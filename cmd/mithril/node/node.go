@@ -32,6 +32,8 @@ var (
 	endSlot            int64
 	pprofPort          int64
 	blockDir           string
+	debugTxs           []string
+	debugAcctWrites    []string
 )
 
 func init() {
@@ -45,6 +47,8 @@ func init() {
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
 	Cmd.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
 	Cmd.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
+	Cmd.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
+	Cmd.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 }
 
 func run(c *cobra.Command, args []string) {
@@ -84,6 +88,11 @@ func run(c *cobra.Command, args []string) {
 	var accountsDbDir string
 	var accountsDb *accountsdb.AccountsDb
 	var manifest *snapshot.SnapshotManifest
+	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
+	if err != nil {
+		klog.Errorf("failed to parse --debugtx or --debugacctwrites values: %v", err)
+		return
+	}
 
 	if loadFromSnapshot {
 		if path == "" || outputDir == "" {
@@ -136,7 +145,7 @@ func run(c *cobra.Command, args []string) {
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir)
+	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, dbgOpts)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
