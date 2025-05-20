@@ -7,7 +7,7 @@ import (
 	"slices"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
@@ -16,7 +16,7 @@ import (
 
 // SyscallGetClockSysvarImpl is an implementation of the sol_get_clock_sysvar syscall
 func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetClock for addr %x, len = %d", addr, SysvarClockStructLen)
+	//mlog.Log.Debugf("SyscallGetClock for addr %x, len = %d", addr, SysvarClockStructLen)
 
 	execCtx := executionCtx(vm)
 
@@ -51,7 +51,7 @@ var SyscallGetClockSysvar = sbpf.SyscallFunc1(SyscallGetClockSysvarImpl)
 
 // SyscallGetRentSysvarImpl is an implementation of the sol_get_rent_sysvar syscall
 func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetRentSysvarImpl")
+	//mlog.Log.Debugf("SyscallGetRentSysvarImpl")
 
 	execCtx := executionCtx(vm)
 
@@ -82,7 +82,7 @@ var SyscallGetRentSysvar = sbpf.SyscallFunc1(SyscallGetRentSysvarImpl)
 
 // SyscallGetEpochScheduleSysvarImpl is an implementation of the sol_get_epoch_schedule_sysvar syscall
 func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetEpochSchedule")
+	//mlog.Log.Debugf("SyscallGetEpochSchedule")
 
 	execCtx := executionCtx(vm)
 
@@ -123,7 +123,7 @@ var SyscallGetEpochScheduleSysvar = sbpf.SyscallFunc1(SyscallGetEpochScheduleSys
 
 // SyscallGetEpochRewardsSysvarImpl is an implementation of the sol_get_epoch_rewards_sysvar syscall
 func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetEpochRewards")
+	//mlog.Log.Debugf("SyscallGetEpochRewards")
 
 	execCtx := executionCtx(vm)
 
@@ -167,7 +167,7 @@ var SyscallGetEpochRewardsSysvar = sbpf.SyscallFunc1(SyscallGetEpochRewardsSysva
 
 // SyscallGetLastRestartSlotSysvarImpl is an implementation of the sol_get_last_restart_slot_sysvar syscall
 func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetLastRestartSlotSysvar")
+	//mlog.Log.Debugf("SyscallGetLastRestartSlotSysvar")
 
 	execCtx := executionCtx(vm)
 
@@ -224,7 +224,7 @@ func fetchSysvarBytesForPubkey(pubkey solana.PublicKey) ([]byte, error) {
 }
 
 func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offset uint64, length uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetSysvar")
+	//mlog.Log.Debugf("SyscallGetSysvar")
 
 	execCtx := executionCtx(vm)
 
@@ -275,7 +275,7 @@ func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offse
 var SyscallGetSysvar = sbpf.SyscallFunc4(SyscallGetSysvarImpl)
 
 func SyscallGetEpochStakeImpl(vm sbpf.VM, varAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetEpochStake")
+	//mlog.Log.Debugf("SyscallGetEpochStake")
 
 	var err error
 	execCtx := executionCtx(vm)

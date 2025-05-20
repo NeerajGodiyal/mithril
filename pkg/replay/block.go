@@ -64,8 +64,8 @@ type Block struct {
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
-	for idx, tx := range block.Transactions {
-		mlog.Log.Debugf("resolveAddrTableLookups for transaction %d", idx)
+	for _, tx := range block.Transactions {
+		//mlog.Log.Debugf("resolveAddrTableLookups for transaction %d", idx)
 
 		if !tx.Message.IsVersioned() {
 			continue
@@ -79,7 +79,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 
 			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
 			if err != nil {
-				mlog.Log.Debugf("unable to get address lookup table account: %s", addrTableKey)
+				//mlog.Log.Debugf("unable to get address lookup table account: %s", addrTableKey)
 				skipLookup = true
 				break
 			}
@@ -382,7 +382,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			// already activated
 			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
 				f.EnableFeature(featureGate, *featureAcct.ActivatedAt)
-				mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+				//mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 
 			if featureAcct.ActivatedAt == nil && startOfEpoch {
@@ -397,7 +397,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 
 				newlyActivatedFeatures = append(newlyActivatedFeatures, featureGate.Address)
 				f.EnableFeature(featureGate, slot)
-				mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
+				//mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 		}
 	}
@@ -409,10 +409,10 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 		}
 	}
 
-	mlog.Log.Debugf("scanAndEnableFeatures, modified features:\n")
+	/*mlog.Log.Debugf("scanAndEnableFeatures, modified features:\n")
 	for _, feat := range newlyActivatedFeatures {
 		mlog.Log.Debugf("feature: %s", feat)
-	}
+	}*/
 
 	return f, newlyActivatedFeatures
 }
@@ -593,7 +593,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
 		} else {
-			mlog.Log.Debugf("block replayed successfully.\n")
+			//mlog.Log.Debugf("block replayed successfully.\n")
 		}
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
@@ -646,7 +646,7 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 	}
 
 	for _, pk := range block.UpdatedAccts {
-		//mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
+		////mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
 		acct, err := slotCtx.GetAccount(pk)
 		if err != nil {
 			panic(fmt.Sprintf("unable to fetch %s from accountsdb for inclusion in bankhash", pk))
@@ -701,7 +701,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOpt
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-		mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
+		//mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 
 		txMeta := block.TxMetas[idx]
 		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, txMeta, dbgOpts)
@@ -710,7 +710,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOpt
 			if txMeta.Err == nil && tx.IsVote() {
 				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
 			}
-			mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
+			//mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
 
 		// check for success-failure return value divergences
@@ -779,7 +779,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	start := time.Now()
-	mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
+	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 	var txPlan [][]int
 	if txParallelism > 0 {
 		txPlan = TopsortPlanner(block)
@@ -810,7 +810,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		// distribute tx fees to the slot leader
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
 		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
-		mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
+		//mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
 	statsd.Timing("replay.block.reward.latency", time.Since(start), nil, 1)
 
@@ -827,14 +827,14 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 	if len(modifiedAccts) > 0 && updateAcctsDb {
-		mlog.Log.Debugf("updating accountsdb")
+		//mlog.Log.Debugf("updating accountsdb")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 	} else {
-		mlog.Log.Debugf("accountsdb not updated")
+		//mlog.Log.Debugf("accountsdb not updated")
 	}
 	statsd.Timing("replay.block.update_accounts.latency", time.Since(start), nil, 1)
 
-	mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
+	//mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
 	// EAH workaround
 	if slotCtx.HasEahWorkaround {

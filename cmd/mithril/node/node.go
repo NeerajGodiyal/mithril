@@ -111,7 +111,7 @@ func run(c *cobra.Command, args []string) {
 			klog.Exitf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}
 
-		mlog.Log.Debugf("successfully created accounts db from snapshot %s", path)
+		//mlog.Log.Debugf("successfully created accounts db from snapshot %s", path)
 
 		// just processing the snapshot - not executing blocks.
 		if startSlot < 0 {

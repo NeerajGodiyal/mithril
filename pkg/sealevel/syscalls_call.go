@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"slices"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
@@ -12,7 +12,7 @@ import (
 
 // SyscallGetStackHeightImpl is an implementation of the sol_get_stack_height syscall
 func SyscallGetStackHeightImpl(vm sbpf.VM) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetStackHeight")
+	//mlog.Log.Debugf("SyscallGetStackHeight")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
@@ -27,7 +27,7 @@ var SyscallGetStackHeight = sbpf.SyscallFunc0(SyscallGetStackHeightImpl)
 
 // SyscallGetReturnDataImpl is an implementation of the sol_get_return_data syscall
 func SyscallGetReturnDataImpl(vm sbpf.VM, returnDataAddr, length, programIdAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetReturnData")
+	//mlog.Log.Debugf("SyscallGetReturnData")
 
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
@@ -80,7 +80,7 @@ const MaxReturnData = 1024
 
 // SyscallSetReturnDataImpl is an implementation of the sol_set_return_data syscall
 func SyscallSetReturnDataImpl(vm sbpf.VM, addr, length uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallSetReturnData")
+	//mlog.Log.Debugf("SyscallSetReturnData")
 
 	execCtx := executionCtx(vm)
 	cost := safemath.SaturatingAddU64(length/CUCpiBytesPerUnit, CUSyscallBaseCost)
@@ -123,7 +123,7 @@ var SyscallSetReturnData = sbpf.SyscallFunc2(SyscallSetReturnDataImpl)
 
 // SyscallGetProcessedSiblingInstructionImpl is an implementation of the sol_get_processed_sibling_instruction syscall
 func SyscallGetProcessedSiblingInstructionImpl(vm sbpf.VM, index, metaAddr, programIdAddr, dataAddr, accountsAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallGetProcessedSiblingInstruction")
+	//mlog.Log.Debugf("SyscallGetProcessedSiblingInstruction")
 
 	execCtx := executionCtx(vm)
 	txCtx := transactionCtx(vm)

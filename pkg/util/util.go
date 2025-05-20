@@ -4,12 +4,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
 )
@@ -90,9 +88,9 @@ func CalculateAcctHash(acct accounts.Account) []byte {
 // this logs the function name as well.
 func VerboseHandleError(err error) (b bool) {
 	if err != nil {
-		pc, filename, line, _ := runtime.Caller(1)
+		// pc, filename, line, _ := runtime.Caller(1)
 
-		mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
+		//mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		b = true
 	}
 	return

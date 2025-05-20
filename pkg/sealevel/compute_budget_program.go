@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -334,7 +333,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 }
 
 func ComputeBudgetExecute(execCtx *ExecutionCtx) error {
-	mlog.Log.Debugf("ComputeBudget program")
+	//mlog.Log.Debugf("ComputeBudget program")
 	err := execCtx.ComputeMeter.Consume(CUComputeBudgetProgramDefaultComputeUnits)
 	return err
 }

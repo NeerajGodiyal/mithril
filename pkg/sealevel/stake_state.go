@@ -5,7 +5,7 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
@@ -881,7 +881,7 @@ func metasCanMerge(stakeMeta *Meta, srcMeta *Meta, clock SysvarClock) error {
 	if stakeMeta.Authorized == srcMeta.Authorized && canMergeLockups {
 		return nil
 	} else {
-		mlog.Log.Debugf("unable to merge due to metadata mismatch")
+		//mlog.Log.Debugf("unable to merge due to metadata mismatch")
 		return StakeErrMergeMismatch
 	}
 
@@ -934,12 +934,12 @@ func (mergeKind *MergeKind) ActiveStake() *Stake {
 
 func activeDelegationsCanMerge(stake *Delegation, src *Delegation) error {
 	if stake.VoterPubkey != src.VoterPubkey {
-		mlog.Log.Debugf("unable to merge due to voter mismatch")
+		//mlog.Log.Debugf("unable to merge due to voter mismatch")
 		return StakeErrMergeMismatch
 	} else if stake.DeactivationEpoch == math.MaxUint64 && src.DeactivationEpoch == math.MaxUint64 {
 		return nil
 	} else {
-		mlog.Log.Debugf("unable to merge due to stake deactivation")
+		//mlog.Log.Debugf("unable to merge due to stake deactivation")
 		return StakeErrMergeMismatch
 	}
 }

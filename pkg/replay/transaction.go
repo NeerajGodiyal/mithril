@@ -145,7 +145,7 @@ func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16
 
 		lastIndex := len(instructionsAcct.Data) - 2
 		binary.LittleEndian.PutUint16(instructionsAcct.Data[lastIndex:], instrIdx)
-		mlog.Log.Debugf("found instructions sysvar pubkey at instr idx %d", instrIdx)
+		//mlog.Log.Debugf("found instructions sysvar pubkey at instr idx %d", instrIdx)
 	}
 	return nil
 }
@@ -203,7 +203,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
 			}
 			slotCtx.RecordModifiedAcct(newAcctState.Key)
-			mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
+			//mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
 		}
 	}
 }
@@ -220,7 +220,7 @@ func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
 	if isEmpty || isUninitialized {
 		delete(slotCtx.StakeAccts, acct.Key)
 	} else {
-		mlog.Log.Debugf("added stake delegation record for %s: %v", acct.Key, acct)
+		//mlog.Log.Debugf("added stake delegation record for %s: %v", acct.Key, acct)
 		slotCtx.StakeAccts[acct.Key] = true
 	}
 }
@@ -369,7 +369,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		}
 		if dbgOpts.IsDebugTx(tx.Signatures[0]) {
 			// Avoid calling util.PrettyPrintAcct when not debug logging.
-			//mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
+			////mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
 		}
 
 		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
@@ -388,8 +388,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		return txFeeInfo, nil
 	}
 
-	//mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
-	//mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
+	////mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
+	////mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
 	/*
 		txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 		if err != nil {
@@ -445,18 +445,18 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	}
 	statsd.Timing("replay.tx.ix_loop.latency", time.Since(start), nil, 1)
 
-	mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
+	//mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
 	// check for CU consumed divergences
 	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
-		discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
+		/*discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
 		var sign byte
 		if execCtx.ComputeMeter.Used() > *txMeta.ComputeUnitsConsumed {
 			sign = '+'
 		} else {
 			sign = '-'
 		}
-		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
+		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy) */
 	}
 
 	start = time.Now()
@@ -473,7 +473,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			if err != nil {
 				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for post-balances divergences", count))
 			}
-			//mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
+			////mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PostBalances[count] {

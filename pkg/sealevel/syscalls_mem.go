@@ -3,7 +3,7 @@ package sealevel
 import (
 	"encoding/binary"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
@@ -27,7 +27,7 @@ func memmoveImplInternal(vm sbpf.VM, dst, src, n uint64) (err error) {
 // SyscallMemcpyImpl is the implementation of the memcpy (sol_memcpy_) syscall.
 // Overlapping src and dst for a given n bytes to be copied results in an error being returned.
 func SyscallMemcpyImpl(vm sbpf.VM, dst, src, n uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallMemcpy")
+	//mlog.Log.Debugf("SyscallMemcpy")
 
 	execCtx := executionCtx(vm)
 	err := MemOpConsume(execCtx, n)
@@ -57,7 +57,7 @@ var SyscallMemcpy = sbpf.SyscallFunc3(SyscallMemcpyImpl)
 
 // SyscallMemmoveImpl is the implementation for the memmove (sol_memmove_) syscall.
 func SyscallMemmoveImpl(vm sbpf.VM, dst, src, n uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallMemmove")
+	//mlog.Log.Debugf("SyscallMemmove")
 
 	execCtx := executionCtx(vm)
 	err := MemOpConsume(execCtx, n)
@@ -77,7 +77,7 @@ var SyscallMemmove = sbpf.SyscallFunc3(SyscallMemmoveImpl)
 
 // SyscallMemcmpImpl is the implementation for the memcmp (sol_memcmp_) syscall.
 func SyscallMemcmpImpl(vm sbpf.VM, addr1, addr2, n, resultAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallMemcmp")
+	//mlog.Log.Debugf("SyscallMemcmp")
 
 	execCtx := executionCtx(vm)
 	err := MemOpConsume(execCtx, n)
@@ -119,7 +119,7 @@ var SyscallMemcmp = sbpf.SyscallFunc4(SyscallMemcmpImpl)
 
 // SyscallMemcmpImpl is the implementation for the memset (sol_memset_) syscall.
 func SyscallMemsetImpl(vm sbpf.VM, dst, c, n uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallMemset")
+	//mlog.Log.Debugf("SyscallMemset")
 
 	execCtx := executionCtx(vm)
 	err := MemOpConsume(execCtx, n)
@@ -143,7 +143,7 @@ var SyscallMemset = sbpf.SyscallFunc3(SyscallMemsetImpl)
 
 // SyscallMemcmpImpl is the implementation for the memset (sol_memset_) syscall.
 func SyscallAllocFreeImpl(vm sbpf.VM, size, freeAddr uint64) (uint64, error) {
-	mlog.Log.Debugf("SyscallAllocFreeImpl")
+	//mlog.Log.Debugf("SyscallAllocFreeImpl")
 
 	execCtx := executionCtx(vm)
 

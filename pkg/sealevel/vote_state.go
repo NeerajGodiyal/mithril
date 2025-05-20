@@ -6,11 +6,10 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
-	"github.com/gammazero/deque"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
+	"github.com/gammazero/deque"
 	"github.com/tidwall/btree"
 )
 
@@ -474,7 +473,7 @@ func (voteState *VoteState0_23_5) MarshalWithEncoder(encoder *bin.Encoder) error
 	if err != nil {
 		return err
 	}
-	for i := 0; i< voteState.Votes.Len(); i++ {
+	for i := 0; i < voteState.Votes.Len(); i++ {
 		lockout := voteState.Votes.At(i)
 		err = lockout.MarshalWithEncoder(encoder)
 		if err != nil {
@@ -1254,7 +1253,7 @@ func (voteStateVersions *VoteStateVersions) UnmarshalWithDecoder(decoder *bin.De
 		}
 	default:
 		{
-			mlog.Log.Debugf("invalid vote state type: %d", voteStateVersions.Type)
+			//mlog.Log.Debugf("invalid vote state type: %d", voteStateVersions.Type)
 			err = InstrErrInvalidAccountData
 		}
 	}

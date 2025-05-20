@@ -98,10 +98,10 @@ func TopsortPlanner(b *Block) [][]int {
 		t := tx(txIdx)
 
 		//txSig := b.Transactions[txIdx].Signatures[0]
-		//mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
+		////mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
 		readonlyAccounts := getReadonlyAccounts(b.Transactions[txIdx], txMeta)
 		for _, roAcct := range readonlyAccounts {
-			//mlog.Log.Debugf("- roAcct=%s", roAcct.String())
+			////mlog.Log.Debugf("- roAcct=%s", roAcct.String())
 			acct, exists := pkToAcct[roAcct]
 			if !exists {
 				panic(fmt.Sprintf("invariant error: did not record account index for pk=%s in previous loop?", roAcct.String()))
@@ -121,7 +121,7 @@ func TopsortPlanner(b *Block) [][]int {
 
 		writableAccts := getWritableAccounts(b.Transactions[txIdx], txMeta)
 		for _, writeAcct := range writableAccts {
-			//mlog.Log.Debugf("- writeAcct=%s", writeAcct.String())
+			////mlog.Log.Debugf("- writeAcct=%s", writeAcct.String())
 			acct, exists := pkToAcct[writeAcct]
 			if !exists {
 				panic(fmt.Sprintf("invariant error: expected pkToAcct to contain all public keys of accounts used in block; missing public key=%s", writeAcct.String()))

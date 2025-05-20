@@ -37,18 +37,18 @@ func run(_ *cobra.Command, args []string) {
 	}
 	defer db.Close()
 
-	mlog.Log.Debugf("Flushing WAL")
+	//mlog.Log.Debugf("Flushing WAL")
 	if err := db.FlushWAL(true); err != nil {
 		klog.Exitf("Failed to flush WAL: %s", err)
 	}
-	mlog.Log.Debugf("Flushed WAL")
+	//mlog.Log.Debugf("Flushed WAL")
 
 	for _, cf := range cfs {
 		name := cf.Name()
-		mlog.Log.Debugf("Compacting %s", name)
+		//mlog.Log.Debugf("Compacting %s", name)
 		db.CompactRangeCF(cf, grocksdb.Range{})
-		mlog.Log.Debugf("Compacted %s", name)
+		//mlog.Log.Debugf("Compacted %s", name)
 	}
 
-	mlog.Log.Debugf("Done")
+	//mlog.Log.Debugf("Done")
 }

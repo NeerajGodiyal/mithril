@@ -2,7 +2,6 @@ package sealevel
 
 import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/wide"
 	"github.com/gagliardetto/solana-go"
@@ -207,7 +206,7 @@ func (txCtx *TransactionCtx) Push() error {
 		}
 
 		if originalCallerInstrAcctsLamportSum.Cmp(currentCallerInstructionAccountsLamportSum) != 0 {
-			mlog.Log.Debugf("unbalanced push")
+			//mlog.Log.Debugf("unbalanced push")
 			return InstrErrUnbalancedInstruction
 		}
 	}

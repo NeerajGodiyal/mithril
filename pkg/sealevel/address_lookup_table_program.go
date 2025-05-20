@@ -6,7 +6,7 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -408,7 +408,7 @@ func overwriteAddrLookupTableMetadata(acct *BorrowedAccount, lookupTableMeta *Lo
 }
 
 func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentSlot uint64, bumpSeed byte) error {
-	mlog.Log.Debugf("AddressLookupTableCreateLookupTable")
+	//mlog.Log.Debugf("AddressLookupTableCreateLookupTable")
 
 	txCtx := execCtx.TransactionContext
 
@@ -487,7 +487,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	}
 
 	if tableKey != derivedTableKey {
-		mlog.Log.Debugf("Table address must match derived address: %s", derivedTableKey)
+		//mlog.Log.Debugf("Table address must match derived address: %s", derivedTableKey)
 		return InstrErrInvalidArgument
 	}
 
@@ -509,7 +509,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	requiredLamports := safemath.SaturatingSubU64(minBalance, lookupTableLamports)
 
 	if requiredLamports > 0 {
-		mlog.Log.Debugf("calling transfer via native invoke")
+		//mlog.Log.Debugf("calling transfer via native invoke")
 		txInstr := newTransferInstruction(payerKey, tableKey, requiredLamports)
 		err = execCtx.NativeInvoke(*txInstr, []solana.PublicKey{payerKey})
 		if err != nil {
@@ -517,14 +517,14 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 		}
 	}
 
-	mlog.Log.Debugf("calling allocate via native invoke")
+	//mlog.Log.Debugf("calling allocate via native invoke")
 	allocInstr := newAllocateInstruction(tableKey, tableAcctDataLen)
 	err = execCtx.NativeInvoke(*allocInstr, []solana.PublicKey{tableKey})
 	if err != nil {
 		return err
 	}
 
-	mlog.Log.Debugf("calling assign via native invoke")
+	//mlog.Log.Debugf("calling assign via native invoke")
 	assignInstr := newAssignInstruction(tableKey, AddressLookupTableAddr)
 	err = execCtx.NativeInvoke(*assignInstr, []solana.PublicKey{tableKey})
 	if err != nil {
@@ -572,7 +572,7 @@ func AddressLookupTableFreezeLookupTable(execCtx *ExecutionCtx) error {
 	authorityKey := authorityAcct.Key()
 
 	if !authorityAcct.IsSigner() {
-		mlog.Log.Debugf("authority didn't sign")
+		//mlog.Log.Debugf("authority didn't sign")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -590,22 +590,22 @@ func AddressLookupTableFreezeLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	if lookupTable.Meta.Authority == nil {
-		mlog.Log.Debugf("lookup table is already frozen")
+		//mlog.Log.Debugf("lookup table is already frozen")
 		return InstrErrImmutable
 	}
 
 	if *lookupTable.Meta.Authority != authorityKey {
-		mlog.Log.Debugf("wrong authority")
+		//mlog.Log.Debugf("wrong authority")
 		return InstrErrIncorrectAuthority
 	}
 
 	if lookupTable.Meta.DeactivationSlot != math.MaxUint64 {
-		mlog.Log.Debugf("Deactivated tables cannot be frozen")
+		//mlog.Log.Debugf("Deactivated tables cannot be frozen")
 		return InstrErrInvalidArgument
 	}
 
 	if len(lookupTable.Addresses) == 0 {
-		mlog.Log.Debugf("Empty lookup tables cannot be frozen")
+		//mlog.Log.Debugf("Empty lookup tables cannot be frozen")
 		return InstrErrInvalidInstructionData
 	}
 
@@ -647,7 +647,7 @@ func AddressLookupTableExtendLookupTable(execCtx *ExecutionCtx, newAddresses []s
 	authorityKey := authorityAcct.Key()
 
 	if !authorityAcct.IsSigner() {
-		mlog.Log.Debugf("authority didn't sign")
+		//mlog.Log.Debugf("authority didn't sign")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -670,28 +670,28 @@ func AddressLookupTableExtendLookupTable(execCtx *ExecutionCtx, newAddresses []s
 	}
 
 	if *lookupTable.Meta.Authority != authorityKey {
-		mlog.Log.Debugf("incorrect authority")
+		//mlog.Log.Debugf("incorrect authority")
 		return InstrErrIncorrectAuthority
 	}
 
 	if lookupTable.Meta.DeactivationSlot != math.MaxUint64 {
-		mlog.Log.Debugf("Deactivated tables cannot be extended")
+		//mlog.Log.Debugf("Deactivated tables cannot be extended")
 		return InstrErrInvalidArgument
 	}
 
 	if len(lookupTable.Addresses) >= LookupTableMaxAddresses {
-		mlog.Log.Debugf("Lookup table is full and cannot contain more addresses")
+		//mlog.Log.Debugf("Lookup table is full and cannot contain more addresses")
 		return InstrErrInvalidArgument
 	}
 
 	if len(newAddresses) == 0 {
-		mlog.Log.Debugf("Must extend with at least one address")
+		//mlog.Log.Debugf("Must extend with at least one address")
 		return InstrErrInvalidInstructionData
 	}
 
 	newTableAddressesLen := safemath.SaturatingAddU64(uint64(len(lookupTable.Addresses)), uint64(len(newAddresses)))
 	if newTableAddressesLen > LookupTableMaxAddresses {
-		mlog.Log.Debugf("Extended lookup table length %d would exceed max capacity of %d", newTableAddressesLen, LookupTableMaxAddresses)
+		//mlog.Log.Debugf("Extended lookup table length %d would exceed max capacity of %d", newTableAddressesLen, LookupTableMaxAddresses)
 		return InstrErrInvalidInstructionData
 	}
 
@@ -741,7 +741,7 @@ func AddressLookupTableExtendLookupTable(execCtx *ExecutionCtx, newAddresses []s
 
 		payerKey := payerAcct.Key()
 		if !payerAcct.IsSigner() {
-			mlog.Log.Debugf("payer account must be a signer")
+			//mlog.Log.Debugf("payer account must be a signer")
 			return InstrErrMissingRequiredSignature
 		}
 		payerAcct.Drop()
@@ -802,7 +802,7 @@ func AddressLookupTableDeactivateLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	if lookupTable.Meta.Authority == nil {
-		mlog.Log.Debugf("lookup table is frozen")
+		//mlog.Log.Debugf("lookup table is frozen")
 		return InstrErrImmutable
 	}
 
@@ -811,7 +811,7 @@ func AddressLookupTableDeactivateLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	if lookupTable.Meta.DeactivationSlot != math.MaxUint64 {
-		mlog.Log.Debugf("Lookup table is already deactivated")
+		//mlog.Log.Debugf("Lookup table is already deactivated")
 		return InstrErrInvalidArgument
 	}
 
@@ -856,7 +856,7 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	authorityKey := authorityAcct.Key()
 
 	if !authorityAcct.IsSigner() {
-		mlog.Log.Debugf("authority did not sign")
+		//mlog.Log.Debugf("authority did not sign")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -878,7 +878,7 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	if idxInTx1 == idxInTx2 {
-		mlog.Log.Debugf("lookup table cannot be the recipient of reclaimed lamports")
+		//mlog.Log.Debugf("lookup table cannot be the recipient of reclaimed lamports")
 		return InstrErrInvalidArgument
 	}
 
@@ -895,7 +895,7 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	if lookupTable.Meta.Authority == nil {
-		mlog.Log.Debugf("lookup table is frozen")
+		//mlog.Log.Debugf("lookup table is frozen")
 		return InstrErrImmutable
 	}
 
@@ -918,13 +918,13 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	switch status.Status {
 	case AddressLookupTableStatusTypeActivated:
 		{
-			mlog.Log.Debugf("lookup table is not deactivated")
+			//mlog.Log.Debugf("lookup table is not deactivated")
 			return InstrErrInvalidArgument
 		}
 
 	case AddressLookupTableStatusTypeDeactivating:
 		{
-			mlog.Log.Debugf("table cannot be closed until it's fully deactivated in %d blocks", status.DeactivatingRemainingBlocks)
+			//mlog.Log.Debugf("table cannot be closed until it's fully deactivated in %d blocks", status.DeactivatingRemainingBlocks)
 			return InstrErrInvalidArgument
 		}
 	}

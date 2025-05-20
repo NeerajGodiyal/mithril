@@ -7,7 +7,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -83,7 +84,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		NumPartitions: block.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,
 		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
 
-	mlog.Log.Debugf("epoch rewards initial: %s", newEpochRewards)
+	//mlog.Log.Debugf("epoch rewards initial: %s", newEpochRewards)
 
 	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
@@ -126,7 +127,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		epochRewards.Active = false
 	}
 
-	mlog.Log.Debugf("epoch rewards update: %s", epochRewards)
+	//mlog.Log.Debugf("epoch rewards update: %s", epochRewards)
 
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
@@ -138,7 +139,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
 	}
 
-	mlog.Log.Debugf("distributePartitionedEpochRewards: slot %d, using partitionIdx %d (partitionedEpochRewardsInfo.FirstStakingRewardSlot = %d)", currentSlot, partitionIdx, partitionedEpochRewardsInfo.FirstStakingRewardSlot)
+	//mlog.Log.Debugf("distributePartitionedEpochRewards: slot %d, using partitionIdx %d (partitionedEpochRewardsInfo.FirstStakingRewardSlot = %d)", currentSlot, partitionIdx, partitionedEpochRewardsInfo.FirstStakingRewardSlot)
 	rewardPks := make([]solana.PublicKey, 0, len(distributedPks)+1)
 	rewardPks = append(rewardPks, distributedPks...)
 	rewardPks = append(rewardPks, sealevel.SysvarEpochRewardsAddr)

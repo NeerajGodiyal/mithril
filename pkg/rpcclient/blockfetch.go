@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
@@ -61,7 +61,7 @@ func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, e
 			if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot)) {
 				return nil, SlotSkipped
 			} else {
-				mlog.Log.Debugf("fetch block %d failed - retrying", slot)
+				//mlog.Log.Debugf("fetch block %d failed - retrying", slot)
 			}
 		}
 	}

@@ -7,7 +7,8 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
@@ -230,10 +231,10 @@ func collectRent(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, pubkey so
 }
 
 func CollectRentEagerly(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, epochSchedule *sealevel.SysvarEpochSchedule) []*accounts.Account {
-	mlog.Log.Debugf("CollectRentEagerly ParentSlot = %d\n", slotCtx.ParentSlot)
+	//mlog.Log.Debugf("CollectRentEagerly ParentSlot = %d\n", slotCtx.ParentSlot)
 
 	if slotCtx.Features.IsActive(features.SkipRentRewrites) {
-		mlog.Log.Debugf("SkipRentRewrites enabled - skipping.")
+		//mlog.Log.Debugf("SkipRentRewrites enabled - skipping.")
 		return nil
 	}
 

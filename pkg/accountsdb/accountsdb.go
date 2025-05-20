@@ -162,7 +162,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 	acctIdxEntryBytes, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {
-		mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
+		//mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
 		return nil, ErrNoAccount
 	}
 
@@ -174,7 +174,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 	appendVecFile, err := os.Open(appendVecFileName)
 	if err != nil {
-		mlog.Log.Debugf("failed to open appendvec file %s")
+		//mlog.Log.Debugf("failed to open appendvec file %s")
 		return nil, err
 	}
 
@@ -228,7 +228,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
+		//mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
 		return err
 	}
 	defer appendVecFile.Close()
@@ -246,7 +246,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: uint64(appendVecAcctsBuf.Len())}
 		err = indexEntry.MarshalWithEncoder(encoder)
 		if err != nil {
-			mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
+			//mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
 			return err
 		}
 

@@ -3,7 +3,7 @@ package sealevel
 import (
 	"bytes"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -105,7 +105,7 @@ func deduplicateConfigKeySigners(configKeys []ConfigKey) []ConfigKey {
 }
 
 func ConfigProgramExecute(ctx *ExecutionCtx) error {
-	mlog.Log.Debugf("Config program")
+	//mlog.Log.Debugf("Config program")
 
 	var err error
 
@@ -216,7 +216,7 @@ func ConfigProgramExecute(ctx *ExecutionCtx) error {
 		return InstrErrInvalidInstructionData
 	}
 
-	mlog.Log.Debugf("writing new config account state")
+	//mlog.Log.Debugf("writing new config account state")
 	dst, err := configAccount.DataMutable(ctx.GlobalCtx.Features)
 	if err != nil {
 		return err

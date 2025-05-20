@@ -7,7 +7,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
@@ -105,7 +104,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	if err != nil {
 		panic("no fee payer")
 	}
-	//mlog.Log.Debugf("feePayerAcct=%+v", feePayerAcct)
+	////mlog.Log.Debugf("feePayerAcct=%+v", feePayerAcct)
 
 	defer transactionAccts.Unlock(feePayerIdx)
 
@@ -137,7 +136,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	if feePayerAcct.Lamports < totalTxFee {
 		return feeInfo, 0, sealevel.InstrErrInsufficientFunds
 	}
-	//mlog.Log.Debugf("feePayerAcct.Lamports=%d totalTxFee=%d", feePayerAcct.Lamports, totalTxFee)
+	////mlog.Log.Debugf("feePayerAcct.Lamports=%d totalTxFee=%d", feePayerAcct.Lamports, totalTxFee)
 
 	feePayerAcct.Lamports -= totalTxFee
 	transactionAccts.Touch(feePayerIdx)
@@ -180,7 +179,7 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 		panic(fmt.Sprintf("failed to SetAccount for leader acct %s when distributing tx fees", leader))
 	}
 
-	mlog.Log.Debugf("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
+	//mlog.Log.Debugf("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
 
 	return feesToBurn
 }

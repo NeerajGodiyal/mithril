@@ -65,7 +65,7 @@ func run(c *cobra.Command, _ []string) {
 	}
 	client := gossip.NewDriver(handler, conn)
 
-	mlog.Log.Debugf("GOSSIP PING %s (%s)", *flagAddr, target.String())
+	//mlog.Log.Debugf("GOSSIP PING %s (%s)", *flagAddr, target.String())
 
 	ctx, cancel := context.WithCancel(c.Context())
 	defer cancel()
@@ -80,11 +80,11 @@ func run(c *cobra.Command, _ []string) {
 	_ = group.Wait()
 	_ = conn.Close()
 
-	mlog.Log.Debugf("--- %s gossip ping statistics ---", target.String())
+	//mlog.Log.Debugf("--- %s gossip ping statistics ---", target.String())
 
 	numSuccess := pingClient.NumOK.Load()
 	numTimeout := pingClient.NumTimeout.Load()
-	mlog.Log.Debugf("%d packets transmitted, %d packets received, %.1f%% packet loss",
+	//mlog.Log.Debugf("%d packets transmitted, %d packets received, %.1f%% packet loss",
 		numSuccess+numTimeout, numSuccess, (1-(float64(numSuccess)/float64(numSuccess+numTimeout)))*100)
 }
 
@@ -114,11 +114,11 @@ func sendPing(ctx context.Context, wg *sync.WaitGroup, pinger *gossip.PingClient
 	start := time.Now()
 	_, responder, err := pinger.Ping(ctx, target)
 	if err == nil {
-		mlog.Log.Debugf("Pong from %s seq=%d time=%v", responder, seq, time.Since(start))
+		//mlog.Log.Debugf("Pong from %s seq=%d time=%v", responder, seq, time.Since(start))
 	} else if errors.Is(err, context.Canceled) {
 		return
 	} else if errors.Is(err, context.DeadlineExceeded) {
-		mlog.Log.Debugf("Request timeout for seq %d", seq)
+		//mlog.Log.Debugf("Request timeout for seq %d", seq)
 	} else {
 		klog.Warning(err)
 	}

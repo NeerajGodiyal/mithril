@@ -10,7 +10,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/gagliardetto/solana-go"
 	"k8s.io/klog/v2"
@@ -149,7 +148,7 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	calleeProgramId := ix.ProgramId
 	programAcctIdx, err := ixCtx.IndexOfInstructionAccount(txCtx, calleeProgramId)
 	if err != nil {
-		mlog.Log.Debugf("unknown program %s", calleeProgramId)
+		//mlog.Log.Debugf("unknown program %s", calleeProgramId)
 		return nil, nil, err
 	}
 
@@ -160,7 +159,7 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	defer borrowedProgramAcct.Drop()
 
 	if !borrowedProgramAcct.IsExecutable() {
-		mlog.Log.Debugf("account %s is not executable", calleeProgramId)
+		//mlog.Log.Debugf("account %s is not executable", calleeProgramId)
 		return nil, nil, InstrErrAccountNotExecutable
 	}
 
@@ -203,7 +202,7 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 
 func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	start := time.Now()
-	mlog.Log.Debugf("ExecuteInstruction")
+	//mlog.Log.Debugf("ExecuteInstruction")
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
@@ -213,11 +212,11 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 
 	borrowedRootAccount, err := instrCtx.BorrowProgramAccount(txCtx, 0)
 	if err != nil {
-		mlog.Log.Debugf("BorrowProgramAccount failed: %s", err)
+		//mlog.Log.Debugf("BorrowProgramAccount failed: %s", err)
 		return InstrErrUnsupportedProgramId
 	}
 
-	mlog.Log.Debugf("ExecuteInstruction, account: %s, owner: %s\n", borrowedRootAccount.Key(), borrowedRootAccount.Owner())
+	//mlog.Log.Debugf("ExecuteInstruction, account: %s, owner: %s\n", borrowedRootAccount.Key(), borrowedRootAccount.Owner())
 
 	ownerId := borrowedRootAccount.Owner()
 	borrowedRootAccount.Drop()
@@ -226,18 +225,18 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	if ownerId == NativeLoaderAddr {
 		builtinId = borrowedRootAccount.Key()
 	} else {
-		mlog.Log.Debugf("invoking bpf program")
+		//mlog.Log.Debugf("invoking bpf program")
 		builtinId = ownerId
 	}
 
-	mlog.Log.Debugf("resolving native program (%s)", builtinId)
+	//mlog.Log.Debugf("resolving native program (%s)", builtinId)
 	nativeProgramFn, nativeProgramStr, err := resolveNativeProgramById(builtinId)
 	if err != nil { // unrecognised builtin
 		return err
 	}
 	statsd.Timing("replay.ix.exec_ix_resolve_native_program.latency", time.Since(start), nil, 1)
 
-	mlog.Log.Debugf("calling native program %s", builtinId)
+	//mlog.Log.Debugf("calling native program %s", builtinId)
 	start = time.Now()
 	err = nativeProgramFn(execCtx)
 	statsd.Timing("replay.ix.exec_ix_native_program.latency", time.Since(start), []string{fmt.Sprintf("program:%s", nativeProgramStr)}, 1)
@@ -306,7 +305,7 @@ func (execCtx *ExecutionCtx) StackHeight() uint64 {
 }
 
 func (execCtx *ExecutionCtx) NativeInvoke(instruction Instruction, signers []solana.PublicKey) error {
-	mlog.Log.Debugf("NativeInvoke")
+	//mlog.Log.Debugf("NativeInvoke")
 
 	instrAccts, programIndices, err := execCtx.PrepareInstruction(instruction, signers)
 	if err != nil {

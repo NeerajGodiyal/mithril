@@ -9,7 +9,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -103,7 +102,7 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 	// we only need number for total staking reward at the beginning of a new epoch
 	// (for setting up the EpochRewards sysvar)
 	if f.IsActive(features.EnablePartitionedEpochReward) {
-		mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochReward case")
+		//mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochReward case")
 
 		if slot == firstSlotInEpoch {
 			for _, rewardSlot := range rewardSlots {
@@ -113,7 +112,7 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 				}
 
 				for _, reward := range rewards {
-					mlog.Log.Debugf("reward: %+v", reward)
+					//mlog.Log.Debugf("reward: %+v", reward)
 					if string(reward.RewardType) == RewardTypeStaking {
 						totalStakingRewards += uint64(reward.Lamports)
 					}
@@ -121,7 +120,7 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 			}
 		}
 	} else if f.IsActive(features.EnablePartitionedEpochRewardsSuperfeature) {
-		mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochRewardsSuperfeature case")
+		//mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochRewardsSuperfeature case")
 		totalStakingRewards = CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
 	} else {
 		panic("shouldn't be here without partitioned rewards enabled")
@@ -195,7 +194,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	for _, stakePk := range partition {
 		reward, ok := stakingRewards[stakePk]
 		if !ok {
-			mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
+			//mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
 			continue
 		}
 
@@ -229,7 +228,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		rewardPks[idx] = stakePk
 
 		distributedLamports += uint64(reward.StakerRewards)
-		mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", stakePk, reward.StakerRewards)
+		//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", stakePk, reward.StakerRewards)
 
 		idx++
 	}
@@ -285,7 +284,7 @@ func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Bloc
 			rewardPks = append(rewardPks, reward.Pubkey)
 
 			distributedLamports += uint64(reward.Lamports)
-			mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
+			//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
 		}
 	}
 
@@ -339,7 +338,7 @@ func CalculateRewardPartitionForPubkey(pubkey solana.PublicKey, blockhash [32]by
 	partitionIdx := wide.Uint128FromUint64(numPartitions).Mul(wide.Uint128FromUint64(hash)).Div(ulongMaxPlus1)
 	partitionIdx64 := partitionIdx.Uint64()
 
-	mlog.Log.Debugf("using blockhash %s in epoch rewards hasher, and num_partitions %d: hash = %d, partitionIdx = %d", solana.HashFromBytes(blockhash[:]), numPartitions, hash, partitionIdx64)
+	//mlog.Log.Debugf("using blockhash %s in epoch rewards hasher, and num_partitions %d: hash = %d, partitionIdx = %d", solana.HashFromBytes(blockhash[:]), numPartitions, hash, partitionIdx64)
 
 	return partitionIdx64
 }
@@ -368,7 +367,7 @@ func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.Slo
 		stakePk := i.(solana.PublicKey)
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
 			return
 		}
 
@@ -378,7 +377,7 @@ func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.Slo
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
 			return
 		}
 
@@ -389,18 +388,18 @@ func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.Slo
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
 			return
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			return
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
 			return
 		}
 
@@ -433,7 +432,7 @@ func CalculateStakeRewardsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, st
 	for stakePk := range stakeAccts {
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
 			continue
 		}
 
@@ -443,7 +442,7 @@ func CalculateStakeRewardsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, st
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
 			continue
 		}
 
@@ -454,18 +453,18 @@ func CalculateStakeRewardsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, st
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
 			continue
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
 			continue
 		}
 
@@ -492,32 +491,32 @@ func CalculateStakeRewardsForAcct(stakePubkey solana.PublicKey, stakeHistory *se
 
 	zero128 := wide.Uint128FromUint64(0)
 	if stakePointsResult.Points.Eq(zero128) || pointValue.Points.Eq(zero128) {
-		mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. stakePointsResult.Points = %d, pointValue.Points = %d", stakePubkey, stakePointsResult.Points.Uint64(), pointValue.Points.Uint64())
+		//mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. stakePointsResult.Points = %d, pointValue.Points = %d", stakePubkey, stakePointsResult.Points.Uint64(), pointValue.Points.Uint64())
 		return nil
 	}
 
 	rewards128 := stakePointsResult.Points.Mul(wide.Uint128FromUint64(pointValue.Rewards)).Div(pointValue.Points)
 	if !rewards128.IsUint64() {
-		mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. rewards128 not a uint64. %s", stakePubkey, rewards128)
+		//mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. rewards128 not a uint64. %s", stakePubkey, rewards128)
 		return nil
 	}
 
 	rewards := rewards128.Uint64()
 	if rewards == 0 {
-		mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. rewards == 0", stakePubkey)
+		//mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. rewards == 0", stakePubkey)
 		return nil
 	}
 
 	splitResult := voteCommissionSplit(voteState, rewards)
 	if splitResult.IsSplit && (splitResult.VoterPortion == 0 || splitResult.StakerPortion == 0) {
-		mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. IsSplit = %t, splitResult.VoterPortion = %d, splitResult.StakerPortion = %d", stakePubkey, splitResult.VoterPortion, splitResult.StakerPortion)
+		//mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. IsSplit = %t, splitResult.VoterPortion = %d, splitResult.StakerPortion = %d", stakePubkey, splitResult.VoterPortion, splitResult.StakerPortion)
 		return nil
 	}
 
 	result := &CalculatedStakeRewards{StakerRewards: splitResult.StakerPortion,
 		VoterRewards: splitResult.VoterPortion, NewCreditsObserved: stakePointsResult.NewCreditsObserved}
 
-	mlog.Log.Debugf("returning CalculatedStakeRewards for %s. %+v", stakePubkey, result)
+	//mlog.Log.Debugf("returning CalculatedStakeRewards for %s. %+v", stakePubkey, result)
 
 	return result
 }
@@ -583,7 +582,7 @@ func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, s
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
 			continue
 		}
 
@@ -593,7 +592,7 @@ func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, s
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
 			continue
 		}
 
@@ -604,18 +603,18 @@ func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, s
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
 			continue
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
 			continue
 		}
 
@@ -630,7 +629,7 @@ func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, s
 				partitions[partitionIdx] = make([]solana.PublicKey, 0)
 			}
 			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
-			mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
+			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
 		}
 	}
 
@@ -652,7 +651,7 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
 			return
 		}
 
@@ -662,7 +661,7 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
 			return
 		}
 
@@ -673,18 +672,18 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
 			return
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			return
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
 			return
 		}
 
@@ -703,7 +702,7 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 			}
 			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
 			partitionsMutex.Unlock()
-			mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
+			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
 		}
 	})
 
@@ -734,7 +733,7 @@ func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.Ac
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
 			continue
 		}
 
@@ -744,7 +743,7 @@ func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.Ac
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
+			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
 			continue
 		}
 
@@ -755,18 +754,18 @@ func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.Ac
 		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
+			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
 			continue
 		}
 
 		if voteAcct.Owner != sealevel.VoteProgramAddr {
-			mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
+			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
 
 		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
+			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
 			continue
 		}
 
@@ -780,7 +779,7 @@ func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.Ac
 				partitions[partitionIdx] = make([]solana.PublicKey, 0)
 			}
 			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
-			mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
+			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
 		}
 	}
 

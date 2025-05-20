@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -1089,7 +1089,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 }
 
 func StakeProgramInitialize(stakeAcct *BorrowedAccount, authorized Authorized, lockup StakeLockup, rent SysvarRent, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramInitialize")
+	//mlog.Log.Debugf("StakeProgramInitialize")
 
 	if len(stakeAcct.Data()) != StakeStateV2Size {
 		return InstrErrInvalidAccountData
@@ -1137,7 +1137,7 @@ func validateAndReturnDelegatedAmount(stakeAcct *BorrowedAccount, meta Meta, f f
 }
 
 func StakeProgramAuthorize(stakeAcct *BorrowedAccount, signers []solana.PublicKey, newAuthority solana.PublicKey, stakeAuthorize uint32, clock SysvarClock, custodianPubkey *solana.PublicKey, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramAuthorize")
+	//mlog.Log.Debugf("StakeProgramAuthorize")
 
 	state, err := UnmarshalStakeState(stakeAcct.Data())
 	if err != nil {
@@ -1175,7 +1175,7 @@ func StakeProgramAuthorize(stakeAcct *BorrowedAccount, signers []solana.PublicKe
 }
 
 func StakeProgramAuthorizeWithSeed(txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcct *BorrowedAccount, authorityBaseIndex uint64, authoritySeed string, authorityOwner solana.PublicKey, newAuthority solana.PublicKey, stakeAuthorize uint32, clock SysvarClock, custodian *solana.PublicKey, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramAuthorizeWithSeed")
+	//mlog.Log.Debugf("StakeProgramAuthorizeWithSeed")
 
 	var signers []solana.PublicKey
 
@@ -1223,7 +1223,7 @@ func warmupCooldownRate(currentEpoch uint64, newRateActivationEpoch *uint64) flo
 }
 
 func StakeProgramDelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcctIdx uint64, voteAcctIdx uint64, clock SysvarClock, stakeHistory SysvarStakeHistory, signers []solana.PublicKey, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramDelegate")
+	//mlog.Log.Debugf("StakeProgramDelegate")
 
 	voteAcct, err := instrCtx.BorrowInstructionAccount(txCtx, voteAcctIdx)
 	if err != nil {
@@ -1290,7 +1290,7 @@ func StakeProgramDelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx
 			}
 
 			if voteUnmarshalErr != nil {
-				mlog.Log.Debugf("failed to unmarshal vote state")
+				//mlog.Log.Debugf("failed to unmarshal vote state")
 				return voteUnmarshalErr
 			}
 
@@ -1375,7 +1375,7 @@ func validateSplitAmount(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx 
 }
 
 func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcctIdx uint64, lamports uint64, splitIdx uint64, signers []solana.PublicKey) error {
-	mlog.Log.Debugf("StakeProgramSplit")
+	//mlog.Log.Debugf("StakeProgramSplit")
 
 	split, err := instrCtx.BorrowInstructionAccount(txCtx, splitIdx)
 	if err != nil {
@@ -1540,7 +1540,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 
 	case StakeStateV2StatusUninitialized:
 		{
-			mlog.Log.Debugf("StakeStateV2StatusUninitialized")
+			//mlog.Log.Debugf("StakeStateV2StatusUninitialized")
 			idxInTx, err := instrCtx.IndexOfInstructionAccountInTransaction(stakeAcctIdx)
 			if err != nil {
 				return err
@@ -1600,7 +1600,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 }
 
 func StakeProgramMerge(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcctIdx uint64, srcAcctIdx uint64, clock SysvarClock, stakeHistory SysvarStakeHistory, signers []solana.PublicKey) error {
-	mlog.Log.Debugf("StakeProgramMerge")
+	//mlog.Log.Debugf("StakeProgramMerge")
 
 	srcAcct, err := instrCtx.BorrowInstructionAccount(txCtx, srcAcctIdx)
 	if err != nil {
@@ -1644,7 +1644,7 @@ func StakeProgramMerge(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 
 	err = stakeAcctMergeKind.Meta().Authorized.Check(signers, StakeAuthorizeStaker)
 	if err != nil {
-		mlog.Log.Debugf("staker did not sign")
+		//mlog.Log.Debugf("staker did not sign")
 		return err
 	}
 
@@ -1691,7 +1691,7 @@ func StakeProgramMerge(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 }
 
 func StakeProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcctIdx uint64, lamports uint64, toIndex uint64, clock SysvarClock, stakeHistory SysvarStakeHistory, withdrawAuthorityIdx uint64, custodianIdx *uint64, newRateActivationEpoch *uint64, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramWithdraw")
+	//mlog.Log.Debugf("StakeProgramWithdraw")
 
 	idxInTx, err := instrCtx.IndexOfInstructionAccountInTransaction(withdrawAuthorityIdx)
 	if err != nil {
@@ -1841,7 +1841,7 @@ func StakeProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, stake
 }
 
 func StakeProgramDeactivate(execCtx *ExecutionCtx, stakeAcct *BorrowedAccount, clock SysvarClock, signers []solana.PublicKey) error {
-	mlog.Log.Debugf("StakeProgramDeactivate")
+	//mlog.Log.Debugf("StakeProgramDeactivate")
 
 	stakeState, err := UnmarshalStakeState(stakeAcct.Data())
 	if err != nil {
@@ -1867,7 +1867,7 @@ func StakeProgramDeactivate(execCtx *ExecutionCtx, stakeAcct *BorrowedAccount, c
 }
 
 func StakeProgramSetLockup(stakeAcct *BorrowedAccount, lockup StakeInstrSetLockup, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
-	mlog.Log.Debugf("StakeProgramSetLockup")
+	//mlog.Log.Debugf("StakeProgramSetLockup")
 
 	stakeState, err := UnmarshalStakeState(stakeAcct.Data())
 	if err != nil {
@@ -2035,7 +2035,7 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 	}
 
 	if srcAcct.Lamports() < srcMeta.RentExemptReserve || dstAcct.Lamports() < destinationMeta.RentExemptReserve {
-		mlog.Log.Debugf("Delegation calculations violated lamport balance assumptions")
+		//mlog.Log.Debugf("Delegation calculations violated lamport balance assumptions")
 		return InstrErrInvalidArgument
 	}
 
@@ -2222,7 +2222,7 @@ func eligibleForDeactivateDelinquent(epochCredits []EpochCredits, currentEpoch u
 }
 
 func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcct *BorrowedAccount, delinquentVoteAcctIdx uint64, referenceVoteAcctIdx uint64, currentEpoch uint64) error {
-	mlog.Log.Debugf("StakeProgramDeactivateDelinquent")
+	//mlog.Log.Debugf("StakeProgramDeactivateDelinquent")
 
 	delinquentVoteAcctIdxInTx, err := instrCtx.IndexOfInstructionAccountInTransaction(delinquentVoteAcctIdx)
 	if err != nil {
@@ -2281,7 +2281,7 @@ func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionC
 		}
 
 		if eligibleForDeactivateDelinquent(delinquentVoteState.EpochCredits, currentEpoch) {
-			mlog.Log.Debugf("eligible for DeactivateDelinquent")
+			//mlog.Log.Debugf("eligible for DeactivateDelinquent")
 			err = deactivateStake(execCtx, &stakeState.Stake.Stake, &stakeState.Stake.StakeFlags, currentEpoch)
 			if err != nil {
 				return err
@@ -2298,7 +2298,7 @@ func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionC
 }
 
 func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, stakeAcct *BorrowedAccount, uninitializedStakeAcctIdx uint64, voteAcctIdx uint64, signers []solana.PublicKey) error {
-	mlog.Log.Debugf("StakeProgramRedelegate")
+	//mlog.Log.Debugf("StakeProgramRedelegate")
 
 	clock, err := ReadClockSysvar(execCtx)
 	if err != nil {
