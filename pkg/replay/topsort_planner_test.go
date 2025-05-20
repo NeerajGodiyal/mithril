@@ -49,6 +49,27 @@ func testTxMeta(readAcctBytes []byte, writeAcctBytes []byte) *rpc.TransactionMet
 	return tm
 }
 
+func runStream(b *Block) []int {
+	do := make(chan int, len(b.Transactions))
+	done := make(chan int, len(b.Transactions))
+	go TopsortPlannerStream(b, do, done)
+	var sort []int
+	for len(sort) < len(b.Transactions) {
+		task := <-do
+		sort = append(sort, task)
+		done <- task
+	}
+	return sort
+}
+
+func flatten(x [][]int) []int {
+	var out []int
+	for _, y := range x {
+		out = append(out, y...)
+	}
+	return out
+}
+
 func TestTopsortReadAfterWriteSequential(t *testing.T) {
 	b := &Block{
 		Transactions: testTxs(2),
@@ -62,6 +83,10 @@ func TestTopsortReadAfterWriteSequential(t *testing.T) {
 	got := TopsortPlanner(b)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
+	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
 	}
 }
 
@@ -78,6 +103,10 @@ func TestTopsortWriteAfterReadSequential(t *testing.T) {
 	got := TopsortPlanner(b)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
+	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
 	}
 }
 
@@ -96,6 +125,10 @@ func TestTopsortReadonlyExecuteAllParallel(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
 	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
+	}
 }
 
 func TestTopsortChainedTxsExecuteSequentially(t *testing.T) {
@@ -113,6 +146,10 @@ func TestTopsortChainedTxsExecuteSequentially(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
 	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
+	}
 }
 
 func TestTopsortDisjointWritesExecuteAllParallel(t *testing.T) {
@@ -129,6 +166,10 @@ func TestTopsortDisjointWritesExecuteAllParallel(t *testing.T) {
 	got := TopsortPlanner(b)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
+	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
 	}
 }
 
@@ -152,6 +193,10 @@ func TestTopsortMultipleChains(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
 	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
+	}
 }
 
 func TestTopsortJoin(t *testing.T) {
@@ -172,6 +217,10 @@ func TestTopsortJoin(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
 	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
+	}
 }
 
 func TestTopsortFork(t *testing.T) {
@@ -191,6 +240,10 @@ func TestTopsortFork(t *testing.T) {
 	got := TopsortPlanner(b)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
+	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
 	}
 }
 
@@ -214,5 +267,9 @@ func TestTopsortForkAndJoin(t *testing.T) {
 	got := TopsortPlanner(b)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("-want +got:\n%s", diff)
+	}
+	gotStream := runStream(b)
+	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
+		t.Errorf("-want +gotStream:\n%s", diff)
 	}
 }

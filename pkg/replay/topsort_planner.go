@@ -175,3 +175,109 @@ func TopsortPlanner(b *Block) [][]int {
 	mlog.Log.Infof("planner finished in %s", time.Since(start))
 	return topSortLevels
 }
+
+// TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
+func TopsortPlannerStream(b *Block, out chan int, done chan int) {
+	// Map between pubkeys and account indices
+	var acctToPk []solana.PublicKey
+	pkToAcct := make(map[solana.PublicKey]acct)
+
+	for i, txMeta := range b.TxMetas {
+		tx := b.Transactions[i]
+		accounts := getAllAccounts(tx, txMeta)
+		for _, acctPk := range accounts {
+			if _, exists := pkToAcct[acctPk]; !exists {
+				pkToAcct[acctPk] = acct(len(acctToPk))
+				acctToPk = append(acctToPk, acctPk)
+			}
+		}
+	}
+
+	acctToReaderTxs := make(map[acct][]tx, len(acctToPk))
+	acctToWriterTxs := make(map[acct][]tx, len(acctToPk))
+	adjList := make([][]tx, len(b.TxMetas))
+	inDegree := make([]int, len(b.TxMetas))
+	for txIdx, txMeta := range b.TxMetas {
+		/* Given S < T (S occurs before T) in a sequential execution, we
+		   use these restrictions on the parallel execution to reproduce
+		   the sequential execution
+
+		   S      | T      | parallel ordering required
+		   reads  | reads  | any order
+		   writes | reads  | S < T
+		   reads  | writes | S < T
+		   writes | writes | S < T
+		*/
+		t := tx(txIdx)
+
+		//txSig := b.Transactions[txIdx].Signatures[0]
+		////mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
+		readonlyAccounts := getReadonlyAccounts(b.Transactions[txIdx], txMeta)
+		for _, roAcct := range readonlyAccounts {
+			////mlog.Log.Debugf("- roAcct=%s", roAcct.String())
+			acct, exists := pkToAcct[roAcct]
+			if !exists {
+				panic(fmt.Sprintf("invariant error: did not record account index for pk=%s in previous loop?", roAcct.String()))
+			}
+
+			// Add an edge for S writes < T reads
+			for _, s := range acctToWriterTxs[acct] {
+				if s >= t {
+					break
+				}
+				adjList[int(s)] = append(adjList[int(s)], t)
+				inDegree[int(t)]++
+			}
+			// Add T as a reader of this account.
+			acctToReaderTxs[acct] = append(acctToReaderTxs[acct], t)
+		}
+
+		writableAccts := getWritableAccounts(b.Transactions[txIdx], txMeta)
+		for _, writeAcct := range writableAccts {
+			////mlog.Log.Debugf("- writeAcct=%s", writeAcct.String())
+			acct, exists := pkToAcct[writeAcct]
+			if !exists {
+				panic(fmt.Sprintf("invariant error: expected pkToAcct to contain all public keys of accounts used in block; missing public key=%s", writeAcct.String()))
+			}
+			// Add an edge for S reads < T writes
+			for _, s := range acctToReaderTxs[acct] {
+				if s >= t {
+					break
+				}
+				adjList[int(s)] = append(adjList[int(s)], t)
+				inDegree[int(t)]++
+			}
+			// Add an edge for S writes < T writes
+			for _, s := range acctToWriterTxs[acct] {
+				if s >= t {
+					break
+				}
+				adjList[int(s)] = append(adjList[int(s)], t)
+				inDegree[int(t)]++
+			}
+			// Add T as a writer of this account.
+			acctToWriterTxs[acct] = append(acctToWriterTxs[acct], t)
+		}
+	}
+
+	sent := 0
+	// Output a topological sorting of the transactions
+	for t, deg := range inDegree {
+		if deg == 0 {
+			out <- t
+			sent++
+		}
+	}
+
+	for sent < len(b.Transactions) {
+		in := <-done
+		for _, dependentTx := range adjList[int(in)] {
+			inDegree[int(dependentTx)]--
+			if inDegree[int(dependentTx)] == 0 {
+				out <- int(dependentTx)
+				sent++
+			}
+		}
+	}
+	close(out)
+}

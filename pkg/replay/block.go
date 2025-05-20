@@ -725,45 +725,43 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOpt
 	return txFeeAccumulator
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+	do := make(chan int, len(block.Transactions))
+	done := make(chan int, len(block.Transactions))
+	go TopsortPlannerStream(block, do, done)
+
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
 	start := time.Now()
-	for _, txs := range txPlan {
 
-		// start workers for this level
-		txIdxs := make(chan int)
-		wg := &sync.WaitGroup{}
-		wg.Add(txParallelism)
-		for i := 0; i < txParallelism; i++ {
-			go func() {
-				defer wg.Done()
-				for idx := range txIdxs {
-					txStart := time.Now()
-					tx := block.Transactions[idx]
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
-					txErr := errs[idx]
-					// check for success-failure return value divergences
-					if txErr == nil && block.TxMetas[idx].Err != nil {
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
-					} else if txErr != nil && block.TxMetas[idx].Err == nil {
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
-					}
-					txDurations[i] += time.Since(txStart)
+	wg := &sync.WaitGroup{}
+	wg.Add(txParallelism)
+	for i := 0; i < txParallelism; i++ {
+		go func() {
+			defer wg.Done()
+			for idx := range do {
+				txStart := time.Now()
+				tx := block.Transactions[idx]
+				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
+				txErr := errs[idx]
+				// check for success-failure return value divergences
+				if txErr == nil && block.TxMetas[idx].Err != nil {
+					panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
+				} else if txErr != nil && block.TxMetas[idx].Err == nil {
+					panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 				}
-			}()
-		}
+				txDurations[i] += time.Since(txStart)
+				done <- idx
+			}
 
-		// feed workers
-		for _, tx := range txs {
-			txIdxs <- tx
-		}
-		close(txIdxs)
-		wg.Wait()
+		}()
 	}
+
+	wg.Wait()
+	close(done)
 	for _, txFeeInfo := range txFeeInfos {
 		txFeeAccumulator.Add(txFeeInfo)
 	}
@@ -780,11 +778,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	start := time.Now()
 	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
-	var txPlan [][]int
-	if txParallelism > 0 {
-		txPlan = TopsortPlanner(block)
-		statsd.Timing("replay.block.topsort_planner.latency", time.Since(start), nil, 1)
-	}
 
 	start = time.Now()
 	// gather up all accounts referenced in the block
@@ -799,7 +792,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 	if txParallelism > 0 {
-		txFeeAccumulator = parallelTxLoop(slotCtx, block, txPlan, txParallelism, dbgOpts)
+		txFeeAccumulator = parallelTxLoop(slotCtx, block, txParallelism, dbgOpts)
 	} else {
 		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
 	}
