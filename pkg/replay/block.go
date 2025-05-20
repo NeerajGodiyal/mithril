@@ -735,7 +735,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txPa
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
-	start := time.Now()
+	//start := time.Now()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(txParallelism)
@@ -765,12 +765,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txPa
 	for _, txFeeInfo := range txFeeInfos {
 		txFeeAccumulator.Add(txFeeInfo)
 	}
-	wallDuration := time.Since(start)
+	/*wallDuration := time.Since(start)
 	var txDuration time.Duration
 	for _, workerTxDuration := range txDurations {
 		txDuration += workerTxDuration
-	}
-	mlog.Log.Infof("completed %s parallel tx execution time in %s wall time.", txDuration, wallDuration)
+	}*/
+	//mlog.Log.Infof("completed %s parallel tx execution time in %s wall time.", txDuration, wallDuration)
 
 	return txFeeAccumulator
 }

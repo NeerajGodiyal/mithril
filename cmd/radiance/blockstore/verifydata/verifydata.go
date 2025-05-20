@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/blockstore"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/VividCortex/ewma"
 	"github.com/linxGnu/grocksdb"
 	"github.com/mattn/go-isatty"
@@ -48,7 +47,7 @@ func init() {
 }
 
 func run(c *cobra.Command, args []string) {
-	start := time.Now()
+	//start := time.Now()
 
 	workers := *flagWorkers
 	if workers == 0 {
@@ -109,7 +108,7 @@ func run(c *cobra.Command, args []string) {
 	}
 	stats := func() {
 		//mlog.Log.Debugf("[stats] good=%d skipped=%d bad=%d tps=%.0f",
-			numSuccess.Load(), numSkipped.Load(), numFailure.Load(), txRate.Value())
+		//numSuccess.Load(), numSkipped.Load(), numFailure.Load(), txRate.Value())
 	}
 
 	var barOutput io.Writer
@@ -208,7 +207,7 @@ func run(c *cobra.Command, args []string) {
 	}
 
 	stats()
-	timeTaken := time.Since(start)
+	//timeTaken := time.Since(start)
 	//mlog.Log.Debugf("Time taken: %s", timeTaken)
 	//mlog.Log.Debugf("Bytes Read: %d (%.2f MB/s)", numBytes.Load(), float64(numBytes.Load())/timeTaken.Seconds()/1000000)
 	//mlog.Log.Debugf("Transaction Count: %d (%.2f tps)", numTxns.Load(), float64(numTxns.Load())/timeTaken.Seconds())

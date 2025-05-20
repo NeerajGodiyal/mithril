@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/klog/v2"
@@ -82,10 +81,10 @@ func run(c *cobra.Command, _ []string) {
 
 	//mlog.Log.Debugf("--- %s gossip ping statistics ---", target.String())
 
-	numSuccess := pingClient.NumOK.Load()
-	numTimeout := pingClient.NumTimeout.Load()
+	//numSuccess := pingClient.NumOK.Load()
+	//numTimeout := pingClient.NumTimeout.Load()
 	//mlog.Log.Debugf("%d packets transmitted, %d packets received, %.1f%% packet loss",
-		numSuccess+numTimeout, numSuccess, (1-(float64(numSuccess)/float64(numSuccess+numTimeout)))*100)
+	//numSuccess+numTimeout, numSuccess, (1-(float64(numSuccess)/float64(numSuccess+numTimeout)))*100)
 }
 
 func pingLoop(ctx context.Context, pinger *gossip.PingClient) {
@@ -111,8 +110,8 @@ func sendPing(ctx context.Context, wg *sync.WaitGroup, pinger *gossip.PingClient
 	ctx, cancel := context.WithTimeout(ctx, *flagTimeout)
 	defer cancel()
 
-	start := time.Now()
-	_, responder, err := pinger.Ping(ctx, target)
+	//start := time.Now()
+	_ /*responder*/, _, err := pinger.Ping(ctx, target)
 	if err == nil {
 		//mlog.Log.Debugf("Pong from %s seq=%d time=%v", responder, seq, time.Since(start))
 	} else if errors.Is(err, context.Canceled) {

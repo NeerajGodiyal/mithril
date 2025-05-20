@@ -2,9 +2,9 @@ package replay
 
 import (
 	"fmt"
-	"time"
+	//"time"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -64,7 +64,7 @@ func getWritableAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solan
 // The ints are indices into the b.Transactions slices.
 // Each list of indices do not have write-after-write or read-after-write conflicts.
 func TopsortPlanner(b *Block) [][]int {
-	start := time.Now()
+	//start := time.Now()
 	// Map between pubkeys and account indices
 	var acctToPk []solana.PublicKey
 	pkToAcct := make(map[solana.PublicKey]acct)
@@ -172,7 +172,7 @@ func TopsortPlanner(b *Block) [][]int {
 		roots = nextRoots
 	}
 
-	mlog.Log.Infof("planner finished in %s", time.Since(start))
+	//mlog.Log.Infof("planner finished in %s", time.Since(start))
 	return topSortLevels
 }
 

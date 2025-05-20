@@ -3,7 +3,6 @@
 package compact
 
 import (
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/linxGnu/grocksdb"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -44,7 +43,7 @@ func run(_ *cobra.Command, args []string) {
 	//mlog.Log.Debugf("Flushed WAL")
 
 	for _, cf := range cfs {
-		name := cf.Name()
+		//name := cf.Name()
 		//mlog.Log.Debugf("Compacting %s", name)
 		db.CompactRangeCF(cf, grocksdb.Range{})
 		//mlog.Log.Debugf("Compacted %s", name)
