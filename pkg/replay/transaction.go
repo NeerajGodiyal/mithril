@@ -372,7 +372,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		}
 		if dbgOpts.IsDebugTx(tx.Signatures[0]) {
 			// Avoid calling util.PrettyPrintAcct when not debug logging.
-			mlog.Log.Debugf("pre-balance account: %s", util.PrettyPrintAcct(txAcct))
+			mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
 		}
 
 		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
