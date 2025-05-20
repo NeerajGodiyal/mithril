@@ -369,7 +369,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		}
 		if dbgOpts.IsDebugTx(tx.Signatures[0]) {
 			// Avoid calling util.PrettyPrintAcct when not debug logging.
-			mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
+			//mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
 		}
 
 		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
@@ -383,13 +383,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	statsd.Timing("replay.tx.pre_balance_divergence_check.latency", time.Since(start), nil, 1)
 
 	start = time.Now()
-	txFeeInfo, newPayerBalance, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 	if err != nil {
 		return txFeeInfo, nil
 	}
 
-	mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
-	mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
+	//mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
+	//mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
 	/*
 		txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
 		if err != nil {
@@ -473,7 +473,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			if err != nil {
 				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for post-balances divergences", count))
 			}
-			mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
+			//mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PostBalances[count] {

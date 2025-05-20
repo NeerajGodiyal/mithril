@@ -745,11 +745,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txPlan [][]int, txP
 					txStart := time.Now()
 					tx := block.Transactions[idx]
 					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
+					txErr := errs[idx]
 					// check for success-failure return value divergences
-					if errs[idx] == nil && block.TxMetas[idx].Err != nil {
-						mlog.Log.Infof("tx %s return value divergence1: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err)
-					} else if errs[idx] != nil && block.TxMetas[idx].Err == nil {
-						mlog.Log.Infof("tx %s return value divergence2: txErr was %s, but onchain err was nil", tx.Signatures[0], errs[idx].Error())
+					if txErr == nil && block.TxMetas[idx].Err != nil {
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
+					} else if txErr != nil && block.TxMetas[idx].Err == nil {
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 					}
 					txDurations[i] += time.Since(txStart)
 				}
