@@ -79,6 +79,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/jessevdk/go-flags v1.6.1 // indirect
+	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/leslie-fei/memcore v0.0.0-20240611074219-2f13777e1d72 // indirect
 	github.com/magiconair/properties v1.8.6 // indirect

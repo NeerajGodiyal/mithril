@@ -725,7 +725,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOpt
 	return txFeeAccumulator
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	do := make(chan int, len(block.Transactions))
 	done := make(chan int, len(block.Transactions))
 	go TopsortPlannerStream(block, do, done)
@@ -745,12 +745,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txParallelism int, 
 			for idx := range do {
 				txStart := time.Now()
 				tx := block.Transactions[idx]
-				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, tx, block.TxMetas[idx], dbgOpts)
+				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts)
 				txErr := errs[idx]
 				// check for success-failure return value divergences
-				if txErr == nil && block.TxMetas[idx].Err != nil {
-					panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
-				} else if txErr != nil && block.TxMetas[idx].Err == nil {
+				if txErr == nil && rblock.TxMetas[idx].Err != nil {
+					panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
+				} else if txErr != nil && rblock.TxMetas[idx].Err == nil {
 					panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 				}
 				txDurations[i] += time.Since(txStart)
@@ -778,6 +778,16 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, txParallelism int, 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	start := time.Now()
 	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
+	unresolvedBlock := &Block{
+		Transactions: make([]*solana.Transaction, len(block.Transactions)),
+		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
+	}
+	for i := range block.Transactions {
+		unresolvedBlock.Transactions[i] = &solana.Transaction{}
+		*(unresolvedBlock.Transactions[i]) = *block.Transactions[i]
+		unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
+		*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
+	}
 
 	start = time.Now()
 	// gather up all accounts referenced in the block
@@ -792,7 +802,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 	if txParallelism > 0 {
-		txFeeAccumulator = parallelTxLoop(slotCtx, block, txParallelism, dbgOpts)
+		txFeeAccumulator = parallelTxLoop(slotCtx, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
 		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
 	}
