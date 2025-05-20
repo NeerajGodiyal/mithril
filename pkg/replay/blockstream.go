@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
@@ -85,7 +84,6 @@ func (blockStream *blockStream) fetchAndParseBlock(slot uint64) *Block {
 	} else {
 		blockResult, err = blockStream.tryGetBlockResultFromFile(slot)
 		if err != nil {
-			mlog.Log.Errorf("block cache miss for slot=%d: %v", slot, err)
 			blockResult, err = blockStream.rpcClient.GetBlockFinalized(uint64(slot))
 			if err == rpcclient.SlotSkipped {
 				return nil
