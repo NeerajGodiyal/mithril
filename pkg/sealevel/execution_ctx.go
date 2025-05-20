@@ -2,6 +2,7 @@ package sealevel
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -32,18 +33,21 @@ type SlotBank struct {
 }
 
 type SlotCtx struct {
-	Accounts              accounts.Accounts
-	AccountsDb            *accountsdb.AccountsDb
-	Slot                  uint64
-	ParentSlot            uint64
-	Epoch                 uint64
-	LamportsPerSignature  uint64
-	ModifiedAccts         map[solana.PublicKey]bool
-	WritableAccts         map[solana.PublicKey]bool
-	Blockhash             [32]byte
-	LastBlockhash         [32]byte
-	SlotBank              SlotBank
-	Features              *features.Features
+	Accounts             accounts.Accounts
+	AccountsDb           *accountsdb.AccountsDb
+	Slot                 uint64
+	ParentSlot           uint64
+	Epoch                uint64
+	LamportsPerSignature uint64
+	AcctMapsMu           *sync.Mutex // AcctMapsMu protects the next 2 maps
+	ModifiedAccts        map[solana.PublicKey]bool
+	WritableAccts        map[solana.PublicKey]bool
+	Blockhash            [32]byte
+	LastBlockhash        [32]byte
+	SlotBank             SlotBank
+	Features             *features.Features
+	VoteTimestampMu      *sync.Mutex
+	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps        map[solana.PublicKey]BlockTimestamp
 	StakeAccts            map[solana.PublicKey]bool
 	VoteAccts             map[solana.PublicKey]uint64
@@ -359,10 +363,14 @@ func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Accou
 }
 
 func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
 	slotCtx.WritableAccts[pubkey] = true
 	slotCtx.ModifiedAccts[pubkey] = true
 }
 
 func (slotCtx *SlotCtx) RecordWritableAcct(pubkey solana.PublicKey) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
 	slotCtx.WritableAccts[pubkey] = true
 }

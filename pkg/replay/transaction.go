@@ -245,6 +245,8 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 		timestamp = voteStateVersioned.V1_14_11.LastTimestamp
 	}
 
+	slotCtx.VoteTimestampMu.Lock()
+	defer slotCtx.VoteTimestampMu.Unlock()
 	slotCtx.VoteTimestamps[acct.Key] = timestamp
 }
 

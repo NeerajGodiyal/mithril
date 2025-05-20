@@ -666,15 +666,33 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 }
 
 func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
-	slotCtx := &sealevel.SlotCtx{Slot: block.Slot, Epoch: block.Epoch, ParentSlot: block.ParentSlot,
-		Blockhash: block.Blockhash, LastBlockhash: block.LastBlockhash, Accounts: accts,
-		AccountsDb: acctsDb, Replay: true, Features: block.Features, StakeAccts: block.StakeAccts,
-		VoteAccts: block.VoteAccts, VoteTimestamps: block.VoteTimestamps, TotalEpochStake: block.TotalEpochStake,
-		EpochsAcctHash: block.EpochAcctsHash, EahWorkaroundBankhash: block.EahWorkaroundBankhash,
-		HasEahWorkaround: block.HasEahWorkaround}
+	slotCtx := &sealevel.SlotCtx{
+		Accounts:   accts,
+		AccountsDb: acctsDb,
+		Slot:       block.Slot,
+		ParentSlot: block.ParentSlot,
+		Epoch:      block.Epoch,
 
-	slotCtx.ModifiedAccts = make(map[solana.PublicKey]bool)
-	slotCtx.WritableAccts = make(map[solana.PublicKey]bool)
+		AcctMapsMu:    &sync.Mutex{},
+		ModifiedAccts: make(map[solana.PublicKey]bool),
+		WritableAccts: make(map[solana.PublicKey]bool),
+
+		Blockhash:     block.Blockhash,
+		LastBlockhash: block.LastBlockhash,
+		Replay:        true,
+		Features:      block.Features,
+		StakeAccts:    block.StakeAccts,
+
+		VoteAccts:       block.VoteAccts,
+		VoteTimestampMu: &sync.Mutex{},
+		VoteTimestamps:  block.VoteTimestamps,
+		TotalEpochStake: block.TotalEpochStake,
+
+		EpochsAcctHash:        block.EpochAcctsHash,
+		EahWorkaroundBankhash: block.EahWorkaroundBankhash,
+
+		HasEahWorkaround: block.HasEahWorkaround,
+	}
 
 	return slotCtx
 }
