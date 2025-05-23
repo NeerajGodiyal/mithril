@@ -1,6 +1,9 @@
 package replay
 
 import (
+	"encoding/json"
+	"slices"
+	"sort"
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
@@ -49,6 +52,139 @@ func testTxMeta(readAcctBytes []byte, writeAcctBytes []byte) *rpc.TransactionMet
 	return tm
 }
 
+// Graph test cases, many taken from https://github.com/apfitzge/prio-graph
+type graphTestCase struct {
+	name            string
+	b               *Block
+	sortedTxIndices [][]int
+}
+
+var tests = []graphTestCase{
+	{
+		"ReadAfterWriteSequential",
+		&Block{
+			Transactions: testTxs(2),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta([]byte{0}, nil),
+			},
+		},
+		[][]int{{0}, {1}},
+	},
+	{
+		"WriteAfterReadSequential",
+		&Block{
+			Transactions: testTxs(2),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta([]byte{0}, nil),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}, {1}},
+	},
+	{
+		"ReadonlyExecuteAllParallel",
+		&Block{
+			Transactions: testTxs(3),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta([]byte{0}, nil),
+				testTxMeta([]byte{0}, nil),
+				testTxMeta([]byte{0}, nil),
+			},
+		},
+		[][]int{{0, 1, 2}},
+	},
+	{
+		"ChainedTxsExecuteSequentially",
+		&Block{
+			Transactions: testTxs(3),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}, {1}, {2}},
+	},
+	{
+		"DisjointWritesExecuteAllParallel",
+		&Block{
+			Transactions: testTxs(3),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{2}),
+			},
+		},
+		[][]int{{0, 1, 2}},
+	},
+	{
+		"MultipleChains",
+		&Block{
+			Transactions: testTxs(8),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{2}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0, 2, 5}, {1, 4}, {3, 6}, {7}},
+	},
+	{
+		"Join",
+		&Block{
+			Transactions: testTxs(6),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0, 1}),
+			},
+		},
+		[][]int{{0, 1}, {3, 2}, {4}, {5}},
+	},
+	{
+		"Fork",
+		&Block{
+			Transactions: testTxs(6),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}, {1}, {2, 4}, {3, 5}},
+	},
+	{
+		"ForkAndJoin",
+		&Block{
+			Transactions: testTxs(9),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}, {1}, {2, 4}, {3}, {5}, {6, 7}, {8}},
+	},
+}
+
 func runStream(b *Block) []int {
 	do := make(chan int, len(b.Transactions))
 	done := make(chan int, len(b.Transactions))
@@ -70,206 +206,89 @@ func flatten(x [][]int) []int {
 	return out
 }
 
-func TestTopsortReadAfterWriteSequential(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(2),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0}),
-			testTxMeta([]byte{0}, nil),
-		},
-	}
-	want := [][]int{{0}, {1}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
-}
-
-func TestTopsortWriteAfterReadSequential(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(2),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta([]byte{0}, nil),
-			testTxMeta(nil, []byte{0}),
-		},
-	}
-	want := [][]int{{0}, {1}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
+func TestTopsort(t *testing.T) {
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Run("Batch", func(t *testing.T) {
+				got := TopsortPlanner(test.b)
+				if diff := cmp.Diff(test.sortedTxIndices, got); diff != "" {
+					t.Errorf("-want +got:\n%s", diff)
+				}
+			})
+			t.Run("Streaming", func(t *testing.T) {
+				got := runStream(test.b)
+				if diff := cmp.Diff(flatten(test.sortedTxIndices), got); diff != "" {
+					t.Errorf("-want +got:\n%s", diff)
+				}
+			})
+		})
 	}
 }
 
-func TestTopsortReadonlyExecuteAllParallel(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(3),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta([]byte{0}, nil),
-			testTxMeta([]byte{0}, nil),
-			testTxMeta([]byte{0}, nil),
-		},
+func mustMarshal(b *Block) []byte {
+	bBytes, err := json.Marshal(b)
+	if err != nil {
+		panic(err)
 	}
-	want := [][]int{{0, 1, 2}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
+	return bBytes
 }
 
-func TestTopsortChainedTxsExecuteSequentially(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(3),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0}),
-		},
+func unwrap(txs []tx) []int {
+	i := make([]int, len(txs))
+	for ti, tx := range txs {
+		i[ti] = int(tx)
 	}
-	want := [][]int{{0}, {1}, {2}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
+	return i
 }
 
-func TestTopsortDisjointWritesExecuteAllParallel(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(3),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{2}),
-		},
+func FuzzBlockToDependencyGraph(f *testing.F) {
+	for _, test := range tests {
+		f.Add(mustMarshal(test.b))
 	}
-	want := [][]int{{0, 1, 2}}
 
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
-}
+	f.Fuzz(func(t *testing.T, blockBytes []byte) {
+		b := &Block{}
+		err := json.Unmarshal(blockBytes, b)
+		if err != nil {
+			t.Skip("skipping unmarshalable block")
+		}
+		if len(b.Transactions) != len(b.TxMetas) {
+			t.Skip("skipping malformed block, not all txs have txmetas")
+		}
+		for _, tx := range b.Transactions {
+			if tx.Message.IsResolved() {
+				t.Skip("skipping resolved tx")
+			}
+		}
 
-func TestTopsortMultipleChains(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(8),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{2}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-		},
-	}
-	want := [][]int{{0, 2, 5}, {1, 4}, {3, 6}, {7}}
+		adjList, inDegrees := blockToDependencyGraph(b)
+		if len(adjList) != len(b.Transactions) {
+			t.Errorf("len(adjList)=%d != len(b.Transactions)=%d", len(adjList), len(b.Transactions))
+		}
+		if len(adjList) != len(inDegrees) {
+			t.Errorf("len(adjList)=%d != len(inDegrees)=%d", len(adjList), len(inDegrees))
+		}
+		for node, inDegree := range inDegrees {
+			if inDegree < 0 {
+				t.Errorf("node=%d had negative inDegree=%d", node, inDegree)
+			}
+		}
 
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
-}
-
-func TestTopsortJoin(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(6),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{0, 1}),
-		},
-	}
-	want := [][]int{{0, 1}, {3, 2}, {4}, {5}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
-}
-
-func TestTopsortFork(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(6),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0}),
-		},
-	}
-	want := [][]int{{0}, {1}, {2, 4}, {3, 5}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
-}
-
-func TestTopsortForkAndJoin(t *testing.T) {
-	b := &Block{
-		Transactions: testTxs(9),
-		TxMetas: []*rpc.TransactionMeta{
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0, 1}),
-			testTxMeta(nil, []byte{1}),
-			testTxMeta(nil, []byte{0}),
-			testTxMeta(nil, []byte{0}),
-		},
-	}
-	want := [][]int{{0}, {1}, {2, 4}, {3}, {5}, {6, 7}, {8}}
-
-	got := TopsortPlanner(b)
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("-want +got:\n%s", diff)
-	}
-	gotStream := runStream(b)
-	if diff := cmp.Diff(flatten(want), gotStream); diff != "" {
-		t.Errorf("-want +gotStream:\n%s", diff)
-	}
+		for u, vs := range adjList {
+			for _, v := range vs {
+				if int(v) < u {
+					t.Errorf("a tx v=%d later in the block depended on a tx u=%d earlier in the block", v, u)
+				}
+			}
+			vs0 := unwrap(vs)
+			if !sort.IntsAreSorted(vs0) {
+				t.Errorf("neighbors list wasn't sorted")
+			}
+			uncompactedVs := make([]int, len(vs0))
+			copy(uncompactedVs, vs0)
+			if len(uncompactedVs) != len(slices.Compact(vs0)) {
+				t.Errorf("node=%d neighbors list=%+v had duplicates %v", u, uncompactedVs, slices.Compact(vs0))
+			}
+		}
+	})
 }

@@ -60,10 +60,7 @@ func getWritableAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solan
 	return util.DedupePubkeys(accounts)
 }
 
-// TopsortPlanner returns a list of list of ints.
-// The ints are indices into the b.Transactions slices.
-// Each list of indices do not have write-after-write or read-after-write conflicts.
-func TopsortPlanner(b *Block) [][]int {
+func blockToDependencyGraph(b *Block) (adjacencyList [][]tx, inDegree []int) {
 	//start := time.Now()
 	// Map between pubkeys and account indices
 	var acctToPk []solana.PublicKey
@@ -82,8 +79,8 @@ func TopsortPlanner(b *Block) [][]int {
 
 	acctToReaderTxs := make(map[acct][]tx, len(acctToPk))
 	acctToWriterTxs := make(map[acct][]tx, len(acctToPk))
-	adjList := make([][]tx, len(b.TxMetas))
-	inDegree := make([]int, len(b.TxMetas))
+	adjacencyList = make([][]tx, len(b.TxMetas))
+	inDegree = make([]int, len(b.TxMetas))
 	for txIdx, txMeta := range b.TxMetas {
 		/* Given S < T (S occurs before T) in a sequential execution, we
 		   use these restrictions on the parallel execution to reproduce
@@ -112,7 +109,10 @@ func TopsortPlanner(b *Block) [][]int {
 				if s >= t {
 					break
 				}
-				adjList[int(s)] = append(adjList[int(s)], t)
+				if len(adjacencyList[int(s)]) > 0 && adjacencyList[int(s)][len(adjacencyList[int(s)])-1] == t {
+					continue
+				}
+				adjacencyList[int(s)] = append(adjacencyList[int(s)], t)
 				inDegree[int(t)]++
 			}
 			// Add T as a reader of this account.
@@ -131,7 +131,10 @@ func TopsortPlanner(b *Block) [][]int {
 				if s >= t {
 					break
 				}
-				adjList[int(s)] = append(adjList[int(s)], t)
+				if len(adjacencyList[int(s)]) > 0 && adjacencyList[int(s)][len(adjacencyList[int(s)])-1] == t {
+					continue
+				}
+				adjacencyList[int(s)] = append(adjacencyList[int(s)], t)
 				inDegree[int(t)]++
 			}
 			// Add an edge for S writes < T writes
@@ -139,13 +142,24 @@ func TopsortPlanner(b *Block) [][]int {
 				if s >= t {
 					break
 				}
-				adjList[int(s)] = append(adjList[int(s)], t)
+				if len(adjacencyList[int(s)]) > 0 && adjacencyList[int(s)][len(adjacencyList[int(s)])-1] == t {
+					continue
+				}
+				adjacencyList[int(s)] = append(adjacencyList[int(s)], t)
 				inDegree[int(t)]++
 			}
 			// Add T as a writer of this account.
 			acctToWriterTxs[acct] = append(acctToWriterTxs[acct], t)
 		}
 	}
+	return adjacencyList, inDegree
+}
+
+// TopsortPlanner returns a list of list of ints.
+// The ints are indices into the b.Transactions slices.
+// Each list of indices do not have write-after-write or read-after-write conflicts.
+func TopsortPlanner(b *Block) [][]int {
+	adjList, inDegree := blockToDependencyGraph(b)
 
 	// Output a topological sorting of the transactions
 	topSorted := 0
@@ -178,87 +192,7 @@ func TopsortPlanner(b *Block) [][]int {
 
 // TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
 func TopsortPlannerStream(b *Block, out chan int, done chan int) {
-	// Map between pubkeys and account indices
-	var acctToPk []solana.PublicKey
-	pkToAcct := make(map[solana.PublicKey]acct)
-
-	for i, txMeta := range b.TxMetas {
-		tx := b.Transactions[i]
-		accounts := getAllAccounts(tx, txMeta)
-		for _, acctPk := range accounts {
-			if _, exists := pkToAcct[acctPk]; !exists {
-				pkToAcct[acctPk] = acct(len(acctToPk))
-				acctToPk = append(acctToPk, acctPk)
-			}
-		}
-	}
-
-	acctToReaderTxs := make(map[acct][]tx, len(acctToPk))
-	acctToWriterTxs := make(map[acct][]tx, len(acctToPk))
-	adjList := make([][]tx, len(b.TxMetas))
-	inDegree := make([]int, len(b.TxMetas))
-	for txIdx, txMeta := range b.TxMetas {
-		/* Given S < T (S occurs before T) in a sequential execution, we
-		   use these restrictions on the parallel execution to reproduce
-		   the sequential execution
-
-		   S      | T      | parallel ordering required
-		   reads  | reads  | any order
-		   writes | reads  | S < T
-		   reads  | writes | S < T
-		   writes | writes | S < T
-		*/
-		t := tx(txIdx)
-
-		//txSig := b.Transactions[txIdx].Signatures[0]
-		////mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
-		readonlyAccounts := getReadonlyAccounts(b.Transactions[txIdx], txMeta)
-		for _, roAcct := range readonlyAccounts {
-			////mlog.Log.Debugf("- roAcct=%s", roAcct.String())
-			acct, exists := pkToAcct[roAcct]
-			if !exists {
-				panic(fmt.Sprintf("invariant error: did not record account index for pk=%s in previous loop?", roAcct.String()))
-			}
-
-			// Add an edge for S writes < T reads
-			for _, s := range acctToWriterTxs[acct] {
-				if s >= t {
-					break
-				}
-				adjList[int(s)] = append(adjList[int(s)], t)
-				inDegree[int(t)]++
-			}
-			// Add T as a reader of this account.
-			acctToReaderTxs[acct] = append(acctToReaderTxs[acct], t)
-		}
-
-		writableAccts := getWritableAccounts(b.Transactions[txIdx], txMeta)
-		for _, writeAcct := range writableAccts {
-			////mlog.Log.Debugf("- writeAcct=%s", writeAcct.String())
-			acct, exists := pkToAcct[writeAcct]
-			if !exists {
-				panic(fmt.Sprintf("invariant error: expected pkToAcct to contain all public keys of accounts used in block; missing public key=%s", writeAcct.String()))
-			}
-			// Add an edge for S reads < T writes
-			for _, s := range acctToReaderTxs[acct] {
-				if s >= t {
-					break
-				}
-				adjList[int(s)] = append(adjList[int(s)], t)
-				inDegree[int(t)]++
-			}
-			// Add an edge for S writes < T writes
-			for _, s := range acctToWriterTxs[acct] {
-				if s >= t {
-					break
-				}
-				adjList[int(s)] = append(adjList[int(s)], t)
-				inDegree[int(t)]++
-			}
-			// Add T as a writer of this account.
-			acctToWriterTxs[acct] = append(acctToWriterTxs[acct], t)
-		}
-	}
+	adjList, inDegree := blockToDependencyGraph(b)
 
 	sent := 0
 	// Output a topological sorting of the transactions
