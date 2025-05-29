@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"slices"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
@@ -48,7 +49,7 @@ func IsWritable(tx *solana.Transaction, am *AccountMeta, f *features.Features) b
 	}
 
 	if f.IsActive(features.EnableSecp256r1Precompile) {
-		if am.Pubkey == Secp256r1PrecompileAddr {
+		if am.Pubkey == a.Secp256r1PrecompileAddr {
 			return false
 		}
 	}
@@ -67,15 +68,15 @@ func IsWritable(tx *solana.Transaction, am *AccountMeta, f *features.Features) b
 	return true
 }
 
-var newReservedAccts = []solana.PublicKey{AddressLookupTableAddr, ComputeBudgetProgramAddr,
-	Ed25519PrecompileAddr, LoaderV4Addr, Secp256kPrecompileAddr, ZkElgamalProofProgramAddr,
-	ZkTokenProofProgramAddr, SysvarEpochRewardsAddr, SysvarLastRestartSlotAddr, SysvarOwnerAddr}
+var newReservedAccts = []solana.PublicKey{a.AddressLookupTableAddr, a.ComputeBudgetProgramAddr,
+	a.Ed25519PrecompileAddr, a.LoaderV4Addr, a.Secp256kPrecompileAddr, a.ZkElgamalProofProgramAddr,
+	a.ZkTokenProofProgramAddr, SysvarEpochRewardsAddr, SysvarLastRestartSlotAddr, a.SysvarOwnerAddr}
 
 func IsSysvar(pubkey solana.PublicKey) bool {
 	if pubkey == SysvarClockAddr || pubkey == SysvarEpochScheduleAddr ||
 		pubkey == SysvarFeesAddr || pubkey == SysvarInstructionsAddr ||
 		pubkey == SysvarRecentBlockHashesAddr || pubkey == SysvarRentAddr ||
-		pubkey == SysvarRewardsAddr || pubkey == SysvarSlotHashesAddr ||
+		pubkey == a.SysvarRewardsAddr || pubkey == SysvarSlotHashesAddr ||
 		pubkey == SysvarSlotHistoryAddr || pubkey == SysvarStakeHistoryAddr {
 		return true
 	} else {
@@ -84,11 +85,11 @@ func IsSysvar(pubkey solana.PublicKey) bool {
 }
 
 func IsNativeProgram(pubkey solana.PublicKey) bool {
-	if pubkey == SystemProgramAddr || pubkey == BpfLoaderUpgradeableAddr ||
-		pubkey == BpfLoader2Addr || pubkey == BpfLoaderDeprecatedAddr ||
-		pubkey == VoteProgramAddr || pubkey == StakeProgramAddr ||
-		pubkey == ConfigProgramAddr || pubkey == StakeProgramConfigAddr ||
-		pubkey == NativeLoaderAddr {
+	if pubkey == a.SystemProgramAddr || pubkey == a.BpfLoaderUpgradeableAddr ||
+		pubkey == a.BpfLoader2Addr || pubkey == a.BpfLoaderDeprecatedAddr ||
+		pubkey == a.VoteProgramAddr || pubkey == a.StakeProgramAddr ||
+		pubkey == a.ConfigProgramAddr || pubkey == a.StakeProgramConfigAddr ||
+		pubkey == a.NativeLoaderAddr {
 		return true
 	} else {
 		return false

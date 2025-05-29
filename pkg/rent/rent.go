@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -71,7 +72,7 @@ func checkRentStateTransitionAllowed(preRentState *RentStateInfo, postRentState 
 		panic("programming error - acct didn't exist in TransactionAccounts")
 	}
 
-	if acct.Key != sealevel.IncineratorAddr {
+	if acct.Key != a.IncineratorAddr {
 		if postRentState.RentState == RentStateUninitialized {
 			return nil
 		} else if postRentState.RentState == RentStateRentExempt {
@@ -119,11 +120,11 @@ func MaybeSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.Sy
 }
 
 func isNativeProgram(pubkey solana.PublicKey) bool {
-	if pubkey == sealevel.SystemProgramAddr || pubkey == sealevel.BpfLoaderUpgradeableAddr ||
-		pubkey == sealevel.BpfLoader2Addr || pubkey == sealevel.BpfLoaderDeprecatedAddr ||
-		pubkey == sealevel.VoteProgramAddr || pubkey == sealevel.StakeProgramAddr ||
-		pubkey == sealevel.AddressLookupTableAddr || pubkey == sealevel.ConfigProgramAddr ||
-		pubkey == sealevel.ComputeBudgetProgramAddr {
+	if pubkey == a.SystemProgramAddr || pubkey == a.BpfLoaderUpgradeableAddr ||
+		pubkey == a.BpfLoader2Addr || pubkey == a.BpfLoaderDeprecatedAddr ||
+		pubkey == a.VoteProgramAddr || pubkey == a.StakeProgramAddr ||
+		pubkey == a.AddressLookupTableAddr || pubkey == a.ConfigProgramAddr ||
+		pubkey == a.ComputeBudgetProgramAddr {
 		return true
 	} else {
 		return false
@@ -150,7 +151,7 @@ func ShouldSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.S
 		return false
 	}
 
-	if acct.IsExecutable() || acct.Key == sealevel.IncineratorAddr {
+	if acct.IsExecutable() || acct.Key == a.IncineratorAddr {
 		return true
 	}
 
@@ -176,7 +177,7 @@ func calculateRentResult(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, a
 		return RentNoCollectionNow
 	}
 
-	if acct.Executable || acct.Key == sealevel.IncineratorAddr {
+	if acct.Executable || acct.Key == a.IncineratorAddr {
 		return RentExempt
 	}
 

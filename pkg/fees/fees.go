@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -76,7 +77,7 @@ func CalculateTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs
 
 	// have to pay fees per signatures to these precompiles as well
 	for _, instr := range instrs {
-		if instr.ProgramId == sealevel.Secp256kPrecompileAddr || instr.ProgramId == sealevel.Ed25519PrecompileAddr || instr.ProgramId == sealevel.Secp256r1PrecompileAddr {
+		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr || instr.ProgramId == a.Secp256r1PrecompileAddr {
 			if len(instr.Data) == 0 {
 				continue
 			} else {
@@ -112,7 +113,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 
 	// have to pay fees per signatures to these precompiles as well
 	for _, instr := range instrs {
-		if instr.ProgramId == sealevel.Secp256kPrecompileAddr || instr.ProgramId == sealevel.Ed25519PrecompileAddr || instr.ProgramId == sealevel.Secp256r1PrecompileAddr {
+		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr || instr.ProgramId == a.Secp256r1PrecompileAddr {
 			if len(instr.Data) == 0 {
 				continue
 			} else {

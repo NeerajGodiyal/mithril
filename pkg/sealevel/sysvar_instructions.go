@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/solana"
 )
@@ -101,7 +102,7 @@ func MakeInstructionsAccount(instructions []Instruction) *accounts.Account {
 	instructionsAcct.Data = serializedData
 	instructionsAcct.RentEpoch = 0
 	instructionsAcct.Executable = false
-	instructionsAcct.Owner = SysvarOwnerAddr
+	instructionsAcct.Owner = a.SysvarOwnerAddr
 
 	return &instructionsAcct
 }

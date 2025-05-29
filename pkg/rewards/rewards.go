@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -392,7 +393,7 @@ func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.Slo
 			return
 		}
 
-		if voteAcct.Owner != sealevel.VoteProgramAddr {
+		if voteAcct.Owner != a.VoteProgramAddr {
 			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			return
 		}
@@ -457,7 +458,7 @@ func CalculateStakeRewardsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, st
 			continue
 		}
 
-		if voteAcct.Owner != sealevel.VoteProgramAddr {
+		if voteAcct.Owner != a.VoteProgramAddr {
 			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
@@ -607,7 +608,7 @@ func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, s
 			continue
 		}
 
-		if voteAcct.Owner != sealevel.VoteProgramAddr {
+		if voteAcct.Owner != a.VoteProgramAddr {
 			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}
@@ -676,7 +677,7 @@ func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *
 			return
 		}
 
-		if voteAcct.Owner != sealevel.VoteProgramAddr {
+		if voteAcct.Owner != a.VoteProgramAddr {
 			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			return
 		}
@@ -758,7 +759,7 @@ func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.Ac
 			continue
 		}
 
-		if voteAcct.Owner != sealevel.VoteProgramAddr {
+		if voteAcct.Owner != a.VoteProgramAddr {
 			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
 			continue
 		}

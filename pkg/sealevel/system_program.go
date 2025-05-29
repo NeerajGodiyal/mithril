@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -178,7 +179,7 @@ func newCreateAccountInstruction(from solana.PublicKey, to solana.PublicKey, lam
 		panic("shouldn't fail")
 	}
 
-	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: SystemProgramAddr}
+	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: a.SystemProgramAddr}
 	return instr
 }
 
@@ -196,7 +197,7 @@ func newTransferInstruction(from solana.PublicKey, to solana.PublicKey, lamports
 		panic("shouldn't fail")
 	}
 
-	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: SystemProgramAddr}
+	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: a.SystemProgramAddr}
 	return instr
 }
 
@@ -213,7 +214,7 @@ func newAllocateInstruction(pubkey solana.PublicKey, space uint64) *Instruction 
 		panic("shouldn't fail")
 	}
 
-	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: SystemProgramAddr}
+	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: a.SystemProgramAddr}
 	return instr
 }
 
@@ -230,7 +231,7 @@ func newAssignInstruction(pubkey solana.PublicKey, owner solana.PublicKey) *Inst
 		panic("shouldn't fail")
 	}
 
-	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: SystemProgramAddr}
+	instr := &Instruction{Accounts: accountMetas, Data: buf.Bytes(), ProgramId: a.SystemProgramAddr}
 	return instr
 }
 
@@ -1122,7 +1123,7 @@ func SystemProgramAllocate(execCtx *ExecutionCtx, acct *BorrowedAccount, address
 		return InstrErrMissingRequiredSignature
 	}
 
-	if len(acct.Data()) != 0 || acct.Owner() != SystemProgramAddr {
+	if len(acct.Data()) != 0 || acct.Owner() != a.SystemProgramAddr {
 		//mlog.Log.Debugf("Allocate: account %s already in use", address)
 		return SystemProgErrAccountAlreadyInUse
 	}
@@ -1354,7 +1355,7 @@ func SystemProgramAuthorizeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAcc
 func SystemProgramUpgradeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount) error {
 	//mlog.Log.Debugf("UpgradeNonceAccount")
 
-	if acct.Owner() != SystemProgramAddr {
+	if acct.Owner() != a.SystemProgramAddr {
 		return InstrErrInvalidAccountOwner
 	}
 
@@ -1473,7 +1474,7 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 }
 
 func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, bool) {
-	if instr.ProgramId != SystemProgramAddr {
+	if instr.ProgramId != a.SystemProgramAddr {
 		return solana.PublicKey{}, false
 	}
 	if len(instr.Data) < 4 {

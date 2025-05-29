@@ -6,6 +6,7 @@ import (
 	"math"
 	"unicode/utf8"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -353,7 +354,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 		if err != nil {
 			return nil, err
 		}
-		if acct.Owner() != StakeProgramAddr {
+		if acct.Owner() != a.StakeProgramAddr {
 			return nil, InstrErrInvalidAccountOwner
 		}
 		return acct, nil
@@ -982,7 +983,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			minimumDelegation := determineMinimumDelegation(execCtx.GlobalCtx.Features)
 			minimumDelegationBytes := make([]byte, 8)
 			binary.LittleEndian.PutUint64(minimumDelegationBytes, minimumDelegation)
-			txCtx.SetReturnData(StakeProgramAddr, minimumDelegationBytes)
+			txCtx.SetReturnData(a.StakeProgramAddr, minimumDelegationBytes)
 		}
 
 	case StakeProgramInstrTypeDeactivateDelinquent:
@@ -1231,7 +1232,7 @@ func StakeProgramDelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx
 	}
 	defer voteAcct.Drop()
 
-	if voteAcct.Owner() != VoteProgramAddr {
+	if voteAcct.Owner() != a.VoteProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -1383,7 +1384,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	}
 	defer split.Drop()
 
-	if split.Owner() != StakeProgramAddr {
+	if split.Owner() != a.StakeProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -1608,7 +1609,7 @@ func StakeProgramMerge(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	}
 	defer srcAcct.Drop()
 
-	if srcAcct.Owner() != StakeProgramAddr {
+	if srcAcct.Owner() != a.StakeProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -2123,7 +2124,7 @@ func moveStakeOrLamportsSharedChecks(execCtx *ExecutionCtx, txCtx *TransactionCt
 
 	signers := []solana.PublicKey{stakeAuthorityPubkey}
 
-	if srcAcct.Owner() != StakeProgramAddr || dstAcct.Owner() != StakeProgramAddr {
+	if srcAcct.Owner() != a.StakeProgramAddr || dstAcct.Owner() != a.StakeProgramAddr {
 		return nil, nil, InstrErrIncorrectProgramId
 	}
 
@@ -2240,7 +2241,7 @@ func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionC
 	}
 	defer delinquentVoteAcct.Drop()
 
-	if delinquentVoteAcct.Owner() != VoteProgramAddr {
+	if delinquentVoteAcct.Owner() != a.VoteProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -2256,7 +2257,7 @@ func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionC
 	}
 	defer referenceVoteAcct.Drop()
 
-	if referenceVoteAcct.Owner() != VoteProgramAddr {
+	if referenceVoteAcct.Owner() != a.VoteProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -2311,7 +2312,7 @@ func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 	}
 	defer uninitializedStakeAcct.Drop()
 
-	if uninitializedStakeAcct.Owner() != StakeProgramAddr {
+	if uninitializedStakeAcct.Owner() != a.StakeProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 
@@ -2334,7 +2335,7 @@ func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 	}
 	defer voteAcct.Drop()
 
-	if voteAcct.Owner() != VoteProgramAddr {
+	if voteAcct.Owner() != a.VoteProgramAddr {
 		return InstrErrIncorrectProgramId
 	}
 

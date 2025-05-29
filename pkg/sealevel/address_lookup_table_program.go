@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -481,7 +482,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	seeds = append(seeds, derivationSlotBytes)
 	seeds = append(seeds, []byte{bumpSeed})
 
-	derivedTableKey, err := solana.CreateProgramAddress(seeds, AddressLookupTableAddr)
+	derivedTableKey, err := solana.CreateProgramAddress(seeds, a.AddressLookupTableAddr)
 	if err != nil {
 		return PubkeyErrInvalidSeeds
 	}
@@ -492,7 +493,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	}
 
 	if execCtx.GlobalCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
-		lookupTableOwner == AddressLookupTableAddr {
+		lookupTableOwner == a.AddressLookupTableAddr {
 		return nil
 	}
 
@@ -525,7 +526,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	}
 
 	//mlog.Log.Debugf("calling assign via native invoke")
-	assignInstr := newAssignInstruction(tableKey, AddressLookupTableAddr)
+	assignInstr := newAssignInstruction(tableKey, a.AddressLookupTableAddr)
 	err = execCtx.NativeInvoke(*assignInstr, []solana.PublicKey{tableKey})
 	if err != nil {
 		return err
@@ -557,7 +558,7 @@ func AddressLookupTableFreezeLookupTable(execCtx *ExecutionCtx) error {
 	}
 	defer lookupTableAcct.Drop()
 
-	if lookupTableAcct.Owner() != AddressLookupTableAddr {
+	if lookupTableAcct.Owner() != a.AddressLookupTableAddr {
 		return InstrErrInvalidAccountOwner
 	}
 
@@ -632,7 +633,7 @@ func AddressLookupTableExtendLookupTable(execCtx *ExecutionCtx, newAddresses []s
 
 	tableKey := lookupTableAcct.Key()
 
-	if lookupTableAcct.Owner() != AddressLookupTableAddr {
+	if lookupTableAcct.Owner() != a.AddressLookupTableAddr {
 		return InstrErrInvalidAccountOwner
 	}
 
@@ -770,7 +771,7 @@ func AddressLookupTableDeactivateLookupTable(execCtx *ExecutionCtx) error {
 	}
 	defer lookupTableAcct.Drop()
 
-	if lookupTableAcct.Owner() != AddressLookupTableAddr {
+	if lookupTableAcct.Owner() != a.AddressLookupTableAddr {
 		return InstrErrInvalidAccountOwner
 	}
 
@@ -841,7 +842,7 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	}
 	defer lookupTableAcct.Drop()
 
-	if lookupTableAcct.Owner() != AddressLookupTableAddr {
+	if lookupTableAcct.Owner() != a.AddressLookupTableAddr {
 		return InstrErrInvalidAccountOwner
 	}
 

@@ -3,6 +3,7 @@ package sealevel
 import (
 	"fmt"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -140,10 +141,10 @@ func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uin
 	}
 }
 
-var migratingBuiltinPubkeys = []solana.PublicKey{StakeProgramAddr, ConfigProgramAddr, AddressLookupTableAddr}
+var migratingBuiltinPubkeys = []solana.PublicKey{a.StakeProgramAddr, a.ConfigProgramAddr, a.AddressLookupTableAddr}
 
-var nonMigratingBuiltinPubkeys = []solana.PublicKey{VoteProgramAddr, SystemProgramAddr, ComputeBudgetProgramAddr, BpfLoaderUpgradeableAddr,
-	BpfLoader2Addr, BpfLoaderDeprecatedAddr, LoaderV4Addr, Secp256kPrecompileAddr, Ed25519PrecompileAddr}
+var nonMigratingBuiltinPubkeys = []solana.PublicKey{a.VoteProgramAddr, a.SystemProgramAddr, a.ComputeBudgetProgramAddr, a.BpfLoaderUpgradeableAddr,
+	a.BpfLoader2Addr, a.BpfLoaderDeprecatedAddr, a.LoaderV4Addr, a.Secp256kPrecompileAddr, a.Ed25519PrecompileAddr}
 
 func isNonMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
 	for _, pk := range nonMigratingBuiltinPubkeys {
@@ -164,7 +165,7 @@ func isMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
 }
 
 func hasBuiltinMigratedYet(pubkey solana.PublicKey) bool {
-	if pubkey == ConfigProgramAddr || pubkey == AddressLookupTableAddr {
+	if pubkey == a.ConfigProgramAddr || pubkey == a.AddressLookupTableAddr {
 		return true
 	} else {
 		return false
@@ -206,7 +207,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 			numNonBuiltinInstrs++
 		}
 
-		if instr.ProgramId != ComputeBudgetProgramAddr {
+		if instr.ProgramId != a.ComputeBudgetProgramAddr {
 			numNonComputeBudgetInstrs++
 			continue
 		}

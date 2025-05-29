@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"unsafe"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 
@@ -264,7 +265,7 @@ func isBpfLoaderUpgradebleCloseInstr(data []byte) bool {
 }
 
 func isPrecompile(programId solana.PublicKey) bool {
-	if programId == Secp256kPrecompileAddr || programId == Ed25519PrecompileAddr {
+	if programId == a.Secp256kPrecompileAddr || programId == a.Ed25519PrecompileAddr {
 		return true
 	} else {
 		return false
@@ -781,7 +782,7 @@ func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, acc
 	if err != nil {
 		return syscallErr(err)
 	}
-	if lastProgramAcct.Owner() == BpfLoaderDeprecatedAddr {
+	if lastProgramAcct.Owner() == a.BpfLoaderDeprecatedAddr {
 		isLoaderDeprecated = true
 	}
 	lastProgramAcct.Drop()
@@ -861,7 +862,7 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 	if err != nil {
 		return syscallErr(err)
 	}
-	if lastProgramAcct.Owner() == BpfLoaderDeprecatedAddr {
+	if lastProgramAcct.Owner() == a.BpfLoaderDeprecatedAddr {
 		isLoaderDeprecated = true
 	}
 	lastProgramAcct.Drop()

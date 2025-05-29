@@ -3,6 +3,7 @@ package sealevel
 import (
 	"encoding/binary"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/zksdk"
 	bin "github.com/gagliardetto/binary"
@@ -292,7 +293,7 @@ func processCloseProofContext(execCtx *ExecutionCtx) error {
 		return err
 	}
 
-	err = proofContextAcct.SetOwner(execCtx.GlobalCtx.Features, SystemProgramAddr)
+	err = proofContextAcct.SetOwner(execCtx.GlobalCtx.Features, a.SystemProgramAddr)
 
 	proofContextAcct.Drop()
 	destinationAcct.Drop()
@@ -464,7 +465,7 @@ func processVerifyProof(execCtx *ExecutionCtx) error {
 			return err
 		}
 
-		if proofContextAcct.Owner() != ZkElgamalProofProgramAddr {
+		if proofContextAcct.Owner() != a.ZkElgamalProofProgramAddr {
 			return InstrErrInvalidAccountOwner
 		}
 

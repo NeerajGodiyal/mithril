@@ -1,16 +1,16 @@
 package sealevel
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
-	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/gagliardetto/solana-go"
 	"k8s.io/klog/v2"
 )
@@ -172,24 +172,24 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 	if err != nil {
 		return err
 	}
-	statsd.Timing("replay.ix.get_next_ix_ctx.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.GetNextIxCtx.AddTimingSince(start)
 
 	start = time.Now()
 	nextInstrCtx.Configure(programIndices, instructionAccts, instrData)
-	statsd.Timing("replay.ix.next_ix_ctx_configure.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.NextIxCtxConfigure.AddTimingSince(start)
 
 	start = time.Now()
 	err = execCtx.Push()
 	if err != nil {
 		return err
 	}
-	statsd.Timing("replay.ix.push.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.IxPush.AddTimingSince(start)
 
 	err1 := execCtx.ExecuteInstruction()
 
 	start = time.Now()
 	err2 := execCtx.Pop()
-	statsd.Timing("replay.ix.pop.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.IxPop.AddTimingSince(start)
 
 	if err1 != nil {
 		return err1
@@ -222,7 +222,7 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	borrowedRootAccount.Drop()
 
 	var builtinId solana.PublicKey
-	if ownerId == NativeLoaderAddr {
+	if ownerId == a.NativeLoaderAddr {
 		builtinId = borrowedRootAccount.Key()
 	} else {
 		//mlog.Log.Debugf("invoking bpf program")
@@ -234,12 +234,33 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	if err != nil { // unrecognised builtin
 		return err
 	}
-	statsd.Timing("replay.ix.exec_ix_resolve_native_program.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.ExecIxResolveNativeProgram.AddTimingSince(start)
 
 	//mlog.Log.Debugf("calling native program %s", builtinId)
 	start = time.Now()
 	err = nativeProgramFn(execCtx)
-	statsd.Timing("replay.ix.exec_ix_native_program.latency", time.Since(start), []string{fmt.Sprintf("program:%s", nativeProgramStr)}, 1)
+	switch nativeProgramStr {
+	case a.SystemProgramAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramSystem.AddTimingSince(start)
+	case a.StakeProgramAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramStake.AddTimingSince(start)
+	case a.VoteProgramAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramVote.AddTimingSince(start)
+	case a.ComputeBudgetProgramAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramComputeBudget.AddTimingSince(start)
+	case a.BpfLoader2AddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramBpfLoader2.AddTimingSince(start)
+	case a.BpfLoaderDeprecatedAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramBpfLoaderDeprecated.AddTimingSince(start)
+	case a.BpfLoaderUpgradeableAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramBpfLoaderUpgradeable.AddTimingSince(start)
+	case a.ZkElgamalProofProgramAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramZkElgamalProof.AddTimingSince(start)
+	case a.Ed25519PrecompileAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramEd25519Precompile.AddTimingSince(start)
+	case a.Secp256kPrecompileAddrStr:
+		metrics.GlobalBlockReplay.ExecIxNativeProgramSecp256kPrecompile.AddTimingSince(start)
+	}
 
 	return err
 }
@@ -329,7 +350,7 @@ func (execCtx *ExecutionCtx) CheckAligned() bool {
 	}
 	defer programAcct.Drop()
 
-	if programAcct.Owner() == BpfLoaderDeprecatedAddr {
+	if programAcct.Owner() == a.BpfLoaderDeprecatedAddr {
 		return false
 	} else {
 		return true

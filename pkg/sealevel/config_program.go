@@ -4,6 +4,7 @@ import (
 	"bytes"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -141,7 +142,7 @@ func ConfigProgramExecute(ctx *ExecutionCtx) error {
 	}
 	defer configAccount.Drop()
 
-	if configAccount.Owner() != ConfigProgramAddr {
+	if configAccount.Owner() != a.ConfigProgramAddr {
 		return InstrErrInvalidAccountOwner
 	}
 

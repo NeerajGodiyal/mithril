@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/loader"
@@ -960,7 +963,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 		return err
 	}
 	programId := programAcct.Key()
-	isLoaderDeprecated := programAcct.Owner() == BpfLoaderDeprecatedAddr
+	isLoaderDeprecated := programAcct.Owner() == a.BpfLoaderDeprecatedAddr
 
 	programAcct.Drop()
 
@@ -997,8 +1000,12 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 		Context:      execCtx,
 	}
 
+	start := time.Now()
 	interpreter := sbpf.NewInterpreter(nil, program, opts)
+	metrics.GlobalBlockReplay.SbpfInterpreterNew.AddTimingSince(start)
+	start = time.Now()
 	ret, _, runErr := interpreter.Run()
+	metrics.GlobalBlockReplay.SbpfInterpreterRun.AddTimingSince(start)
 
 	//mlog.Log.Debugf("Program %s consumed %d of %d compute units", programId, computeRemainingPrev-execCtx.ComputeMeter.Remaining(), computeRemainingPrev)
 
@@ -1039,6 +1046,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 }
 
 func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte) error {
+	start := time.Now()
 	//mlog.Log.Debugf("bpf loader - executeProgram")
 
 	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, false)
@@ -1055,6 +1063,8 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 
 	entry := &accountsdb.ProgramCacheEntry{Program: program}
 	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+
+	metrics.GlobalBlockReplay.AddProgramToCache.AddTimingSince(start)
 
 	return executeLoadedProgram(execCtx, program, &syscallRegistry)
 }
@@ -1074,26 +1084,26 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	}
 	defer programAcct.Drop()
 
-	if programAcct.Owner() == NativeLoaderAddr {
+	if programAcct.Owner() == a.NativeLoaderAddr {
 		programId, err := instrCtx.LastProgramKey(txCtx)
 		if err != nil {
 			return err
 		}
-		if programId == BpfLoaderUpgradeableAddr {
+		if programId == a.BpfLoaderUpgradeableAddr {
 			err = execCtx.ComputeMeter.Consume(CUUpgradeableLoaderComputeUnits)
 			if err != nil {
 				return err
 			}
 			err = ProcessUpgradeableLoaderInstruction(execCtx)
 			return err
-		} else if programId == BpfLoader2Addr {
+		} else if programId == a.BpfLoader2Addr {
 			err = execCtx.ComputeMeter.Consume(CUDefaultLoaderComputeUnits)
 			if err != nil {
 				return err
 			}
 			//mlog.Log.Debugf("BPF loader 2 mgmt no longer supported")
 			return InstrErrUnsupportedProgramId
-		} else if programId == BpfLoaderDeprecatedAddr {
+		} else if programId == a.BpfLoaderDeprecatedAddr {
 			err = execCtx.ComputeMeter.Consume(CUDeprecatedLoaderComputeUnits)
 			if err != nil {
 				return err
@@ -1116,7 +1126,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 	programOwner := programAcct.Owner()
 
-	if programOwner == BpfLoader2Addr || programOwner == BpfLoaderDeprecatedAddr {
+	if programOwner == a.BpfLoader2Addr || programOwner == a.BpfLoaderDeprecatedAddr {
 		var programCacheEntry *accountsdb.ProgramCacheEntry
 		programCacheEntry, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcct.Key())
 		if hasLoadedProgram {
@@ -1140,10 +1150,11 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 			programAcctKey = programAcct.Key()
 		}
-	} else if programOwner == BpfLoaderUpgradeableAddr {
+	} else if programOwner == a.BpfLoaderUpgradeableAddr {
 		var programAcctState *UpgradeableLoaderState
 
 		if len(programAcct.Data()) == 0 {
+			start := time.Now()
 			var paTmp *accounts.Account
 			paTmp, err = execCtx.SlotCtx.GetAccount(programAcct.Key())
 
@@ -1158,6 +1169,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				return err
 			}
+			metrics.GlobalBlockReplay.GetProgramAccount.AddTimingSince(start)
 		} else {
 			programAcctState, err = unmarshalUpgradeableLoaderState(programAcct.Data())
 			if err != nil {
@@ -1165,6 +1177,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 		}
 
+		start := time.Now()
 		var programCacheEntry *accountsdb.ProgramCacheEntry
 		programCacheEntry, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcctState.Program.ProgramDataAddress)
 		if hasLoadedProgram {
@@ -1173,6 +1186,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 			programAcctKey = programAcctState.Program.ProgramDataAddress
 			loadedProgram = programCacheEntry.Program
+			metrics.GlobalBlockReplay.GetProgramDataCached.AddTimingSince(start)
 		} else { // program is not cached
 			programDataAcct, err := execCtx.SlotCtx.GetAccount(programAcctState.Program.ProgramDataAddress)
 			if err != nil {
@@ -1181,8 +1195,12 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 					//mlog.Log.Debugf("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
 					return InstrErrUnsupportedProgramId
 				}
+				metrics.GlobalBlockReplay.GetProgramDataUncachedAccountsDb.AddTimingSince(start)
+			} else {
+				metrics.GlobalBlockReplay.GetProgramDataUncachedAccounts.AddTimingSince(start)
 			}
 
+			start = time.Now()
 			programDataAcctState, err := unmarshalUpgradeableLoaderState(programDataAcct.Data)
 			if err != nil {
 				return err
@@ -1200,6 +1218,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 			programAcctKey = programAcctState.Program.ProgramDataAddress
 			programBytes = programDataAcct.Data[upgradeableLoaderSizeOfProgramDataMetaData:]
+			metrics.GlobalBlockReplay.GetProgramDataUncachedMarshal.AddTimingSince(start)
 		}
 	} else {
 		return InstrErrUnsupportedProgramId

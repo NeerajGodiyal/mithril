@@ -5,6 +5,7 @@ import (
 	"math"
 	"unicode/utf8"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -629,7 +630,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 		return err
 	}
 
-	if me.Owner() != VoteProgramAddr {
+	if me.Owner() != a.VoteProgramAddr {
 		return InstrErrInvalidAccountOwner
 	}
 

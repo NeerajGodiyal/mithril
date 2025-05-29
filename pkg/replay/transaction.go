@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -150,9 +151,9 @@ func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16
 	return nil
 }
 
-var newReservedAccts = []solana.PublicKey{sealevel.AddressLookupTableAddr, sealevel.ComputeBudgetProgramAddr,
-	sealevel.Ed25519PrecompileAddr, sealevel.LoaderV4Addr, sealevel.Secp256kPrecompileAddr, sealevel.ZkElgamalProofProgramAddr,
-	sealevel.ZkTokenProofProgramAddr, sealevel.SysvarEpochRewardsAddr, sealevel.SysvarLastRestartSlotAddr, sealevel.SysvarOwnerAddr}
+var newReservedAccts = []solana.PublicKey{a.AddressLookupTableAddr, a.ComputeBudgetProgramAddr,
+	a.Ed25519PrecompileAddr, a.LoaderV4Addr, a.Secp256kPrecompileAddr, a.ZkElgamalProofProgramAddr,
+	a.ZkTokenProofProgramAddr, sealevel.SysvarEpochRewardsAddr, sealevel.SysvarLastRestartSlotAddr, a.SysvarOwnerAddr}
 
 func isWritable(tx *solana.Transaction, am *solana.AccountMeta, f *features.Features) bool {
 	if !am.IsWritable {
@@ -170,7 +171,7 @@ func isWritable(tx *solana.Transaction, am *solana.AccountMeta, f *features.Feat
 	}
 
 	if f.IsActive(features.EnableSecp256r1Precompile) {
-		if am.PublicKey == sealevel.Secp256r1PrecompileAddr {
+		if am.PublicKey == a.Secp256r1PrecompileAddr {
 			return false
 		}
 	}
@@ -261,11 +262,11 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 			continue
 		}
 
-		if modifiedVoteAccts && acct.Owner == sealevel.VoteProgramAddr {
+		if modifiedVoteAccts && acct.Owner == a.VoteProgramAddr {
 			recordVoteTimestampAndSlot(slotCtx, acct)
 		}
 
-		if modifiedStakeAccts && acct.Owner == sealevel.StakeProgramAddr {
+		if modifiedStakeAccts && acct.Owner == a.StakeProgramAddr {
 			recordStakeDelegation(slotCtx, acct)
 		}
 	}
@@ -315,7 +316,7 @@ func verifySignatures(tx *solana.Transaction) {
 	if err != nil {
 		panic(fmt.Sprintf("error - tx %s had an invalid signature", tx.Signatures[0]))
 	}
-	statsd.Timing("replay.tx_async.sigverify.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
@@ -332,14 +333,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	if err != nil {
 		return nil, err
 	}
-	statsd.Timing("replay.tx.instrs_and_acct_metas.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.InstructionsAndAccountMetasFromTx.AddTimingSince(start)
 
 	start = time.Now()
 	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
 	if err != nil {
 		return nil, err
 	}
-	statsd.Timing("replay.tx.compute_budget_exec_instrs.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
 
 	// fast path for failed tx's
 	/*if txMeta.Err != nil {
@@ -353,7 +354,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	if err != nil {
 		return nil, err
 	}
-	statsd.Timing("replay.tx.accts_from_tx.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)
 
 	var log sealevel.LogRecorder
 	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
@@ -380,7 +381,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 
 		execCtx.TransactionContext.Accounts.Unlock(count)
 	}
-	statsd.Timing("replay.tx.pre_balance_divergence_check.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.PreBalanceDivergenceCheck.AddTimingSince(start)
 
 	start = time.Now()
 	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
@@ -395,7 +396,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		if err != nil {
 			return txFeeInfo, nil
 		}*/
-	statsd.Timing("replay.tx.calc_and_deduct_fees.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
 
 	// check for fee divergences
 	if txFeeInfo.TotalFee != txMeta.Fee {
@@ -407,12 +408,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	if err != nil {
 		panic("failed to get and deserialize rent sysvar")
 	}
-	statsd.Timing("replay.tx.read_rent_sysvar.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
 
 	start = time.Now()
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.GlobalCtx.Features, &execCtx.TransactionContext.Accounts)
 	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
-	statsd.Timing("replay.tx.pre_tx_rent_states.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
 
 	var instrErr error
 	writablePubkeys := make([]solana.PublicKey, 0, 64)
@@ -424,12 +425,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 		if err != nil {
 			return txFeeInfo, err
 		}
-		statsd.Timing("replay.ix.fixup_instr_sysvar_acct.latency", time.Since(ixStart), nil, 1)
+		metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
 
 		ixStart = time.Now()
 		acctMetas := acctMetasPerInstr[instrIdx]
 		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-		statsd.Timing("replay.ix.instr_accts_from_acct_metas.latency", time.Since(ixStart), nil, 1)
+		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
 
 		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
 		if err == nil {
@@ -443,7 +444,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			break
 		}
 	}
-	statsd.Timing("replay.tx.ix_loop.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.IxLoop.AddTimingSince(start)
 
 	//mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
@@ -462,7 +463,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	start = time.Now()
 	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
-	statsd.Timing("replay.tx.post_tx_rent_states.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
 
 	start = time.Now()
 	// check for post-balances divergences (but only if the tx succeeded)
@@ -489,7 +490,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 			panic(msg)
 		}
 	}
-	statsd.Timing("replay.tx.post_balance_divergence_check.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.PostBalanceDivergenceCheck.AddTimingSince(start)
 
 	start = time.Now()
 	payerAcct, err := execCtx.TransactionContext.Accounts.GetAccount(0)
@@ -521,7 +522,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMet
 	handleModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeys)
-	statsd.Timing("replay.tx.update_accts.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 
 	return txFeeInfo, nil
 }

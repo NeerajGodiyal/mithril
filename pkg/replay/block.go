@@ -2,16 +2,20 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
@@ -131,11 +135,11 @@ func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
 }
 
 func isNativeProgram(pubkey solana.PublicKey) bool {
-	if pubkey == sealevel.SystemProgramAddr || pubkey == sealevel.BpfLoaderUpgradeableAddr ||
-		pubkey == sealevel.BpfLoader2Addr || pubkey == sealevel.BpfLoaderDeprecatedAddr ||
-		pubkey == sealevel.VoteProgramAddr || pubkey == sealevel.StakeProgramAddr ||
-		pubkey == sealevel.ConfigProgramAddr || pubkey == sealevel.StakeProgramConfigAddr ||
-		pubkey == sealevel.NativeLoaderAddr {
+	if pubkey == a.SystemProgramAddr || pubkey == a.BpfLoaderUpgradeableAddr ||
+		pubkey == a.BpfLoader2Addr || pubkey == a.BpfLoaderDeprecatedAddr ||
+		pubkey == a.VoteProgramAddr || pubkey == a.StakeProgramAddr ||
+		pubkey == a.ConfigProgramAddr || pubkey == a.StakeProgramConfigAddr ||
+		pubkey == a.NativeLoaderAddr {
 		return true
 	} else {
 		return false
@@ -146,7 +150,7 @@ func isSysvar(pubkey solana.PublicKey) bool {
 	if pubkey == sealevel.SysvarClockAddr || pubkey == sealevel.SysvarEpochScheduleAddr ||
 		pubkey == sealevel.SysvarFeesAddr || pubkey == sealevel.SysvarInstructionsAddr ||
 		pubkey == sealevel.SysvarRecentBlockHashesAddr || pubkey == sealevel.SysvarRentAddr ||
-		pubkey == sealevel.SysvarRewardsAddr || pubkey == sealevel.SysvarSlotHashesAddr ||
+		pubkey == a.SysvarRewardsAddr || pubkey == sealevel.SysvarSlotHashesAddr ||
 		pubkey == sealevel.SysvarSlotHistoryAddr || pubkey == sealevel.SysvarStakeHistoryAddr {
 		return true
 	} else {
@@ -373,7 +377,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 	for _, featureGate := range features.AllFeatureGates {
 		acct, err := acctsDb.GetAccount(slot, featureGate.Address)
 		if err == nil {
-			if acct.Owner != sealevel.FeatureAddr {
+			if acct.Owner != a.FeatureAddr {
 				continue
 			}
 
@@ -497,7 +501,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, txParallelism int, dbgOpts *DebugOptions) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, txParallelism int, dbgOpts *DebugOptions, metricsWriter io.Writer) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -586,7 +590,7 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 				block.HasEahWorkaround = true
 			}
 		}
-		statsd.Timing("replay.blocks.preprocessblock_latency", time.Since(start), nil, 1)
+		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, txParallelism, dbgOpts)
 		if err != nil {
@@ -616,18 +620,31 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 		} else {
 			justCrossedEpochBoundary = false
 		}
+		{
+			metrics.GlobalBlockReplay.Slot = block.Slot
+			if metricsWriter != nil {
+				encoder := json.NewEncoder(metricsWriter)
+				err := encoder.Encode(metrics.GlobalBlockReplay)
+				if err != nil {
+					mlog.Log.Errorf("Error marshaling latencies: %v", err)
+				}
+			}
+			statsd.SendBlockReplayMetrics(metrics.GlobalBlockReplay)
+			metrics.GlobalBlockReplay = metrics.BlockReplay{}
+		}
+
 	}
 
 	return nil
 }
 
 func runIncinerator(slotCtx *sealevel.SlotCtx) {
-	incineratorAcct, err := slotCtx.GetAccount(sealevel.IncineratorAddr)
+	incineratorAcct, err := slotCtx.GetAccount(a.IncineratorAddr)
 	if err != nil {
 		return
 	}
-	newIncineratorAcct := &accounts.Account{Key: sealevel.IncineratorAddr, Owner: sealevel.SystemProgramAddr, RentEpoch: math.MaxUint64}
-	slotCtx.SetAccount(sealevel.IncineratorAddr, newIncineratorAcct)
+	newIncineratorAcct := &accounts.Account{Key: a.IncineratorAddr, Owner: a.SystemProgramAddr, RentEpoch: math.MaxUint64}
+	slotCtx.SetAccount(a.IncineratorAddr, newIncineratorAcct)
 	slotCtx.LamportsBurnt += incineratorAcct.Lamports
 }
 
@@ -795,7 +812,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
-	statsd.Timing("replay.block.load_block_accts.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
 	slotCtx := newSlotCtx(block, accts, acctsDb)
 
@@ -806,7 +823,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	} else {
 		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
 	}
-	statsd.Timing("replay.block.txloop.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 
 	start = time.Now()
 	if block.BlockReward != nil {
@@ -815,17 +832,17 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
 		//mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
 	}
-	statsd.Timing("replay.block.reward.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.Reward.AddTimingSince(start)
 
 	start = time.Now()
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
-	statsd.Timing("replay.block.rent.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.Rent.AddTimingSince(start)
 
 	start = time.Now()
 	runIncinerator(slotCtx)
-	statsd.Timing("replay.block.run_incinerator.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.RunIncinerator.AddTimingSince(start)
 
 	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
@@ -835,7 +852,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	} else {
 		//mlog.Log.Debugf("accountsdb not updated")
 	}
-	statsd.Timing("replay.block.update_accounts.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
 	//mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
@@ -848,10 +865,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	// calculate ADH and bankhash
 	start = time.Now()
 	acctDeltaHash := calculateAcctsDeltaHash(writableAccts)
-	statsd.Timing("replay.block.accts_delta_hash.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.AccountsDeltaHash.AddTimingSince(start)
 	start = time.Now()
 	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
-	statsd.Timing("replay.block.bank_hash.latency", time.Since(start), nil, 1)
+	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
 	return slotCtx, err
 }
