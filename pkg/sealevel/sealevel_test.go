@@ -13,6 +13,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/fixtures"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
@@ -658,7 +659,7 @@ func TestInterpreter_Get_Stack_Height_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -672,7 +673,7 @@ func TestInterpreter_Get_Stack_Height_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -730,7 +731,7 @@ func TestInterpreter_ReturnData_Syscalls(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -744,7 +745,7 @@ func TestInterpreter_ReturnData_Syscalls(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -814,7 +815,7 @@ func TestInterpreter_Poseidon_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -828,7 +829,7 @@ func TestInterpreter_Poseidon_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -887,7 +888,7 @@ func TestInterpreter_Get_Sysvar_Syscalls(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -901,7 +902,7 @@ func TestInterpreter_Get_Sysvar_Syscalls(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1006,7 +1007,7 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1020,7 +1021,7 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1126,7 +1127,7 @@ func TestInterpreter_Alloc_Free_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1140,7 +1141,7 @@ func TestInterpreter_Alloc_Free_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1187,7 +1188,7 @@ func TestInterpreter_Alt_Bn128_Compression_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1201,7 +1202,7 @@ func TestInterpreter_Alt_Bn128_Compression_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1251,7 +1252,7 @@ func TestInterpreter_Validate_Point_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1265,7 +1266,7 @@ func TestInterpreter_Validate_Point_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1315,7 +1316,7 @@ func TestInterpreter_Curve_Group_Ops_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1329,7 +1330,7 @@ func TestInterpreter_Curve_Group_Ops_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1379,7 +1380,7 @@ func TestInterpreter_Curve_Multiscalar_Mul_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1393,7 +1394,7 @@ func TestInterpreter_Curve_Multiscalar_Mul_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1443,7 +1444,7 @@ func TestInterpreter_Log_Data_Syscall(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1457,7 +1458,7 @@ func TestInterpreter_Log_Data_Syscall(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 
@@ -1507,7 +1508,7 @@ func TestInterpreter_Cpi_C_System_Program_Allocate(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1521,23 +1522,23 @@ func TestInterpreter_Cpi_C_System_Program_Allocate(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: programData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: programData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	seed := []byte{'Y', 'o', 'u', ' ', 'p', 'a', 's', 's',
 		' ', 'b', 'u', 't', 't', 'e', 'r'}
 
 	acctToAllocPubKey, bumpSeed, err := solana.FindProgramAddress([][]byte{seed}, programPubkey)
 	assert.NoError(t, err)
-	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 1)
 	instrData[0] = bumpSeed
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{programAcct, systemAcct, acctToAlloc})
 
-	acctMetas := []AccountMeta{{Pubkey: SystemProgramAddr, IsSigner: false, IsWritable: false},
+	acctMetas := []AccountMeta{{Pubkey: a.SystemProgramAddr, IsSigner: false, IsWritable: false},
 		{Pubkey: acctToAlloc.Key, IsSigner: true, IsWritable: true}}
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
@@ -1587,7 +1588,7 @@ func TestInterpreter_Cpi_Rust_System_Program_Allocate(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1601,23 +1602,23 @@ func TestInterpreter_Cpi_Rust_System_Program_Allocate(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: programData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: programData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	seed := []byte{'Y', 'o', 'u', ' ', 'p', 'a', 's', 's',
 		' ', 'b', 'u', 't', 't', 'e', 'r'}
 
 	acctToAllocPubKey, bumpSeed, err := solana.FindProgramAddress([][]byte{seed}, programPubkey)
 	assert.NoError(t, err)
-	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 1)
 	instrData[0] = bumpSeed
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{programAcct, systemAcct, acctToAlloc})
 
-	acctMetas := []AccountMeta{{Pubkey: SystemProgramAddr, IsSigner: false, IsWritable: false},
+	acctMetas := []AccountMeta{{Pubkey: a.SystemProgramAddr, IsSigner: false, IsWritable: false},
 		{Pubkey: acctToAlloc.Key, IsSigner: true, IsWritable: true}}
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
@@ -1667,7 +1668,7 @@ func TestInterpreter_Cpi_C_Bpf_Program_Call(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1681,7 +1682,7 @@ func TestInterpreter_Cpi_C_Bpf_Program_Call(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	fromAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -1754,7 +1755,7 @@ func executeFirstBpfProgramAndReturnExecCtx(t *testing.T, log *LogRecorder, acct
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1768,7 +1769,7 @@ func executeFirstBpfProgramAndReturnExecCtx(t *testing.T, log *LogRecorder, acct
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 5)
 	instrData[0] = 'x'
@@ -1839,7 +1840,7 @@ func TestInterpreter_Get_Processed_Sibling_Instruction_Test(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -1853,16 +1854,16 @@ func TestInterpreter_Get_Processed_Sibling_Instruction_Test(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: programData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: programData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	seed := []byte{'Y', 'o', 'u', ' ', 'p', 'a', 's', 's',
 		' ', 'b', 'u', 't', 't', 'e', 'r'}
 
 	acctToAllocPubKey, _, err := solana.FindProgramAddress([][]byte{seed}, programPubkey)
 	assert.NoError(t, err)
-	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	acctToAlloc := accounts.Account{Key: acctToAllocPubKey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	instrData[0] = 0x61
@@ -1877,7 +1878,7 @@ func TestInterpreter_Get_Processed_Sibling_Instruction_Test(t *testing.T) {
 	err = execCtx.Accounts.SetAccount(&pk, &programDataAcct)
 	assert.NoError(t, err)
 
-	acctMetas := []AccountMeta{{Pubkey: SystemProgramAddr, IsSigner: false, IsWritable: false},
+	acctMetas := []AccountMeta{{Pubkey: a.SystemProgramAddr, IsSigner: false, IsWritable: false},
 		{Pubkey: acctToAlloc.Key, IsSigner: true, IsWritable: true}}
 
 	instructionAccts := InstructionAcctsFromAccountMetas(acctMetas, execCtx.TransactionContext.Accounts)
@@ -1912,12 +1913,12 @@ func TestInterpreter_Test_Memo_Program_With_LoaderV2(t *testing.T) {
 	programPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programPubkey := programPrivKey.PublicKey()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoader2Addr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoader2Addr, Executable: true, RentEpoch: 100}
 
 	signerPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	signerPubkey := signerPrivKey.PublicKey()
-	signerAcct := accounts.Account{Key: signerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	signerAcct := accounts.Account{Key: signerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	instrData := []byte("hello world")
 
@@ -1975,19 +1976,19 @@ func TestInterpreter_Test_Deprecated_Loader(t *testing.T) {
 	programPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programPubkey := programPrivKey.PublicKey()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderDeprecatedAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderDeprecatedAddr, Executable: true, RentEpoch: 100}
 
 	acct1PrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	acct1Pubkey := acct1PrivKey.PublicKey()
-	acct1 := accounts.Account{Key: acct1Pubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
-	acct1 = accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	acct1 := accounts.Account{Key: acct1Pubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
+	acct1 = accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	acct2PrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	acct2Pubkey := acct2PrivateKey.PublicKey()
-	acct2 := accounts.Account{Key: acct2Pubkey, Lamports: 0x1337, Data: make([]byte, 0), Owner: VoteProgramAddr, Executable: true, RentEpoch: 100}
-	acct2 = accounts.Account{Key: VoteProgramAddr, Lamports: 0x1337, Data: make([]byte, 0), Owner: VoteProgramAddr, Executable: true, RentEpoch: 100}
+	acct2 := accounts.Account{Key: acct2Pubkey, Lamports: 0x1337, Data: make([]byte, 0), Owner: a.VoteProgramAddr, Executable: true, RentEpoch: 100}
+	acct2 = accounts.Account{Key: a.VoteProgramAddr, Lamports: 0x1337, Data: make([]byte, 0), Owner: a.VoteProgramAddr, Executable: true, RentEpoch: 100}
 
 	fmt.Printf("acct1 key: %s\n", acct1.Key)
 	fmt.Printf("acct2 key: %s\n", acct2.Key)

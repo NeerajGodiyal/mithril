@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/fixtures"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -26,16 +27,16 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Success(t *testing.T) {
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
 	bufferAcctData := make([]byte, 500)
 	binary.LittleEndian.PutUint32(bufferAcctData, UpgradeableLoaderStateTypeUninitialized)
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: []byte(bufferAcctData), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: []byte(bufferAcctData), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// authority account
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{programAcct, bufferAcct, authorityAcct})
 
@@ -69,16 +70,16 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Buffer_Acct_Already_Initialize_Fa
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
 	bufferAcctData := make([]byte, 500)
 	binary.LittleEndian.PutUint32(bufferAcctData, UpgradeableLoaderStateTypeBuffer) // buffer acct already initialized
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: []byte(bufferAcctData), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: []byte(bufferAcctData), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// authority account
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{programAcct, bufferAcct, authorityAcct})
 
@@ -99,13 +100,13 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Buffer_Acct_Already_Initialize_Fa
 func TestExecute_Tx_BpfLoader_Write_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority account
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -118,7 +119,7 @@ func TestExecute_Tx_BpfLoader_Write_Success(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// bpf loader write instruction
 	var writeInstr UpgradeableLoaderInstrWrite
@@ -159,13 +160,13 @@ func TestExecute_Tx_BpfLoader_Write_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Write_Offset_Too_Large_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority account
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -178,7 +179,7 @@ func TestExecute_Tx_BpfLoader_Write_Offset_Too_Large_Failure(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// bpf loader write instruction
 	var writeInstr UpgradeableLoaderInstrWrite
@@ -210,13 +211,13 @@ func TestExecute_Tx_BpfLoader_Write_Offset_Too_Large_Failure(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Write_Buffer_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority account
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -229,7 +230,7 @@ func TestExecute_Tx_BpfLoader_Write_Buffer_Authority_Didnt_Sign_Failure(t *testi
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// bpf loader write instruction
 	var writeInstr UpgradeableLoaderInstrWrite
@@ -261,13 +262,13 @@ func TestExecute_Tx_BpfLoader_Write_Buffer_Authority_Didnt_Sign_Failure(t *testi
 func TestExecute_Tx_BpfLoader_Write_Incorrect_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// incorrect authority account
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -285,7 +286,7 @@ func TestExecute_Tx_BpfLoader_Write_Incorrect_Authority_Failure(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// bpf loader write instruction
 	var writeInstr UpgradeableLoaderInstrWrite
@@ -317,7 +318,7 @@ func TestExecute_Tx_BpfLoader_Write_Incorrect_Authority_Failure(t *testing.T) {
 func TestExecute_Tx_BpfLoader_SetAuthority_Not_Enough_Instr_Accts_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	authorityPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -334,7 +335,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Not_Enough_Instr_Accts_Failure(t *tes
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -353,19 +354,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Not_Enough_Instr_Accts_Failure(t *tes
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -378,7 +379,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Success(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -407,19 +408,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -432,7 +433,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Success(t *testing.T) {
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -461,19 +462,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Immutable_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -486,7 +487,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Immutable_Failure(t *testing.T
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -506,7 +507,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Immutable_Failure(t *testing.T
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Wrong_Upgrade_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -517,13 +518,13 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Wrong_Upgrade_Authority_Failur
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// incorrect authority account
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -536,7 +537,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Wrong_Upgrade_Authority_Failur
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -556,19 +557,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Wrong_Upgrade_Authority_Failur
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -581,7 +582,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Authority_Didnt_Sign_Failure(t
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -601,13 +602,13 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Authority_Didnt_Sign_Failure(t
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_No_New_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -620,7 +621,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_No_New_Authority_Failure(t *te
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -640,19 +641,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_No_New_Authority_Failure(t *te
 func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Uninitialized_Account_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -665,7 +666,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Uninitialized_Account_Failure(
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -685,19 +686,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Uninitialized_Account_Failure(
 func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Immutable_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -710,7 +711,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Immutable_Failure(t *test
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -730,19 +731,19 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Immutable_Failure(t *test
 func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -755,7 +756,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Authority_Didnt_Sign_Fail
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -775,7 +776,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Authority_Didnt_Sign_Fail
 func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Wrong_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -786,13 +787,13 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Wrong_Authority_Failure(t
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// incorrect authority account
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -805,7 +806,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Wrong_Authority_Failure(t
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthority)
@@ -825,7 +826,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Wrong_Authority_Failure(t
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Not_Enough_Instr_Accts_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	authorityPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -842,7 +843,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Not_Enough_Instr_Accts_Failure
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -863,19 +864,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Not_Enough_Instr_Accts_Failure
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -888,7 +889,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -919,19 +920,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -944,7 +945,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -975,19 +976,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Immutable_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -1000,7 +1001,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Immutable_Failure(t *te
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1022,7 +1023,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Immutable_Failure(t *te
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -1033,13 +1034,13 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// incorrect authority account
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -1052,7 +1053,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1074,19 +1075,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -1099,7 +1100,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Authority_Didnt_Sign_Fa
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1121,19 +1122,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Authority_Didnt_Sign_Fa
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_New_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -1146,7 +1147,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_New_Authority_Didnt_Sig
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1168,19 +1169,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_New_Authority_Didnt_Sig
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Uninitialized_Account_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the buffer acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferWriter := new(bytes.Buffer)
@@ -1193,7 +1194,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Uninitialized_Account_F
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 0, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1215,19 +1216,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Uninitialized_Account_F
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Immutable_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -1240,7 +1241,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Immutable_Failure(
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1262,19 +1263,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Immutable_Failure(
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -1287,7 +1288,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Authority_Didnt_Si
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1309,19 +1310,19 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Authority_Didnt_Si
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_New_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// new authority pubkey for the programdata acct
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -1334,7 +1335,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_New_Authority_Didn
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1356,7 +1357,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_New_Authority_Didn
 func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the programdata acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -1367,13 +1368,13 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Fa
 	newAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newAuthorityPubkey := newAuthorityPrivKey.PublicKey()
-	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	newAuthorityAcct := accounts.Account{Key: newAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// incorrect authority account
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// programdata account
 	programDataWriter := new(bytes.Buffer)
@@ -1386,7 +1387,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Fa
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeSetAuthorityChecked)
@@ -1408,13 +1409,13 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Fa
 func TestExecute_Tx_BpfLoader_Close_Buffer_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1427,12 +1428,12 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Success(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1464,13 +1465,13 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Close_Buffer_Immutable_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1483,12 +1484,12 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Immutable_Failure(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1509,13 +1510,13 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Immutable_Failure(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Close_Buffer_Authority_Didnt_Sign_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1528,12 +1529,12 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Authority_Didnt_Sign_Failure(t *testi
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1554,7 +1555,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Authority_Didnt_Sign_Failure(t *testi
 func TestExecute_Tx_BpfLoader_Close_Buffer_Wrong_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -1566,7 +1567,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Wrong_Authority_Failure(t *testing.T)
 	incorrectAuthorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	incorrectAuthorityPubkey := incorrectAuthorityPrivKey.PublicKey()
-	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	incorrectAuthorityAcct := accounts.Account{Key: incorrectAuthorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1579,12 +1580,12 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Wrong_Authority_Failure(t *testing.T)
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1605,7 +1606,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Wrong_Authority_Failure(t *testing.T)
 func TestExecute_Tx_BpfLoader_Close_Uninitialized_Success(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// uninit account
 	uninitDataWriter := new(bytes.Buffer)
@@ -1618,12 +1619,12 @@ func TestExecute_Tx_BpfLoader_Close_Uninitialized_Success(t *testing.T) {
 	uninitAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	uninitPubkey := uninitAcctPrivKey.PublicKey()
-	uninitAcct := accounts.Account{Key: uninitPubkey, Lamports: 1337, Data: uninitData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: uninitPubkey, Lamports: 1337, Data: uninitData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1654,7 +1655,7 @@ func TestExecute_Tx_BpfLoader_Close_Uninitialized_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Close_Recipient_Same_As_Account_Being_Closed_Failure(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// uninit account
 	uninitDataWriter := new(bytes.Buffer)
@@ -1667,7 +1668,7 @@ func TestExecute_Tx_BpfLoader_Close_Recipient_Same_As_Account_Being_Closed_Failu
 	uninitAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	uninitPubkey := uninitAcctPrivKey.PublicKey()
-	uninitAcct := accounts.Account{Key: uninitPubkey, Lamports: 1337, Data: uninitData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: uninitPubkey, Lamports: 1337, Data: uninitData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1687,7 +1688,7 @@ func TestExecute_Tx_BpfLoader_Close_Recipient_Same_As_Account_Being_Closed_Failu
 func TestExecute_Tx_BpfLoader_Close_Buffer_Not_Enough_Accounts(t *testing.T) {
 	// bpf loader acct
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
@@ -1705,12 +1706,12 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Not_Enough_Accounts(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1730,13 +1731,13 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Not_Enough_Accounts(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1749,12 +1750,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	programPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -1765,7 +1766,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1805,13 +1806,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Not_Enough_Accounts_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1824,12 +1825,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Not_Enough_Accounts_Failure(t *t
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	programPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -1840,7 +1841,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Not_Enough_Accounts_Failure(t *t
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1868,13 +1869,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Not_Enough_Accounts_Failure(t *t
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Not_Writable_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1887,12 +1888,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Not_Writable_Failur
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	programPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
@@ -1903,7 +1904,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Not_Writable_Failur
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1932,13 +1933,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Not_Writable_Failur
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Wrong_Owner_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -1951,12 +1952,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Wrong_Owner_Failure
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -1968,7 +1969,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Wrong_Owner_Failure
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: SystemProgramAddr, Executable: true, RentEpoch: 100} // wrong owner
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100} // wrong owner
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -1997,13 +1998,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Program_Acct_Wrong_Owner_Failure
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Already_Deployed_In_This_Block_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -2016,12 +2017,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Already_Deployed_In_This_Block_F
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2033,7 +2034,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Already_Deployed_In_This_Block_F
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -2062,13 +2063,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Already_Deployed_In_This_Block_F
 func TestExecute_Tx_BpfLoader_Close_ProgramData_ProgramData_Not_A_Program_Acct_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
@@ -2081,12 +2082,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_ProgramData_Not_A_Program_Acct_F
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2098,7 +2099,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_ProgramData_Not_A_Program_Acct_F
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -2127,18 +2128,18 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_ProgramData_Not_A_Program_Acct_F
 func TestExecute_Tx_BpfLoader_Close_ProgramData_Nonclosable_Account_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	bufferDataWriter := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(bufferDataWriter)
-	bufferAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: SystemProgramAddr}} // trying to close Program acct, which isn't possible
+	bufferAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: a.SystemProgramAddr}} // trying to close Program acct, which isn't possible
 	err = bufferAcctState.MarshalWithEncoder(encoder)
 	bufferAcctBytes := bufferDataWriter.Bytes()
 	bufferData := make([]byte, 500, 500)
@@ -2146,12 +2147,12 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Nonclosable_Account_Failure(t *t
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	bufferPubkey := bufferAcctPrivKey.PublicKey()
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1337, Data: bufferData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	dstPrivkey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	dstPubkey := dstPrivkey.PublicKey()
-	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	dstAcct := accounts.Account{Key: dstPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2163,7 +2164,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Nonclosable_Account_Failure(t *t
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeClose)
@@ -2192,13 +2193,13 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Nonclosable_Account_Failure(t *t
 func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataDataWriter := new(bytes.Buffer)
@@ -2215,7 +2216,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 100000000000, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 100000000000, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2227,7 +2228,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	var extendProgram UpgradeableLoaderInstrExtendProgram
 	extendProgram.AdditionalBytes = 12
@@ -2295,13 +2296,13 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_ExtendProgram_Extend_By_Zero_Bytes_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataDataWriter := new(bytes.Buffer)
@@ -2317,7 +2318,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Extend_By_Zero_Bytes_Failure(t *test
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 100000000000, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 100000000000, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2329,7 +2330,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Extend_By_Zero_Bytes_Failure(t *test
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	var extendProgram UpgradeableLoaderInstrExtendProgram
 	extendProgram.AdditionalBytes = 0
@@ -2374,13 +2375,13 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Extend_By_Zero_Bytes_Failure(t *test
 func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Not_Enough_Keys_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataDataWriter := new(bytes.Buffer)
@@ -2397,7 +2398,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Not_Enou
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2409,7 +2410,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Not_Enou
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	var extendProgram UpgradeableLoaderInstrExtendProgram
 	extendProgram.AdditionalBytes = 200000
@@ -2454,13 +2455,13 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Not_Enou
 func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	//authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	// programdata account
 	programDataDataWriter := new(bytes.Buffer)
@@ -2477,17 +2478,17 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(
 	programDataAcctPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	programDataPubkey := programDataAcctPrivKey.PublicKey()
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 	origProgramDataBalance := uint64(0)
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 0, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 	origPayerBalance := uint64(10)
 
 	// program account
@@ -2500,7 +2501,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	var extendProgram UpgradeableLoaderInstrExtendProgram
 	extendProgram.AdditionalBytes = 200000
@@ -2576,13 +2577,13 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(
 func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	programDataDataWriter := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(programDataDataWriter)
@@ -2597,7 +2598,7 @@ func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 
 	programDataBuffer := make([]byte, upgradeableLoaderSizeOfProgramDataMetaData+len(validProgramBytes))
 	copy(programDataBuffer, programDataAcctBytes)
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataBuffer, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataBuffer, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account containing program bytes
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
@@ -2611,13 +2612,13 @@ func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 	bufferStateWriter.Write(validProgramBytes)
 	bufferStateBytes := bufferStateWriter.Bytes()
 
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1000000, Data: bufferStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1000000, Data: bufferStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// spill acct
 	spillPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	spillPubkey := spillPrivKey.PublicKey()
-	spillAcct := accounts.Account{Key: spillPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	spillAcct := accounts.Account{Key: spillPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2629,13 +2630,13 @@ func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeUpgrade)
 
-	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
-	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{loaderAcct, programDataAcct, programAcct, bufferAcct, spillAcct, fakeRent, fakeClockAcct, authorityAcct})
 
@@ -2688,13 +2689,13 @@ func TestExecute_Tx_BpfLoader_Upgrade_Success(t *testing.T) {
 func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	programDataDataWriter := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(programDataDataWriter)
@@ -2709,7 +2710,7 @@ func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.
 
 	programDataBuffer := make([]byte, upgradeableLoaderSizeOfProgramDataMetaData+len(validProgramBytes))
 	copy(programDataBuffer, programDataAcctBytes)
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataBuffer, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataBuffer, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// buffer account containing program bytes
 	bufferAcctPrivKey, err := solana.NewRandomPrivateKey()
@@ -2723,13 +2724,13 @@ func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.
 	bufferStateWriter.Write(validProgramBytes)
 	bufferStateBytes := bufferStateWriter.Bytes()
 
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1000000, Data: bufferStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 1000000, Data: bufferStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// spill acct
 	spillPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	spillPubkey := spillPrivKey.PublicKey()
-	spillAcct := accounts.Account{Key: spillPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	spillAcct := accounts.Account{Key: spillPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programPrivKey, err := solana.NewRandomPrivateKey()
@@ -2741,13 +2742,13 @@ func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.
 	err = programAcctState.MarshalWithEncoder(programEncoder)
 	assert.NoError(t, err)
 	programBytes := programWriter.Bytes()
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 0, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 4)
 	binary.LittleEndian.PutUint32(instrData, UpgradeableLoaderInstrTypeUpgrade)
 
-	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 1, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
-	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 1, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{loaderAcct, programDataAcct, programAcct, bufferAcct, spillAcct, fakeRent, fakeClockAcct, authorityAcct})
 
@@ -2788,15 +2789,15 @@ func TestExecute_Tx_BpfLoader_Upgrade_Buffer_Wrong_Authority_Failure(t *testing.
 func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 	// bpf loader acct
 	loaderAcctData := make([]byte, 500, 500)
-	loaderAcct := accounts.Account{Key: BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	loaderAcct := accounts.Account{Key: a.BpfLoaderUpgradeableAddr, Lamports: 0, Data: loaderAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority pubkey for the buffer acct
 	authorityPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 0, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// buffer account containing program bytes
 	validProgramBytes := fixtures.Load(t, "sbpf", "noop_aligned.so")
@@ -2811,13 +2812,13 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 	bufferStateWriter.Write(validProgramBytes)
 	bufferStateBytes := bufferStateWriter.Bytes()
 
-	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 20000, Data: bufferStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	bufferAcct := accounts.Account{Key: bufferPubkey, Lamports: 20000, Data: bufferStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// spill acct
 	payerPrivKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 200000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 200000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeUninitialized}
@@ -2831,14 +2832,14 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	seed := make([][]byte, 1)
 	seed[0] = make([]byte, solana.PublicKeyLength)
 	copy(seed[0], programPubkey[:])
-	programDataPubkey, _, err := solana.FindProgramAddress(seed, BpfLoaderUpgradeableAddr)
+	programDataPubkey, _, err := solana.FindProgramAddress(seed, a.BpfLoaderUpgradeableAddr)
 	assert.NoError(t, err)
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	instrWriter := new(bytes.Buffer)
 	instrEncoder := bin.NewBinEncoder(instrWriter)
@@ -2847,8 +2848,8 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 	err = deploy.MarshalWithEncoder(instrEncoder)
 	instrData := instrWriter.Bytes()
 
-	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 1, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
-	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Data: programBytes, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeClockAcct := accounts.Account{Key: SysvarClockAddr, Lamports: 1, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	fakeRent := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Data: programBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	transactionAccts := NewTransactionAccounts([]accounts.Account{loaderAcct, payerAcct, programDataAcct, programAcct, bufferAcct, fakeRent, fakeClockAcct, systemAcct, authorityAcct})
 
@@ -2858,7 +2859,7 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 		{Pubkey: bufferAcct.Key, IsSigner: false, IsWritable: true},
 		{Pubkey: fakeRent.Key, IsSigner: false, IsWritable: true},      //rent
 		{Pubkey: fakeClockAcct.Key, IsSigner: false, IsWritable: true}, // clock
-		{Pubkey: SystemProgramAddr, IsSigner: false, IsWritable: true},
+		{Pubkey: a.SystemProgramAddr, IsSigner: false, IsWritable: true},
 		{Pubkey: authorityAcct.Key, IsSigner: true, IsWritable: true}, // authority
 	}
 
@@ -2918,7 +2919,7 @@ func TestExecute_Tx_BpfLoader_Invoke_Bpf_Program_Success(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -2932,7 +2933,7 @@ func TestExecute_Tx_BpfLoader_Invoke_Bpf_Program_Success(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instrData := make([]byte, 0)
 

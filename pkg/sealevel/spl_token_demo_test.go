@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/fixtures"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
@@ -23,7 +24,7 @@ var splTokenProgramAddr = base58.MustDecodeFromString("TokenkegQfeZyiNwAJbNbGKPF
 // spl token program later.
 func setupSplTokenProgramAccount(t *testing.T, accts *accounts.Accounts) accounts.Account {
 	programBytes := fixtures.Load(t, "sbpf", "spl-token.so")
-	splTokenAcct := accounts.Account{Key: splTokenProgramAddr, Lamports: 0, Data: programBytes, Owner: BpfLoader2Addr, Executable: true, RentEpoch: 100}
+	splTokenAcct := accounts.Account{Key: splTokenProgramAddr, Lamports: 0, Data: programBytes, Owner: a.BpfLoader2Addr, Executable: true, RentEpoch: 100}
 
 	pk := [32]byte(splTokenProgramAddr)
 	err := (*accts).SetAccount(&pk, &splTokenAcct)
@@ -46,7 +47,7 @@ func newExecCtx(t *testing.T, log *LogRecorder) *ExecutionCtx {
 func newDefaultRentSysvar(accts *accounts.Accounts) accounts.Account {
 	rent := SysvarRent{LamportsPerUint8Year: 3480, ExemptionThreshold: 2.0, BurnPercent: 50}
 
-	rentAcct := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Owner: SysvarOwnerAddr}
+	rentAcct := accounts.Account{Key: SysvarRentAddr, Lamports: 1, Owner: a.SysvarOwnerAddr}
 	(*accts).SetAccount(&SysvarRentAddr, &rentAcct)
 	WriteRentSysvar(accts, rent)
 
@@ -187,7 +188,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 
 	//  InitializeMint: create accounts to serve as a) mint account, and b) mint authority account
 	mintAcct := newRandomAccountWithOwnerAndSizeAndLamports(splTokenProgramAddr, 82, 100000000)
-	mintAuthority := newRandomAccountWithOwnerAndSizeAndLamports(SystemProgramAddr, 0, 100000000)
+	mintAuthority := newRandomAccountWithOwnerAndSizeAndLamports(a.SystemProgramAddr, 0, 100000000)
 
 	rent := newDefaultRentSysvar(&execCtx.Accounts)
 	initMintInstrData := newInitializeMintInstructionBytes(6, mintAuthority.Key, nil)
@@ -216,7 +217,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 
 	// InitializeAccount: create accounts to serve as a) token account, and b) the token account's owner
 	tokenAcct := newRandomAccountWithOwnerAndSizeAndLamports(splTokenProgramAddr, 165, 10000000)
-	tokenOwner := newRandomAccountWithOwnerAndSizeAndLamports(SystemProgramAddr, 0, 10000000)
+	tokenOwner := newRandomAccountWithOwnerAndSizeAndLamports(a.SystemProgramAddr, 0, 10000000)
 	initAccountInstrData := make([]byte, 1)
 	initAccountInstrData[0] = initializeAccountInstr
 
@@ -245,7 +246,7 @@ func Test_Spl_Token_Program_Demo(t *testing.T) {
 
 	// InitializeAccount: create accounts to serve as a) token account, and b) the token account's owner
 	dstTokenAcct := newRandomAccountWithOwnerAndSizeAndLamports(splTokenProgramAddr, 165, 10000000)
-	dstTokenOwner := newRandomAccountWithOwnerAndSizeAndLamports(SystemProgramAddr, 0, 10000000)
+	dstTokenOwner := newRandomAccountWithOwnerAndSizeAndLamports(a.SystemProgramAddr, 0, 10000000)
 	initAccountInstrData = make([]byte, 1)
 	initAccountInstrData[0] = initializeAccountInstr
 

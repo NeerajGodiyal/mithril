@@ -10,6 +10,7 @@ import (
 	bin "github.com/gagliardetto/binary"
 	"github.com/stretchr/testify/require"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,7 +19,7 @@ import (
 func TestExecute_Tx_ComputeBudget_Program_Entry_Point(t *testing.T) {
 
 	programAcctData := make([]byte, 500, 500)
-	programAcct := accounts.Account{Key: ComputeBudgetProgramAddr, Lamports: 0, Data: programAcctData, Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: a.ComputeBudgetProgramAddr, Lamports: 0, Data: programAcctData, Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 	transactionAccts := NewTransactionAccounts([]accounts.Account{programAcct})
 
 	instructionAccts := []InstructionAccount{
@@ -43,7 +44,7 @@ func newTestSetComputeUnitLimit(units uint32) (Instruction, error) {
 		return Instruction{}, err
 	}
 
-	instr := Instruction{ProgramId: ComputeBudgetProgramAddr, Data: writer.Bytes()}
+	instr := Instruction{ProgramId: a.ComputeBudgetProgramAddr, Data: writer.Bytes()}
 	return instr, nil
 }
 
@@ -57,7 +58,7 @@ func newTestSetComputeUnitPrice(microLamports uint64) (Instruction, error) {
 		return Instruction{}, err
 	}
 
-	instr := Instruction{ProgramId: ComputeBudgetProgramAddr, Data: writer.Bytes()}
+	instr := Instruction{ProgramId: a.ComputeBudgetProgramAddr, Data: writer.Bytes()}
 	return instr, nil
 }
 
@@ -71,7 +72,7 @@ func newTestRequestHeapFrame(numBytes uint32) (Instruction, error) {
 		return Instruction{}, err
 	}
 
-	instr := Instruction{ProgramId: ComputeBudgetProgramAddr, Data: writer.Bytes()}
+	instr := Instruction{ProgramId: a.ComputeBudgetProgramAddr, Data: writer.Bytes()}
 	return instr, nil
 }
 
@@ -85,7 +86,7 @@ func newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(numBytes uint32) (I
 		return Instruction{}, err
 	}
 
-	instr := Instruction{ProgramId: ComputeBudgetProgramAddr, Data: writer.Bytes()}
+	instr := Instruction{ProgramId: a.ComputeBudgetProgramAddr, Data: writer.Bytes()}
 	return instr, nil
 }
 

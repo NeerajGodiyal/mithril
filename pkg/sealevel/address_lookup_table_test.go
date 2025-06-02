@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	bin "github.com/gagliardetto/binary"
@@ -17,31 +18,31 @@ import (
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Idempotent(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
-	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -102,7 +103,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Idempotent(t *
 	addrLookupTablePost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 
-	assert.Equal(t, AddressLookupTableAddr, addrLookupTablePost.Owner)
+	assert.Equal(t, a.AddressLookupTableAddr, addrLookupTablePost.Owner)
 	assert.Equal(t, AddressLookupTableMetaSize, len(addrLookupTablePost.Data))
 	expectedBalance := rent.MinimumBalance(AddressLookupTableMetaSize)
 	assert.Equal(t, expectedBalance, addrLookupTablePost.Lamports)
@@ -127,31 +128,31 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Idempotent(t *
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Idempotent(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
-	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -209,7 +210,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Idempotent
 	addrLookupTablePost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 
-	assert.Equal(t, AddressLookupTableAddr, addrLookupTablePost.Owner)
+	assert.Equal(t, a.AddressLookupTableAddr, addrLookupTablePost.Owner)
 	assert.Equal(t, AddressLookupTableMetaSize, len(addrLookupTablePost.Data))
 	expectedBalance := rent.MinimumBalance(AddressLookupTableMetaSize)
 	assert.Equal(t, expectedBalance, addrLookupTablePost.Lamports)
@@ -234,25 +235,25 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Idempotent
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Use_Payer_As_Authority(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
-	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -313,7 +314,7 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Use_Payer_As_A
 	addrLookupTablePost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 
-	assert.Equal(t, AddressLookupTableAddr, addrLookupTablePost.Owner)
+	assert.Equal(t, a.AddressLookupTableAddr, addrLookupTablePost.Owner)
 	assert.Equal(t, AddressLookupTableMetaSize, len(addrLookupTablePost.Data))
 	expectedBalance := rent.MinimumBalance(AddressLookupTableMetaSize)
 	assert.Equal(t, expectedBalance, addrLookupTablePost.Lamports)
@@ -332,31 +333,31 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Use_Payer_As_A
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Missing_Signer(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
-	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -414,31 +415,31 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Missing_Signer
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Recent_Slot(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	addrLookupTableAddr, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
-	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: addrLookupTableAddr, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -499,19 +500,19 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_Not_Recent_Slo
 func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_PDA_Mismatch(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
 	binary.LittleEndian.PutUint64(recentSlotBytes[:], recentSlot)
 
-	_, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, AddressLookupTableAddr)
+	_, bumpSeed, err := solana.FindProgramAddress([][]byte{authorityAcct.Key.Bytes(), recentSlotBytes[:]}, a.AddressLookupTableAddr)
 	assert.NoError(t, err)
 
 	// set the address lookup table address as some random account pubkey rather than a PDA derived from the
@@ -519,16 +520,16 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_PDA_Mismatch(t
 	randomPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	randomPubkey := randomPrivateKey.PublicKey()
-	uninitAcct := accounts.Account{Key: randomPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	uninitAcct := accounts.Account{Key: randomPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// payer acct
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// system acct
-	systemAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	createLookupTableInstrWriter := new(bytes.Buffer)
 	createLookupTableEncoder := bin.NewBinEncoder(createLookupTableInstrWriter)
@@ -589,13 +590,13 @@ func TestExecute_AddrLookupTable_Program_Test_Create_Lookup_Table_PDA_Mismatch(t
 func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Success(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -604,12 +605,12 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Success(t *testin
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -677,13 +678,13 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Success(t *testin
 func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Table_Not_Deactivated_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -692,12 +693,12 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Table_Not_Deactiv
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -755,13 +756,13 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Table_Not_Deactiv
 func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Deactivated_In_Current_Slot_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -770,12 +771,12 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Deactivated
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -833,13 +834,13 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Deactivated
 func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Recently_Deactivated_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -848,12 +849,12 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Recently_De
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -913,12 +914,12 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Recently_De
 func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Immutable_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -927,12 +928,12 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Immutable_F
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 	activatedTableAcct.Data = getBytesForFrozenLookupTable(t)
 
 	instrBytes := make([]byte, 4)
@@ -985,7 +986,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Immutable_F
 func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Wrong_Authority_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
@@ -996,7 +997,7 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Wrong_Autho
 	wrongAuthorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	wrongAuthorityPubkey := wrongAuthorityPrivateKey.PublicKey()
-	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1005,12 +1006,12 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Wrong_Autho
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1070,13 +1071,13 @@ func TestExecute_AddrLookupTable_Program_Test_Table_CloseLookupTable_Wrong_Autho
 func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Authority_Didnt_Sign_Failure(t *testing.T) {
 
 	// system program acct
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1085,12 +1086,12 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Authority_Didnt_S
 	receiverPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	receiverPubkey := receiverPrivateKey.PublicKey()
-	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	receiverAcct := accounts.Account{Key: receiverPubkey, Lamports: 1, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1146,13 +1147,13 @@ func TestExecute_AddrLookupTable_Program_Test_CloseLookupTable_Authority_Didnt_S
 
 func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Success(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1161,7 +1162,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Success(t *t
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1228,13 +1229,13 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Success(t *t
 
 func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Immutable_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1243,7 +1244,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Immutable_Fa
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 	activatedTableAcct.Data = getBytesForFrozenLookupTable(t)
 
 	instrBytes := make([]byte, 4)
@@ -1292,13 +1293,13 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Immutable_Fa
 
 func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Already_Deactivated_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1307,7 +1308,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Already_Deac
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1363,7 +1364,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Already_Deac
 
 func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Wrong_Authority_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
@@ -1374,7 +1375,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Wrong_Author
 	wrongAuthorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	wrongAuthorityPubkey := wrongAuthorityPrivateKey.PublicKey()
-	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1383,7 +1384,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Wrong_Author
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1439,13 +1440,13 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Wrong_Author
 
 func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Authority_Didnt_Sign(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1454,7 +1455,7 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Authority_Di
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -1510,13 +1511,13 @@ func TestExecute_AddrLookupTable_Program_Test_DeactivateLookupTable_Authority_Di
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Success(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1525,15 +1526,15 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Success(t *testi
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = math.MaxUint64 // denotes an active address lookup table
-	lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, VoteProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, StakeProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.VoteProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.StakeProgramAddr)
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
@@ -1592,13 +1593,13 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Success(t *testi
 }
 
 func getBytesForFrozenLookupTable(t *testing.T) []byte {
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1607,15 +1608,15 @@ func getBytesForFrozenLookupTable(t *testing.T) []byte {
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = math.MaxUint64 // denotes an active address lookup table
-	lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, VoteProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, StakeProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.VoteProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.StakeProgramAddr)
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
@@ -1677,13 +1678,13 @@ func getBytesForFrozenLookupTable(t *testing.T) []byte {
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Immutable_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1692,7 +1693,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Immutable_Failur
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 	activatedTableAcct.Data = getBytesForFrozenLookupTable(t)
 
 	instrBytes := make([]byte, 4)
@@ -1741,13 +1742,13 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Immutable_Failur
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Deactivated_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1756,15 +1757,15 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Deactivated_Fail
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = 0 // already deactivated
-	lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, VoteProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, StakeProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.VoteProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.StakeProgramAddr)
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
@@ -1815,7 +1816,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Deactivated_Fail
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Wrong_Authority_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
@@ -1826,7 +1827,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Wrong_Authority_
 	wrongAuthorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	wrongAuthorityPubkey := wrongAuthorityPrivateKey.PublicKey()
-	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1835,15 +1836,15 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Wrong_Authority_
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = math.MaxUint64 // denotes an active address lookup table
-	lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, VoteProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, StakeProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.VoteProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.StakeProgramAddr)
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
@@ -1894,13 +1895,13 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Wrong_Authority_
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Authority_Didnt_Sign(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1909,15 +1910,15 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Authority_Didnt_
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = math.MaxUint64 // denotes an active address lookup table
-	lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, VoteProgramAddr)
-	lookupTable.Addresses = append(lookupTable.Addresses, StakeProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.VoteProgramAddr)
+	lookupTable.Addresses = append(lookupTable.Addresses, a.StakeProgramAddr)
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
@@ -1968,13 +1969,13 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Authority_Didnt_
 
 func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Empty_Table_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -1983,7 +1984,7 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Empty_Table_Fail
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 1337, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2039,13 +2040,13 @@ func TestExecute_AddrLookupTable_Program_Test_FreezeLookupTable_Empty_Table_Fail
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Success(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2054,14 +2055,14 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Success(t *testi
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2072,9 +2073,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Success(t *testi
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2135,14 +2136,14 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Success(t *testi
 	assert.Equal(t, int(3), len(tableAcctStatePost.Addresses))
 
 	// check that the newly added account keys are as expected
-	assert.Equal(t, solana.PublicKeyFromBytes(SystemProgramAddr[:]), tableAcctStatePost.Addresses[0])
-	assert.Equal(t, solana.PublicKeyFromBytes(VoteProgramAddr[:]), tableAcctStatePost.Addresses[1])
-	assert.Equal(t, solana.PublicKeyFromBytes(StakeProgramAddr[:]), tableAcctStatePost.Addresses[2])
+	assert.Equal(t, solana.PublicKeyFromBytes(a.SystemProgramAddr[:]), tableAcctStatePost.Addresses[0])
+	assert.Equal(t, solana.PublicKeyFromBytes(a.VoteProgramAddr[:]), tableAcctStatePost.Addresses[1])
+	assert.Equal(t, solana.PublicKeyFromBytes(a.StakeProgramAddr[:]), tableAcctStatePost.Addresses[2])
 }
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
@@ -2153,7 +2154,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_
 	wrongAuthorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	wrongAuthorityPubkey := wrongAuthorityPrivateKey.PublicKey()
-	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	wrongAuthorityAcct := accounts.Account{Key: wrongAuthorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2162,14 +2163,14 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2180,9 +2181,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2235,13 +2236,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Wrong_Authority_
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Authority_Didnt_Sign_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2250,14 +2251,14 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Authority_Didnt_
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2268,9 +2269,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Authority_Didnt_
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2323,13 +2324,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Authority_Didnt_
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Deactivated_Table_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2338,14 +2339,14 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Deactivated_Tabl
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2356,9 +2357,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Deactivated_Tabl
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2411,13 +2412,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Deactivated_Tabl
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Immutable_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2426,20 +2427,20 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Immutable_Failur
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 	activatedTableAcct.Data = getBytesForFrozenLookupTable(t)
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2492,13 +2493,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Immutable_Failur
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Payer(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2507,7 +2508,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2518,9 +2519,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2571,13 +2572,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Payer_But_Prepaid_Success(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2586,7 +2587,7 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
@@ -2597,9 +2598,9 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, VoteProgramAddr)
-	extend.NewAddresses = append(extend.NewAddresses, StakeProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.VoteProgramAddr)
+	extend.NewAddresses = append(extend.NewAddresses, a.StakeProgramAddr)
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)
@@ -2650,13 +2651,13 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Didnt_Include_Pa
 
 func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Too_Many_Addresses_Failure(t *testing.T) {
 
-	lookupTableProgramAcct := accounts.Account{Key: AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	lookupTableProgramAcct := accounts.Account{Key: a.AddressLookupTableAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// authority for addr lookup table acct
 	authorityPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	authorityPubkey := authorityPrivateKey.PublicKey()
-	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	authorityAcct := accounts.Account{Key: authorityPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	recentSlot := uint64(123)
 	var recentSlotBytes [8]byte
@@ -2665,28 +2666,28 @@ func TestExecute_AddrLookupTable_Program_Test_ExtendLookupTable_Too_Many_Address
 	activatedTablePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	activatedTablePubkey := activatedTablePrivateKey.PublicKey()
-	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: AddressLookupTableAddr, Executable: false, RentEpoch: 100}
+	activatedTableAcct := accounts.Account{Key: activatedTablePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.AddressLookupTableAddr, Executable: false, RentEpoch: 100}
 
 	payerPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	payerPubkey := payerPrivateKey.PublicKey()
-	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	payerAcct := accounts.Account{Key: payerPubkey, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 10000000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: true, RentEpoch: 100}
 
 	var lookupTable AddressLookupTable
 	lookupTable.Meta.Authority = &authorityPubkey
 	lookupTable.State = AddressLookupTableProgramStateLookupTable
 	lookupTable.Meta.DeactivationSlot = math.MaxUint64 // denotes an active address lookup table
 	for count := 0; count < 256; count++ {             // fill lookup table with addresses up to the max number, 256
-		lookupTable.Addresses = append(lookupTable.Addresses, SystemProgramAddr)
+		lookupTable.Addresses = append(lookupTable.Addresses, a.SystemProgramAddr)
 	}
 	addrLookupTableBytes, err := marshalAddressLookupTable(&lookupTable)
 	assert.NoError(t, err)
 	activatedTableAcct.Data = addrLookupTableBytes
 
 	var extend AddrLookupTableInstrExtendLookupTable
-	extend.NewAddresses = append(extend.NewAddresses, SystemProgramAddr) // trying to add one more to the table should cause an error
+	extend.NewAddresses = append(extend.NewAddresses, a.SystemProgramAddr) // trying to add one more to the table should cause an error
 	writer := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(writer)
 	err = extend.MarshalWithEncoder(encoder)

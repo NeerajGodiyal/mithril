@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/stretchr/testify/assert"
@@ -15,7 +16,7 @@ import (
 
 func newExecCtxAndInstrAcctsFromFixtureForVote(fixture *InstrFixture) (*sealevel.ExecutionCtx, []sealevel.InstructionAccount) {
 
-	programAcct := createProgramAcct(sealevel.VoteProgramAddr[:])
+	programAcct := createProgramAcct(a.VoteProgramAddr[:])
 	accts := make([]accounts.Account, 0)
 
 	for count := 0; count < len(fixture.Input.Accounts); count++ {

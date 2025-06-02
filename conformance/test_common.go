@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -27,7 +28,7 @@ func fixtureAcctStateToAccount(acctState *AcctState) accounts.Account {
 
 func createProgramAcct(programId []byte) accounts.Account {
 	programKey := solana.PublicKeyFromBytes(programId)
-	programAcct := accounts.Account{Key: programKey, Lamports: 100000000, Data: make([]byte, 0), Owner: sealevel.NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programKey, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 	return programAcct
 }
 

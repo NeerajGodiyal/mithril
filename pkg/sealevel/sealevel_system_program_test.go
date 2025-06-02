@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -14,23 +15,23 @@ import (
 func TestExecute_Tx_System_Program_CreateAccount_Success(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -90,17 +91,17 @@ func TestExecute_Tx_System_Program_CreateAccount_Success(t *testing.T) {
 func TestExecute_Tx_System_Program_CreateAccount_Not_Enough_Accts_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -144,23 +145,23 @@ func TestExecute_Tx_System_Program_CreateAccount_Not_Enough_Accts_Failure(t *tes
 func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Lamports_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 1000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 1000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -206,23 +207,23 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Lamports_Failure(t
 func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Signer_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -268,23 +269,23 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Signer_Failure(t *
 func TestExecute_Tx_System_Program_CreateAccount_Too_Much_Space_Allocated_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = SystemProgMaxPermittedDataLen + 10
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -330,23 +331,23 @@ func TestExecute_Tx_System_Program_CreateAccount_Too_Much_Space_Allocated_Failur
 func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Data_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 1000), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 1000), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -392,23 +393,23 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Has_Data_Failure(t *te
 func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Owned_By_System_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -454,23 +455,23 @@ func TestExecute_Tx_System_Program_CreateAccount_New_Acct_Not_Owned_By_System_Fa
 func TestExecute_Tx_System_Program_CreateAccount_Funding_Acct_Not_Signer(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var createAcct SystemInstrCreateAccount
 	createAcct.Lamports = 1234
-	createAcct.Owner = BpfLoaderUpgradeableAddr
+	createAcct.Owner = a.BpfLoaderUpgradeableAddr
 	createAcct.Space = 1234
 
 	createAcctInstrWriter := new(bytes.Buffer)
@@ -516,19 +517,19 @@ func TestExecute_Tx_System_Program_CreateAccount_Funding_Acct_Not_Signer(t *test
 func TestExecute_Tx_System_Program_Assign_Success(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	assignInstrWriter := new(bytes.Buffer)
 	assignEncoder := bin.NewBinEncoder(assignInstrWriter)
 
 	var assign SystemInstrAssign
-	assign.Owner = BpfLoaderUpgradeableAddr
+	assign.Owner = a.BpfLoaderUpgradeableAddr
 	err = assign.MarshalWithEncoder(assignEncoder)
 	assert.NoError(t, err)
 	instrBytes := assignInstrWriter.Bytes()
@@ -566,25 +567,25 @@ func TestExecute_Tx_System_Program_Assign_Success(t *testing.T) {
 	acctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 
-	assert.Equal(t, BpfLoaderUpgradeableAddr, acctPost.Owner)
+	assert.Equal(t, a.BpfLoaderUpgradeableAddr, acctPost.Owner)
 }
 
 func TestExecute_Tx_System_Program_Assign_Not_Signer_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// new acct
 	newAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	newPubkey := newAcctPrivateKey.PublicKey()
-	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	newAcct := accounts.Account{Key: newPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	assignInstrWriter := new(bytes.Buffer)
 	assignEncoder := bin.NewBinEncoder(assignInstrWriter)
 
 	var assign SystemInstrAssign
-	assign.Owner = BpfLoaderUpgradeableAddr
+	assign.Owner = a.BpfLoaderUpgradeableAddr
 	err = assign.MarshalWithEncoder(assignEncoder)
 	assert.NoError(t, err)
 	instrBytes := assignInstrWriter.Bytes()
@@ -623,19 +624,19 @@ func TestExecute_Tx_System_Program_Assign_Not_Signer_Failure(t *testing.T) {
 func TestExecute_Tx_System_Program_Transfer_Success(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// recipient acct
 	recipientPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	recipientPubkey := recipientPrivateKey.PublicKey()
-	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var transfer SystemInstrTransfer
 	transfer.Lamports = 1337
@@ -690,19 +691,19 @@ func TestExecute_Tx_System_Program_Transfer_Success(t *testing.T) {
 func TestExecute_Tx_System_Program_Transfer_From_Not_Signer_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// recipient acct
 	recipientPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	recipientPubkey := recipientPrivateKey.PublicKey()
-	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	var transfer SystemInstrTransfer
 	transfer.Lamports = 1337
@@ -749,19 +750,19 @@ func TestExecute_Tx_System_Program_Transfer_From_Not_Signer_Failure(t *testing.T
 func TestExecute_Tx_System_Program_Transfer_From_Has_Data_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 100), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 10000, Data: make([]byte, 100), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// recipient acct
 	recipientPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	recipientPubkey := recipientPrivateKey.PublicKey()
-	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	var transfer SystemInstrTransfer
 	transfer.Lamports = 1337
@@ -808,19 +809,19 @@ func TestExecute_Tx_System_Program_Transfer_From_Has_Data_Failure(t *testing.T) 
 func TestExecute_Tx_System_Program_Transfer_Not_Enough_Lamports_In_From_Acct(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// funding acct
 	fundingAcctPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	fundingPubkey := fundingAcctPrivateKey.PublicKey()
-	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 100, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	fundingAcct := accounts.Account{Key: fundingPubkey, Lamports: 100, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	// recipient acct
 	recipientPrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	recipientPubkey := recipientPrivateKey.PublicKey()
-	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	recipientAcct := accounts.Account{Key: recipientPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	var transfer SystemInstrTransfer
 	transfer.Lamports = 1000000
@@ -867,18 +868,18 @@ func TestExecute_Tx_System_Program_Transfer_Not_Enough_Lamports_In_From_Acct(t *
 func TestExecute_Tx_System_Program_AssignWithSeed_Success(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// base acct
 	basePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	basePubkey := basePrivateKey.PublicKey()
-	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
-	assignedPubkey, err := solana.CreateWithSeed(basePubkey, "seed", BpfLoaderUpgradeableAddr)
+	assignedPubkey, err := solana.CreateWithSeed(basePubkey, "seed", a.BpfLoaderUpgradeableAddr)
 	assert.NoError(t, err)
 
-	assignedAcct := accounts.Account{Key: assignedPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	assignedAcct := accounts.Account{Key: assignedPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	assert.NoError(t, err)
 	transactionAccts := NewTransactionAccounts([]accounts.Account{systemProgramAcct, assignedAcct, baseAcct})
@@ -892,7 +893,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Success(t *testing.T) {
 	instrEncoder := bin.NewBinEncoder(instrWriter)
 	var assignWithSeed SystemInstrAssignWithSeed
 	assignWithSeed.Base = basePubkey
-	assignWithSeed.Owner = BpfLoaderUpgradeableAddr
+	assignWithSeed.Owner = a.BpfLoaderUpgradeableAddr
 	assignWithSeed.Seed = "seed"
 	err = assignWithSeed.MarshalWithEncoder(instrEncoder)
 	assert.NoError(t, err)
@@ -932,19 +933,19 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Success(t *testing.T) {
 func TestExecute_Tx_System_Program_AssignWithSeed_Addr_Doesnt_Match_Derived_Addr_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// base acct
 	basePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	basePubkey := basePrivateKey.PublicKey()
-	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// base acct
 	wrongBasePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	wrongBasePubkey := wrongBasePrivateKey.PublicKey()
-	wrongBaseAcct := accounts.Account{Key: wrongBasePubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	wrongBaseAcct := accounts.Account{Key: wrongBasePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	assert.NoError(t, err)
 	transactionAccts := NewTransactionAccounts([]accounts.Account{systemProgramAcct, wrongBaseAcct, baseAcct})
@@ -958,7 +959,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Addr_Doesnt_Match_Derived_Addr
 	instrEncoder := bin.NewBinEncoder(instrWriter)
 	var assignWithSeed SystemInstrAssignWithSeed
 	assignWithSeed.Base = basePubkey
-	assignWithSeed.Owner = BpfLoaderUpgradeableAddr
+	assignWithSeed.Owner = a.BpfLoaderUpgradeableAddr
 	assignWithSeed.Seed = "seed"
 	err = assignWithSeed.MarshalWithEncoder(instrEncoder)
 	assert.NoError(t, err)
@@ -993,18 +994,18 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Addr_Doesnt_Match_Derived_Addr
 func TestExecute_Tx_System_Program_AssignWithSeed_Base_Not_Signer_Failure(t *testing.T) {
 
 	// system program acct
-	systemProgramAcct := accounts.Account{Key: SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	systemProgramAcct := accounts.Account{Key: a.SystemProgramAddr, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
 
 	// base acct
 	basePrivateKey, err := solana.NewRandomPrivateKey()
 	assert.NoError(t, err)
 	basePubkey := basePrivateKey.PublicKey()
-	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	baseAcct := accounts.Account{Key: basePubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
-	assignedPubkey, err := solana.CreateWithSeed(basePubkey, "seed", BpfLoaderUpgradeableAddr)
+	assignedPubkey, err := solana.CreateWithSeed(basePubkey, "seed", a.BpfLoaderUpgradeableAddr)
 	assert.NoError(t, err)
 
-	assignedAcct := accounts.Account{Key: assignedPubkey, Lamports: 0, Data: make([]byte, 0), Owner: SystemProgramAddr, Executable: false, RentEpoch: 100}
+	assignedAcct := accounts.Account{Key: assignedPubkey, Lamports: 0, Data: make([]byte, 0), Owner: a.SystemProgramAddr, Executable: false, RentEpoch: 100}
 
 	assert.NoError(t, err)
 	transactionAccts := NewTransactionAccounts([]accounts.Account{systemProgramAcct, assignedAcct, baseAcct})
@@ -1018,7 +1019,7 @@ func TestExecute_Tx_System_Program_AssignWithSeed_Base_Not_Signer_Failure(t *tes
 	instrEncoder := bin.NewBinEncoder(instrWriter)
 	var assignWithSeed SystemInstrAssignWithSeed
 	assignWithSeed.Base = basePubkey
-	assignWithSeed.Owner = BpfLoaderUpgradeableAddr
+	assignWithSeed.Owner = a.BpfLoaderUpgradeableAddr
 	assignWithSeed.Seed = "seed"
 	err = assignWithSeed.MarshalWithEncoder(instrEncoder)
 	assert.NoError(t, err)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/fixtures"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	bin "github.com/gagliardetto/binary"
@@ -58,7 +59,7 @@ func TestExecute_Tx_Sysvar_Instructions_Bpf_Test(t *testing.T) {
 	copy(programDataStateBytes, programDataStateWriter.Bytes())
 	copy(programDataStateBytes[upgradeableLoaderSizeOfProgramDataMetaData:], validProgramBytes)
 
-	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
+	programDataAcct := accounts.Account{Key: programDataPubkey, Lamports: 0, Data: programDataStateBytes, Owner: a.BpfLoaderUpgradeableAddr, Executable: false, RentEpoch: 100}
 
 	// program account
 	programAcctState := UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgram, Program: UpgradeableLoaderStateProgram{ProgramDataAddress: programDataAcct.Key}}
@@ -72,19 +73,19 @@ func TestExecute_Tx_Sysvar_Instructions_Bpf_Test(t *testing.T) {
 	programPubkey := programPrivKey.PublicKey()
 	programData := make([]byte, 5000)
 	copy(programData, programBytes)
-	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
+	programAcct := accounts.Account{Key: programPubkey, Lamports: 10000, Data: programData, Owner: a.BpfLoaderUpgradeableAddr, Executable: true, RentEpoch: 100}
 
 	instr1, err := newTestSetComputeUnitLimit(0x1338)
 	assert.NoError(t, err)
-	instr1.Accounts = append(instr1.Accounts, AccountMeta{Pubkey: VoteProgramAddr, IsWritable: true, IsSigner: false})
-	instr1.Accounts = append(instr1.Accounts, AccountMeta{Pubkey: StakeProgramAddr, IsWritable: false, IsSigner: true})
+	instr1.Accounts = append(instr1.Accounts, AccountMeta{Pubkey: a.VoteProgramAddr, IsWritable: true, IsSigner: false})
+	instr1.Accounts = append(instr1.Accounts, AccountMeta{Pubkey: a.StakeProgramAddr, IsWritable: false, IsSigner: true})
 	instr2, err := newTestSetComputeUnitLimit(0x1337)
-	instr2.Accounts = append(instr2.Accounts, AccountMeta{Pubkey: AddressLookupTableAddr, IsWritable: true, IsSigner: true})
-	instr2.Accounts = append(instr2.Accounts, AccountMeta{Pubkey: Secp256kPrecompileAddr, IsWritable: false, IsSigner: false})
+	instr2.Accounts = append(instr2.Accounts, AccountMeta{Pubkey: a.AddressLookupTableAddr, IsWritable: true, IsSigner: true})
+	instr2.Accounts = append(instr2.Accounts, AccountMeta{Pubkey: a.Secp256kPrecompileAddr, IsWritable: false, IsSigner: false})
 	assert.NoError(t, err)
 
 	sysvarInstructionsData := marshalInstructions([]Instruction{instr1, instr2})
-	sysvarInstructionsAcct := accounts.Account{Key: SysvarInstructionsAddr, Lamports: 1, Data: sysvarInstructionsData, Owner: SysvarOwnerAddr, Executable: false, RentEpoch: 100}
+	sysvarInstructionsAcct := accounts.Account{Key: SysvarInstructionsAddr, Lamports: 1, Data: sysvarInstructionsData, Owner: a.SysvarOwnerAddr, Executable: false, RentEpoch: 100}
 
 	instrData := make([]byte, 1)
 	instrData[0] = 0
