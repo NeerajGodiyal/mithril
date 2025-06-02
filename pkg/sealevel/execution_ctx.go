@@ -12,7 +12,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/gagliardetto/solana-go"
-	"k8s.io/klog/v2"
 )
 
 type ExecutionCtx struct {
@@ -73,7 +72,6 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	for instructionAcctIndex, accountMeta := range ix.Accounts {
 		indexInTx, err := txCtx.IndexOfAccount(accountMeta.Pubkey)
 		if err != nil {
-			klog.Error("instruction references unknown account %s", accountMeta.Pubkey)
 			return nil, nil, err
 		}
 
