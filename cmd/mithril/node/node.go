@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 
 	_ "net/http/pprof"
 
@@ -102,6 +103,8 @@ func run(c *cobra.Command, args []string) {
 		return
 	}
 
+	logVCSInfo()
+
 	if loadFromSnapshot {
 		if path == "" || outputDir == "" {
 			klog.Errorf("must specify snapshot path and directory path for writing generated AccountsDB")
@@ -162,6 +165,29 @@ func run(c *cobra.Command, args []string) {
 	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
+}
+
+func logVCSInfo() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		mlog.Log.Errorf("VCS info: not available")
+		return
+	}
+
+	var revision, time, modified string
+
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.time":
+			time = setting.Value
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+
+	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, time, modified)
 }
 
 func createMetricsWriter(filename string) (io.Writer, func(), error) {
