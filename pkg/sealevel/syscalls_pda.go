@@ -47,8 +47,6 @@ func translateAndValidateSeeds(vm sbpf.VM, seedsAddr, seedsLen uint64) ([][]byte
 }
 
 func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallCreateProgramAddress")
-
 	execCtx := executionCtx(vm)
 	execCtx.ComputeMeter.Remaining()
 	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
@@ -76,9 +74,6 @@ func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdA
 		return syscallErr(err)
 	}
 
-	/*used := origCu - execCtx.ComputeMeter.Remaining()
-	mlog.Log.Debugf("******** SyscallCreateProgramAddress used %d CUs", used)*/
-
 	copy(address, newAddress)
 	return syscallSuccess(0)
 }
@@ -86,11 +81,7 @@ func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdA
 var SyscallCreateProgramAddress = sbpf.SyscallFunc4(SyscallCreateProgramAddressImpl)
 
 func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr, bumpSeedAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallTryFindProgramAddress")
-
 	execCtx := executionCtx(vm)
-	//origCu := execCtx.ComputeMeter.Remaining()
-
 	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
 	if err != nil {
 		return syscallCuErr()
@@ -132,9 +123,6 @@ func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programId
 			}
 			bumpSeedOut[0] = bumpSeed
 			copy(addressOut, newAddress)
-
-			/*used := origCu - execCtx.ComputeMeter.Remaining()
-			mlog.Log.Debugf("******** SyscallTryFindProgramAddress used %d CUs. bumpSeed = %d", used, bumpSeed)*/
 
 			// address found
 			return syscallSuccess(0)

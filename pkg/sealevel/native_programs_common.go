@@ -29,7 +29,7 @@ func resolveNativeProgramById(programId [32]byte) (func(ctx *ExecutionCtx) error
 	case a.BpfLoaderUpgradeableAddr:
 		return BpfLoaderProgramExecute, a.BpfLoaderUpgradeableAddrStr, nil
 	case a.ZkElgamalProofProgramAddr:
-		return ElGamalExecute, a.ZkElgamalProofProgramAddrStr, nil
+		return ElGamalProofProgramExecute, a.ZkElgamalProofProgramAddrStr, nil
 	case a.Ed25519PrecompileAddr:
 		return Ed25519ProgramExecute, a.Ed25519PrecompileAddrStr, nil
 	case a.Secp256kPrecompileAddr:
