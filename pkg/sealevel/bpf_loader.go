@@ -590,9 +590,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 
 			alignOffset := util.AlignUp(dataLen, 8) - dataLen
 			numPaddingBytes := ReallocSpace + alignOffset
-			for count := uint64(0); count < numPaddingBytes; count++ {
-				serializedData = append(serializedData, 0)
-			}
+			serializedData = serializedData[:len(serializedData)+int(numPaddingBytes)]
 
 			// rent epoch
 			serializedData = binary.LittleEndian.AppendUint64(serializedData, borrowedAcct.RentEpoch())
