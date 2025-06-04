@@ -41,6 +41,7 @@ var (
 	debugTxs        []string
 	debugAcctWrites []string
 	metricsFilename string
+	cpuprofFilename string
 )
 
 func init() {
@@ -58,6 +59,7 @@ func init() {
 	Cmd.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	Cmd.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 	Cmd.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
+	Cmd.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
 }
 
 func run(c *cobra.Command, args []string) {
@@ -156,13 +158,19 @@ func run(c *cobra.Command, args []string) {
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
-	metricsWriter, metricsWriterCleanup, err := createMetricsWriter(metricsFilename)
+	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsFilename)
 	if err != nil {
 		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
 	}
 	defer metricsWriterCleanup()
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter)
+	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofFilename)
+	if err != nil {
+		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
+	}
+	defer cpuprofCleanup()
+
+	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -190,7 +198,7 @@ func logVCSInfo() {
 	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, time, modified)
 }
 
-func createMetricsWriter(filename string) (io.Writer, func(), error) {
+func createBufWriter(filename string) (io.Writer, func(), error) {
 	if filename == "" {
 		return nil, func() {}, nil
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -501,7 +502,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
-func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, txParallelism int, dbgOpts *DebugOptions, metricsWriter io.Writer) error {
+func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotManifest *snapshot.SnapshotManifest, startSlot, endSlot uint64, rpcEndpoint string, updateAcctsDb bool, blockDir string, txParallelism int, dbgOpts *DebugOptions, metricsWriter io.Writer, cpuprofWriter io.Writer) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -530,6 +531,10 @@ func ReplayBlocks(acctsDb *accountsdb.AccountsDb, acctsDbPath string, snapshotMa
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 
+	if cpuprofWriter != nil {
+		pprof.StartCPUProfile(cpuprofWriter)
+		defer pprof.StopCPUProfile()
+	}
 	for block := range streamChan {
 		start := time.Now()
 
