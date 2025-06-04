@@ -1000,6 +1000,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 
 	start := time.Now()
 	interpreter := sbpf.NewInterpreter(nil, program, opts)
+	defer interpreter.Finish()
 	metrics.GlobalBlockReplay.SbpfInterpreterNew.AddTimingSince(start)
 	start = time.Now()
 	ret, _, runErr := interpreter.Run()

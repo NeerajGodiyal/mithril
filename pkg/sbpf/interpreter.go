@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
+	"sync"
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -39,17 +41,29 @@ type TraceSink interface {
 	Printf(format string, v ...any)
 }
 
+var heapPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 256*1024) // sealevel.MaxHeapFrameBytes
+	},
+}
+
 // NewInterpreter creates a new interpreter instance for a program execution.
 //
 // The caller must create a new interpreter object for every new execution.
 // In other words, Run may only be called once per interpreter.
 func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Interpreter {
+	heap := heapPool.Get().([]byte)
+	if len(heap) < opts.HeapMax {
+		heap = slices.Grow(heap, opts.HeapMax-len(heap))
+	}
+	heap = heap[:opts.HeapMax]
+	clear(heap)
 	return &Interpreter{
 		textVA:            p.TextVA,
 		text:              p.Text,
 		ro:                p.RO,
 		stack:             NewStack(),
-		heap:              make([]byte, opts.HeapMax),
+		heap:              heap,
 		input:             opts.Input,
 		entry:             p.Entrypoint,
 		syscalls:          opts.Syscalls,
@@ -62,6 +76,11 @@ func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Inte
 		initialInstrMeter: opts.ComputeMeter.Remaining(),
 		enableTracing:     opts.EnableTracing,
 	}
+}
+
+func (ip *Interpreter) Finish() {
+	heapPool.Put(ip.heap)
+	ip.stack.Finish()
 }
 
 // Run executes the program.

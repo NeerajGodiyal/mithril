@@ -1,5 +1,9 @@
 package sbpf
 
+import (
+	"sync"
+)
+
 // Stack is the VM's call frame stack.
 //
 // # Memory stack
@@ -44,16 +48,43 @@ const StackFrameSize = 0x1000
 // StackDepth is the max frame count of the stack.
 const StackDepth = 64
 
+var (
+	stackMemPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, StackDepth*StackFrameSize)
+		},
+	}
+	stackShadowPool = sync.Pool{
+		New: func() interface{} {
+			return make([]Frame, 1, StackDepth)
+		},
+	}
+)
+
 func NewStack() Stack {
+	m := stackMemPool.Get().([]byte)
+	m = m[:StackDepth*StackFrameSize]
+	clear(m)
+
+	sh := stackShadowPool.Get().([]Frame)
+	sh = sh[:StackDepth]
+	clear(sh)
+	sh = sh[:1]
+
 	s := Stack{
-		mem:    make([]byte, StackDepth*StackFrameSize),
+		mem:    m,
 		sp:     VaddrStack,
-		shadow: make([]Frame, 1, StackDepth),
+		shadow: sh,
 	}
 	s.shadow[0] = Frame{
 		FramePtr: VaddrStack + StackFrameSize,
 	}
 	return s
+}
+
+func (s *Stack) Finish() {
+	stackMemPool.Put(s.mem)
+	stackShadowPool.Put(s.shadow)
 }
 
 // GetFramePtr returns the current frame pointer.
