@@ -432,7 +432,7 @@ func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {
 	return nil
 }
 
-func NewBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
+func NewBlockFromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {
 	block := new(Block)
 
 	for _, tx := range blockResult.Transactions {
@@ -459,6 +459,15 @@ func NewBlockFromBlockResult(blockResult *rpc.GetBlockResult) (*Block, error) {
 	blockReward := blockRewardRewards(blockResult.Rewards)
 	if blockReward != nil {
 		block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
+	} else {
+		if rpcc != nil {
+			leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
+			if err != nil {
+				panic(fmt.Sprintf("unable to get blockreward for slot %d", slot))
+			} else {
+				block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
+			}
+		}
 	}
 
 	for _, tx := range block.Transactions {

@@ -22,7 +22,7 @@ func unmarshalBlockJSON(filename string) (*replay.Block, error) {
 		return nil, fmt.Errorf("unmarshaling JSON: %w", err)
 	}
 
-	b, err := replay.NewBlockFromBlockResult(gbr)
+	b, err := replay.NewBlockFromBlockResult(gbr, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("transforming to replay.Block: %w", err)
 	}

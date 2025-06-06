@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -207,7 +208,10 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	for _, acct := range accts {
 		acct.Slot = slot
 	}
-	go accountsDb.storeAccountsInternal(accts, slot)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go accountsDb.storeAccountsInternal(accts, slot, &wg)
 
 	for _, acct := range accts {
 
@@ -218,18 +222,20 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
 	}
+	wg.Wait()
 
 	return nil
 }
 
-func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64) error {
-	fileId := accountsDb.LargestFileId.Add(1)
+func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64, wg *sync.WaitGroup) {
+	defer wg.Done()
 
+	fileId := accountsDb.LargestFileId.Add(1)
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		//mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
-		return err
+		panic(err)
 	}
 	defer appendVecFile.Close()
 
@@ -247,7 +253,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 		err = indexEntry.MarshalWithEncoder(encoder)
 		if err != nil {
 			//mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
-			return err
+			panic(err)
 		}
 
 		err = accountsDb.Index.Set(acct.Key[:], writer.Bytes())
@@ -261,19 +267,17 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 		err = appendVecAcct.Marshal(appendVecAcctsBuf)
 		if err != nil {
-			return err
+			panic(err)
 		}
 	}
 
 	// write the appendvecs data into the file
 	n, err := appendVecFile.Write(appendVecAcctsBuf.Bytes())
 	if err != nil {
-		return err
+		panic(err)
 	} else if n != appendVecAcctsBuf.Len() {
-		return fmt.Errorf("only wrote %d appendvec account bytes, rather than %d", n, appendVecAcctsBuf.Len())
+		panic(fmt.Sprintf("only wrote %d appendvec account bytes, rather than %d", n, appendVecAcctsBuf.Len()))
 	}
-
-	return nil
 }
 
 func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix uint64) []solana.PublicKey {

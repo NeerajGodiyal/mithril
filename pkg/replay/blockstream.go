@@ -93,7 +93,7 @@ func (blockStream *blockStream) fetchAndParseBlock(slot uint64) *Block {
 		}
 	}
 
-	block, err := NewBlockFromBlockResult(blockResult)
+	block, err := NewBlockFromBlockResult(blockResult, slot, blockStream.rpcClient)
 	if err != nil {
 		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))
 	}

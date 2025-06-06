@@ -274,7 +274,7 @@ func fetchBankhashForSlot(rpcc *rpcclient.RpcClient, slot uint64) ([]byte, error
 		}
 	}
 
-	block, err := NewBlockFromBlockResult(blockResult)
+	block, err := NewBlockFromBlockResult(blockResult, slot, rpcc)
 	if err != nil {
 		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))
 	}
