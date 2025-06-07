@@ -2,11 +2,14 @@ package node
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"syscall"
 
 	_ "net/http/pprof"
 
@@ -22,7 +25,12 @@ var (
 	Cmd = cobra.Command{
 		Use:   "verifier",
 		Short: "Run mithril verifier node",
-		Run:   run,
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			cmd.SetContext(ctx)
+			defer cancel()
+			run(cmd, args)
+		},
 	}
 
 	loadFromSnapshot   bool
@@ -170,7 +178,7 @@ func run(c *cobra.Command, args []string) {
 	}
 	defer cpuprofCleanup()
 
-	replay.ReplayBlocks(accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
