@@ -139,8 +139,15 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			panic("invalid snapshot - unable to convert string to file id\n")
 		}
 
-		if fileId > largestFileId.Load() {
-			largestFileId.Store(fileId)
+		for {
+			prevLargestFileId := largestFileId.Load()
+			if fileId <= prevLargestFileId {
+				break
+			}
+			swapped := largestFileId.CompareAndSwap(prevLargestFileId, fileId)
+			if swapped {
+				break
+			}
 		}
 
 		// find the relevant appendvec storage info
