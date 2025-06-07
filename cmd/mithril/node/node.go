@@ -1,5 +1,3 @@
-//go:build !lite
-
 package node
 
 import (
@@ -7,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
 
 	_ "net/http/pprof"
@@ -60,6 +59,7 @@ func init() {
 	Cmd.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 	Cmd.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
 	Cmd.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
+	Cmd.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
 }
 
 func run(c *cobra.Command, args []string) {

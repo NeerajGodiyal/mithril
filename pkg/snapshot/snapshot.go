@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -94,6 +95,10 @@ const (
 	snapshotTypeLz4
 )
 
+var (
+	ZstdDecoderConcurrency = runtime.NumCPU()
+)
+
 func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error) {
 	var reader io.Reader
 
@@ -102,7 +107,7 @@ func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error
 		return nil, err
 	}
 	if snapshotType == snapshotTypeZst {
-		zstdReader, err := zstd.NewReader(bmr)
+		zstdReader, err := zstd.NewReader(bmr, zstd.WithDecoderConcurrency(ZstdDecoderConcurrency))
 		if err != nil {
 			return nil, err
 		}
