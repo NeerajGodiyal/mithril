@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -182,11 +183,12 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		}
 
 		writer := new(bytes.Buffer)
-		_, err = io.Copy(writer, tarReader)
+		tarBytesRead, err := io.Copy(writer, tarReader)
 		if err != nil {
 			mlog.Log.Errorf("err copying data to reader: %s\n", err)
 			return nil, nil, err
 		}
+		statsd.Count("snapshot.tar_bytes_read", tarBytesRead, nil, 1)
 
 		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
 		wg.Add(1)
@@ -205,43 +207,21 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 
 	mlog.Log.Infof("snapshot processed in %s.\n", time.Since(start))
 
-	largestFileIdFile, err := os.Create(fmt.Sprintf("%s/largest_file_id", accountsDbDir))
-	if err != nil {
-		mlog.Log.Errorf("err creating new: %s\n", err)
+	var largestFileIdBytes [8]byte
+	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())
+
+	path := filepath.Join(accountsDbDir, "largest_file_id")
+	if err := os.WriteFile(path, largestFileIdBytes[:], 0644); err != nil {
+		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId, path, err)
 		return nil, nil, err
 	}
 
-	largestFileIdBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(largestFileIdBytes, largestFileId.Load())
-
-	numBytesWritten, err := largestFileIdFile.Write(largestFileIdBytes[:])
-	if err != nil {
-		mlog.Log.Errorf("error writing largest file ID to file: %s\n", err)
-		return nil, nil, err
-	} else if numBytesWritten != 8 {
-		mlog.Log.Errorf("error writing largest file ID to file\n")
-		return nil, nil, fmt.Errorf("error writing largest file ID to file, wrote %d bytes", numBytesWritten)
-	}
-
-	largestFileIdFile.Close()
-
-	bankHashOutputFileName := fmt.Sprintf("%s/bank_hash", accountsDbDir)
-	bankHashFile, err := os.Create(bankHashOutputFileName)
-	if err != nil {
-		mlog.Log.Errorf("err creating new: %s\n", err)
+	bankHashOutputFileName := filepath.Join(accountsDbDir, "bank_hash")
+	if err := os.WriteFile(bankHashOutputFileName, manifest.Bank.Hash[:], 0644); err != nil {
+		mlog.Log.Errorf("error writing bank hash=%x to file=%s: %s", manifest.Bank.Hash, bankHashOutputFileName, err)
 		return nil, nil, err
 	}
 
-	numBytesWritten, err = bankHashFile.Write(manifest.Bank.Hash[:])
-	if err != nil {
-		mlog.Log.Errorf("error writing bank hash to file: %s\n", err)
-		return nil, nil, err
-	} else if numBytesWritten != 32 {
-		mlog.Log.Errorf("error writing bank hash to file\n")
-		return nil, nil, fmt.Errorf("error writing bank hash to file, wrote %d bytes", numBytesWritten)
-	}
-
-	bankHashFile.Close()
 	indexEntryCommiterPool.Release()
 	appendVecCopyingPool.Release()
 	appendVecCopyingPool.Release()
