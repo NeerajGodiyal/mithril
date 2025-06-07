@@ -728,14 +728,14 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		//mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 
 		txMeta := block.TxMetas[idx]
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, tx, txMeta, dbgOpts)
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts)
 
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {
@@ -756,7 +756,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, block *Block, dbgOpts *DebugOpt
 	return txFeeAccumulator
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *Block, rblock *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	do := make(chan int, len(block.Transactions))
 	done := make(chan int, len(block.Transactions))
 	go TopsortPlannerStream(block, do, done)
@@ -776,7 +776,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txPa
 			for idx := range do {
 				txStart := time.Now()
 				tx := block.Transactions[idx]
-				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts)
+				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts)
 				txErr := errs[idx]
 				// check for success-failure return value divergences
 				if txErr == nil && rblock.TxMetas[idx].Err != nil {
@@ -807,6 +807,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, block *Block, rblock *Block, txPa
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	var sigverifyWg sync.WaitGroup
+	// Each Transaction's sigverify is done asynchronously. Make sure they're all done before we finish this block.
+	defer sigverifyWg.Wait()
 	start := time.Now()
 	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 	unresolvedBlock := &Block{
@@ -833,9 +836,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 	if txParallelism > 0 {
-		txFeeAccumulator = parallelTxLoop(slotCtx, unresolvedBlock, block, txParallelism, dbgOpts)
+		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
-		txFeeAccumulator = sequentialTxLoop(slotCtx, block, dbgOpts)
+		txFeeAccumulator = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
 	}
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 

@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -310,7 +311,8 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	return txFeeInfo, relevantErr
 }
 
-func verifySignatures(tx *solana.Transaction) {
+func verifySignatures(tx *solana.Transaction, sigverifyWg *sync.WaitGroup) {
+	defer sigverifyWg.Done()
 	start := time.Now()
 	err := tx.VerifySignatures()
 	if err != nil {
@@ -319,9 +321,10 @@ func verifySignatures(tx *solana.Transaction) {
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
 	start := time.Now()
-	go verifySignatures(tx)
+	sigverifyWg.Add(1)
+	go verifySignatures(tx, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
