@@ -840,7 +840,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 
 	start = time.Now()
-	if block.BlockReward != nil {
+
+	// skip leader handling if there are zero transactions in this block
+	if block.BlockReward != nil && len(block.Transactions) > 0 {
 		// distribute tx fees to the slot leader
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
 		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
