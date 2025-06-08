@@ -26,6 +26,12 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
+const (
+	maxIndexEntryCommitter = 512
+	maxIndexEntryBuilder   = 500
+	maxAppendVecCopying    = 500
+)
+
 func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
@@ -68,7 +74,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	}
 	sl := NewShardLogger(numShards, logsDir, ss, 16)
 
-	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(512, func(i interface{}) {
+	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
@@ -79,7 +85,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
 	})
 
-	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
+	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i interface{}) {
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
@@ -98,7 +104,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		}
 	})
 
-	appendVecCopyingPool, _ := ants.NewPoolWithFunc(500, func(i interface{}) {
+	appendVecCopyingPool, _ := ants.NewPoolWithFunc(maxAppendVecCopying, func(i interface{}) {
 		start := time.Now()
 		defer wg.Done()
 		task := i.(appendVecCopyingTask)
