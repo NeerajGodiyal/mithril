@@ -32,6 +32,12 @@ const (
 	maxAppendVecCopying    = 500
 )
 
+var (
+	indexEntryCommitterInProgress = &atomic.Int64{}
+	indexEntryBuilderInProgress   = &atomic.Int64{}
+	appendVecCopyingInProgress    = &atomic.Int64{}
+)
+
 func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
@@ -75,6 +81,8 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	sl := NewShardLogger(numShards, logsDir, ss, 16)
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
+		tasks := indexEntryCommitterInProgress.Add(1)
+		statsd.Gauge("snapshot.worker_pool.utilization", float64(tasks)/float64(maxIndexEntryCommitter), []string{"worker_pool:index_entry_committer"}, 1)
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
@@ -83,9 +91,12 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			sl.EnqueueRequest(task.Pubkeys[idx], *entry)
 		}
 		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
+		indexEntryCommitterInProgress.Add(-1)
 	})
 
 	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i interface{}) {
+		tasks := indexEntryBuilderInProgress.Add(1)
+		statsd.Gauge("snapshot.worker_pool.utilization", float64(tasks)/float64(maxIndexEntryBuilder), []string{"worker_pool:index_entry_builder"}, 1)
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
@@ -95,6 +106,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			return
 		}
 
+		indexEntryBuilderInProgress.Add(-1)
 		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
 		wg.Add(1)
 		statsd.Timing("tasks.index_entry_builder.latency", time.Since(start), nil, 1)
@@ -105,6 +117,8 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	})
 
 	appendVecCopyingPool, _ := ants.NewPoolWithFunc(maxAppendVecCopying, func(i interface{}) {
+		tasks := appendVecCopyingInProgress.Add(1)
+		statsd.Gauge("snapshot.worker_pool.utilization", float64(tasks)/float64(maxAppendVecCopying), []string{"worker_pool:append_vec_copying"}, 1)
 		start := time.Now()
 		defer wg.Done()
 		task := i.(appendVecCopyingTask)
@@ -112,12 +126,14 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		writer := task.TarBuffer
 
 		if !isAppendVec(filename) {
+			appendVecCopyingInProgress.Add(-1)
 			return
 		}
 
 		outFile, err := os.Create(fmt.Sprintf("%s/%s", accountsDbDir, filename))
 		if err != nil {
 			mlog.Log.Errorf("err creating new: %s\n", err)
+			appendVecCopyingInProgress.Add(-1)
 			return
 		}
 
@@ -125,6 +141,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		_, err = io.Copy(outFile, bytes.NewReader(appendVecBytes))
 		if err != nil {
 			mlog.Log.Errorf("err copying file out: %s\n", err)
+			appendVecCopyingInProgress.Add(-1)
 			return
 		}
 
@@ -170,6 +187,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			panic("programming error - fileSize for appendvec was 0")
 		}
 
+		appendVecCopyingInProgress.Add(-1)
 		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
 		wg.Add(1)
 		statsd.Timing("tasks.append_vec_copying.latency", time.Since(start), nil, 1)
