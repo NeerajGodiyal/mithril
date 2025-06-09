@@ -3,12 +3,14 @@ package sealevel
 import (
 	"errors"
 	"math"
+	"sync"
 	"unicode/utf8"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gammazero/deque"
@@ -1862,6 +1864,17 @@ func VoteProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAc
 	return err
 }
 
+func newVoteDeque() *deque.Deque[LandedVote] {
+	return &deque.Deque[LandedVote]{}
+}
+
+var (
+	voteDequePool = &sync.Pool{
+		New: func() interface{} {
+			return newVoteDeque()
+		}}
+)
+
 func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
 	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
 	if err != nil {
@@ -1873,7 +1886,14 @@ func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlo
 		return err
 	}
 
-	newState := &deque.Deque[LandedVote]{}
+	var newState *deque.Deque[LandedVote]
+	if sbpf.UsePool {
+		newState = voteDequePool.Get().(*deque.Deque[LandedVote])
+		newState.Clear()
+		defer voteDequePool.Put(newState)
+	} else {
+		newState = newVoteDeque()
+	}
 	for i := 0; i < towerSync.Lockouts.Len(); i++ {
 		newState.PushBack(LandedVote{Latency: 0, Lockout: towerSync.Lockouts.At(i)})
 	}
