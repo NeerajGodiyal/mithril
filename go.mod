@@ -2,8 +2,11 @@ module github.com/Overclock-Validator/mithril
 
 go 1.23.4
 
+replace github.com/gagliardetto/solana-go => github.com/palmerlao/solana-go v0.0.0-20250609100755-01c2412e5333
+
 require (
 	github.com/LiamHaworth/go-tproxy v0.0.0-20190726054950-ef7efd7f24ed
+	github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5
 	github.com/VividCortex/ewma v1.2.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/gagliardetto/binary v0.8.0
@@ -21,6 +24,7 @@ require (
 	github.com/spaolacci/murmur3 v1.1.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
+	github.com/twmb/murmur3 v1.1.8
 	github.com/vbauerster/mpb/v8 v8.4.0
 	golang.org/x/sync v0.12.0
 	golang.org/x/sys v0.31.0
@@ -35,7 +39,6 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Overclock-Validator/bn256-go/plugin/bn256 v0.0.0-20250309134322-d0c680ad9f5f // indirect
 	github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 // indirect
-	github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5 // indirect
 	github.com/Overclock-Validator/gnark-crypto v0.0.0-20250309203346-2a67ed08a105 // indirect
 	github.com/Overclock-Validator/go-bls v0.0.0-20250304162602-9e5d35efdbe8 // indirect
 	github.com/Overclock-Validator/go-ethereum v0.0.0-20250303234049-5cf00fe11343 // indirect
@@ -106,7 +109,6 @@ require (
 	github.com/subosito/gotenv v1.3.0 // indirect
 	github.com/tidwall/interval v0.0.0-20191207210631-da4d74c2f07b // indirect
 	github.com/tidwall/rhh v1.3.0 // indirect
-	github.com/twmb/murmur3 v1.1.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.etcd.io/bbolt v1.3.8 // indirect
