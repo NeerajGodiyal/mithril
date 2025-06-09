@@ -48,28 +48,43 @@ const StackFrameSize = 0x1000
 // StackDepth is the max frame count of the stack.
 const StackDepth = 64
 
+func newStackMem() []byte {
+	return make([]byte, StackDepth*StackFrameSize)
+}
+
+func newStackShadow() []Frame {
+	return make([]Frame, 1, StackDepth)
+}
+
 var (
-	stackMemPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, StackDepth*StackFrameSize)
-		},
-	}
-	stackShadowPool = sync.Pool{
-		New: func() interface{} {
-			return make([]Frame, 1, StackDepth)
-		},
-	}
+	// Also applies to interpreter heap.
+	UsePool = true
+
+	stackMemPool = &sync.Pool{New: func() interface{} {
+		return newStackMem()
+	}}
+
+	stackShadowPool = &sync.Pool{New: func() interface{} {
+		return newStackShadow()
+	}}
 )
 
 func NewStack() Stack {
-	m := stackMemPool.Get().([]byte)
-	m = m[:StackDepth*StackFrameSize]
-	clear(m)
+	var m []byte
+	var sh []Frame
+	if UsePool {
+		m = stackMemPool.Get().([]byte)
+		m = m[:StackDepth*StackFrameSize]
+		clear(m)
 
-	sh := stackShadowPool.Get().([]Frame)
-	sh = sh[:StackDepth]
-	clear(sh)
-	sh = sh[:1]
+		sh = stackShadowPool.Get().([]Frame)
+		sh = sh[:StackDepth]
+		clear(sh)
+		sh = sh[:1]
+	} else {
+		m = newStackMem()
+		sh = newStackShadow()
+	}
 
 	s := Stack{
 		mem:    m,
@@ -83,8 +98,10 @@ func NewStack() Stack {
 }
 
 func (s *Stack) Finish() {
-	stackMemPool.Put(s.mem)
-	stackShadowPool.Put(s.shadow)
+	if UsePool {
+		stackMemPool.Put(s.mem)
+		stackShadowPool.Put(s.shadow)
+	}
 }
 
 // GetFramePtr returns the current frame pointer.

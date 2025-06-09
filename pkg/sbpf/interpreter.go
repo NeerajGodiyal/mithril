@@ -41,23 +41,35 @@ type TraceSink interface {
 	Printf(format string, v ...any)
 }
 
-var heapPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 256*1024) // sealevel.MaxHeapFrameBytes
-	},
+func newHeap() []byte {
+	return make([]byte /*sealevel.MaxHeapFrameBytes=*/, 256*1024)
 }
+
+var (
+	heapPool = &sync.Pool{
+		New: func() interface{} {
+			return newHeap()
+		},
+	}
+)
 
 // NewInterpreter creates a new interpreter instance for a program execution.
 //
 // The caller must create a new interpreter object for every new execution.
 // In other words, Run may only be called once per interpreter.
 func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Interpreter {
-	heap := heapPool.Get().([]byte)
-	if len(heap) < opts.HeapMax {
-		heap = slices.Grow(heap, opts.HeapMax-len(heap))
+	var heap []byte
+	if UsePool {
+		heap = heapPool.Get().([]byte)
+		if len(heap) < opts.HeapMax {
+			heap = slices.Grow(heap, opts.HeapMax-len(heap))
+		}
+		heap = heap[:opts.HeapMax]
+		clear(heap)
+	} else {
+		heap = newHeap()
 	}
-	heap = heap[:opts.HeapMax]
-	clear(heap)
+
 	return &Interpreter{
 		textVA:            p.TextVA,
 		text:              p.Text,
@@ -79,7 +91,9 @@ func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Inte
 }
 
 func (ip *Interpreter) Finish() {
-	heapPool.Put(ip.heap)
+	if UsePool {
+		heapPool.Put(ip.heap)
+	}
 	ip.stack.Finish()
 }
 
