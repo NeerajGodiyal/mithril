@@ -94,13 +94,13 @@ func SyscallSetReturnDataImpl(vm sbpf.VM, addr, length uint64) (uint64, error) {
 	}
 
 	var returnData []byte
-	if length == 0 {
-		returnData = make([]byte, 0)
-	} else {
-		returnData, err = vm.Translate(addr, length, false)
+	if length > 0 {
+		returnDataBytes, err := vm.Translate(addr, length, false)
 		if err != nil {
 			return syscallErr(err)
 		}
+		returnData = make([]byte, length)
+		copy(returnData, returnDataBytes)
 	}
 
 	txCtx := transactionCtx(vm)
