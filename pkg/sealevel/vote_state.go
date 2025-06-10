@@ -87,7 +87,7 @@ type VoteState0_23_5 struct {
 	PriorVoters          PriorVoters0_23_5
 	AuthorizedWithdrawer solana.PublicKey
 	Commission           byte
-	Votes                *deque.Deque[VoteLockout]
+	Votes                deque.Deque[VoteLockout]
 	RootSlot             *uint64
 	EpochCredits         []EpochCredits
 	LastTimestamp        BlockTimestamp
@@ -583,15 +583,6 @@ func (authVoters *AuthorizedVoters) MarshalWithEncoder(encoder *bin.Encoder) err
 			return err
 		}
 	}
-
-	/*for count := 0; count < authVoters.AuthorizedVoters.Len(); count++ {
-		key, val, _ := authVoters.AuthorizedVoters.GetAt(count)
-		authVoter := AuthorizedVoter{Epoch: key, Pubkey: val}
-		err = authVoter.MarshalWithEncoder(encoder)
-		if err != nil {
-			return err
-		}
-	}*/
 
 	return nil
 }
