@@ -74,13 +74,7 @@ func NewStack() Stack {
 	var sh []Frame
 	if UsePool {
 		m = stackMemPool.Get().([]byte)
-		m = m[:StackDepth*StackFrameSize]
-		clear(m)
-
 		sh = stackShadowPool.Get().([]Frame)
-		sh = sh[:StackDepth]
-		clear(sh)
-		sh = sh[:1]
 	} else {
 		m = newStackMem()
 		sh = newStackShadow()
@@ -99,8 +93,15 @@ func NewStack() Stack {
 
 func (s *Stack) Finish() {
 	if UsePool {
-		stackMemPool.Put(s.mem)
-		stackShadowPool.Put(s.shadow)
+		go func() {
+			s.mem = s.mem[:StackDepth*StackFrameSize]
+			clear(s.mem)
+			stackMemPool.Put(s.mem)
+			s.shadow = s.shadow[:StackDepth]
+			clear(s.shadow)
+			s.shadow = s.shadow[:1]
+			stackShadowPool.Put(s.shadow)
+		}()
 	}
 }
 
