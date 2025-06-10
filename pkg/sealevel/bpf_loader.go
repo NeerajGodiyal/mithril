@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -593,7 +594,13 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 			serializedData = serializedData[:len(serializedData)+int(numPaddingBytes)]
 
 			// rent epoch
-			serializedData = binary.LittleEndian.AppendUint64(serializedData, borrowedAcct.RentEpoch())
+			var rentEpoch uint64
+			if execCtx.GlobalCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
+				rentEpoch = math.MaxUint64
+			} else {
+				rentEpoch = borrowedAcct.RentEpoch()
+			}
+			serializedData = binary.LittleEndian.AppendUint64(serializedData, rentEpoch)
 		}
 	}
 
@@ -840,7 +847,13 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 			}
 
 			// rent epoch
-			serializedData = binary.LittleEndian.AppendUint64(serializedData, borrowedAcct.RentEpoch())
+			var rentEpoch uint64
+			if execCtx.GlobalCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
+				rentEpoch = math.MaxUint64
+			} else {
+				rentEpoch = borrowedAcct.RentEpoch()
+			}
+			serializedData = binary.LittleEndian.AppendUint64(serializedData, rentEpoch)
 		}
 	}
 
