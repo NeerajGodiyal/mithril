@@ -693,13 +693,8 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 
 			if resizeErr != nil || changedErr != nil {
 				acctBytes := borrowedAcct.Data()
-				if len(acctBytes) != len(data) {
+				if !bytes.Equal(acctBytes, data) {
 					return fmt.Errorf("data cannot be changed, but did anyway")
-				}
-				for count := range acctBytes {
-					if acctBytes[count] != data[count] {
-						return fmt.Errorf("data cannot be changed, but did anyway")
-					}
 				}
 			} else {
 				err = borrowedAcct.SetData(execCtx.GlobalCtx.Features, data)
