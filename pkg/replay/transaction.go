@@ -48,25 +48,25 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 	}
 
 	var programIdIdxs []uint64
-	var instructionAcctPubkeys []solana.PublicKey
+	instructionAcctPubkeys := make(map[solana.PublicKey]struct{})
 
 	for instrIdx, instr := range tx.Message.Instructions {
 		programIdIdxs = append(programIdIdxs, uint64(instr.ProgramIDIndex))
 		ias := acctMetasPerInstr[instrIdx]
 		for _, ia := range ias {
-			instructionAcctPubkeys = append(instructionAcctPubkeys, ia.Pubkey)
+			instructionAcctPubkeys[ia.Pubkey] = struct{}{}
 		}
 	}
-	instructionAcctPubkeys = util.DedupePubkeys(instructionAcctPubkeys)
 
 	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
 	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
+		_, instrContainsAcctMeta := instructionAcctPubkeys[acctMeta.PublicKey]
 		if acctMeta.PublicKey == sealevel.SysvarInstructionsAddr {
 			acct = instrsAcct
-		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !slices.Contains(instructionAcctPubkeys, acctMeta.PublicKey) {
+		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !instrContainsAcctMeta {
 			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
 			if err != nil {
 				return nil, err
