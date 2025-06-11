@@ -518,7 +518,6 @@ func ReplayBlocks(
 	snapshotManifest *snapshot.SnapshotManifest,
 	startSlot, endSlot uint64,
 	rpcEndpoint string,
-	updateAcctsDb bool,
 	blockDir string,
 	txParallelism int,
 	dbgOpts *DebugOptions,
@@ -623,7 +622,7 @@ func ReplayBlocks(
 		}
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, updateAcctsDb, txParallelism, dbgOpts)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, txParallelism, dbgOpts)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
@@ -823,7 +822,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	return txFeeAccumulator
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bool, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	var sigverifyWg sync.WaitGroup
 	// Each Transaction's sigverify is done asynchronously. Make sure they're all done before we finish this block.
 	defer sigverifyWg.Wait()
@@ -882,11 +881,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, updateAcctsDb bo
 
 	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
-	if len(modifiedAccts) > 0 && updateAcctsDb {
+	if len(modifiedAccts) > 0 {
 		//mlog.Log.Debugf("updating accountsdb")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
-	} else {
-		//mlog.Log.Debugf("accountsdb not updated")
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 

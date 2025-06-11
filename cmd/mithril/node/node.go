@@ -36,11 +36,10 @@ var (
 
 	loadFromSnapshot   bool
 	loadFromAccountsDb bool
-	updateAccountsDb   bool
 	path               string
 	outputDir          string
 	rpcEndpoint        string
-	startSlot          int64
+	numReplaySlots     int64
 	endSlot            int64
 	pprofPort          int64
 	blockDir           string
@@ -55,11 +54,10 @@ var (
 func init() {
 	Cmd.Flags().BoolVarP(&loadFromSnapshot, "snapshot", "s", false, "Load from a full snapshot")
 	Cmd.Flags().BoolVarP(&loadFromAccountsDb, "accountsdb", "a", false, "Load from AccountsDB")
-	Cmd.Flags().BoolVarP(&updateAccountsDb, "update-accounts-db", "u", false, "Update accountsdb after execution")
 	Cmd.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
 	Cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
 	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
-	Cmd.Flags().Int64VarP(&startSlot, "startslot", "b", -1, "Block at which to begin replaying")
+	Cmd.Flags().Int64Var(&numReplaySlots, "num-replay-slots", 0, "Number of slots to replay.")
 	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
 	Cmd.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
 	Cmd.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
@@ -76,33 +74,12 @@ func run(c *cobra.Command, args []string) {
 	if pprofPort != -1 {
 		startPprofHandlers(int(pprofPort))
 	}
+	if endSlot != -1 && numReplaySlots != 0 {
+		klog.Fatalf("specify at most one of --endslot and --num-replay-slots")
+	}
 
 	if !loadFromSnapshot && !loadFromAccountsDb {
-		klog.Errorf("must specify either to load from a snapshot or from an existing AccountsDB")
-		return
-	}
-
-	if startSlot < 0 {
-		if loadFromAccountsDb {
-			klog.Errorf("must specify a slot at which to begin replaying")
-			return
-		}
-	}
-
-	if endSlot != -1 && endSlot < startSlot {
-		klog.Errorf("end slot cannot be lower than start block")
-		return
-	}
-
-	if endSlot > 0 && startSlot < 0 {
-		klog.Errorf("specified end block without providing start block")
-		return
-	}
-
-	if startSlot > 0 && endSlot > 0 {
-		updateAccountsDb = true
-	} else if startSlot > 0 && endSlot == -1 {
-		endSlot = startSlot
+		klog.Fatalf("must specify either to load from a snapshot or from an existing AccountsDB")
 	}
 
 	var err error
@@ -111,16 +88,14 @@ func run(c *cobra.Command, args []string) {
 	var manifest *snapshot.SnapshotManifest
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
 	if err != nil {
-		klog.Errorf("failed to parse --debugtx or --debugacctwrites values: %v", err)
-		return
+		klog.Fatalf("failed to parse --debugtx or --debugacctwrites values: %v", err)
 	}
 
 	logVCSInfo()
 
 	if loadFromSnapshot {
 		if path == "" || outputDir == "" {
-			klog.Errorf("must specify snapshot path and directory path for writing generated AccountsDB")
-			return
+			klog.Fatalf("must specify snapshot path and directory path for writing generated AccountsDB")
 		}
 
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", path)
@@ -128,15 +103,10 @@ func run(c *cobra.Command, args []string) {
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
 		accountsDb, manifest, err = snapshot.BuildAccountsDb(path, outputDir)
 		if err != nil {
-			klog.Exitf("failed to populate new accounts db from snapshot %s: %s", path, err)
+			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}
 
 		//mlog.Log.Debugf("successfully created accounts db from snapshot %s", path)
-
-		// just processing the snapshot - not executing blocks.
-		if startSlot < 0 {
-			return
-		}
 
 		accountsDbDir = outputDir
 	} else if loadFromAccountsDb {
@@ -165,6 +135,21 @@ func run(c *cobra.Command, args []string) {
 		}
 	}
 
+	startSlot := int64(manifest.Bank.Slot + 1)
+	if endSlot != -1 {
+		numReplaySlots = endSlot - startSlot
+	} else if numReplaySlots != 0 {
+		endSlot = startSlot + numReplaySlots
+	}
+	// just processing the snapshot - not executing blocks.
+	if numReplaySlots == 0 {
+		return
+	}
+	if endSlot != -1 && endSlot < startSlot {
+		klog.Fatalf("end slot cannot be lower than start slot")
+	}
+	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
+
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
@@ -180,7 +165,7 @@ func run(c *cobra.Command, args []string) {
 	}
 	defer cpuprofCleanup()
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, updateAccountsDb, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
