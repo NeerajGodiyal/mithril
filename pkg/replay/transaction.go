@@ -274,7 +274,7 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 }
 
 func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
-	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits)
+	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
 	p, err := slotCtx.GetAccount(payerAcctKey)
@@ -387,7 +387,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	metrics.GlobalBlockReplay.PreBalanceDivergenceCheck.AddTimingSince(start)
 
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
 	if err != nil {
 		return txFeeInfo, nil
 	}

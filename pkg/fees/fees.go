@@ -72,15 +72,15 @@ func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
 	}
 }
 
-func CalculateTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits) *TxFeeInfo {
+func CalculateTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) *TxFeeInfo {
 	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
+	secp256r1PrecompiledEnabled := f.IsActive(features.EnableSecp256r1Precompile)
 
 	// have to pay fees per signatures to these precompiles as well
 	for _, instr := range instrs {
-		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr || instr.ProgramId == a.Secp256r1PrecompileAddr {
-			if len(instr.Data) == 0 {
-				continue
-			} else {
+		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr ||
+			(instr.ProgramId == a.Secp256r1PrecompileAddr && secp256r1PrecompiledEnabled) {
+			if len(instr.Data) != 0 {
 				numSignatures += uint64(instr.Data[0])
 			}
 		}
@@ -100,7 +100,7 @@ func CalculateTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs
 }
 
 // TODO: implement new fee model
-func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits) (*TxFeeInfo, uint64, error) {
+func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {
 		panic("no fee payer")
@@ -110,13 +110,13 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	defer transactionAccts.Unlock(feePayerIdx)
 
 	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
+	secp256r1PrecompiledEnabled := f.IsActive(features.EnableSecp256r1Precompile)
 
 	// have to pay fees per signatures to these precompiles as well
 	for _, instr := range instrs {
-		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr || instr.ProgramId == a.Secp256r1PrecompileAddr {
-			if len(instr.Data) == 0 {
-				continue
-			} else {
+		if instr.ProgramId == a.Secp256kPrecompileAddr || instr.ProgramId == a.Ed25519PrecompileAddr ||
+			(instr.ProgramId == a.Secp256r1PrecompileAddr && secp256r1PrecompiledEnabled) {
+			if len(instr.Data) != 0 {
 				numSignatures += uint64(instr.Data[0])
 			}
 		}

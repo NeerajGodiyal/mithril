@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	bin "github.com/gagliardetto/binary"
 	"golang.org/x/crypto/sha3"
@@ -124,6 +125,26 @@ func parseAndValidateSignature(sigBytes []byte) error {
 	return nil
 }
 
+func Secp256k1GetDataSlice(txCtx *TransactionCtx, index uint16, offset uint16, size uint64) ([]byte, error) {
+
+	var data []byte
+	var dataSize uint64
+
+	if uint64(index) >= uint64(len(txCtx.AllInstructions)) {
+		return nil, PrecompileErrDataOffset
+	}
+
+	data = txCtx.AllInstructions[index].Data
+	dataSize = uint64(len(data))
+
+	end := safemath.SaturatingAddU64(uint64(offset), size)
+	if end > dataSize {
+		return nil, PrecompileErrSignature
+	}
+
+	return data[offset:end], nil
+}
+
 func Secp256k1ProgramExecute(execCtx *ExecutionCtx) error {
 
 	txCtx := execCtx.TransactionContext
@@ -163,17 +184,17 @@ func Secp256k1ProgramExecute(execCtx *ExecutionCtx) error {
 			panic("shouldn't happen, lengths already checked")
 		}
 
-		signature, err := PrecompileGetDataSlice(txCtx, uint16(secpOffsets.SignatureInstructionIndex), secpOffsets.SignatureOffset, SignatureSerializedSize+1)
+		signature, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.SignatureInstructionIndex), secpOffsets.SignatureOffset, SignatureSerializedSize+1)
 		if err != nil {
 			return PrecompileErrDataOffset
 		}
 
-		ethAddr, err := PrecompileGetDataSlice(txCtx, uint16(secpOffsets.EthAddressInstructionIndex), secpOffsets.EthAddressOffset, Secp256k1HashedPubkeySerializedSize)
+		ethAddr, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.EthAddressInstructionIndex), secpOffsets.EthAddressOffset, Secp256k1HashedPubkeySerializedSize)
 		if err != nil {
 			return PrecompileErrDataOffset
 		}
 
-		msg, err := PrecompileGetDataSlice(txCtx, uint16(secpOffsets.MessageInstructionIndex), secpOffsets.MessageDataOffset, secpOffsets.MessageDataSize)
+		msg, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.MessageInstructionIndex), secpOffsets.MessageDataOffset, uint64(secpOffsets.MessageDataSize))
 		if err != nil {
 			return PrecompileErrDataOffset
 		}

@@ -34,6 +34,8 @@ func resolveNativeProgramById(programId [32]byte) (func(ctx *ExecutionCtx) error
 		return Ed25519ProgramExecute, a.Ed25519PrecompileAddrStr, nil
 	case a.Secp256kPrecompileAddr:
 		return Secp256k1ProgramExecute, a.Secp256kPrecompileAddrStr, nil
+	case a.Secp256r1PrecompileAddr:
+		return Secp256r1ProgramExecute, a.Secp256r1PrecompileAddrStr, nil
 	}
 
 	return nil, "UNSUPPORTED", InstrErrUnsupportedProgramId
