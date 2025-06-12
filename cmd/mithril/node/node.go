@@ -3,10 +3,10 @@ package node
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"syscall"
@@ -34,16 +34,17 @@ var (
 		},
 	}
 
-	loadFromSnapshot   bool
-	loadFromAccountsDb bool
-	path               string
-	outputDir          string
-	rpcEndpoint        string
-	numReplaySlots     int64
-	endSlot            int64
-	pprofPort          int64
-	blockDir           string
-	txParallelism      int64
+	loadFromSnapshot            bool
+	loadFromAccountsDb          bool
+	path                        string
+	incrementalSnapshotFilename string
+	outputDir                   string
+	rpcEndpoint                 string
+	numReplaySlots              int64
+	endSlot                     int64
+	pprofPort                   int64
+	blockDir                    string
+	txParallelism               int64
 
 	debugTxs        []string
 	debugAcctWrites []string
@@ -55,6 +56,7 @@ func init() {
 	Cmd.Flags().BoolVarP(&loadFromSnapshot, "snapshot", "s", false, "Load from a full snapshot")
 	Cmd.Flags().BoolVarP(&loadFromAccountsDb, "accountsdb", "a", false, "Load from AccountsDB")
 	Cmd.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
+	Cmd.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot-filename", "", "Filename containing incremental snapshot")
 	Cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
 	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
 	Cmd.Flags().Int64Var(&numReplaySlots, "num-replay-slots", 0, "Number of slots to replay.")
@@ -101,7 +103,7 @@ func run(c *cobra.Command, args []string) {
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", path)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(path, outputDir)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(path, incrementalSnapshotFilename, outputDir)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
 		}
@@ -129,7 +131,7 @@ func run(c *cobra.Command, args []string) {
 			klog.Fatalf("unable to open accounts db %s\n", accountsDbDir)
 		}
 
-		manifest, err = snapshot.LoadManifestFromFile(fmt.Sprintf("%s/manifest", accountsDbDir))
+		manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsDbDir, "manifest"))
 		if err != nil {
 			klog.Fatalf("unable to open manifest file")
 		}

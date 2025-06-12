@@ -38,16 +38,27 @@ var (
 	appendVecCopyingInProgress    = &atomic.Int64{}
 )
 
-func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
+func BuildAccountsDb(
+	snapshotFile string,
+	incrementalSnapshotFile string,
+	accountsDbDir string,
+) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
+	mlog.Log.Infof("parsed manifest from snapshotFile=%s", snapshotFile)
 	defer file.Close()
 
-	tarReader, err := newSnapshotReader(file)
-	if err != nil {
-		return nil, nil, err
+	var incrementalManifest *SnapshotManifest
+	var incrementalFile *os.File
+	if incrementalSnapshotFile != "" {
+		incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotFile, accountsDbDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
+		}
+		mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotFile)
+		defer incrementalFile.Close()
 	}
 
 	start := time.Now()
@@ -60,7 +71,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	defer ants.Release()
 
 	var largestFileId atomic.Uint64
-	wg := sync.WaitGroup{}
+	wg := &sync.WaitGroup{}
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
@@ -177,6 +188,15 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			}
 		}
 
+		if fileSize == 0 && incrementalManifest != nil {
+			for _, av := range incrementalManifest.AccountsDb.Storages[slot].AcctVecs {
+				if av.Id == fileId {
+					fileSize = av.FileSize
+					break
+				}
+			}
+		}
+
 		if fileSize == 0 {
 			panic("programming error - fileSize for appendvec was 0")
 		}
@@ -191,33 +211,33 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 		}
 	})
 
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			mlog.Log.Errorf("err reading next tar: %s\n", err)
-			return nil, nil, err
-		}
-
-		writer := new(bytes.Buffer)
-		tarBytesRead, err := io.Copy(writer, tarReader)
-		if err != nil {
-			mlog.Log.Errorf("err copying data to reader: %s\n", err)
-			return nil, nil, err
-		}
-		statsd.Count("snapshot.tar_bytes_read", tarBytesRead, nil, 1)
-
-		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err = readTar(wg, file, appendVecCopyingPool)
+	}()
+	var incrementalErr error
+	if incrementalFile != nil {
 		wg.Add(1)
-		err = appendVecCopyingPool.Invoke(task)
-		if err != nil {
-			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke\n")
-		}
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			incrementalErr = readTar(wg, incrementalFile, appendVecCopyingPool)
+			mlog.Log.Infof("finished reading %s in %s", incrementalFile.Name(), time.Since(start))
+		}()
+	}
+	wg.Wait()
+	mlog.Log.Infof("done in %s. waiting for all tasks to complete.", time.Since(start))
+	if err != nil {
+		mlog.Log.Errorf("processing snapshot: %v", err)
+	}
+	if incrementalErr != nil {
+		mlog.Log.Errorf("processing incremental snapshot: %v", err)
+	}
+	if err != nil || incrementalErr != nil {
+		return nil, nil, err
 	}
 
-	mlog.Log.Infof("done in %s. waiting for all tasks to complete.", time.Since(start))
-	wg.Wait()
 	mlog.Log.Infof("Closing shard logger.")
 	sl.Close()
 	mlog.Log.Infof("Stopping shard setter.")
@@ -230,7 +250,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 
 	path := filepath.Join(accountsDbDir, "largest_file_id")
 	if err := os.WriteFile(path, largestFileIdBytes[:], 0644); err != nil {
-		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId, path, err)
+		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId.Load(), path, err)
 		return nil, nil, err
 	}
 
@@ -241,7 +261,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	}
 
 	indexEntryCommiterPool.Release()
-	appendVecCopyingPool.Release()
+	indexEntryBuilderPool.Release()
 	appendVecCopyingPool.Release()
 
 	accountsDb := &accountsdb.AccountsDb{Index: db, AcctsDir: appendVecsOutputDir}
@@ -249,4 +269,39 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
 	return accountsDb, manifest, nil
+}
+
+func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
+	tarReader, err := newSnapshotReader(file)
+	if err != nil {
+		return err
+	}
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			mlog.Log.Errorf("reading next tar: %s\n", err)
+			return err
+		}
+
+		writer := new(bytes.Buffer)
+		tarBytesRead, err := io.Copy(writer, tarReader)
+		if err != nil {
+			mlog.Log.Errorf("err copying data to reader: %s\n", err)
+			return err
+		}
+		statsd.Count("snapshot.tar_bytes_read", tarBytesRead, nil, 1)
+
+		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
+		wg.Add(1)
+		err = appendVecCopyingPool.Invoke(task)
+		if err != nil {
+			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke: %v", err)
+			return err
+		}
+	}
+
+	return nil
 }
