@@ -27,16 +27,9 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*Snap
 		return nil, nil, err
 	}
 
-	manifestOutputFile := fmt.Sprintf("%s/manifest", accountsDbDir)
 	if err = os.MkdirAll(accountsDbDir, 0775); err != nil {
 		return nil, nil, err
 	}
-	manifestOut, err := os.Create(manifestOutputFile)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer manifestOut.Close()
-
 	tarReader, err := newSnapshotReader(file)
 	if err != nil {
 		panic(err)
@@ -57,7 +50,7 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*Snap
 				if err != nil {
 					return nil, nil, err
 				}
-				_, err = io.Copy(manifestOut, bytes.NewBuffer(writer.Bytes()))
+				err = os.WriteFile(filepath.Join(accountsDbDir, "manifest"), writer.Bytes(), 0644)
 				if err != nil {
 					mlog.Log.Errorf("err copying manifest file out: %s\n", err)
 					return nil, nil, err
