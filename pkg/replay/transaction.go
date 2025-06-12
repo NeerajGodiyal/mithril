@@ -41,9 +41,11 @@ func (err *TxErrInvalidSignature) Error() string {
 var (
 	TxErrInsufficientFundsForRent          = errors.New("TxErrInsufficientFundsForRent")
 	TxErrMaxLoadedAccountsDataSizeExceeded = errors.New("TxErrMaxLoadedAccountsDataSizeExceeded")
+	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
+	TxErrInvalidProgramForExecution        = errors.New("TxErrProgramAccountNotFound")
 )
 
-func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
+func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
 		return nil, err
@@ -95,6 +97,56 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 
 	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
 	transactionAccts.AcctMetas = convertedAcctMetas
+
+	removeAcctsExecutableFlagChecks := slotCtx.Features.IsActive(features.RemoveAccountsExecutableFlagChecks)
+	validatedLoaders := make(map[solana.PublicKey]struct{})
+
+	for _, instr := range instrs {
+		if instr.ProgramId == a.NativeLoaderAddr {
+			continue
+		}
+
+		programAcct, err := slotCtx.GetAccount(instr.ProgramId)
+		if err != nil {
+			return nil, TxErrProgramAccountNotFound
+		}
+
+		if programAcct.Lamports == 0 {
+			return nil, TxErrProgramAccountNotFound
+		}
+
+		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
+			return nil, TxErrInvalidProgramForExecution
+		}
+
+		owner := programAcct.Owner
+		if owner == a.NativeLoaderAddr {
+			continue
+		}
+
+		_, exists := validatedLoaders[owner]
+		if !exists {
+			var ownerAcct *accounts.Account
+			ownerAcct, err = slotCtx.GetAccount(owner)
+			if err != nil {
+				ownerAcct, err = slotCtx.GetAccountFromAccountsDb(owner)
+				if err != nil {
+					return nil, TxErrInvalidProgramForExecution
+				}
+			}
+
+			if ownerAcct.Owner != a.NativeLoaderAddr || (!removeAcctsExecutableFlagChecks && !ownerAcct.Executable) {
+				return nil, TxErrInvalidProgramForExecution
+			}
+
+			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(ownerAcct.Data)))
+			if loadedBytesAccumulator > loadedAcctBytesLimit {
+				return nil, TxErrMaxLoadedAccountsDataSizeExceeded
+			}
+
+			validatedLoaders[owner] = struct{}{}
+		}
+	}
 
 	return transactionAccts, nil
 }
@@ -357,8 +409,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
 
 	start = time.Now()
-	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
-	if err == TxErrMaxLoadedAccountsDataSizeExceeded {
+	transactionAccts, err := loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
 		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, err, nil)
 	} else if err != nil {
 		return nil, err

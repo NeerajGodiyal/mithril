@@ -49,6 +49,7 @@ var DisableAccountLoaderSpecialCase = FeatureGate{Name: "DisableAccountLoaderSpe
 var EnableGetEpochStakeSyscall = FeatureGate{Name: "EnableGetEpochStakeSyscall", Address: base58.MustDecodeFromString("FKe75t4LXxGaQnVHdUKM6DSFifVVraGZ8LyNo7oPwy1Z")}
 var ReserveMinimalCUsForBuiltinInstructions = FeatureGate{Name: "ReserveMinimalCUsForBuiltinInstructions", Address: base58.MustDecodeFromString("C9oAhLxDBm3ssWtJx1yBGzPY55r2rArHmN1pbQn6HogH")}
 var MaskOutRentEpochInVmSerialization = FeatureGate{Name: "MaskOutRentEpochInVmSerialization", Address: base58.MustDecodeFromString("RENtePQcDLrAbxAsP3k8dwVcnNYQ466hi2uKvALjnXx")}
+var RemoveAccountsExecutableFlagChecks = FeatureGate{Name: "RemoveAccountsExecutableFlagchecks", Address: base58.MustDecodeFromString("FXs1zh47QbNnhXcnB6YiAQoJ4sGB91tKF3UFHLcKT7PM")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -61,4 +62,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
-	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization}
+	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks}
