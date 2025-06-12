@@ -130,17 +130,11 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 			return
 		}
 
-		outFile, err := os.Create(fmt.Sprintf("%s/%s", accountsDbDir, filename))
-		if err != nil {
-			mlog.Log.Errorf("err creating new: %s\n", err)
-			appendVecCopyingInProgress.Add(-1)
-			return
-		}
-
+		outFilename := filepath.Join(accountsDbDir, filename)
 		appendVecBytes := writer.Bytes()
-		_, err = io.Copy(outFile, bytes.NewReader(appendVecBytes))
+		err := os.WriteFile(outFilename, appendVecBytes, 0644)
 		if err != nil {
-			mlog.Log.Errorf("err copying file out: %s\n", err)
+			mlog.Log.Errorf("err writing new file=%s: %v", outFilename, err)
 			appendVecCopyingInProgress.Add(-1)
 			return
 		}
