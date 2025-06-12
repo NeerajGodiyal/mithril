@@ -18,6 +18,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -38,10 +39,11 @@ func (err *TxErrInvalidSignature) Error() string {
 }
 
 var (
-	TxErrInsufficientFundsForRent = errors.New("TxErrInsufficientFundsForRent")
+	TxErrInsufficientFundsForRent          = errors.New("TxErrInsufficientFundsForRent")
+	TxErrMaxLoadedAccountsDataSizeExceeded = errors.New("TxErrMaxLoadedAccountsDataSizeExceeded")
 )
 
-func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrsAcct *accounts.Account) (*sealevel.TransactionAccounts, error) {
+func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
 		return nil, err
@@ -60,6 +62,8 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 
 	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
 	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
+	var loadedBytesAccumulator uint32
+
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 
@@ -77,6 +81,11 @@ func transactionAcctsFromTx(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 			if err != nil {
 				return nil, err
 			}
+		}
+
+		loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(acct.Data)))
+		if loadedBytesAccumulator > loadedAcctBytesLimit {
+			return nil, TxErrMaxLoadedAccountsDataSizeExceeded
 		}
 
 		acctsForTx = append(acctsForTx, *acct)
@@ -345,16 +354,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
 
-	// fast path for failed tx's
-	/*if txMeta.Err != nil {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits)
-	}*/
-
-	instrsAcct := sealevel.MakeInstructionsAccount(instrs)
+	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
 
 	start = time.Now()
-	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx, instrsAcct)
-	if err != nil {
+	transactionAccts, err := transactionAcctsFromTx(slotCtx, acctMetasPerInstr, tx, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	if err == TxErrMaxLoadedAccountsDataSizeExceeded {
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, err, nil)
+	} else if err != nil {
 		return nil, err
 	}
 	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)

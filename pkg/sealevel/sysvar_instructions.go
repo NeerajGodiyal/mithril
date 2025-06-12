@@ -93,7 +93,7 @@ func marshalInstructions(instructions []Instruction) []byte {
 	return data
 }
 
-func MakeInstructionsAccount(instructions []Instruction) *accounts.Account {
+func MakeInstructionsSysvarAccount(instructions []Instruction) *accounts.Account {
 	serializedData := marshalInstructions(instructions)
 
 	instructionsAcct := accounts.Account{}
