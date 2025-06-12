@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -153,7 +154,7 @@ func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter, maxConc
 
 // newShard creates a new shard with the given ID
 func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.Weighted) *shard {
-	filename := fmt.Sprintf("%s%03d", filePrefix, id)
+	filename := filepath.Join(filePrefix, fmt.Sprintf("%03d", id))
 	file, err := os.Create(filename)
 	if err != nil {
 		panic(fmt.Sprintf("shardlogger setup: %v", err))

@@ -52,7 +52,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 
 	start := time.Now()
 
-	appendVecsOutputDir := fmt.Sprintf("%s/accounts", accountsDbDir)
+	appendVecsOutputDir := filepath.Join(accountsDbDir, "accounts")
 	if err = os.MkdirAll(appendVecsOutputDir, 0775); err != nil {
 		return nil, nil, err
 	}
@@ -63,7 +63,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	wg := sync.WaitGroup{}
 
 	numShards := 256
-	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
+	dbFn := filepath.Join(accountsDbDir, "mithril_db")
 	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
@@ -74,7 +74,7 @@ func BuildAccountsDb(snapshotFile string, accountsDbDir string) (*accountsdb.Acc
 	}
 
 	ss := NewShardedSetter(db, numShards, 100)
-	logsDir := fmt.Sprintf("%s/mithril_db_log_shards/", accountsDbDir)
+	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
 	if err = os.MkdirAll(logsDir, 0775); err != nil {
 		return nil, nil, err
 	}
