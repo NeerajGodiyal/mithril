@@ -16,7 +16,7 @@ import (
 // Interpreter implements the SBF core in pure Go.
 type Interpreter struct {
 	textVA uint64
-	text   []byte
+	text   []Slot
 	ro     []byte
 	stack  Stack
 	heap   []byte
@@ -548,7 +548,7 @@ mainLoop:
 			if !ok {
 				err = ExcCallDepth
 			}
-			if target < ip.textVA || target >= VaddrStack || target >= ip.textVA+uint64(len(ip.text)) {
+			if target < ip.textVA || target >= VaddrStack || target >= ip.textVA+uint64(len(ip.text)*8) {
 				err = NewExcBadAccess(target, 8, false, "jump out-of-bounds")
 			}
 			pc = int64((target - ip.textVA) / 8)
@@ -587,7 +587,7 @@ mainLoop:
 }
 
 func (ip *Interpreter) getSlot(pc int64) Slot {
-	return GetSlot(ip.text[pc*SlotSize:])
+	return ip.text[pc]
 }
 
 func (ip *Interpreter) VMContext() any {

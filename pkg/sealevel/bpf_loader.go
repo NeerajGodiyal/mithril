@@ -12,6 +12,7 @@ import (
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/loader"
@@ -411,7 +412,7 @@ func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, er
 
 	err = program.Verify()
 	if err != nil {
-		//mlog.Log.Debugf("failed to verify program: %s", err)
+		mlog.Log.Errorf("failed to verify program: %s", err)
 		return nil, err
 	}
 

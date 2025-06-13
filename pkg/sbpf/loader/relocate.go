@@ -29,7 +29,7 @@ func (l *Loader) fixupRelativeCalls() error {
 	buf := l.getRange(l.textRange)
 	for i := uint64(0); i < insCount; i++ {
 		off := i * sbpf.SlotSize
-		slot := sbpf.GetSlot(buf[off : off+sbpf.SlotSize])
+		slot := sbpf.Slot(binary.LittleEndian.Uint64(buf[off : off+sbpf.SlotSize]))
 
 		isCall := slot.Op() == sbpf.OpCall && slot.Imm() != -1
 		if !isCall {

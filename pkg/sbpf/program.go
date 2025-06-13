@@ -3,7 +3,7 @@ package sbpf
 // Program is a loaded SBF program.
 type Program struct {
 	RO         []byte // read-only segment containing text and ELFs
-	Text       []byte
+	Text       []Slot
 	TextVA     uint64
 	Entrypoint uint64 // PC
 	Funcs      map[uint32]int64

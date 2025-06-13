@@ -1,8 +1,6 @@
 // Package sbpf implements the Solana Bytecode Format.
 package sbpf
 
-import "encoding/binary"
-
 // Hardcoded addresses.
 const (
 	VaddrProgram = uint64(0x1_0000_0000)
@@ -26,11 +24,6 @@ func IsLongIns(op uint8) bool {
 
 // Slot holds the content of one instruction slot.
 type Slot uint64
-
-// GetSlot reads an instruction slot from memory.
-func GetSlot(buf []byte) Slot {
-	return Slot(binary.LittleEndian.Uint64(buf))
-}
 
 // Op returns the opcode field.
 func (s Slot) Op() uint8 {

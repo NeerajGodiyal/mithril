@@ -6,6 +6,7 @@ package loader
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -110,10 +111,21 @@ func (l *Loader) Load() (*sbpf.Program, error) {
 	return l.getProgram(), nil
 }
 
+func parseSlots(bs []byte) []sbpf.Slot {
+	if len(bs) % 8 != 0 {
+		panic(fmt.Sprintf("expected len(bs)=%d to be divisible by 8", len(bs)))
+	}
+	out := make([]sbpf.Slot, len(bs)/8)
+	for i := 0; i < len(bs); i+= 8 {
+		out[i/8] = sbpf.Slot(binary.LittleEndian.Uint64(bs[i:i+8]))
+	}
+	return out
+}
+
 func (l *Loader) getProgram() *sbpf.Program {
 	return &sbpf.Program{
 		RO:         l.program,
-		Text:       l.text,
+		Text:       parseSlots(l.text),
 		TextVA:     sbpf.VaddrProgram + l.textRange.min,
 		Entrypoint: l.entrypoint,
 		Funcs:      l.funcs,

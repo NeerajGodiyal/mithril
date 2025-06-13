@@ -12,16 +12,12 @@ func NewVerifier(p *Program) *Verifier {
 
 func (v *Verifier) Verify() error {
 	text := v.Program.Text
-	if len(text)%SlotSize != 0 {
-		return fmt.Errorf("odd .text size")
-	}
 	if len(text) == 0 {
 		return fmt.Errorf("empty text")
 	}
 
-	for pc := uint64(0); (pc+1)*SlotSize <= uint64(len(text)); pc++ {
-		insBytes := text[pc*SlotSize:]
-		ins := GetSlot(insBytes)
+	for pc := 0; pc < len(text); pc++ {
+		ins := text[pc]
 
 		if ins.Src() > 10 {
 			return fmt.Errorf("invalid src register")
@@ -84,10 +80,10 @@ func (v *Verifier) Verify() error {
 			OpJsltImm, OpJsltReg,
 			OpJsleImm, OpJsleReg:
 			dst := int64(pc) + int64(ins.Off()) + 1
-			if dst < 0 || (dst*SlotSize) >= int64(len(text)) {
+			if (dst < 0) || (int(dst) >= len(text)) {
 				return fmt.Errorf("jump out of code")
 			}
-			dstIns := GetSlot(text[dst*SlotSize:])
+			dstIns := text[dst]
 			if dstIns.Op() == 0 {
 				return fmt.Errorf("jump into middle of instruction")
 			}
@@ -96,11 +92,12 @@ func (v *Verifier) Verify() error {
 				return fmt.Errorf("invalid callx register")
 			}
 		case OpLddw:
-			if len(insBytes) < 2*SlotSize {
-				return fmt.Errorf("incomplete lddw instruction")
+			if pc+1 >= len(text) {
+        return fmt.Errorf("incomplete lddw instruction")
 			}
-			if insBytes[8] != 0 {
-				return fmt.Errorf("malformed lddw instruction")
+			secondSlot := text[pc+1]
+			if secondSlot&0xFF != 0 {  // Check lowest byte is 0
+        return fmt.Errorf("malformed lddw instruction")
 			}
 			pc++
 		default:
