@@ -20,11 +20,6 @@ import (
 	"github.com/Overclock-Validator/fastcache"
 )
 
-// identify appendvec files, whose path is of the form "accounts/SLOT.ID"
-func isAppendVec(filename string) bool {
-	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
-}
-
 const (
 	maxIndexEntryCommitter = 512
 	maxIndexEntryBuilder   = 500
@@ -134,11 +129,6 @@ func BuildAccountsDb(
 		task := i.(appendVecCopyingTask)
 		filename := task.Filename
 		writer := task.TarBuffer
-
-		if !isAppendVec(filename) {
-			appendVecCopyingInProgress.Add(-1)
-			return
-		}
 
 		outFilename := filepath.Join(accountsDbDir, filename)
 		appendVecBytes := writer.Bytes()
@@ -259,6 +249,11 @@ func BuildAccountsDb(
 	return accountsDb, manifest, nil
 }
 
+// identify appendvec files, whose path is of the form "accounts/SLOT.ID"
+func isAppendVec(filename string) bool {
+	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
+}
+
 func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
 	tarReader, err := newSnapshotReader(file)
 	if err != nil {
@@ -272,6 +267,10 @@ func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolW
 		} else if err != nil {
 			mlog.Log.Errorf("reading next tar: %s\n", err)
 			return err
+		}
+
+		if !isAppendVec(header.Name) {
+			continue
 		}
 
 		writer := new(bytes.Buffer)
