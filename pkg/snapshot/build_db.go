@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,22 +149,11 @@ func BuildAccountsDb(
 			return
 		}
 
-		// parse slot and file ID out of filename
-		_, after, found := strings.Cut(filename, "/")
-		if !found {
-			panic(fmt.Sprintf("invalid appendvec path format: %s", filename))
-		}
-
-		slotStr, idStr, found := strings.Cut(after, ".")
-		slot, err := strconv.ParseUint(slotStr, 10, 64)
-		if err != nil {
-			mlog.Log.Errorf("invalid snapshot - unable to convert string to slot\n")
-			panic("")
-		}
-
-		fileId, err := strconv.ParseUint(idStr, 10, 64)
-		if err != nil {
-			panic("invalid snapshot - unable to convert string to file id\n")
+		var slot, fileId uint64
+		if n, err := fmt.Sscanf(filepath.Base(filename), "%d.%d", &slot, &fileId); n != 2 || err != nil {
+			panic(fmt.Sprintf(
+				"failed to parse slot and file from filename=%s basename=%s; parsed n=%d arguments (expected 2) and had err=%v",
+				filename, filepath.Base(filename), n, err))
 		}
 
 		for {
