@@ -5,6 +5,7 @@
 _bin
 /radiance
 /mithril
+/blockdl
 /cmd/radiance/radiance
 /cmd/mithril/mithril
 /vendor

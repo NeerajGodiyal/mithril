@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
@@ -66,11 +68,11 @@ type VoteAccountsPair struct {
 }
 
 type Stakes struct {
-	VoteAccounts     []VoteAccountsPair
-	StakeDelegations []DelegationPair
-	Unused           uint64
-	Epoch            uint64
-	StakeHistory     sealevel.SysvarStakeHistory
+	VoteAccounts []VoteAccountsPair
+	Delegations  []DelegationPair
+	Unused       uint64
+	Epoch        uint64
+	StakeHistory sealevel.SysvarStakeHistory
 }
 
 type DelegationPair struct {
@@ -84,6 +86,24 @@ type Delegation struct {
 	ActivationEpoch    uint64
 	DeactivationEpoch  uint64
 	WarmupCooldownRate float64
+}
+
+type Stake struct {
+	VoteAccounts     []VoteAccountsPair
+	StakeDelegations []StakePair
+	Unused           uint64
+	Epoch            uint64
+	StakeHistory     sealevel.SysvarStakeHistory
+}
+
+type StakeInner struct {
+	Delegation      Delegation
+	CreditsObserved uint64
+}
+
+type StakePair struct {
+	Account [32]byte
+	Stake   StakeInner
 }
 
 type UnusedAccountsU64Pair struct {
@@ -122,6 +142,18 @@ type EpochStakes struct {
 type EpochStakesPair struct {
 	Key uint64
 	Val EpochStakes
+}
+
+type VersionedEpochStakes struct {
+	Stakes                Stake
+	TotalStake            uint64
+	NodeIdToVoteAccounts  []NodeVoteAccountsPair
+	EpochAuthorizedVoters []PubkeyPair
+}
+
+type VersionedEpochStakesPair struct {
+	Epoch uint64
+	Val   VersionedEpochStakes
 }
 
 type DeserializableVersionedBank struct {
@@ -171,6 +203,7 @@ type SlotAcctVecs struct {
 
 type BankHashStats struct {
 	NumUpdatedAccts    uint64
+	NumRemovedAccts    uint64
 	NumLamportsStored  uint64
 	TotalDataLen       uint64
 	NumExecutableAccts uint64
@@ -235,7 +268,8 @@ type SnapshotManifest struct {
 	LamportsPerSignature               uint64
 	BankIncrementalSnapshotPersistence BankIncrementalSnapshotPersistence
 	EpochAccountHash                   [32]byte
-	EpochRewardStatus                  SerializableEpochRewardStatus
+	VersionedEpochStakes               []VersionedEpochStakesPair
+	LtHash                             *lthash.LtHash
 }
 
 func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -386,7 +420,6 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		positionAfter := decoder.Position() + uint(dataLen)
 
 		var voteState sealevel.VoteStateVersions
-
 		err = voteState.UnmarshalWithDecoder(decoder)
 		decoder.SetPosition(positionAfter)
 
@@ -458,6 +491,16 @@ func (voteAcctsPair *VoteAccountsPair) UnmarshalWithDecoder(decoder *bin.Decoder
 	return err
 }
 
+func (stakeInner *StakeInner) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	err := stakeInner.Delegation.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		return err
+	}
+
+	stakeInner.CreditsObserved, err = decoder.ReadUint64(bin.LE)
+	return err
+}
+
 func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	var err error
 
@@ -483,14 +526,14 @@ func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
-	stakes.StakeDelegations = make([]DelegationPair, 0, numStakeDelegations)
+	stakes.Delegations = make([]DelegationPair, 0, numStakeDelegations)
 	for count := uint64(0); count < numStakeDelegations; count++ {
-		var dp DelegationPair
-		err = dp.UnmarshalWithDecoder(decoder)
+		var delegationPair DelegationPair
+		err = delegationPair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		stakes.StakeDelegations = append(stakes.StakeDelegations, dp)
+		stakes.Delegations = append(stakes.Delegations, delegationPair)
 	}
 
 	stakes.Unused, err = decoder.ReadUint64(bin.LE)
@@ -548,6 +591,69 @@ func (delegationPair *DelegationPair) UnmarshalWithDecoder(decoder *bin.Decoder)
 	delegationPair.Account = solana.PublicKeyFromBytes(pk)
 
 	err = delegationPair.Delegation.UnmarshalWithDecoder(decoder)
+	return err
+}
+
+func (stakes *Stake) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+
+	var numVoteAccts uint64
+	numVoteAccts, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	stakes.VoteAccounts = make([]VoteAccountsPair, 0, numVoteAccts)
+	for count := uint64(0); count < numVoteAccts; count++ {
+		var pair VoteAccountsPair
+		err = pair.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		stakes.VoteAccounts = append(stakes.VoteAccounts, pair)
+	}
+
+	var numStakeDelegations uint64
+	numStakeDelegations, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	stakes.StakeDelegations = make([]StakePair, 0, numStakeDelegations)
+	for count := uint64(0); count < numStakeDelegations; count++ {
+		var stakeDelegationPair StakePair
+		err = stakeDelegationPair.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		stakes.StakeDelegations = append(stakes.StakeDelegations, stakeDelegationPair)
+	}
+
+	stakes.Unused, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	stakes.Epoch, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	err = stakes.StakeHistory.UnmarshalWithDecoder(decoder)
+	return err
+}
+
+func (stakePair *StakePair) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+
+	var pk []byte
+	pk, err = decoder.ReadBytes(32)
+	if err != nil {
+		return err
+	}
+	stakePair.Account = solana.PublicKeyFromBytes(pk)
+
+	err = stakePair.Stake.UnmarshalWithDecoder(decoder)
 	return err
 }
 
@@ -728,6 +834,73 @@ func (epochStakesPair *EpochStakesPair) UnmarshalWithDecoder(decoder *bin.Decode
 	var err error
 
 	epochStakesPair.Key, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	err = epochStakesPair.Val.UnmarshalWithDecoder(decoder)
+	return err
+}
+
+func (versionedEpochStakes *VersionedEpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	version, err := decoder.ReadUint32(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	if version != 0 {
+		panic("only 'Current' version (0) currently supported")
+	}
+
+	err = versionedEpochStakes.Stakes.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		return err
+	}
+
+	versionedEpochStakes.TotalStake, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	var numAccts uint64
+	numAccts, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	versionedEpochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
+	for count := uint64(0); count < numAccts; count++ {
+		var pair NodeVoteAccountsPair
+		err = pair.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		versionedEpochStakes.NodeIdToVoteAccounts = append(versionedEpochStakes.NodeIdToVoteAccounts, pair)
+	}
+
+	var numEpochAuthVoters uint64
+	numEpochAuthVoters, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	versionedEpochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, numEpochAuthVoters)
+	for count := uint64(0); count < numEpochAuthVoters; count++ {
+		var pair PubkeyPair
+		err = pair.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		versionedEpochStakes.EpochAuthorizedVoters = append(versionedEpochStakes.EpochAuthorizedVoters, pair)
+	}
+
+	return err
+}
+
+func (epochStakesPair *VersionedEpochStakesPair) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+
+	epochStakesPair.Epoch, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
 		return err
 	}
@@ -990,6 +1163,11 @@ func (stats *BankHashStats) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	var err error
 
 	stats.NumUpdatedAccts, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	stats.NumRemovedAccts, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
 		return err
 	}
@@ -1282,8 +1460,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 
 	snapshot.LamportsPerSignature, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
-		//util.VerboseHandleError(err)
-		//return err
+		return err
 	}
 
 	if !decoder.HasRemaining() {
@@ -1297,14 +1474,11 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	}
 
 	if hasIncrementalSnapshotPersistence {
-		//mlog.Log.Debugf("hasIncrementalSnapshotPersistence")
+		mlog.Log.Infof("hasIncrementalSnapshotPersistence")
 		err = snapshot.BankIncrementalSnapshotPersistence.UnmarshalWithDecoder(decoder)
 		if err != nil {
-			//mlog.Log.Debugf("error decoding BankIncrementalSnapshotPersistence: %s", err)
 			return nil
 		}
-	} else {
-		//mlog.Log.Debugf("!hasIncrementalSnapshotPersistence")
 	}
 
 	if !decoder.HasRemaining() {
@@ -1318,32 +1492,51 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	}
 
 	if hashEpochAcctHash {
-		//mlog.Log.Debugf("hashEpochAcctHash")
 		var pkBytes []byte
 		pkBytes, err = decoder.ReadBytes(32)
 		if err != nil {
 			return err
 		}
 		snapshot.EpochAccountHash = solana.PublicKeyFromBytes(pkBytes)
-	} else {
-		//mlog.Log.Debugf("!hashEpochAcctHash")
 	}
 
 	if !decoder.HasRemaining() {
 		return nil
 	}
 
-	var hashEpochRewardStatus bool
-	hashEpochRewardStatus, err = decoder.ReadBool()
+	numVersionedEpochStakes, err := decoder.ReadUint64(bin.LE)
 	if err != nil {
 		return err
 	}
 
-	if hashEpochRewardStatus {
-		err = snapshot.EpochRewardStatus.UnmarshalWithDecoder(decoder)
+	if numVersionedEpochStakes != 0 {
+		snapshot.VersionedEpochStakes = make([]VersionedEpochStakesPair, 0, numVersionedEpochStakes)
+		for range numVersionedEpochStakes {
+			var pair VersionedEpochStakesPair
+			err = pair.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				return err
+			}
+			snapshot.VersionedEpochStakes = append(snapshot.VersionedEpochStakes, pair)
+		}
+	}
+
+	if !decoder.HasRemaining() {
+		return nil
+	}
+
+	var hasLtHash bool
+	hasLtHash, err = decoder.ReadBool()
+	if err != nil {
+		return err
+	}
+
+	if hasLtHash {
+		ltHashBytes, err := decoder.ReadBytes(2048)
 		if err != nil {
 			return err
 		}
+		snapshot.LtHash = new(lthash.LtHash).InitWithBytes(ltHashBytes)
 	}
 
 	return nil

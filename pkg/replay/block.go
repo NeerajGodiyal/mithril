@@ -489,7 +489,7 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 		block.TotalEpochStake += va.Stake
 	}
 
-	for _, sa := range snapshotManifest.Bank.Stakes.StakeDelegations {
+	for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
 		block.StakeAccts[sa.Account] = true
 	}
 }
