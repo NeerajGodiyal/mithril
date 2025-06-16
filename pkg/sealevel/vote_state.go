@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"slices"
+	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gammazero/deque"
@@ -202,12 +205,10 @@ func (priorVoters *PriorVoters0_23_5) MarshalWithEncoder(encoder *bin.Encoder) e
 func (priorVoters *PriorVoters) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	var err error
 	for count := 0; count < 32; count++ {
-		var priorVoter PriorVoter
-		err = priorVoter.UnmarshalWithDecoder(decoder, false)
+		err = priorVoters.Buf[count].UnmarshalWithDecoder(decoder, false)
 		if err != nil {
 			return err
 		}
-		priorVoters.Buf[count] = priorVoter
 	}
 	priorVoters.Index, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
@@ -912,6 +913,7 @@ func (voteState *VoteState) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
+	voteState.EpochCredits = slices.Grow(voteState.EpochCredits, int(numEpochCredits))
 	for count := uint64(0); count < numEpochCredits; count++ {
 		var epochCredits EpochCredits
 		err = epochCredits.UnmarshalWithDecoder(decoder)
@@ -1372,8 +1374,19 @@ func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	}
 }
 
+var voteStateBufPool = &sync.Pool{New: func() any {
+	return make([]byte, 0, 4096)
+}}
+
 func marshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, error) {
-	buffer := new(bytes.Buffer)
+	var buffer *bytes.Buffer
+	if sbpf.UsePool {
+		bs := voteStateBufPool.Get().([]byte)
+		bs = bs[:0]
+		buffer = bytes.NewBuffer(bs)
+	} else {
+		buffer = &bytes.Buffer{}
+	}
 	encoder := bin.NewBinEncoder(buffer)
 
 	err := voteStateVersions.MarshalWithEncoder(encoder)
@@ -1442,6 +1455,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 			newVoteStateVersioned.Type = VoteStateVersionV1_14_11
 			newVoteStateVersioned.V1_14_11 = *newVoteState
 			voteStateBytes, err := marshalVersionedVoteState(newVoteStateVersioned)
+			defer voteStateBufPool.Put(voteStateBytes)
 			if err != nil {
 				return err
 			}
@@ -1453,6 +1467,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 		newCurrent.Type = VoteStateVersionCurrent
 		newCurrent.Current = *voteState
 		voteStateBytes, err := marshalVersionedVoteState(newCurrent)
+		defer voteStateBufPool.Put(voteStateBytes)
 		if err != nil {
 			return err
 		}
@@ -1464,6 +1479,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 		newVoteStateVersioned.Type = VoteStateVersionV1_14_11
 		newVoteStateVersioned.V1_14_11 = *newVoteState
 		voteStateBytes, err := marshalVersionedVoteState(newVoteStateVersioned)
+		defer voteStateBufPool.Put(voteStateBytes)
 		if err != nil {
 			return err
 		}
