@@ -714,6 +714,10 @@ github.com/onsi/gomega v1.10.1/go.mod h1:iN09h71vgCQne3DLsj+A5owkum+a2tYe+TOCB1y
 github.com/onsi/gomega v1.27.6 h1:ENqfyGeS5AX/rlXDd/ETokDz93u0YufY1Pgxuy/PvWE=
 github.com/orcaman/concurrent-map/v2 v2.0.1 h1:jOJ5Pg2w1oeB6PeDurIYf6k9PQ+aTITr/6lP/L/zp6c=
 github.com/orcaman/concurrent-map/v2 v2.0.1/go.mod h1:9Eq3TG2oBe5FirmYWQfYO5iH1q0Jv47PLaNK++uCdOM=
+github.com/palmerlao/binary v0.0.0-20250617053903-bf5055e049bb h1:rRUKAWwPRJoXqFL5deOvIou2bG8iVQ96riL9hrEnXi8=
+github.com/palmerlao/binary v0.0.0-20250617053903-bf5055e049bb/go.mod h1:2tfj51g5o9dnvsc+fL3Jxr22MuWzYXwx9wEoN0XQ7/c=
+github.com/palmerlao/binary v0.0.0-20250617062159-3054b4d33aed h1:KGRWBqejy/etSgMHjmAmYgqS2pD8vEj3xgRIRR/VWgk=
+github.com/palmerlao/binary v0.0.0-20250617062159-3054b4d33aed/go.mod h1:2tfj51g5o9dnvsc+fL3Jxr22MuWzYXwx9wEoN0XQ7/c=
 github.com/palmerlao/solana-go v0.0.0-20250609073344-a25ae34ec2cd h1:t1VJaDJYuri4MvbD9AKt8q6TpvDqlcOTe64LRTsA7zA=
 github.com/palmerlao/solana-go v0.0.0-20250609073344-a25ae34ec2cd/go.mod h1:l/qqqIN6qJJPtxW/G1PF4JtcE3Zg2vD2EliZrr9Gn5k=
 github.com/palmerlao/solana-go v0.0.0-20250609082338-df594993d104 h1:b42rRcryuwAVcRDlj3B50uroq3d//SXlBOawXw1ogjM=
