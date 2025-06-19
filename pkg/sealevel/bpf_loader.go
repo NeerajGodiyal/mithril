@@ -482,7 +482,6 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	programAcct.Drop()
 
 	instrData := instrCtx.Data
-	var preLens []uint64
 
 	accts := make([]serializeAcct, 0, instrCtx.NumberOfInstructionAccounts())
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
@@ -543,64 +542,62 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	}
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
-	for _, acct := range accts {
+	preLens := make([]uint64, len(accts))
+	for i, acct := range accts {
 		borrowedAcct := acct.acct
+		l := len(serializedData)
 		if acct.isDuplicate { // duplicate
+			serializedData = serializedData[:l+8]
 			position := acct.indexOfAcct
-			serializedData = append(serializedData, byte(position))
-			for count := 0; count < 7; count++ {
-				serializedData = append(serializedData, 0)
-			}
-			preLens = append(preLens, preLens[position])
+			serializedData[l] = byte(position)
+			preLens[i] = preLens[position]
 		} else { // not a duplicate
-			serializedData = append(serializedData, 0xff)
-
+			dataLen := uint64(len(borrowedAcct.Data()))
+			numPaddingBytes := ReallocSpace + util.AlignUp(dataLen, 8) - dataLen
+			serializedData = serializedData[:l+
+				8+ /*not duplicate, signer, writable, executable, 4 bytes padding*/
+				32+ /*account pubkey*/
+				32+ /*owner pubkey*/
+				8+ /*lamports*/
+				8+ /*acct data len*/
+				len(borrowedAcct.Data())+ /*acct data*/
+				int(numPaddingBytes)+
+				8 /*rent epoch*/]
+			serializedData[l] = 0xff
 			if borrowedAcct.IsSigner() {
-				serializedData = append(serializedData, 1)
+				serializedData[l+1] = 1
 			} else {
-				serializedData = append(serializedData, 0)
+				serializedData[l+1] = 0
 			}
 
 			if borrowedAcct.IsWritable() {
-				serializedData = append(serializedData, 1)
+				serializedData[l+2] = 1
 			} else {
-				serializedData = append(serializedData, 0)
+				serializedData[l+2] = 0
 			}
 
 			if borrowedAcct.IsExecutable() {
-				serializedData = append(serializedData, 1)
+				serializedData[l+3] = 1
 			} else {
-				serializedData = append(serializedData, 0)
+				serializedData[l+3] = 0
 			}
 
-			for count := 0; count < 4; count++ {
-				serializedData = append(serializedData, 0)
+			{
+				acctKey := [32]byte(borrowedAcct.Key())
+				copy(serializedData[l+8:l+40], acctKey[:])
+				owner := [32]byte(borrowedAcct.Owner())
+				copy(serializedData[l+40:l+72], owner[:])
 			}
-
-			// acct key
-			acctKey := [32]byte(borrowedAcct.Key())
-			acctKeySlice := acctKey[:]
-			serializedData = append(serializedData, acctKeySlice...)
-
-			// owner
-			owner := [32]byte(borrowedAcct.Owner())
-			ownerSlice := owner[:]
-			serializedData = append(serializedData, ownerSlice...)
 
 			// lamports
-			serializedData = binary.LittleEndian.AppendUint64(serializedData, borrowedAcct.Lamports())
+			binary.LittleEndian.PutUint64(serializedData[l+72:l+80], borrowedAcct.Lamports())
 
 			// acct data len
-			dataLen := uint64(len(borrowedAcct.Data()))
-			preLens = append(preLens, dataLen)
-			serializedData = binary.LittleEndian.AppendUint64(serializedData, dataLen)
+			preLens[i] = dataLen
+			binary.LittleEndian.PutUint64(serializedData[l+80:l+88], dataLen)
 
 			// data in account
-			serializedData = append(serializedData, borrowedAcct.Data()...)
-
-			alignOffset := util.AlignUp(dataLen, 8) - dataLen
-			numPaddingBytes := ReallocSpace + alignOffset
-			serializedData = serializedData[:len(serializedData)+int(numPaddingBytes)]
+			copy(serializedData[l+88:l+88+len(borrowedAcct.Data())], borrowedAcct.Data())
 
 			// rent epoch
 			var rentEpoch uint64
@@ -609,19 +606,19 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 			} else {
 				rentEpoch = borrowedAcct.RentEpoch()
 			}
-			serializedData = binary.LittleEndian.AppendUint64(serializedData, rentEpoch)
+			binary.LittleEndian.PutUint64(serializedData[len(serializedData)-8:], rentEpoch)
 		}
 	}
 
-	// instr data len
-	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(instrData)))
+	l := len(serializedData)
+	serializedData = serializedData[:len(serializedData)+
+		8+ /*instr data len*/
+		len(instrData)+ /*instr data*/
+		32 /*program key*/]
 
-	// instr data
-	serializedData = append(serializedData, instrData...)
-
-	// program id
-	programIdSlice := programId[:]
-	serializedData = append(serializedData, programIdSlice...)
+	binary.LittleEndian.PutUint64(serializedData[l:l+8], uint64(len(instrData)))
+	copy(serializedData[l+8:l+8+len(instrData)], instrData)
+	copy(serializedData[len(serializedData)-32:], programId[:])
 
 	// sanity check for expected len vs. serialized data size
 	if uint64(len(serializedData)) != size {
