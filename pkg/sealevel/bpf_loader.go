@@ -396,9 +396,11 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 }
 
 func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, error) {
-	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, true)
+	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
+		return Syscalls(&execCtx.GlobalCtx.Features, true, u)
+	})
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, true)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true)
 	if err != nil {
 		//mlog.Log.Debugf("failed to create loader: %s", err)
 		return nil, err
@@ -953,12 +955,7 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 	return nil
 }
 
-func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallRegistry *sbpf.SyscallRegistry) error {
-	if syscallRegistry == nil {
-		s := Syscalls(&execCtx.GlobalCtx.Features, false)
-		syscallRegistry = &s
-	}
-
+func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallRegistry sbpf.SyscallRegistry) error {
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
@@ -1001,7 +998,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	opts := &sbpf.VMOpts{
 		HeapMax:      int(heapSize),
 		Input:        parameterBytes,
-		Syscalls:     *syscallRegistry,
+		Syscalls:     syscallRegistry,
 		MaxCU:        int(execCtx.ComputeMeter.Remaining()),
 		ComputeMeter: &execCtx.ComputeMeter,
 		Context:      execCtx,
@@ -1053,13 +1050,11 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	return runErr
 }
 
-func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte) error {
+func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte, syscallRegistry sbpf.SyscallRegistry) error {
 	start := time.Now()
 	//mlog.Log.Debugf("bpf loader - executeProgram")
 
-	syscallRegistry := Syscalls(&execCtx.GlobalCtx.Features, false)
-
-	loader, err := loader.NewLoaderWithSyscalls(programData, &syscallRegistry, false)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false)
 	if err != nil {
 		return err
 	}
@@ -1074,7 +1069,7 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 
 	metrics.GlobalBlockReplay.AddProgramToCache.AddTimingSince(start)
 
-	return executeLoadedProgram(execCtx, program, &syscallRegistry)
+	return executeLoadedProgram(execCtx, program, syscallRegistry)
 }
 
 func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
@@ -1234,12 +1229,15 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 	programAcct.Drop()
 
+	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
+		return Syscalls(&execCtx.GlobalCtx.Features, false, u)
+	})
 	// two cases here: we're either executing from the program cache, so from a pre-parsed/loaded program, or from bytes if
 	// the the program was not found in the cache.
 	if hasLoadedProgram {
-		err = executeLoadedProgram(execCtx, loadedProgram, nil)
+		err = executeLoadedProgram(execCtx, loadedProgram, syscallRegistry)
 	} else {
-		err = executeProgramFromBytes(execCtx, programAcctKey, programBytes)
+		err = executeProgramFromBytes(execCtx, programAcctKey, programBytes, syscallRegistry)
 	}
 
 	return err

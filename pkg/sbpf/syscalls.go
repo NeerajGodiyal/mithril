@@ -31,34 +31,11 @@ type Syscall interface {
 	Invoke(vm VM, r1, r2, r3, r4, r5 uint64) (r0 uint64, err error)
 }
 
-type SyscallRegistry map[uint32]Syscall
-
-func NewSyscallRegistry() SyscallRegistry {
-	return make(SyscallRegistry)
-}
-
-func (s SyscallRegistry) Register(name string, syscall Syscall) (hash uint32, ok bool) {
-	hash = SymbolHash(name)
-	if _, exist := s[hash]; exist {
-		return 0, false // collision or duplicate
-	}
-	s[hash] = syscall
-	ok = true
-	return
-}
+type SyscallRegistry func(uint32) (Syscall, bool)
 
 func (s SyscallRegistry) ExistsByHash(hash uint32) bool {
-	_, exists := s[hash]
+	_, exists := s(hash)
 	return exists
-}
-
-func syscallPrologue(vm VM) error {
-	err := vm.ComputeMeter().Consume(vm.PrevInstrMeter() - vm.DueInstrCount())
-	return err
-}
-
-func syscallEpilogue(vm VM) {
-	vm.SetPrevInstrMeter(vm.ComputeMeter().Remaining())
 }
 
 // Convenience Methods

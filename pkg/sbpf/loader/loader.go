@@ -22,7 +22,7 @@ type Loader struct {
 	rd       io.ReaderAt
 	fileSize uint64
 
-	syscalls        *sbpf.SyscallRegistry
+	syscalls        sbpf.SyscallRegistry
 	elfDeployChecks bool
 
 	// ELF data structures
@@ -81,7 +81,7 @@ func NewLoaderFromBytes(buf []byte) (*Loader, error) {
 	return l, nil
 }
 
-func NewLoaderWithSyscalls(buf []byte, syscalls *sbpf.SyscallRegistry, elfDeployChecks bool) (*Loader, error) {
+func NewLoaderWithSyscalls(buf []byte, syscalls sbpf.SyscallRegistry, elfDeployChecks bool) (*Loader, error) {
 	if len(buf) > maxFileLen {
 		return nil, fmt.Errorf("ELF file too large")
 	}
@@ -112,12 +112,12 @@ func (l *Loader) Load() (*sbpf.Program, error) {
 }
 
 func parseSlots(bs []byte) []sbpf.Slot {
-	if len(bs) % 8 != 0 {
+	if len(bs)%8 != 0 {
 		panic(fmt.Sprintf("expected len(bs)=%d to be divisible by 8", len(bs)))
 	}
 	out := make([]sbpf.Slot, len(bs)/8)
-	for i := 0; i < len(bs); i+= 8 {
-		out[i/8] = sbpf.Slot(binary.LittleEndian.Uint64(bs[i:i+8]))
+	for i := 0; i < len(bs); i += 8 {
+		out[i/8] = sbpf.Slot(binary.LittleEndian.Uint64(bs[i : i+8]))
 	}
 	return out
 }

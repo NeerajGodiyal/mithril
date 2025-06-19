@@ -25,7 +25,7 @@ type Interpreter struct {
 	entry    uint64
 	heapSize uint64
 
-	syscalls          map[uint32]Syscall
+	syscalls          func(uint32) (Syscall, bool)
 	funcs             map[uint32]int64
 	vmContext         any
 	globalCtx         *global.GlobalCtx
@@ -528,7 +528,7 @@ mainLoop:
 			pc++
 		case OpCall:
 			// TODO use src reg hint
-			if sc, ok := ip.syscalls[ins.Uimm()]; ok {
+			if sc, ok := ip.syscalls(ins.Uimm()); ok {
 				r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
 				pc++
 			} else if target, ok := ip.funcs[ins.Uimm()]; ok {
