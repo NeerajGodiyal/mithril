@@ -24,6 +24,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type MapSyscallRegistry map[uint32]sbpf.Syscall
+
+func NewSyscallRegistry() MapSyscallRegistry {
+	return make(MapSyscallRegistry)
+}
+
+func (s MapSyscallRegistry) Register(name string, syscall sbpf.Syscall) (hash uint32, ok bool) {
+	hash = sbpf.SymbolHash(name)
+	if _, exist := s[hash]; exist {
+		return 0, false // collision or duplicate
+	}
+	s[hash] = syscall
+	ok = true
+	return
+}
+
+func ToFunc(m MapSyscallRegistry) sbpf.SyscallRegistry {
+	return sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
+		f, ok := m[u]
+		return f, ok
+	})
+}
+
 func TestInterpreter_Noop(t *testing.T) {
 	// TODO simplify API?
 	loader, err := loader.NewLoaderFromBytes(fixtures.Load(t, "sbpf", "noop.so"))
@@ -36,7 +59,7 @@ func TestInterpreter_Noop(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("log", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 
@@ -46,7 +69,7 @@ func TestInterpreter_Noop(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -75,7 +98,7 @@ func TestInterpreter_Memcpy_Strings_Match(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_copy", SyscallMemcpy)
@@ -85,7 +108,7 @@ func TestInterpreter_Memcpy_Strings_Match(t *testing.T) {
 	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -113,7 +136,7 @@ func TestInterpreter_Memcpy_Do_Not_Match(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_copy", SyscallMemcpy)
@@ -124,7 +147,7 @@ func TestInterpreter_Memcpy_Do_Not_Match(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -151,7 +174,7 @@ func TestInterpreter_Memmove_Strings_Match(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_copy", SyscallMemmove)
@@ -162,7 +185,7 @@ func TestInterpreter_Memmove_Strings_Match(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -190,7 +213,7 @@ func TestInterpreter_Memmove_Do_Not_Match(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_copy", SyscallMemmove)
@@ -201,7 +224,7 @@ func TestInterpreter_Memmove_Do_Not_Match(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -227,7 +250,7 @@ func TestInterpreter_Memcpy_Overlapping(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_copy", SyscallMemcpy)
@@ -238,7 +261,7 @@ func TestInterpreter_Memcpy_Overlapping(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -265,7 +288,7 @@ func TestInterpreter_Memcmp_Matches(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_memcmp", SyscallMemcmp)
@@ -276,7 +299,7 @@ func TestInterpreter_Memcmp_Matches(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -306,7 +329,7 @@ func TestInterpreter_Memcmp_Does_Not_Match(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_memcmp", SyscallMemcmp)
@@ -317,7 +340,7 @@ func TestInterpreter_Memcmp_Does_Not_Match(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -346,7 +369,7 @@ func TestInterpreter_Memset_Check_Correct(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_memset", SyscallMemset)
@@ -358,7 +381,7 @@ func TestInterpreter_Memset_Check_Correct(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -386,7 +409,7 @@ func TestInterpreter_Sha256(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_sha256", SyscallSha256)
@@ -398,7 +421,7 @@ func TestInterpreter_Sha256(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -427,7 +450,7 @@ func TestInterpreter_Blake3(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_blake3", SyscallBlake3)
@@ -439,7 +462,7 @@ func TestInterpreter_Blake3(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -468,7 +491,7 @@ func TestInterpreter_Keccak256(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_keccak256", SyscallKeccak256)
@@ -480,7 +503,7 @@ func TestInterpreter_Keccak256(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -509,7 +532,7 @@ func TestInterpreter_CreateProgramAddress(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_create_program_address", SyscallCreateProgramAddress)
@@ -522,7 +545,7 @@ func TestInterpreter_CreateProgramAddress(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -553,7 +576,7 @@ func TestInterpreter_TryFindProgramAddress(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_create_program_address", SyscallCreateProgramAddress)
@@ -567,7 +590,7 @@ func TestInterpreter_TryFindProgramAddress(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -594,7 +617,7 @@ func TestInterpreter_TestPanic(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := sbpf.NewSyscallRegistry()
+	syscalls := NewSyscallRegistry()
 	syscalls.Register("sol_log_", SyscallLog)
 	syscalls.Register("log_64", SyscallLog64)
 	syscalls.Register("my_panic", SyscallPanic)
@@ -605,7 +628,7 @@ func TestInterpreter_TestPanic(t *testing.T) {
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
-		Syscalls: syscalls,
+		Syscalls: ToFunc(syscalls),
 		Context:  &ExecutionCtx{Log: &log, ComputeMeter: cu.NewComputeMeterDefault()},
 	})
 	require.NotNil(t, interpreter)
@@ -626,7 +649,9 @@ func TestInterpreter_Secp256k1_Syscall(t *testing.T) {
 
 	require.NoError(t, program.Verify())
 
-	syscalls := Syscalls(new(features.Features), false)
+	syscalls := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
+		return Syscalls(new(features.Features), false, u)
+	})
 
 	var log LogRecorder
 
