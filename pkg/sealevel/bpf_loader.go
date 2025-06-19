@@ -483,24 +483,28 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 
 	instrData := instrCtx.Data
 
-	accts := make([]serializeAcct, 0, instrCtx.NumberOfInstructionAccounts())
+	accts := make([]serializeAcct, instrCtx.NumberOfInstructionAccounts())
+	defer func() {
+		for _, sa := range accts {
+			if sa.acct != nil {
+				sa.acct.Drop()
+			}
+		}
+	}()
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if isDupe {
-			sa := serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
-			accts = append(accts, sa)
+			accts[int(instrAcctIdx)] = serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
 		} else {
 			acct, err := instrCtx.BorrowInstructionAccount(txCtx, instrAcctIdx)
 			if err != nil {
 				return nil, nil, err
 			}
-			defer acct.Drop()
 
-			sa := serializeAcct{indexOfAcct: instrAcctIdx, acct: acct}
-			accts = append(accts, sa)
+			accts[int(instrAcctIdx)] = serializeAcct{indexOfAcct: instrAcctIdx, acct: acct}
 		}
 	}
 
