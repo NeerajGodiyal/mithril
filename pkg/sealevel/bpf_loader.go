@@ -534,7 +534,13 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	size += 8 + uint64(len(instrData)) // data len
 	size += solana.PublicKeyLength     // program id
 
-	serializedData := make([]byte, 0, size)
+	var serializedData []byte
+	if execCtx.SlotCtx.SerializedParameterArena != nil {
+		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
+		serializedData = arenaData[:0]
+	} else {
+		serializedData = make([]byte, 0, size) // No arena configured
+	}
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
 	for _, acct := range accts {
@@ -798,7 +804,13 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	size += 8 + uint64(len(instrData)) // data len
 	size += solana.PublicKeyLength     // program id
 
-	serializedData := make([]byte, 0, size)
+	var serializedData []byte
+	if execCtx.SlotCtx.SerializedParameterArena != nil {
+		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
+		serializedData = arenaData[:0] // Use arena slice with zero length but full capacity
+	} else {
+		serializedData = make([]byte, 0, size) // No arena configured
+	}
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
 	for _, acct := range accts {

@@ -82,8 +82,14 @@ func (instrCtx *InstructionCtx) BorrowAccount(txCtx *TransactionCtx, idxInTx uin
 		return nil, err
 	}
 
-	borrowedAcct := BorrowedAccount{Account: account, TxCtx: txCtx, InstrCtx: instrCtx, IndexInTransaction: idxInTx, IndexInInstruction: idxInInstr}
-	return &borrowedAcct, nil
+	if txCtx.BorrowedAccountArena != nil {
+		borrowedAcct, _ := txCtx.BorrowedAccountArena.Alloc()
+		*borrowedAcct = BorrowedAccount{Account: account, TxCtx: txCtx, InstrCtx: instrCtx, IndexInTransaction: idxInTx, IndexInInstruction: idxInInstr}
+		return borrowedAcct, nil
+	} else {
+		borrowedAcct := BorrowedAccount{Account: account, TxCtx: txCtx, InstrCtx: instrCtx, IndexInTransaction: idxInTx, IndexInInstruction: idxInInstr}
+		return &borrowedAcct, nil
+	}
 }
 
 func (instrCtx *InstructionCtx) BorrowInstructionAccount(txCtx *TransactionCtx, instrAcctIdx uint64) (*BorrowedAccount, error) {

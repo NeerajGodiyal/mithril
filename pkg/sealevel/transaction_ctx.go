@@ -2,10 +2,14 @@ package sealevel
 
 import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/wide"
 	"github.com/gagliardetto/solana-go"
 )
+
+// One per tx processor.
+var BorrowedAccountArenas []*arena.Arena[BorrowedAccount]
 
 type TxReturnData struct {
 	programId solana.PublicKey
@@ -36,6 +40,7 @@ type TransactionCtx struct {
 	ModifiedStakeAccts       bool
 	ModifiedVoteAccts        bool
 	NonceAcctAdvanced        bool
+	BorrowedAccountArena     *arena.Arena[BorrowedAccount]
 }
 
 func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {

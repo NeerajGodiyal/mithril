@@ -14,9 +14,11 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -50,6 +52,9 @@ var (
 	debugAcctWrites []string
 	metricsFilename string
 	cpuprofFilename string
+
+	paramArenaSizeMB         uint64
+	borrowedAccountArenaSize uint64
 )
 
 func init() {
@@ -68,6 +73,8 @@ func init() {
 	Cmd.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 	Cmd.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
 	Cmd.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
+	Cmd.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
+	Cmd.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
 	Cmd.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
 	Cmd.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 }
@@ -166,6 +173,16 @@ func run(c *cobra.Command, args []string) {
 		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
 	}
 	defer cpuprofCleanup()
+
+	if paramArenaSizeMB > 0 {
+		replay.SerializedParameterArena = arena.New[byte](paramArenaSizeMB << 20)
+	}
+	if borrowedAccountArenaSize > 0 {
+		sealevel.BorrowedAccountArenas = make([]*arena.Arena[sealevel.BorrowedAccount], txParallelism)
+		for i := range txParallelism {
+			sealevel.BorrowedAccountArenas[i] = arena.New[sealevel.BorrowedAccount](borrowedAccountArenaSize)
+		}
+	}
 
 	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
 	mlog.Log.Infof("done replaying, closing DB")

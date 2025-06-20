@@ -12,6 +12,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
@@ -382,7 +383,10 @@ func verifySignatures(tx *solana.Transaction, sigverifyWg *sync.WaitGroup) {
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions) (*fees.TxFeeInfo, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
+	if arena != nil {
+		arena.Reset()
+	}
 	start := time.Now()
 	sigverifyWg.Add(1)
 	go verifySignatures(tx, sigverifyWg)
@@ -421,6 +425,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
 	execCtx.TransactionContext.AllInstructions = instrs
 	execCtx.TransactionContext.Signature = tx.Signatures[0]
+	execCtx.TransactionContext.BorrowedAccountArena = arena
 
 	start = time.Now()
 	// check for pre-balance divergences

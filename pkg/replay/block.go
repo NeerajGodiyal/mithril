@@ -13,6 +13,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
@@ -29,6 +30,8 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
+
+var SerializedParameterArena *arena.Arena[byte]
 
 type BlockRewardsInfo struct {
 	Leader      solana.PublicKey
@@ -739,6 +742,8 @@ func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.Accou
 		EahWorkaroundBankhash: block.EahWorkaroundBankhash,
 
 		HasEahWorkaround: block.HasEahWorkaround,
+
+		SerializedParameterArena: SerializedParameterArena,
 	}
 
 	return slotCtx
@@ -751,7 +756,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		//mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
 
 		txMeta := block.TxMetas[idx]
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts)
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
 
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {
@@ -786,13 +791,13 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 	wg := &sync.WaitGroup{}
 	wg.Add(txParallelism)
-	for i := 0; i < txParallelism; i++ {
+	for i := range txParallelism {
 		go func() {
 			defer wg.Done()
 			for idx := range do {
 				txStart := time.Now()
 				tx := block.Transactions[idx]
-				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts)
+				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
 				txErr := errs[idx]
 				// check for success-failure return value divergences
 				if txErr == nil && rblock.TxMetas[idx].Err != nil {
@@ -823,6 +828,10 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	if SerializedParameterArena != nil {
+		SerializedParameterArena.Reset()
+	}
+
 	var sigverifyWg sync.WaitGroup
 	// Each Transaction's sigverify is done asynchronously. Make sure they're all done before we finish this block.
 	defer sigverifyWg.Wait()
