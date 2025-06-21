@@ -812,8 +812,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 var SyscallAltBn128Compression = sbpf.SyscallFunc4(SyscallAltBn128CompressionImpl)
 
 func altbn128Addition(input []byte) ([]byte, error) {
-	mlog.Log.Debugf("input to addition: %d", input)
-
 	if len(input) > AltBn128AdditionInputLen {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
@@ -843,8 +841,6 @@ func altbn128Addition(input []byte) ([]byte, error) {
 }
 
 func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
-	mlog.Log.Debugf("input to multiplication: %d", input)
-
 	if uint64(len(input)) > expectedLen {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
@@ -867,8 +863,6 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 }
 
 func altbn128Pairing(input []byte) ([]byte, error) {
-	mlog.Log.Debugf("input to pairing: %d", input)
-
 	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
 
 	g1Vals := make([]*bn256.G1, 0)
