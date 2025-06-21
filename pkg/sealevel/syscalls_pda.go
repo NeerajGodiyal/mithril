@@ -3,9 +3,10 @@ package sealevel
 import (
 	"bytes"
 
+	"math"
+
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/solana"
-	"github.com/ethereum/go-ethereum/common/math"
 )
 
 const MaxSeeds = 16

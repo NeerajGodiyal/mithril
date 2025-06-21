@@ -507,6 +507,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 	metrics.GlobalBlockReplay.IxLoop.AddTimingSince(start)
 
+	if dbgOpts.IsDebugTx(tx.Signatures[0]) {
+		for _, l := range log.Logs {
+			mlog.Log.Debugf("%s", l)
+		}
+	}
+
 	//mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
 	// check for CU consumed divergences

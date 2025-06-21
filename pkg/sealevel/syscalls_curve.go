@@ -9,12 +9,13 @@ import (
 	"github.com/Overclock-Validator/bgls/curves"
 	"github.com/Overclock-Validator/gnark-crypto/ecc/bn254"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
-	bn256 "github.com/ethereum/go-ethereum/crypto/bn256/cloudflare"
 	"github.com/gtank/ristretto255"
+	bn256 "github.com/smcio/go-ethereum/crypto/bn256/cloudflare"
 )
 
 // curve types
@@ -811,6 +812,8 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 var SyscallAltBn128Compression = sbpf.SyscallFunc4(SyscallAltBn128CompressionImpl)
 
 func altbn128Addition(input []byte) ([]byte, error) {
+	mlog.Log.Debugf("input to addition: %d", input)
+
 	if len(input) > AltBn128AdditionInputLen {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
@@ -840,6 +843,8 @@ func altbn128Addition(input []byte) ([]byte, error) {
 }
 
 func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
+	mlog.Log.Debugf("input to multiplication: %d", input)
+
 	if uint64(len(input)) > expectedLen {
 		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
 	}
@@ -862,6 +867,8 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 }
 
 func altbn128Pairing(input []byte) ([]byte, error) {
+	mlog.Log.Debugf("input to pairing: %d", input)
+
 	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
 
 	g1Vals := make([]*bn256.G1, 0)
@@ -895,7 +902,7 @@ func altbn128Pairing(input []byte) ([]byte, error) {
 	if isPaired || len(g1Vals) == 0 {
 		callResult[31] = 1
 	} else {
-		//mlog.Log.Debugf("PairingCheck fail\n")
+		mlog.Log.Debugf("PairingCheck fail\n")
 	}
 
 	return callResult[:], nil
@@ -959,7 +966,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Addition(inputSlice)
 			if err != nil {
-				//mlog.Log.Debugf("altbn128 addition err: %s", err)
+				mlog.Log.Debugf("altbn128 addition err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -978,7 +985,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 
 			result, err := altbn128Multiplication(inputSlice, expectedSize)
 			if err != nil {
-				//mlog.Log.Debugf("altbn128 multiplication err: %s", err)
+				mlog.Log.Debugf("altbn128 multiplication err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)
@@ -990,7 +997,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			result, err := altbn128Pairing(inputSlice)
 			if err != nil {
-				//mlog.Log.Debugf("altbn128 pairing err: %s", err)
+				mlog.Log.Debugf("altbn128 pairing err: %s", err)
 				return syscallSuccess(1)
 			} else {
 				copy(callResult, result)

@@ -235,7 +235,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 			err = clock.UnmarshalWithDecoder(decoder)
 			if err != nil {
-				panic(fmt.Sprintf("unable to unmarshal clock sysvar"))
+				panic("unable to unmarshal clock sysvar")
 			}
 
 			err = updateClockSysvar(&clock, block)
@@ -268,7 +268,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 			err = slotHashes.UnmarshalWithDecoder(decoder)
 			if err != nil {
-				panic(fmt.Sprintf("unable to unmarshal slothashes sysvar"))
+				panic("unable to unmarshal slothashes sysvar")
 			}
 
 			slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
