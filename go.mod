@@ -6,8 +6,6 @@ replace github.com/gagliardetto/solana-go => github.com/palmerlao/solana-go v0.0
 
 replace github.com/gagliardetto/binary => github.com/palmerlao/binary v0.0.0-20250617062159-3054b4d33aed
 
-replace github.com/ethereum/go-ethereum => /mnt/go-ethereum
-
 require (
 	github.com/LiamHaworth/go-tproxy v0.0.0-20190726054950-ef7efd7f24ed
 	github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5
