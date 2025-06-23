@@ -200,28 +200,32 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
-	accts := accounts.NewMemAccounts()
-
 	ctx := context.Background()
 	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	for _, acct := range slotAccts {
-		var pkBytes [32]byte
-		copy(pkBytes[:], acct.Key[:])
+	numAccts := uint64(len(slotAccts))
+	accts := accounts.NewMemAccountsWithLen(numAccts)
+	parentAccts := accounts.NewMemAccountsWithLen(numAccts)
 
-		err = accts.SetAccount(&pkBytes, acct)
+	for _, acct := range slotAccts {
+		err = accts.SetAccountWithoutLock(acct.Key, acct)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+
+		err = parentAccts.SetAccountWithoutLock(acct.Key, acct)
+		if err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -251,9 +255,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.Clock.Sysvar = &clock
 			sealevel.SysvarCache.Clock.Acct = clockAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarClockAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, clockAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct)
+			if err != nil {
+				panic("unable to set clock sysvar to accts")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct)
 			if err != nil {
 				panic("unable to set clock sysvar to accts")
 			}
@@ -280,9 +287,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.SlotHashes.Sysvar = &slotHashes
 			sealevel.SysvarCache.SlotHashes.Acct = slotHashesAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarSlotHashesAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, slotHashesAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct)
+			if err != nil {
+				panic("unable to set slothashes sysvar to accountsdb")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct)
 			if err != nil {
 				panic("unable to set slothashes sysvar to accountsdb")
 			}
@@ -300,9 +310,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 			sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarRecentBlockHashesAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, recentBlockhashesAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
+			if err != nil {
+				panic("unable to set recentblockhashes sysvar to accts")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
 			if err != nil {
 				panic("unable to set recentblockhashes sysvar to accts")
 			}
@@ -320,9 +333,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.SlotHistory.Sysvar = &slotHistory
 			sealevel.SysvarCache.SlotHistory.Acct = slotHistoryAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarSlotHistoryAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, slotHistoryAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct)
+			if err != nil {
+				panic("unable to set clock sysvar to accts")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct)
 			if err != nil {
 				panic("unable to set clock sysvar to accts")
 			}
@@ -340,9 +356,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.StakeHistory.Sysvar = &stakeHistory
 			sealevel.SysvarCache.StakeHistory.Acct = stakeHistoryAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarStakeHistoryAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, stakeHistoryAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
+			if err != nil {
+				panic("unable to set stakehistory sysvar to accts")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
 			if err != nil {
 				panic("unable to set stakehistory sysvar to accts")
 			}
@@ -360,16 +379,19 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.LastRestartSlot.Sysvar = &lastRestartSlot
 			sealevel.SysvarCache.LastRestartSlot.Acct = lastRestartSlotAcct
 
-			var sysvarPkBytes [32]byte
-			copy(sysvarPkBytes[:], sealevel.SysvarLastRestartSlotAddr[:])
-			err = accts.SetAccount(&sysvarPkBytes, lastRestartSlotAcct)
+			err = accts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct)
+			if err != nil {
+				panic("unable to set last restart slot sysvar to accts")
+			}
+
+			err = accts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct)
 			if err != nil {
 				panic("unable to set last restart slot sysvar to accts")
 			}
 		}
 	}
 
-	return accts, nil
+	return accts, parentAccts, nil
 }
 
 func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []solana.PublicKey) {
@@ -715,13 +737,14 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 	return writableAccts, modifiedAccts
 }
 
-func newSlotCtx(block *Block, accts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
+func newSlotCtx(block *Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
 	slotCtx := &sealevel.SlotCtx{
-		Accounts:   accts,
-		AccountsDb: acctsDb,
-		Slot:       block.Slot,
-		ParentSlot: block.ParentSlot,
-		Epoch:      block.Epoch,
+		Accounts:    accts,
+		ParentAccts: parentAccts,
+		AccountsDb:  acctsDb,
+		Slot:        block.Slot,
+		ParentSlot:  block.ParentSlot,
+		Epoch:       block.Epoch,
 
 		AcctMapsMu:    &sync.Mutex{},
 		ModifiedAccts: make(map[solana.PublicKey]bool),
@@ -850,13 +873,13 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism in
 
 	start = time.Now()
 	// gather up all accounts referenced in the block
-	accts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
-	slotCtx := newSlotCtx(block, accts, acctsDb)
+	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
 
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()

@@ -33,6 +33,7 @@ type SlotBank struct {
 
 type SlotCtx struct {
 	Accounts             accounts.Accounts
+	ParentAccts          accounts.Accounts
 	AccountsDb           *accountsdb.AccountsDb
 	Slot                 uint64
 	ParentSlot           uint64

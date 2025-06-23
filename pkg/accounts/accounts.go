@@ -12,6 +12,7 @@ type Accounts interface {
 	GetAccount(pubkey *[32]byte) (*Account, error)
 	SetAccount(pubkey *[32]byte, acc *Account) error
 	AllAccounts() []*Account
+	SetAccountWithoutLock(pubkey solana.PublicKey, acc *Account) error
 }
 
 type Account struct {
