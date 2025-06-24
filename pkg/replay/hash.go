@@ -1,11 +1,12 @@
 package replay
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"runtime"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -167,23 +168,12 @@ func computeMerkleRootLoop(acctHashes [][]byte) []byte {
 	}
 }
 
-func pubkeyCmp(a solana.PublicKey, b solana.PublicKey) bool {
-	for i := uint64(0); i < 4; i++ {
-		a1 := binary.BigEndian.Uint64(a[8*i:])
-		b1 := binary.BigEndian.Uint64(b[8*i:])
-		if a1 != b1 {
-			return a1 < b1
-		}
-	}
-	return false
-}
-
 func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 	acctHashes := calculateAccountHashes(accts)
 
 	// sort by pubkey
-	sort.SliceStable(acctHashes, func(i, j int) bool {
-		return pubkeyCmp(acctHashes[i].Pubkey, acctHashes[j].Pubkey)
+	slices.SortFunc(acctHashes, func(a, b acctHash) int {
+		return bytes.Compare(a.Pubkey[:], b.Pubkey[:])
 	})
 
 	/*mlog.Log.Debugf("accounts modified, sorted by pubkey:\n")
