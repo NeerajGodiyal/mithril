@@ -25,7 +25,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
-	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -126,14 +125,20 @@ func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
 
 	numPubkeys += len(block.UpdatedAccts)
 
-	pubkeys := make([]solana.PublicKey, 0, numPubkeys)
+	pubkeyMap := make(map[solana.PublicKey]struct{}, numPubkeys)
 
 	for _, tx := range block.Transactions {
-		pubkeys = append(pubkeys, tx.Message.AccountKeys...)
+		for _, pk := range tx.Message.AccountKeys {
+			pubkeyMap[pk] = struct{}{}
+		}
 	}
 
-	pubkeys = append(pubkeys, block.UpdatedAccts...)
-	pubkeys = util.DedupePubkeys(pubkeys)
+	pubkeys := make([]solana.PublicKey, len(pubkeyMap))
+	i := 0
+	for pk := range pubkeyMap {
+		pubkeys[i] = pk
+		i++
+	}
 
 	return pubkeys
 }
