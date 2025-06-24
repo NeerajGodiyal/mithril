@@ -51,10 +51,10 @@ func calculateSingleAcctHash(acct accounts.Account) acctHash {
 	_, _ = hasher.Write(acct.Owner[:])
 	_, _ = hasher.Write(acct.Key[:])
 
-	h := sha256.New()
+	/*h := sha256.New()
 	h.Write(acct.Data)
 
-	//fmt.Printf("acct: pubkey %s, lamports %d, owner %s, rent_epoch %d, data hash: %s\n", acct.Key, acct.Lamports, solana.PublicKeyFromBytes(acct.Owner[:]), acct.RentEpoch, solana.HashFromBytes(h.Sum(nil)))
+	fmt.Printf("acct: pubkey %s, lamports %d, owner %s, rent_epoch %d, data hash: %s\n", acct.Key, acct.Lamports, solana.PublicKeyFromBytes(acct.Owner[:]), acct.RentEpoch, solana.HashFromBytes(h.Sum(nil)))*/
 
 	return newAcctHash(acct.Key, hasher.Sum(nil))
 }
@@ -80,9 +80,6 @@ func calculateSingleAcctHashOnly(acct accounts.Account) []byte {
 
 	_, _ = hasher.Write(acct.Owner[:])
 	_, _ = hasher.Write(acct.Key[:])
-
-	h := sha256.New()
-	h.Write(acct.Data)
 
 	return hasher.Sum(nil)
 }
