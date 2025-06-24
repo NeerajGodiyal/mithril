@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -85,16 +87,41 @@ func calculateSingleAcctHashOnly(acct accounts.Account) []byte {
 }
 
 func calculateAccountHashes(accts []*accounts.Account) []acctHash {
-	pairs := make([]acctHash, 0, len(accts))
-	for _, acct := range accts {
-		if acct.Lamports == 0 {
-			pairs = append(pairs, newAcctHash(acct.Key, nil))
-		} else {
-			pair := calculateSingleAcctHash(*acct)
-			pairs = append(pairs, pair)
-		}
+	if len(accts) == 0 {
+		return []acctHash{}
 	}
 
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(accts) {
+		numWorkers = len(accts)
+	}
+
+	pairs := make([]acctHash, len(accts))
+	chunkSize := (len(accts) + numWorkers - 1) / numWorkers
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			start := workerID * chunkSize
+			end := start + chunkSize
+			if end > len(accts) {
+				end = len(accts)
+			}
+
+			for j := start; j < end; j++ {
+				acct := accts[j]
+				if acct.Lamports == 0 {
+					pairs[j] = newAcctHash(acct.Key, nil)
+				} else {
+					pairs[j] = calculateSingleAcctHash(*acct)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
 	return pairs
 }
 
