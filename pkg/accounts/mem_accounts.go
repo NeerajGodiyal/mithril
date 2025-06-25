@@ -37,6 +37,14 @@ func (m MemAccounts) GetAccount(pubkey *[32]byte) (*Account, error) {
 	return acct, nil
 }
 
+func (m MemAccounts) GetAccountWithoutLock(pubkey solana.PublicKey) (*Account, error) {
+	acct, ok := m.Map[pubkey]
+	if !ok {
+		return nil, fmt.Errorf("no such account %s found", base58.Encode(pubkey[:]))
+	}
+	return acct, nil
+}
+
 func (m MemAccounts) SetAccount(pubkey *[32]byte, acct *Account) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

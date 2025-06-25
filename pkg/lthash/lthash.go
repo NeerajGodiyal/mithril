@@ -2,8 +2,8 @@ package lthash
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -23,10 +23,6 @@ func (ltHash *LtHash) calculateAcctHash(acct *accounts.Account) []byte {
 	binary.LittleEndian.PutUint64(lamportBytes[:], acct.Lamports)
 	_, _ = hasher.Write(lamportBytes[:])
 
-	var rentEpochBytes [8]byte
-	binary.LittleEndian.PutUint64(rentEpochBytes[:], acct.RentEpoch)
-	_, _ = hasher.Write(rentEpochBytes[:])
-
 	_, _ = hasher.Write(acct.Data)
 
 	if acct.Executable {
@@ -38,26 +34,27 @@ func (ltHash *LtHash) calculateAcctHash(acct *accounts.Account) []byte {
 	_, _ = hasher.Write(acct.Owner[:])
 	_, _ = hasher.Write(acct.Key[:])
 
-	h := sha256.New()
-	h.Write(acct.Data)
-
-	return hasher.Sum(nil)
-}
-
-func (ltHash *LtHash) InitWithAcct(acct *accounts.Account) *LtHash {
-	h := ltHash.calculateAcctHash(acct)
-
-	hasher := blake3.New()
-	hasher.Write(h)
-
 	var data [2048]byte
 	digest := hasher.Digest()
 	digest.Read(data[:])
 
-	for i := range numElements {
-		val := binary.LittleEndian.Uint16(data[i*2 : (i*2)+2])
-		ltHash.value[i] = val
+	return data[:]
+}
+
+func (ltHash *LtHash) InitWithAcct(acct *accounts.Account) *LtHash {
+	if acct.Lamports == 0 {
+		return &LtHash{}
 	}
+
+	hashData := ltHash.calculateAcctHash(acct)
+
+	bytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
+	copy(bytes, hashData)
+
+	/*for i := range numElements {
+		val := binary.LittleEndian.Uint16(hashData[i*2 : (i*2)+2])
+		ltHash.value[i] = val
+	}*/
 
 	return ltHash
 }
@@ -74,6 +71,17 @@ func (ltHash *LtHash) InitWithBytes(data []byte) *LtHash {
 		val := binary.LittleEndian.Uint16(output[i*2 : (i*2)+2])
 		ltHash.value[i] = val
 	}
+
+	return ltHash
+}
+
+func (ltHash *LtHash) InitWithHash(data []byte) *LtHash {
+	if len(data) != numElements*2 {
+		panic(fmt.Sprintf("wrong len of input data (%d)", len(data)))
+	}
+
+	bytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
+	copy(bytes, data)
 
 	return ltHash
 }
@@ -110,6 +118,15 @@ func (ltHash *LtHash) Add(other *LtHash) *LtHash {
 func (ltHash *LtHash) Sub(other *LtHash) *LtHash {
 	ltHash.MixOut(other)
 	return ltHash
+}
+
+func (ltHash *LtHash) Equals(other *LtHash) bool {
+	for i, element := range ltHash.value {
+		if element != other.value[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (ltHash *LtHash) Checksum() []byte {

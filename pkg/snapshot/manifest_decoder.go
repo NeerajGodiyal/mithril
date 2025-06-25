@@ -1536,7 +1536,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 		if err != nil {
 			return err
 		}
-		snapshot.LtHash = new(lthash.LtHash).InitWithBytes(ltHashBytes)
+		snapshot.LtHash = new(lthash.LtHash).InitWithHash(ltHashBytes)
 	}
 
 	return nil

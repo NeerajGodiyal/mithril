@@ -11,6 +11,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/gagliardetto/solana-go"
 )
@@ -53,6 +54,7 @@ type SlotCtx struct {
 	VoteAccts             map[solana.PublicKey]uint64
 	TotalEpochStake       uint64
 	FinalBankhash         []byte
+	AcctsLtHash           *lthash.LtHash
 	EpochsAcctHash        []byte
 	Replay                bool
 	LamportsBurnt         uint64
@@ -366,6 +368,15 @@ func (slotCtx *SlotCtx) GetAccount(pubkey solana.PublicKey) (*accounts.Account, 
 		return nil, err
 	} else {
 		return acct.Clone(), nil
+	}
+}
+
+func (slotCtx *SlotCtx) GetParentAccount(pubkey solana.PublicKey) (*accounts.Account, error) {
+	acct, err := slotCtx.ParentAccts.GetAccountWithoutLock(pubkey)
+	if err != nil {
+		return nil, err
+	} else {
+		return acct, nil
 	}
 }
 

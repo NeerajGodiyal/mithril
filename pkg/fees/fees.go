@@ -163,11 +163,13 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 
 	leaderAcct, err = slotCtx.GetAccount(leader)
 	if err != nil {
-		// if leader didn't appear at all in the block, then retrieve its latest state from accountsdb instead
+		// if leader didn't appear at all in the block, then retrieve its latest state from
+		// accountsdb, and also add it to the parent accts object
 		leaderAcct, err = acctsDb.GetAccount(slotCtx.Slot, leader)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get leader acct %s from both slotCtx and accountsdb", leader))
 		}
+		slotCtx.ParentAccts.SetAccountWithoutLock(leader, leaderAcct.Clone())
 	}
 
 	leaderAcct.Lamports, err = safemath.CheckedAddU64(leaderAcct.Lamports, feesToLeader)

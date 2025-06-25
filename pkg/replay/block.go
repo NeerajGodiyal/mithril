@@ -14,9 +14,11 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/bankhash"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
@@ -49,6 +51,7 @@ type Block struct {
 	EahWorkaroundBankhash  []byte
 	HasEahWorkaround       bool
 	ParentBankhash         [32]byte
+	AcctsLtHash            *lthash.LtHash
 	NumSignatures          uint64
 	Blockhash              [32]byte
 	ExpectedBankhash       [32]byte
@@ -242,6 +245,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to retrieve clock sysvar when updating clock")
 			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct.Clone())
+			if err != nil {
+				panic("unable to set clock sysvar to accts")
+			}
+
 			decoder := bin.NewBinDecoder(clockAcct.Data)
 			var clock sealevel.SysvarClock
 
@@ -264,11 +273,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to set clock sysvar to accts")
 			}
-
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct)
-			if err != nil {
-				panic("unable to set clock sysvar to accts")
-			}
 		}
 
 		// update and cache SlotHashes sysvar
@@ -276,6 +280,11 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			slotHashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHashesAddr)
 			if err != nil {
 				panic("unable to retrieve slothashes sysvar from acctsdb")
+			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct.Clone())
+			if err != nil {
+				panic("unable to set slothashes sysvar to accountsdb")
 			}
 
 			decoder := bin.NewBinDecoder(slotHashesAcct.Data)
@@ -296,11 +305,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to set slothashes sysvar to accountsdb")
 			}
-
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct)
-			if err != nil {
-				panic("unable to set slothashes sysvar to accountsdb")
-			}
 		}
 
 		// cache RecentBlockhashes sysvar
@@ -309,6 +313,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to get recentblockhashes")
 			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct.Clone())
+			if err != nil {
+				panic("unable to set recentblockhashes sysvar to accts")
+			}
+
 			decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 			var recentBlockhashes sealevel.SysvarRecentBlockhashes
 			recentBlockhashes.MustUnmarshalWithDecoder(decoder)
@@ -316,11 +326,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
-			if err != nil {
-				panic("unable to set recentblockhashes sysvar to accts")
-			}
-
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
 			if err != nil {
 				panic("unable to set recentblockhashes sysvar to accts")
 			}
@@ -332,6 +337,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to get slothistory")
 			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct.Clone())
+			if err != nil {
+				panic("unable to set slothistory sysvar to accts")
+			}
+
 			decoder := bin.NewBinDecoder(slotHistoryAcct.Data)
 			var slotHistory sealevel.SysvarSlotHistory
 			slotHistory.MustUnmarshalWithDecoder(decoder)
@@ -339,11 +350,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.SlotHistory.Acct = slotHistoryAcct
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct)
-			if err != nil {
-				panic("unable to set clock sysvar to accts")
-			}
-
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct)
 			if err != nil {
 				panic("unable to set clock sysvar to accts")
 			}
@@ -355,6 +361,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to get stakehistory")
 			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct.Clone())
+			if err != nil {
+				panic("unable to set stakehistory sysvar to accts")
+			}
+
 			decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 			var stakeHistory sealevel.SysvarStakeHistory
 			stakeHistory.MustUnmarshalWithDecoder(decoder)
@@ -362,11 +374,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			sealevel.SysvarCache.StakeHistory.Acct = stakeHistoryAcct
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
-			if err != nil {
-				panic("unable to set stakehistory sysvar to accts")
-			}
-
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
 			if err != nil {
 				panic("unable to set stakehistory sysvar to accts")
 			}
@@ -378,16 +385,17 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			if err != nil {
 				panic("unable to get last restart slot sysvar acct")
 			}
+
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct.Clone())
+			if err != nil {
+				panic("unable to set last restart slot sysvar to accts")
+			}
+
 			decoder := bin.NewBinDecoder(lastRestartSlotAcct.Data)
 			var lastRestartSlot sealevel.SysvarLastRestartSlot
 			lastRestartSlot.MustUnmarshalWithDecoder(decoder)
 			sealevel.SysvarCache.LastRestartSlot.Sysvar = &lastRestartSlot
 			sealevel.SysvarCache.LastRestartSlot.Acct = lastRestartSlotAcct
-
-			err = accts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct)
-			if err != nil {
-				panic("unable to set last restart slot sysvar to accts")
-			}
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct)
 			if err != nil {
@@ -527,6 +535,7 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
+	block.AcctsLtHash = snapshotManifest.LtHash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 	setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
 	snapshotManifest = nil
@@ -534,6 +543,7 @@ func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotMani
 
 func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
+	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
 	block.StakeAccts = lastSlotCtx.StakeAccts
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
 	block.VoteAccts = lastSlotCtx.VoteAccts
@@ -586,6 +596,15 @@ func ReplayBlocks(
 		pprof.StartCPUProfile(cpuprofWriter)
 		defer pprof.StopCPUProfile()
 	}
+
+	if replayCtx.CurrentFeatures.IsActive(features.AccountsLtHash) {
+		mlog.Log.Infof("accounts lt hash enabled on cluster")
+	}
+
+	if replayCtx.CurrentFeatures.IsActive(features.RemoveAccountsDeltaHash) {
+		mlog.Log.Infof("accounts lt hash enabled on cluster")
+	}
+
 	for block := range streamChan {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
@@ -760,6 +779,7 @@ func newSlotCtx(block *Block, accts accounts.Accounts, parentAccts accounts.Acco
 		Replay:        true,
 		Features:      block.Features,
 		StakeAccts:    block.StakeAccts,
+		AcctsLtHash:   block.AcctsLtHash,
 
 		VoteAccts:       block.VoteAccts,
 		VoteTimestampMu: &sync.Mutex{},
@@ -932,12 +952,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism in
 		return slotCtx, err
 	}
 
-	// calculate ADH and bankhash
 	start = time.Now()
-	acctDeltaHash := calculateAcctsDeltaHash(writableAccts)
-	metrics.GlobalBlockReplay.AccountsDeltaHash.AddTimingSince(start)
-	start = time.Now()
-	slotCtx.FinalBankhash = calculateBankHash(slotCtx, acctDeltaHash, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
 	return slotCtx, err
