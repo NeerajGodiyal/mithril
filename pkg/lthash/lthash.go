@@ -51,11 +51,6 @@ func (ltHash *LtHash) InitWithAcct(acct *accounts.Account) *LtHash {
 	bytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
 	copy(bytes, hashData)
 
-	/*for i := range numElements {
-		val := binary.LittleEndian.Uint16(hashData[i*2 : (i*2)+2])
-		ltHash.value[i] = val
-	}*/
-
 	return ltHash
 }
 
