@@ -172,14 +172,21 @@ func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.
 	return s
 }
 
+const vlen = /*Slot*/ 8 + /*FileId*/ 8 + /*Offset*/ 8
+
 // processRequests handles incoming requests for a shard
 func (s *shard) processRequests(wg *sync.WaitGroup) {
 	defer wg.Done()
 	for req := range s.requests {
-		// Binary encode key and value to the file
-		binary.Write(s.writer, binary.LittleEndian, req.k)
-		binary.Write(s.writer, binary.LittleEndian, req.v)
-		s.logSize += len(req.k) + 3*8 // assumed size of accountindexentry
+		var kBytes = [32]byte(req.k)
+		s.writer.Write(kBytes[:])
+		var buf [vlen]byte
+		binary.LittleEndian.PutUint64(buf[0:8], req.v.Slot)
+		binary.LittleEndian.PutUint64(buf[8:16], req.v.FileId)
+		binary.LittleEndian.PutUint64(buf[16:24], req.v.Offset)
+		s.writer.Write(buf[:24])
+
+		s.logSize += len(req.k) + vlen
 		if s.logSize > 256<<20 {
 			if err := s.flushLogToCache(); err != nil {
 				panic(err)
@@ -209,17 +216,21 @@ func (s *shard) flushLogToCache() error {
 	}
 	defer file.Close()
 	reader := bufio.NewReader(file)
+	var buf [32 + vlen]byte
 	for {
-		var k solana.PublicKey
-		var v accountsdb.AccountIndexEntry
-		if err := binary.Read(reader, binary.LittleEndian, &k); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("failed to read key: %w", err)
+		_, err := io.ReadFull(reader, buf[:32+vlen])
+		if err == io.EOF {
+			break
 		}
-		if err := binary.Read(reader, binary.LittleEndian, &v); err != nil {
-			return fmt.Errorf("failed to read value: %w", err)
+		if err != nil {
+			return fmt.Errorf("flushLogToCache read loop: %v", err)
+		}
+
+		k := solana.PublicKey(buf[:32])
+		v := accountsdb.AccountIndexEntry{
+			Slot:   binary.LittleEndian.Uint64(buf[32:40]),
+			FileId: binary.LittleEndian.Uint64(buf[40:48]),
+			Offset: binary.LittleEndian.Uint64(buf[48:56]),
 		}
 
 		// Flush to cache
