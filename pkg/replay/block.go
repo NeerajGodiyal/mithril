@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -562,7 +561,6 @@ func ReplayBlocks(
 	txParallelism int,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
-	cpuprofWriter io.Writer,
 ) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
@@ -591,11 +589,6 @@ func ReplayBlocks(
 	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
-
-	if cpuprofWriter != nil {
-		pprof.StartCPUProfile(cpuprofWriter)
-		defer pprof.StopCPUProfile()
-	}
 
 	if replayCtx.CurrentFeatures.IsActive(features.AccountsLtHash) {
 		mlog.Log.Infof("accounts lt hash enabled on cluster")

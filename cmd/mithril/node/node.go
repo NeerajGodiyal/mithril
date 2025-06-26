@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"syscall"
 
 	_ "net/http/pprof"
@@ -101,6 +102,15 @@ func run(c *cobra.Command, args []string) {
 	}
 
 	logVCSInfo()
+	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofFilename)
+	if err != nil {
+		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
+	}
+	defer cpuprofCleanup()
+	if cpuprofWriter != nil {
+		pprof.StartCPUProfile(cpuprofWriter)
+		defer pprof.StopCPUProfile()
+	}
 
 	if loadFromSnapshot {
 		if path == "" || outputDir == "" {
@@ -168,12 +178,6 @@ func run(c *cobra.Command, args []string) {
 	}
 	defer metricsWriterCleanup()
 
-	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofFilename)
-	if err != nil {
-		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
-	}
-	defer cpuprofCleanup()
-
 	if paramArenaSizeMB > 0 {
 		replay.SerializedParameterArena = arena.New[byte](paramArenaSizeMB << 20)
 	}
@@ -184,7 +188,7 @@ func run(c *cobra.Command, args []string) {
 		}
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter, cpuprofWriter)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
