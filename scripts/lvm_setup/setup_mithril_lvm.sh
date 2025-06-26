@@ -4,7 +4,8 @@ set -euo pipefail
 
 ### CONFIGURATION ###
 # --- Disk and Partitioning ---
-DEVICE="/dev/nvme3n1"              # The disk to use
+DEVICE="$1"              # The disk to use
+echo "Using device: $DEVICE"
 LVM_PCT=80                         # % of DEVICE for LVM PV partition (p1) - Set to 80 for 20% other partition
 
 # --- LVM Naming ---
@@ -61,7 +62,7 @@ fi
 
 usage(){
   cat <<EOF
-Usage: $0 <wipe|setup>
+Usage: $0 <device> <wipe|setup>
 
 wipe          — Unmount filesystems created by 'setup', destroy LVM structure '${VG_NAME}'
                 on ${DEVICE}p1, remove related fstab entries, and reset ${DEVICE}
@@ -90,10 +91,10 @@ EOF
 }
 
 # Ensure a command was provided
-if [ $# -lt 1 ]; then
+if [ $# -lt 2 ]; then
   usage
 fi
-cmd="$1"; shift
+cmd="$2"; shift
 
 # --- Helper Function for Fstab ---
 add_fstab_entry() {
