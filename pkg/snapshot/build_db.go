@@ -273,7 +273,7 @@ func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolW
 			continue
 		}
 
-		writer := new(bytes.Buffer)
+		writer := bytes.NewBuffer(make([]byte, 0, header.Size))
 		tarBytesRead, err := io.Copy(writer, tarReader)
 		if err != nil {
 			mlog.Log.Errorf("err copying data to reader: %s\n", err)
