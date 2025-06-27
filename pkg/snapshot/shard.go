@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cespare/xxhash"
-	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"golang.org/x/sync/semaphore"
 )
@@ -58,7 +56,7 @@ func NewShardedSetter(cache fastcache.Cache, numShards int, bufsz int) *shardedS
 func (s *shardedSetter) processRequests(chanIndex int) {
 	defer s.wg.Done()
 
-	writer := &bytes.Buffer{}
+	var buf [24]byte
 	ch := s.inputChans[chanIndex]
 	reqCount := 0
 	var start time.Time
@@ -68,8 +66,7 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 		}
 		shouldSet := true
 		kb := req.k[:]
-		writer.Reset()
-		req.v.MarshalWithEncoder(bin.NewBinEncoder(writer))
+		req.v.Marshal(&buf)
 
 		dst, err := s.cache.Get(kb)
 		if err == nil {
@@ -82,7 +79,7 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 		}
 
 		if shouldSet {
-			err = s.cache.Set(kb, writer.Bytes())
+			err = s.cache.Set(kb, buf[:])
 			if err != nil {
 				mlog.Log.Infof("failed to set value for %s: %s", req.k, err)
 			}

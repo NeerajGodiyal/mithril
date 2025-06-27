@@ -13,7 +13,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
-	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/maypok86/otter"
 )
@@ -241,22 +240,22 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 	appendVecAcctsBuf := new(bytes.Buffer)
 	writer := new(bytes.Buffer)
+	var acctIdxEntryBuf [24]byte
 
 	for _, acct := range accts {
 
 		// create index entry, encode it and write it to the index kv store
 		// offset field is specified as the current num of bytes written to the appendvec buffer.
 		writer.Reset()
-		encoder := bin.NewBinEncoder(writer)
 
 		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: uint64(appendVecAcctsBuf.Len())}
-		err = indexEntry.MarshalWithEncoder(encoder)
+		indexEntry.Marshal(&acctIdxEntryBuf)
 		if err != nil {
 			//mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
 			panic(err)
 		}
 
-		err = accountsDb.Index.Set(acct.Key[:], writer.Bytes())
+		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:])
 		if err != nil {
 			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
 		}
