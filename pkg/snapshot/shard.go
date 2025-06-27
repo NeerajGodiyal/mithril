@@ -23,6 +23,8 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+var MaxConcurrentFlushers int = 16
+
 type shardRequest struct {
 	k solana.PublicKey
 	v accountsdb.AccountIndexEntry
@@ -132,7 +134,7 @@ type shard struct {
 // NewShardLogger creates a new ShardLogger with the specified number of
 // shards for logging entries. Entries are flushed to shardedSetter
 // when log reaches a certain size or on shard closure.
-func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter, maxConcurrentFlushers int) *ShardLogger {
+func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter) *ShardLogger {
 	if numShards > 1000 {
 		panic(fmt.Sprintf("numShards=%d > 1000 is too many shards", numShards))
 	}
@@ -140,7 +142,7 @@ func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter, maxConc
 		shards:     make([]*shard, numShards),
 		filePrefix: filePrefix,
 		wg:         &sync.WaitGroup{},
-		flushSem:   semaphore.NewWeighted(int64(maxConcurrentFlushers)),
+		flushSem:   semaphore.NewWeighted(int64(MaxConcurrentFlushers)),
 	}
 
 	sl.wg.Add(numShards)

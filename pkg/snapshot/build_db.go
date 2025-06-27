@@ -83,7 +83,7 @@ func BuildAccountsDb(
 	if err = os.MkdirAll(logsDir, 0775); err != nil {
 		return nil, nil, err
 	}
-	sl := NewShardLogger(numShards, logsDir, ss, 16)
+	sl := NewShardLogger(numShards, logsDir, ss)
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
 		tasks := indexEntryCommitterInProgress.Add(1)
