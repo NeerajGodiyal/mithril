@@ -43,7 +43,7 @@ func NewShardedSetter(cache fastcache.Cache, numShards int, bufsz int) *shardedS
 		inputChans: make([]chan shardRequest, numShards),
 		wg:         &sync.WaitGroup{},
 	}
-	for i := 0; i < numShards; i++ {
+	for i := range numShards {
 		s.inputChans[i] = make(chan shardRequest, bufsz)
 	}
 	s.wg.Add(len(s.inputChans))
@@ -146,7 +146,7 @@ func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter) *ShardL
 	}
 
 	sl.wg.Add(numShards)
-	for i := 0; i < numShards; i++ {
+	for i := range numShards {
 		sl.shards[i] = newShard(i, filePrefix, ss, sl.flushSem)
 		go sl.shards[i].processRequests(sl.wg)
 	}
