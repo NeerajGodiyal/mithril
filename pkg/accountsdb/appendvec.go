@@ -38,25 +38,27 @@ type appendVecParser struct {
 	Slot   uint64
 }
 
-func (parser *appendVecParser) ParseNextAcct() (solana.PublicKey, *AccountIndexEntry, error) {
+func (parser *appendVecParser) ParseNextAcct(pk *solana.PublicKey, a *AccountIndexEntry) error {
 	if parser.Offset+hdrLen > parser.FileSize {
-		return solana.PublicKey{}, nil, fmt.Errorf("overflow")
+		return fmt.Errorf("overflow")
 	}
 
 	dataLen := binary.LittleEndian.Uint64(parser.Buf[parser.Offset+dataLenOffset : parser.Offset+dataLenOffset+8])
-	pubkey := solana.PublicKeyFromBytes(parser.Buf[parser.Offset+pubkeyOffset : parser.Offset+pubkeyOffset+32])
 
-	entry := &AccountIndexEntry{Slot: parser.Slot, FileId: parser.FileId, Offset: parser.Offset}
+	*pk = solana.PublicKeyFromBytes(parser.Buf[parser.Offset+pubkeyOffset : parser.Offset+pubkeyOffset+32])
+	a.Slot = parser.Slot
+	a.FileId = parser.FileId
+	a.Offset = parser.Offset
 
 	parser.Offset += hdrLen
 
 	if parser.Offset+dataLen > parser.FileSize {
-		return solana.PublicKey{}, nil, fmt.Errorf("overflow")
+		return fmt.Errorf("overflow")
 	}
 
 	parser.Offset += util.AlignUp(dataLen, 8)
 
-	return pubkey, entry, nil
+	return nil
 }
 
 func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {

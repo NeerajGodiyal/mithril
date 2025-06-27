@@ -93,7 +93,7 @@ func BuildAccountsDb(
 		task := i.(indexEntryCommitterTask)
 
 		for idx, entry := range task.IndexEntries {
-			sl.EnqueueRequest(task.Pubkeys[idx], *entry)
+			sl.EnqueueRequest(task.Pubkeys[idx], entry)
 		}
 		statsd.Timing("tasks.index_entry_committer.latency", time.Since(start), nil, 1)
 		indexEntryCommitterInProgress.Add(-1)

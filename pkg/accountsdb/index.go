@@ -34,21 +34,21 @@ func unmarshalAcctIdxEntry(data []byte) (*AccountIndexEntry, error) {
 	return out, nil
 }
 
-func BuildIndexEntriesFromAppendVecs(data []byte, fileSize uint64, slot uint64, fileId uint64) ([]solana.PublicKey, []*AccountIndexEntry, error) {
-	offsetAndPubkeys := make([]*AccountIndexEntry, 0, 20000)
+func BuildIndexEntriesFromAppendVecs(data []byte, fileSize uint64, slot uint64, fileId uint64) ([]solana.PublicKey, []AccountIndexEntry, error) {
 	pubkeys := make([]solana.PublicKey, 0, 20000)
+	acctIdxEntries := make([]AccountIndexEntry, 0, 20000)
+	var err error
 
 	parser := &appendVecParser{Buf: data, FileSize: fileSize, FileId: fileId, Slot: slot}
 
 	for {
-		pubkey, entry, err := parser.ParseNextAcct()
+		pubkeys = append(pubkeys, solana.PublicKey{})
+		acctIdxEntries = append(acctIdxEntries, AccountIndexEntry{})
+		err = parser.ParseNextAcct(&pubkeys[len(pubkeys)-1], &acctIdxEntries[len(acctIdxEntries)-1])
 		if err != nil {
 			break
 		}
-
-		pubkeys = append(pubkeys, pubkey)
-		offsetAndPubkeys = append(offsetAndPubkeys, entry)
 	}
 
-	return pubkeys, offsetAndPubkeys, nil
+	return pubkeys, acctIdxEntries, nil
 }

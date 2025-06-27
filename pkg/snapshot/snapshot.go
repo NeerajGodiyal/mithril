@@ -79,7 +79,7 @@ type indexEntryBuilderTask struct {
 }
 
 type indexEntryCommitterTask struct {
-	IndexEntries []*accountsdb.AccountIndexEntry
+	IndexEntries []accountsdb.AccountIndexEntry
 	Pubkeys      []solana.PublicKey
 }
 
