@@ -60,7 +60,14 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 	ch := s.inputChans[chanIndex]
 	reqCount := 0
 	var start time.Time
-	for req := range ch {
+	// Use a slightly awkward for loop, since for req := range ch {
+	// called runtime.newobject
+	var req shardRequest
+	var ok bool
+	for {
+		if req, ok = <-ch; !ok {
+			break
+		}
 		if reqCount%100 == 0 {
 			start = time.Now()
 		}
