@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -61,8 +60,12 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 
 	writer := &bytes.Buffer{}
 	ch := s.inputChans[chanIndex]
+	reqCount := 0
+	var start time.Time
 	for req := range ch {
-		start := time.Now()
+		if reqCount%100 == 0 {
+			start = time.Now()
+		}
 		shouldSet := true
 		kb := req.k[:]
 		writer.Reset()
@@ -85,10 +88,11 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 			}
 		}
 
-		if rand.Intn(100) == 0 {
+		if reqCount%100 == 0 {
 			statsd.Timing("tasks.set_if_slot_higher.latency", time.Since(start), nil, 0.01)
 			statsd.Gauge("tasks.set_if_slot_higher.queue_size", float64(len(ch)), nil, 0.01)
 		}
+		reqCount++
 	}
 }
 
