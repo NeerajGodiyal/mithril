@@ -180,14 +180,15 @@ const vlen = /*Slot*/ 8 + /*FileId*/ 8 + /*Offset*/ 8
 // processRequests handles incoming requests for a shard
 func (s *shard) processRequests(wg *sync.WaitGroup) {
 	defer wg.Done()
+	var kBytes [32]byte
+	var vBytes [vlen]byte
 	for req := range s.requests {
-		var kBytes = [32]byte(req.k)
+		kBytes = [32]byte(req.k)
 		s.writer.Write(kBytes[:])
-		var buf [vlen]byte
-		binary.LittleEndian.PutUint64(buf[0:8], req.v.Slot)
-		binary.LittleEndian.PutUint64(buf[8:16], req.v.FileId)
-		binary.LittleEndian.PutUint64(buf[16:24], req.v.Offset)
-		s.writer.Write(buf[:24])
+		binary.LittleEndian.PutUint64(vBytes[0:8], req.v.Slot)
+		binary.LittleEndian.PutUint64(vBytes[8:16], req.v.FileId)
+		binary.LittleEndian.PutUint64(vBytes[16:24], req.v.Offset)
+		s.writer.Write(vBytes[:24])
 
 		s.logSize += len(req.k) + vlen
 		if s.logSize > 256<<20 {
