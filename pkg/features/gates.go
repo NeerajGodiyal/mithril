@@ -52,6 +52,7 @@ var MaskOutRentEpochInVmSerialization = FeatureGate{Name: "MaskOutRentEpochInVmS
 var RemoveAccountsExecutableFlagChecks = FeatureGate{Name: "RemoveAccountsExecutableFlagchecks", Address: base58.MustDecodeFromString("FXs1zh47QbNnhXcnB6YiAQoJ4sGB91tKF3UFHLcKT7PM")}
 var AccountsLtHash = FeatureGate{Name: "AccountsLtHash", Address: base58.MustDecodeFromString("LTHasHQX6661DaDD4S6A2TFi6QBuiwXKv66fB1obfHq")}
 var RemoveAccountsDeltaHash = FeatureGate{Name: "RemoveAccountsDeltaHash", Address: base58.MustDecodeFromString("LTdLt9Ycbyoipz5fLysCi1NnDnASsZfmJLJXts5ZxZz")}
+var EnableLoaderV4 = FeatureGate{Name: "EnableLoaderV4", Address: base58.MustDecodeFromString("2aQJYqER2aKyb3cZw22v4SL2xMX7vwXBRWfvS4pTrtED")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -65,4 +66,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
 	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
-	AccountsLtHash, RemoveAccountsDeltaHash}
+	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4}

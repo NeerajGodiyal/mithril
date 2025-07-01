@@ -5,6 +5,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -180,7 +181,9 @@ func loaderV4DecodeStateAndCheckProgramAcct(instrCtx *InstructionCtx, program *B
 }
 
 func LoaderV4Execute(execCtx *ExecutionCtx) error {
-	//mlog.Log.Debugf("BpfLoaderProgramExecute")
+	if !execCtx.GlobalCtx.Features.IsActive(features.EnableLoaderV4) {
+		return InstrErrUnsupportedProgramId
+	}
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
