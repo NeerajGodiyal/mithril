@@ -57,4 +57,5 @@ const (
 	CUVerifyBatchedGroupedCiphertext2HandlesValidityComputeUnits = 13000
 	CUVerifyGroupedCiphertext3HandlesValidityComputeUnits        = 8100
 	CUVerifyBatchedGroupedCiphertext3HandlesValidityComputeUnits = 16400
+	CULoaderV4ComputeUnits                                       = 2000
 )

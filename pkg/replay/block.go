@@ -650,16 +650,20 @@ func ReplayBlocks(
 			featuresActivatedInFirstSlot = make([]solana.PublicKey, 0)
 		}
 
-		// workaround for skipping the soon-to-be obsolete EAH
-		if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
-			if replayCtx.HasEpochAcctsHash {
-				block.EpochAcctsHash = replayCtx.EpochAcctsHash
-			} else {
-				block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
-				if err != nil {
-					panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+		// workaround for skipping the soon-to-be obsolete EAH.
+		// EAH is now obsolete as per the introduction of the accounts lattice hash.
+		// This remains in place for old slots.
+		if !block.Features.IsActive(features.AccountsLtHash) {
+			if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
+				if replayCtx.HasEpochAcctsHash {
+					block.EpochAcctsHash = replayCtx.EpochAcctsHash
+				} else {
+					block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
+					if err != nil {
+						panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+					}
+					block.HasEahWorkaround = true
 				}
-				block.HasEahWorkaround = true
 			}
 		}
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
