@@ -93,21 +93,34 @@ func (v *Verifier) Verify() error {
 			}
 		case OpLddw:
 			if pc+1 >= len(text) {
-        return fmt.Errorf("incomplete lddw instruction")
+				return fmt.Errorf("incomplete lddw instruction")
 			}
 			secondSlot := text[pc+1]
-			if secondSlot&0xFF != 0 {  // Check lowest byte is 0
-        return fmt.Errorf("malformed lddw instruction")
+			if secondSlot&0xFF != 0 { // Check lowest byte is 0
+				return fmt.Errorf("malformed lddw instruction")
 			}
 			pc++
 		default:
 			return fmt.Errorf("unknown opcode %#02x", ins.Op())
 		}
 
-		if ins.Dst() > 9 {
+		if ins.Dst() == 10 && v.Program.SbpfVersion.DynamicStackFrames() &&
+			ins.Op() == 0x07 && (ins.Imm()%DynamicStackFramesAlign) == 0 {
+			continue
+		}
+
+		if ins.Dst() == 10 && !isStoreInstr(ins.Op()) {
+			return fmt.Errorf("invalid dst register")
+		}
+
+		if ins.Dst() > 10 {
 			return fmt.Errorf("invalid dst register")
 		}
 	}
 
 	return nil
+}
+
+func isStoreInstr(op uint8) bool {
+	return op == 0x27 || op == 0x2f || op == 0x37 || op == 0x3f || op == 0x87 || op == 0x8f || op == 0x97 || op == 0x9f
 }

@@ -400,7 +400,7 @@ func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, er
 		return Syscalls(&execCtx.GlobalCtx.Features, true, u)
 	})
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.GlobalCtx.Features)
 	if err != nil {
 		//mlog.Log.Debugf("failed to create loader: %s", err)
 		return nil, err
@@ -1067,7 +1067,7 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 	start := time.Now()
 	//mlog.Log.Debugf("bpf loader - executeProgram")
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false, &execCtx.GlobalCtx.Features)
 	if err != nil {
 		return err
 	}

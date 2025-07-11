@@ -9,6 +9,8 @@ import (
 	"math"
 	"math/bits"
 	"strings"
+
+	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 )
 
 // parse checks ELF file for validity and loads metadata with minimal allocations.
@@ -34,6 +36,7 @@ func (l *Loader) parse() error {
 	if err := l.validate(); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -139,9 +142,18 @@ func (l *Loader) validateElfHeader() error {
 		return fmt.Errorf("invalid ELF file")
 	}
 
-	// only SBPFv1 is supported in production at present
-	if eh.Flags == EF_SBPF_V2 {
-		return fmt.Errorf("ElfError::UnsupportedSBPFVersion")
+	if l.maxSbpfVersion != sbpfver.SbpfVersionV0 {
+		if eh.Flags > l.maxSbpfVersion {
+			return fmt.Errorf("invalid sbpf version")
+		}
+	} else {
+		if eh.Flags == EF_SBPF_V2 {
+			return fmt.Errorf("invalid sbpf version")
+		}
+	}
+
+	if eh.Flags < l.minSbpfVersion {
+		return fmt.Errorf("invalid sbpf version")
 	}
 
 	if eh.Phoff < ehLen {

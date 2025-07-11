@@ -74,7 +74,7 @@ func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Inte
 		textVA:            p.TextVA,
 		text:              p.Text,
 		ro:                p.RO,
-		stack:             NewStack(),
+		stack:             NewStack(p.SbpfVersion),
 		heap:              heap,
 		input:             opts.Input,
 		entry:             p.Entrypoint,

@@ -2,6 +2,8 @@ package sbpf
 
 import (
 	"sync"
+
+	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 )
 
 // Stack is the VM's call frame stack.
@@ -28,9 +30,10 @@ import (
 // The shadow stack is not directly accessible from SBF.
 // It stores return addresses and caller-preserved registers.
 type Stack struct {
-	mem    []byte
-	sp     uint64
-	shadow []Frame
+	mem                []byte
+	sp                 uint64
+	shadow             []Frame
+	dynamicStackFrames bool
 }
 
 // Frame is an entry on the shadow stack.
@@ -43,13 +46,17 @@ type Frame struct {
 // StackFrameSize is the addressable memory within a stack frame.
 //
 // Note that this constant cannot be changed trivially.
-const StackFrameSize = 0x1000
+const (
+	StackFrameSize          = 0x1000
+	StackMax                = 64 * StackFrameSize
+	DynamicStackFramesAlign = 64
+)
 
 // StackDepth is the max frame count of the stack.
 const StackDepth = 64
 
 func newStackMem() []byte {
-	return make([]byte, StackDepth*StackFrameSize)
+	return make([]byte, StackMax)
 }
 
 func newStackShadow() []Frame {
@@ -69,7 +76,7 @@ var (
 	}}
 )
 
-func NewStack() Stack {
+func NewStack(sbpfVer sbpfver.SbpfVersion) Stack {
 	var m []byte
 	var sh []Frame
 	if UsePool {
@@ -85,8 +92,17 @@ func NewStack() Stack {
 		sp:     VaddrStack,
 		shadow: sh,
 	}
+
+	var sz uint64
+	if sbpfVer.DynamicStackFrames() {
+		sz = StackMax
+		s.dynamicStackFrames = true
+	} else {
+		sz = StackFrameSize
+	}
+
 	s.shadow[0] = Frame{
-		FramePtr: VaddrStack + StackFrameSize,
+		FramePtr: VaddrStack + sz,
 	}
 	return s
 }
@@ -118,7 +134,7 @@ func (s *Stack) GetFramePtr() uint64 {
 // Returns nil if the program tries to address a gap or out-of-bounds memory.
 func (s *Stack) GetFrame(addr uint32) []byte {
 	hi, lo := addr/StackFrameSize, addr%StackFrameSize
-	if hi%2 == 1 {
+	if hi%2 == 1 && !s.dynamicStackFrames {
 		return nil
 	}
 
@@ -137,7 +153,12 @@ func (s *Stack) Push(nvRegs *[4]uint64, ret int64) (fp uint64, ok bool) {
 		return
 	}
 
-	fp = s.GetFramePtr() + 2*StackFrameSize
+	if !s.dynamicStackFrames {
+		fp = s.GetFramePtr() + 2*StackFrameSize
+	} else {
+		fp = s.GetFramePtr()
+	}
+
 	s.shadow = s.shadow[:len(s.shadow)+1]
 	s.shadow[len(s.shadow)-1] = Frame{
 		FramePtr: fp,

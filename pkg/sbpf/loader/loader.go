@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 )
 
 // TODO Fuzz
@@ -24,6 +26,9 @@ type Loader struct {
 
 	syscalls        sbpf.SyscallRegistry
 	elfDeployChecks bool
+
+	minSbpfVersion uint32
+	maxSbpfVersion uint32
 
 	// ELF data structures
 	eh         elf.Header64
@@ -81,16 +86,22 @@ func NewLoaderFromBytes(buf []byte) (*Loader, error) {
 	return l, nil
 }
 
-func NewLoaderWithSyscalls(buf []byte, syscalls sbpf.SyscallRegistry, elfDeployChecks bool) (*Loader, error) {
+func NewLoaderWithSyscalls(buf []byte, syscalls sbpf.SyscallRegistry, elfDeployChecks bool, f *features.Features) (*Loader, error) {
 	if len(buf) > maxFileLen {
 		return nil, fmt.Errorf("ELF file too large")
 	}
+
+	minVer, maxVer := sbpfver.GetMinAndMaxSbpfVersions(f)
+
 	l := &Loader{
 		rd:              bytes.NewReader(buf),
 		fileSize:        uint64(len(buf)),
 		syscalls:        syscalls,
 		elfDeployChecks: elfDeployChecks,
+		minSbpfVersion:  minVer,
+		maxSbpfVersion:  maxVer,
 	}
+
 	return l, nil
 }
 
@@ -124,10 +135,11 @@ func parseSlots(bs []byte) []sbpf.Slot {
 
 func (l *Loader) getProgram() *sbpf.Program {
 	return &sbpf.Program{
-		RO:         l.program,
-		Text:       parseSlots(l.text),
-		TextVA:     sbpf.VaddrProgram + l.textRange.min,
-		Entrypoint: l.entrypoint,
-		Funcs:      l.funcs,
+		RO:          l.program,
+		Text:        parseSlots(l.text),
+		TextVA:      sbpf.VaddrProgram + l.textRange.min,
+		Entrypoint:  l.entrypoint,
+		Funcs:       l.funcs,
+		SbpfVersion: sbpfver.SbpfVersion{Version: l.eh.Flags},
 	}
 }

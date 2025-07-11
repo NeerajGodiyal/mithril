@@ -590,14 +590,6 @@ func ReplayBlocks(
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 
-	if replayCtx.CurrentFeatures.IsActive(features.AccountsLtHash) {
-		mlog.Log.Infof("accounts lt hash enabled on cluster")
-	}
-
-	if replayCtx.CurrentFeatures.IsActive(features.RemoveAccountsDeltaHash) {
-		mlog.Log.Infof("accounts lt hash enabled on cluster")
-	}
-
 	for block := range streamChan {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
