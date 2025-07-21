@@ -250,9 +250,48 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: uint64(appendVecAcctsBuf.Len())}
 		indexEntry.Marshal(&acctIdxEntryBuf)
-		if err != nil {
-			//mlog.Log.Debugf("error marshaling in Set on accountsdb for pubkey %s", acct.Key)
-			panic(err)
+
+		// if an entry already existed in the index for this account, very often we can simply make the state update
+		// in-place, i.e. into the account's existing appendvec blob.
+		// we can make the account state update in-place iff the existing version's data length is the same as the
+		// new version's data length, which is the case about 98% of the time.
+		// if not, then we write out a new appendvec.
+		existingacctIdxEntryBuf, err := accountsDb.Index.Get(acct.Key[:])
+		if err == nil {
+			acctIdxEntry, err := unmarshalAcctIdxEntry(existingacctIdxEntryBuf)
+			if err != nil {
+				panic("failed to unmarshal AccountIndexEntry from index kv database")
+			}
+
+			existingAppendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
+			existingAppendVecFile, err := os.OpenFile(existingAppendVecFileName, os.O_RDWR, 0666)
+			if err != nil {
+				panic(err)
+			}
+
+			_, err = existingAppendVecFile.Seek(int64(acctIdxEntry.Offset), 0)
+			if err != nil {
+				panic(err)
+			}
+
+			existingAcct, err := unmarshalAcctFromAppendVecAcctHeader(existingAppendVecFile)
+			if err != nil {
+				panic(fmt.Sprintf("failed to unmarshal account from appendvec file %s: %s", existingAppendVecFileName, err))
+			}
+
+			if len(acct.Data) == len(existingAcct.Data) {
+				newAppendVecAcct := AppendVecAccount{DataLen: uint64(len(acct.Data)), Pubkey: acct.Key, Lamports: acct.Lamports,
+					RentEpoch: acct.RentEpoch, Owner: acct.Owner, Executable: acct.Executable, Data: acct.Data}
+
+				_, err = existingAppendVecFile.Seek(int64(acctIdxEntry.Offset), 0)
+				if err != nil {
+					panic(err)
+				}
+
+				err = newAppendVecAcct.Marshal(existingAppendVecFile)
+				existingAppendVecFile.Close()
+				continue
+			}
 		}
 
 		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:])
@@ -271,11 +310,9 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 	}
 
 	// write the appendvecs data into the file
-	n, err := appendVecFile.Write(appendVecAcctsBuf.Bytes())
+	_, err = appendVecFile.Write(appendVecAcctsBuf.Bytes())
 	if err != nil {
 		panic(err)
-	} else if n != appendVecAcctsBuf.Len() {
-		panic(fmt.Sprintf("only wrote %d appendvec account bytes, rather than %d", n, appendVecAcctsBuf.Len()))
 	}
 }
 
