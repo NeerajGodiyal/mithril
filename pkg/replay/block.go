@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,7 @@ type Block struct {
 	PartitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	Rewards                []rpc.BlockReward
 	NumRewardPartitions    uint64
+	LatestEvictedBlockhash [32]byte
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
@@ -547,6 +549,7 @@ func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.Slo
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
 	block.VoteAccts = lastSlotCtx.VoteAccts
 	block.ParentSlot = lastSlotCtx.Slot
+	block.LatestEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 }
 
@@ -716,6 +719,14 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 	slotCtx.LamportsBurnt += incineratorAcct.Lamports
 }
 
+func acctsEqual(a *accounts.Account, b *accounts.Account) bool {
+	return a.Lamports == b.Lamports &&
+		a.Executable == b.Executable &&
+		a.RentEpoch == b.RentEpoch &&
+		a.Owner == b.Owner &&
+		bytes.Equal(a.Data, b.Data)
+}
+
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
@@ -726,7 +737,10 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 	}
 
 	for pk := range slotCtx.ModifiedAccts {
-		acct, _ := slotCtx.GetAccount(pk)
+		acct, err := slotCtx.GetAccount(pk)
+		if err != nil {
+			mlog.Log.Infof("compileWritableAndModifiedAccts: unable to get %s", acct.Key)
+		}
 		modifiedAccts = append(modifiedAccts, acct)
 	}
 
@@ -763,12 +777,13 @@ func newSlotCtx(block *Block, accts accounts.Accounts, parentAccts accounts.Acco
 		ModifiedAccts: make(map[solana.PublicKey]bool),
 		WritableAccts: make(map[solana.PublicKey]bool),
 
-		Blockhash:     block.Blockhash,
-		LastBlockhash: block.LastBlockhash,
-		Replay:        true,
-		Features:      block.Features,
-		StakeAccts:    block.StakeAccts,
-		AcctsLtHash:   block.AcctsLtHash,
+		Blockhash:              block.Blockhash,
+		LastBlockhash:          block.LastBlockhash,
+		LatestEvictedBlockhash: block.LatestEvictedBlockhash,
+		Replay:                 true,
+		Features:               block.Features,
+		StakeAccts:             block.StakeAccts,
+		AcctsLtHash:            block.AcctsLtHash,
 
 		VoteAccts:       block.VoteAccts,
 		VoteTimestampMu: &sync.Mutex{},

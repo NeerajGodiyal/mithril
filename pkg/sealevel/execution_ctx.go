@@ -49,17 +49,18 @@ type SlotCtx struct {
 	Features             *features.Features
 	VoteTimestampMu      *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
-	VoteTimestamps        map[solana.PublicKey]BlockTimestamp
-	StakeAccts            map[solana.PublicKey]bool
-	VoteAccts             map[solana.PublicKey]uint64
-	TotalEpochStake       uint64
-	FinalBankhash         []byte
-	AcctsLtHash           *lthash.LtHash
-	EpochsAcctHash        []byte
-	Replay                bool
-	LamportsBurnt         uint64
-	EahWorkaroundBankhash []byte
-	HasEahWorkaround      bool
+	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
+	StakeAccts             map[solana.PublicKey]bool
+	VoteAccts              map[solana.PublicKey]uint64
+	TotalEpochStake        uint64
+	FinalBankhash          []byte
+	AcctsLtHash            *lthash.LtHash
+	EpochsAcctHash         []byte
+	Replay                 bool
+	LamportsBurnt          uint64
+	EahWorkaroundBankhash  []byte
+	HasEahWorkaround       bool
+	LatestEvictedBlockhash [32]byte
 
 	SerializedParameterArena *arena.Arena[byte]
 }

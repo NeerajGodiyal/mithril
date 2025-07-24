@@ -30,7 +30,7 @@ func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Acco
 	}
 
 	if ltHashEnabled {
-		updateAcctsLtHash(slotCtx, modifiedAccts)
+		updateAcctsLtHash(slotCtx, writableAccts)
 	}
 
 	hasher := sha256.New()

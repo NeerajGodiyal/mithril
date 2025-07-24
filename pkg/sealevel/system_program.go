@@ -1083,7 +1083,6 @@ func SystemProgramCreateAccount(execCtx *ExecutionCtx, toAddr solana.PublicKey, 
 	defer toAcct.Drop()
 
 	if toAcct.Lamports() > 0 {
-		//mlog.Log.Debugf("CreateAccount: account %s already in use (non-zero lamports)", toAddr)
 		return SystemProgErrAccountAlreadyInUse
 	}
 
@@ -1490,8 +1489,13 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 		return solana.PublicKey{}, false
 	}
 
+	// we don't need to advance the durable nonce under error conditions if the blockhash is of valid age.
+	// we check against the latest 151 blockhashes (hence slotCtx.LatestEvictedBlockhash) instead of 150
+	// because of a (known) bug in Agave.
 	recentBlockhashes := SysvarCache.RecentBlockHashes.Sysvar
 	if recentBlockhashes.IsBlockhashAgeValid(tx.Message.RecentBlockhash) {
+		return solana.PublicKey{}, false
+	} else if tx.Message.RecentBlockhash == slotCtx.LatestEvictedBlockhash {
 		return solana.PublicKey{}, false
 	}
 
@@ -1524,12 +1528,12 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 
 	if nonceStateVersions.Type == NonceVersionCurrent {
 		state.DurableNonce = nextDurableNonce
-		state.FeeCalculator.LamportsPerSignature = 5000 //rbh.FeeCalculator.LamportsPerSignature
+		state.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature */
 	} else {
 		nonceStateVersions.Upgrade()
 		upgradedState := nonceStateVersions.State()
 		upgradedState.DurableNonce = nextDurableNonce
-		upgradedState.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature*/
+		upgradedState.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature */
 	}
 
 	newData, err := nonceStateVersions.Marshal()

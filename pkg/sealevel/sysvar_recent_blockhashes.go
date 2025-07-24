@@ -19,7 +19,9 @@ type RecentBlockHashesEntry struct {
 
 type SysvarRecentBlockhashes []RecentBlockHashesEntry
 
-const recentBlockhashesMaxEntries = 150
+const (
+	recentBlockhashesMaxEntries = 150
+)
 
 func (recentBlockhashes *SysvarRecentBlockhashes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	numBlockhashes, err := decoder.ReadUint64(bin.LE)
@@ -110,12 +112,14 @@ func (recentBlockhashes *SysvarRecentBlockhashes) GetLatest() RecentBlockHashesE
 	return rbh[0]
 }
 
-func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte) {
+func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte) [32]byte {
 	rbh := *recentBlockhashes
 
 	newEntry := RecentBlockHashesEntry{Blockhash: latest, FeeCalculator: FeeCalculator{LamportsPerSignature: 5000}}
+	var latestEvicted [32]byte
 
 	if len(rbh) >= recentBlockhashesMaxEntries {
+		latestEvicted = rbh[len(rbh)-1].Blockhash
 		rbh = rbh[:len(rbh)-1]
 		rbh = append([]RecentBlockHashesEntry{newEntry}, rbh...)
 	} else {
@@ -123,6 +127,7 @@ func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte) {
 	}
 
 	*recentBlockhashes = rbh
+	return latestEvicted
 }
 
 func (recentBlockhashes *SysvarRecentBlockhashes) IsBlockhashAgeValid(hash [32]byte) bool {

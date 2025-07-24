@@ -48,7 +48,7 @@ func collectAndUpdateSysvarAcctsForAdh(slotCtx *sealevel.SlotCtx) []*accounts.Ac
 
 		if acct.Key == sealevel.SysvarRecentBlockHashesAddr {
 			recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
-			recentBlockhashes.PushLatest(slotCtx.Blockhash)
+			slotCtx.LatestEvictedBlockhash = recentBlockhashes.PushLatest(slotCtx.Blockhash)
 			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
 			copy(acct.Data, newRecentBlockhashesBytes)
 		} else if acct.Key == sealevel.SysvarSlotHistoryAddr {

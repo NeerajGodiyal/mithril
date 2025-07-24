@@ -69,10 +69,12 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
+		var isInstructionsSysvarAcct bool
 
 		_, instrContainsAcctMeta := instructionAcctPubkeys[acctMeta.PublicKey]
 		if acctMeta.PublicKey == sealevel.SysvarInstructionsAddr {
 			acct = instrsAcct
+			isInstructionsSysvarAcct = true
 		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !instrContainsAcctMeta {
 			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
 			if err != nil {
@@ -86,9 +88,11 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 			}
 		}
 
-		loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(acct.Data)))
-		if loadedBytesAccumulator > loadedAcctBytesLimit {
-			return nil, TxErrMaxLoadedAccountsDataSizeExceeded
+		if !isInstructionsSysvarAcct {
+			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(acct.Data)))
+			if loadedBytesAccumulator > loadedAcctBytesLimit {
+				return nil, TxErrMaxLoadedAccountsDataSizeExceeded
+			}
 		}
 
 		acctsForTx = append(acctsForTx, *acct)
@@ -335,7 +339,7 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 	}
 }
 
-func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
+func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error, advanceNonceInstrSucceeded bool) (*fees.TxFeeInfo, error) {
 	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
@@ -355,10 +359,10 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	}
 	slotCtx.RecordModifiedAcct(payerAcctKey)
 
-	if len(instrs) >= 1 {
+	if len(instrs) >= 1 && advanceNonceInstrSucceeded {
 		instr := instrs[0]
-		noncePubkey, advancedNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
-		if advancedNonceAcct {
+		noncePubkey, didAdvanceNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
+		if didAdvanceNonceAcct {
 			slotCtx.RecordModifiedAcct(noncePubkey)
 		}
 	}
@@ -415,7 +419,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	start = time.Now()
 	transactionAccts, err := loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, err, nil)
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, err, nil, false)
 	} else if err != nil {
 		return nil, err
 	}
@@ -573,7 +577,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account and advancing the nonce account if applicable
 	if instrErr != nil || rentStateErr != nil {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, instrErr, rentStateErr)
+		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, instrErr, rentStateErr, execCtx.TransactionContext.NonceAcctAdvanced)
 	}
 
 	txAcctMetas, err := tx.AccountMetaList()

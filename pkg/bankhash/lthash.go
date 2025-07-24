@@ -53,26 +53,19 @@ func calculateSingleDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAcct *account
 
 	var deltaLtHash lthash.LtHash
 
-	if modifiedAcct.Lamports == 0 {
-		// acct now deleted. mix out the original acct's state.
+	if previousAcct.Lamports != 0 {
+		if acctsEqual(modifiedAcct, previousAcct) {
+			return &deltaLtHash
+		}
+
 		var oldLtHash lthash.LtHash
 		oldLtHash.InitWithAcct(previousAcct)
 		deltaLtHash.Sub(&oldLtHash)
-	} else {
-		// only need to include in the bankhash if the acct state actually changed.
-		if !acctsEqual(modifiedAcct, previousAcct) {
-
-			// mix out old acct's hash
-			var oldLtHash lthash.LtHash
-			oldLtHash.InitWithAcct(previousAcct)
-			deltaLtHash.Sub(&oldLtHash)
-
-			// mix in the new acct's hash
-			var newLtHash lthash.LtHash
-			newLtHash.InitWithAcct(modifiedAcct)
-			deltaLtHash.Add(&newLtHash)
-		}
 	}
+
+	var newLtHash lthash.LtHash
+	newLtHash.InitWithAcct(modifiedAcct)
+	deltaLtHash.Add(&newLtHash)
 
 	return &deltaLtHash
 }
