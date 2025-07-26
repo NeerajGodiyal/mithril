@@ -16,8 +16,6 @@ func resolveNativeProgramById(programId [32]byte) (func(ctx *ExecutionCtx) error
 	switch programId {
 	case a.SystemProgramAddr:
 		return SystemProgramExecute, a.SystemProgramAddrStr, nil
-	case a.StakeProgramAddr:
-		return StakeProgramExecute, a.StakeProgramAddrStr, nil
 	case a.VoteProgramAddr:
 		return VoteProgramExecute, a.VoteProgramAddrStr, nil
 	case a.ComputeBudgetProgramAddr:

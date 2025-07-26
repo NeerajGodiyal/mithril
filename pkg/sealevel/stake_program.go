@@ -7,8 +7,10 @@ import (
 	"unicode/utf8"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
+
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -336,7 +338,9 @@ func getOptionalPubkey(txCtx *TransactionCtx, instrCtx *InstructionCtx, instrAcc
 }
 
 func StakeProgramExecute(execCtx *ExecutionCtx) error {
-	err := execCtx.ComputeMeter.Consume(CUStakeProgramDefaultComputeUnits)
+	mlog.Log.Infof("in Stake program")
+
+	err := execCtx.ComputeMeter.Consume(cu.CUStakeProgramDefaultComputeUnits)
 	if err != nil {
 		return err
 	}

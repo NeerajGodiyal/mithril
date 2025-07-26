@@ -8,6 +8,7 @@ import (
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -686,7 +687,7 @@ func extractAddressWithSeed(txCtx *TransactionCtx, instrCtx *InstructionCtx, ins
 func SystemProgramExecute(execCtx *ExecutionCtx) error {
 	//mlog.Log.Debugf("System program")
 
-	err := execCtx.ComputeMeter.Consume(CUSystemProgramDefaultComputeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUSystemProgramDefaultComputeUnits)
 	if err != nil {
 		return InstrErrComputationalBudgetExceeded
 	}

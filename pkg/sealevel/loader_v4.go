@@ -5,6 +5,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	bin "github.com/gagliardetto/binary"
@@ -199,7 +200,7 @@ func LoaderV4Execute(execCtx *ExecutionCtx) error {
 
 	// program management code path
 	if programId == addresses.LoaderV4Addr {
-		err = execCtx.ComputeMeter.Consume(CULoaderV4ComputeUnits)
+		err = execCtx.ComputeMeter.Consume(cu.CULoaderV4ComputeUnits)
 		if err != nil {
 			return InstrErrComputationalBudgetExceeded
 		}

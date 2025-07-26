@@ -74,7 +74,7 @@ require (
 	github.com/edsrzf/mmap-go v1.1.0 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.0 // indirect
 	github.com/ethereum/go-verkle v0.2.2 // indirect
-	github.com/fsnotify/fsnotify v1.6.0 // indirect
+	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
@@ -91,29 +91,32 @@ require (
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/leslie-fei/memcore v0.0.0-20240611074219-2f13777e1d72 // indirect
-	github.com/magiconair/properties v1.8.6 // indirect
+	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mimoo/StrobeGo v0.0.0-20181016162300-f8f6d4d2b643 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
-	github.com/pelletier/go-toml/v2 v2.0.5 // indirect
+	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/philsippl/bls12 v0.0.0-20210305152037-695a40105eda // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/plar/go-adaptive-radix-tree v1.0.4 // indirect
 	github.com/recoilme/sortedset v0.0.0-20200825100557-fdc6fff0bc87 // indirect
 	github.com/rosedblabs/diskhash v0.0.0-20230910084041-289755737e2a // indirect
 	github.com/rosedblabs/wal v1.3.6 // indirect
+	github.com/sagikazarmark/locafero v0.4.0 // indirect
+	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/segmentio/fasthash v1.0.3 // indirect
 	github.com/shiena/ansicolor v0.0.0-20151119151921-a422bbe96644 // indirect
 	github.com/simplespy/bls12 v0.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/smcio/go-ethereum v1.15.12-0.20250621134551-8b739407bb93 // indirect
-	github.com/spf13/afero v1.8.2 // indirect
-	github.com/spf13/cast v1.5.0 // indirect
+	github.com/sourcegraph/conc v0.3.0 // indirect
+	github.com/spf13/afero v1.11.0 // indirect
+	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/viper v1.12.0 // indirect
+	github.com/spf13/viper v1.19.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/subosito/gotenv v1.3.0 // indirect
+	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/supranational/blst v0.3.14 // indirect
 	github.com/tidwall/interval v0.0.0-20191207210631-da4d74c2f07b // indirect
 	github.com/tidwall/rhh v1.3.0 // indirect
@@ -134,6 +137,7 @@ require (
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
 	github.com/Overclock-Validator/neostd v0.0.0-20250321114349-815aed984986
 	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250725100536-f7215e35adce
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/aead/siphash v1.0.1
@@ -146,7 +150,7 @@ require (
 	github.com/bwesterb/go-ristretto v1.2.3
 	github.com/clearmatics/bn256 v0.0.0-20190516154049-c6c2a2b131e6
 	github.com/cockroachdb/pebble v1.1.5
-	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-sip13 v0.0.0-20200911182023-62edffca9245
 	github.com/distributed-lab/bulletproofs v0.0.0-20240620125235-111e1d7a508f
 	github.com/dusk-network/bn256 v0.5.1-lattices
@@ -182,6 +186,7 @@ require (
 	github.com/leslie-fei/fastcache v0.0.0-20240620024905-c9d4d2000ec4
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/lotusdblabs/lotusdb/v2 v2.1.0
+	github.com/maestroi/solana-snapshot-finder-go v0.0.8
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
@@ -199,7 +204,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.10.0
 	github.com/philsippl/bgls v0.5.3
 	github.com/pierrec/lz4/v4 v4.1.22
-	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.10.1 // indirect

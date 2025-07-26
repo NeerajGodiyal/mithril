@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gtank/merlin"
 	"github.com/gtank/ristretto255"
@@ -640,19 +641,20 @@ func init() {
 	}
 }
 
-var cusPerInstr = []uint64{CUCloseContextStateComputeUnits,
-	CUVerifyZeroCiphertextComputeUnits,
-	CUVerifyCiphertextCiphertextEqualityComputeUnits,
-	CUVerifyCiphertextCommitmentEqualityComputeUnits,
-	CUVerifyPubkeyValidityComputeUnits,
-	CUVerifyPercentageWithCapComputeUnits,
-	CUVerifyBatchedRangeProofU64ComputeUnits,
-	CUVerifyBatchedRangeProofU128ComputeUnits,
-	CUVerifyBatchedRangeProofU256ComputeUnits,
-	CUVerifyGroupedCiphertext2HandlesValidityComputeUnits,
-	CUVerifyBatchedGroupedCiphertext2HandlesValidityComputeUnits,
-	CUVerifyGroupedCiphertext3HandlesValidityComputeUnits,
-	CUVerifyBatchedGroupedCiphertext3HandlesValidityComputeUnits,
+var cusPerInstr = []uint64{
+	cu.CUCloseContextStateComputeUnits,
+	cu.CUVerifyZeroCiphertextComputeUnits,
+	cu.CUVerifyCiphertextCiphertextEqualityComputeUnits,
+	cu.CUVerifyCiphertextCommitmentEqualityComputeUnits,
+	cu.CUVerifyPubkeyValidityComputeUnits,
+	cu.CUVerifyPercentageWithCapComputeUnits,
+	cu.CUVerifyBatchedRangeProofU64ComputeUnits,
+	cu.CUVerifyBatchedRangeProofU128ComputeUnits,
+	cu.CUVerifyBatchedRangeProofU256ComputeUnits,
+	cu.CUVerifyGroupedCiphertext2HandlesValidityComputeUnits,
+	cu.CUVerifyBatchedGroupedCiphertext2HandlesValidityComputeUnits,
+	cu.CUVerifyGroupedCiphertext3HandlesValidityComputeUnits,
+	cu.CUVerifyBatchedGroupedCiphertext3HandlesValidityComputeUnits,
 }
 
 func consumeElGamalCus(instrType ElGamalProofInstruction, execCtx *ExecutionCtx) error {

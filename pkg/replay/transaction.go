@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
+	"github.com/Overclock-Validator/mithril/pkg/migration"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -459,13 +460,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		return txFeeInfo, nil
 	}
 
-	////mlog.Log.Debugf("txFeeInfo=%+v", txFeeInfo)
-	////mlog.Log.Debugf("******** new balance for payer acct: %d", newPayerBalance)
-	/*
-		txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits)
-		if err != nil {
-			return txFeeInfo, nil
-		}*/
 	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
 
 	// check for fee divergences
@@ -502,12 +496,26 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
 		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
 
+		programId := tx.Message.AccountKeys[instr.ProgramIDIndex]
+		migratingCus, isMigrating := migration.IsMigratingProgramAndGetCUs(programId)
+		if isMigrating {
+			err = execCtx.ComputeMeter.Consume(migratingCus)
+			if err != nil {
+				instrErr = err
+				break
+			}
+			execCtx.ComputeMeter.Disable()
+		}
+
 		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
 		if err == nil {
 			for _, am := range acctMetas {
 				if am.IsWritable {
 					writablePubkeys = append(writablePubkeys, am.Pubkey)
 				}
+			}
+			if isMigrating {
+				execCtx.ComputeMeter.Enable()
 			}
 		} else {
 			instrErr = err
@@ -525,15 +533,15 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	//mlog.Log.Debugf("[+] tx %s - compute units consumed: %d", tx.Signatures[0], execCtx.ComputeMeter.Used())
 
 	// check for CU consumed divergences
-	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
-		/*discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
+	if dbgOpts.IsDebugTx(tx.Signatures[0]) && instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
+		discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
 		var sign byte
 		if execCtx.ComputeMeter.Used() > *txMeta.ComputeUnitsConsumed {
 			sign = '+'
 		} else {
 			sign = '-'
 		}
-		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy) */
+		mlog.Log.Debugf("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 	}
 
 	start = time.Now()

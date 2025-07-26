@@ -5,6 +5,7 @@ import (
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -110,7 +111,7 @@ func ConfigProgramExecute(ctx *ExecutionCtx) error {
 
 	var err error
 
-	err = ctx.ComputeMeter.Consume(CUConfigProcessorDefaultComputeUnits)
+	err = ctx.ComputeMeter.Consume(cu.CUConfigProcessorDefaultComputeUnits)
 	if err != nil {
 		return InstrErrComputationalBudgetExceeded
 	}

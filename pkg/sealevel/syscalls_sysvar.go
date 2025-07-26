@@ -7,6 +7,8 @@ import (
 	"slices"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
+
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
@@ -20,7 +22,7 @@ func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 
 	execCtx := executionCtx(vm)
 
-	cost := uint64(CUSyscallBaseCost + SysvarClockStructLen)
+	cost := uint64(cu.CUSyscallBaseCost + SysvarClockStructLen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -51,11 +53,11 @@ var SyscallGetClockSysvar = sbpf.SyscallFunc1(SyscallGetClockSysvarImpl)
 
 // SyscallGetRentSysvarImpl is an implementation of the sol_get_rent_sysvar syscall
 func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetRentSysvarImpl")
+	//mlog.Log.Infof("SyscallGetRentSysvarImpl")
 
 	execCtx := executionCtx(vm)
 
-	cost := uint64(CUSyscallBaseCost + SysvarRentStructLen)
+	cost := uint64(cu.CUSyscallBaseCost + SysvarRentStructLen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -86,7 +88,7 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 
 	execCtx := executionCtx(vm)
 
-	cost := uint64(CUSyscallBaseCost + SysvarEpochScheduleStructLen)
+	cost := uint64(cu.CUSyscallBaseCost + SysvarEpochScheduleStructLen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -127,7 +129,7 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 
 	execCtx := executionCtx(vm)
 
-	cost := uint64(CUSyscallBaseCost + SysvarEpochRewardsStructLen)
+	cost := uint64(cu.CUSyscallBaseCost + SysvarEpochRewardsStructLen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -140,7 +142,7 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 
 	epochRewards, err := ReadEpochRewardsSysvar(execCtx)
 	if err != nil {
-		return syscallErr(err)
+		return syscallSuccess(1)
 	}
 
 	binary.LittleEndian.PutUint64(epochRewardsDst[:8], epochRewards.DistributionStartingBlockHeight)
@@ -171,7 +173,7 @@ func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error
 
 	execCtx := executionCtx(vm)
 
-	cost := uint64(CUSyscallBaseCost + SysvarLastRestartSlotStructLen)
+	cost := uint64(cu.CUSyscallBaseCost + SysvarLastRestartSlotStructLen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -228,9 +230,9 @@ func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offse
 
 	execCtx := executionCtx(vm)
 
-	sysvarIdCost := uint64(32 / CUCpiBytesPerUnit)
-	sysvarBufCost := length / CUCpiBytesPerUnit
-	totalCost := safemath.SaturatingAddU64(safemath.SaturatingAddU64(CUSysvarBaseCost, sysvarIdCost), max(sysvarBufCost, CUMemOpBaseCost))
+	sysvarIdCost := uint64(32 / cu.CUCpiBytesPerUnit)
+	sysvarBufCost := length / cu.CUCpiBytesPerUnit
+	totalCost := safemath.SaturatingAddU64(safemath.SaturatingAddU64(cu.CUSysvarBaseCost, sysvarIdCost), max(sysvarBufCost, cu.CUMemOpBaseCost))
 
 	err := execCtx.ComputeMeter.Consume(totalCost)
 	if err != nil {
@@ -281,14 +283,14 @@ func SyscallGetEpochStakeImpl(vm sbpf.VM, varAddr uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
 
 	if varAddr == 0 {
-		err = execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
+		err = execCtx.ComputeMeter.Consume(cu.CUSyscallBaseCost)
 		if err != nil {
 			return syscallCuErr()
 		}
 
 		return syscallSuccess(execCtx.SlotCtx.TotalEpochStake)
 	} else {
-		cost := uint64(CUSyscallBaseCost + (32 / CUCpiBytesPerUnit) + CUMemOpBaseCost)
+		cost := uint64(cu.CUSyscallBaseCost + (32 / cu.CUCpiBytesPerUnit) + cu.CUMemOpBaseCost)
 		err = execCtx.ComputeMeter.Consume(cost)
 		if err != nil {
 			return syscallCuErr()

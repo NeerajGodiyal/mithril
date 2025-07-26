@@ -7,6 +7,7 @@ import (
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -33,7 +34,7 @@ func checkInstructionSize(execCtx *ExecutionCtx, numAccounts uint64, dataLen uin
 		}
 	} else {
 		size := safemath.SaturatingAddU64(safemath.SaturatingMulU64(numAccounts, AccountMetaSize), dataLen)
-		if size > CUMaxCpiInstructionSize {
+		if size > cu.CUMaxCpiInstructionSize {
 			return SyscallErrInstructionTooLarge
 		}
 	}
@@ -89,7 +90,7 @@ func translateInstructionC(vm sbpf.VM, addr uint64) (Instruction, error) {
 
 	execCtx := executionCtx(vm)
 	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
-		err = execCtx.ComputeMeter.Consume(ix.DataLen / CUCpiBytesPerUnit)
+		err = execCtx.ComputeMeter.Consume(ix.DataLen / cu.CUCpiBytesPerUnit)
 		if err != nil {
 			return Instruction{}, err
 		}
@@ -166,7 +167,7 @@ func translateInstructionRust(vm sbpf.VM, addr uint64) (Instruction, error) {
 
 	execCtx := executionCtx(vm)
 	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
-		err = execCtx.ComputeMeter.Consume(ix.Data.Len / CUCpiBytesPerUnit)
+		err = execCtx.ComputeMeter.Consume(ix.Data.Len / cu.CUCpiBytesPerUnit)
 		if err != nil {
 			return Instruction{}, err
 		}
@@ -302,7 +303,7 @@ func checkAccountInfos(execCtx *ExecutionCtx, numAccountInfos uint64) error {
 		}
 	} else {
 		adjustedLen := safemath.SaturatingMulU64(numAccountInfos, solana.PublicKeyLength)
-		if adjustedLen > CUMaxCpiInstructionSize {
+		if adjustedLen > cu.CUMaxCpiInstructionSize {
 			return SyscallErrTooManyAccounts
 		}
 	}
@@ -400,7 +401,7 @@ func callerAccountFromAccountInfoC(vm sbpf.VM, execCtx *ExecutionCtx, callerAcct
 		return CallerAccount{}, err
 	}
 
-	cost := accountInfo.DataLen / CUCpiBytesPerUnit
+	cost := accountInfo.DataLen / cu.CUCpiBytesPerUnit
 	err = execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return CallerAccount{}, err
@@ -462,7 +463,7 @@ func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, account
 		return CallerAccount{}, err
 	}
 
-	cost := dataBox.Len / CUCpiBytesPerUnit
+	cost := dataBox.Len / cu.CUCpiBytesPerUnit
 	err = execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return CallerAccount{}, err
@@ -614,7 +615,7 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 		}
 
 		if calleeAcct.IsExecutable() {
-			cost := uint64(len(calleeAcct.Data()) / CUCpiBytesPerUnit)
+			cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
 			err = execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return nil, InstrErrComputationalBudgetExceeded
@@ -689,7 +690,7 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 		}
 
 		if calleeAcct.IsExecutable() {
-			cost := uint64(len(calleeAcct.Data()) / CUCpiBytesPerUnit)
+			cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
 			err = execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return nil, InstrErrComputationalBudgetExceeded
@@ -752,7 +753,7 @@ func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, acc
 	//mlog.Log.Debugf("SyscallInvokeSignedC")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -832,7 +833,7 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 	//mlog.Log.Debugf("SyscallInvokeSignedRust")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
 	if err != nil {
 		return syscallCuErr()
 	}

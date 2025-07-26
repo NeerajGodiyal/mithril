@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -616,7 +617,7 @@ func (towerSyncSwitch *VoteInstrTowerSyncSwitch) UnmarshalWithDecoder(decoder *b
 }
 
 func VoteProgramExecute(execCtx *ExecutionCtx) error {
-	err := execCtx.ComputeMeter.Consume(CUVoteProgramDefaultComputeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUVoteProgramDefaultComputeUnits)
 	if err != nil {
 		return InstrErrComputationalBudgetExceeded
 	}

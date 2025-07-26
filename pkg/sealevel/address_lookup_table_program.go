@@ -6,7 +6,9 @@ import (
 	"math"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
@@ -306,7 +308,7 @@ func marshalAddressLookupTable(addrLookupTable *AddressLookupTable) ([]byte, err
 }
 
 func AddressLookupTableExecute(execCtx *ExecutionCtx) error {
-	err := execCtx.ComputeMeter.Consume(CUAddressLookupTableDefaultComputeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUAddressLookupTableDefaultComputeUnits)
 	if err != nil {
 		return InstrErrComputationalBudgetExceeded
 	}

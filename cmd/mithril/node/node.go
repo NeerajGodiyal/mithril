@@ -21,6 +21,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
+	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -43,6 +44,7 @@ var (
 	incrementalSnapshotFilename string
 	outputDir                   string
 	rpcEndpoint                 string
+	snapshotDlPath              string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -79,6 +81,7 @@ func init() {
 	Cmd.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
 	Cmd.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Cmd.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	Cmd.Flags().StringVar(&snapshotDlPath, "download-snapshot", "", "Path to download snapshot to")
 }
 
 func run(c *cobra.Command, args []string) {
@@ -89,8 +92,8 @@ func run(c *cobra.Command, args []string) {
 		klog.Fatalf("specify at most one of --endslot and --num-replay-slots")
 	}
 
-	if !loadFromSnapshot && !loadFromAccountsDb {
-		klog.Fatalf("must specify either to load from a snapshot or from an existing AccountsDB")
+	if !loadFromSnapshot && !loadFromAccountsDb && snapshotDlPath == "" {
+		klog.Fatalf("must specify either to load from a snapshot, or load from an existing AccountsDB, or download a snapshot.")
 	}
 
 	var err error
@@ -111,6 +114,10 @@ func run(c *cobra.Command, args []string) {
 	if cpuprofWriter != nil {
 		pprof.StartCPUProfile(cpuprofWriter)
 		defer pprof.StopCPUProfile()
+	}
+
+	if rpcEndpoint == "" {
+		rpcEndpoint = "https://api.mainnet-beta.solana.com"
 	}
 
 	if loadFromSnapshot {
@@ -135,10 +142,24 @@ func run(c *cobra.Command, args []string) {
 		}
 
 		accountsDbDir = path
-	}
+	} else if snapshotDlPath != "" {
+		if outputDir == "" {
+			klog.Fatalf("must specify a path to download a snapshot to")
+		}
 
-	if rpcEndpoint == "" {
-		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+		mlog.Log.Infof("downloading snapshot...")
+
+		path, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
+		if err != nil {
+			klog.Fatalf("error downloading snapshot: %s", err)
+		}
+
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(path, incrementalSnapshotFilename, outputDir)
+		if err != nil {
+			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
+		}
+
+		accountsDbDir = outputDir
 	}
 
 	if accountsDb == nil || manifest == nil {
@@ -161,10 +182,12 @@ func run(c *cobra.Command, args []string) {
 	} else if numReplaySlots != 0 {
 		endSlot = startSlot + numReplaySlots
 	}
+
 	// just processing the snapshot - not executing blocks.
 	if numReplaySlots == 0 {
 		return
 	}
+
 	if endSlot != -1 && endSlot < startSlot {
 		klog.Fatalf("end slot cannot be lower than start slot")
 	}

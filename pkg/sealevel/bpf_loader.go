@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -985,7 +986,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	programAcct.Drop()
 
 	heapSize := execCtx.TransactionContext.ComputeBudgetLimits.UpdatedHeapBytes
-	heapCostResult := calculateHeapCost(heapSize, CUHeapCostDefault)
+	heapCostResult := calculateHeapCost(heapSize, cu.CUHeapCostDefault)
 	err = execCtx.ComputeMeter.Consume(heapCostResult)
 	if err != nil {
 		return err
@@ -1106,21 +1107,21 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			return err
 		}
 		if programId == a.BpfLoaderUpgradeableAddr {
-			err = execCtx.ComputeMeter.Consume(CUUpgradeableLoaderComputeUnits)
+			err = execCtx.ComputeMeter.Consume(cu.CUUpgradeableLoaderComputeUnits)
 			if err != nil {
 				return err
 			}
 			err = ProcessUpgradeableLoaderInstruction(execCtx)
 			return err
 		} else if programId == a.BpfLoader2Addr {
-			err = execCtx.ComputeMeter.Consume(CUDefaultLoaderComputeUnits)
+			err = execCtx.ComputeMeter.Consume(cu.CUDefaultLoaderComputeUnits)
 			if err != nil {
 				return err
 			}
 			//mlog.Log.Debugf("BPF loader 2 mgmt no longer supported")
 			return InstrErrUnsupportedProgramId
 		} else if programId == a.BpfLoaderDeprecatedAddr {
-			err = execCtx.ComputeMeter.Consume(CUDeprecatedLoaderComputeUnits)
+			err = execCtx.ComputeMeter.Consume(cu.CUDeprecatedLoaderComputeUnits)
 			if err != nil {
 				return err
 			}

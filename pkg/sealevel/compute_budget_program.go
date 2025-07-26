@@ -4,9 +4,10 @@ import (
 	"fmt"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/migration"
 	bin "github.com/gagliardetto/binary"
-	"github.com/gagliardetto/solana-go"
 )
 
 const (
@@ -141,44 +142,13 @@ func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uin
 	}
 }
 
-var migratingBuiltinPubkeys = []solana.PublicKey{a.StakeProgramAddr, a.ConfigProgramAddr, a.AddressLookupTableAddr}
-
-var nonMigratingBuiltinPubkeys = []solana.PublicKey{a.VoteProgramAddr, a.SystemProgramAddr, a.ComputeBudgetProgramAddr, a.BpfLoaderUpgradeableAddr,
-	a.BpfLoader2Addr, a.BpfLoaderDeprecatedAddr, a.LoaderV4Addr, a.Secp256kPrecompileAddr, a.Ed25519PrecompileAddr}
-
-func isNonMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
-	for _, pk := range nonMigratingBuiltinPubkeys {
-		if pubkey == pk {
-			return true
-		}
-	}
-	return false
-}
-
-func isMigratingBuiltinProgram(pubkey solana.PublicKey) bool {
-	for _, pk := range migratingBuiltinPubkeys {
-		if pk == pubkey {
-			return true
-		}
-	}
-	return false
-}
-
-func hasBuiltinMigratedYet(pubkey solana.PublicKey) bool {
-	if pubkey == a.ConfigProgramAddr || pubkey == a.AddressLookupTableAddr {
-		return true
-	} else {
-		return false
-	}
-}
-
 func isBuiltin(instr Instruction) bool {
 	programPubkey := instr.ProgramId
-	if isNonMigratingBuiltinProgram(programPubkey) {
+	if migration.IsNonMigratingBuiltinProgram(programPubkey) {
 		return true
 	}
 
-	if isMigratingBuiltinProgram(programPubkey) && !hasBuiltinMigratedYet(programPubkey) {
+	if migration.IsMigratingBuiltinProgram(programPubkey) && !migration.HasBuiltinMigratedYet(programPubkey) {
 		return true
 	}
 
@@ -335,6 +305,6 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 
 func ComputeBudgetExecute(execCtx *ExecutionCtx) error {
 	//mlog.Log.Debugf("ComputeBudget program")
-	err := execCtx.ComputeMeter.Consume(CUComputeBudgetProgramDefaultComputeUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUComputeBudgetProgramDefaultComputeUnits)
 	return err
 }

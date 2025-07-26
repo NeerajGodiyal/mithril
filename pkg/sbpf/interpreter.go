@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"runtime"
 	"slices"
 	"sync"
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
@@ -652,8 +654,6 @@ func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, 
 
 	ptr, err := ip.translateInternal(addr, size, write)
 	if err != nil {
-		//pc, filename, line, _ := runtime.Caller(1)
-		//mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		return nil, err
 	}
 
@@ -690,6 +690,8 @@ func (ip *Interpreter) Read(addr uint64, p []byte) error {
 func (ip *Interpreter) Read8(addr uint64) (uint8, error) {
 	ptr, err := ip.translateInternal(addr, 1, false)
 	if err != nil {
+		pc, filename, line, _ := runtime.Caller(1)
+		mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		return 0, err
 	}
 	return *(*uint8)(ptr), nil

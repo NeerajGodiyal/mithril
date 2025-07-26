@@ -4,13 +4,14 @@ import (
 	"encoding/binary"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 )
 
 func MemOpConsume(execCtx *ExecutionCtx, n uint64) error {
-	cost := max(CUMemOpBaseCost, n/CUCpiBytesPerUnit)
+	cost := max(cu.CUMemOpBaseCost, n/cu.CUCpiBytesPerUnit)
 	return execCtx.ComputeMeter.Consume(cost)
 }
 

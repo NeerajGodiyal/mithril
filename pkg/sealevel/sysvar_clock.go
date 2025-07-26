@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	bin "github.com/gagliardetto/binary"
 )
 
@@ -103,10 +104,12 @@ func ReadClockSysvar(execCtx *ExecutionCtx) (SysvarClock, error) {
 	accts := addrObjectForLookup(execCtx)
 	clockAccount, err := (*accts).GetAccount(&SysvarClockAddr)
 	if err != nil {
+		mlog.Log.Infof("returning at [1] for clock: %+v\n", clockAccount)
 		return SysvarClock{}, InstrErrUnsupportedSysvar
 	}
 
 	if clockAccount.Lamports == 0 {
+		mlog.Log.Infof("returning at [2] for clock: %+v\n", clockAccount)
 		return SysvarClock{}, InstrErrUnsupportedSysvar
 	}
 
@@ -114,6 +117,7 @@ func ReadClockSysvar(execCtx *ExecutionCtx) (SysvarClock, error) {
 	var clock SysvarClock
 	err = clock.UnmarshalWithDecoder(dec)
 	if err != nil {
+		mlog.Log.Infof("returning at [3] for clock: %+v\n", clockAccount)
 		return SysvarClock{}, InstrErrUnsupportedSysvar
 	}
 

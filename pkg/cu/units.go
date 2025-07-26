@@ -1,4 +1,4 @@
-package sealevel
+package cu
 
 const (
 	CUSyscallBaseCost                                            = 100

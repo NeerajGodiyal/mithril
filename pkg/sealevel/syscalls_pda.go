@@ -5,6 +5,7 @@ import (
 
 	"math"
 
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/solana"
 )
@@ -50,7 +51,7 @@ func translateAndValidateSeeds(vm sbpf.VM, seedsAddr, seedsLen uint64) ([][]byte
 func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
 	execCtx.ComputeMeter.Remaining()
-	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUCreateProgramAddressUnits)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -83,7 +84,7 @@ var SyscallCreateProgramAddress = sbpf.SyscallFunc4(SyscallCreateProgramAddressI
 
 func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr, bumpSeedAddr uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CUCreateProgramAddressUnits)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -128,7 +129,7 @@ func SyscallTryFindProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programId
 			// address found
 			return syscallSuccess(0)
 		}
-		err = execCtx.ComputeMeter.Consume(CUCreateProgramAddressUnits)
+		err = execCtx.ComputeMeter.Consume(cu.CUCreateProgramAddressUnits)
 		if err != nil {
 			return syscallCuErr()
 		}

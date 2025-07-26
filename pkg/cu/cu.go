@@ -9,6 +9,7 @@ var ErrComputeExceeded = errors.New("Compute exceeded")
 type ComputeMeter struct {
 	computeMeter    uint64
 	startingBalance uint64
+	disable         bool
 }
 
 func NewComputeMeter(budget uint64) ComputeMeter {
@@ -20,6 +21,10 @@ func NewComputeMeterDefault() ComputeMeter {
 }
 
 func (cm *ComputeMeter) Consume(cost uint64) error {
+	if cm.disable {
+		return nil
+	}
+
 	if cm.computeMeter < cost {
 		cm.computeMeter = 0
 		return ErrComputeExceeded
@@ -34,4 +39,12 @@ func (cm *ComputeMeter) Used() uint64 {
 
 func (cm *ComputeMeter) Remaining() uint64 {
 	return cm.computeMeter
+}
+
+func (cm *ComputeMeter) Disable() {
+	cm.disable = true
+}
+
+func (cm *ComputeMeter) Enable() {
+	cm.disable = false
 }

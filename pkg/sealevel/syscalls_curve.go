@@ -8,6 +8,7 @@ import (
 	"filippo.io/edwards25519"
 	"github.com/Overclock-Validator/bgls/curves"
 	"github.com/Overclock-Validator/gnark-crypto/ecc/bn254"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 
@@ -77,7 +78,7 @@ func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint6
 	switch curveId {
 	case Curve25519Edwards:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519EdwardsValidatePointCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519EdwardsValidatePointCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -98,7 +99,7 @@ func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint6
 
 	case Curve25519Ristretto:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519RistrettoValidatePointCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoValidatePointCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -237,7 +238,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 	switch curveId {
 	case Curve25519Edwards:
 		{
-			cost := CUCurve25519EdwardsMsmBaseCost + (CUCurve25519EdwardsMsmIncrementalCost * (safemath.SaturatingSubU64(pointsLen, 1)))
+			cost := cu.CUCurve25519EdwardsMsmBaseCost + (cu.CUCurve25519EdwardsMsmIncrementalCost * (safemath.SaturatingSubU64(pointsLen, 1)))
 			err := execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return syscallCuErr()
@@ -278,7 +279,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 	case Curve25519Ristretto:
 		{
-			cost := CUCurve25519RistrettoMsmBaseCost + (CUCurve25519RistrettoMsmIncrementalCost * (safemath.SaturatingSubU64(pointsLen, 1)))
+			cost := cu.CUCurve25519RistrettoMsmBaseCost + (cu.CUCurve25519RistrettoMsmIncrementalCost * (safemath.SaturatingSubU64(pointsLen, 1)))
 			err := execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return syscallCuErr()
@@ -334,7 +335,7 @@ func handleEdwardsCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInputAd
 	switch groupOp {
 	case CurveOpAdd:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519EdwardsAddCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519EdwardsAddCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -372,7 +373,7 @@ func handleEdwardsCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInputAd
 
 	case CurveOpSub:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519EdwardsSubCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519EdwardsSubCost)
 			if err != nil {
 				return syscallErr(err)
 			}
@@ -410,7 +411,7 @@ func handleEdwardsCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInputAd
 
 	case CurveOpMul:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519EdwardsMulCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519EdwardsMulCost)
 			if err != nil {
 				return syscallErr(err)
 			}
@@ -463,7 +464,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 	switch groupOp {
 	case CurveOpAdd:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519RistrettoAddCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoAddCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -503,7 +504,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 
 	case CurveOpSub:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519RistrettoSubCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoSubCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -543,7 +544,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 
 	case CurveOpMul:
 		{
-			err := execCtx.ComputeMeter.Consume(CUCurve25519RistrettoAddCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoAddCost)
 			if err != nil {
 				return syscallCuErr()
 			}
@@ -701,25 +702,25 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 	switch op {
 	case AltBn128G1Compress:
 		{
-			cost = CUSyscallBaseCost + CUBn128G1Compress
+			cost = cu.CUSyscallBaseCost + cu.CUBn128G1Compress
 			outputLen = Bn128G1CompressedLen
 		}
 
 	case AltBn128G1Decompress:
 		{
-			cost = CUSyscallBaseCost + CUBn128G1Decompress
+			cost = cu.CUSyscallBaseCost + cu.CUBn128G1Decompress
 			outputLen = Bn128G1Len
 		}
 
 	case AltBn128G2Compress:
 		{
-			cost = CUSyscallBaseCost + CUBn128G2Compress
+			cost = cu.CUSyscallBaseCost + cu.CUBn128G2Compress
 			outputLen = Bn128G2CompressedLen
 		}
 
 	case AltBn128G2Decompress:
 		{
-			cost = CUSyscallBaseCost + CUBn128G2Decompress
+			cost = cu.CUSyscallBaseCost + cu.CUBn128G2Decompress
 			outputLen = Bn128G2Len
 		}
 
@@ -912,14 +913,14 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 	case AltBn128Add:
 		{
 			//mlog.Log.Debugf("AltBn128Add. inputLen = %d", inputLen)
-			cost = CUBn128AdditionCost
+			cost = cu.CUBn128AdditionCost
 			outputLen = AltBn128AdditionOutputLen
 		}
 
 	case AltBn128Mul:
 		{
 			//mlog.Log.Debugf("AltBn128Mul. inputLen = %d", inputLen)
-			cost = CUBn128MultiplicationCost
+			cost = cu.CUBn128MultiplicationCost
 			outputLen = AltBn128MultiplicationOutputLen
 		}
 
@@ -927,8 +928,8 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		{
 			//mlog.Log.Debugf("AltBn128Pairing. inputLen = %d", inputLen)
 			elementLen := inputLen / AltBn128PairingElementLen
-			cost = CUBn128PairingOnePairCostFirst + CUSha256BaseCost + AltBn128PairingOutputLen
-			cost = safemath.SaturatingAddU64(cost, safemath.SaturatingMulU64(CUBn128PairingOnePairCostOther, safemath.SaturatingSubU64(elementLen, 1)))
+			cost = cu.CUBn128PairingOnePairCostFirst + cu.CUSha256BaseCost + AltBn128PairingOutputLen
+			cost = safemath.SaturatingAddU64(cost, safemath.SaturatingMulU64(cu.CUBn128PairingOnePairCostOther, safemath.SaturatingSubU64(elementLen, 1)))
 			cost = safemath.SaturatingAddU64(cost, inputLen)
 			outputLen = AltBn128PairingOutputLen
 		}

@@ -7,6 +7,7 @@ import (
 	"math/big"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/iden3/go-iden3-crypto/poseidon"
@@ -18,12 +19,12 @@ import (
 func SyscallSha256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallSha256Impl")
 
-	if valsLen > CUSha256MaxSlices {
+	if valsLen > cu.CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
 	}
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSha256BaseCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSha256BaseCost)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -62,7 +63,7 @@ func SyscallSha256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint6
 				return syscallErr(err)
 			}
 
-			cost := max(vec.Len/2, CUMemOpBaseCost)
+			cost := max(vec.Len/2, cu.CUMemOpBaseCost)
 			err = execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return syscallCuErr()
@@ -81,12 +82,12 @@ var SyscallSha256 = sbpf.SyscallFunc3(SyscallSha256Impl)
 func SyscallKeccak256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallKeccak256")
 
-	if valsLen > CUSha256MaxSlices {
+	if valsLen > cu.CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
 	}
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSha256BaseCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSha256BaseCost)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -124,7 +125,7 @@ func SyscallKeccak256Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (ui
 				return syscallErr(err)
 			}
 
-			cost := max(CUMemOpBaseCost, vec.Len/2)
+			cost := max(cu.CUMemOpBaseCost, vec.Len/2)
 			err = execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return syscallCuErr()
@@ -143,12 +144,12 @@ var SyscallKeccak256 = sbpf.SyscallFunc3(SyscallKeccak256Impl)
 func SyscallBlake3Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallBlake3")
 
-	if valsLen > CUSha256MaxSlices {
+	if valsLen > cu.CUSha256MaxSlices {
 		return syscallErr(SyscallErrTooManySlices)
 	}
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSha256BaseCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSha256BaseCost)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -186,7 +187,7 @@ func SyscallBlake3Impl(vm sbpf.VM, valsAddr, valsLen, resultsAddr uint64) (uint6
 				return syscallErr(err)
 			}
 
-			cost := max(vec.Len/2, CUMemOpBaseCost)
+			cost := max(vec.Len/2, cu.CUMemOpBaseCost)
 			err = execCtx.ComputeMeter.Consume(cost)
 			if err != nil {
 				return syscallCuErr()
@@ -206,7 +207,7 @@ func SyscallSecp256k1RecoverImpl(vm sbpf.VM, hashAddr, recoveryIdVal, signatureA
 	//mlog.Log.Debugf("SyscallSecp256k1Recover")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSecP256k1RecoverCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSecP256k1RecoverCost)
 	if err != nil {
 		return syscallCuErr()
 	}

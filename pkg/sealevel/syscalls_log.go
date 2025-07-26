@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
@@ -16,7 +17,7 @@ func SyscallLogImpl(vm sbpf.VM, ptr, strlen uint64) (uint64, error) {
 
 	execCtx := executionCtx(vm)
 
-	cost := max(CUSyscallBaseCost, strlen)
+	cost := max(cu.CUSyscallBaseCost, strlen)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -36,7 +37,7 @@ func SyscallLog64Impl(vm sbpf.VM, r1, r2, r3, r4, r5 uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallLog64")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CULog64Units)
+	err := execCtx.ComputeMeter.Consume(cu.CULog64Units)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -52,7 +53,7 @@ func SyscallLogCUsImpl(vm sbpf.VM) (uint64, error) {
 	//mlog.Log.Debugf("SyscallLogCUs")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSyscallBaseCost)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -68,7 +69,7 @@ func SyscallLogPubkeyImpl(vm sbpf.VM, pubkeyAddr uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallLogPubkey")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CULogPubkeyUnits)
+	err := execCtx.ComputeMeter.Consume(cu.CULogPubkeyUnits)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -88,7 +89,7 @@ func SyscallLogDataImpl(vm sbpf.VM, addr uint64, len uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallLogData")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(CUSyscallBaseCost)
+	err := execCtx.ComputeMeter.Consume(cu.CUSyscallBaseCost)
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -103,7 +104,7 @@ func SyscallLogDataImpl(vm sbpf.VM, addr uint64, len uint64) (uint64, error) {
 		return syscallErr(err)
 	}
 
-	err = execCtx.ComputeMeter.Consume(safemath.SaturatingMulU64(len, CUSyscallBaseCost))
+	err = execCtx.ComputeMeter.Consume(safemath.SaturatingMulU64(len, cu.CUSyscallBaseCost))
 	if err != nil {
 		return syscallCuErr()
 	}
