@@ -146,46 +146,43 @@ func (s *Stack) GetFrame(addr uint32) []byte {
 
 // Push allocates a new call frame.
 //
-// Saves the given nonvolatile regs and return address.
+// Saves the given nonvolatile regs, return address,
+// and current frame pointer.
 // Returns the new frame pointer.
-func (s *Stack) Push(nvRegs *[4]uint64, ret int64) (fp uint64, ok bool) {
-	if ok = len(s.shadow) < cap(s.shadow); !ok {
-		return
+func (s *Stack) Push(regs []uint64, ret int64) bool {
+	if ok := len(s.shadow) < cap(s.shadow); !ok {
+		return false
 	}
 
-	if !s.dynamicStackFrames {
-		fp = s.GetFramePtr() + 2*StackFrameSize
-	} else {
-		fp = s.GetFramePtr()
-	}
+	frame := Frame{RetAddr: ret}
+	copy(frame.NVRegs[:], regs[6:10])
+	frame.FramePtr = regs[10]
 
 	s.shadow = s.shadow[:len(s.shadow)+1]
-	s.shadow[len(s.shadow)-1] = Frame{
-		FramePtr: fp,
-		NVRegs:   *nvRegs,
-		RetAddr:  ret,
+	s.shadow[len(s.shadow)-1] = frame
+
+	if !s.dynamicStackFrames {
+		regs[10] += StackFrameSize * 2
 	}
-	s.sp = fp - StackFrameSize
-	return
+
+	return true
 }
 
 // Pop exits the last call frame.
 //
-// Writes saved nonvolatile regs into provided slice.
-// Returns saved return address, new frame pointer.
-// Sets `ok` to false if no call frames are left.
-func (s *Stack) Pop(nvRegs *[4]uint64) (fp uint64, ret int64, ok bool) {
+// Restores saved nonvolatile regs into provided slice.
+// Returns saved return address and returns true upon success,
+// and returns false if no call frames are left.
+func (s *Stack) Pop(regs []uint64) (int64, bool) {
 	if len(s.shadow) <= 1 {
-		ok = false
-		return
+		return 0, false
 	}
 
 	var frame Frame
 	frame, s.shadow = s.shadow[len(s.shadow)-1], s.shadow[:len(s.shadow)-1]
 
-	fp = s.GetFramePtr()
-	*nvRegs = frame.NVRegs
-	ret = frame.RetAddr
-	ok = true
-	return
+	copy(regs[6:10], frame.NVRegs[:])
+	regs[10] = frame.FramePtr
+
+	return frame.RetAddr, true
 }

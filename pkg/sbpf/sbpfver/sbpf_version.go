@@ -25,6 +25,38 @@ func (ver *SbpfVersion) EnableElfVAddr() bool {
 	return ver.Version != SbpfVersionV0
 }
 
+func (ver *SbpfVersion) EnablePqr() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) ExplicitSignExtensionOfResults() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) SwapSubRegImmOperands() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) DisableNeg() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) CallXUsesSrcReg() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) DisableLe() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) DisableLddw() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
+func (ver *SbpfVersion) MoveMemoryInstructionClasses() bool {
+	return ver.Version >= SbpfVersionV2
+}
+
 func GetMinAndMaxSbpfVersions(f *features.Features) (uint32, uint32) {
 	disableSbpfV0 := f.IsActive(features.DisableSbpfV0Execution)
 	reenableSbpfV0 := f.IsActive(features.ReenableSbpfV0Execution)

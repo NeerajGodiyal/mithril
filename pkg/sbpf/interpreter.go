@@ -6,12 +6,16 @@ import (
 	"math/bits"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
+	"github.com/Overclock-Validator/wide"
+	"github.com/gagliardetto/solana-go"
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
@@ -37,6 +41,9 @@ type Interpreter struct {
 	dueInstrCount     uint64
 	prevInstrMeter    uint64
 	initialInstrMeter uint64
+	sbpfVersion       sbpfver.SbpfVersion
+	programId         solana.PublicKey
+	txSignature       solana.Signature
 }
 
 type TraceSink interface {
@@ -89,6 +96,9 @@ func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Inte
 		prevInstrMeter:    opts.ComputeMeter.Remaining(),
 		initialInstrMeter: opts.ComputeMeter.Remaining(),
 		enableTracing:     opts.EnableTracing,
+		sbpfVersion:       p.SbpfVersion,
+		programId:         opts.ProgramId,
+		txSignature:       opts.TxSignature,
 	}
 }
 
@@ -105,26 +115,28 @@ func (ip *Interpreter) Finish() {
 func (ip *Interpreter) Run() (ret uint64, cuConsumed uint64, err error) {
 	var r [11]uint64
 	r[1] = VaddrInput
-	r[10] = ip.stack.GetFramePtr()
-	// TODO frame pointer
-	pc := int64(ip.entry)
 
-	// Design notes
-	// - The interpreter is deliberately implemented in a single big loop,
-	//   to give the compiler more creative liberties, and avoid escaping hot data to the heap.
-	// - uint64(int32(x)) performs sign extension. Most ALU64 instructions make use of this.
-	// - The static verifier imposes invariants on the bytecode.
-	//   The interpreter may panic when it notices these invariants are violated (e.g. invalid opcode)
+	// initialise fp
+	var sz uint64
+	if ip.sbpfVersion.DynamicStackFrames() {
+		sz = StackMax
+	} else {
+		sz = StackFrameSize
+	}
+	r[10] = VaddrStack + sz
+
+	// initialize pc to program entry point
+	pc := int64(ip.entry)
 
 mainLoop:
 	for i := 0; true; i++ {
 		// Fetch
 		ins := ip.getSlot(pc)
 		if ip.enableTracing {
-			/*regsDump := fmt.Sprintf("%016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x",
+			regsDump := fmt.Sprintf("%016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x",
 				r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10])
 			fmt.Printf("% 5d [%s]: %s\n",
-				i, strings.ToUpper(regsDump), disassemble(ins, 0))*/
+				i, strings.ToUpper(regsDump), ip.disassemble(ins, 0))
 		}
 
 		err = ip.computeMeter.Consume(1)
@@ -135,66 +147,114 @@ mainLoop:
 		// Execute
 		switch ins.Op() {
 		case OpLdxb:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
 			var v uint8
 			v, err = ip.Read8(vma)
 			r[ins.Dst()] = uint64(v)
 			pc++
 		case OpLdxh:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
 			var v uint16
 			v, err = ip.Read16(vma)
 			r[ins.Dst()] = uint64(v)
 			pc++
 		case OpLdxw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
 			var v uint32
 			v, err = ip.Read32(vma)
 			r[ins.Dst()] = uint64(v)
 			pc++
 		case OpLdxdw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
 			var v uint64
 			v, err = ip.Read64(vma)
 			r[ins.Dst()] = v
 			pc++
 		case OpStb:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write8(vma, uint8(ins.Uimm()))
 			pc++
 		case OpSth:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write16(vma, uint16(ins.Uimm()))
 			pc++
 		case OpStw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write32(vma, ins.Uimm())
 			pc++
 		case OpStdw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write64(vma, uint64(ins.Imm()))
 			pc++
 		case OpStxb:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write8(vma, uint8(r[ins.Src()]))
 			pc++
 		case OpStxh:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write16(vma, uint16(r[ins.Src()]))
 			pc++
 		case OpStxw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write32(vma, uint32(r[ins.Src()]))
 			pc++
 		case OpStxdw:
+			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
 			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
 			err = ip.Write64(vma, r[ins.Src()])
 			pc++
 		case OpAdd32Imm:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) + ins.Imm())
+			r[ins.Dst()] = ip.signExtension(int32(r[ins.Dst()]) + ins.Imm())
 			pc++
 		case OpAdd32Reg:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) + int32(r[ins.Src()]))
+			r[ins.Dst()] = ip.signExtension(int32(r[ins.Dst()]) + int32(r[ins.Src()]))
 			pc++
 		case OpAdd64Imm:
 			r[ins.Dst()] += uint64(ins.Imm())
@@ -203,13 +263,21 @@ mainLoop:
 			r[ins.Dst()] += r[ins.Src()]
 			pc++
 		case OpSub32Imm:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) - ins.Imm())
+			if ip.sbpfVersion.SwapSubRegImmOperands() {
+				r[ins.Dst()] = ip.signExtension(ins.Imm() - int32(r[ins.Dst()]))
+			} else {
+				r[ins.Dst()] = ip.signExtension(int32(r[ins.Dst()]) - ins.Imm())
+			}
 			pc++
 		case OpSub32Reg:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) - int32(r[ins.Src()]))
+			r[ins.Dst()] = ip.signExtension(int32(r[ins.Dst()]) - int32(r[ins.Src()]))
 			pc++
 		case OpSub64Imm:
-			r[ins.Dst()] -= uint64(ins.Imm())
+			if ip.sbpfVersion.SwapSubRegImmOperands() {
+				r[ins.Dst()] = uint64(ins.Imm()) - r[ins.Dst()]
+			} else {
+				r[ins.Dst()] -= uint64(ins.Imm())
+			}
 			pc++
 		case OpSub64Reg:
 			r[ins.Dst()] -= r[ins.Src()]
@@ -218,62 +286,322 @@ mainLoop:
 			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) * ins.Imm())
 			pc++
 		case OpMul32Reg:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) * int32(r[ins.Src()]))
-			pc++
+			if !ip.sbpfVersion.EnablePqr() {
+				r[ins.Dst()] = uint64(int32(r[ins.Dst()]) * int32(r[ins.Src()]))
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpLd1BReg
+				vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
+				var v uint8
+				v, err = ip.Read8(vma)
+				r[ins.Dst()] = uint64(v)
+				pc++
+			}
 		case OpMul64Imm:
-			r[ins.Dst()] *= uint64(ins.Imm())
-			pc++
+			if !ip.sbpfVersion.EnablePqr() {
+				r[ins.Dst()] *= uint64(ins.Imm())
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt1BImm
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write8(vma, uint8(ins.Uimm()))
+				pc++
+			}
 		case OpMul64Reg:
-			r[ins.Dst()] *= r[ins.Src()]
-			pc++
+			if !ip.sbpfVersion.EnablePqr() {
+				r[ins.Dst()] *= r[ins.Src()]
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt1BReg
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write8(vma, uint8(r[ins.Src()]))
+				pc++
+			}
 		case OpDiv32Imm:
 			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) / ins.Uimm())
 			pc++
 		case OpDiv32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				if src := uint32(r[ins.Src()]); src != 0 {
+					r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) / src)
+				} else {
+					err = ExcDivideByZero
+				}
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpLd2BReg
+				vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
+				var v uint16
+				v, err = ip.Read16(vma)
+				r[ins.Dst()] = uint64(v)
+				pc++
+			}
+		case OpLd4BReg:
+			if !ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
+			vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
+			var v uint32
+			v, err = ip.Read32(vma)
+			r[ins.Dst()] = uint64(v)
+			pc++
+		case OpDiv64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				r[ins.Dst()] /= uint64(ins.Imm())
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt2BImm
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write16(vma, uint16(ins.Uimm()))
+				pc++
+			}
+		case OpDiv64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				if src := r[ins.Src()]; src != 0 {
+					r[ins.Dst()] /= src
+				} else {
+					err = ExcDivideByZero
+				}
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt2BReg
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write16(vma, uint16(r[ins.Src()]))
+				pc++
+			}
+		case OpSt4BReg:
+			if !ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				err = ExcInvalidInstr
+				break
+			}
+			vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+			err = ip.Write32(vma, uint32(r[ins.Src()]))
+			pc++
+		case OpLmul32Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) * uint32(ins.Imm()))
+			pc++
+		case OpLmul32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) * uint32(r[ins.Src()]))
+			pc++
+		case OpLmul64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] *= uint64(ins.Imm())
+			pc++
+		case OpLmul64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] *= r[ins.Src()]
+			pc++
+		case OpUhmul64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			dst128 := wide.Uint128FromUint64(r[ins.Dst()])
+			imm128 := wide.Uint128FromUint64(uint64(ins.Imm()))
+			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
+			pc++
+		case OpUhmul64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			dst128 := wide.Uint128FromUint64(r[ins.Dst()])
+			regSrc128 := wide.Uint128FromUint64(r[ins.Src()])
+			r[ins.Dst()] = dst128.Mul(regSrc128).RShiftN(64).Uint64()
+			pc++
+		case OpShmul64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			dst128 := wide.Int128FromInt64(int64(r[ins.Dst()]))
+			imm128 := wide.Int128FromInt64(int64(ins.Imm()))
+			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
+			pc++
+		case OpShmul64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			dst128 := wide.Int128FromInt64(int64(r[ins.Dst()]))
+			imm128 := wide.Int128FromInt64(int64(r[ins.Src()]))
+			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
+			pc++
+		case OpUdiv32Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) / ins.Uimm())
+			pc++
+		case OpUdiv32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if src := uint32(r[ins.Src()]); src != 0 {
 				r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) / src)
 			} else {
 				err = ExcDivideByZero
 			}
 			pc++
-		case OpDiv64Imm:
-			r[ins.Dst()] /= uint64(ins.Imm())
+		case OpUdiv64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] /= uint64(ins.Uimm())
 			pc++
-		case OpDiv64Reg:
+		case OpUdiv64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if src := r[ins.Src()]; src != 0 {
 				r[ins.Dst()] /= src
 			} else {
 				err = ExcDivideByZero
 			}
 			pc++
+		case OpUrem32Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % ins.Uimm())
+			pc++
+		case OpUrem32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % uint32(r[ins.Src()]))
+			pc++
+		case OpUrem64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] %= uint64(ins.Uimm())
+			pc++
+		case OpUrem64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			if src := r[ins.Src()]; src != 0 {
+				r[ins.Dst()] %= r[ins.Src()]
+			} else {
+				err = ExcDivideByZero
+			}
+			pc++
 		case OpSdiv32Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if int32(r[ins.Dst()]) == math.MinInt32 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
 			}
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) / ins.Imm())
+			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) / ins.Imm()))
 			pc++
 		case OpSdiv32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if src := int32(r[ins.Src()]); src != 0 {
 				if int32(r[ins.Dst()]) == math.MinInt32 && src == -1 {
 					err = ExcDivideOverflow
 				}
-				r[ins.Dst()] = uint64(int32(r[ins.Dst()]) / src)
+				r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) / src))
 			} else {
 				err = ExcDivideByZero
 			}
 			pc++
 		case OpSdiv64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if int64(r[ins.Dst()]) == math.MinInt64 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
 			}
 			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) / int64(ins.Imm()))
 			pc++
 		case OpSdiv64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
 			if src := int64(r[ins.Src()]); src != 0 {
 				if int64(r[ins.Dst()]) == math.MinInt64 && src == -1 {
 					err = ExcDivideOverflow
 				}
 				r[ins.Dst()] = uint64(int64(r[ins.Dst()]) / src)
+			} else {
+				err = ExcDivideByZero
+			}
+			pc++
+		case OpSrem32Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			if int32(r[ins.Dst()]) == math.MinInt32 && ins.Imm() == -1 {
+				err = ExcDivideOverflow
+			}
+			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) % ins.Imm()))
+			pc++
+		case OpSrem32Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			if src := int32(r[ins.Src()]); src != 0 {
+				if int32(r[ins.Dst()]) == math.MinInt32 && src == -1 {
+					err = ExcDivideOverflow
+				}
+				r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) % int32(r[ins.Src()])))
+			} else {
+				err = ExcDivideByZero
+			}
+			pc++
+		case OpSrem64Imm:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			if int64(r[ins.Dst()]) == math.MinInt64 && ins.Imm() == -1 {
+				err = ExcDivideOverflow
+			}
+			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) % int64(ins.Imm()))
+			pc++
+		case OpSrem64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				err = ExcInvalidInstr
+				break
+			}
+			if src := int64(r[ins.Src()]); src != 0 {
+				if int64(r[ins.Dst()]) == math.MinInt64 && src == -1 {
+					err = ExcDivideOverflow
+				}
+				r[ins.Dst()] = uint64(int64(r[ins.Dst()]) % int64(r[ins.Src()]))
 			} else {
 				err = ExcDivideByZero
 			}
@@ -327,31 +655,65 @@ mainLoop:
 			r[ins.Dst()] >>= r[ins.Src()] & 0x3f
 			pc++
 		case OpNeg32:
+			if ip.sbpfVersion.DisableNeg() {
+				err = ExcInvalidInstr
+				break
+			}
 			r[ins.Dst()] = uint64(-int32(r[ins.Dst()]))
 			pc++
 		case OpNeg64:
-			r[ins.Dst()] = uint64(-int64(r[ins.Dst()]))
-			pc++
+			if !ip.sbpfVersion.DisableNeg() {
+				r[ins.Dst()] = uint64(-int64(r[ins.Dst()]))
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt4BImm
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write32(vma, ins.Uimm())
+				pc++
+			}
 		case OpMod32Imm:
 			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % ins.Uimm())
 			pc++
 		case OpMod32Reg:
-			if src := uint32(r[ins.Src()]); src != 0 {
-				r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % src)
-			} else {
-				err = ExcDivideByZero
+			if !ip.sbpfVersion.EnablePqr() {
+				if src := uint32(r[ins.Src()]); src != 0 {
+					r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % src)
+				} else {
+					err = ExcDivideByZero
+				}
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpLd8BReg
+				vma := uint64(int64(r[ins.Src()]) + int64(ins.Off()))
+				var v uint64
+				v, err = ip.Read64(vma)
+				r[ins.Dst()] = v
+				pc++
 			}
-			pc++
 		case OpMod64Imm:
-			r[ins.Dst()] %= uint64(ins.Imm())
-			pc++
-		case OpMod64Reg:
-			if src := r[ins.Src()]; src != 0 {
-				r[ins.Dst()] %= src
-			} else {
-				err = ExcDivideByZero
+			if !ip.sbpfVersion.EnablePqr() {
+				r[ins.Dst()] %= uint64(ins.Imm())
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt8BImm
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write64(vma, uint64(ins.Imm()))
+				pc++
 			}
-			pc++
+		case OpMod64Reg:
+			if !ip.sbpfVersion.EnablePqr() {
+				if src := r[ins.Src()]; src != 0 {
+					r[ins.Dst()] %= src
+				} else {
+					err = ExcDivideByZero
+				}
+				pc++
+			} else if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+				// OpSt8BReg
+				vma := uint64(int64(r[ins.Dst()]) + int64(ins.Off()))
+				err = ip.Write64(vma, r[ins.Src()])
+				pc++
+			}
 		case OpXor32Imm:
 			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) ^ ins.Uimm())
 			pc++
@@ -368,7 +730,11 @@ mainLoop:
 			r[ins.Dst()] = uint64(ins.Uimm())
 			pc++
 		case OpMov32Reg:
-			r[ins.Dst()] = r[ins.Src()]
+			if ip.sbpfVersion.ExplicitSignExtensionOfResults() {
+				r[ins.Dst()] = uint64(int64(int32(r[ins.Src()])))
+			} else {
+				r[ins.Dst()] = uint64(uint32(r[ins.Src()]))
+			}
 			pc++
 		case OpMov64Imm:
 			r[ins.Dst()] = uint64(ins.Imm())
@@ -377,10 +743,10 @@ mainLoop:
 			r[ins.Dst()] = r[ins.Src()]
 			pc++
 		case OpArsh32Imm:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) >> ins.Uimm())
+			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) >> ins.Uimm()))
 			pc++
 		case OpArsh32Reg:
-			r[ins.Dst()] = uint64(int32(r[ins.Dst()]) >> uint32(r[ins.Src()]))
+			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) >> uint32(r[ins.Src()])))
 			pc++
 		case OpArsh64Imm:
 			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) >> ins.Imm())
@@ -388,7 +754,18 @@ mainLoop:
 		case OpArsh64Reg:
 			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) >> (r[ins.Src()]))
 			pc++
+		case OpHor64Imm:
+			if !ip.sbpfVersion.DisableLddw() {
+				err = ExcInvalidInstr
+				break
+			}
+			r[ins.Dst()] |= uint64(ins.Uimm()) << 32
+			pc++
 		case OpLe:
+			if ip.sbpfVersion.DisableLe() {
+				err = ExcInvalidInstr
+				break
+			}
 			switch ins.Uimm() {
 			case 16:
 				r[ins.Dst()] &= math.MaxUint16
@@ -413,6 +790,10 @@ mainLoop:
 			}
 			pc++
 		case OpLddw:
+			if ip.sbpfVersion.DisableLddw() {
+				err = ExcInvalidInstr
+				break
+			}
 			r[ins.Dst()] = uint64(ins.Uimm()) | (uint64(ip.getSlot(pc+1).Uimm()) << 32)
 			pc += 2
 		case OpJa:
@@ -534,7 +915,7 @@ mainLoop:
 				r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
 				pc++
 			} else if target, ok := ip.funcs[ins.Uimm()]; ok {
-				r[10], ok = ip.stack.Push((*[4]uint64)(r[6:10]), pc+1)
+				ok = ip.stack.Push(r[:], pc+1)
 				if !ok {
 					err = ExcCallDepth
 				}
@@ -543,10 +924,16 @@ mainLoop:
 				err = ExcCallDest{ins.Uimm()}
 			}
 		case OpCallx:
-			target := r[ins.Uimm()]
+			var target uint64
+			if ip.sbpfVersion.CallXUsesSrcReg() {
+				target = r[ins.Src()]
+			} else {
+				target = r[ins.Uimm()]
+			}
 			target &= ^(uint64(0x7))
+
 			var ok bool
-			r[10], ok = ip.stack.Push((*[4]uint64)(r[6:10]), pc+1)
+			ok = ip.stack.Push(r[:], pc+1)
 			if !ok {
 				err = ExcCallDepth
 			}
@@ -556,7 +943,7 @@ mainLoop:
 			pc = int64((target - ip.textVA) / 8)
 		case OpExit:
 			var ok bool
-			r[10], pc, ok = ip.stack.Pop((*[4]uint64)(r[6:10]))
+			pc, ok = ip.stack.Pop(r[:])
 			if !ok {
 				ret = r[0]
 				break mainLoop
@@ -573,7 +960,7 @@ mainLoop:
 		if err != nil {
 			exc := &Exception{
 				PC:     pc,
-				Detail: err,
+				Detail: fmt.Errorf("tx: %s, programId: %s - %s:", ip.txSignature, ip.programId, err),
 			}
 			if IsLongIns(ins.Op()) {
 				exc.PC-- // fix reported PC
@@ -586,6 +973,14 @@ mainLoop:
 	cuConsumed = ip.initialInstrMeter - ip.computeMeter.Remaining()
 
 	return
+}
+
+func (ip *Interpreter) signExtension(val int32) uint64 {
+	if ip.sbpfVersion.ExplicitSignExtensionOfResults() {
+		return uint64(uint32(val))
+	} else {
+		return uint64(int64(val))
+	}
 }
 
 func (ip *Interpreter) getSlot(pc int64) Slot {
@@ -619,6 +1014,7 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 	hi, lo := addr>>32, addr&math.MaxUint32
 	switch hi {
 	case VaddrProgram >> 32:
+		mlog.Log.Debugf("addr %x is in VaddrProgram", addr)
 		if write {
 			return nil, NewExcBadAccess(addr, size, write, "write to program")
 		}
@@ -654,6 +1050,8 @@ func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, 
 
 	ptr, err := ip.translateInternal(addr, size, write)
 	if err != nil {
+		pc, filename, line, _ := runtime.Caller(1)
+		mlog.Log.Debugf("[error] in %s[%s:%d] %v. calling translate on addr = %x, size = %d", runtime.FuncForPC(pc).Name(), filename, line, err, addr, size)
 		return nil, err
 	}
 
@@ -690,8 +1088,6 @@ func (ip *Interpreter) Read(addr uint64, p []byte) error {
 func (ip *Interpreter) Read8(addr uint64) (uint8, error) {
 	ptr, err := ip.translateInternal(addr, 1, false)
 	if err != nil {
-		pc, filename, line, _ := runtime.Caller(1)
-		mlog.Log.Debugf("[error] in %s[%s:%d] %v", runtime.FuncForPC(pc).Name(), filename, line, err)
 		return 0, err
 	}
 	return *(*uint8)(ptr), nil

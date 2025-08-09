@@ -33,8 +33,8 @@ var mnemonicTable = [0x100]string{
 	OpRsh32Imm:  "rsh32",
 	OpRsh32Reg:  "rsh32",
 	OpNeg32:     "neg32",
-	OpMod32Imm:  "mod32",
-	OpMod32Reg:  "mod32",
+	OpMod32Imm:  "mod32imm",
+	OpMod32Reg:  "mod32reg",
 	OpXor32Imm:  "xor32",
 	OpXor32Reg:  "xor32",
 	OpMov32Imm:  "mov32",
@@ -98,15 +98,16 @@ var mnemonicTable = [0x100]string{
 	OpCall:      "call",
 	OpCallx:     "callx",
 	OpExit:      "exit",
+	OpSt4BReg:   "OpSt4BReg",
 }
 
-func GetOpcodeName(opc uint8) string {
+func (ip *Interpreter) GetOpcodeName(opc uint8) string {
 	return mnemonicTable[opc]
 }
 
-func disassemble(slot Slot, slot2 Slot) string {
+func (ip *Interpreter) disassemble(slot Slot, slot2 Slot) string {
 	opc := slot.Op()
-	mnemonic := GetOpcodeName(opc)
+	mnemonic := ip.GetOpcodeName(opc)
 	switch opc {
 	case OpLddw:
 		return fmt.Sprintf("lddw r%d", slot.Dst())
@@ -137,7 +138,13 @@ func disassemble(slot Slot, slot2 Slot) string {
 		OpAdd64Reg, OpSub64Reg, OpMul64Reg, OpDiv64Reg, OpOr64Reg, OpAnd64Reg, OpLsh64Reg, OpRsh64Reg, OpMod64Reg, OpXor64Reg, OpMov64Reg, OpArsh64Reg, OpSdiv64Reg:
 		return fmt.Sprintf("%s r%d, r%d", mnemonic, slot.Dst(), slot.Src())
 	case OpNeg32, OpNeg64:
-		return fmt.Sprintf("%s r%d", mnemonic, slot.Dst())
+		if ip.sbpfVersion.MoveMemoryInstructionClasses() {
+			return fmt.Sprintf("%s r%d, %d", mnemonic, slot.Dst(), slot.Uimm())
+		} else {
+			return fmt.Sprintf("%s r%d", mnemonic, slot.Dst())
+		}
+	case OpSt4BReg:
+		return fmt.Sprintf("%s r%d, r%d", mnemonic, slot.Dst(), slot.Src())
 	case OpLe, OpBe:
 		return fmt.Sprintf("%s%d r%d", mnemonic, slot.Uimm(), slot.Dst())
 	case OpJa:
@@ -149,10 +156,10 @@ func disassemble(slot Slot, slot2 Slot) string {
 	case OpCall:
 		return fmt.Sprintf("call")
 	case OpCallx:
-		return fmt.Sprintf("call")
+		return fmt.Sprintf("callx")
 	case OpExit:
 		return "exit"
 	default:
-		return "invalid"
+		return fmt.Sprintf("invalid (%x)", opc)
 	}
 }

@@ -751,7 +751,6 @@ func translateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, pr
 // SyscallInvokeSignedCImpl is an implementation of the sol_invoke_signed_c syscall
 func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallInvokeSignedC")
-
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
 	if err != nil {

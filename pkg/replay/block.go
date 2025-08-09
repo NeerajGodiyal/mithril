@@ -805,8 +805,6 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-		//mlog.Log.Debugf("[+] executing transaction %d (slot %d, epoch %d), %s", idx+1, block.Slot, block.Epoch, tx.Signatures[0])
-
 		txMeta := block.TxMetas[idx]
 		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
 

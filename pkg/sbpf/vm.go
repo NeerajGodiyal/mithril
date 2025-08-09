@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/gagliardetto/solana-go"
 )
 
 // VM is the virtual machine abstraction, implemented by each executor.
@@ -50,6 +51,10 @@ type VMOpts struct {
 	MaxCU        int
 	ComputeMeter *cu.ComputeMeter
 	Input        []byte // mapped at VaddrInput
+
+	// Debug
+	ProgramId   solana.PublicKey
+	TxSignature solana.Signature
 }
 
 type Exception struct {
@@ -71,6 +76,7 @@ var (
 	ExcDivideOverflow = errors.New("divide overflow")
 	ExcOutOfCU        = errors.New("compute unit overrun")
 	ExcCallDepth      = errors.New("call depth exceeded")
+	ExcInvalidInstr   = errors.New("invalid instruction - feature not enabled")
 )
 
 type ExcBadAccess struct {

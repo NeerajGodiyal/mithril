@@ -8,7 +8,7 @@ const (
 	ClassStx
 	ClassAlu
 	ClassJmp
-	Class0x06 // reserved
+	ClassPqr
 	ClassAlu64
 )
 
@@ -18,6 +18,10 @@ const (
 	SizeH
 	SizeB
 	SizeDw
+	Size1B = 0x20
+	Size2B = 0x30
+	Size4B = 0x80
+	Size8B = 0x90
 )
 
 // Addressing modes
@@ -54,6 +58,7 @@ const (
 	AluArsh
 	AluEnd
 	AluSdiv
+	AluHor
 )
 
 // Jump operations
@@ -72,6 +77,17 @@ const (
 	JumpLe
 	JumpSlt
 	JumpSle
+)
+
+// PQR operations
+const (
+	PqrUhmul = uint8(0x20)
+	PqrUdiv  = uint8(0x40)
+	PqrUrem  = uint8(0x60)
+	PqrLmul  = uint8(0x80)
+	PqrShmul = uint8(0xa0)
+	PqrSdiv  = uint8(0xc0)
+	PqrSrem  = uint8(0xe0)
 )
 
 // Opcodes
@@ -116,8 +132,6 @@ const (
 	OpMov32Reg  = ClassAlu | SrcX | AluMov
 	OpArsh32Imm = ClassAlu | SrcK | AluArsh
 	OpArsh32Reg = ClassAlu | SrcX | AluArsh
-	OpSdiv32Imm = ClassAlu | SrcK | AluSdiv
-	OpSdiv32Reg = ClassAlu | SrcX | AluSdiv
 	OpLe        = ClassAlu | SrcK | AluEnd
 	OpBe        = ClassAlu | SrcX | AluEnd
 
@@ -146,8 +160,7 @@ const (
 	OpMov64Reg  = ClassAlu64 | SrcX | AluMov
 	OpArsh64Imm = ClassAlu64 | SrcK | AluArsh
 	OpArsh64Reg = ClassAlu64 | SrcX | AluArsh
-	OpSdiv64Imm = ClassAlu64 | SrcK | AluSdiv
-	OpSdiv64Reg = ClassAlu64 | SrcX | AluSdiv
+	OpHor64Imm  = ClassAlu64 | SrcK | AluHor
 
 	OpJa      = ClassJmp | JumpAlways
 	OpJeqImm  = ClassJmp | SrcK | JumpEq
@@ -176,4 +189,47 @@ const (
 	OpCall  = ClassJmp | SrcK | JumpCall
 	OpCallx = ClassJmp | SrcX | JumpCall
 	OpExit  = ClassJmp | JumpExit
+
+	OpLmul32Imm  = ClassPqr | SrcK | PqrLmul
+	OpLmul32Reg  = ClassPqr | SrcX | PqrLmul
+	OpUhmul32Imm = ClassPqr | SrcK | PqrUhmul
+	OpUhmul32Reg = ClassPqr | SrcX | PqrUhmul
+	OpUdiv32Imm  = ClassPqr | SrcK | PqrUdiv
+	OpUdiv32Reg  = ClassPqr | SrcX | PqrUdiv
+	OpUrem32Imm  = ClassPqr | SrcK | PqrUrem
+	OpUrem32Reg  = ClassPqr | SrcX | PqrUrem
+	OpShmul32Imm = ClassPqr | SrcK | PqrShmul
+	OpShmul32Reg = ClassPqr | SrcX | PqrShmul
+	OpSdiv32Imm  = ClassPqr | SrcK | PqrSdiv
+	OpSdiv32Reg  = ClassPqr | SrcX | PqrSdiv
+	OpSrem32Imm  = ClassPqr | SrcK | PqrSrem
+	OpSrem32Reg  = ClassPqr | SrcX | PqrSrem
+
+	OpLmul64Imm  = ClassPqr | SizeB | SrcK | PqrLmul
+	OpLmul64Reg  = ClassPqr | SizeB | SrcX | PqrLmul
+	OpUhmul64Imm = ClassPqr | SizeB | SrcK | PqrUhmul
+	OpUhmul64Reg = ClassPqr | SizeB | SrcX | PqrUhmul
+	OpUdiv64Imm  = ClassPqr | SizeB | SrcK | PqrUdiv
+	OpUdiv64Reg  = ClassPqr | SizeB | SrcX | PqrUdiv
+	OpUrem64Imm  = ClassPqr | SizeB | SrcK | PqrUrem
+	OpUrem64Reg  = ClassPqr | SizeB | SrcX | PqrUrem
+	OpShmul64Imm = ClassPqr | SizeB | SrcK | PqrShmul
+	OpShmul64Reg = ClassPqr | SizeB | SrcX | PqrShmul
+	OpSdiv64Imm  = ClassPqr | SizeB | SrcK | PqrSdiv
+	OpSdiv64Reg  = ClassPqr | SizeB | SrcX | PqrSdiv
+	OpSrem64Imm  = ClassPqr | SizeB | SrcK | PqrSrem
+	OpSrem64Reg  = ClassPqr | SizeB | SrcX | PqrSrem
+
+	OpLd1BReg = ClassAlu | SrcX | Size1B
+	OpLd2BReg = ClassAlu | SrcX | Size2B
+	OpLd4BReg = ClassAlu | SrcX | Size4B
+	OpLd8BReg = ClassAlu | SrcX | Size8B
+	OpSt1BImm = ClassAlu64 | SrcK | Size1B
+	OpSt2BImm = ClassAlu64 | SrcK | Size2B
+	OpSt4BImm = ClassAlu64 | SrcK | Size4B
+	OpSt8BImm = ClassAlu64 | SrcK | Size8B
+	OpSt1BReg = ClassAlu64 | SrcX | Size1B
+	OpSt2BReg = ClassAlu64 | SrcX | Size2B
+	OpSt4BReg = ClassAlu64 | SrcX | Size4B
+	OpSt8BReg = ClassAlu64 | SrcX | Size8B
 )
