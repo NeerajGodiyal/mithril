@@ -339,11 +339,9 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 	for _, acctInfo := range accountInfos {
 		keyData, err := vm.Translate(acctInfo.KeyAddr, 32, false)
 		if err != nil {
-			mlog.Log.Debugf("SolAccountInfoC: %+v", acctInfo)
 			return nil, nil, err
 		}
 		key := solana.PublicKeyFromBytes(keyData)
-		mlog.Log.Debugf("%s: SolAccountInfoC: %+v", key, acctInfo)
 		accountInfoKeys = append(accountInfoKeys, key)
 	}
 
@@ -651,20 +649,6 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 				}
 			}
 			if !found {
-				mlog.Log.Debugf("translateAndUpdateAccountsC InstrErrMissingAccount [2]. acct %s not found. len(instructionAccts) = %d, len(accountInfoKeys) = %d", accountKey, len(instructionAccts), len(accountInfoKeys))
-				mlog.Log.Debugf("instructionAccts:")
-				for _, ia := range instructionAccts {
-					accountKey, err := txCtx.KeyOfAccountAtIndex(ia.IndexInTransaction)
-					if err != nil {
-						panic(err)
-					}
-					mlog.Log.Debugf("acct: %s", accountKey)
-				}
-				mlog.Log.Debugf("\n\naccountInfoKeys: ")
-
-				for _, ai := range accountInfoKeys {
-					mlog.Log.Debugf("ai: %s", ai)
-				}
 				return nil, InstrErrMissingAccount
 			}
 		}
@@ -686,7 +670,6 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 
 	idx := len(programIndices) - 1
 	if idx < 0 {
-		mlog.Log.Debugf("translateAndUpdateAccountsRust InstrErrMissingAccount [1]")
 		return nil, InstrErrMissingAccount
 	}
 	programAcctIdx := programIndices[idx]
@@ -741,7 +724,6 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 				}
 			}
 			if !found {
-				mlog.Log.Debugf("translateAndUpdateAccountsRust InstrErrMissingAccount [2]")
 				return nil, InstrErrMissingAccount
 			}
 		}
