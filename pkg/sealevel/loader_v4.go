@@ -543,7 +543,7 @@ func LoaderV4ProcessSetProgramLength(execCtx *ExecutionCtx, newLen uint32) error
 		}
 
 		if isInitialization {
-			err = program.SetExecutable(true)
+			err = program.SetExecutable(execCtx.GlobalCtx.Features, true)
 			if err != nil {
 				return err
 			}

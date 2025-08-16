@@ -9,6 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -338,9 +339,11 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 	for _, acctInfo := range accountInfos {
 		keyData, err := vm.Translate(acctInfo.KeyAddr, 32, false)
 		if err != nil {
+			mlog.Log.Debugf("SolAccountInfoC: %+v", acctInfo)
 			return nil, nil, err
 		}
 		key := solana.PublicKeyFromBytes(keyData)
+		mlog.Log.Debugf("%s: SolAccountInfoC: %+v", key, acctInfo)
 		accountInfoKeys = append(accountInfoKeys, key)
 	}
 
@@ -594,6 +597,7 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 
 	idx := len(programIndices) - 1
 	if idx < 0 {
+		mlog.Log.Debugf("translateAndUpdateAccountsC InstrErrMissingAccount [1]")
 		return nil, InstrErrMissingAccount
 	}
 	programAcctIdx := programIndices[idx]
@@ -647,6 +651,20 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 				}
 			}
 			if !found {
+				mlog.Log.Debugf("translateAndUpdateAccountsC InstrErrMissingAccount [2]. acct %s not found. len(instructionAccts) = %d, len(accountInfoKeys) = %d", accountKey, len(instructionAccts), len(accountInfoKeys))
+				mlog.Log.Debugf("instructionAccts:")
+				for _, ia := range instructionAccts {
+					accountKey, err := txCtx.KeyOfAccountAtIndex(ia.IndexInTransaction)
+					if err != nil {
+						panic(err)
+					}
+					mlog.Log.Debugf("acct: %s", accountKey)
+				}
+				mlog.Log.Debugf("\n\naccountInfoKeys: ")
+
+				for _, ai := range accountInfoKeys {
+					mlog.Log.Debugf("ai: %s", ai)
+				}
 				return nil, InstrErrMissingAccount
 			}
 		}
@@ -668,6 +686,7 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 
 	idx := len(programIndices) - 1
 	if idx < 0 {
+		mlog.Log.Debugf("translateAndUpdateAccountsRust InstrErrMissingAccount [1]")
 		return nil, InstrErrMissingAccount
 	}
 	programAcctIdx := programIndices[idx]
@@ -722,6 +741,7 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 				}
 			}
 			if !found {
+				mlog.Log.Debugf("translateAndUpdateAccountsRust InstrErrMissingAccount [2]")
 				return nil, InstrErrMissingAccount
 			}
 		}
@@ -750,7 +770,6 @@ func translateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, pr
 
 // SyscallInvokeSignedCImpl is an implementation of the sol_invoke_signed_c syscall
 func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallInvokeSignedC")
 	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
 	if err != nil {

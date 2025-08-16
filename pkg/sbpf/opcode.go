@@ -190,20 +190,20 @@ const (
 	OpCallx = ClassJmp | SrcX | JumpCall
 	OpExit  = ClassJmp | JumpExit
 
-	OpLmul32Imm  = ClassPqr | SrcK | PqrLmul
-	OpLmul32Reg  = ClassPqr | SrcX | PqrLmul
-	OpUhmul32Imm = ClassPqr | SrcK | PqrUhmul
-	OpUhmul32Reg = ClassPqr | SrcX | PqrUhmul
-	OpUdiv32Imm  = ClassPqr | SrcK | PqrUdiv
-	OpUdiv32Reg  = ClassPqr | SrcX | PqrUdiv
-	OpUrem32Imm  = ClassPqr | SrcK | PqrUrem
-	OpUrem32Reg  = ClassPqr | SrcX | PqrUrem
-	OpShmul32Imm = ClassPqr | SrcK | PqrShmul
-	OpShmul32Reg = ClassPqr | SrcX | PqrShmul
-	OpSdiv32Imm  = ClassPqr | SrcK | PqrSdiv
-	OpSdiv32Reg  = ClassPqr | SrcX | PqrSdiv
-	OpSrem32Imm  = ClassPqr | SrcK | PqrSrem
-	OpSrem32Reg  = ClassPqr | SrcX | PqrSrem
+	OpLmul32Imm = ClassPqr | SrcK | PqrLmul
+	OpLmul32Reg = ClassPqr | SrcX | PqrLmul
+	//OpUhmul32Imm = ClassPqr | SrcK | PqrUhmul
+	//OpUhmul32Reg = ClassPqr | SrcX | PqrUhmul
+	OpUdiv32Imm = ClassPqr | SrcK | PqrUdiv
+	OpUdiv32Reg = ClassPqr | SrcX | PqrUdiv
+	OpUrem32Imm = ClassPqr | SrcK | PqrUrem
+	OpUrem32Reg = ClassPqr | SrcX | PqrUrem
+	//OpShmul32Imm = ClassPqr | SrcK | PqrShmul
+	//OpShmul32Reg = ClassPqr | SrcX | PqrShmul
+	OpSdiv32Imm = ClassPqr | SrcK | PqrSdiv
+	OpSdiv32Reg = ClassPqr | SrcX | PqrSdiv
+	OpSrem32Imm = ClassPqr | SrcK | PqrSrem
+	OpSrem32Reg = ClassPqr | SrcX | PqrSrem
 
 	OpLmul64Imm  = ClassPqr | SizeB | SrcK | PqrLmul
 	OpLmul64Reg  = ClassPqr | SizeB | SrcX | PqrLmul

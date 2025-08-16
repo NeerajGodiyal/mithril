@@ -1,9 +1,12 @@
 package sealevel
 
 import (
+	"fmt"
+
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -144,7 +147,7 @@ func (acct *BorrowedAccount) SetOwner(f features.Features, owner solana.PublicKe
 		return InstrErrModifiedProgramId
 	}
 
-	if acct.IsExecutable() {
+	if !f.IsActive(features.RemoveAccountsExecutableFlagChecks) && acct.IsExecutable() {
 		return InstrErrModifiedProgramId
 	}
 
@@ -221,8 +224,8 @@ func (acct *BorrowedAccount) IsOwnedByCurrentProgram() bool {
 	return lastProgramKey == acct.Owner()
 }
 
-func (acct *BorrowedAccount) DataCanBeChanged(features features.Features) error {
-	if acct.IsExecutable() {
+func (acct *BorrowedAccount) DataCanBeChanged(f features.Features) error {
+	if !f.IsActive(features.RemoveAccountsExecutableFlagChecks) && acct.IsExecutable() {
 		return InstrErrExecutableDataModified
 	}
 	if !acct.IsWritable() {
@@ -286,7 +289,7 @@ func (acct *BorrowedAccount) SetLamports(lamports uint64, f features.Features) e
 		return InstrErrReadonlyLamportChange
 	}
 
-	if acct.IsExecutable() {
+	if !f.IsActive(features.RemoveAccountsExecutableFlagChecks) && acct.IsExecutable() {
 		return InstrErrExecutableLamportChange
 	}
 
@@ -303,7 +306,7 @@ func (acct *BorrowedAccount) SetLamports(lamports uint64, f features.Features) e
 	return nil
 }
 
-func (acct *BorrowedAccount) SetExecutable(isExecutable bool) error {
+func (acct *BorrowedAccount) SetExecutable(f features.Features, isExecutable bool) error {
 	if !acct.TxCtx.Rent.IsExempt(acct.Lamports(), uint64(len(acct.Data()))) {
 		return InstrErrExecutableAccountNotRentExempt
 	}
@@ -317,11 +320,11 @@ func (acct *BorrowedAccount) SetExecutable(isExecutable bool) error {
 	}
 
 	// can't remove executable flag
-	if acct.Account.Executable && !isExecutable {
+	if !f.IsActive(features.RemoveAccountsExecutableFlagChecks) && acct.IsExecutable() && !isExecutable {
 		return InstrErrExecutableModified
 	}
 
-	if acct.Account.Executable == isExecutable {
+	if acct.IsExecutable() == isExecutable {
 		return nil
 	}
 
@@ -356,4 +359,8 @@ func (acct *BorrowedAccount) IsRentExemptAtDataLength(len uint64) bool {
 
 func (acct *BorrowedAccount) Drop() {
 	acct.TxCtx.Accounts.Unlock(acct.IndexInTransaction)
+}
+
+func (acct BorrowedAccount) String() string {
+	return fmt.Sprintf("acct - slot: %d, pubkey: %s, owner: %s, lamports: %d, executable: %t, isWritable = %t, isSigner = %t, rent epoch: %d, data len: %d, data hash: %s\n", acct.Account.Slot, acct.Account.Key, solana.PublicKeyFromBytes(acct.Account.Owner[:]), acct.Account.Lamports, acct.Account.Executable, acct.IsWritable(), acct.IsSigner(), acct.Account.RentEpoch, len(acct.Account.Data), solana.HashFromBytes(util.CalculateAcctHash(*acct.Account)))
 }

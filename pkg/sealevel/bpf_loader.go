@@ -520,7 +520,6 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 			dataLen := uint64(len(acct.acct.Data()))
 			alignmentMask := uint64(7) // (alignment - 1)
 			alignedDataLen := dataLen + (-dataLen & alignmentMask)
-
 			size += 1                      // is_signer
 			size += 1                      // is_writable
 			size += 1                      // executable
@@ -627,7 +626,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 
 	// sanity check for expected len vs. serialized data size
 	if uint64(len(serializedData)) != size {
-		panic("mismatch between serialized data and expected length")
+		panic(fmt.Sprintf("mismatch between serialized data and expected length: len(serializedData) = %d, expected size = %d", uint64(len(serializedData)), size))
 	}
 
 	return serializedData, preLens, nil
@@ -1016,6 +1015,8 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 		MaxCU:        int(execCtx.ComputeMeter.Remaining()),
 		ComputeMeter: &execCtx.ComputeMeter,
 		Context:      execCtx,
+		TxSignature:  execCtx.TransactionContext.Signature,
+		ProgramId:    programId,
 	}
 
 	start := time.Now()
@@ -1630,7 +1631,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	}
 
 	if !execCtx.GlobalCtx.Features.IsActive(features.DeprecateExecutableMetaUpdateInBpfLoader) {
-		err = program.SetExecutable(true)
+		err = program.SetExecutable(execCtx.GlobalCtx.Features, true)
 		if err != nil {
 			return err
 		}

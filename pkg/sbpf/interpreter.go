@@ -274,9 +274,9 @@ mainLoop:
 			pc++
 		case OpSub64Imm:
 			if ip.sbpfVersion.SwapSubRegImmOperands() {
-				r[ins.Dst()] = uint64(ins.Imm()) - r[ins.Dst()]
+				r[ins.Dst()] = uint64(int64(ins.Imm())) - r[ins.Dst()]
 			} else {
-				r[ins.Dst()] -= uint64(ins.Imm())
+				r[ins.Dst()] -= uint64(int64(ins.Imm()))
 			}
 			pc++
 		case OpSub64Reg:
@@ -383,7 +383,7 @@ mainLoop:
 				err = ExcInvalidInstr
 				break
 			}
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) * uint32(ins.Imm()))
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) * ins.Uimm())
 			pc++
 		case OpLmul32Reg:
 			if !ip.sbpfVersion.EnablePqr() {
@@ -397,7 +397,7 @@ mainLoop:
 				err = ExcInvalidInstr
 				break
 			}
-			r[ins.Dst()] *= uint64(ins.Imm())
+			r[ins.Dst()] *= uint64(int64(ins.Imm()))
 			pc++
 		case OpLmul64Reg:
 			if !ip.sbpfVersion.EnablePqr() {
@@ -412,7 +412,7 @@ mainLoop:
 				break
 			}
 			dst128 := wide.Uint128FromUint64(r[ins.Dst()])
-			imm128 := wide.Uint128FromUint64(uint64(ins.Imm()))
+			imm128 := wide.Uint128FromUint64(uint64(ins.Uimm()))
 			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
 			pc++
 		case OpUhmul64Reg:
@@ -910,7 +910,6 @@ mainLoop:
 			}
 			pc++
 		case OpCall:
-			// TODO use src reg hint
 			if sc, ok := ip.syscalls(ins.Uimm()); ok {
 				r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
 				pc++
@@ -1014,7 +1013,6 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 	hi, lo := addr>>32, addr&math.MaxUint32
 	switch hi {
 	case VaddrProgram >> 32:
-		mlog.Log.Debugf("addr %x is in VaddrProgram", addr)
 		if write {
 			return nil, NewExcBadAccess(addr, size, write, "write to program")
 		}

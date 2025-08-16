@@ -94,19 +94,28 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
-	result, err := fetcher.client.GetBlockWithOpts(
-		context.TODO(),
-		slot,
-		&rpc.GetBlockOpts{
-			MaxSupportedTransactionVersion: &maxSupportedTxVer,
-			Commitment:                     rpc.CommitmentFinalized,
-			TransactionDetails:             rpc.TransactionDetailsNone,
-			Rewards:                        &includeRewards,
-		},
-	)
+	var result *rpc.GetBlockResult
+	var err error
 
-	if err != nil {
-		return 0, err
+	for count := uint64(0); count < 20; count++ {
+		result, err = fetcher.client.GetBlockWithOpts(
+			context.TODO(),
+			slot+count,
+			&rpc.GetBlockOpts{
+				MaxSupportedTransactionVersion: &maxSupportedTxVer,
+				Commitment:                     rpc.CommitmentFinalized,
+				TransactionDetails:             rpc.TransactionDetailsNone,
+				Rewards:                        &includeRewards,
+			},
+		)
+
+		if err == nil {
+			break
+		} else if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot+count)) {
+			continue
+		} else {
+			panic(err)
+		}
 	}
 
 	if result.NumRewardPartitions == nil {

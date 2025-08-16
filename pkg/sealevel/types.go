@@ -336,9 +336,9 @@ func (accountInfo *SolAccountInfoC) Unmarshal(buf io.Reader) error {
 	accountInfo.DataAddr = binary.LittleEndian.Uint64(acctInfoBytes[24:32])
 	accountInfo.OwnerAddr = binary.LittleEndian.Uint64(acctInfoBytes[32:40])
 	accountInfo.RentEpoch = binary.LittleEndian.Uint64(acctInfoBytes[40:48])
-	accountInfo.IsSigner = acctInfoBytes[40] != 0
-	accountInfo.IsWritable = acctInfoBytes[41] != 0
-	accountInfo.Executable = acctInfoBytes[42] != 0
+	accountInfo.IsSigner = acctInfoBytes[48] != 0
+	accountInfo.IsWritable = acctInfoBytes[49] != 0
+	accountInfo.Executable = acctInfoBytes[50] != 0
 
 	return nil
 }

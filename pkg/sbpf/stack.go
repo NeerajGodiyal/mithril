@@ -1,6 +1,7 @@
 package sbpf
 
 import (
+	"math"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
@@ -54,6 +55,8 @@ const (
 
 // StackDepth is the max frame count of the stack.
 const StackDepth = 64
+
+var GapMask = uint64(0xFFFFFFFFFFFFF000)
 
 func newStackMem() []byte {
 	return make([]byte, StackMax)
@@ -110,7 +113,7 @@ func NewStack(sbpfVer sbpfver.SbpfVersion) Stack {
 func (s *Stack) Finish() {
 	if UsePool {
 		go func() {
-			s.mem = s.mem[:StackDepth*StackFrameSize]
+			s.mem = s.mem[:StackMax]
 			clear(s.mem)
 			stackMemPool.Put(s.mem)
 			s.shadow = s.shadow[:StackDepth]
@@ -126,22 +129,26 @@ func (s *Stack) GetFramePtr() uint64 {
 	return s.shadow[len(s.shadow)-1].FramePtr
 }
 
-// GetFrame returns the stack frame memory slice containing the frame pointer.
-//
-// The returned slice starts at the location within the frame as indicated by the address.
-// To get the full frame, align the provided address by StackFrameSize.
-//
-// Returns nil if the program tries to address a gap or out-of-bounds memory.
+// GetFrame returns underlying memory as a slice for a given stack address
 func (s *Stack) GetFrame(addr uint32) []byte {
-	hi, lo := addr/StackFrameSize, addr%StackFrameSize
-	if hi%2 == 1 && !s.dynamicStackFrames {
-		return nil
+	off := uint64(addr & math.MaxUint32)
+
+	if !s.dynamicStackFrames {
+		// disallow addressing a gap
+		hi := addr / StackFrameSize
+		if hi%2 == 1 {
+			return nil
+		}
+
+		// account for gapping in virtual addr space but not in the underlying memory
+		off = ((off & GapMask) >> 1) | (off & ^GapMask)
 	}
 
-	pos := hi / 2
-	off := pos * StackFrameSize
-
-	return s.mem[off+lo: /*off+StackFrameSize*/]
+	if off > StackMax {
+		return nil
+	} else {
+		return s.mem[off:]
+	}
 }
 
 // Push allocates a new call frame.
@@ -158,8 +165,7 @@ func (s *Stack) Push(regs []uint64, ret int64) bool {
 	copy(frame.NVRegs[:], regs[6:10])
 	frame.FramePtr = regs[10]
 
-	s.shadow = s.shadow[:len(s.shadow)+1]
-	s.shadow[len(s.shadow)-1] = frame
+	s.shadow = append(s.shadow, frame)
 
 	if !s.dynamicStackFrames {
 		regs[10] += StackFrameSize * 2
