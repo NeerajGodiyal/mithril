@@ -11,7 +11,6 @@ type Program struct {
 	TextVA      uint64
 	Entrypoint  uint64 // PC
 	Funcs       map[uint32]int64
-	Syscalls    SyscallRegistry
 	SbpfVersion sbpfver.SbpfVersion
 }
 

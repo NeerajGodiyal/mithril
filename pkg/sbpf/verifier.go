@@ -130,11 +130,7 @@ func (v *Verifier) VerifyProgram() error {
 			}
 
 		case verifyCheckSyscall:
-			{
-				if _, ok := v.Program.Syscalls(ins.Uimm()); !ok {
-					return fmt.Errorf("invalid syscall")
-				}
-			}
+			// nothing to do - already verified by the loader
 
 		case verifyInvalid:
 			fallthrough

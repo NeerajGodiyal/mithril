@@ -141,6 +141,5 @@ func (l *Loader) getProgram() *sbpf.Program {
 		Entrypoint:  l.entrypoint,
 		Funcs:       l.funcs,
 		SbpfVersion: sbpfver.SbpfVersion{Version: l.eh.Flags},
-		Syscalls:    l.syscalls,
 	}
 }
