@@ -57,6 +57,10 @@ func (ver *SbpfVersion) MoveMemoryInstructionClasses() bool {
 	return ver.Version >= SbpfVersionV2
 }
 
+func (ver *SbpfVersion) EnableStaticSyscalls() bool {
+	return ver.Version >= SbpfVersionV3
+}
+
 func GetMinAndMaxSbpfVersions(f *features.Features) (uint32, uint32) {
 	disableSbpfV0 := f.IsActive(features.DisableSbpfV0Execution)
 	reenableSbpfV0 := f.IsActive(features.ReenableSbpfV0Execution)
