@@ -1069,7 +1069,7 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 	start := time.Now()
 	//mlog.Log.Debugf("bpf loader - executeProgram")
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false, &execCtx.GlobalCtx.Features)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.GlobalCtx.Features)
 	if err != nil {
 		return err
 	}

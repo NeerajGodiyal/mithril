@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"runtime/pprof"
 	"syscall"
+	"time"
 
 	_ "net/http/pprof"
 
@@ -27,14 +28,25 @@ import (
 )
 
 var (
-	Cmd = cobra.Command{
+	Verifier = cobra.Command{
 		Use:   "verifier",
 		Short: "Run mithril verifier node",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			cmd.SetContext(ctx)
 			defer cancel()
-			run(cmd, args)
+			runVerifier(cmd, args)
+		},
+	}
+
+	Catchup = cobra.Command{
+		Use:   "catchup",
+		Short: "Catchup and run live",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			cmd.SetContext(ctx)
+			defer cancel()
+			runCatchup(cmd, args)
 		},
 	}
 
@@ -61,30 +73,46 @@ var (
 )
 
 func init() {
-	Cmd.Flags().BoolVarP(&loadFromSnapshot, "snapshot", "s", false, "Load from a full snapshot")
-	Cmd.Flags().BoolVarP(&loadFromAccountsDb, "accountsdb", "a", false, "Load from AccountsDB")
-	Cmd.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
-	Cmd.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot-filename", "", "Filename containing incremental snapshot")
-	Cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
-	Cmd.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
-	Cmd.Flags().Int64Var(&numReplaySlots, "num-replay-slots", 0, "Number of slots to replay.")
-	Cmd.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
-	Cmd.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
-	Cmd.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
-	Cmd.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
-	Cmd.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
-	Cmd.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
-	Cmd.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
-	Cmd.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
-	Cmd.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
-	Cmd.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
-	Cmd.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
-	Cmd.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
-	Cmd.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
-	Cmd.Flags().StringVar(&snapshotDlPath, "download-snapshot", "", "Path to download snapshot to")
+	// flags for verifier mode
+	Verifier.Flags().BoolVarP(&loadFromSnapshot, "snapshot", "s", false, "Load from a full snapshot")
+	Verifier.Flags().BoolVarP(&loadFromAccountsDb, "accountsdb", "a", false, "Load from AccountsDB")
+	Verifier.Flags().StringVarP(&path, "path", "p", "", "Path of full snapshot or AccountsDB to load from")
+	Verifier.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot-filename", "", "Filename containing incremental snapshot")
+	Verifier.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
+	Verifier.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	Verifier.Flags().Int64Var(&numReplaySlots, "num-replay-slots", 0, "Number of slots to replay.")
+	Verifier.Flags().Int64VarP(&endSlot, "endslot", "e", -1, "Block at which to stop replaying, inclusive")
+	Verifier.Flags().Int64Var(&pprofPort, "pprofport", -1, "Port to serve HTTP pprof endpoint")
+	Verifier.Flags().StringVar(&blockDir, "blockdir", "", "Path containing slot.json files")
+	Verifier.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
+	Verifier.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
+	Verifier.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
+	Verifier.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
+	Verifier.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
+	Verifier.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
+	Verifier.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
+	Verifier.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
+	Verifier.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
+	Verifier.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	Verifier.Flags().StringVar(&snapshotDlPath, "download-snapshot", "", "Path to download snapshot to")
+
+	// flags for catchup mode
+	Catchup.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
+	Catchup.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	Catchup.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
+	Catchup.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
+	Catchup.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
+	Catchup.Flags().StringVar(&metricsFilename, "metrics-filename", "", "Filename to write JSONL records of latencies")
+	Catchup.Flags().StringVar(&cpuprofFilename, "cpuprof-filename", "", "Filename to write CPU profile")
+	Catchup.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
+	Catchup.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
+	Catchup.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
+	Catchup.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
+	Catchup.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	Catchup.Flags().StringVar(&blockDir, "blockdir", "/tmp", "Path containing slot.json files")
 }
 
-func run(c *cobra.Command, args []string) {
+func runVerifier(c *cobra.Command, args []string) {
 	if pprofPort != -1 {
 		startPprofHandlers(int(pprofPort))
 	}
@@ -149,7 +177,7 @@ func run(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("downloading snapshot...")
 
-		path, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
+		path, _, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -213,6 +241,79 @@ func run(c *cobra.Command, args []string) {
 	}
 
 	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter)
+	mlog.Log.Infof("done replaying, closing DB")
+	accountsDb.CloseDb()
+}
+
+func runCatchup(c *cobra.Command, args []string) {
+	/*var accountsDb *accountsdb.AccountsDb
+	var manifest *snapshot.SnapshotManifest
+	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
+	if err != nil {
+		klog.Fatalf("failed to parse --debugtx or --debugacctwrites values: %v", err)
+	}*/
+
+	logVCSInfo()
+	snapshotDownloadPath := "/tmp"
+
+	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
+	if err != nil {
+		klog.Fatalf("failed to parse --debugtx or --debugacctwrites values: %v", err)
+	}
+
+	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofFilename)
+	if err != nil {
+		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
+	}
+	defer cpuprofCleanup()
+	if cpuprofWriter != nil {
+		pprof.StartCPUProfile(cpuprofWriter)
+		defer pprof.StopCPUProfile()
+	}
+
+	if rpcEndpoint == "" {
+		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	}
+
+	mlog.Log.Infof("downloading full snapshot...")
+	fullSnapshotDlStart := time.Now()
+	fullSnapshotPath, referenceSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
+	if err != nil {
+		klog.Fatalf("error downloading snapshot: %s", err)
+	}
+	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
+
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, referenceSlot, outputDir, rpcEndpoint, blockDir)
+	if err != nil {
+		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
+	}
+	mlog.Log.Infof("finished building accountsdb")
+
+	startSlot := int64(manifest.Bank.Slot + 1)
+	endSlot := startSlot + 20000
+
+	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
+
+	mlog.Log.Infof("initializing caches")
+	accountsDb.InitCaches()
+
+	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsFilename)
+	if err != nil {
+		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsFilename, err)
+	}
+	defer metricsWriterCleanup()
+
+	if paramArenaSizeMB > 0 {
+		replay.SerializedParameterArena = arena.New[byte](paramArenaSizeMB << 20)
+	}
+	if borrowedAccountArenaSize > 0 {
+		sealevel.BorrowedAccountArenas = make([]*arena.Arena[sealevel.BorrowedAccount], txParallelism)
+		for i := range txParallelism {
+			sealevel.BorrowedAccountArenas[i] = arena.New[sealevel.BorrowedAccount](borrowedAccountArenaSize)
+		}
+	}
+
+	replay.ReplayBlocks(c.Context(), accountsDb, outputDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

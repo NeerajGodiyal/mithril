@@ -27,7 +27,10 @@ func init() {
 	cmd.PersistentFlags().AddGoFlagSet(klogFlags)
 
 	cmd.AddCommand(
-		&node.Cmd,
+		&node.Verifier,
+	)
+	cmd.AddCommand(
+		&node.Catchup,
 	)
 }
 

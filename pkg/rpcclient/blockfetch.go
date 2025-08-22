@@ -2,11 +2,16 @@ package rpcclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
@@ -196,4 +201,57 @@ func (fetcher *RpcClient) GetBlockTime(slot uint64) (int64, error) {
 		return 0, rpc.ErrNotConfirmed
 	}
 	return int64(*ts), err
+}
+
+func (fetcher *RpcClient) GetSlot() (uint64, error) {
+	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentFinalized)
+	if err != nil {
+		return 0, rpc.ErrNotConfirmed
+	}
+	return slot, err
+}
+
+func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num uint64) {
+	endSlot := slot + num
+	slotMu := &sync.Mutex{}
+	wg := &sync.WaitGroup{}
+	workers := 10
+	wg.Add(int(workers))
+	for i := 0; i < int(workers); i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				slotMu.Lock()
+				s := slot
+				slot++
+				slotMu.Unlock()
+				if s > endSlot {
+					return
+				}
+
+				blockResult, err := fetcher.GetBlockFinalized(s)
+				if err == SlotSkipped {
+					continue
+				} else if err != nil {
+					mlog.Log.Errorf("error fetching slot=%d: %v", s, err)
+					continue
+				}
+				blockFilename := filepath.Join(filepath.Clean(outDir), fmt.Sprintf("%d.json", s))
+				saveBlockToFile(blockFilename, blockResult)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func saveBlockToFile(filename string, b *rpc.GetBlockResult) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(b)
 }

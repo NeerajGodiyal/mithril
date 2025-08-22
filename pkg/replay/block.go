@@ -590,6 +590,7 @@ func ReplayBlocks(
 	blockBuffer := 25
 	streamChan := make(chan *Block, blockBuffer)
 	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
+
 	blockStream.downloadInitialBlocks()
 	go blockStream.startAsyncBlockStream()
 

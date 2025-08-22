@@ -67,8 +67,9 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*Snap
 }
 
 type appendVecCopyingTask struct {
-	Filename  string
-	TarBuffer *bytes.Buffer
+	Filename                string
+	TarBuffer               *bytes.Buffer
+	FromIncrementalSnapshot bool
 }
 
 type indexEntryBuilderTask struct {
@@ -108,7 +109,7 @@ func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error
 	} else if snapshotType == snapshotTypeLz4 {
 		reader = lz4.NewReader(bmr)
 	} else {
-		panic(fmt.Sprintf("unknown snapshot type"))
+		panic("unknown snapshot type")
 	}
 
 	return reader, nil

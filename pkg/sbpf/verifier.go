@@ -136,7 +136,7 @@ func (v *Verifier) VerifyProgram() error {
 			fallthrough
 		default:
 			{
-				return fmt.Errorf("invalid opcode")
+				return fmt.Errorf("invalid opcode 0x%x", ins.Op())
 			}
 		}
 
