@@ -264,7 +264,7 @@ func BuildAccountsDbWithIncr(
 
 	latestSlot, _ = rpcClient.GetSlot()
 
-	mlog.Log.Infof("node currently at slot %d, whereas chain is at slot %d. mithril is %d slots behind.", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+	mlog.Log.Infof("node currently at slot %d, whereas chain is at slot %d. currently %d slots behind.", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
 
 	return accountsDb, incrementalManifest, nil
 }

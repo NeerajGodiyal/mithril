@@ -1,6 +1,8 @@
 module github.com/Overclock-Validator/mithril
 
-go 1.23.4
+go 1.23.5
+
+toolchain go1.24.2
 
 replace github.com/gagliardetto/solana-go => github.com/palmerlao/solana-go v0.0.0-20250609100755-01c2412e5333
 
@@ -49,6 +51,7 @@ require (
 	github.com/astaxie/beego v1.12.3 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.2.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/bwmarrin/snowflake v0.3.0 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cloudflare/bn256 v0.0.0-20241212004005-a4a408366973 // indirect
@@ -79,11 +82,13 @@ require (
 	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/glog v1.2.0 // indirect
+	github.com/golang/glog v1.2.4 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/rpc v1.2.0 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
@@ -103,6 +108,7 @@ require (
 	github.com/recoilme/sortedset v0.0.0-20200825100557-fdc6fff0bc87 // indirect
 	github.com/rosedblabs/diskhash v0.0.0-20230910084041-289755737e2a // indirect
 	github.com/rosedblabs/wal v1.3.6 // indirect
+	github.com/rpcpool/yellowstone-grpc/examples/golang v0.0.0-20250409203454-bb3a44a2f723 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/segmentio/fasthash v1.0.3 // indirect
@@ -125,6 +131,8 @@ require (
 	go.etcd.io/bbolt v1.3.8 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f // indirect
+	google.golang.org/grpc v1.71.1 // indirect
 	gopkg.in/go-playground/validator.v8 v8.18.2 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
@@ -172,6 +180,7 @@ require (
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/gtank/merlin v0.1.1
 	github.com/gtank/ristretto255 v0.1.2
+	github.com/helius-labs/laserstream-sdk/go v0.0.5
 	github.com/icza/kvcache v0.0.0-20230330133025-f5eb6361aef6
 	github.com/iden3/go-iden3-crypto v0.0.16
 	github.com/ielm/neostd v0.0.0-20240911190201-d89b0d99b9b3
@@ -245,5 +254,5 @@ require (
 	golang.org/x/term v0.30.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	golang.org/x/tools v0.29.0 // indirect
-	google.golang.org/protobuf v1.36.5 // indirect
+	google.golang.org/protobuf v1.36.6 // indirect
 )
