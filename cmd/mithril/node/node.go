@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -177,7 +178,7 @@ func runVerifier(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("downloading snapshot...")
 
-		path, _, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
+		path, _, _, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -277,20 +278,20 @@ func runCatchup(c *cobra.Command, args []string) {
 
 	mlog.Log.Infof("downloading full snapshot...")
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotPath, referenceSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
+	fullSnapshotPath, referenceSlot, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, referenceSlot, outputDir, rpcEndpoint, blockDir)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, referenceSlot, outputDir, rpcEndpoint, blockDir)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
 	}
 	mlog.Log.Infof("finished building accountsdb")
 
 	startSlot := int64(manifest.Bank.Slot + 1)
-	endSlot := startSlot + 20000
+	endSlot := uint64(math.MaxUint64)
 
 	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
 

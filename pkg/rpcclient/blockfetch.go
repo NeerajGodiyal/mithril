@@ -211,8 +211,13 @@ func (fetcher *RpcClient) GetSlot() (uint64, error) {
 	return slot, err
 }
 
-func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num uint64) {
-	endSlot := slot + num
+func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num int64) {
+	var fetchForever bool
+	if num < 0 {
+		fetchForever = true
+	}
+
+	endSlot := slot + uint64(num)
 	slotMu := &sync.Mutex{}
 	wg := &sync.WaitGroup{}
 	workers := 10
@@ -225,7 +230,7 @@ func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num u
 				s := slot
 				slot++
 				slotMu.Unlock()
-				if s > endSlot {
+				if !fetchForever && s > endSlot {
 					return
 				}
 

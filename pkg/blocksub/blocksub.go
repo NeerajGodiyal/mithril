@@ -130,7 +130,6 @@ func (subscriber *BlockSubscriber) handleLaserStreamSubscription() {
 	err := subscriber.laserStreamClient.Subscribe(req,
 		func(update *laserstream.SubscribeUpdate) {
 			mlog.Log.Infof("Received block %d", update.GetBlock().Slot)
-			update.GetBlock()
 		},
 		func(err error) {
 			panic(err)

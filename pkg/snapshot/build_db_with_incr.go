@@ -25,6 +25,7 @@ func BuildAccountsDbWithIncr(
 	fullSnapshotFile string,
 	snapshotDownloadPath string,
 	fullSnapshotSlot int,
+	referenceSlot int,
 	accountsDbDir string,
 	rpcEndpoint string,
 	blockDir string,
@@ -195,19 +196,23 @@ func BuildAccountsDbWithIncr(
 		mlog.Log.Errorf("processing snapshot: %v", err)
 	}
 
-	mlog.Log.Infof("downloading incremental snapshot...")
+	// download an incremental snapshot based on the full snapshot's slot number
+	mlog.Log.Infof("downloading incremental snapshot (%d)...", referenceSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath, fullSnapshotSlot)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}
 	mlog.Log.Infof("finished downloading incremental snapshot in %s to %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
 
 	rpcClient := rpcclient.NewRpcClient(rpcEndpoint)
-	latestSlot, _ := rpcClient.GetSlot()
-	go rpcClient.DownloadBlocksToFile(blockDir, uint64(incrSlot), latestSlot-uint64(incrSlot))
+	currentSlot, err := rpcClient.GetSlot()
+	if err != nil {
+		klog.Fatalf("error getting current slot: %s", err)
+	}
 
-	// download an incremental snapshot based on the full snapshot's slot number
+	go rpcClient.DownloadBlocksToFile(blockDir, uint64(incrSlot), int64(currentSlot-uint64(incrSlot)))
+
 	incrSnapshotStart := time.Now()
 	incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
 	if err != nil {
@@ -262,7 +267,8 @@ func BuildAccountsDbWithIncr(
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
-	latestSlot, _ = rpcClient.GetSlot()
+	latestSlot, _ := rpcClient.GetSlot()
+	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
 	mlog.Log.Infof("node currently at slot %d, whereas chain is at slot %d. currently %d slots behind.", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
 
