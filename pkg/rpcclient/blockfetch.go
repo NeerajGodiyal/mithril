@@ -21,20 +21,34 @@ func (fetcher *RpcClient) GetBlock(slot uint64) (*rpc.GetBlockResult, error) {
 }
 
 func (fetcher *RpcClient) GetBlockConfirmed(slot uint64) (*rpc.GetBlockResult, error) {
-	includeRewards := false
+	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
-	result, err := fetcher.client.GetBlockWithOpts(
-		context.TODO(),
-		slot,
-		&rpc.GetBlockOpts{
-			MaxSupportedTransactionVersion: &maxSupportedTxVer,
-			Encoding:                       solana.EncodingBase64,
-			Commitment:                     rpc.CommitmentConfirmed,
-			TransactionDetails:             rpc.TransactionDetailsFull,
-			Rewards:                        &includeRewards,
-		},
-	)
+	var result *rpc.GetBlockResult
+	var err error
+
+	for count := 0; count < 10; count++ {
+		result, err = fetcher.client.GetBlockWithOpts(
+			context.TODO(),
+			slot,
+			&rpc.GetBlockOpts{
+				MaxSupportedTransactionVersion: &maxSupportedTxVer,
+				Commitment:                     rpc.CommitmentConfirmed,
+				TransactionDetails:             rpc.TransactionDetailsFull,
+				Rewards:                        &includeRewards,
+			},
+		)
+
+		if err == nil {
+			break
+		} else {
+			if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot)) {
+				return nil, SlotSkipped
+			} else {
+				//mlog.Log.Debugf("fetch block %d failed - retrying", slot)
+			}
+		}
+	}
 
 	return result, err
 }

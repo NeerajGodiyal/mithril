@@ -6,6 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -30,7 +31,7 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 	return &epoch
 }
 
-func calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo, acctsDb *accountsdb.AccountsDb, block *Block, epochSchedule *sealevel.SysvarEpochSchedule, slot uint64, epoch uint64, f *features.Features) {
+func calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo, acctsDb *accountsdb.AccountsDb, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, slot uint64, epoch uint64, f *features.Features) {
 	stakeHistoryAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarStakeHistoryAddr)
 	if err != nil {
 		panic(fmt.Sprintf("unable to retrieve stakehistory sysvar: %s", err))
@@ -58,7 +59,7 @@ func calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo 
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewardsDuringRewardsWindow(acctsDb, block.StakeAccts, &stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, f)
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, block *Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey) {
 	rewardPks, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 

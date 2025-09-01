@@ -16,9 +16,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/bankhash"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
@@ -34,45 +35,7 @@ import (
 
 var SerializedParameterArena *arena.Arena[byte]
 
-type BlockRewardsInfo struct {
-	Leader      solana.PublicKey
-	Lamports    uint64
-	PostBalance uint64
-}
-
-type Block struct {
-	Slot                   uint64
-	ParentSlot             uint64
-	BlockHeight            uint64
-	Epoch                  uint64
-	Transactions           []*solana.Transaction
-	BankHash               [32]byte
-	EpochAcctsHash         []byte
-	EahWorkaroundBankhash  []byte
-	HasEahWorkaround       bool
-	ParentBankhash         [32]byte
-	AcctsLtHash            *lthash.LtHash
-	NumSignatures          uint64
-	Blockhash              [32]byte
-	ExpectedBankhash       [32]byte
-	TxMetas                []*rpc.TransactionMeta
-	Leader                 solana.PublicKey
-	BlockReward            *BlockRewardsInfo
-	LastBlockhash          [32]byte
-	UnixTimestamp          int64
-	StakeAccts             map[solana.PublicKey]bool
-	VoteAccts              map[solana.PublicKey]uint64
-	VoteTimestamps         map[solana.PublicKey]sealevel.BlockTimestamp
-	TotalEpochStake        uint64
-	Features               *features.Features
-	UpdatedAccts           []solana.PublicKey
-	PartitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
-	Rewards                []rpc.BlockReward
-	NumRewardPartitions    uint64
-	LatestEvictedBlockhash [32]byte
-}
-
-func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) error {
+func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for _, tx := range block.Transactions {
@@ -121,7 +84,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *Block) er
 	return nil
 }
 
-func extractAndDedupeBlockAccts(block *Block) []solana.PublicKey {
+func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
 	var numPubkeys int
 	for _, tx := range block.Transactions {
 		numPubkeys += len(tx.Message.AccountKeys)
@@ -209,7 +172,7 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *Block) (accounts.Accounts, accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
 		return nil, nil, err
@@ -461,62 +424,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 	return f, newlyActivatedFeatures
 }
 
-func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {
-	for _, reward := range rewards {
-		if string(reward.RewardType) == "Fee" {
-			return &reward
-		}
-	}
-
-	return nil
-}
-
-func NewBlockFromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {
-	block := new(Block)
-
-	for _, tx := range blockResult.Transactions {
-		txParsed, err := tx.GetTransaction()
-		if err != nil {
-			return nil, err
-		}
-		block.Transactions = append(block.Transactions, txParsed)
-		block.TxMetas = append(block.TxMetas, tx.Meta)
-	}
-
-	block.Blockhash = blockResult.Blockhash
-	block.LastBlockhash = blockResult.PreviousBlockhash
-	block.UnixTimestamp = int64(*blockResult.BlockTime)
-	block.BlockHeight = *blockResult.BlockHeight
-	block.Rewards = blockResult.Rewards
-
-	if blockResult.NumRewardPartitions != nil {
-		block.NumRewardPartitions = *blockResult.NumRewardPartitions
-	} else {
-		block.NumRewardPartitions = math.MaxUint64
-	}
-
-	blockReward := blockRewardRewards(blockResult.Rewards)
-	if blockReward != nil {
-		block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
-	} else {
-		if rpcc != nil {
-			leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
-			if err != nil {
-				panic(fmt.Sprintf("unable to get blockreward for slot %d", slot))
-			} else {
-				block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
-			}
-		}
-	}
-
-	for _, tx := range block.Transactions {
-		block.NumSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
-	}
-
-	return block, nil
-}
-
-func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot.SnapshotManifest) {
+func setupInitialVoteAcctsAndStakeAccts(block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.StakeAccts = make(map[solana.PublicKey]bool)
 	block.VoteAccts = make(map[solana.PublicKey]uint64)
@@ -533,7 +441,7 @@ func setupInitialVoteAcctsAndStakeAccts(block *Block, snapshotManifest *snapshot
 	}
 }
 
-func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
+func configureInitialBlock(block *b.Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.AcctsLtHash = snapshotManifest.LtHash
@@ -542,7 +450,7 @@ func configureInitialBlock(block *Block, snapshotManifest *snapshot.SnapshotMani
 	snapshotManifest = nil
 }
 
-func configureBlock(block *Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
+func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
 	block.StakeAccts = lastSlotCtx.StakeAccts
@@ -562,6 +470,8 @@ func ReplayBlocks(
 	rpcEndpoint string,
 	blockDir string,
 	txParallelism int,
+	blockChan chan *b.Block,
+	isLive bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 ) error {
@@ -587,18 +497,26 @@ func ReplayBlocks(
 	var timeAccumulator float64
 	var justCrossedEpochBoundary bool
 
-	blockBuffer := 25
-	streamChan := make(chan *Block, blockBuffer)
-	blockStream := NewBlockStream(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
+	var streamChan chan *b.Block
+	if blockChan == nil {
+		blockBuffer := 25
+		streamChan = make(chan *b.Block, blockBuffer)
+		blockConsumer := blockstream.NewBlockConsumer(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
 
-	blockStream.downloadInitialBlocks()
-	go blockStream.startAsyncBlockStream()
+		if !isLive {
+			blockConsumer.DownloadInitialBlocks()
+		}
+		go blockConsumer.StartAsyncBlockStream()
+	} else {
+		streamChan = blockChan
+	}
 
 	for block := range streamChan {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			break
 		}
+
 		start := time.Now()
 
 		currentSlot = block.Slot
@@ -728,7 +646,7 @@ func acctsEqual(a *accounts.Account, b *accounts.Account) bool {
 		bytes.Equal(a.Data, b.Data)
 }
 
-func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
+func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 
@@ -765,7 +683,7 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *Block, re
 	return writableAccts, modifiedAccts
 }
 
-func newSlotCtx(block *Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
+func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:    accts,
 		ParentAccts: parentAccts,
@@ -802,7 +720,7 @@ func newSlotCtx(block *Block, accts accounts.Accounts, parentAccts accounts.Acco
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
@@ -828,7 +746,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 	return txFeeAccumulator
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *Block, rblock *Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	do := make(chan int, len(block.Transactions))
 	done := make(chan int, len(block.Transactions))
 	go TopsortPlannerStream(block, do, done)
@@ -878,7 +796,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	return txFeeAccumulator
 }
 
-func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
 	if SerializedParameterArena != nil {
 		SerializedParameterArena.Reset()
 	}
@@ -888,7 +806,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *Block, txParallelism in
 	defer sigverifyWg.Wait()
 	start := time.Now()
 	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
-	unresolvedBlock := &Block{
+	unresolvedBlock := &b.Block{
 		Transactions: make([]*solana.Transaction, len(block.Transactions)),
 		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
 	}

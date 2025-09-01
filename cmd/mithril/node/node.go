@@ -57,6 +57,7 @@ var (
 	incrementalSnapshotFilename string
 	outputDir                   string
 	rpcEndpoint                 string
+	rpcEndpointFile             string
 	snapshotDlPath              string
 	numReplaySlots              int64
 	endSlot                     int64
@@ -100,6 +101,7 @@ func init() {
 	// flags for catchup mode
 	Catchup.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
 	Catchup.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	Catchup.Flags().StringVarP(&rpcEndpointFile, "rpc-node-list", "n", "", "Path for RPC node list file")
 	Catchup.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 	Catchup.Flags().StringSliceVar(&debugTxs, "debugtx", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	Catchup.Flags().StringSliceVar(&debugAcctWrites, "debugacctwrites", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
@@ -241,19 +243,12 @@ func runVerifier(c *cobra.Command, args []string) {
 		}
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, false, dbgOpts, metricsWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
 
 func runCatchup(c *cobra.Command, args []string) {
-	/*var accountsDb *accountsdb.AccountsDb
-	var manifest *snapshot.SnapshotManifest
-	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
-	if err != nil {
-		klog.Fatalf("failed to parse --debugtx or --debugacctwrites values: %v", err)
-	}*/
-
 	logVCSInfo()
 	snapshotDownloadPath := "/tmp"
 
@@ -276,15 +271,19 @@ func runCatchup(c *cobra.Command, args []string) {
 		rpcEndpoint = "https://api.mainnet-beta.solana.com"
 	}
 
+	if rpcEndpointFile == "" {
+		klog.Fatalf("must provide list of RPC nodes to use")
+	}
+
 	mlog.Log.Infof("downloading full snapshot...")
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotPath, referenceSlot, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
+	fullSnapshotPath, _, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, referenceSlot, outputDir, rpcEndpoint, blockDir)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, outputDir, rpcEndpoint, rpcEndpointFile, blockDir, nil)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", path, err)
 	}
@@ -314,7 +313,7 @@ func runCatchup(c *cobra.Command, args []string) {
 		}
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, outputDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), dbgOpts, metricsWriter)
+	replay.ReplayBlocks(c.Context(), accountsDb, outputDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, true, dbgOpts, metricsWriter)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

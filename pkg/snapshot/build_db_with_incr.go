@@ -13,6 +13,8 @@ import (
 
 	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
@@ -28,7 +30,9 @@ func BuildAccountsDbWithIncr(
 	referenceSlot int,
 	accountsDbDir string,
 	rpcEndpoint string,
+	rpcEndpointFile string,
 	blockDir string,
+	blockChan chan *block.Block,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
@@ -205,13 +209,15 @@ func BuildAccountsDbWithIncr(
 	}
 	mlog.Log.Infof("finished downloading incremental snapshot in %s to %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
 
-	rpcClient := rpcclient.NewRpcClient(rpcEndpoint)
-	currentSlot, err := rpcClient.GetSlot()
-	if err != nil {
-		klog.Fatalf("error getting current slot: %s", err)
+	opts := blockstream.BlockSourceOpts{
+		EndpointType: blockstream.BlockEndpointTypeRpc,
+		OutDir:       blockDir,
+		RpcPoolFile:  rpcEndpointFile,
+		StartSlot:    uint64(incrSlot),
 	}
 
-	go rpcClient.DownloadBlocksToFile(blockDir, uint64(incrSlot), int64(currentSlot-uint64(incrSlot)))
+	blockSubscriber := blockstream.NewBlockSource(opts)
+	go blockSubscriber.Start()
 
 	incrSnapshotStart := time.Now()
 	incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
@@ -267,6 +273,7 @@ func BuildAccountsDbWithIncr(
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
+	rpcClient := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
 	latestSlot, _ := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 

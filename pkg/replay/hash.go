@@ -11,6 +11,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -288,7 +289,7 @@ func fetchBankhashForSlot(rpcc *rpcclient.RpcClient, slot uint64) ([]byte, error
 		}
 	}
 
-	block, err := NewBlockFromBlockResult(blockResult, slot, rpcc)
+	block, err := block.FromBlockResult(blockResult, slot, rpcc)
 	if err != nil {
 		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))
 	}

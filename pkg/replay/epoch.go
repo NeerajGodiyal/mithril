@@ -7,6 +7,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
@@ -153,7 +154,7 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 
 const numSlotsPerEpoch = 432000
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey, map[solana.PublicKey]uint64) {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey, map[solana.PublicKey]uint64) {
 	stakeHistory := updateStakeHistorySysvar(acctsDb, prevSlotCtx, epoch)
 
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo

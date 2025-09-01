@@ -6,12 +6,13 @@ import (
 	"os"
 	"slices"
 
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func unmarshalBlockJSON(filename string) (*replay.Block, error) {
+func unmarshalBlockJSON(filename string) (*block.Block, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("reading file: %w", err)
@@ -22,7 +23,7 @@ func unmarshalBlockJSON(filename string) (*replay.Block, error) {
 		return nil, fmt.Errorf("unmarshaling JSON: %w", err)
 	}
 
-	b, err := replay.NewBlockFromBlockResult(gbr, 0, nil)
+	b, err := block.FromBlockResult(gbr, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("transforming to replay.Block: %w", err)
 	}

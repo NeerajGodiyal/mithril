@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/google/go-cmp/cmp"
@@ -55,14 +56,14 @@ func testTxMeta(readAcctBytes []byte, writeAcctBytes []byte) *rpc.TransactionMet
 // Graph test cases, many taken from https://github.com/apfitzge/prio-graph
 type graphTestCase struct {
 	name            string
-	b               *Block
+	b               *block.Block
 	sortedTxIndices [][]int
 }
 
 var tests = []graphTestCase{
 	{
 		"ReadAfterWriteSequential",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(2),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0}),
@@ -73,7 +74,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"WriteAfterReadSequential",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(2),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta([]byte{0}, nil),
@@ -84,7 +85,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"ReadonlyExecuteAllParallel",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(3),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta([]byte{0}, nil),
@@ -96,7 +97,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"ChainedTxsExecuteSequentially",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(3),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0}),
@@ -108,7 +109,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"DisjointWritesExecuteAllParallel",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(3),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0}),
@@ -120,7 +121,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"MultipleChains",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(8),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0}),
@@ -137,7 +138,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"Join",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(6),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0}),
@@ -152,7 +153,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"Fork",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(6),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0, 1}),
@@ -167,7 +168,7 @@ var tests = []graphTestCase{
 	},
 	{
 		"ForkAndJoin",
-		&Block{
+		&block.Block{
 			Transactions: testTxs(9),
 			TxMetas: []*rpc.TransactionMeta{
 				testTxMeta(nil, []byte{0, 1}),
@@ -185,7 +186,7 @@ var tests = []graphTestCase{
 	},
 }
 
-func runStream(b *Block) []int {
+func runStream(b *block.Block) []int {
 	do := make(chan int, len(b.Transactions))
 	done := make(chan int, len(b.Transactions))
 	go TopsortPlannerStream(b, do, done)
@@ -225,7 +226,7 @@ func TestTopsort(t *testing.T) {
 	}
 }
 
-func mustMarshal(b *Block) []byte {
+func mustMarshal(b *block.Block) []byte {
 	bBytes, err := json.Marshal(b)
 	if err != nil {
 		panic(err)
@@ -247,7 +248,7 @@ func FuzzBlockToDependencyGraph(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, blockBytes []byte) {
-		b := &Block{}
+		b := &block.Block{}
 		err := json.Unmarshal(blockBytes, b)
 		if err != nil {
 			t.Skip("skipping unmarshalable block")

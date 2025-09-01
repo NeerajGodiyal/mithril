@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
@@ -18,7 +19,7 @@ type lastTimestampData struct {
 	Stake     uint64
 }
 
-func updateClockSysvar(clock *sealevel.SysvarClock, block *Block) error {
+func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block) error {
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
 	clock.UnixTimestamp = block.UnixTimestamp

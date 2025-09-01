@@ -5,6 +5,7 @@ import (
 	//"time"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -60,7 +61,7 @@ func getWritableAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solan
 	return util.DedupePubkeys(accounts)
 }
 
-func blockToDependencyGraph(b *Block) (adjacencyList [][]tx, inDegree []int) {
+func blockToDependencyGraph(b *block.Block) (adjacencyList [][]tx, inDegree []int) {
 	//start := time.Now()
 	// Map between pubkeys and account indices
 	var acctToPk []solana.PublicKey
@@ -158,7 +159,7 @@ func blockToDependencyGraph(b *Block) (adjacencyList [][]tx, inDegree []int) {
 // TopsortPlanner returns a list of list of ints.
 // The ints are indices into the b.Transactions slices.
 // Each list of indices do not have write-after-write or read-after-write conflicts.
-func TopsortPlanner(b *Block) [][]int {
+func TopsortPlanner(b *block.Block) [][]int {
 	adjList, inDegree := blockToDependencyGraph(b)
 
 	// Output a topological sorting of the transactions
@@ -191,7 +192,7 @@ func TopsortPlanner(b *Block) [][]int {
 }
 
 // TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
-func TopsortPlannerStream(b *Block, out chan int, done chan int) {
+func TopsortPlannerStream(b *block.Block, out chan int, done chan int) {
 	adjList, inDegree := blockToDependencyGraph(b)
 
 	sent := 0
