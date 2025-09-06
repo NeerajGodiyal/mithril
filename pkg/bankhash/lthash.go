@@ -48,7 +48,7 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 func calculateSingleDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAcct *accounts.Account) *lthash.LtHash {
 	previousAcct, err := slotCtx.GetParentAccount(modifiedAcct.Key)
 	if err != nil {
-		panic(fmt.Sprintf("couldn't find parent acct for %s", modifiedAcct.Key))
+		panic(fmt.Sprintf("couldn't find parent acct for %s for slot %d", modifiedAcct.Key, slotCtx.Slot))
 	}
 
 	var deltaLtHash lthash.LtHash

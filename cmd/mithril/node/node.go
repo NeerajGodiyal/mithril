@@ -56,6 +56,7 @@ var (
 	path                        string
 	incrementalSnapshotFilename string
 	outputDir                   string
+	scratchDir                  string
 	rpcEndpoint                 string
 	rpcEndpointFile             string
 	snapshotDlPath              string
@@ -113,6 +114,7 @@ func init() {
 	Catchup.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Catchup.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Catchup.Flags().StringVar(&blockDir, "blockdir", "/tmp", "Path containing slot.json files")
+	Catchup.Flags().StringVar(&scratchDir, "scratchdir", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 }
 
 func runVerifier(c *cobra.Command, args []string) {
@@ -250,7 +252,7 @@ func runVerifier(c *cobra.Command, args []string) {
 
 func runCatchup(c *cobra.Command, args []string) {
 	logVCSInfo()
-	snapshotDownloadPath := "/tmp"
+	snapshotDownloadPath := scratchDir
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
 	if err != nil {

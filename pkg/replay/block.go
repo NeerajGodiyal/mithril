@@ -100,6 +100,10 @@ func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
 		}
 	}
 
+	for _, pk := range block.UpdatedAccts {
+		pubkeyMap[pk] = struct{}{}
+	}
+
 	pubkeys := make([]solana.PublicKey, len(pubkeyMap))
 	i := 0
 	for pk := range pubkeyMap {
@@ -667,7 +671,10 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 		////mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
 		acct, err := slotCtx.GetAccount(pk)
 		if err != nil {
-			panic(fmt.Sprintf("unable to fetch %s from accountsdb for inclusion in bankhash", pk))
+			acct, err = slotCtx.GetAccountFromAccountsDb(pk)
+			if err != nil {
+				panic(fmt.Sprintf("unable to fetch %s from neither SlotCtx nor accountsdb for inclusion in bankhash in slot %d", pk, slotCtx.Slot))
+			}
 		}
 		writableAccts = append(writableAccts, acct)
 		modifiedAccts = append(modifiedAccts, acct)

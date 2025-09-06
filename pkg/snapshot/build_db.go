@@ -246,7 +246,11 @@ func BuildAccountsDb(
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
-	return accountsDb, manifest, nil
+	if incrementalManifest != nil {
+		return accountsDb, incrementalManifest, nil
+	} else {
+		return accountsDb, manifest, nil
+	}
 }
 
 // identify appendvec files, whose path is of the form "accounts/SLOT.ID"

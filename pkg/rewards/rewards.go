@@ -149,7 +149,7 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	rewardPks := make([]solana.PublicKey, numVoteRewardEntries)
 
 	for _, reward := range rewards {
-		if string(reward.RewardType) == RewardTypeVoting {
+		if string(reward.RewardType) == RewardTypeVoting && reward.Lamports != 0 {
 			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
 			if err != nil {
 				panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", reward.Pubkey, slot))
@@ -196,6 +196,10 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		reward, ok := stakingRewards[stakePk]
 		if !ok {
 			//mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
+			continue
+		}
+
+		if reward.StakerRewards == 0 {
 			continue
 		}
 
@@ -551,22 +555,31 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 	commissionSplit := uint64(min(commission, 100))
 
 	result := CommissionSplit{}
-	result.IsSplit = commissionSplit != 0 && commissionSplit != 100
 
-	if commissionSplit == 0 {
-		result.VoterPortion = 0
-		result.StakerPortion = rewards
-		return result
+	switch commissionSplit {
+	case 0:
+		{
+			result.StakerPortion = rewards
+		}
+	case 100:
+		{
+			result.VoterPortion = rewards
+		}
+
+	default:
+		{
+			on := wide.Uint128FromUint64(rewards)
+			mine := on.Mul(wide.Uint128FromUint64(commissionSplit)).Div(wide.Uint128FromUint64(100))
+
+			multiplier := wide.Uint128FromUint64(100 - commissionSplit)
+			theirs := on.Mul(multiplier).Div(wide.Uint128FromUint64(100))
+
+			result.VoterPortion = mine.Uint64()
+			result.StakerPortion = theirs.Uint64()
+			result.IsSplit = true
+		}
 	}
 
-	if commissionSplit == 100 {
-		result.VoterPortion = rewards
-		result.StakerPortion = 0
-		return result
-	}
-
-	result.VoterPortion = wide.Uint128FromUint64(rewards).Mul(wide.Uint128FromUint64(commissionSplit)).Div(wide.Uint128FromUint64(100)).Uint64()
-	result.StakerPortion = wide.Uint128FromUint64(rewards).Mul(wide.Uint128FromUint64(100 - commissionSplit)).Div(wide.Uint128FromUint64(100)).Uint64()
 	return result
 }
 
@@ -836,9 +849,9 @@ func calculateStakePointsAndCredits(stakeHistory *sealevel.SysvarStakeHistory, s
 		var earnedCredits wide.Uint128
 
 		if creditsInStake < initialEpochCredits {
-			earnedCredits = wide.Uint128FromUint64(finalEpochCredits).Sub(wide.Uint128FromUint64(initialEpochCredits))
+			earnedCredits = wide.Uint128FromUint64(finalEpochCredits - initialEpochCredits)
 		} else if creditsInStake < finalEpochCredits {
-			earnedCredits = wide.Uint128FromUint64(finalEpochCredits).Sub(wide.Uint128FromUint64(newCreditsObserved))
+			earnedCredits = wide.Uint128FromUint64(finalEpochCredits - newCreditsObserved)
 		}
 
 		newCreditsObserved = max(newCreditsObserved, finalEpochCredits)
