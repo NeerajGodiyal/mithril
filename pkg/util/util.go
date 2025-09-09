@@ -60,7 +60,13 @@ func DedupePubkeys(pubkeys []solana.PublicKey) []solana.PublicKey {
 	return sortedPubkeys
 }
 
+var empty32Bytes [32]byte
+
 func CalculateAcctHash(acct accounts.Account) []byte {
+	if acct.Lamports == 0 {
+		return empty32Bytes[:]
+	}
+
 	hasher := blake3.New()
 
 	var lamportBytes [8]byte

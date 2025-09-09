@@ -47,12 +47,7 @@ func collectAndUpdateSysvarAcctsForAdh(slotCtx *sealevel.SlotCtx) []*accounts.Ac
 			panic(fmt.Sprintf("unable to get sysvar account for ADH: %s", pk))
 		}
 
-		if acct.Key == sealevel.SysvarRecentBlockHashesAddr {
-			recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
-			slotCtx.LatestEvictedBlockhash = recentBlockhashes.PushLatest(slotCtx.Blockhash)
-			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
-			copy(acct.Data, newRecentBlockhashesBytes)
-		} else if acct.Key == sealevel.SysvarSlotHistoryAddr {
+		if acct.Key == sealevel.SysvarSlotHistoryAddr {
 			slotHistory := sealevel.SysvarCache.SlotHistory.Sysvar
 			slotHistory.Add(slotCtx.Slot)
 			slotHistory.SetNextSlot(slotCtx.Slot + 1)

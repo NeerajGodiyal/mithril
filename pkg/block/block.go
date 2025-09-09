@@ -21,35 +21,39 @@ type BlockRewardsInfo struct {
 }
 
 type Block struct {
-	Slot                   uint64
-	ParentSlot             uint64
-	BlockHeight            uint64
-	Epoch                  uint64
-	Transactions           []*solana.Transaction
-	BankHash               [32]byte
-	EpochAcctsHash         []byte
-	EahWorkaroundBankhash  []byte
-	HasEahWorkaround       bool
-	ParentBankhash         [32]byte
-	AcctsLtHash            *lthash.LtHash
-	NumSignatures          uint64
-	Blockhash              [32]byte
-	ExpectedBankhash       [32]byte
-	TxMetas                []*rpc.TransactionMeta
-	Leader                 solana.PublicKey
-	BlockReward            *BlockRewardsInfo
-	LastBlockhash          [32]byte
-	UnixTimestamp          int64
-	StakeAccts             map[solana.PublicKey]bool
-	VoteAccts              map[solana.PublicKey]uint64
-	VoteTimestamps         map[solana.PublicKey]sealevel.BlockTimestamp
-	TotalEpochStake        uint64
-	Features               *features.Features
-	UpdatedAccts           []solana.PublicKey
-	PartitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
-	Rewards                []rpc.BlockReward
-	NumRewardPartitions    uint64
-	LatestEvictedBlockhash [32]byte
+	Slot                                uint64
+	ParentSlot                          uint64
+	BlockHeight                         uint64
+	Epoch                               uint64
+	Transactions                        []*solana.Transaction
+	BankHash                            [32]byte
+	EpochAcctsHash                      []byte
+	EahWorkaroundBankhash               []byte
+	HasEahWorkaround                    bool
+	ParentBankhash                      [32]byte
+	AcctsLtHash                         *lthash.LtHash
+	NumSignatures                       uint64
+	PrevNumSignatures                   uint64
+	InitialPreviousLamportsPerSignature uint64
+	Blockhash                           [32]byte
+	ExpectedBankhash                    [32]byte
+	TxMetas                             []*rpc.TransactionMeta
+	Leader                              solana.PublicKey
+	BlockReward                         *BlockRewardsInfo
+	LastBlockhash                       [32]byte
+	UnixTimestamp                       int64
+	StakeAccts                          map[solana.PublicKey]bool
+	VoteAccts                           map[solana.PublicKey]uint64
+	VoteTimestamps                      map[solana.PublicKey]sealevel.BlockTimestamp
+	TotalEpochStake                     uint64
+	Features                            *features.Features
+	UpdatedAccts                        []solana.PublicKey
+	PartitionedRewardsInfo              *rewards.PartitionedRewardDistributionInfo
+	Rewards                             []rpc.BlockReward
+	NumRewardPartitions                 uint64
+	LatestEvictedBlockhash              [32]byte
+	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
+	FeeRateGovernor                     *sealevel.FeeRateGovernor
 }
 
 func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {

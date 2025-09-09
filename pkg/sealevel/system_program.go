@@ -1310,7 +1310,7 @@ func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAc
 		IsInitialized: true,
 		Authority:     nonceAuthority,
 		DurableNonce:  durableNonce,
-		FeeCalculator: FeeCalculator{LamportsPerSignature: 5000},
+		FeeCalculator: FeeCalculator{LamportsPerSignature: execCtx.PrevLamportsPerSignature},
 	}}
 
 	newStateBytes, err := newNonceStateVersions.Marshal()
@@ -1529,12 +1529,12 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 
 	if nonceStateVersions.Type == NonceVersionCurrent {
 		state.DurableNonce = nextDurableNonce
-		state.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature */
+		state.FeeCalculator.LamportsPerSignature = slotCtx.FeeRateGovernor.PrevLamportsPerSignature
 	} else {
 		nonceStateVersions.Upgrade()
 		upgradedState := nonceStateVersions.State()
 		upgradedState.DurableNonce = nextDurableNonce
-		upgradedState.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature */
+		upgradedState.FeeCalculator.LamportsPerSignature = slotCtx.FeeRateGovernor.PrevLamportsPerSignature
 	}
 
 	newData, err := nonceStateVersions.Marshal()
@@ -1583,12 +1583,12 @@ func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 
 	if nonceStateVersions.Type == NonceVersionCurrent {
 		state.DurableNonce = nextDurableNonce
-		state.FeeCalculator.LamportsPerSignature = 5000 //rbh.FeeCalculator.LamportsPerSignature
+		state.FeeCalculator.LamportsPerSignature = execCtx.PrevLamportsPerSignature
 	} else {
 		nonceStateVersions.Upgrade()
 		upgradedState := nonceStateVersions.State()
 		upgradedState.DurableNonce = nextDurableNonce
-		upgradedState.FeeCalculator.LamportsPerSignature = 5000 /* rbh.FeeCalculator.LamportsPerSignature*/
+		upgradedState.FeeCalculator.LamportsPerSignature = execCtx.PrevLamportsPerSignature
 	}
 
 	newData, err := nonceStateVersions.Marshal()

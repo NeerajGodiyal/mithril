@@ -17,14 +17,14 @@ import (
 )
 
 type ExecutionCtx struct {
-	Log                  Logger
-	Accounts             accounts.Accounts
-	TransactionContext   *TransactionCtx
-	GlobalCtx            global.GlobalCtx
-	ComputeMeter         cu.ComputeMeter
-	Blockhash            [32]byte
-	LamportsPerSignature uint64
-	SlotCtx              *SlotCtx
+	Log                      Logger
+	Accounts                 accounts.Accounts
+	TransactionContext       *TransactionCtx
+	GlobalCtx                global.GlobalCtx
+	ComputeMeter             cu.ComputeMeter
+	Blockhash                [32]byte
+	PrevLamportsPerSignature uint64
+	SlotCtx                  *SlotCtx
 }
 
 type SlotBank struct {
@@ -33,21 +33,22 @@ type SlotBank struct {
 }
 
 type SlotCtx struct {
-	Accounts             accounts.Accounts
-	ParentAccts          accounts.Accounts
-	AccountsDb           *accountsdb.AccountsDb
-	Slot                 uint64
-	ParentSlot           uint64
-	Epoch                uint64
-	LamportsPerSignature uint64
-	AcctMapsMu           *sync.Mutex // AcctMapsMu protects the next 2 maps
-	ModifiedAccts        map[solana.PublicKey]bool
-	WritableAccts        map[solana.PublicKey]bool
-	Blockhash            [32]byte
-	LastBlockhash        [32]byte
-	SlotBank             SlotBank
-	Features             *features.Features
-	VoteTimestampMu      *sync.Mutex
+	Accounts        accounts.Accounts
+	ParentAccts     accounts.Accounts
+	AccountsDb      *accountsdb.AccountsDb
+	FeeRateGovernor *FeeRateGovernor
+	Slot            uint64
+	ParentSlot      uint64
+	Epoch           uint64
+	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
+	ModifiedAccts   map[solana.PublicKey]bool
+	WritableAccts   map[solana.PublicKey]bool
+	NumSignatures   uint64
+	Blockhash       [32]byte
+	LastBlockhash   [32]byte
+	SlotBank        SlotBank
+	Features        *features.Features
+	VoteTimestampMu *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
 	StakeAccts             map[solana.PublicKey]bool

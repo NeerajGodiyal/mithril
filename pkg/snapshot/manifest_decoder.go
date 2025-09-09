@@ -36,14 +36,6 @@ type SlotPair struct {
 	Val  uint64
 }
 
-type FeeRateGovernor struct {
-	TargetLamportsPerSignature uint64
-	TargetSignaturesPerSlot    uint64
-	MinLamportsPerSignature    uint64
-	MaxLamportsPerSignature    uint64
-	BurnPercent                byte
-}
-
 type RentCollector struct {
 	Epoch         uint64
 	EpochSchedule sealevel.SysvarEpochSchedule
@@ -180,7 +172,7 @@ type DeserializableVersionedBank struct {
 	CollectorId         solana.PublicKey
 	CollectorFees       uint64
 	FeeCalculator       sealevel.FeeCalculator
-	FeeRateGovernor     FeeRateGovernor
+	FeeRateGovernor     sealevel.FeeRateGovernor
 	CollectedRent       uint64
 	RentCollector       RentCollector
 	EpochSchedule       sealevel.SysvarEpochSchedule
@@ -350,33 +342,6 @@ func (slotPair *SlotPair) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	}
 
 	slotPair.Val, err = decoder.ReadUint64(bin.LE)
-	return err
-}
-
-func (rateGovernor *FeeRateGovernor) UnmarshalWithDecoder(decoder *bin.Decoder) error {
-	var err error
-
-	rateGovernor.TargetLamportsPerSignature, err = decoder.ReadUint64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	rateGovernor.TargetSignaturesPerSlot, err = decoder.ReadUint64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	rateGovernor.MinLamportsPerSignature, err = decoder.ReadUint64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	rateGovernor.MaxLamportsPerSignature, err = decoder.ReadUint64(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	rateGovernor.BurnPercent, err = decoder.ReadByte()
 	return err
 }
 

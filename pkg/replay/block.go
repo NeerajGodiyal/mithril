@@ -205,6 +205,11 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		}
 	}
 
+	block.FeeRateGovernor = sealevel.NewFeeRateGovernorDerived(block.PrevFeeRateGovernor, block.PrevNumSignatures)
+	if block.FeeRateGovernor.PrevLamportsPerSignature == 0 {
+		block.FeeRateGovernor.PrevLamportsPerSignature = block.InitialPreviousLamportsPerSignature
+	}
+
 	// load sysvar accounts and assign them to the sysvar cache
 	{
 		// update and cache clock sysvar
@@ -290,6 +295,10 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 			var recentBlockhashes sealevel.SysvarRecentBlockhashes
 			recentBlockhashes.MustUnmarshalWithDecoder(decoder)
+			block.LatestEvictedBlockhash = recentBlockhashes.PushLatest(block.Blockhash, block.FeeRateGovernor.LamportsPerSignature)
+			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
+			copy(recentBlockhashesAcct.Data, newRecentBlockhashesBytes)
+
 			sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 			sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
 
@@ -450,6 +459,9 @@ func configureInitialBlock(block *b.Block, snapshotManifest *snapshot.SnapshotMa
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.AcctsLtHash = snapshotManifest.LtHash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
+	block.PrevFeeRateGovernor = &snapshotManifest.Bank.FeeRateGovernor
+	block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
+	block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
 	setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
 	snapshotManifest = nil
 }
@@ -463,6 +475,8 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	block.ParentSlot = lastSlotCtx.Slot
 	block.LatestEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
+	block.PrevFeeRateGovernor = lastSlotCtx.FeeRateGovernor
+	block.PrevNumSignatures = lastSlotCtx.NumSignatures
 }
 
 func ReplayBlocks(
@@ -692,12 +706,14 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 
 func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
 	slotCtx := &sealevel.SlotCtx{
-		Accounts:    accts,
-		ParentAccts: parentAccts,
-		AccountsDb:  acctsDb,
-		Slot:        block.Slot,
-		ParentSlot:  block.ParentSlot,
-		Epoch:       block.Epoch,
+		Accounts:        accts,
+		ParentAccts:     parentAccts,
+		AccountsDb:      acctsDb,
+		Slot:            block.Slot,
+		ParentSlot:      block.ParentSlot,
+		Epoch:           block.Epoch,
+		FeeRateGovernor: block.FeeRateGovernor,
+		NumSignatures:   block.NumSignatures,
 
 		AcctMapsMu:    &sync.Mutex{},
 		ModifiedAccts: make(map[solana.PublicKey]bool),

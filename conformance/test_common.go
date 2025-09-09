@@ -181,10 +181,10 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 			if err == nil {
 				if len(rbh) != 0 {
 					execCtx.Blockhash = rbh[len(rbh)-1].Blockhash
-					execCtx.LamportsPerSignature = rbh[len(rbh)-1].FeeCalculator.LamportsPerSignature
+					execCtx.PrevLamportsPerSignature = rbh[len(rbh)-1].FeeCalculator.LamportsPerSignature
 				}
 			} else {
-				execCtx.LamportsPerSignature = 5000
+				execCtx.PrevLamportsPerSignature = 5000
 			}
 		}
 	}

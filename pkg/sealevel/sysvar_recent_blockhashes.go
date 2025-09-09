@@ -112,10 +112,10 @@ func (recentBlockhashes *SysvarRecentBlockhashes) GetLatest() RecentBlockHashesE
 	return rbh[0]
 }
 
-func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte) [32]byte {
+func (recentBlockhashes *SysvarRecentBlockhashes) PushLatest(latest [32]byte, lamportsPerSignature uint64) [32]byte {
 	rbh := *recentBlockhashes
 
-	newEntry := RecentBlockHashesEntry{Blockhash: latest, FeeCalculator: FeeCalculator{LamportsPerSignature: 5000}}
+	newEntry := RecentBlockHashesEntry{Blockhash: latest, FeeCalculator: FeeCalculator{LamportsPerSignature: lamportsPerSignature}}
 	var latestEvicted [32]byte
 
 	if len(rbh) >= recentBlockhashesMaxEntries {
