@@ -19,13 +19,13 @@ import (
 
 type AccountsDb struct {
 	Index            fastcache.Cache
+	BankHashStore    fastcache.Cache
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
 	BankHashBytes    [32]byte
 	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
-	CurrentSlot      uint64
 }
 
 var (
@@ -81,7 +81,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 
 	// attempt to open the index kv store
 	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
-	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
+	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards: 256,
 		//MaxElementLen: 2000000000,
 		MemoryType: fastcache.MMAP,
@@ -91,7 +91,19 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		panic(err)
 	}
 
-	accountsDb := &AccountsDb{Index: db, AcctsDir: appendVecsDir}
+	// attempt to open the index kv store
+	bankHashDbFn := fmt.Sprintf("%s/bankhash_db", accountsDbDir)
+	bankhashDb, err := fastcache.NewCache(fastcache.MB*128, &fastcache.Config{
+		Shards: 256,
+		//MaxElementLen: 2000000000,
+		MemoryType: fastcache.MMAP,
+		MemoryKey:  bankHashDbFn,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	accountsDb := &AccountsDb{Index: indexDb, BankHashStore: bankhashDb, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
 	copy(accountsDb.BankHashBytes[:], bankHashBytes)
 
@@ -315,6 +327,18 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (accountsDb *AccountsDb) GetBankHashForSlot(slot uint64) ([]byte, error) {
+	var slotBytes [8]byte
+	binary.LittleEndian.PutUint64(slotBytes[:], slot)
+	return accountsDb.BankHashStore.Get(slotBytes[:])
+}
+
+func (accountsDb *AccountsDb) StoreBankHashForSlot(slot uint64, bankHash []byte) error {
+	var slotBytes [8]byte
+	binary.LittleEndian.PutUint64(slotBytes[:], slot)
+	return accountsDb.BankHashStore.Set(slotBytes[:], bankHash)
 }
 
 func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix uint64) []solana.PublicKey {

@@ -69,7 +69,7 @@ func BuildAccountsDb(
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
-	db, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
+	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
 		MemoryKey:  dbFn,
@@ -78,7 +78,7 @@ func BuildAccountsDb(
 		panic(err)
 	}
 
-	ss := NewShardedSetter(db, numShards, 100)
+	ss := NewShardedSetter(indexDb, numShards, 100)
 	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
 	if err = os.MkdirAll(logsDir, 0775); err != nil {
 		return nil, nil, err
@@ -242,14 +242,19 @@ func BuildAccountsDb(
 	indexEntryBuilderPool.Release()
 	appendVecCopyingPool.Release()
 
-	accountsDb := &accountsdb.AccountsDb{Index: db, AcctsDir: appendVecsOutputDir}
+	accountsDb := &accountsdb.AccountsDb{Index: indexDb, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
-	if incrementalManifest != nil {
-		accountsDb.CurrentSlot = incrementalManifest.Bank.Slot + 1
-	} else {
-		accountsDb.CurrentSlot = manifest.Bank.Slot + 1
+	bankHashDbFn := fmt.Sprintf("%s/bankhash_db", accountsDbDir)
+	accountsDb.BankHashStore, err = fastcache.NewCache(fastcache.MB*128, &fastcache.Config{
+		Shards: 256,
+		//MaxElementLen: 2000000000,
+		MemoryType: fastcache.MMAP,
+		MemoryKey:  bankHashDbFn,
+	})
+	if err != nil {
+		panic(err)
 	}
 
 	if incrementalManifest != nil {

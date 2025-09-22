@@ -900,8 +900,6 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
-	acctsDb.CurrentSlot++
-
 	//mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
 	// EAH workaround
@@ -913,6 +911,11 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	start = time.Now()
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
+
+	err = acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
+	if err != nil {
+		mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
+	}
 
 	return slotCtx, err
 }
