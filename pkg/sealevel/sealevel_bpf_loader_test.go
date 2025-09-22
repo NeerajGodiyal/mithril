@@ -11,7 +11,6 @@ import (
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
@@ -856,7 +855,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Not_Enough_Instr_Accts_Failure
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrNotEnoughAccountKeys, err)
 }
@@ -903,7 +902,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
 
@@ -959,7 +958,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
 
@@ -1015,7 +1014,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Immutable_Failure(t *te
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrImmutable, err)
 }
@@ -1067,7 +1066,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Wrong_Upgrade_Authority
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
 }
@@ -1114,7 +1113,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Authority_Didnt_Sign_Fa
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }
@@ -1161,7 +1160,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_New_Authority_Didnt_Sig
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }
@@ -1208,7 +1207,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Uninitialized_Account_F
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrInvalidArgument, err)
 }
@@ -1255,7 +1254,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Immutable_Failure(
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrImmutable, err)
 }
@@ -1302,7 +1301,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Authority_Didnt_Si
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }
@@ -1349,7 +1348,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_New_Authority_Didn
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrMissingRequiredSignature, err)
 }
@@ -1401,7 +1400,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Wrong_Authority_Fa
 	txCtx := NewTransactionCtx(*transactionAccts, 5, 64)
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableBpfLoaderSetAuthorityCheckedIx, 0)
-	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault(), GlobalCtx: global.GlobalCtx{Features: *f}}
+	execCtx := ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeterDefault()}
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, InstrErrIncorrectAuthority, err)
 }

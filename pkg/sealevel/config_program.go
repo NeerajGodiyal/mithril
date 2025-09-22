@@ -219,7 +219,7 @@ func ConfigProgramExecute(ctx *ExecutionCtx) error {
 	}
 
 	//mlog.Log.Debugf("writing new config account state")
-	dst, err := configAccount.DataMutable(ctx.GlobalCtx.Features)
+	dst, err := configAccount.DataMutable(ctx.Features)
 	if err != nil {
 		return err
 	}

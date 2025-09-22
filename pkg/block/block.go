@@ -77,14 +77,13 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 		block.UnixTimestamp = int64(*blockResult.BlockTime)
 	}
 	block.BlockHeight = *blockResult.BlockHeight
-	block.Rewards = blockResult.Rewards
 
+	block.Rewards = blockResult.Rewards
 	if blockResult.NumRewardPartitions != nil {
 		block.NumRewardPartitions = *blockResult.NumRewardPartitions
 	} else {
 		block.NumRewardPartitions = math.MaxUint64
 	}
-
 	blockReward := blockRewardRewards(blockResult.Rewards)
 	if blockReward != nil {
 		block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}

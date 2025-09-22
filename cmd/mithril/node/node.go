@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
@@ -73,6 +74,8 @@ var (
 
 	paramArenaSizeMB         uint64
 	borrowedAccountArenaSize uint64
+
+	rpcPort int
 )
 
 func init() {
@@ -98,6 +101,7 @@ func init() {
 	Verifier.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Verifier.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Verifier.Flags().StringVar(&snapshotDlPath, "download-snapshot", "", "Path to download snapshot to")
+	Verifier.Flags().IntVar(&rpcPort, "rpc-server-port", 0, "RPC server port. Default off.")
 
 	// flags for catchup mode
 	Catchup.Flags().StringVarP(&outputDir, "out", "o", "", "Output path for writing AccountsDB data to")
@@ -115,6 +119,7 @@ func init() {
 	Catchup.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Catchup.Flags().StringVar(&blockDir, "blockdir", "/tmp", "Path containing slot.json files")
 	Catchup.Flags().StringVar(&scratchDir, "scratchdir", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
+	Catchup.Flags().IntVar(&rpcPort, "rpc-server-port", 0, "RPC server port. Default off.")
 }
 
 func runVerifier(c *cobra.Command, args []string) {
@@ -245,7 +250,16 @@ func runVerifier(c *cobra.Command, args []string) {
 		}
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, false, dbgOpts, metricsWriter)
+	var rpcServer *rpcserver.RpcServer
+	if rpcPort < 0 || rpcPort > 65535 {
+		klog.Fatalf("invalid port: %d", rpcPort)
+	} else if rpcPort != 0 {
+		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort))
+		rpcServer.Start()
+		mlog.Log.Infof("started RPC server on port %d", rpcPort)
+	}
+
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, false, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -315,7 +329,16 @@ func runCatchup(c *cobra.Command, args []string) {
 		}
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, outputDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, true, dbgOpts, metricsWriter)
+	var rpcServer *rpcserver.RpcServer
+	if rpcPort < 0 || rpcPort > 65535 {
+		klog.Fatalf("invalid port: %d", rpcPort)
+	} else if rpcPort != 0 {
+		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort))
+		rpcServer.Start()
+		mlog.Log.Infof("started RPC server on port %d", rpcPort)
+	}
+
+	replay.ReplayBlocks(c.Context(), accountsDb, outputDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, blockDir, int(txParallelism), nil, true, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

@@ -119,7 +119,7 @@ func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint6
 
 	default:
 		{
-			if execCtx.GlobalCtx.Features.IsActive(features.AbortOnInvalidCurve) {
+			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
 				return syscallSuccess(1)
@@ -318,7 +318,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 	default:
 		{
-			if execCtx.GlobalCtx.Features.IsActive(features.AbortOnInvalidCurve) {
+			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
 				return syscallSuccess(1)
@@ -449,7 +449,7 @@ func handleEdwardsCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInputAd
 
 	default:
 		{
-			if execCtx.GlobalCtx.Features.IsActive(features.AbortOnInvalidCurve) {
+			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
 				return syscallSuccess(1)
@@ -584,7 +584,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 
 	default:
 		{
-			if execCtx.GlobalCtx.Features.IsActive(features.AbortOnInvalidCurve) {
+			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
 				return syscallSuccess(1)
@@ -610,7 +610,7 @@ func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, right
 	default:
 		{
 			execCtx := executionCtx(vm)
-			if execCtx.GlobalCtx.Features.IsActive(features.AbortOnInvalidCurve) {
+			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
 				return syscallSuccess(1)
@@ -972,7 +972,7 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 	case AltBn128Mul:
 		{
 			var expectedSize uint64
-			if execCtx.GlobalCtx.Features.IsActive(features.FixAltBn128MultiplicationInputLength) {
+			if execCtx.Features.IsActive(features.FixAltBn128MultiplicationInputLength) {
 				expectedSize = 96
 			} else {
 				expectedSize = 128

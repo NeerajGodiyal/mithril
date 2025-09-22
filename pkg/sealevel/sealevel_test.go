@@ -65,7 +65,7 @@ func TestInterpreter_Noop(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -105,7 +105,7 @@ func TestInterpreter_Memcpy_Strings_Match(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		Syscalls: ToFunc(syscalls),
@@ -143,7 +143,7 @@ func TestInterpreter_Memcpy_Do_Not_Match(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -181,7 +181,7 @@ func TestInterpreter_Memmove_Strings_Match(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -220,7 +220,7 @@ func TestInterpreter_Memmove_Do_Not_Match(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -257,7 +257,7 @@ func TestInterpreter_Memcpy_Overlapping(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -295,7 +295,7 @@ func TestInterpreter_Memcmp_Matches(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -336,7 +336,7 @@ func TestInterpreter_Memcmp_Does_Not_Match(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -377,7 +377,7 @@ func TestInterpreter_Memset_Check_Correct(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -417,7 +417,7 @@ func TestInterpreter_Sha256(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -458,7 +458,7 @@ func TestInterpreter_Blake3(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -499,7 +499,7 @@ func TestInterpreter_Keccak256(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -541,7 +541,7 @@ func TestInterpreter_CreateProgramAddress(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -586,7 +586,7 @@ func TestInterpreter_TryFindProgramAddress(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -624,7 +624,7 @@ func TestInterpreter_TestPanic(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -655,7 +655,7 @@ func TestInterpreter_Secp256k1_Syscall(t *testing.T) {
 
 	var log LogRecorder
 
-	interpreter := sbpf.NewInterpreter(nil, program, &sbpf.VMOpts{
+	interpreter := sbpf.NewInterpreter(program, &sbpf.VMOpts{
 		HeapMax:  32 * 1024,
 		Input:    nil,
 		MaxCU:    10000,
@@ -999,7 +999,7 @@ func TestInterpreter_Get_Sysvar_Syscalls(t *testing.T) {
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.LastRestartSlotSysvar, 0)
 	f.EnableFeature(features.EnablePartitionedEpochReward, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	pk := [32]byte(programDataAcct.Key)
 	err = execCtx.Accounts.SetAccount(&pk, &programDataAcct)
@@ -1122,7 +1122,7 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 	f.EnableFeature(features.LastRestartSlotSysvar, 0)
 	f.EnableFeature(features.EnablePartitionedEpochReward, 0)
 	f.EnableFeature(features.EnableAltBn128Syscall, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	pk := [32]byte(programDataAcct.Key)
 	err = execCtx.SlotCtx.Accounts.SetAccount(&pk, &programDataAcct)
@@ -1242,7 +1242,7 @@ func TestInterpreter_Alt_Bn128_Compression_Syscall(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.EnableAltbn128CompressionSyscall, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1306,7 +1306,7 @@ func TestInterpreter_Validate_Point_Syscall(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1370,7 +1370,7 @@ func TestInterpreter_Curve_Group_Ops_Syscall(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1434,7 +1434,7 @@ func TestInterpreter_Curve_Multiscalar_Mul_Syscall(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1498,7 +1498,7 @@ func TestInterpreter_Log_Data_Syscall(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1573,7 +1573,7 @@ func TestInterpreter_Cpi_C_System_Program_Allocate(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1653,7 +1653,7 @@ func TestInterpreter_Cpi_Rust_System_Program_Allocate(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1735,7 +1735,7 @@ func TestInterpreter_Cpi_C_Bpf_Program_Call(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -1956,7 +1956,7 @@ func TestInterpreter_Test_Memo_Program_With_LoaderV2(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -2031,7 +2031,7 @@ func TestInterpreter_Test_Deprecated_Loader(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 
@@ -2085,7 +2085,7 @@ func (e *executeCase) run(t *testing.T) {
 	opts := tx.newVMOpts(&e.Params)
 	opts.Tracer = testLogger{t}
 
-	interpreter := sbpf.NewInterpreter(nil, program, opts)
+	interpreter := sbpf.NewInterpreter(program, opts)
 	require.NotNil(t, interpreter)
 
 	_, _, err = interpreter.Run()

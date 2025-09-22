@@ -273,6 +273,12 @@ func BuildAccountsDbWithIncr(
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
+	if incrementalManifest != nil {
+		accountsDb.CurrentSlot = incrementalManifest.Bank.Slot + 1
+	} else {
+		accountsDb.CurrentSlot = manifest.Bank.Slot + 1
+	}
+
 	rpcClient := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
 	latestSlot, _ := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)

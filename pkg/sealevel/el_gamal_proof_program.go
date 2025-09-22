@@ -761,22 +761,22 @@ func processCloseProofContext(execCtx *ExecutionCtx) error {
 		return err
 	}
 
-	err = destinationAcct.CheckedAddLamports(proofContextAcct.Lamports(), execCtx.GlobalCtx.Features)
+	err = destinationAcct.CheckedAddLamports(proofContextAcct.Lamports(), execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = proofContextAcct.SetLamports(0, execCtx.GlobalCtx.Features)
+	err = proofContextAcct.SetLamports(0, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = proofContextAcct.SetDataLength(0, execCtx.GlobalCtx.Features)
+	err = proofContextAcct.SetDataLength(0, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = proofContextAcct.SetOwner(execCtx.GlobalCtx.Features, a.SystemProgramAddr)
+	err = proofContextAcct.SetOwner(execCtx.Features, a.SystemProgramAddr)
 
 	proofContextAcct.Drop()
 	destinationAcct.Drop()
@@ -871,7 +871,7 @@ func processVerifyProofInstr(instructionData []byte, execCtx *ExecutionCtx) erro
 			return InstrErrInvalidAccountData
 		}
 
-		ctxAcctData, err := proofContextAcct.DataMutable(execCtx.GlobalCtx.Features)
+		ctxAcctData, err := proofContextAcct.DataMutable(execCtx.Features)
 		if err != nil {
 			return err
 		}

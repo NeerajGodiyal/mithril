@@ -38,7 +38,7 @@ require (
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible // indirect
-	github.com/DataDog/zstd v1.5.2 // indirect
+	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/FiloSottile/powersoftau v0.0.0-20180220134833-e2af11381747 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Overclock-Validator/bn256-go/plugin/bn256 v0.0.0-20250309134322-d0c680ad9f5f // indirect
@@ -92,6 +92,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
+	github.com/ipfs/go-log/v2 v2.5.1 // indirect
 	github.com/jessevdk/go-flags v1.6.1 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
@@ -131,6 +132,7 @@ require (
 	go.etcd.io/bbolt v1.3.8 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f // indirect
 	google.golang.org/grpc v1.71.1 // indirect
 	gopkg.in/go-playground/validator.v8 v8.18.2 // indirect
@@ -149,6 +151,7 @@ require (
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/aead/siphash v1.0.1
+	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
 	github.com/akrylysov/pogreb v0.10.2
 	github.com/alitto/pond v1.9.2
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
@@ -166,6 +169,7 @@ require (
 	github.com/ethereum/go-ethereum v1.15.12-0.20250620111820-f26b5653e8bf
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/fengyoulin/shm v0.0.0-20200305015033-287e184bdf0a
+	github.com/filecoin-project/go-jsonrpc v0.8.0
 	github.com/filosottile/powersoftau v0.0.0-20180220134833-e2af11381747
 	github.com/gagliardetto/treeout v0.1.4 // indirect
 	github.com/gammazero/deque v1.0.0
@@ -227,6 +231,7 @@ require (
 	github.com/sirgallo/mmcmap v1.1.3
 	github.com/skycccu/copernicus v0.0.0-20180825092906-a24b6ab9ee2f
 	github.com/snissn/gomap v0.0.0-20250318003102-54621cf89762
+	github.com/sourcegraph/jsonrpc2 v0.2.1
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7

@@ -785,7 +785,7 @@ func setStakeAccountState(acct *BorrowedAccount, stakeState *StakeStateV2, f fea
 }
 
 func newWarmupCooldownRateEpoch(execCtx *ExecutionCtx) (*uint64, error) {
-	f := execCtx.GlobalCtx.Features
+	f := execCtx.Features
 	slot, existed := f.ActivationSlot(features.ReduceStakeWarmupCooldown)
 	if !existed {
 		return nil, nil
@@ -818,7 +818,7 @@ func modifyStakeForRedelegation(execCtx *ExecutionCtx, stake *Stake, stakeLampor
 
 	if stake.Stake(clock.Epoch, stakeHistory, newRateActivationEpoch) != 0 {
 		var stakeLamportsOk bool
-		if execCtx.GlobalCtx.Features.IsActive(features.StakeRedelegateInstruction) {
+		if execCtx.Features.IsActive(features.StakeRedelegateInstruction) {
 			stakeLamportsOk = stakeLamports >= stake.Delegation.StakeLamports
 		} else {
 			stakeLamportsOk = true
@@ -995,7 +995,7 @@ func (mergeKind *MergeKind) Merge(execCtx *ExecutionCtx, src *MergeKind, clock S
 }
 
 func deactivateStake(execCtx *ExecutionCtx, stake *Stake, stakeFlags *StakeFlags, epoch uint64) error {
-	if execCtx.GlobalCtx.Features.IsActive(features.StakeRedelegateInstruction) {
+	if execCtx.Features.IsActive(features.StakeRedelegateInstruction) {
 		if stakeFlags.Contains(StakeFlagsMustFullyActivateBeforeDeactivationIsPermitted) {
 			stakeHistory, err := ReadStakeHistorySysvar(execCtx)
 			if err != nil {

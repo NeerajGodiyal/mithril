@@ -387,7 +387,7 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 		return InstrErrAccountDataTooSmall
 	}
 
-	data, err := program.DataMutable(execCtx.GlobalCtx.Features)
+	data, err := program.DataMutable(execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -398,10 +398,10 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 
 func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, error) {
 	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
-		return Syscalls(&execCtx.GlobalCtx.Features, true, u)
+		return Syscalls(&execCtx.Features, true, u)
 	})
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.GlobalCtx.Features)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.Features)
 	if err != nil {
 		//mlog.Log.Debugf("failed to create loader: %s", err)
 		return nil, err
@@ -605,7 +605,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 
 			// rent epoch
 			var rentEpoch uint64
-			if execCtx.GlobalCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
+			if execCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
 				rentEpoch = math.MaxUint64
 			} else {
 				rentEpoch = borrowedAcct.RentEpoch()
@@ -678,7 +678,7 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 			lamports := binary.LittleEndian.Uint64(parameterBytes[off:])
 
 			if borrowedAcct.Lamports() != lamports {
-				err = borrowedAcct.SetLamports(lamports, execCtx.GlobalCtx.Features)
+				err = borrowedAcct.SetLamports(lamports, execCtx.Features)
 				if err != nil {
 					return err
 				}
@@ -706,7 +706,7 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 			data := parameterBytes[off : off+postLen]
 
 			resizeErr := borrowedAcct.CanDataBeResized(postLen)
-			changedErr := borrowedAcct.DataCanBeChanged(execCtx.GlobalCtx.Features)
+			changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
 
 			if resizeErr != nil || changedErr != nil {
 				acctBytes := borrowedAcct.Data()
@@ -714,7 +714,7 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 					return fmt.Errorf("data cannot be changed, but did anyway")
 				}
 			} else {
-				err = borrowedAcct.SetData(execCtx.GlobalCtx.Features, data)
+				err = borrowedAcct.SetData(execCtx.Features, data)
 				if err != nil {
 					return err
 				}
@@ -728,7 +728,7 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 
 			ownerPk := solana.PublicKeyFromBytes(owner)
 			if borrowedAcct.Owner() != ownerPk {
-				err = borrowedAcct.SetOwner(execCtx.GlobalCtx.Features, ownerPk)
+				err = borrowedAcct.SetOwner(execCtx.Features, ownerPk)
 				if err != nil {
 					return err
 				}
@@ -864,7 +864,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 
 			// rent epoch
 			var rentEpoch uint64
-			if execCtx.GlobalCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
+			if execCtx.Features.IsActive(features.MaskOutRentEpochInVmSerialization) {
 				rentEpoch = math.MaxUint64
 			} else {
 				rentEpoch = borrowedAcct.RentEpoch()
@@ -923,7 +923,7 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 			lamports := binary.LittleEndian.Uint64(parameterBytes[off:])
 
 			if borrowedAcct.Lamports() != lamports {
-				err = borrowedAcct.SetLamports(lamports, execCtx.GlobalCtx.Features)
+				err = borrowedAcct.SetLamports(lamports, execCtx.Features)
 				if err != nil {
 					return err
 				}
@@ -938,7 +938,7 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 			data := parameterBytes[off : off+preLen]
 
 			resizeErr := borrowedAcct.CanDataBeResized(uint64(len(data)))
-			changedErr := borrowedAcct.DataCanBeChanged(execCtx.GlobalCtx.Features)
+			changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
 
 			if resizeErr != nil || changedErr != nil {
 				acctBytes := borrowedAcct.Data()
@@ -951,7 +951,7 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 					}
 				}
 			} else {
-				err = borrowedAcct.SetData(execCtx.GlobalCtx.Features, data)
+				err = borrowedAcct.SetData(execCtx.Features, data)
 				if err != nil {
 					return err
 				}
@@ -1020,7 +1020,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	}
 
 	start := time.Now()
-	interpreter := sbpf.NewInterpreter(nil, program, opts)
+	interpreter := sbpf.NewInterpreter(program, opts)
 	defer interpreter.Finish()
 	metrics.GlobalBlockReplay.SbpfInterpreterNew.AddTimingSince(start)
 	start = time.Now()
@@ -1069,7 +1069,7 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 	start := time.Now()
 	//mlog.Log.Debugf("bpf loader - executeProgram")
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.GlobalCtx.Features)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1245,7 +1245,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	programAcct.Drop()
 
 	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
-		return Syscalls(&execCtx.GlobalCtx.Features, false, u)
+		return Syscalls(&execCtx.Features, false, u)
 	})
 	// two cases here: we're either executing from the program cache, so from a pre-parsed/loaded program, or from bytes if
 	// the the program was not found in the cache.
@@ -1294,7 +1294,7 @@ func UpgradeableLoaderInitializeBuffer(execCtx *ExecutionCtx, txCtx *Transaction
 	state.Type = UpgradeableLoaderStateTypeBuffer
 	state.Buffer.AuthorityAddress = authorityKey.ToPointer()
 
-	err = setUpgradeableLoaderAccountState(buffer, state, execCtx.GlobalCtx.Features)
+	err = setUpgradeableLoaderAccountState(buffer, state, execCtx.Features)
 
 	return err
 }
@@ -1517,8 +1517,8 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	}
 	defer payer.Drop()
 
-	payer.CheckedAddLamports(buffer.Lamports(), execCtx.GlobalCtx.Features)
-	buffer.SetLamports(0, execCtx.GlobalCtx.Features)
+	payer.CheckedAddLamports(buffer.Lamports(), execCtx.Features)
+	buffer.SetLamports(0, execCtx.Features)
 
 	buffer.Drop()
 	payer.Drop()
@@ -1583,7 +1583,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	programDataState := &UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgramData,
 		ProgramData: UpgradeableLoaderStateProgramData{Slot: clock.Slot, UpgradeAuthorityAddress: authorityKey}}
 
-	err = setUpgradeableLoaderAccountState(programData, programDataState, execCtx.GlobalCtx.Features)
+	err = setUpgradeableLoaderAccountState(programData, programDataState, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1596,7 +1596,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 		return InstrErrAccountDataTooSmall
 	}
 
-	dstSlice, err := programData.DataMutable(execCtx.GlobalCtx.Features)
+	dstSlice, err := programData.DataMutable(execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1609,7 +1609,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	srcSlice := buffer.Account.Data[bufferDataOffset:]
 	copy(dstSlice[programDataDataOffset:dstEnd], srcSlice)
 
-	err = buffer.SetDataLength(upgradeableLoaderSizeOfBuffer(0), execCtx.GlobalCtx.Features)
+	err = buffer.SetDataLength(upgradeableLoaderSizeOfBuffer(0), execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1625,13 +1625,13 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 		return err
 	}
 
-	err = setUpgradeableLoaderAccountState(program, programState, execCtx.GlobalCtx.Features)
+	err = setUpgradeableLoaderAccountState(program, programState, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	if !execCtx.GlobalCtx.Features.IsActive(features.DeprecateExecutableMetaUpdateInBpfLoader) {
-		err = program.SetExecutable(execCtx.GlobalCtx.Features, true)
+	if !execCtx.Features.IsActive(features.DeprecateExecutableMetaUpdateInBpfLoader) {
+		err = program.SetExecutable(execCtx.Features, true)
 		if err != nil {
 			return err
 		}
@@ -1834,7 +1834,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	}
 
 	programDataNewState := &UpgradeableLoaderState{Type: UpgradeableLoaderStateTypeProgramData, ProgramData: UpgradeableLoaderStateProgramData{Slot: clock.Slot, UpgradeAuthorityAddress: &authorityKey}}
-	err = setUpgradeableLoaderAccountState(programData, programDataNewState, execCtx.GlobalCtx.Features)
+	err = setUpgradeableLoaderAccountState(programData, programDataNewState, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1853,7 +1853,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return err
 	}
 
-	dstSlice, err := programData.DataMutable(execCtx.GlobalCtx.Features)
+	dstSlice, err := programData.DataMutable(execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1870,21 +1870,21 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	defer spill.Drop()
 
 	spillLamports := safemath.SaturatingSubU64(safemath.SaturatingAddU64(programData.Lamports(), bufferLamports), programDataBalanceRequired)
-	err = spill.CheckedAddLamports(spillLamports, execCtx.GlobalCtx.Features)
+	err = spill.CheckedAddLamports(spillLamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = buffer.SetLamports(0, execCtx.GlobalCtx.Features)
+	err = buffer.SetLamports(0, execCtx.Features)
 	if err != nil {
 		return err
 	}
-	err = programData.SetLamports(programDataBalanceRequired, execCtx.GlobalCtx.Features)
+	err = programData.SetLamports(programDataBalanceRequired, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = buffer.SetDataLength(upgradeableLoaderSizeOfBuffer(0), execCtx.GlobalCtx.Features)
+	err = buffer.SetDataLength(upgradeableLoaderSizeOfBuffer(0), execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1965,7 +1965,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 			}
 
 			accountState.Buffer.AuthorityAddress = newAuthority
-			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.GlobalCtx.Features)
+			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -1995,7 +1995,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 			}
 
 			accountState.ProgramData.UpgradeAuthorityAddress = newAuthority
-			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.GlobalCtx.Features)
+			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2022,7 +2022,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx) error {
 	//mlog.Log.Debugf("SetAuthorityChecked instr")
 
-	if !execCtx.GlobalCtx.Features.IsActive(features.EnableBpfLoaderSetAuthorityCheckedIx) {
+	if !execCtx.Features.IsActive(features.EnableBpfLoaderSetAuthorityCheckedIx) {
 		return InstrErrInvalidInstructionData
 	}
 
@@ -2096,7 +2096,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			accountState.Buffer.AuthorityAddress = &newAuthority
-			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.GlobalCtx.Features)
+			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2135,7 +2135,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 			}
 
 			accountState.ProgramData.UpgradeAuthorityAddress = &newAuthority
-			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.GlobalCtx.Features)
+			err = setUpgradeableLoaderAccountState(account, accountState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2248,7 +2248,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 		return err
 	}
 
-	err = closeAcct.SetDataLength(upgradeableLoaderSizeOfUninitialized, execCtx.GlobalCtx.Features)
+	err = closeAcct.SetDataLength(upgradeableLoaderSizeOfUninitialized, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -2262,12 +2262,12 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			}
 			defer recipientAcct.Drop()
 
-			err = recipientAcct.CheckedAddLamports(closeAcct.Lamports(), execCtx.GlobalCtx.Features)
+			err = recipientAcct.CheckedAddLamports(closeAcct.Lamports(), execCtx.Features)
 			if err != nil {
 				return err
 			}
 
-			err = closeAcct.SetLamports(0, execCtx.GlobalCtx.Features)
+			err = closeAcct.SetLamports(0, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2285,7 +2285,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 
 			closeAcct.Drop()
 
-			err = closeAcctCommon(closeAcctState.Buffer.AuthorityAddress, txCtx, instrCtx, execCtx.GlobalCtx.Features)
+			err = closeAcctCommon(closeAcctState.Buffer.AuthorityAddress, txCtx, instrCtx, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2351,7 +2351,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 
 					programAcct.Drop()
 
-					err = closeAcctCommon(closeAcctState.ProgramData.UpgradeAuthorityAddress, txCtx, instrCtx, execCtx.GlobalCtx.Features)
+					err = closeAcctCommon(closeAcctState.ProgramData.UpgradeAuthorityAddress, txCtx, instrCtx, execCtx.Features)
 					if err != nil {
 						return err
 					}
@@ -2518,7 +2518,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 		return err
 	}
 
-	err = programDataAcct.SetDataLength(newLen, execCtx.GlobalCtx.Features)
+	err = programDataAcct.SetDataLength(newLen, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -2534,7 +2534,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	}
 
 	programDataAcctState.ProgramData.Slot = clockSlot
-	err = setUpgradeableLoaderAccountState(programDataAcct, programDataAcctState, execCtx.GlobalCtx.Features)
+	err = setUpgradeableLoaderAccountState(programDataAcct, programDataAcctState, execCtx.Features)
 	if err != nil {
 		return err
 	}

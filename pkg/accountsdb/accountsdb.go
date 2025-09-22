@@ -25,6 +25,7 @@ type AccountsDb struct {
 	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+	CurrentSlot      uint64
 }
 
 var (

@@ -101,7 +101,7 @@ func TestExecute_Tx_Sysvar_Instructions_Bpf_Test(t *testing.T) {
 	execCtx := ExecutionCtx{Log: &log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(10000000000)}
 	f := features.NewFeaturesDefault()
 	f.EnableFeature(features.Curve25519SyscallEnabled, 0)
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	execCtx.Accounts = accounts.NewMemAccounts()
 

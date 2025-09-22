@@ -430,7 +430,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	tableKey := lookupTableAcct.Key()
 	lookupTableOwner := lookupTableAcct.Owner()
 
-	if !execCtx.GlobalCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
+	if !execCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
 		len(lookupTableAcct.Data()) != 0 {
 		return InstrErrAccountAlreadyInitialized
 	}
@@ -445,7 +445,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 
 	authorityKey := authorityAcct.Key()
 
-	if !execCtx.GlobalCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
+	if !execCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
 		!authorityAcct.IsSigner() {
 		return InstrErrMissingRequiredSignature
 	}
@@ -494,7 +494,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 		return InstrErrInvalidArgument
 	}
 
-	if execCtx.GlobalCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
+	if execCtx.Features.IsActive(features.RelaxAuthoritySignerCheckForLookupTableCreation) &&
 		lookupTableOwner == a.AddressLookupTableAddr {
 		return nil
 	}
@@ -540,7 +540,7 @@ func AddressLookupTableCreateLookupTable(execCtx *ExecutionCtx, untrustedRecentS
 	}
 
 	newState := &AddressLookupTable{State: AddressLookupTableProgramStateLookupTable, Meta: LookupTableMeta{Authority: &authorityKey, DeactivationSlot: math.MaxUint64}}
-	err = setAddrTableLookupAccountState(lookupTableAcct, newState, execCtx.GlobalCtx.Features)
+	err = setAddrTableLookupAccountState(lookupTableAcct, newState, execCtx.Features)
 	lookupTableAcct.Drop()
 
 	return err
@@ -613,7 +613,7 @@ func AddressLookupTableFreezeLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	lookupTable.Meta.Authority = nil
-	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.GlobalCtx.Features)
+	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.Features)
 	lookupTableAcct.Drop()
 
 	return err
@@ -710,13 +710,13 @@ func AddressLookupTableExtendLookupTable(execCtx *ExecutionCtx, newAddresses []s
 
 	newTableDataLen := AddressLookupTableMetaSize + (newTableAddressesLen * solana.PublicKeyLength)
 
-	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.GlobalCtx.Features)
+	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
 	for _, newAddr := range newAddresses {
-		err = lookupTableAcct.ExtendFromSlice(execCtx.GlobalCtx.Features, newAddr[:])
+		err = lookupTableAcct.ExtendFromSlice(execCtx.Features, newAddr[:])
 		if err != nil {
 			return err
 		}
@@ -824,7 +824,7 @@ func AddressLookupTableDeactivateLookupTable(execCtx *ExecutionCtx) error {
 	}
 
 	lookupTable.Meta.DeactivationSlot = clock.Slot
-	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.GlobalCtx.Features)
+	err = overwriteAddrLookupTableMetadata(lookupTableAcct, &lookupTable.Meta, execCtx.Features)
 	lookupTableAcct.Drop()
 
 	return err
@@ -940,7 +940,7 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	}
 	defer recipientAcct.Drop()
 
-	err = recipientAcct.CheckedAddLamports(withdrawnLamports, execCtx.GlobalCtx.Features)
+	err = recipientAcct.CheckedAddLamports(withdrawnLamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -951,11 +951,11 @@ func AddressLookupTableCloseLookupTable(execCtx *ExecutionCtx) error {
 	if err != nil {
 		return err
 	}
-	err = lookupTableAcct.SetDataLength(0, execCtx.GlobalCtx.Features)
+	err = lookupTableAcct.SetDataLength(0, execCtx.Features)
 	if err != nil {
 		return err
 	}
-	err = lookupTableAcct.SetLamports(0, execCtx.GlobalCtx.Features)
+	err = lookupTableAcct.SetLamports(0, execCtx.Features)
 	lookupTableAcct.Drop()
 
 	return err

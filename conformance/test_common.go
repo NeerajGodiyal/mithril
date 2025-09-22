@@ -192,14 +192,14 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 
 func parseAndConfigureFeatures(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 	f := features.NewFeaturesDefault()
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	for _, ftr := range fixture.Input.EpochContext.Features.Features {
 		for _, featureGate := range features.AllFeatureGates {
 			featureIdInt := binary.LittleEndian.Uint64(featureGate.Address[:8])
 			if featureIdInt == ftr {
 				fmt.Printf("enabling feature %s\n", featureGate.Name)
-				execCtx.GlobalCtx.Features.EnableFeature(featureGate, 0)
+				execCtx.Features.EnableFeature(featureGate, 0)
 			}
 		}
 	}

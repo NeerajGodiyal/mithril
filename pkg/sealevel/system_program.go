@@ -1133,7 +1133,7 @@ func SystemProgramAllocate(execCtx *ExecutionCtx, acct *BorrowedAccount, address
 		return SystemProgErrInvalidAccountDataLength
 	}
 
-	return acct.SetDataLength(space, execCtx.GlobalCtx.Features)
+	return acct.SetDataLength(space, execCtx.Features)
 }
 
 func SystemProgramAssign(execCtx *ExecutionCtx, acct *BorrowedAccount, address solana.PublicKey, owner solana.PublicKey, signers []solana.PublicKey) error {
@@ -1155,7 +1155,7 @@ func SystemProgramAssign(execCtx *ExecutionCtx, acct *BorrowedAccount, address s
 		return InstrErrMissingRequiredSignature
 	}
 
-	return acct.SetOwner(execCtx.GlobalCtx.Features, owner)
+	return acct.SetOwner(execCtx.Features, owner)
 }
 
 func SystemProgramTransfer(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx uint64, lamports uint64) error {
@@ -1250,7 +1250,7 @@ func transferInternal(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx uint6
 		return SystemProgErrResultWithNegativeLamports
 	}
 
-	f := execCtx.GlobalCtx.Features
+	f := execCtx.Features
 	err = from.CheckedSubLamports(lamports, f)
 	if err != nil {
 		return err
@@ -1318,7 +1318,7 @@ func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAc
 		return err
 	}
 
-	err = acct.SetState(execCtx.GlobalCtx.Features, newStateBytes)
+	err = acct.SetState(execCtx.Features, newStateBytes)
 	return err
 }
 
@@ -1349,7 +1349,7 @@ func SystemProgramAuthorizeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAcc
 	if err != nil {
 		return err
 	}
-	return acct.SetState(execCtx.GlobalCtx.Features, newStateData)
+	return acct.SetState(execCtx.Features, newStateData)
 }
 
 func SystemProgramUpgradeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount) error {
@@ -1378,7 +1378,7 @@ func SystemProgramUpgradeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 		return err
 	}
 
-	return acct.SetState(execCtx.GlobalCtx.Features, newStateData)
+	return acct.SetState(execCtx.Features, newStateData)
 }
 
 func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *InstructionCtx, fromAcctIdx uint64, lamports uint64, toAcctIdx uint64, rent *SysvarRent, signers []solana.PublicKey, recentBlockhashes *SysvarRecentBlockhashes) error {
@@ -1416,7 +1416,7 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 			if err != nil {
 				return err
 			}
-			err = from.SetState(execCtx.GlobalCtx.Features, deinitNonceStateVersionsData)
+			err = from.SetState(execCtx.Features, deinitNonceStateVersionsData)
 			if err != nil {
 				return err
 			}
@@ -1453,7 +1453,7 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 		return InstrErrMissingRequiredSignature
 	}
 
-	err = from.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	err = from.CheckedSubLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1465,7 +1465,7 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 	}
 	defer to.Drop()
 
-	err = to.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	err = to.CheckedAddLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1596,7 +1596,7 @@ func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 		return err
 	}
 
-	err = acct.SetState(execCtx.GlobalCtx.Features, newData)
+	err = acct.SetState(execCtx.Features, newData)
 	if err != nil {
 		return err
 	}

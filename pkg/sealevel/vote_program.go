@@ -690,7 +690,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramInitializeAccount(me, voteInit, signers, clock, execCtx.GlobalCtx.Features)
+			err = VoteProgramInitializeAccount(me, voteInit, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorize:
@@ -712,7 +712,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(me, voteAuthorize.Pubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.GlobalCtx.Features)
+			err = VoteProgramAuthorize(me, voteAuthorize.Pubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorizeWithSeed:
@@ -788,7 +788,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramUpdateValidatorIdentity(me, nodePubkey, signers, execCtx.GlobalCtx.Features)
+			err = VoteProgramUpdateValidatorIdentity(me, nodePubkey, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeUpdateCommission:
@@ -811,7 +811,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramUpdateCommission(me, updateCommission.Commission, signers, epochSchedule, clock, execCtx.GlobalCtx.Features)
+			err = VoteProgramUpdateCommission(me, updateCommission.Commission, signers, epochSchedule, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeVoteSwitch:
@@ -854,7 +854,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVote(me, slotHashes, clock, &vote, signers, execCtx.GlobalCtx.Features)
+			err = VoteProgramProcessVote(me, slotHashes, clock, &vote, signers, execCtx.Features)
 		}
 	case VoteProgramInstrTypeUpdateVoteStateSwitch:
 		isUpdateVoteStateSwitch = true
@@ -889,7 +889,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, &updateVoteState, signers, execCtx.GlobalCtx.Features)
+			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, &updateVoteState, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeCompactUpdateVoteStateSwitch:
@@ -927,7 +927,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, updateVoteState, signers, execCtx.GlobalCtx.Features)
+			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, updateVoteState, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeWithdraw:
@@ -957,7 +957,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 
 			me.Drop()
 
-			err = VoteProgramWithdraw(txCtx, instrCtx, 0, withdraw.Lamports, 1, signers, rent, clock, execCtx.GlobalCtx.Features)
+			err = VoteProgramWithdraw(txCtx, instrCtx, 0, withdraw.Lamports, 1, signers, rent, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorizeChecked:
@@ -1006,7 +1006,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.GlobalCtx.Features)
+			err = VoteProgramAuthorize(me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeTowerSyncSwitch:
@@ -1032,7 +1032,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				towerSyncInstr = &towerSync
 			}
 
-			if !execCtx.GlobalCtx.Features.IsActive(features.EnableTowerSyncIx) {
+			if !execCtx.Features.IsActive(features.EnableTowerSyncIx) {
 				return InstrErrInvalidInstructionData
 			}
 
@@ -1048,7 +1048,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessTowerSync(me, slotHashes, clock, towerSyncInstr, signers, execCtx.GlobalCtx.Features)
+			err = VoteProgramProcessTowerSync(me, slotHashes, clock, towerSyncInstr, signers, execCtx.Features)
 		}
 
 	default: // invalid instruction
@@ -1171,7 +1171,7 @@ func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCt
 		expectedAuthorityKeys = append(expectedAuthorityKeys, authKey)
 	}
 
-	err = VoteProgramAuthorize(voteAcct, newAuthority, authorizationType, expectedAuthorityKeys, clock, execCtx.GlobalCtx.Features)
+	err = VoteProgramAuthorize(voteAcct, newAuthority, authorizationType, expectedAuthorityKeys, clock, execCtx.Features)
 	return err
 }
 

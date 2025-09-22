@@ -166,7 +166,7 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	txCtx := sealevel.NewTransactionCtx(*transactionAccts, 64, 64)
 	execCtx := &sealevel.ExecutionCtx{Log: log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(uint64(computeBudgetLimits.ComputeUnitLimit)), PrevLamportsPerSignature: slotCtx.FeeRateGovernor.PrevLamportsPerSignature}
 
-	execCtx.GlobalCtx.Features = *slotCtx.Features
+	execCtx.Features = *slotCtx.Features
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
@@ -475,8 +475,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
 
 	start = time.Now()
-	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.GlobalCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
+	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.Features)
 	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
 
 	var instrErr error
@@ -545,7 +545,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.GlobalCtx.Features)
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
 	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
 
@@ -594,7 +594,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(tx, txAcctMeta, &execCtx.GlobalCtx.Features) {
+		if isWritable(tx, txAcctMeta, &execCtx.Features) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
 		}
 	}

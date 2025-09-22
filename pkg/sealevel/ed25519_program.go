@@ -129,7 +129,7 @@ func Ed25519ProgramExecute(execCtx *ExecutionCtx) error {
 
 		pk := ed25519.PublicKey(pubkey)
 
-		if execCtx.GlobalCtx.Features.IsActive(features.Ed25519PrecompileVerifyStrict) {
+		if execCtx.Features.IsActive(features.Ed25519PrecompileVerifyStrict) {
 			verifyOptions := ed25519.VerifyOptions{AllowSmallOrderA: false, AllowSmallOrderR: false, CofactorlessVerify: true}
 			opts := ed25519.Options{Verify: &verifyOptions}
 

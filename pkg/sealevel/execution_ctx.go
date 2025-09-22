@@ -10,7 +10,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/gagliardetto/solana-go"
@@ -20,7 +19,7 @@ type ExecutionCtx struct {
 	Log                      Logger
 	Accounts                 accounts.Accounts
 	TransactionContext       *TransactionCtx
-	GlobalCtx                global.GlobalCtx
+	Features                 features.Features
 	ComputeMeter             cu.ComputeMeter
 	Blockhash                [32]byte
 	PrevLamportsPerSignature uint64

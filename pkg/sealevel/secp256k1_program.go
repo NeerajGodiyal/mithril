@@ -165,8 +165,8 @@ func Secp256k1ProgramExecute(execCtx *ExecutionCtx) error {
 
 	numSignatures := data[0]
 
-	if (execCtx.GlobalCtx.Features.IsActive(features.Libsecp256k1FailOnBadCount) ||
-		execCtx.GlobalCtx.Features.IsActive(features.Libsecp256k1FailOnBadCount2)) && numSignatures == 0 && dataLen > 1 {
+	if (execCtx.Features.IsActive(features.Libsecp256k1FailOnBadCount) ||
+		execCtx.Features.IsActive(features.Libsecp256k1FailOnBadCount2)) && numSignatures == 0 && dataLen > 1 {
 		return PrecompileErrInstrDataSize
 	}
 

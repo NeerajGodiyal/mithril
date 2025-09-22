@@ -247,6 +247,12 @@ func BuildAccountsDb(
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
 	if incrementalManifest != nil {
+		accountsDb.CurrentSlot = incrementalManifest.Bank.Slot + 1
+	} else {
+		accountsDb.CurrentSlot = manifest.Bank.Slot + 1
+	}
+
+	if incrementalManifest != nil {
 		return accountsDb, incrementalManifest, nil
 	} else {
 		return accountsDb, manifest, nil

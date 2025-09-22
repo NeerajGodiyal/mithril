@@ -5,14 +5,12 @@ import (
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/gagliardetto/solana-go"
 )
 
 // VM is the virtual machine abstraction, implemented by each executor.
 type VM interface {
 	VMContext() any
-	GlobalCtx() *global.GlobalCtx
 
 	HeapMax() uint64
 	HeapSize() uint64

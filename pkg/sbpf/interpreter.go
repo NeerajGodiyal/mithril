@@ -11,7 +11,6 @@ import (
 	"unsafe"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 	"github.com/Overclock-Validator/wide"
@@ -34,7 +33,6 @@ type Interpreter struct {
 	syscalls          func(uint32) (Syscall, bool)
 	funcs             map[uint32]int64
 	vmContext         any
-	globalCtx         *global.GlobalCtx
 	trace             TraceSink
 	enableTracing     bool
 	computeMeter      *cu.ComputeMeter
@@ -66,7 +64,7 @@ var (
 //
 // The caller must create a new interpreter object for every new execution.
 // In other words, Run may only be called once per interpreter.
-func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Interpreter {
+func NewInterpreter(p *Program, opts *VMOpts) *Interpreter {
 	var heap []byte
 	if UsePool {
 		heap = heapPool.Get().([]byte)
@@ -90,7 +88,6 @@ func NewInterpreter(globalCtx *global.GlobalCtx, p *Program, opts *VMOpts) *Inte
 		syscalls:          opts.Syscalls,
 		funcs:             p.Funcs,
 		vmContext:         opts.Context,
-		globalCtx:         globalCtx,
 		trace:             opts.Tracer,
 		computeMeter:      opts.ComputeMeter,
 		prevInstrMeter:    opts.ComputeMeter.Remaining(),
@@ -988,10 +985,6 @@ func (ip *Interpreter) getSlot(pc int64) Slot {
 
 func (ip *Interpreter) VMContext() any {
 	return ip.vmContext
-}
-
-func (ip *Interpreter) GlobalCtx() *global.GlobalCtx {
-	return ip.globalCtx
 }
 
 func (ip *Interpreter) HeapMax() uint64 {

@@ -414,7 +414,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramInitialize(me, initialize.Authorized, initialize.Lockup, rent, execCtx.GlobalCtx.Features)
+			err = StakeProgramInitialize(me, initialize.Authorized, initialize.Lockup, rent, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeAuthorize:
@@ -458,7 +458,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramAuthorize(me, signers, authorize.Pubkey, authorize.StakeAuthorize, clock, custodianPubkey, execCtx.GlobalCtx.Features)
+			err = StakeProgramAuthorize(me, signers, authorize.Pubkey, authorize.StakeAuthorize, clock, custodianPubkey, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeAuthorizeWithSeed:
@@ -502,7 +502,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramAuthorizeWithSeed(txCtx, instrCtx, me, 1, authorizeWithSeed.AuthoritySeed, authorizeWithSeed.AuthorityOwner, authorizeWithSeed.NewAuthorizedPubkey, authorizeWithSeed.StakeAuthorize, clock, custodianPubkey, execCtx.GlobalCtx.Features)
+			err = StakeProgramAuthorizeWithSeed(txCtx, instrCtx, me, 1, authorizeWithSeed.AuthoritySeed, authorizeWithSeed.AuthorityOwner, authorizeWithSeed.NewAuthorizedPubkey, authorizeWithSeed.StakeAuthorize, clock, custodianPubkey, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeDelegateStake:
@@ -551,7 +551,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			}
 			me.Drop()
 
-			err = StakeProgramDelegate(execCtx, txCtx, instrCtx, 0, 1, clock, stakeHistory, signers, execCtx.GlobalCtx.Features)
+			err = StakeProgramDelegate(execCtx, txCtx, instrCtx, 0, 1, clock, stakeHistory, signers, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeSplit:
@@ -690,7 +690,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				return err
 			}
-			err = StakeProgramWithdraw(txCtx, instrCtx, 0, withdraw.Lamports, 1, clock, stakeHistory, 4, custodianIndex, epoch, execCtx.GlobalCtx.Features)
+			err = StakeProgramWithdraw(txCtx, instrCtx, 0, withdraw.Lamports, 1, clock, stakeHistory, 4, custodianIndex, epoch, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeDeactivate:
@@ -745,7 +745,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramSetLockup(me, lockup, signers, clock, execCtx.GlobalCtx.Features)
+			err = StakeProgramSetLockup(me, lockup, signers, clock, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeInitializeChecked:
@@ -808,7 +808,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramInitialize(me, authorized, StakeLockup{}, rent, execCtx.GlobalCtx.Features)
+			err = StakeProgramInitialize(me, authorized, StakeLockup{}, rent, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeAuthorizeChecked:
@@ -873,7 +873,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramAuthorize(me, signers, authorizedPubkey, authorizeChecked.StakeAuthorize, clock, custodianPubkey, execCtx.GlobalCtx.Features)
+			err = StakeProgramAuthorize(me, signers, authorizedPubkey, authorizeChecked.StakeAuthorize, clock, custodianPubkey, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeAuthorizeCheckedWithSeed:
@@ -943,7 +943,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = StakeProgramAuthorizeWithSeed(txCtx, instrCtx, me, 1, authorizeCheckedWithSeed.AuthoritySeed, authorizeCheckedWithSeed.AuthorityOwner, authorizedPubkey, authorizeCheckedWithSeed.StakeAuthorize, clock, custodianPubkey, execCtx.GlobalCtx.Features)
+			err = StakeProgramAuthorizeWithSeed(txCtx, instrCtx, me, 1, authorizeCheckedWithSeed.AuthoritySeed, authorizeCheckedWithSeed.AuthorityOwner, authorizedPubkey, authorizeCheckedWithSeed.StakeAuthorize, clock, custodianPubkey, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeSetLockupChecked:
@@ -979,12 +979,12 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 
 			lockup := StakeInstrSetLockup{UnixTimestamp: setLockupChecked.UnixTimestamp, Epoch: setLockupChecked.Epoch, Custodian: custodianPubkey}
 
-			err = StakeProgramSetLockup(me, lockup, signers, clock, execCtx.GlobalCtx.Features)
+			err = StakeProgramSetLockup(me, lockup, signers, clock, execCtx.Features)
 		}
 
 	case StakeProgramInstrTypeGetMinimumDelegation:
 		{
-			minimumDelegation := determineMinimumDelegation(execCtx.GlobalCtx.Features)
+			minimumDelegation := determineMinimumDelegation(execCtx.Features)
 			minimumDelegationBytes := make([]byte, 8)
 			binary.LittleEndian.PutUint64(minimumDelegationBytes, minimumDelegation)
 			txCtx.SetReturnData(a.StakeProgramAddr, minimumDelegationBytes)
@@ -1030,7 +1030,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			}
 			defer me.Drop()
 
-			if execCtx.GlobalCtx.Features.IsActive(features.StakeRedelegateInstruction) {
+			if execCtx.Features.IsActive(features.StakeRedelegateInstruction) {
 				err = instrCtx.CheckNumOfInstructionAccounts(3)
 				if err != nil {
 					return err
@@ -1051,7 +1051,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			if execCtx.GlobalCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
+			if execCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
 				err = instrCtx.CheckNumOfInstructionAccounts(3)
 				if err != nil {
 					return err
@@ -1071,7 +1071,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			if execCtx.GlobalCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
+			if execCtx.Features.IsActive(features.MoveStakeAndMoveLamportsIxs) {
 				err = instrCtx.CheckNumOfInstructionAccounts(3)
 				if err != nil {
 					return err
@@ -1365,7 +1365,7 @@ func validateSplitAmount(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx 
 
 	dstRentExemptReserve := rent.MinimumBalance(dstDataLen)
 
-	if execCtx.GlobalCtx.Features.IsActive(features.RequireRentExemptSplitDestination) &&
+	if execCtx.Features.IsActive(features.RequireRentExemptSplitDestination) &&
 		srcIsActive && srcRemainingBalance != 0 && dstLamports < dstRentExemptReserve {
 		return validatedSplitInfo{}, InstrErrInsufficientFunds
 	}
@@ -1432,10 +1432,10 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 				return err
 			}
 
-			minimumDelegation := determineMinimumDelegation(execCtx.GlobalCtx.Features)
+			minimumDelegation := determineMinimumDelegation(execCtx.Features)
 
 			var isActive bool
-			if execCtx.GlobalCtx.Features.IsActive(features.RequireRentExemptSplitDestination) {
+			if execCtx.Features.IsActive(features.RequireRentExemptSplitDestination) {
 				clock, err := ReadClockSysvar(execCtx)
 				if err != nil {
 					return err
@@ -1493,7 +1493,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 			}
 			defer stakeAcct.Drop()
 
-			err = setStakeAccountState(stakeAcct, stakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(stakeAcct, stakeState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -1507,7 +1507,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 			defer split.Drop()
 
 			newSplitStakeState := StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: splitMeta, Stake: splitStake, StakeFlags: stakeState.Stake.StakeFlags}}
-			err = setStakeAccountState(split, &newSplitStakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(split, &newSplitStakeState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -1536,7 +1536,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 			defer split.Drop()
 
 			newStakeState := StakeStateV2{Status: StakeStateV2StatusInitialized, Initialized: StakeStateV2Initialized{Meta: splitMeta}}
-			err = setStakeAccountState(split, &newStakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(split, &newStakeState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -1576,7 +1576,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 
 	if lamports == stakeAcct.Lamports() {
 		newStakeState := StakeStateV2{Status: StakeStateV2StatusUninitialized}
-		err = setStakeAccountState(stakeAcct, &newStakeState, execCtx.GlobalCtx.Features)
+		err = setStakeAccountState(stakeAcct, &newStakeState, execCtx.Features)
 		if err != nil {
 			return err
 		}
@@ -1589,7 +1589,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	}
 	defer split.Drop()
 
-	err = split.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	err = split.CheckedAddLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1599,7 +1599,7 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	if err != nil {
 		return err
 	}
-	err = stakeAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	err = stakeAcct.CheckedSubLamports(lamports, execCtx.Features)
 
 	return err
 }
@@ -1669,25 +1669,25 @@ func StakeProgramMerge(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 	}
 
 	if mergedState != nil {
-		err = setStakeAccountState(stakeAcct, mergedState, execCtx.GlobalCtx.Features)
+		err = setStakeAccountState(stakeAcct, mergedState, execCtx.Features)
 		if err != nil {
 			return err
 		}
 	}
 
 	uninitializedState := &StakeStateV2{Status: StakeStateV2StatusUninitialized}
-	err = setStakeAccountState(srcAcct, uninitializedState, execCtx.GlobalCtx.Features)
+	err = setStakeAccountState(srcAcct, uninitializedState, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
 	lamports := srcAcct.Lamports()
-	err = srcAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	err = srcAcct.CheckedSubLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = stakeAcct.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	err = stakeAcct.CheckedAddLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -1864,7 +1864,7 @@ func StakeProgramDeactivate(execCtx *ExecutionCtx, stakeAcct *BorrowedAccount, c
 			return err
 		}
 
-		err = setStakeAccountState(stakeAcct, stakeState, execCtx.GlobalCtx.Features)
+		err = setStakeAccountState(stakeAcct, stakeState, execCtx.Features)
 		return err
 	} else {
 		return InstrErrInvalidAccountData
@@ -1939,7 +1939,7 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 
 	srcStake := srcMergeKind.FullyActive.Stake
 	srcMeta := srcMergeKind.FullyActive.Meta
-	minimumDelegation := determineMinimumDelegation(execCtx.GlobalCtx.Features)
+	minimumDelegation := determineMinimumDelegation(execCtx.Features)
 	srcEffectiveStake := srcStake.Delegation.StakeLamports
 
 	srcFinalStake, err := safemath.CheckedSubU64(srcEffectiveStake, lamports)
@@ -1979,7 +1979,7 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 			}
 
 			newDstStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: dstMeta, Stake: dstStake}}
-			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -1999,7 +1999,7 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 			dstStake.Delegation.StakeLamports = lamports
 
 			newDstStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: dstMeta, Stake: dstStake}}
-			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(dstAcct, newDstStakeState, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -2015,7 +2015,7 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 
 	if srcFinalStake == 0 {
 		newSrcAcctStakeState := &StakeStateV2{Status: StakeStateV2StatusInitialized, Initialized: StakeStateV2Initialized{srcMeta}}
-		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.GlobalCtx.Features)
+		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.Features)
 		if err != nil {
 			return err
 		}
@@ -2023,18 +2023,18 @@ func StakeProgramMoveStake(execCtx *ExecutionCtx, instrCtx *InstructionCtx, srcA
 		srcStake.Delegation.StakeLamports = srcFinalStake
 
 		newSrcAcctStakeState := &StakeStateV2{Status: StakeStateV2StatusStake, Stake: StakeStateV2Stake{Meta: srcMeta, Stake: srcStake}}
-		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.GlobalCtx.Features)
+		err = setStakeAccountState(srcAcct, newSrcAcctStakeState, execCtx.Features)
 		if err != nil {
 			return err
 		}
 	}
 
-	err = srcAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	err = srcAcct.CheckedSubLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = dstAcct.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	err = dstAcct.CheckedAddLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -2096,12 +2096,12 @@ func StakeProgramMoveLamports(execCtx *ExecutionCtx, instrCtx *InstructionCtx, s
 		return InstrErrInvalidArgument
 	}
 
-	err = srcAcct.CheckedSubLamports(lamports, execCtx.GlobalCtx.Features)
+	err = srcAcct.CheckedSubLamports(lamports, execCtx.Features)
 	if err != nil {
 		return err
 	}
 
-	err = dstAcct.CheckedAddLamports(lamports, execCtx.GlobalCtx.Features)
+	err = dstAcct.CheckedAddLamports(lamports, execCtx.Features)
 
 	return err
 }
@@ -2291,7 +2291,7 @@ func StakeProgramDeactivateDelinquent(execCtx *ExecutionCtx, txCtx *TransactionC
 			if err != nil {
 				return err
 			}
-			err = setStakeAccountState(stakeAcct, stakeState, execCtx.GlobalCtx.Features)
+			err = setStakeAccountState(stakeAcct, stakeState, execCtx.Features)
 			return err
 		} else {
 			return StakeErrMinimumDelinquentEpochsForDeactivationNotMet
@@ -2379,11 +2379,11 @@ func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 		return err
 	}
 
-	err = stakeAcct.CheckedSubLamports(effectiveStake, execCtx.GlobalCtx.Features)
+	err = stakeAcct.CheckedSubLamports(effectiveStake, execCtx.Features)
 	if err != nil {
 		return err
 	}
-	err = uninitializedStakeAcct.CheckedAddLamports(effectiveStake, execCtx.GlobalCtx.Features)
+	err = uninitializedStakeAcct.CheckedAddLamports(effectiveStake, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -2396,7 +2396,7 @@ func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 	uninitializedStakeMeta := *stakeMeta
 	uninitializedStakeMeta.RentExemptReserve = rent.MinimumBalance(uint64(len(uninitializedStakeAcct.Data())))
 
-	stakeAmount, err := validateAndReturnDelegatedAmount(uninitializedStakeAcct, uninitializedStakeMeta, execCtx.GlobalCtx.Features)
+	stakeAmount, err := validateAndReturnDelegatedAmount(uninitializedStakeAcct, uninitializedStakeMeta, execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -2407,7 +2407,7 @@ func StakeProgramRedelegate(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 			Stake: Stake{Delegation: Delegation{VoterPubkey: votePubkey, StakeLamports: stakeAmount, ActivationEpoch: clock.Epoch, DeactivationEpoch: math.MaxUint64, WarmupCooldownRate: 0.25},
 				CreditsObserved: credits}, StakeFlags: StakeFlagsMustFullyActivateBeforeDeactivationIsPermitted}}
 
-	err = setStakeAccountState(uninitializedStakeAcct, &newState, execCtx.GlobalCtx.Features)
+	err = setStakeAccountState(uninitializedStakeAcct, &newState, execCtx.Features)
 
 	return err
 }

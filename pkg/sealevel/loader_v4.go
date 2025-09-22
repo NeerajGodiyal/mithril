@@ -182,7 +182,7 @@ func loaderV4DecodeStateAndCheckProgramAcct(instrCtx *InstructionCtx, program *B
 }
 
 func LoaderV4Execute(execCtx *ExecutionCtx) error {
-	if !execCtx.GlobalCtx.Features.IsActive(features.EnableLoaderV4) {
+	if !execCtx.Features.IsActive(features.EnableLoaderV4) {
 		return InstrErrUnsupportedProgramId
 	}
 
@@ -308,7 +308,7 @@ func LoaderV4Execute(execCtx *ExecutionCtx) error {
 		}
 
 		syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
-			return Syscalls(&execCtx.GlobalCtx.Features, false, u)
+			return Syscalls(&execCtx.Features, false, u)
 		})
 
 		program.Drop()
@@ -359,7 +359,7 @@ func LoaderV4ProcessWrite(execCtx *ExecutionCtx, offset uint32, bytes []byte) er
 	}
 
 	var programData []byte
-	programData, err = program.DataMutable(execCtx.GlobalCtx.Features)
+	programData, err = program.DataMutable(execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -431,7 +431,7 @@ func LoaderV4ProcessCopy(execCtx *ExecutionCtx, destinationOffset uint32, source
 	data := srcProgram.Data()[srcOffset : srcOffset+uint64(length)]
 
 	var programData []byte
-	programData, err = program.DataMutable(execCtx.GlobalCtx.Features)
+	programData, err = program.DataMutable(execCtx.Features)
 	if err != nil {
 		return err
 	}
@@ -517,12 +517,12 @@ func LoaderV4ProcessSetProgramLength(execCtx *ExecutionCtx, newLen uint32) error
 			}
 
 			lamportsToReceive := programLamports - requiredLamports
-			err = program.CheckedSubLamports(lamportsToReceive, execCtx.GlobalCtx.Features)
+			err = program.CheckedSubLamports(lamportsToReceive, execCtx.Features)
 			if err != nil {
 				return err
 			}
 
-			err = recipient.CheckedAddLamports(lamportsToReceive, execCtx.GlobalCtx.Features)
+			err = recipient.CheckedAddLamports(lamportsToReceive, execCtx.Features)
 			if err != nil {
 				return err
 			}
@@ -532,18 +532,18 @@ func LoaderV4ProcessSetProgramLength(execCtx *ExecutionCtx, newLen uint32) error
 	}
 
 	if newLen == 0 {
-		err = program.SetDataLength(0, execCtx.GlobalCtx.Features)
+		err = program.SetDataLength(0, execCtx.Features)
 		if err != nil {
 			return err
 		}
 	} else {
-		err = program.SetDataLength(uint64(newLen)+loaderV4ProgramDataOffset, execCtx.GlobalCtx.Features)
+		err = program.SetDataLength(uint64(newLen)+loaderV4ProgramDataOffset, execCtx.Features)
 		if err != nil {
 			return err
 		}
 
 		if isInitialization {
-			err = program.SetExecutable(execCtx.GlobalCtx.Features, true)
+			err = program.SetExecutable(execCtx.Features, true)
 			if err != nil {
 				return err
 			}

@@ -38,7 +38,7 @@ func newExecCtx(t *testing.T, log *LogRecorder) *ExecutionCtx {
 	accts := accounts.NewMemAccounts()
 	execCtx := ExecutionCtx{Log: log, ComputeMeter: cu.NewComputeMeter(10000000000), Accounts: accts}
 	f := features.NewFeaturesDefault()
-	execCtx.GlobalCtx.Features = *f
+	execCtx.Features = *f
 
 	return &execCtx
 }

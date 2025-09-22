@@ -25,7 +25,7 @@ const (
 )
 
 func checkInstructionSize(execCtx *ExecutionCtx, numAccounts uint64, dataLen uint64) error {
-	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
+	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
 		if dataLen > MaxCpiInstructionDataLen {
 			return SyscallErrMaxInstructionDataLenExceeded
 		}
@@ -90,7 +90,7 @@ func translateInstructionC(vm sbpf.VM, addr uint64) (Instruction, error) {
 	}
 
 	execCtx := executionCtx(vm)
-	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
+	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
 		err = execCtx.ComputeMeter.Consume(ix.DataLen / cu.CUCpiBytesPerUnit)
 		if err != nil {
 			return Instruction{}, err
@@ -167,7 +167,7 @@ func translateInstructionRust(vm sbpf.VM, addr uint64) (Instruction, error) {
 	}
 
 	execCtx := executionCtx(vm)
-	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
+	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
 		err = execCtx.ComputeMeter.Consume(ix.Data.Len / cu.CUCpiBytesPerUnit)
 		if err != nil {
 			return Instruction{}, err
@@ -282,7 +282,7 @@ func checkAuthorizedProgram(execCtx *ExecutionCtx, programId solana.PublicKey, i
 		(programId == solana.BPFLoaderUpgradeableProgramID &&
 			!(isBpfLoaderUpgradebleUpgradeInstr(instructionData) ||
 				isBpfLoaderUpgradebleSetAuthorityInstr(instructionData) ||
-				(execCtx.GlobalCtx.Features.IsActive(features.EnableBpfLoaderSetAuthorityCheckedIx) && isBpfLoaderUpgradebleSetAuthorityCheckedInstr(instructionData)) ||
+				(execCtx.Features.IsActive(features.EnableBpfLoaderSetAuthorityCheckedIx) && isBpfLoaderUpgradebleSetAuthorityCheckedInstr(instructionData)) ||
 				isBpfLoaderUpgradebleCloseInstr(instructionData))) ||
 		isPrecompile(programId) {
 		return SyscallErrProgramNotSupported
@@ -292,9 +292,9 @@ func checkAuthorizedProgram(execCtx *ExecutionCtx, programId solana.PublicKey, i
 }
 
 func checkAccountInfos(execCtx *ExecutionCtx, numAccountInfos uint64) error {
-	if execCtx.GlobalCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
+	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
 		var maxAccountInfos uint64
-		if execCtx.GlobalCtx.Features.IsActive(features.IncreaseTxAccountLockLimit) {
+		if execCtx.Features.IsActive(features.IncreaseTxAccountLockLimit) {
 			maxAccountInfos = MaxCpiAccountInfos
 		} else {
 			maxAccountInfos = 64
@@ -492,7 +492,7 @@ func updateCalleeAccount(execCtx *ExecutionCtx, callerAccount CallerAccount, cal
 	}
 
 	err1 := calleeAccount.CanDataBeResized(uint64(len(callerAccount.SerializedData)))
-	err2 := calleeAccount.DataCanBeChanged(execCtx.GlobalCtx.Features)
+	err2 := calleeAccount.DataCanBeChanged(execCtx.Features)
 
 	var err error
 
@@ -509,14 +509,14 @@ func updateCalleeAccount(execCtx *ExecutionCtx, callerAccount CallerAccount, cal
 		}
 		err = nil
 	} else {
-		err = calleeAccount.SetData(execCtx.GlobalCtx.Features, callerAccount.SerializedData)
+		err = calleeAccount.SetData(execCtx.Features, callerAccount.SerializedData)
 		if err != nil {
 			return err
 		}
 	}
 
 	if calleeAccount.Owner() != solana.PublicKeyFromBytes(callerAccount.Owner) {
-		err = calleeAccount.SetOwner(execCtx.GlobalCtx.Features, solana.PublicKeyFromBytes(callerAccount.Owner))
+		err = calleeAccount.SetOwner(execCtx.Features, solana.PublicKeyFromBytes(callerAccount.Owner))
 	}
 
 	return err

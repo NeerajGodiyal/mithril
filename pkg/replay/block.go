@@ -20,11 +20,13 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
+	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
@@ -479,6 +481,13 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	block.PrevNumSignatures = lastSlotCtx.NumSignatures
 }
 
+func configureGlobalCtx(block *b.Block) {
+	global.SetSlot(block.Slot)
+	global.SetEpoch(block.Epoch)
+	global.SetLatestBlockHash(block.LastBlockhash)
+	global.SetBlockHeight(block.BlockHeight)
+}
+
 func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
@@ -492,6 +501,7 @@ func ReplayBlocks(
 	isLive bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
+	rpcServer *rpcserver.RpcServer,
 ) error {
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
@@ -545,6 +555,8 @@ func ReplayBlocks(
 		}
 
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
+
+		configureGlobalCtx(block)
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
@@ -887,6 +899,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
+
+	acctsDb.CurrentSlot++
 
 	//mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
