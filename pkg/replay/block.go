@@ -517,6 +517,7 @@ func ReplayBlocks(
 
 	replayCtx := newReplayCtx(snapshotManifest)
 
+	global.IncrTransactionCount(snapshotManifest.Bank.TransactionCount)
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
@@ -916,6 +917,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	if err != nil {
 		mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
 	}
+
+	global.IncrTransactionCount(uint64(len(block.Transactions)))
 
 	return slotCtx, err
 }

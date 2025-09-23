@@ -7,29 +7,34 @@ import (
 )
 
 type GlobalCtx struct {
-	latestBlockhash [32]byte
-	blockHeight     uint64
-	slot            uint64
-	epoch           uint64
-	mu              sync.Mutex
+	latestBlockhash  [32]byte
+	blockHeight      uint64
+	slot             uint64
+	epoch            uint64
+	transactionCount uint64
+	mu               sync.Mutex
 }
 
 var instance GlobalCtx
 
 func SetLatestBlockHash(blockHash [32]byte) {
-	instance.setLatestBlockhash(blockHash)
+	instance.SetLatestBlockhash(blockHash)
 }
 
 func SetBlockHeight(blockHeight uint64) {
-	instance.setBlockHeight(blockHeight)
+	instance.SetBlockHeight(blockHeight)
 }
 
 func SetSlot(slot uint64) {
-	instance.setSlot(slot)
+	instance.SetSlot(slot)
 }
 
 func SetEpoch(epoch uint64) {
-	instance.setEpoch(epoch)
+	instance.SetEpoch(epoch)
+}
+
+func IncrTransactionCount(num uint64) {
+	instance.IncrTransactionCount(num)
 }
 
 func LatestBlockHash() [32]byte {
@@ -48,28 +53,38 @@ func Epoch() uint64 {
 	return instance.Epoch()
 }
 
-func (globctx *GlobalCtx) setLatestBlockhash(blockhash [32]byte) {
+func TransactionCount() uint64 {
+	return instance.TransactionCount()
+}
+
+func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.latestBlockhash = blockhash
 }
 
-func (globctx *GlobalCtx) setBlockHeight(blockHeight uint64) {
+func (globctx *GlobalCtx) SetBlockHeight(blockHeight uint64) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.blockHeight = blockHeight
 }
 
-func (globctx *GlobalCtx) setSlot(slot uint64) {
+func (globctx *GlobalCtx) SetSlot(slot uint64) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.slot = slot
 }
 
-func (globctx *GlobalCtx) setEpoch(epoch uint64) {
+func (globctx *GlobalCtx) SetEpoch(epoch uint64) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.epoch = epoch
+}
+
+func (globctx *GlobalCtx) IncrTransactionCount(num uint64) {
+	globctx.mu.Lock()
+	defer globctx.mu.Unlock()
+	globctx.transactionCount += num
 }
 
 func (globctx *GlobalCtx) LatestBlockhash() [32]byte {
@@ -94,4 +109,10 @@ func (globctx *GlobalCtx) Epoch() uint64 {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	return globctx.epoch
+}
+
+func (globctx *GlobalCtx) TransactionCount() uint64 {
+	globctx.mu.Lock()
+	defer globctx.mu.Unlock()
+	return globctx.transactionCount
 }

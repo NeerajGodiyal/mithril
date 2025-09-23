@@ -14,7 +14,7 @@ type GetEpochInfoResp struct {
 	Epoch            uint64 `json:"epoch"`
 	SlotIndex        uint64 `json:"slotIndex"`
 	SlotsInEpoch     uint64 `json:"slotsInEpoch"`
-	TransactionCount any    `json:"transactionCount"`
+	TransactionCount uint64 `json:"transactionCount"`
 }
 
 func (rpcServer *RpcServer) GetEpochInfo(ctx context.Context, p jsonrpc.RawParams) (GetEpochInfoResp, error) {
@@ -31,11 +31,12 @@ func (rpcServer *RpcServer) GetEpochInfo(ctx context.Context, p jsonrpc.RawParam
 	slotIndex := slot - firstSlotInEpoch
 
 	resp := GetEpochInfoResp{
-		AbsoluteSlot: global.Slot(),
-		BlockHeight:  global.BlockHeight(),
-		Epoch:        global.Epoch(),
-		SlotIndex:    slotIndex,
-		SlotsInEpoch: 432000,
+		AbsoluteSlot:     global.Slot(),
+		BlockHeight:      global.BlockHeight(),
+		Epoch:            global.Epoch(),
+		SlotIndex:        slotIndex,
+		SlotsInEpoch:     432000,
+		TransactionCount: global.TransactionCount(),
 	}
 
 	return resp, nil
