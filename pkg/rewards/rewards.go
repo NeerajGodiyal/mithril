@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -155,23 +156,37 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	return accts, parentUpdatedAccts, totalVotingRewards
 }
 
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
-	var distributedLamports uint64
-	accts := make([]*accounts.Account, 0, partition.NumPubkeys())
-	parentAccts := make([]*accounts.Account, 0, partition.NumPubkeys())
+type idxAndPubkey struct {
+	idx    int
+	pubkey solana.PublicKey
+}
 
-	for _, stakePk := range partition.Pubkeys() {
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+	var distributedLamports atomic.Uint64
+	accts := make([]*accounts.Account, partition.NumPubkeys())
+	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
+
+	var wg sync.WaitGroup
+
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
+		defer wg.Done()
+
+		ip := i.(idxAndPubkey)
+		idx := ip.idx
+		stakePk := ip.pubkey
+
 		reward, ok := stakingRewards[stakePk]
 		if !ok {
 			//mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
-			continue
+			return
 		}
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d", stakePk, slot))
 		}
-		parentAccts = append(parentAccts, stakeAcct.Clone())
+		parentAccts[idx] = stakeAcct.Clone()
 
 		// update the delegation in the stake account state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
@@ -194,17 +209,27 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			panic(fmt.Sprintf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %s", slot, stakePk, err))
 		}
 
-		accts = append(accts, stakeAcct)
-		distributedLamports += uint64(reward.StakerRewards)
+		accts[idx] = stakeAcct
+		distributedLamports.Add(reward.StakerRewards)
 		//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", stakePk, reward.StakerRewards)
+	})
+
+	for idx, stakePk := range partition.Pubkeys() {
+		ip := idxAndPubkey{idx: idx, pubkey: stakePk}
+		wg.Add(1)
+		workerPool.Invoke(ip)
 	}
+	wg.Wait()
+
+	workerPool.Release()
+	ants.Release()
 
 	err := acctsDb.StoreAccounts(accts, slot)
 	if err != nil {
 		panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
 	}
 
-	return accts, parentAccts, distributedLamports
+	return accts, parentAccts, distributedLamports.Load()
 }
 
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {

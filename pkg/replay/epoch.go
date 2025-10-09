@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -65,7 +66,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	var activating atomic.Uint64
 	var deactivating atomic.Uint64
 
-	workerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
 
 		delegation := i.(*sealevel.Delegation)
@@ -116,7 +117,7 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	workerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
 
 		delegation := i.(*sealevel.Delegation)

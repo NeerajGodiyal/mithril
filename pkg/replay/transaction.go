@@ -279,7 +279,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 	}
 }
 
-func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
+func recordStakeDelegation(acct *accounts.Account) {
 	isEmpty := acct.Lamports == 0
 	isUninitialized := true
 
@@ -289,6 +289,7 @@ func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
 	}
 
 	if isEmpty || isUninitialized {
+		global.DeleteStakeCacheItem(acct.Key)
 	} else {
 		//mlog.Log.Debugf("added stake delegation record for %s: %v", acct.Key, acct)
 		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
@@ -344,7 +345,7 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 		}
 
 		if acct.Owner == a.StakeProgramAddr {
-			recordStakeDelegation(slotCtx, acct)
+			recordStakeDelegation(acct)
 		}
 	}
 }

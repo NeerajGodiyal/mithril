@@ -39,9 +39,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, block.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
-	fmt.Printf("- done rewards.CalculateTotalPointsAndPartitions\n")
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
-	fmt.Printf("- done rewards.CalculateStakeRewards\n")
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
 		NumPartitions: block.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,

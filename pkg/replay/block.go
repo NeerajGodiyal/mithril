@@ -402,6 +402,10 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	}
 
 	for idx, acct := range block.EpochUpdatedAccts {
+		if acct == nil {
+			continue
+		}
+
 		err = accts.SetAccountWithoutLock(acct.Key, acct.Clone())
 		if err != nil {
 			panic("unable to setup epoch transition modified acct")
@@ -779,6 +783,9 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 	}
 
 	for _, eua := range block.EpochUpdatedAccts {
+		if eua == nil {
+			continue
+		}
 		////mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
 		if _, exists := alreadyAdded[eua.Key]; exists {
 			continue
