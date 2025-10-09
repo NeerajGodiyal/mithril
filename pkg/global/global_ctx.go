@@ -4,6 +4,9 @@ package global
 
 import (
 	"sync"
+
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/gagliardetto/solana-go"
 )
 
 type GlobalCtx struct {
@@ -12,6 +15,10 @@ type GlobalCtx struct {
 	slot             uint64
 	epoch            uint64
 	transactionCount uint64
+	stakeCache       map[solana.PublicKey]*sealevel.Delegation
+	voteCache        map[solana.PublicKey]*sealevel.VoteStateVersions
+	stakeCacheMutex  sync.Mutex
+	voteCacheMutex   sync.Mutex
 	mu               sync.Mutex
 }
 
@@ -35,6 +42,48 @@ func SetEpoch(epoch uint64) {
 
 func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
+}
+
+func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	instance.stakeCache[pubkey] = delegation
+}
+
+func DeleteStakeCacheItem(pubkey solana.PublicKey) {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	delete(instance.stakeCache, pubkey)
+}
+
+func StakeCache() map[solana.PublicKey]*sealevel.Delegation {
+	return instance.stakeCache
+}
+
+func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
+	if instance.voteCache == nil {
+		instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
+	}
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
+	instance.voteCache[pubkey] = voteState
+}
+
+func VoteCacheItem(pubkey solana.PublicKey) *sealevel.VoteStateVersions {
+	return instance.voteCache[pubkey]
+}
+
+func DeleteVoteCacheItem(pubkey solana.PublicKey) {
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
+	delete(instance.voteCache, pubkey)
+}
+
+func VoteCache() map[solana.PublicKey]*sealevel.VoteStateVersions {
+	return instance.voteCache
 }
 
 func LatestBlockHash() [32]byte {

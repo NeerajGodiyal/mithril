@@ -1433,7 +1433,7 @@ func newVoteStateFromVoteInit(voteInit VoteInstrVoteInit, clock SysvarClock) *Vo
 	return voteState
 }
 
-func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features.Features) error {
+func setVoteAccountState(execCtx *ExecutionCtx, acct *BorrowedAccount, voteState *VoteState, f features.Features) error {
 	var err error
 	if f.IsActive(features.VoteStateAddVoteLatency) {
 		vsz := VoteStateV3Size
@@ -1454,6 +1454,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 			newVoteStateVersioned := new(VoteStateVersions)
 			newVoteStateVersioned.Type = VoteStateVersionV1_14_11
 			newVoteStateVersioned.V1_14_11 = *newVoteState
+			execCtx.AddModifiedVoteState(acct.Key(), newVoteStateVersioned)
 			voteStateBytes, err := marshalVersionedVoteState(newVoteStateVersioned)
 			defer voteStateBufPool.Put(voteStateBytes)
 			if err != nil {
@@ -1466,6 +1467,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 		newCurrent := new(VoteStateVersions)
 		newCurrent.Type = VoteStateVersionCurrent
 		newCurrent.Current = *voteState
+		execCtx.AddModifiedVoteState(acct.Key(), newCurrent)
 		voteStateBytes, err := marshalVersionedVoteState(newCurrent)
 		defer voteStateBufPool.Put(voteStateBytes)
 		if err != nil {
@@ -1478,6 +1480,7 @@ func setVoteAccountState(acct *BorrowedAccount, voteState *VoteState, f features
 		newVoteStateVersioned := new(VoteStateVersions)
 		newVoteStateVersioned.Type = VoteStateVersionV1_14_11
 		newVoteStateVersioned.V1_14_11 = *newVoteState
+		execCtx.AddModifiedVoteState(acct.Key(), newVoteStateVersioned)
 		voteStateBytes, err := marshalVersionedVoteState(newVoteStateVersioned)
 		defer voteStateBufPool.Put(voteStateBytes)
 		if err != nil {

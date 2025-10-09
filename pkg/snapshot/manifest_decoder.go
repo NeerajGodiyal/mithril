@@ -82,7 +82,7 @@ type Delegation struct {
 
 type Stake struct {
 	VoteAccounts     []VoteAccountsPair
-	StakeDelegations []StakePair
+	StakeDelegations map[solana.PublicKey]StakePair
 	Unused           uint64
 	Epoch            uint64
 	StakeHistory     sealevel.SysvarStakeHistory
@@ -246,7 +246,7 @@ type SerializableStakeRewards struct {
 
 type StartBlockHeightAndRewards struct {
 	StartBlockHeight        uint64
-	StakeRewardsByPartition []SerializableStakeRewards
+	StakeRewardsByPartition map[solana.PublicKey]SerializableStakeRewards
 }
 
 type SerializableEpochRewardStatus struct {
@@ -584,14 +584,14 @@ func (stakes *Stake) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
-	stakes.StakeDelegations = make([]StakePair, 0, numStakeDelegations)
+	stakes.StakeDelegations = make(map[solana.PublicKey]StakePair)
 	for count := uint64(0); count < numStakeDelegations; count++ {
 		var stakeDelegationPair StakePair
 		err = stakeDelegationPair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		stakes.StakeDelegations = append(stakes.StakeDelegations, stakeDelegationPair)
+		stakes.StakeDelegations[stakeDelegationPair.Account] = stakeDelegationPair
 	}
 
 	stakes.Unused, err = decoder.ReadUint64(bin.LE)
@@ -1347,6 +1347,8 @@ func (startBlockHeightAndRewards *StartBlockHeightAndRewards) UnmarshalWithDecod
 		return err
 	}
 
+	startBlockHeightAndRewards.StakeRewardsByPartition = make(map[solana.PublicKey]SerializableStakeRewards)
+
 	//startBlockHeightAndRewards.StakeRewardsByPartition = make([]SerializableStakeRewards, 0, numStakeRewardsByPartition)
 	for count := uint64(0); count < numStakeRewardsByPartition; count++ {
 		var stakeRewards SerializableStakeRewards
@@ -1354,7 +1356,7 @@ func (startBlockHeightAndRewards *StartBlockHeightAndRewards) UnmarshalWithDecod
 		if err != nil {
 			return err
 		}
-		//startBlockHeightAndRewards.StakeRewardsByPartition = append(startBlockHeightAndRewards.StakeRewardsByPartition, stakeRewards)
+		startBlockHeightAndRewards.StakeRewardsByPartition[stakeRewards.StakePubkey] = stakeRewards
 	}
 
 	return nil

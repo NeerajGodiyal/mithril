@@ -686,7 +686,7 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			var epoch *uint64
-			epoch, err = newWarmupCooldownRateEpoch(execCtx)
+			epoch, err = NewWarmupCooldownRateEpoch(execCtx)
 			if err != nil {
 				return err
 			}
@@ -1446,11 +1446,11 @@ func StakeProgramSplit(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *I
 					return err
 				}
 
-				epoch, err := newWarmupCooldownRateEpoch(execCtx)
+				epoch, err := NewWarmupCooldownRateEpoch(execCtx)
 				if err != nil {
 					return err
 				}
-				stakeHistoryEntry := stakeState.Stake.Stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, stakeHistory, epoch)
+				stakeHistoryEntry := stakeState.Stake.Stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, &stakeHistory, epoch)
 				if stakeHistoryEntry.Effective > 0 {
 					isActive = true
 				}
@@ -1743,7 +1743,7 @@ func StakeProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, stake
 
 			var staked uint64
 			if clock.Epoch >= stakeState.Stake.Stake.Delegation.DeactivationEpoch {
-				staked = stakeState.Stake.Stake.Stake(clock.Epoch, stakeHistory, newRateActivationEpoch)
+				staked = stakeState.Stake.Stake.Stake(clock.Epoch, &stakeHistory, newRateActivationEpoch)
 			} else {
 				staked = stakeState.Stake.Stake.Delegation.StakeLamports
 			}

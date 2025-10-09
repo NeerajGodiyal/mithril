@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
+
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/wide"
@@ -35,6 +36,7 @@ type Delegation struct {
 	ActivationEpoch    uint64
 	DeactivationEpoch  uint64
 	WarmupCooldownRate float64
+	CreditsObserved    uint64
 }
 
 var (
@@ -373,7 +375,7 @@ func (delegation *Delegation) MarshalWithEncoder(encoder *bin.Encoder) error {
 	return err
 }
 
-func (delegation *Delegation) Stake(epoch uint64, stakeHistory SysvarStakeHistory, newRateActivationEpoch *uint64) uint64 {
+func (delegation *Delegation) Stake(epoch uint64, stakeHistory *SysvarStakeHistory, newRateActivationEpoch *uint64) uint64 {
 	return delegation.StakeActivatingAndDeactivating(epoch, stakeHistory, newRateActivationEpoch).Effective
 }
 
@@ -381,7 +383,7 @@ func (delegation *Delegation) IsBootstrap() bool {
 	return delegation.ActivationEpoch == math.MaxUint64
 }
 
-func (delegation *Delegation) StakeAndActivating(targetEpoch uint64, stakeHistory SysvarStakeHistory, newRateActivationEpoch *uint64) (uint64, uint64) {
+func (delegation *Delegation) StakeAndActivating(targetEpoch uint64, stakeHistory *SysvarStakeHistory, newRateActivationEpoch *uint64) (uint64, uint64) {
 	delegatedStake := delegation.StakeLamports
 
 	if delegation.IsBootstrap() {
@@ -392,10 +394,11 @@ func (delegation *Delegation) StakeAndActivating(targetEpoch uint64, stakeHistor
 		return 0, delegatedStake
 	} else if targetEpoch < delegation.ActivationEpoch {
 		return 0, 0
-	} else if prevClusterStake := stakeHistory.Get(delegation.ActivationEpoch); prevClusterStake != nil {
+	} else if pcs := stakeHistory.Get(delegation.ActivationEpoch); pcs != nil {
 		prevEpoch := delegation.ActivationEpoch
 		currentEpoch := uint64(0)
 		currentEffectiveStake := uint64(0)
+		prevClusterStake := pcs
 
 		for {
 			currentEpoch = prevEpoch + 1
@@ -409,13 +412,7 @@ func (delegation *Delegation) StakeAndActivating(targetEpoch uint64, stakeHistor
 			warmupCooldownRate := warmupCooldownRate(currentEpoch, newRateActivationEpoch)
 
 			newlyEffectiveClusterStake := float64(prevClusterStake.Effective) * warmupCooldownRate
-
-			var newlyEffectiveStake uint64
-			if uint64(weight*newlyEffectiveClusterStake) < 1 {
-				newlyEffectiveStake = 1
-			} else {
-				newlyEffectiveStake = uint64(weight * newlyEffectiveClusterStake)
-			}
+			newlyEffectiveStake := max(uint64(weight*newlyEffectiveClusterStake), 1)
 
 			currentEffectiveStake += newlyEffectiveStake
 			if currentEffectiveStake >= delegatedStake {
@@ -440,7 +437,7 @@ func (delegation *Delegation) StakeAndActivating(targetEpoch uint64, stakeHistor
 	}
 }
 
-func (delegation *Delegation) StakeActivatingAndDeactivating(targetEpoch uint64, stakeHistory SysvarStakeHistory, newRateActivationEpoch *uint64) StakeHistoryEntry {
+func (delegation *Delegation) StakeActivatingAndDeactivating(targetEpoch uint64, stakeHistory *SysvarStakeHistory, newRateActivationEpoch *uint64) StakeHistoryEntry {
 	effectiveStake, activatingStake := delegation.StakeAndActivating(targetEpoch, stakeHistory, newRateActivationEpoch)
 
 	if targetEpoch < delegation.DeactivationEpoch {
@@ -467,13 +464,7 @@ func (delegation *Delegation) StakeActivatingAndDeactivating(targetEpoch uint64,
 			warmupCooldownRate := warmupCooldownRate(currentEpoch, newRateActivationEpoch)
 
 			newlyNotEffectiveClusterStake := float64(prevClusterStake.Effective) * warmupCooldownRate
-
-			var newlyNotEffectiveStake uint64
-			if uint64(weight*newlyNotEffectiveClusterStake) > 1 {
-				newlyNotEffectiveStake = uint64(weight * newlyNotEffectiveClusterStake)
-			} else {
-				newlyNotEffectiveStake = 1
-			}
+			newlyNotEffectiveStake := max(uint64(weight*newlyNotEffectiveClusterStake), 1)
 
 			currentEffectiveStake = safemath.SaturatingSubU64(currentEffectiveStake, newlyNotEffectiveStake)
 			if currentEffectiveStake == 0 {
@@ -549,7 +540,7 @@ func (stake *Stake) MarshalWithEncoder(encoder *bin.Encoder) error {
 	return err
 }
 
-func (stake *Stake) Stake(epoch uint64, stakeHistory SysvarStakeHistory, newRateActivationEpoch *uint64) uint64 {
+func (stake *Stake) Stake(epoch uint64, stakeHistory *SysvarStakeHistory, newRateActivationEpoch *uint64) uint64 {
 	return stake.Delegation.Stake(epoch, stakeHistory, newRateActivationEpoch)
 }
 
@@ -751,14 +742,14 @@ func (config *StakeConfig) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 }
 
 func UnmarshalStakeState(data []byte) (*StakeStateV2, error) {
-	state := new(StakeStateV2)
+	var state StakeStateV2
 	decoder := bin.NewBinDecoder(data)
 
 	err := state.UnmarshalWithDecoder(decoder)
 	if err != nil {
 		return nil, InstrErrInvalidAccountData
 	} else {
-		return state, nil
+		return &state, nil
 	}
 }
 
@@ -784,7 +775,7 @@ func setStakeAccountState(acct *BorrowedAccount, stakeState *StakeStateV2, f fea
 	return err
 }
 
-func newWarmupCooldownRateEpoch(execCtx *ExecutionCtx) (*uint64, error) {
+func NewWarmupCooldownRateEpoch(execCtx *ExecutionCtx) (*uint64, error) {
 	f := execCtx.Features
 	slot, existed := f.ActivationSlot(features.ReduceStakeWarmupCooldown)
 	if !existed {
@@ -811,12 +802,12 @@ func NewWarmupCooldownRateEpochWithSlotCtx(slotCtx *SlotCtx, epochSchedule *Sysv
 }
 
 func modifyStakeForRedelegation(execCtx *ExecutionCtx, stake *Stake, stakeLamports uint64, voterPubkey solana.PublicKey, voteState *VoteState, clock SysvarClock, stakeHistory SysvarStakeHistory) error {
-	newRateActivationEpoch, err := newWarmupCooldownRateEpoch(execCtx)
+	newRateActivationEpoch, err := NewWarmupCooldownRateEpoch(execCtx)
 	if err != nil {
 		return err
 	}
 
-	if stake.Stake(clock.Epoch, stakeHistory, newRateActivationEpoch) != 0 {
+	if stake.Stake(clock.Epoch, &stakeHistory, newRateActivationEpoch) != 0 {
 		var stakeLamportsOk bool
 		if execCtx.Features.IsActive(features.StakeRedelegateInstruction) {
 			stakeLamportsOk = stakeLamports >= stake.Delegation.StakeLamports
@@ -844,12 +835,12 @@ func getMergeKindIfMergeable(execCtx *ExecutionCtx, stakeState *StakeStateV2, st
 	switch stakeState.Status {
 	case StakeStateV2StatusStake:
 		{
-			epoch, err := newWarmupCooldownRateEpoch(execCtx)
+			epoch, err := NewWarmupCooldownRateEpoch(execCtx)
 			if err != nil {
 				return nil, err
 			}
 
-			status := stakeState.Stake.Stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, stakeHistory, epoch)
+			status := stakeState.Stake.Stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, &stakeHistory, epoch)
 			if status.Effective == 0 && status.Activating == 0 && status.Deactivating == 0 {
 				return &MergeKind{Status: MergeKindStatusInactive, Inactive: MergeKindInactive{Meta: stakeState.Stake.Meta, StakeLamports: stakeLamports, StakeFlags: stakeState.Stake.StakeFlags}}, nil
 			} else if status.Effective == 0 {
@@ -864,7 +855,6 @@ func getMergeKindIfMergeable(execCtx *ExecutionCtx, stakeState *StakeStateV2, st
 	case StakeStateV2StatusInitialized:
 		{
 			return &MergeKind{Status: MergeKindStatusInactive, Inactive: MergeKindInactive{Meta: stakeState.Initialized.Meta, StakeLamports: stakeLamports}}, nil
-
 		}
 
 	default:
@@ -1002,11 +992,11 @@ func deactivateStake(execCtx *ExecutionCtx, stake *Stake, stakeFlags *StakeFlags
 				return err
 			}
 
-			newRateActivationEpoch, err := newWarmupCooldownRateEpoch(execCtx)
+			newRateActivationEpoch, err := NewWarmupCooldownRateEpoch(execCtx)
 			if err != nil {
 				return err
 			}
-			status := stake.Delegation.StakeActivatingAndDeactivating(epoch, stakeHistory, newRateActivationEpoch)
+			status := stake.Delegation.StakeActivatingAndDeactivating(epoch, &stakeHistory, newRateActivationEpoch)
 			if status.Activating != 0 {
 				return StakeErrRedelegatedStakeMustFullyActivateBeforeDeactivationIsPermitted
 			} else {
@@ -1028,9 +1018,9 @@ func getStakeStatus(execCtx *ExecutionCtx, stake *Stake, clock SysvarClock) (Sta
 		return StakeHistoryEntry{}, err
 	}
 
-	newRateActivationEpoch, err := newWarmupCooldownRateEpoch(execCtx)
+	newRateActivationEpoch, err := NewWarmupCooldownRateEpoch(execCtx)
 	if err != nil {
 		return StakeHistoryEntry{}, err
 	}
-	return stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, stakeHistory, newRateActivationEpoch), nil
+	return stake.Delegation.StakeActivatingAndDeactivating(clock.Epoch, &stakeHistory, newRateActivationEpoch), nil
 }

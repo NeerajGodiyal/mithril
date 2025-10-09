@@ -181,8 +181,7 @@ func WriteEpochRewardsSysvar(accts *accounts.Accounts, epochRewards SysvarEpochR
 }
 
 func (sr SysvarEpochRewards) String() string {
-	fmtStr := "EpochRewards { distribution_starting_block_height: %d, num_partitions: %d, parent_blockhash: %s, total_points: %d (%s), total_rewards: %d, distributed_rewards: %d, active: %t"
-	totalPoints := fmt.Sprintf("%d%d", sr.TotalPoints.Hi, sr.TotalPoints.Lo)
-	str := fmt.Sprintf(fmtStr, sr.DistributionStartingBlockHeight, sr.NumPartitions, solana.HashFromBytes(sr.ParentBlockhash[:]), totalPoints, sr.TotalPoints, sr.TotalRewards, sr.DistributedRewards, sr.Active)
+	fmtStr := "EpochRewards { distribution_starting_block_height: %d, num_partitions: %d, parent_blockhash: %s, total_points: %s, total_rewards: %d, distributed_rewards: %d, active: %t"
+	str := fmt.Sprintf(fmtStr, sr.DistributionStartingBlockHeight, sr.NumPartitions, solana.HashFromBytes(sr.ParentBlockhash[:]), sr.TotalPoints, sr.TotalRewards, sr.DistributedRewards, sr.Active)
 	return str
 }

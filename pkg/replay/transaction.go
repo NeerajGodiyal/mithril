@@ -16,6 +16,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/migration"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -170,6 +171,7 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
+	execCtx.ModifiedVoteStates = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
 	//execCtx.ComputeMeter.Disable()
 
 	return execCtx
@@ -287,10 +289,14 @@ func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
 	}
 
 	if isEmpty || isUninitialized {
-		delete(slotCtx.StakeAccts, acct.Key)
 	} else {
 		//mlog.Log.Debugf("added stake delegation record for %s: %v", acct.Key, acct)
-		slotCtx.StakeAccts[acct.Key] = true
+		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
+		if err == nil {
+			delegation := stakeState.Stake.Stake.Delegation
+			delegation.CreditsObserved = stakeState.Stake.Stake.CreditsObserved
+			global.PutStakeCacheItem(acct.Key, &delegation)
+		}
 	}
 }
 
@@ -323,7 +329,6 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 
 func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, writablePubkeys []solana.PublicKey) {
 	modifiedVoteAccts := execCtx.TransactionContext.ModifiedVoteAccts
-	modifiedStakeAccts := execCtx.TransactionContext.ModifiedStakeAccts
 
 	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
 		if !slices.Contains(writablePubkeys, acct.Key) {
@@ -332,9 +337,13 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 
 		if modifiedVoteAccts && acct.Owner == a.VoteProgramAddr {
 			recordVoteTimestampAndSlot(slotCtx, acct)
+			newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
+			if wasModified {
+				global.PutVoteCacheItem(acct.Key, newVersionedVoteState)
+			}
 		}
 
-		if modifiedStakeAccts && acct.Owner == a.StakeProgramAddr {
+		if acct.Owner == a.StakeProgramAddr {
 			recordStakeDelegation(slotCtx, acct)
 		}
 	}

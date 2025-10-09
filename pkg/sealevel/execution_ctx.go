@@ -24,6 +24,7 @@ type ExecutionCtx struct {
 	Blockhash                [32]byte
 	PrevLamportsPerSignature uint64
 	SlotCtx                  *SlotCtx
+	ModifiedVoteStates       map[solana.PublicKey]*VoteStateVersions
 }
 
 type SlotBank struct {
@@ -50,7 +51,7 @@ type SlotCtx struct {
 	VoteTimestampMu *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
-	StakeAccts             map[solana.PublicKey]bool
+	StakeCache             map[solana.PublicKey]*Delegation
 	VoteAccts              map[solana.PublicKey]uint64
 	TotalEpochStake        uint64
 	FinalBankhash          []byte
@@ -203,6 +204,10 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 	}
 
 	return nil
+}
+
+func (execCtx *ExecutionCtx) AddModifiedVoteState(pubkey solana.PublicKey, state *VoteStateVersions) {
+	execCtx.ModifiedVoteStates[pubkey] = state
 }
 
 func (execCtx *ExecutionCtx) ExecuteInstruction() error {

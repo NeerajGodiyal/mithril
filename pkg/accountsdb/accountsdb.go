@@ -11,6 +11,7 @@ import (
 
 	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/gagliardetto/solana-go"
@@ -209,12 +210,15 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	}
 
 	acct.Slot = acctIdxEntry.Slot
-	accountsDb.CommonAcctsCache.Set(pubkey, acct)
+
+	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+		accountsDb.VoteAcctCache.Set(pubkey, acct)
+	} else {
+		accountsDb.CommonAcctsCache.Set(pubkey, acct)
+	}
 
 	return acct, err
 }
-
-var voteAcct = solana.MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111")
 
 func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint64) error {
 	for _, acct := range accts {
@@ -226,9 +230,8 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 	go accountsDb.storeAccountsInternal(accts, slot, &wg)
 
 	for _, acct := range accts {
-
 		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
-		if solana.PublicKeyFromBytes(acct.Owner[:]) == voteAcct {
+		if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 		} else {
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)

@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -41,7 +44,7 @@ func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest) *ReplayCtx {
 	return epochCtx
 }
 
-func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64) *sealevel.SysvarStakeHistory {
+func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64) *sealevel.SysvarStakeHistory {
 	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
 	if err != nil {
 		stakeHistoryAcct, err = acctsDb.GetAccount(prevSlotCtx.Slot, sealevel.SysvarStakeHistoryAddr)
@@ -49,50 +52,52 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 			panic(fmt.Sprintf("unable to retrieve stakehistory sysvar: %s", err))
 		}
 	}
+	block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, stakeHistoryAcct.Clone())
 
 	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 	var stakeHistory sealevel.SysvarStakeHistory
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
 	newRateActivationEpoch := newWarmupCooldownRateEpoch(nil, nil)
-	var accumulatorStakeHistoryEntry sealevel.StakeHistoryEntry
 
-	for stakePubkey := range prevSlotCtx.StakeAccts {
-		stakeAcct, err := prevSlotCtx.GetAccount(stakePubkey)
-		if err != nil {
-			stakeAcct, err = acctsDb.GetAccount(prevSlotCtx.Slot, stakePubkey)
-			if err != nil {
-				panic(fmt.Sprintf("unable to retrieve staking account: %s", err))
-			}
+	var wg sync.WaitGroup
+	var effective atomic.Uint64
+	var activating atomic.Uint64
+	var deactivating atomic.Uint64
+
+	workerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+		defer wg.Done()
+
+		delegation := i.(*sealevel.Delegation)
+		if delegation.StakeLamports == 0 {
+			return
 		}
 
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			continue
-		}
+		stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, &stakeHistory, newRateActivationEpoch)
 
-		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			continue
-		}
+		effective.Add(stakeHistoryEntry.Effective)
+		activating.Add(stakeHistoryEntry.Activating)
+		deactivating.Add(stakeHistoryEntry.Deactivating)
+	})
 
-		if stakeState.Stake.Stake.Delegation.StakeLamports == 0 {
-			continue
-		}
-
-		delegation := stakeState.Stake.Stake.Delegation
-		stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, stakeHistory, newRateActivationEpoch)
-
-		accumulatorStakeHistoryEntry.Effective += stakeHistoryEntry.Effective
-		accumulatorStakeHistoryEntry.Activating += stakeHistoryEntry.Activating
-		accumulatorStakeHistoryEntry.Deactivating += stakeHistoryEntry.Deactivating
+	for _, delegation := range global.StakeCache() {
+		wg.Add(1)
+		workerPool.Invoke(delegation)
 	}
 
+	wg.Wait()
+	workerPool.Release()
+	ants.Release()
+
+	var accumulatorStakeHistoryEntry sealevel.StakeHistoryEntry
+	accumulatorStakeHistoryEntry.Activating = activating.Load()
+	accumulatorStakeHistoryEntry.Effective = effective.Load()
+	accumulatorStakeHistoryEntry.Deactivating = deactivating.Load()
 	stakeHistory.Update(targetEpoch, accumulatorStakeHistoryEntry)
 
 	buf := new(bytes.Buffer)
 	encoder := bin.NewBinEncoder(buf)
-	stakeHistory.MarshalWithEncoder(encoder)
-
+	stakeHistory.MustMarshalWithEncoder(encoder)
 	newStakeHistoryBytes := buf.Bytes()
 	copy(stakeHistoryAcct.Data, newStakeHistoryBytes)
 
@@ -100,6 +105,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, prevSlotCtx *seale
 	if err != nil {
 		panic(fmt.Sprintf("error storing new StakeHistory sysvar to accountsdb: %s", err))
 	}
+	block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, stakeHistoryAcct.Clone())
 
 	return &stakeHistory
 }
@@ -110,34 +116,21 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	workerPool, _ := ants.NewPoolWithFunc(10000, func(i interface{}) {
+	workerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
 		defer wg.Done()
 
-		stakePk := i.(solana.PublicKey)
-		stakeAcct, err := acctsDb.GetAccount(0, stakePk)
-		if err != nil {
-			panic(fmt.Sprintf("unable to get stake acct %s from accountsdb whilst refreshing vote accts cache", stakePk))
-		}
-
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			return
-		}
-
-		votePk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		stakeLamports := stakeState.Stake.Stake.Delegation.Stake(newEpoch, *stakeHistory, newRateActivationEpoch)
+		delegation := i.(*sealevel.Delegation)
+		votePk := delegation.VoterPubkey
+		stakeLamports := delegation.Stake(newEpoch, stakeHistory, newRateActivationEpoch)
 
 		mu.Lock()
 		voteAcctStakes[votePk] += stakeLamports
 		mu.Unlock()
 	})
 
-	for stakePk, valid := range prevSlotCtx.StakeAccts {
-		if !valid {
-			continue
-		}
+	for _, delegation := range global.StakeCache() {
 		wg.Add(1)
-		workerPool.Invoke(stakePk)
+		workerPool.Invoke(delegation)
 	}
 
 	wg.Wait()
@@ -152,28 +145,33 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	return newVoteAccts
 }
 
-const numSlotsPerEpoch = 432000
-
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, []solana.PublicKey, map[solana.PublicKey]uint64) {
-	stakeHistory := updateStakeHistorySysvar(acctsDb, prevSlotCtx, epoch)
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, map[solana.PublicKey]uint64) {
+	var stakeHistory sealevel.SysvarStakeHistory
+	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
+	if err != nil {
+		stakeHistoryAcct, err = acctsDb.GetAccount(prevSlotCtx.Slot, sealevel.SysvarStakeHistoryAddr)
+		if err != nil {
+			panic("unable to get stake history sysvar")
+		}
+	}
+	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
+	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
-	updatedVoteCache := refreshVoteAcctsCache(prevSlotCtx, acctsDb, stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
+	updatedVoteCache := refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
 
-	var updatedAcctsPks []solana.PublicKey
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, updatedAcctsPks = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, stakeHistory, replayCtx, epochSchedule, rpcc, block, f, newEpoch, firstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, rpcc, block, f, newEpoch, firstSlotInEpoch)
 	} else {
-		rewards.DistributeVotingRewards(acctsDb, block.Rewards, firstSlotInEpoch)
-		_, credits, _ := rewards.CalculateRewardPointsCreditsAndPartitions(acctsDb, prevSlotCtx, firstSlotInEpoch, 0, stakeHistory, newWarmupCooldownRateEpoch)
-		rewards.DistributeStakingRewards(acctsDb, block.Rewards, credits, firstSlotInEpoch)
+		panic("only partitioned rewards supported")
 	}
 
-	updatedAcctsPks = append(updatedAcctsPks, sealevel.SysvarStakeHistoryAddr)
+	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch)
+	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
 
-	return partitionedRewardsInfo, updatedAcctsPks, updatedVoteCache
+	return partitionedRewardsInfo, updatedVoteCache
 }

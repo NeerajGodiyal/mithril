@@ -3,13 +3,14 @@ package rewards
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -35,8 +36,14 @@ type PartitionedRewardDistributionInfo struct {
 	EahStopOffsetSlot      uint64
 	NumRewardPartitions    uint64
 	Credits                map[solana.PublicKey]CalculatedStakePoints
-	RewardPartitions       map[uint64][]solana.PublicKey
+	RewardPartitions       Partitions
 	StakingRewards         map[solana.PublicKey]*CalculatedStakeRewards
+}
+
+type CalculatedStakePoints struct {
+	Points                              wide.Uint128
+	NewCreditsObserved                  uint64
+	ForceCreditsUpdateWithSkippedReward bool
 }
 
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
@@ -99,33 +106,7 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 	}
 
 	finalStakingRewardSlot := rewardSlots[len(rewardSlots)-1]
-
-	// we only need number for total staking reward at the beginning of a new epoch
-	// (for setting up the EpochRewards sysvar)
-	if f.IsActive(features.EnablePartitionedEpochReward) {
-		//mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochReward case")
-
-		if slot == firstSlotInEpoch {
-			for _, rewardSlot := range rewardSlots {
-				rewards, err := rpcc.GetRewardsForSlot(rewardSlot)
-				if err != nil {
-					panic(fmt.Sprintf("error retrieving reward data from rpc: %s", err))
-				}
-
-				for _, reward := range rewards {
-					//mlog.Log.Debugf("reward: %+v", reward)
-					if string(reward.RewardType) == RewardTypeStaking {
-						totalStakingRewards += uint64(reward.Lamports)
-					}
-				}
-			}
-		}
-	} else if f.IsActive(features.EnablePartitionedEpochRewardsSuperfeature) {
-		//mlog.Log.Debugf("RetrievePartitionedStakingRewardsInfo - EnablePartitionedEpochRewardsSuperfeature case")
-		totalStakingRewards = CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
-	} else {
-		panic("shouldn't be here without partitioned rewards enabled")
-	}
+	totalStakingRewards = CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
 
 	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
@@ -134,26 +115,19 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot, NumRewardPartitions: numRewardPartitions}
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]solana.PublicKey, uint64) {
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var totalVotingRewards uint64
-	var numVoteRewardEntries uint64
+
+	accts := make([]*accounts.Account, 0, len(rewards))
+	parentUpdatedAccts := make([]*accounts.Account, 0, len(rewards))
 
 	for _, reward := range rewards {
-		if string(reward.RewardType) == RewardTypeVoting {
-			numVoteRewardEntries++
-		}
-	}
-
-	var idx uint64
-	accts := make([]*accounts.Account, numVoteRewardEntries)
-	rewardPks := make([]solana.PublicKey, numVoteRewardEntries)
-
-	for _, reward := range rewards {
-		if string(reward.RewardType) == RewardTypeVoting && reward.Lamports != 0 {
+		if string(reward.RewardType) == RewardTypeVoting /*&& reward.Lamports != 0*/ {
 			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
 			if err != nil {
 				panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", reward.Pubkey, slot))
 			}
+			parentUpdatedAccts = append(parentUpdatedAccts, stakeAcct.Clone())
 
 			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
 			if err != nil {
@@ -164,42 +138,32 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 				panic(fmt.Sprintf("post-balance for acct %s in distributing voting rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports))
 			}
 
-			accts[idx] = stakeAcct
+			accts = append(accts, stakeAcct)
 
 			totalVotingRewards, err = safemath.CheckedAddU64(totalVotingRewards, uint64(reward.Lamports))
 			if err != nil {
 				panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
 			}
-
-			rewardPks[idx] = reward.Pubkey
-			idx++
 		}
 	}
 
-	if idx != 0 {
-		err := acctsDb.StoreAccounts(accts[:idx], slot)
-		if err != nil {
-			panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
-		}
+	err := acctsDb.StoreAccounts(accts, slot)
+	if err != nil {
+		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
 	}
 
-	return rewardPks[:idx], totalVotingRewards
+	return accts, parentUpdatedAccts, totalVotingRewards
 }
 
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition []solana.PublicKey, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]solana.PublicKey, uint64) {
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var distributedLamports uint64
-	accts := make([]*accounts.Account, len(partition))
-	rewardPks := make([]solana.PublicKey, len(partition))
+	accts := make([]*accounts.Account, 0, partition.NumPubkeys())
+	parentAccts := make([]*accounts.Account, 0, partition.NumPubkeys())
 
-	var idx uint64
-	for _, stakePk := range partition {
+	for _, stakePk := range partition.Pubkeys() {
 		reward, ok := stakingRewards[stakePk]
 		if !ok {
 			//mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
-			continue
-		}
-
-		if reward.StakerRewards == 0 {
 			continue
 		}
 
@@ -207,6 +171,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		if err != nil {
 			panic(fmt.Sprintf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d", stakePk, slot))
 		}
+		parentAccts = append(parentAccts, stakeAcct.Clone())
 
 		// update the delegation in the stake account state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
@@ -229,84 +194,17 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			panic(fmt.Sprintf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %s", slot, stakePk, err))
 		}
 
-		accts[idx] = stakeAcct
-		rewardPks[idx] = stakePk
-
+		accts = append(accts, stakeAcct)
 		distributedLamports += uint64(reward.StakerRewards)
 		//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", stakePk, reward.StakerRewards)
-
-		idx++
 	}
 
-	if idx != 0 {
-		err := acctsDb.StoreAccounts(accts[:idx], slot)
-		if err != nil {
-			panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
-		}
+	err := acctsDb.StoreAccounts(accts, slot)
+	if err != nil {
+		panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
 	}
 
-	return rewardPks[:idx], distributedLamports
-}
-
-func DistributeStakingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, credits map[solana.PublicKey]CalculatedStakePoints, slot uint64) ([]solana.PublicKey, uint64) {
-	var distributedLamports uint64
-	accts := make([]*accounts.Account, 0, len(rewards))
-	rewardPks := make([]solana.PublicKey, 0, len(rewards))
-
-	for _, reward := range rewards {
-		if string(reward.RewardType) == RewardTypeStaking {
-			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
-			if err != nil {
-				panic(fmt.Sprintf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d", reward.Pubkey, slot))
-			}
-
-			// update the delegation in the stake account state
-			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-			if err != nil {
-				panic(fmt.Sprintf("unable to deserialize stake account in distributing partitioned rewards: %s", err))
-			}
-
-			stakeState.Stake.Stake.CreditsObserved = credits[reward.Pubkey].NewCreditsObserved
-			stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.Lamports))
-
-			newStakeStateBytes, err := sealevel.MarshalStakeStake(stakeState)
-			if err != nil {
-				panic(fmt.Sprintf("unable to serialize new stake account state in distributing partitioned rewards: %s", err))
-			}
-			copy(stakeAcct.Data, newStakeStateBytes)
-
-			// update lamports in stake account
-			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
-			if err != nil {
-				panic(fmt.Sprintf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %s", slot, reward.Pubkey, err))
-			}
-
-			if stakeAcct.Lamports != reward.PostBalance {
-				panic(fmt.Sprintf("post-balance for acct %s in distributing epoch rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports))
-			}
-
-			accts = append(accts, stakeAcct)
-			rewardPks = append(rewardPks, reward.Pubkey)
-
-			distributedLamports += uint64(reward.Lamports)
-			//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", reward.Pubkey, reward.Lamports)
-		}
-	}
-
-	if len(accts) != 0 {
-		err := acctsDb.StoreAccounts(accts, slot)
-		if err != nil {
-			panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
-		}
-	}
-
-	return rewardPks, distributedLamports
-}
-
-type CalculatedStakePoints struct {
-	Points                              wide.Uint128
-	NewCreditsObserved                  uint64
-	ForceCreditsUpdateWithSkippedReward bool
+	return accts, parentAccts, distributedLamports
 }
 
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
@@ -315,18 +213,6 @@ func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
 	}
 
 	if slotCtx.Features.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
-		return 1000000000
-	}
-
-	return 1
-}
-
-func minimumStakeDelegationFeatures(f *features.Features) uint64 {
-	if !f.IsActive(features.StakeMinimumDelegationForRewards) {
-		return 0
-	}
-
-	if f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
 		return 1000000000
 	}
 
@@ -359,69 +245,41 @@ type CalculatedStakeRewards struct {
 	NewCreditsObserved uint64
 }
 
-func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
+func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
 	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
 	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	workerPool, _ := ants.NewPoolWithFunc(10000, func(i interface{}) {
+	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
 
-		stakePk := i.(solana.PublicKey)
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+		delegation := i.(*delegationAndPubkey)
+
+		if delegation.delegation.StakeLamports < minimumStakeDelegation {
 			return
 		}
 
-		if stakeAcct.Lamports == 0 {
+		voterPk := delegation.delegation.VoterPubkey
+		voteStateVersioned := global.VoteCacheItem(voterPk)
+		if voteStateVersioned == nil {
 			return
 		}
 
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			return
-		}
-
-		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			return
-		}
-
-		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			return
-		}
-
-		if voteAcct.Owner != a.VoteProgramAddr {
-			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			return
-		}
-
-		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			return
-		}
-
-		calculatedStakeRewards := CalculateStakeRewardsForAcct(stakePk, stakeHistory, stakeState, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
+		pointsForStakeAcct := pointsPerStakeAcct[delegation.pubkey]
+		calculatedStakeRewards := CalculateStakeRewardsForAcct(delegation.pubkey, pointsForStakeAcct, delegation.delegation, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
 		if calculatedStakeRewards != nil {
 			mu.Lock()
-			stakeInfoResults[stakePk] = calculatedStakeRewards
+			stakeInfoResults[delegation.pubkey] = calculatedStakeRewards
 			mu.Unlock()
 		}
 	})
 
-	for stakePk, valid := range slotCtx.StakeAccts {
-		if !valid {
-			continue
-		}
+	for pk, delegation := range global.StakeCache() {
+		d := &delegationAndPubkey{delegation: delegation, pubkey: pk}
 		wg.Add(1)
-		workerPool.Invoke(stakePk)
+		workerPool.Invoke(d)
 	}
 	wg.Wait()
 	workerPool.Release()
@@ -430,62 +288,8 @@ func CalculateStakeRewards(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.Slo
 	return stakeInfoResults
 }
 
-func CalculateStakeRewardsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, stakeAccts map[solana.PublicKey]bool, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
-	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards)
-	minimumStakeDelegation := minimumStakeDelegationFeatures(f)
-
-	for stakePk := range stakeAccts {
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
-			continue
-		}
-
-		if stakeAcct.Lamports == 0 {
-			continue
-		}
-
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			continue
-		}
-
-		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			continue
-		}
-
-		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			continue
-		}
-
-		if voteAcct.Owner != a.VoteProgramAddr {
-			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			continue
-		}
-
-		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			continue
-		}
-
-		calculatedStakeRewards := CalculateStakeRewardsForAcct(stakePk, stakeHistory, stakeState, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
-		if calculatedStakeRewards != nil {
-			stakeInfoResults[stakePk] = calculatedStakeRewards
-		}
-	}
-
-	return stakeInfoResults
-}
-
-func CalculateStakeRewardsForAcct(stakePubkey solana.PublicKey, stakeHistory *sealevel.SysvarStakeHistory, stakeState *sealevel.StakeStateV2, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
-	stakePointsResult := calculateStakePointsAndCredits(stakeHistory, stakeState, voteState, newRateActivationEpoch)
-
-	if pointValue.Rewards == 0 || stakeState.Stake.Stake.Delegation.ActivationEpoch == rewardedEpoch {
+func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
+	if pointValue.Rewards == 0 || delegation.ActivationEpoch == rewardedEpoch {
 		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
 	}
 
@@ -537,294 +341,143 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 
 	switch voteState.Type {
 	case sealevel.VoteStateVersionCurrent:
-		{
-			commission = voteState.Current.Commission
-		}
-
+		commission = voteState.Current.Commission
 	case sealevel.VoteStateVersionV0_23_5:
-		{
-			commission = voteState.V0_23_5.Commission
-		}
-
+		commission = voteState.V0_23_5.Commission
 	case sealevel.VoteStateVersionV1_14_11:
-		{
-			commission = voteState.V1_14_11.Commission
-		}
+		commission = voteState.V1_14_11.Commission
 	}
 
-	commissionSplit := uint64(min(commission, 100))
-
+	commissionRate := uint64(min(commission, 100))
 	result := CommissionSplit{}
 
-	switch commissionSplit {
+	switch commissionRate {
 	case 0:
-		{
-			result.StakerPortion = rewards
-		}
+		// no commission, all rewards go to staker
+		result.StakerPortion = rewards
 	case 100:
-		{
-			result.VoterPortion = rewards
-		}
-
+		// 100% commission, all rewards go to validator
+		result.VoterPortion = rewards
 	default:
-		{
-			on := wide.Uint128FromUint64(rewards)
-			mine := on.Mul(wide.Uint128FromUint64(commissionSplit)).Div(wide.Uint128FromUint64(100))
+		// TODO: refactor to use 128-bit math here
+		on := rewards
+		mine := (on * commissionRate) / 100
+		theirs := (on * (100 - commissionRate)) / 100
 
-			multiplier := wide.Uint128FromUint64(100 - commissionSplit)
-			theirs := on.Mul(multiplier).Div(wide.Uint128FromUint64(100))
-
-			result.VoterPortion = mine.Uint64()
-			result.StakerPortion = theirs.Uint64()
-			result.IsSplit = true
-		}
+		result.VoterPortion = mine
+		result.StakerPortion = theirs
+		result.IsSplit = true
 	}
 
 	return result
 }
 
-func CalculateRewardPointsCreditsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, slot uint64, numPartitions uint64, stakeHistory *sealevel.SysvarStakeHistory, newWarmupCooldownRateEpoch *uint64) (wide.Uint128, map[solana.PublicKey]CalculatedStakePoints, map[uint64][]solana.PublicKey) {
-	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
-	var totalPoints wide.Uint128
-	credits := make(map[solana.PublicKey]CalculatedStakePoints)
-	partitions := make(map[uint64][]solana.PublicKey)
-
-	for stakePk, valid := range slotCtx.StakeAccts {
-		if !valid {
-			continue
-		}
-
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
-			continue
-		}
-
-		if stakeAcct.Lamports == 0 {
-			continue
-		}
-
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			continue
-		}
-
-		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			continue
-		}
-
-		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			continue
-		}
-
-		if voteAcct.Owner != a.VoteProgramAddr {
-			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			continue
-		}
-
-		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			continue
-		}
-
-		pointsAndCredits := calculateStakePointsAndCredits(stakeHistory, stakeState, voteStateVersioned, newWarmupCooldownRateEpoch)
-		totalPoints = totalPoints.Add(pointsAndCredits.Points)
-		credits[stakePk] = pointsAndCredits
-
-		if numPartitions != 0 {
-			partitionIdx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
-			_, exists := partitions[partitionIdx]
-			if !exists {
-				partitions[partitionIdx] = make([]solana.PublicKey, 0)
-			}
-			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
-			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
-		}
-	}
-
-	return totalPoints, credits, partitions
+type delegationAndPubkey struct {
+	delegation *sealevel.Delegation
+	pubkey     solana.PublicKey
 }
 
-func CalculateTotalPointsAndPartitions(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, slot uint64, numPartitions uint64, stakeHistory *sealevel.SysvarStakeHistory, newWarmupCooldownRateEpoch *uint64) (wide.Uint128, map[uint64][]solana.PublicKey) {
-	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
-	var totalPoints wide.Uint128
-	partitions := make(map[uint64][]solana.PublicKey, 500)
+func CalculateTotalPointsAndPartitions(
+	acctsDb *accountsdb.AccountsDb,
+	slotCtx *sealevel.SlotCtx,
+	slot uint64,
+	numPartitions uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newWarmupCooldownRateEpoch *uint64,
+) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128, Partitions) {
+	/*old := debug.SetGCPercent(200)
+	defer debug.SetGCPercent(old)*/
+
+	minimum := minimumStakeDelegation(slotCtx)
+
+	n := len(global.StakeCache())
+	pks := make([]solana.PublicKey, 0, n)
+	for pk := range global.StakeCache() {
+		pks = append(pks, pk)
+	}
+
+	pointsAccum := NewCalculatedStakePointsAccumulator(pks)
+	partitions := NewPartitions(numPartitions)
+
+	type assign struct {
+		idx uint64
+		pk  solana.PublicKey
+	}
+	var wgMerge sync.WaitGroup
+	assigns := make(chan assign, 1<<20)
+	if numPartitions != 0 {
+		wgMerge.Add(1)
+		go func() {
+			defer wgMerge.Done()
+			for a := range assigns {
+				partitions[a.idx].pubkeys = append(partitions[a.idx].pubkeys, a.pk)
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
-	var partitionsMutex sync.Mutex
-	var totalPointsMutex sync.Mutex
 
-	workerPool, _ := ants.NewPoolWithFunc(10000, func(i interface{}) {
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
 		defer wg.Done()
-		stakePk := i.(solana.PublicKey)
 
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
+		t := i.(*delegationAndPubkey)
+		d := t.delegation
+		if d.StakeLamports < minimum {
 			return
 		}
 
-		if stakeAcct.Lamports == 0 {
+		voterPk := d.VoterPubkey
+		voteState := global.VoteCacheItem(voterPk)
+		if voteState == nil {
 			return
 		}
 
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			return
-		}
-
-		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			return
-		}
-
-		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			return
-		}
-
-		if voteAcct.Owner != a.VoteProgramAddr {
-			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			return
-		}
-
-		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			return
-		}
-
-		pointsAndCredits := calculateStakePointsAndCredits(stakeHistory, stakeState, voteStateVersioned, newWarmupCooldownRateEpoch)
-
-		totalPointsMutex.Lock()
-		totalPoints = totalPoints.Add(pointsAndCredits.Points)
-		totalPointsMutex.Unlock()
+		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch)
+		pointsAccum.Add(t.pubkey, pcs)
 
 		if numPartitions != 0 {
-			partitionIdx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
-			partitionsMutex.Lock()
-			_, exists := partitions[partitionIdx]
-			if !exists {
-				partitions[partitionIdx] = make([]solana.PublicKey, 0)
-			}
-			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
-			partitionsMutex.Unlock()
-			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
+			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.Blockhash, numPartitions)
+			assigns <- assign{idx: idx, pk: t.pubkey}
 		}
 	})
 
-	for stakePk, valid := range slotCtx.StakeAccts {
-		if !valid {
-			continue
-		}
+	for pk, delegation := range global.StakeCache() {
 		wg.Add(1)
-		workerPool.Invoke(stakePk)
+		workerPool.Invoke(&delegationAndPubkey{delegation: delegation, pubkey: pk})
 	}
 
 	wg.Wait()
 	workerPool.Release()
 	ants.Release()
 
-	return totalPoints, partitions
-}
-
-func CalculateTotalPointsAndPartitionsDuringRewardsWindow(acctsDb *accountsdb.AccountsDb, blockhash [32]byte, stakeAccts map[solana.PublicKey]bool, slot uint64, numPartitions uint64, stakeHistory *sealevel.SysvarStakeHistory, newWarmupCooldownRateEpoch *uint64, f *features.Features) (wide.Uint128, map[uint64][]solana.PublicKey) {
-	minimumStakeDelegation := minimumStakeDelegationFeatures(f)
-	var totalPoints wide.Uint128
-	partitions := make(map[uint64][]solana.PublicKey)
-
-	for stakePk, valid := range stakeAccts {
-		if !valid {
-			continue
-		}
-
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get stake acct %s from accountsdb in calculating rewards points: %s", stakePk, err)
-			continue
-		}
-
-		if stakeAcct.Lamports == 0 {
-			continue
-		}
-
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid stake acct state (%s) - should be impossible: %s", stakeAcct.Key, err)
-			continue
-		}
-
-		if stakeState.Stake.Stake.Delegation.StakeLamports < minimumStakeDelegation {
-			continue
-		}
-
-		voterPk := stakeState.Stake.Stake.Delegation.VoterPubkey
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
-		if err != nil {
-			//mlog.Log.Debugf("failed to get vote acct %s from accountsdb in calculating rewards points: %s", voterPk, err)
-			continue
-		}
-
-		if voteAcct.Owner != a.VoteProgramAddr {
-			//mlog.Log.Debugf("vote acct %s has the wrong owner (%s)", voteAcct.Key, voteAcct.Owner)
-			continue
-		}
-
-		voteStateVersioned, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-		if err != nil {
-			//mlog.Log.Debugf("invalid vote acct state (%s) - should be impossible: %s", voteAcct.Key, err)
-			continue
-		}
-
-		pointsAndCredits := calculateStakePointsAndCredits(stakeHistory, stakeState, voteStateVersioned, newWarmupCooldownRateEpoch)
-		totalPoints = totalPoints.Add(pointsAndCredits.Points)
-
-		if numPartitions != 0 {
-			partitionIdx := CalculateRewardPartitionForPubkey(stakePk, blockhash, numPartitions)
-			_, exists := partitions[partitionIdx]
-			if !exists {
-				partitions[partitionIdx] = make([]solana.PublicKey, 0)
-			}
-			partitions[partitionIdx] = append(partitions[partitionIdx], stakePk)
-			//mlog.Log.Debugf("partitionIdx for stake account %s: %d", stakePk, partitionIdx)
-		}
+	if numPartitions != 0 {
+		close(assigns)
+		wgMerge.Wait()
 	}
 
-	return totalPoints, partitions
+	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints(), partitions
 }
 
-func calculateStakePointsAndCredits(stakeHistory *sealevel.SysvarStakeHistory, stakeState *sealevel.StakeStateV2, voteState *sealevel.VoteStateVersions, newRateActivationEpoch *uint64) CalculatedStakePoints {
-	creditsInStake := stakeState.Stake.Stake.CreditsObserved
+func calculateStakePointsAndCredits(
+	pubkey solana.PublicKey,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	delegation *sealevel.Delegation,
+	voteState *sealevel.VoteStateVersions,
+	newRateActivationEpoch *uint64,
+) CalculatedStakePoints {
+	creditsInStake := delegation.CreditsObserved
 
 	var epochCredits []sealevel.EpochCredits
-
 	switch voteState.Type {
 	case sealevel.VoteStateVersionCurrent:
-		{
-			epochCredits = voteState.Current.EpochCredits
-		}
-
+		epochCredits = voteState.Current.EpochCredits
 	case sealevel.VoteStateVersionV0_23_5:
-		{
-			epochCredits = voteState.V0_23_5.EpochCredits
-		}
-
+		epochCredits = voteState.V0_23_5.EpochCredits
 	case sealevel.VoteStateVersionV1_14_11:
-		{
-			epochCredits = voteState.V1_14_11.EpochCredits
-		}
-
+		epochCredits = voteState.V1_14_11.EpochCredits
 	default:
-		{
-			panic("invalid vote state - should be impossible")
-		}
+		panic("invalid vote state - should be impossible")
 	}
 
 	var creditsInVote uint64
@@ -833,31 +486,49 @@ func calculateStakePointsAndCredits(stakeHistory *sealevel.SysvarStakeHistory, s
 	}
 
 	if creditsInVote < creditsInStake {
-		return CalculatedStakePoints{NewCreditsObserved: creditsInVote, ForceCreditsUpdateWithSkippedReward: true}
+		return CalculatedStakePoints{
+			NewCreditsObserved:                  creditsInVote,
+			ForceCreditsUpdateWithSkippedReward: true,
+		}
 	}
 
-	if creditsInVote == creditsInStake {
-		return CalculatedStakePoints{NewCreditsObserved: creditsInVote, ForceCreditsUpdateWithSkippedReward: false}
+	if creditsInVote == creditsInStake || len(epochCredits) == 0 {
+		return CalculatedStakePoints{NewCreditsObserved: creditsInVote}
 	}
+
+	/*start := sort.Search(len(epochCredits), func(i int) bool {
+		return epochCredits[i].Credits > creditsInStake
+	})
+	if start >= len(epochCredits) {
+		return CalculatedStakePoints{NewCreditsObserved: creditsInVote}
+	}*/
 
 	var points wide.Uint128
-	newCreditsObserved := creditsInStake
+	newObserved := creditsInStake
 
 	for _, ec := range epochCredits {
-		finalEpochCredits := ec.Credits
-		initialEpochCredits := ec.PrevCredits
-		var earnedCredits wide.Uint128
+		final := ec.Credits
+		initial := ec.PrevCredits
 
-		if creditsInStake < initialEpochCredits {
-			earnedCredits = wide.Uint128FromUint64(finalEpochCredits - initialEpochCredits)
-		} else if creditsInStake < finalEpochCredits {
-			earnedCredits = wide.Uint128FromUint64(finalEpochCredits - newCreditsObserved)
+		var earnedCredits uint64
+		if creditsInStake < initial {
+			earnedCredits = final - initial
+		} else if creditsInStake < final {
+			earnedCredits = final - newObserved
 		}
 
-		newCreditsObserved = max(newCreditsObserved, finalEpochCredits)
-		stakeAmount := stakeState.Stake.Stake.Delegation.StakeActivatingAndDeactivating(ec.Epoch, *stakeHistory, newRateActivationEpoch).Effective
-		points = points.Add(wide.Uint128FromUint64(stakeAmount).Mul(earnedCredits))
+		if earnedCredits != 0 {
+			stakeAmt := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
+			earnedPoints := wide.Uint128FromUint64(stakeAmt).Mul(wide.Uint128FromUint64(earnedCredits))
+			points = points.Add(earnedPoints)
+
+		}
+
+		newObserved = max(newObserved, final)
 	}
 
-	return CalculatedStakePoints{Points: points, NewCreditsObserved: newCreditsObserved}
+	return CalculatedStakePoints{
+		Points:             points,
+		NewCreditsObserved: newObserved,
+	}
 }

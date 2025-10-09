@@ -144,6 +144,14 @@ func (sh *SysvarStakeHistory) Update(epoch uint64, entry StakeHistoryEntry) {
 	}
 }
 
+func (sh *SysvarStakeHistory) String() string {
+	var str string
+	for _, s := range *sh {
+		str += fmt.Sprintf("epoch: %d, effective: %d, activating: %d, deactivating: %d\n", s.Epoch, s.Entry.Effective, s.Entry.Activating, s.Entry.Deactivating)
+	}
+	return str
+}
+
 func ReadStakeHistorySysvar(execCtx *ExecutionCtx) (SysvarStakeHistory, error) {
 	if SysvarCache.StakeHistory.Sysvar != nil {
 		return *SysvarCache.StakeHistory.Sysvar, nil

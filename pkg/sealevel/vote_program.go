@@ -690,7 +690,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramInitializeAccount(me, voteInit, signers, clock, execCtx.Features)
+			err = VoteProgramInitializeAccount(execCtx, me, voteInit, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorize:
@@ -712,7 +712,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(me, voteAuthorize.Pubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
+			err = VoteProgramAuthorize(execCtx, me, voteAuthorize.Pubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorizeWithSeed:
@@ -788,7 +788,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramUpdateValidatorIdentity(me, nodePubkey, signers, execCtx.Features)
+			err = VoteProgramUpdateValidatorIdentity(execCtx, me, nodePubkey, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeUpdateCommission:
@@ -811,7 +811,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramUpdateCommission(me, updateCommission.Commission, signers, epochSchedule, clock, execCtx.Features)
+			err = VoteProgramUpdateCommission(execCtx, me, updateCommission.Commission, signers, epochSchedule, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeVoteSwitch:
@@ -854,7 +854,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVote(me, slotHashes, clock, &vote, signers, execCtx.Features)
+			err = VoteProgramProcessVote(execCtx, me, slotHashes, clock, &vote, signers, execCtx.Features)
 		}
 	case VoteProgramInstrTypeUpdateVoteStateSwitch:
 		isUpdateVoteStateSwitch = true
@@ -889,7 +889,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, &updateVoteState, signers, execCtx.Features)
+			err = VoteProgramProcessVoteStateUpdate(execCtx, me, slotHashes, clock, &updateVoteState, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeCompactUpdateVoteStateSwitch:
@@ -927,7 +927,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessVoteStateUpdate(me, slotHashes, clock, updateVoteState, signers, execCtx.Features)
+			err = VoteProgramProcessVoteStateUpdate(execCtx, me, slotHashes, clock, updateVoteState, signers, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeWithdraw:
@@ -957,7 +957,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 
 			me.Drop()
 
-			err = VoteProgramWithdraw(txCtx, instrCtx, 0, withdraw.Lamports, 1, signers, rent, clock, execCtx.Features)
+			err = VoteProgramWithdraw(execCtx, txCtx, instrCtx, 0, withdraw.Lamports, 1, signers, rent, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorizeChecked:
@@ -1006,7 +1006,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
+			err = VoteProgramAuthorize(execCtx, me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeTowerSyncSwitch:
@@ -1048,7 +1048,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramProcessTowerSync(me, slotHashes, clock, towerSyncInstr, signers, execCtx.Features)
+			err = VoteProgramProcessTowerSync(execCtx, me, slotHashes, clock, towerSyncInstr, signers, execCtx.Features)
 		}
 
 	default: // invalid instruction
@@ -1060,7 +1060,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 	return err
 }
 
-func VoteProgramInitializeAccount(voteAccount *BorrowedAccount, voteInit VoteInstrVoteInit, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
+func VoteProgramInitializeAccount(execCtx *ExecutionCtx, voteAccount *BorrowedAccount, voteInit VoteInstrVoteInit, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
 	//mlog.Log.Debugf("InitializeAccount")
 	if uint64(len(voteAccount.Data())) != sizeOfVersionedVoteState(f) {
 		return InstrErrInvalidAccountData
@@ -1081,10 +1081,10 @@ func VoteProgramInitializeAccount(voteAccount *BorrowedAccount, voteInit VoteIns
 	}
 
 	voteState := newVoteStateFromVoteInit(voteInit, clock)
-	return setVoteAccountState(voteAccount, voteState, f)
+	return setVoteAccountState(execCtx, voteAccount, voteState, f)
 }
 
-func VoteProgramAuthorize(voteAcct *BorrowedAccount, authorized solana.PublicKey, voteAuthorize uint32, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
+func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, authorized solana.PublicKey, voteAuthorize uint32, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
 	//mlog.Log.Debugf("VoteAuthorize")
 
 	voteStateVersions, err := UnmarshalVersionedVoteState(voteAcct.Data())
@@ -1129,7 +1129,7 @@ func VoteProgramAuthorize(voteAcct *BorrowedAccount, authorized solana.PublicKey
 		}
 	}
 
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 	return err
 }
 
@@ -1171,11 +1171,11 @@ func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCt
 		expectedAuthorityKeys = append(expectedAuthorityKeys, authKey)
 	}
 
-	err = VoteProgramAuthorize(voteAcct, newAuthority, authorizationType, expectedAuthorityKeys, clock, execCtx.Features)
+	err = VoteProgramAuthorize(execCtx, voteAcct, newAuthority, authorizationType, expectedAuthorityKeys, clock, execCtx.Features)
 	return err
 }
 
-func VoteProgramUpdateValidatorIdentity(voteAcct *BorrowedAccount, nodePubkey solana.PublicKey, signers []solana.PublicKey, f features.Features) error {
+func VoteProgramUpdateValidatorIdentity(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, nodePubkey solana.PublicKey, signers []solana.PublicKey, f features.Features) error {
 	//mlog.Log.Debugf("UpdateValidatorIdentity")
 
 	voteStateVersions, err := UnmarshalVersionedVoteState(voteAcct.Data())
@@ -1196,7 +1196,7 @@ func VoteProgramUpdateValidatorIdentity(voteAcct *BorrowedAccount, nodePubkey so
 	}
 
 	voteState.NodePubkey = nodePubkey
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
@@ -1211,7 +1211,7 @@ func isCommissionUpdateAllowed(slot uint64, epochSchedule SysvarEpochSchedule) b
 	}
 }
 
-func VoteProgramUpdateCommission(voteAcct *BorrowedAccount, commission byte, signers []solana.PublicKey, epochSchedule SysvarEpochSchedule, clock SysvarClock, f features.Features) error {
+func VoteProgramUpdateCommission(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, commission byte, signers []solana.PublicKey, epochSchedule SysvarEpochSchedule, clock SysvarClock, f features.Features) error {
 	//mlog.Log.Debugf("UpdateCommission")
 
 	var voteState *VoteState
@@ -1246,7 +1246,7 @@ func VoteProgramUpdateCommission(voteAcct *BorrowedAccount, commission byte, sig
 	}
 
 	voteState.Commission = commission
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
@@ -1375,7 +1375,7 @@ func processVote(voteState *VoteState, vote *VoteInstrVote, slotHashes SysvarSlo
 	return processVoteUnfiltered(voteState, voteSlots, vote, slotHashes, epoch, currentSlot, timelyVoteCredits, deprecateUnusedLegacyVotePlumbing)
 }
 
-func VoteProgramProcessVote(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, vote *VoteInstrVote, signers []solana.PublicKey, f features.Features) error {
+func VoteProgramProcessVote(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, vote *VoteInstrVote, signers []solana.PublicKey, f features.Features) error {
 	//mlog.Log.Debugf("Vote / VoteSwitch")
 
 	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
@@ -1407,7 +1407,7 @@ func VoteProgramProcessVote(voteAcct *BorrowedAccount, slotHashes SysvarSlotHash
 		}
 	}
 
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
@@ -1766,7 +1766,7 @@ func processNewVoteState(voteState *VoteState, newState *deque.Deque[LandedVote]
 	return nil
 }
 
-func VoteProgramProcessVoteStateUpdate(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, voteStateUpdate *VoteInstrUpdateVoteState, signers []solana.PublicKey, f features.Features) error {
+func VoteProgramProcessVoteStateUpdate(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, voteStateUpdate *VoteInstrUpdateVoteState, signers []solana.PublicKey, f features.Features) error {
 	//mlog.Log.Debugf("VoteStateUpdate")
 
 	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
@@ -1790,12 +1790,12 @@ func VoteProgramProcessVoteStateUpdate(voteAcct *BorrowedAccount, slotHashes Sys
 		return err
 	}
 
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
 
-func VoteProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAcctIdx uint64, lamports uint64, toAcctIdx uint64, signers []solana.PublicKey, rent SysvarRent, clock SysvarClock, f features.Features) error {
+func VoteProgramWithdraw(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAcctIdx uint64, lamports uint64, toAcctIdx uint64, signers []solana.PublicKey, rent SysvarRent, clock SysvarClock, f features.Features) error {
 	//mlog.Log.Debugf("VoteProgramWithdraw")
 
 	voteAcct, err := instrCtx.BorrowInstructionAccount(txCtx, voteAcctIdx)
@@ -1836,7 +1836,7 @@ func VoteProgramWithdraw(txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAc
 			newDefaultVoteState := new(VoteState)
 			newDefaultVoteState.PriorVoters.Index = 31
 			newDefaultVoteState.PriorVoters.IsEmpty = true
-			err = setVoteAccountState(voteAcct, newDefaultVoteState, f)
+			err = setVoteAccountState(execCtx, voteAcct, newDefaultVoteState, f)
 			if err != nil {
 				return err
 			}
@@ -1876,7 +1876,7 @@ var (
 		}}
 )
 
-func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
+func VoteProgramProcessTowerSync(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
 	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
 	if err != nil {
 		return err
@@ -1904,7 +1904,7 @@ func VoteProgramProcessTowerSync(voteAcct *BorrowedAccount, slotHashes SysvarSlo
 		return err
 	}
 
-	err = setVoteAccountState(voteAcct, voteState, f)
+	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }

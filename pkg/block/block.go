@@ -1,9 +1,9 @@
 package block
 
 import (
-	"fmt"
 	"math"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -42,12 +42,13 @@ type Block struct {
 	BlockReward                         *BlockRewardsInfo
 	LastBlockhash                       [32]byte
 	UnixTimestamp                       int64
-	StakeAccts                          map[solana.PublicKey]bool
 	VoteAccts                           map[solana.PublicKey]uint64
 	VoteTimestamps                      map[solana.PublicKey]sealevel.BlockTimestamp
 	TotalEpochStake                     uint64
 	Features                            *features.Features
 	UpdatedAccts                        []solana.PublicKey
+	ParentEpochUpdatedAccts             []*accounts.Account
+	EpochUpdatedAccts                   []*accounts.Account
 	PartitionedRewardsInfo              *rewards.PartitionedRewardDistributionInfo
 	Rewards                             []rpc.BlockReward
 	NumRewardPartitions                 uint64
@@ -90,9 +91,7 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 	} else {
 		if rpcc != nil {
 			leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
-			if err != nil {
-				panic(fmt.Sprintf("unable to get blockreward for slot %d", slot))
-			} else {
+			if err == nil {
 				block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
 			}
 		}

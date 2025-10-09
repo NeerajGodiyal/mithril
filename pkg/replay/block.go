@@ -33,6 +33,7 @@ import (
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/panjf2000/ants/v2"
 )
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -341,9 +342,26 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to get stakehistory")
 			}
 
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct.Clone())
-			if err != nil {
-				panic("unable to set stakehistory sysvar to accts")
+			var setStakeHistoryParent bool
+			if len(block.EpochUpdatedAccts) != 0 {
+				for _, a := range block.ParentEpochUpdatedAccts {
+					if a != nil {
+						if a.Key == sealevel.SysvarStakeHistoryAddr {
+							err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, a.Clone())
+							if err != nil {
+								panic("unable to set stakehistory sysvar to accts")
+							}
+							setStakeHistoryParent = true
+						}
+					}
+				}
+			}
+
+			if !setStakeHistoryParent {
+				err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct.Clone())
+				if err != nil {
+					panic("unable to set stakehistory sysvar to accts")
+				}
 			}
 
 			decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
@@ -383,12 +401,25 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		}
 	}
 
+	for idx, acct := range block.EpochUpdatedAccts {
+		err = accts.SetAccountWithoutLock(acct.Key, acct.Clone())
+		if err != nil {
+			panic("unable to setup epoch transition modified acct")
+		}
+
+		parentAcct := block.ParentEpochUpdatedAccts[idx].Clone()
+		err = parentAccts.SetAccountWithoutLock(acct.Key, parentAcct)
+		if err != nil {
+			panic("unable to setup epoch transition modified acct")
+		}
+	}
+
 	return accts, parentAccts, nil
 }
 
-func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []solana.PublicKey) {
-	newlyActivatedFeatures := make([]solana.PublicKey, 0)
-	acctsToStore := make([]*accounts.Account, 0)
+func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []*accounts.Account, []*accounts.Account) {
+	parentNewlyActivatedFeatureAccts := make([]*accounts.Account, 0)
+	newlyActivatedFeatureAccts := make([]*accounts.Account, 0)
 
 	f := features.NewFeaturesDefault()
 
@@ -398,6 +429,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			if acct.Owner != a.FeatureAddr {
 				continue
 			}
+			parentNewlyActivatedFeatureAccts = append(parentNewlyActivatedFeatureAccts, acct.Clone())
 
 			featureAcct := features.UnmarshalFeatureAcct(acct.Data)
 
@@ -415,17 +447,16 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 				}
 
 				acct.Data = newFeatureAcctBytes
-				acctsToStore = append(acctsToStore, acct)
+				newlyActivatedFeatureAccts = append(newlyActivatedFeatureAccts, acct)
 
-				newlyActivatedFeatures = append(newlyActivatedFeatures, featureGate.Address)
 				f.EnableFeature(featureGate, slot)
 				//mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 		}
 	}
 
-	if len(acctsToStore) != 0 {
-		err := acctsDb.StoreAccounts(acctsToStore, slot)
+	if len(newlyActivatedFeatureAccts) != 0 {
+		err := acctsDb.StoreAccounts(newlyActivatedFeatureAccts, slot)
 		if err != nil {
 			panic(err)
 		}
@@ -436,27 +467,79 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 		mlog.Log.Debugf("feature: %s", feat)
 	}*/
 
-	return f, newlyActivatedFeatures
+	return f, newlyActivatedFeatureAccts, parentNewlyActivatedFeatureAccts
 }
 
-func setupInitialVoteAcctsAndStakeAccts(block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
+func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
-	block.StakeAccts = make(map[solana.PublicKey]bool)
 	block.VoteAccts = make(map[solana.PublicKey]uint64)
 
-	for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
-		ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
-		block.VoteTimestamps[va.Key] = ts
-		block.VoteAccts[va.Key] = va.Stake
-		block.TotalEpochStake += va.Stake
-	}
+	var wg sync.WaitGroup
+	voteAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+		defer wg.Done()
 
-	for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
-		block.StakeAccts[sa.Account] = true
-	}
+		pk := i.(solana.PublicKey)
+		voteAcct, err := acctsDb.GetAccount(block.Slot, pk)
+		if err == nil {
+			versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+			if err == nil {
+				global.PutVoteCacheItem(pk, versionedVoteState)
+			}
+		}
+	})
+
+	stakeAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+		defer wg.Done()
+
+		sa := i.(snapshot.DelegationPair)
+		var creditsObserved uint64
+
+		stakeAcct, err := acctsDb.GetAccount(block.Slot, sa.Account)
+		if err == nil {
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err == nil {
+				creditsObserved = stakeState.Stake.Stake.CreditsObserved
+			}
+		}
+		global.PutStakeCacheItem(sa.Account,
+			&sealevel.Delegation{VoterPubkey: sa.Delegation.VoterPubkey,
+				StakeLamports:      sa.Delegation.Stake,
+				ActivationEpoch:    sa.Delegation.ActivationEpoch,
+				DeactivationEpoch:  sa.Delegation.DeactivationEpoch,
+				WarmupCooldownRate: sa.Delegation.WarmupCooldownRate,
+				CreditsObserved:    creditsObserved})
+
+	})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
+			ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
+			block.VoteTimestamps[va.Key] = ts
+			block.VoteAccts[va.Key] = va.Stake
+			block.TotalEpochStake += va.Stake
+
+			wg.Add(1)
+			voteAcctWorkerPool.Invoke(va.Key)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
+			wg.Add(1)
+			stakeAcctWorkerPool.Invoke(sa)
+		}
+	}()
+
+	wg.Wait()
+	stakeAcctWorkerPool.Release()
+	ants.Release()
 }
 
-func configureInitialBlock(block *b.Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
+func configureInitialBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.AcctsLtHash = snapshotManifest.LtHash
@@ -464,14 +547,13 @@ func configureInitialBlock(block *b.Block, snapshotManifest *snapshot.SnapshotMa
 	block.PrevFeeRateGovernor = &snapshotManifest.Bank.FeeRateGovernor
 	block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
 	block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
-	setupInitialVoteAcctsAndStakeAccts(block, snapshotManifest)
+	setupInitialVoteAcctsAndStakeAccts(acctsDb, block, snapshotManifest)
 	snapshotManifest = nil
 }
 
 func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
-	block.StakeAccts = lastSlotCtx.StakeAccts
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
 	block.VoteAccts = lastSlotCtx.VoteAccts
 	block.ParentSlot = lastSlotCtx.Slot
@@ -513,13 +595,14 @@ func ReplayBlocks(
 	var lastSlotCtx *sealevel.SlotCtx
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
-	var featuresActivatedInFirstSlot []solana.PublicKey
+	var featuresActivatedInFirstSlot []*accounts.Account
+	var parentFeaturesActivatedInFirstSlot []*accounts.Account
 
 	replayCtx := newReplayCtx(snapshotManifest)
 
 	global.IncrTransactionCount(snapshotManifest.Bank.TransactionCount)
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
-	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
+	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	var statsCounter uint64
@@ -549,36 +632,39 @@ func ReplayBlocks(
 		start := time.Now()
 
 		currentSlot = block.Slot
+		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		if currentSlot == startSlot {
-			configureInitialBlock(block, snapshotManifest, replayCtx)
+			configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx)
 		} else {
 			configureBlock(block, replayCtx, lastSlotCtx)
 		}
-
-		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 
 		configureGlobalCtx(block)
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
-			mlog.Log.Infof("epoch boundary")
+			mlog.Log.Infof("epoch boundary, %d -> %d", currentEpoch, currentEpoch+1)
 
-			var newlyActivatedFeatures []solana.PublicKey
-			replayCtx.CurrentFeatures, newlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
+			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
+			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-
-			var updatedPks []solana.PublicKey
-			partitionedRewardsInfo, updatedPks, block.VoteAccts = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
-			if partitionedEpochRewardsEnabled {
-				block.UpdatedAccts = append(block.UpdatedAccts, updatedPks...)
-			}
-			block.UpdatedAccts = append(block.UpdatedAccts, newlyActivatedFeatures...)
+			partitionedRewardsInfo, block.VoteAccts = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
+			if len(newlyActivatedFeatures) != 0 {
+				block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, newlyActivatedFeatures...)
+				block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentNewlyActivatedFeatures...)
+			}
+			if len(featuresActivatedInFirstSlot) != 0 {
+				block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, featuresActivatedInFirstSlot...)
+				block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentFeaturesActivatedInFirstSlot...)
+				featuresActivatedInFirstSlot = nil
+				parentFeaturesActivatedInFirstSlot = nil
+			}
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
 			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &replayCtx.Inflation, replayCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, replayCtx.SlotsPerYear, replayCtx.CurrentFeatures)
 			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-				calculatePartitionedEpochRewardsDuringRewardsWindow(partitionedRewardsInfo, acctsDb, block, epochSchedule, startSlot, currentEpoch, replayCtx.CurrentFeatures)
+				panic("cannot bootstrap during beginning of epoch rewards period")
 			}
 		}
 
@@ -586,13 +672,9 @@ func ReplayBlocks(
 		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-			rewardPks := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
-			block.UpdatedAccts = append(block.UpdatedAccts, rewardPks...)
-		}
-
-		if len(featuresActivatedInFirstSlot) != 0 {
-			block.UpdatedAccts = append(block.UpdatedAccts, featuresActivatedInFirstSlot...)
-			featuresActivatedInFirstSlot = make([]solana.PublicKey, 0)
+			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
+			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
+			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
 
 		// workaround for skipping the soon-to-be obsolete EAH.
@@ -680,10 +762,12 @@ func acctsEqual(a *accounts.Account, b *accounts.Account) bool {
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
+	alreadyAdded := make(map[solana.PublicKey]bool)
 
 	for pk := range slotCtx.WritableAccts {
 		acct, _ := slotCtx.GetAccount(pk)
 		writableAccts = append(writableAccts, acct)
+		alreadyAdded[pk] = true
 	}
 
 	for pk := range slotCtx.ModifiedAccts {
@@ -694,13 +778,16 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 		modifiedAccts = append(modifiedAccts, acct)
 	}
 
-	for _, pk := range block.UpdatedAccts {
+	for _, eua := range block.EpochUpdatedAccts {
 		////mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
-		acct, err := slotCtx.GetAccount(pk)
+		if _, exists := alreadyAdded[eua.Key]; exists {
+			continue
+		}
+		acct, err := slotCtx.GetAccount(eua.Key)
 		if err != nil {
-			acct, err = slotCtx.GetAccountFromAccountsDb(pk)
+			acct, err = slotCtx.GetAccountFromAccountsDb(eua.Key)
 			if err != nil {
-				panic(fmt.Sprintf("unable to fetch %s from neither SlotCtx nor accountsdb for inclusion in bankhash in slot %d", pk, slotCtx.Slot))
+				panic(fmt.Sprintf("unable to fetch %s from neither SlotCtx nor accountsdb for inclusion in bankhash in slot %d", eua.Key, slotCtx.Slot))
 			}
 		}
 		writableAccts = append(writableAccts, acct)
@@ -737,7 +824,6 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		LatestEvictedBlockhash: block.LatestEvictedBlockhash,
 		Replay:                 true,
 		Features:               block.Features,
-		StakeAccts:             block.StakeAccts,
 		AcctsLtHash:            block.AcctsLtHash,
 
 		VoteAccts:       block.VoteAccts,
