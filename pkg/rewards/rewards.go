@@ -116,19 +116,33 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot, NumRewardPartitions: numRewardPartitions}
 }
 
+type idxAndReward struct {
+	idx    int
+	reward rpc.BlockReward
+}
+
 func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
-	var totalVotingRewards uint64
+	var totalVotingRewards atomic.Uint64
 
-	accts := make([]*accounts.Account, 0, len(rewards))
-	parentUpdatedAccts := make([]*accounts.Account, 0, len(rewards))
+	accts := make([]*accounts.Account, len(rewards))
+	parentUpdatedAccts := make([]*accounts.Account, len(rewards))
 
-	for _, reward := range rewards {
+	var wg sync.WaitGroup
+
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
+		defer wg.Done()
+
+		r := i.(idxAndReward)
+		reward := r.reward
+		idx := r.idx
+
 		if string(reward.RewardType) == RewardTypeVoting /*&& reward.Lamports != 0*/ {
 			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
 			if err != nil {
 				panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", reward.Pubkey, slot))
 			}
-			parentUpdatedAccts = append(parentUpdatedAccts, stakeAcct.Clone())
+			parentUpdatedAccts[idx] = stakeAcct.Clone()
 
 			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
 			if err != nil {
@@ -139,21 +153,31 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 				panic(fmt.Sprintf("post-balance for acct %s in distributing voting rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports))
 			}
 
-			accts = append(accts, stakeAcct)
+			accts[idx] = stakeAcct
 
-			totalVotingRewards, err = safemath.CheckedAddU64(totalVotingRewards, uint64(reward.Lamports))
-			if err != nil {
+			new := totalVotingRewards.Add(uint64(reward.Lamports))
+			if new < uint64(reward.Lamports) {
 				panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
 			}
 		}
+	})
+
+	for idx, reward := range rewards {
+		r := idxAndReward{idx: idx, reward: reward}
+		wg.Add(1)
+		workerPool.Invoke(r)
 	}
+
+	wg.Wait()
+	workerPool.Release()
+	ants.Release()
 
 	err := acctsDb.StoreAccounts(accts, slot)
 	if err != nil {
 		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
 	}
 
-	return accts, parentUpdatedAccts, totalVotingRewards
+	return accts, parentUpdatedAccts, totalVotingRewards.Load()
 }
 
 type idxAndPubkey struct {
