@@ -44,6 +44,7 @@ type Block struct {
 	UnixTimestamp                       int64
 	VoteAccts                           map[solana.PublicKey]uint64
 	VoteTimestamps                      map[solana.PublicKey]sealevel.BlockTimestamp
+	BankhashStakes                      map[[32]byte]uint64
 	TotalEpochStake                     uint64
 	Features                            *features.Features
 	UpdatedAccts                        []solana.PublicKey

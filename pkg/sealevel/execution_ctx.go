@@ -53,6 +53,8 @@ type SlotCtx struct {
 	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
 	StakeCache             map[solana.PublicKey]*Delegation
 	VoteAccts              map[solana.PublicKey]uint64
+	BankhashStakeMu        *sync.Mutex
+	BankhashStakes         map[[32]byte]uint64
 	TotalEpochStake        uint64
 	FinalBankhash          []byte
 	AcctsLtHash            *lthash.LtHash

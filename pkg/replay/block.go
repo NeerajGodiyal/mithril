@@ -551,6 +551,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, snaps
 	block.PrevFeeRateGovernor = &snapshotManifest.Bank.FeeRateGovernor
 	block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
 	block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
+	block.BankhashStakes = make(map[[32]byte]uint64)
 	setupInitialVoteAcctsAndStakeAccts(acctsDb, block, snapshotManifest)
 	snapshotManifest = nil
 }
@@ -565,6 +566,8 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 	block.PrevFeeRateGovernor = lastSlotCtx.FeeRateGovernor
 	block.PrevNumSignatures = lastSlotCtx.NumSignatures
+	block.TotalEpochStake = lastSlotCtx.TotalEpochStake
+	block.BankhashStakes = lastSlotCtx.BankhashStakes
 }
 
 func configureGlobalCtx(block *b.Block) {
@@ -627,6 +630,8 @@ func ReplayBlocks(
 		streamChan = blockChan
 	}
 
+	unconfirmedBankhashStates := make(map[[32]byte]*unconfirmedBankhashState)
+
 	for block := range streamChan {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
@@ -652,7 +657,7 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo, block.VoteAccts = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
@@ -706,6 +711,8 @@ func ReplayBlocks(
 		} else {
 			//mlog.Log.Debugf("block replayed successfully.\n")
 		}
+
+		addStakesAndConfirmBankhashes(unconfirmedBankhashStates, lastSlotCtx)
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
 		slotReplayDuration := time.Since(start)
@@ -715,6 +722,7 @@ func ReplayBlocks(
 		statsd.Gauge("epoch", float64(block.Epoch), nil, 1)
 		statsd.Gauge("slot", float64(block.Slot), nil, 1)
 		statsd.Distribution("txs_per_block", float64(len(block.Transactions)), nil, 1)
+
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			timeAccumulator += slotReplayDuration.Seconds()
@@ -822,9 +830,11 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		FeeRateGovernor: block.FeeRateGovernor,
 		NumSignatures:   block.NumSignatures,
 
-		AcctMapsMu:    &sync.Mutex{},
-		ModifiedAccts: make(map[solana.PublicKey]bool),
-		WritableAccts: make(map[solana.PublicKey]bool),
+		AcctMapsMu:      &sync.Mutex{},
+		ModifiedAccts:   make(map[solana.PublicKey]bool),
+		WritableAccts:   make(map[solana.PublicKey]bool),
+		BankhashStakeMu: &sync.Mutex{},
+		BankhashStakes:  block.BankhashStakes,
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,

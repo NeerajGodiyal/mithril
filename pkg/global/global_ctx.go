@@ -10,16 +10,18 @@ import (
 )
 
 type GlobalCtx struct {
-	latestBlockhash  [32]byte
-	blockHeight      uint64
-	slot             uint64
-	epoch            uint64
-	transactionCount uint64
-	stakeCache       map[solana.PublicKey]*sealevel.Delegation
-	voteCache        map[solana.PublicKey]*sealevel.VoteStateVersions
-	stakeCacheMutex  sync.Mutex
-	voteCacheMutex   sync.Mutex
-	mu               sync.Mutex
+	latestBlockhash     [32]byte
+	blockHeight         uint64
+	slot                uint64
+	epoch               uint64
+	transactionCount    uint64
+	stakeCache          map[solana.PublicKey]*sealevel.Delegation
+	voteCache           map[solana.PublicKey]*sealevel.VoteStateVersions
+	slotsConfirmed      map[uint64]struct{}
+	stakeCacheMutex     sync.Mutex
+	voteCacheMutex      sync.Mutex
+	slotsConfirmedMutex sync.Mutex
+	mu                  sync.Mutex
 }
 
 var instance GlobalCtx
@@ -57,6 +59,22 @@ func DeleteStakeCacheItem(pubkey solana.PublicKey) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 	delete(instance.stakeCache, pubkey)
+}
+
+func PutSlotConfirmed(slot uint64) {
+	if instance.slotsConfirmed == nil {
+		instance.slotsConfirmed = make(map[uint64]struct{})
+	}
+	instance.slotsConfirmedMutex.Lock()
+	defer instance.slotsConfirmedMutex.Unlock()
+	instance.slotsConfirmed[slot] = struct{}{}
+}
+
+func SlotConfirmed(slot uint64) bool {
+	instance.slotsConfirmedMutex.Lock()
+	defer instance.slotsConfirmedMutex.Unlock()
+	_, exists := instance.slotsConfirmed[slot]
+	return exists
 }
 
 func StakeCache() map[solana.PublicKey]*sealevel.Delegation {
