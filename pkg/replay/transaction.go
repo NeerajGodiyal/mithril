@@ -172,8 +172,6 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
 	execCtx.ModifiedVoteStates = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
-	//execCtx.ComputeMeter.Disable()
-
 	return execCtx
 }
 

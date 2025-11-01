@@ -27,7 +27,9 @@ func SyscallLogImpl(vm sbpf.VM, ptr, strlen uint64) (uint64, error) {
 	if err = vm.Read(ptr, buf); err != nil {
 		return syscallErr(err)
 	}
+
 	execCtx.Log.Log("Program log: " + string(buf))
+
 	return syscallSuccess(0)
 }
 

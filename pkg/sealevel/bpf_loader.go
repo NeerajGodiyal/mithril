@@ -1067,8 +1067,6 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 
 func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte, syscallRegistry sbpf.SyscallRegistry) error {
 	start := time.Now()
-	//mlog.Log.Debugf("bpf loader - executeProgram")
-
 	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.Features)
 	if err != nil {
 		return err
@@ -1247,6 +1245,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
 		return Syscalls(&execCtx.Features, false, u)
 	})
+
 	// two cases here: we're either executing from the program cache, so from a pre-parsed/loaded program, or from bytes if
 	// the the program was not found in the cache.
 	if hasLoadedProgram {

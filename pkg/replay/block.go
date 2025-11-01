@@ -169,13 +169,25 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
 		if err != nil {
-			panic("nable to get fees sysvar when caching sysvars")
+			panic("unable to get fees sysvar when caching sysvars")
 		}
 		var fees sealevel.SysvarFees
 		decoder := bin.NewBinDecoder(acct.Data)
 		fees.MustUnmarshalWithDecoder(decoder)
 		sealevel.SysvarCache.Fees.Sysvar = &fees
 		sealevel.SysvarCache.Fees.Acct = acct
+	}
+
+	{
+		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochRewardsAddr)
+		if err != nil {
+			panic("unable to get fees sysvar when caching sysvars")
+		}
+		var rewards sealevel.SysvarEpochRewards
+		decoder := bin.NewBinDecoder(acct.Data)
+		rewards.MustUnmarshalWithDecoder(decoder)
+		sealevel.SysvarCache.EpochRewards.Sysvar = &rewards
+		sealevel.SysvarCache.EpochRewards.Acct = acct
 	}
 }
 

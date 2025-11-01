@@ -60,6 +60,8 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	if err != nil {
 		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
 	}
+	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
+	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
 
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
@@ -96,6 +98,8 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	if err != nil {
 		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
 	}
+	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
+	sealevel.SysvarCache.EpochRewards.Sysvar = &epochRewards
 
 	distributedAccts = append(distributedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += distributedLamports

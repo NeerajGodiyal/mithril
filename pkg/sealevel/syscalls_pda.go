@@ -50,7 +50,6 @@ func translateAndValidateSeeds(vm sbpf.VM, seedsAddr, seedsLen uint64) ([][]byte
 
 func SyscallCreateProgramAddressImpl(vm sbpf.VM, seedsAddr, seedsLen, programIdAddr, addressAddr uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
-	execCtx.ComputeMeter.Remaining()
 	err := execCtx.ComputeMeter.Consume(cu.CUCreateProgramAddressUnits)
 	if err != nil {
 		return syscallCuErr()
