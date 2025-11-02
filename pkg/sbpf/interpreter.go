@@ -1000,6 +1000,9 @@ func (ip *Interpreter) UpdateHeapSize(size uint64) {
 	ip.heapSize = size
 }
 
+var emptyArray [0]byte
+var emptySlice = reflect.ValueOf(emptyArray[:]).UnsafePointer()
+
 func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (unsafe.Pointer, error) {
 	hi, lo := addr>>32, addr&math.MaxUint32
 	switch hi {
@@ -1008,7 +1011,7 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 			return nil, NewExcBadAccess(addr, size, write, "write to program")
 		}
 		if size == 0 {
-			return emptySlicePtr()
+			return emptySlice, nil
 		}
 		if lo+size > uint64(len(ip.ro)) {
 			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds program read")
@@ -1022,7 +1025,7 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		return unsafe.Pointer(&mem[0]), nil
 	case VaddrHeap >> 32:
 		if size == 0 {
-			return emptySlicePtr()
+			return emptySlice, nil
 		}
 		if lo+size > uint64(len(ip.heap)) {
 			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds heap access")
@@ -1030,7 +1033,7 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		return unsafe.Pointer(&ip.heap[lo]), nil
 	case VaddrInput >> 32:
 		if size == 0 {
-			return emptySlicePtr()
+			return emptySlice, nil
 		}
 		if lo+size > uint64(len(ip.input)) {
 			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds input access")
@@ -1039,12 +1042,6 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 	default:
 		return nil, NewExcBadAccess(addr, size, write, "unmapped region")
 	}
-}
-
-var emptyArray [0]byte
-
-func emptySlicePtr() (unsafe.Pointer, error) {
-	return reflect.ValueOf(emptyArray[:]).UnsafePointer(), nil
 }
 
 func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, error) {
