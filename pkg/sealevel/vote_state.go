@@ -1362,6 +1362,30 @@ func (voteStateVersions *VoteStateVersions) ConvertToCurrent() *VoteState {
 	}
 }
 
+func (voteStateVersions *VoteStateVersions) LastTimestamp() *BlockTimestamp {
+	switch voteStateVersions.Type {
+	case VoteStateVersionV0_23_5:
+		{
+			return &voteStateVersions.V0_23_5.LastTimestamp
+		}
+
+	case VoteStateVersionV1_14_11:
+		{
+			return &voteStateVersions.V1_14_11.LastTimestamp
+		}
+
+	case VoteStateVersionCurrent:
+		{
+			return &voteStateVersions.Current.LastTimestamp
+		}
+
+	default:
+		{
+			panic("vote account in invalid state - potential programming error")
+		}
+	}
+}
+
 func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	versioned := new(VoteStateVersions)
 	decoder := bin.NewBinDecoder(data)

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+import "slot_entry.proto";
+
+package slot_stream;
+option go_package="/overcast";
+
+service SlotStream {
+    rpc StreamSlots(SlotStreamRequest) returns (stream SlotResponse);
+}
+
+message SlotStreamRequest {}
+
+message SlotResponse {
+    repeated slot_entry.Entry entries = 1; // JSON encoded entries 
+    uint64 slot = 2;
+}

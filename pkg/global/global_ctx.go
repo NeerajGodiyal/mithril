@@ -5,23 +5,26 @@ package global
 import (
 	"sync"
 
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
 
 type GlobalCtx struct {
-	latestBlockhash     [32]byte
-	blockHeight         uint64
-	slot                uint64
-	epoch               uint64
-	transactionCount    uint64
-	stakeCache          map[solana.PublicKey]*sealevel.Delegation
-	voteCache           map[solana.PublicKey]*sealevel.VoteStateVersions
-	slotsConfirmed      map[uint64]struct{}
-	stakeCacheMutex     sync.Mutex
-	voteCacheMutex      sync.Mutex
-	slotsConfirmedMutex sync.Mutex
-	mu                  sync.Mutex
+	latestBlockhash            [32]byte
+	blockHeight                uint64
+	slot                       uint64
+	epoch                      uint64
+	transactionCount           uint64
+	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
+	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
+	epochStakes                *epochstakes.EpochStakesCache
+	slotsConfirmed             map[uint64]struct{}
+	calcUnixTimeForClockSysvar bool
+	stakeCacheMutex            sync.Mutex
+	voteCacheMutex             sync.Mutex
+	slotsConfirmedMutex        sync.Mutex
+	mu                         sync.Mutex
 }
 
 var instance GlobalCtx
@@ -104,6 +107,17 @@ func VoteCache() map[solana.PublicKey]*sealevel.VoteStateVersions {
 	return instance.voteCache
 }
 
+func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64) {
+	if instance.epochStakes == nil {
+		instance.epochStakes = epochstakes.NewEpochStakesCache()
+	}
+	instance.epochStakes.PutEntry(epoch, pubkey, stake)
+}
+
+func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
+	return instance.epochStakes.EpochStakes(epoch)
+}
+
 func LatestBlockHash() [32]byte {
 	return instance.LatestBlockhash()
 }
@@ -122,6 +136,14 @@ func Epoch() uint64 {
 
 func TransactionCount() uint64 {
 	return instance.TransactionCount()
+}
+
+func SetCalcUnixTimeForClockSysvar(useOvercast bool) {
+	instance.calcUnixTimeForClockSysvar = useOvercast
+}
+
+func CalcUnixTimeForClockSysvar() bool {
+	return instance.calcUnixTimeForClockSysvar
 }
 
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {

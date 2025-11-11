@@ -118,6 +118,31 @@ func SaturatingAddU128(a, b wide.Uint128) wide.Uint128 {
 	return result
 }
 
+func SaturatingAddI64(a, b int64) int64 {
+	result := a + b
+
+	if (a < 0 && b < 0) && result > 0 {
+		return math.MinInt64
+	}
+
+	if (a > 0 && b > 0) && result < 0 {
+		return math.MaxInt64
+	}
+
+	return result
+}
+
+func SaturatingSubI64(a, b int64) int64 {
+	result := a - b
+	if a >= 0 && b < 0 && result < 0 {
+		return math.MaxInt64
+	}
+	if a < 0 && b > 0 && result > 0 {
+		return math.MinInt64
+	}
+	return result
+}
+
 // SaturatingMulU64 multiplies two uint64's together and saturates at the numerical boundary
 // if an overflow would have occurred.
 func SaturatingMulU64(a, b uint64) uint64 {

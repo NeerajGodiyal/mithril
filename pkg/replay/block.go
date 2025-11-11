@@ -564,6 +564,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, snaps
 	block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
 	block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
 	block.BankhashStakes = make(map[[32]byte]uint64)
+	buildEpochStakesCache(snapshotManifest)
 	setupInitialVoteAcctsAndStakeAccts(acctsDb, block, snapshotManifest)
 	snapshotManifest = nil
 }
@@ -589,6 +590,14 @@ func configureGlobalCtx(block *b.Block) {
 	global.SetBlockHeight(block.BlockHeight)
 }
 
+func buildEpochStakesCache(snapshotManifest *snapshot.SnapshotManifest) {
+	for _, epochStake := range snapshotManifest.VersionedEpochStakes {
+		for _, entry := range epochStake.Val.Stakes.VoteAccounts {
+			global.PutEpochStakesEntry(epochStake.Epoch, entry.Key, entry.Stake)
+		}
+	}
+}
+
 func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
@@ -607,6 +616,8 @@ func ReplayBlocks(
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+
+	global.SetCalcUnixTimeForClockSysvar(true)
 
 	var err error
 	var currentSlot uint64
@@ -642,7 +653,7 @@ func ReplayBlocks(
 		streamChan = blockChan
 	}
 
-	unconfirmedBankhashStates := make(map[[32]byte]*unconfirmedBankhashState)
+	//unconfirmedBankhashStates := make(map[[32]byte]*unconfirmedBankhashState)
 
 	for block := range streamChan {
 		if ctx.Err() != nil {
@@ -724,7 +735,7 @@ func ReplayBlocks(
 			//mlog.Log.Debugf("block replayed successfully.\n")
 		}
 
-		addStakesAndConfirmBankhashes(unconfirmedBankhashStates, lastSlotCtx)
+		//addStakesAndConfirmBankhashes(unconfirmedBankhashStates, lastSlotCtx)
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
 		slotReplayDuration := time.Since(start)

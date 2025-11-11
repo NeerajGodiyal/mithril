@@ -16,7 +16,7 @@ type unconfirmedBankhashState struct {
 	slotsElapsed uint64
 }
 
-const maxSlotsElapsedForVoting = 16
+const maxSlotsElapsedForVoting = 32
 
 func addStakesAndConfirmBankhashes(b map[[32]byte]*unconfirmedBankhashState, slotCtx *sealevel.SlotCtx) {
 	// add the last replayed slot bankhash
