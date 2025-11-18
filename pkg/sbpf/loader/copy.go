@@ -34,6 +34,11 @@ func (l *Loader) getText() error {
 	if err := l.checkSectionAddrs(l.shText); err != nil {
 		return fmt.Errorf("invalid .text: %w", err)
 	}
+
+	if l.shText.Size%8 != 0 {
+		return fmt.Errorf(".text section size was not divisible by 8, got %d", l.shText.Size)
+	}
+
 	l.textRange = addrRange{min: l.shText.Off, max: l.shText.Off + l.shText.Size}
 	return nil
 }
