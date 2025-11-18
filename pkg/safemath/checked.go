@@ -182,11 +182,18 @@ func CheckedAddU128(a, b wide.Uint128) (wide.Uint128, error) {
 	return result, nil
 }
 
+var zeroU128 = wide.Uint128FromUint64(0)
+
 // CheckedMulU128 multiplies two uint128's together, returning an error in the event of an overflow.
 func CheckedMulU128(a, b wide.Uint128) (wide.Uint128, error) {
+	// handle the case where one operand is 0
+	if a.Cmp(zeroU128) == 0 || b.Cmp(zeroU128) == 0 {
+		return zeroU128, nil
+	}
+
 	result := a.Mul(b)
 	if result.Cmp(a) == -1 {
-		return wide.NewUint128(0, 0), ErrOverflowMul
+		return zeroU128, ErrOverflowMul
 	}
 	return result, nil
 }
