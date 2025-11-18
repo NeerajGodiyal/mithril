@@ -154,7 +154,6 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	calleeProgramId := ix.ProgramId
 	programAcctIdx, err := ixCtx.IndexOfInstructionAccount(txCtx, calleeProgramId)
 	if err != nil {
-		//mlog.Log.Debugf("unknown program %s", calleeProgramId)
 		return nil, nil, err
 	}
 
@@ -165,7 +164,6 @@ func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana
 	defer borrowedProgramAcct.Drop()
 
 	if !borrowedProgramAcct.IsExecutable() {
-		//mlog.Log.Debugf("account %s is not executable", calleeProgramId)
 		return nil, nil, InstrErrAccountNotExecutable
 	}
 
@@ -212,7 +210,6 @@ func (execCtx *ExecutionCtx) AddModifiedVoteState(pubkey solana.PublicKey, state
 
 func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 	start := time.Now()
-	//mlog.Log.Debugf("ExecuteInstruction")
 
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
@@ -222,31 +219,26 @@ func (execCtx *ExecutionCtx) ExecuteInstruction() error {
 
 	borrowedRootAccount, err := instrCtx.BorrowProgramAccount(txCtx, 0)
 	if err != nil {
-		//mlog.Log.Debugf("BorrowProgramAccount failed: %s", err)
 		return InstrErrUnsupportedProgramId
 	}
 
-	//mlog.Log.Debugf("ExecuteInstruction, account: %s, owner: %s\n", borrowedRootAccount.Key(), borrowedRootAccount.Owner())
-
 	ownerId := borrowedRootAccount.Owner()
+	rootAcctKey := borrowedRootAccount.Key()
 	borrowedRootAccount.Drop()
 
 	var builtinId solana.PublicKey
 	if ownerId == a.NativeLoaderAddr {
-		builtinId = borrowedRootAccount.Key()
+		builtinId = rootAcctKey
 	} else {
-		//mlog.Log.Debugf("invoking bpf program")
 		builtinId = ownerId
 	}
 
-	//mlog.Log.Debugf("resolving native program (%s)", builtinId)
 	nativeProgramFn, nativeProgramStr, err := resolveNativeProgramById(builtinId)
 	if err != nil { // unrecognised builtin
 		return err
 	}
 	metrics.GlobalBlockReplay.ExecIxResolveNativeProgram.AddTimingSince(start)
 
-	//mlog.Log.Debugf("calling native program %s", builtinId)
 	start = time.Now()
 	err = nativeProgramFn(execCtx)
 	switch nativeProgramStr {
@@ -336,8 +328,6 @@ func (execCtx *ExecutionCtx) StackHeight() uint64 {
 }
 
 func (execCtx *ExecutionCtx) NativeInvoke(instruction Instruction, signers []solana.PublicKey) error {
-	//mlog.Log.Debugf("NativeInvoke")
-
 	instrAccts, programIndices, err := execCtx.PrepareInstruction(instruction, signers)
 	if err != nil {
 		return err
