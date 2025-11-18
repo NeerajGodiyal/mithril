@@ -115,7 +115,7 @@ func (instrCtx *InstructionCtx) BorrowLastProgramAccount(txCtx *TransactionCtx) 
 }
 
 func (instrCtx *InstructionCtx) IsInstructionAccountSigner(instrAcctIdx uint64) (bool, error) {
-	if len(instrCtx.InstructionAccounts) == 0 || instrAcctIdx > uint64(len(instrCtx.InstructionAccounts)) {
+	if len(instrCtx.InstructionAccounts) == 0 || instrAcctIdx >= uint64(len(instrCtx.InstructionAccounts)) {
 		return false, InstrErrMissingAccount
 	}
 
@@ -132,7 +132,7 @@ func (instrCtx *InstructionCtx) BorrowExecutableAccount(txCtx *TransactionCtx, p
 }
 
 func (instrCtx *InstructionCtx) IsInstructionAccountWritable(instrAcctIdx uint64) (bool, error) {
-	if len(instrCtx.InstructionAccounts) == 0 || instrAcctIdx > uint64(len(instrCtx.InstructionAccounts)) {
+	if len(instrCtx.InstructionAccounts) == 0 || instrAcctIdx >= uint64(len(instrCtx.InstructionAccounts)) {
 		return false, InstrErrMissingAccount
 	}
 
