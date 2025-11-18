@@ -8,6 +8,10 @@ import (
 )
 
 func isNonOverlapping(src, srcLen, dst, dstLen uint64) bool {
+	if srcLen == 0 || dstLen == 0 {
+		return true
+	}
+
 	if src > dst {
 		return src-dst >= dstLen
 	} else {
