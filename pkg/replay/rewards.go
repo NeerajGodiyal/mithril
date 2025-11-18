@@ -19,13 +19,11 @@ import (
 )
 
 func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) *uint64 {
-	/*slot, existed := f.ActivationSlot(features.ReduceStakeWarmupCooldown)
+	slot, existed := f.ActivationSlot(features.ReduceStakeWarmupCooldown)
 	if !existed {
 		return nil
 	}
-
-	epoch := epochSchedule.GetEpoch(slot)*/
-	epoch := uint64(565)
+	epoch := epochSchedule.GetEpoch(slot)
 	return &epoch
 }
 
