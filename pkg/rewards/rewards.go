@@ -109,9 +109,17 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 		panic(err)
 	}
 
+	if numRewardPartitions > 500 {
+		panic(fmt.Sprintf("num_reward_partitions returned by RPC node too large: %d", numRewardPartitions))
+	}
+
 	rewardSlots, err := rpcc.GetStakingRewardSlots(firstSlotInEpoch, numRewardPartitions)
 	if err != nil {
 		panic(err)
+	}
+
+	if len(rewardSlots) == 0 {
+		panic("RPC node returned empty reward blocks response")
 	}
 
 	finalStakingRewardSlot := rewardSlots[len(rewardSlots)-1]
