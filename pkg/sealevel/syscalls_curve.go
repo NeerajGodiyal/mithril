@@ -544,7 +544,7 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 
 	case CurveOpMul:
 		{
-			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoAddCost)
+			err := execCtx.ComputeMeter.Consume(cu.CUCurve25519RistrettoMulCost)
 			if err != nil {
 				return syscallCuErr()
 			}
