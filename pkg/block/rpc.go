@@ -3,6 +3,7 @@ package block
 import (
 	"math"
 
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -37,13 +38,16 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 		block.NumRewardPartitions = math.MaxUint64
 	}
 	blockReward := blockRewardRewards(blockResult.Rewards)
-	if blockReward != nil {
-		block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
-	} else {
-		if rpcc != nil {
-			leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
-			if err == nil {
-				block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
+
+	if !global.ManageLeaderSchedule() {
+		if blockReward != nil {
+			block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
+		} else {
+			if rpcc != nil {
+				leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
+				if err == nil {
+					block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
+				}
 			}
 		}
 	}

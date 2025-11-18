@@ -43,11 +43,14 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Overclock-Validator/bn256-go/plugin/bn256 v0.0.0-20250309134322-d0c680ad9f5f // indirect
 	github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 // indirect
+	github.com/Overclock-Validator/frand v0.0.0-20251113191226-96ce04ddc1a8 // indirect
 	github.com/Overclock-Validator/gnark-crypto v0.0.0-20250309203346-2a67ed08a105 // indirect
 	github.com/Overclock-Validator/go-bls v0.0.0-20250304162602-9e5d35efdbe8 // indirect
 	github.com/Overclock-Validator/go-ethereum v0.0.0-20250303234049-5cf00fe11343 // indirect
 	github.com/Overclock-Validator/sm9 v0.0.0-20250309104404-1792339eb247 // indirect
+	github.com/Overclock-Validator/weightedrand v0.0.0-20251113203832-5ac028321d0a // indirect
 	github.com/abcum/lcp v0.0.0-20201209214815-7a3f3840be81 // indirect
+	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da // indirect
 	github.com/astaxie/beego v1.12.3 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.2.0 // indirect
@@ -138,6 +141,7 @@ require (
 	gopkg.in/go-playground/validator.v8 v8.18.2 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
+	lukechampine.com/frand v1.4.2 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
@@ -210,6 +214,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
+	github.com/mroth/weightedrand v1.0.0
 	github.com/nio-net/bls v1.0.0
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
@@ -259,6 +264,7 @@ require (
 	golang.org/x/term v0.30.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	golang.org/x/tools v0.29.0 // indirect
+	gonum.org/v1/gonum v0.16.0
 	google.golang.org/protobuf v1.36.10 // indirect
 	lukechampine.com/uint128 v1.3.0
 )

@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,8 +17,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -466,7 +467,6 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 				newlyActivatedFeatureAccts = append(newlyActivatedFeatureAccts, acct)
 
 				f.EnableFeature(featureGate, slot)
-				//mlog.Log.Debugf("enabled pending feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 		}
 	}
@@ -477,11 +477,6 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			panic(err)
 		}
 	}
-
-	/*mlog.Log.Debugf("scanAndEnableFeatures, modified features:\n")
-	for _, feat := range newlyActivatedFeatures {
-		mlog.Log.Debugf("feature: %s", feat)
-	}*/
 
 	return f, newlyActivatedFeatureAccts, parentNewlyActivatedFeatureAccts
 }
@@ -555,7 +550,12 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 	ants.Release()
 }
 
-func configureInitialBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest, epochCtx *ReplayCtx) {
+func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
+	block *b.Block,
+	snapshotManifest *snapshot.SnapshotManifest,
+	epochCtx *ReplayCtx,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	rpcClient *rpcclient.RpcClient) {
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.AcctsLtHash = snapshotManifest.LtHash
@@ -563,9 +563,23 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, snaps
 	block.PrevFeeRateGovernor = &snapshotManifest.Bank.FeeRateGovernor
 	block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
 	block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
-	block.BankhashStakes = make(map[[32]byte]uint64)
-	buildEpochStakesCache(snapshotManifest)
+
 	setupInitialVoteAcctsAndStakeAccts(acctsDb, block, snapshotManifest)
+	configureGlobalCtx(block)
+
+	if global.ManageLeaderSchedule() {
+		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		var exists bool
+		block.Leader, exists = global.LeaderForSlot(block.Slot)
+		if !exists {
+			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+		}
+	}
+
+	if global.ManageBlockHeight() {
+		block.BlockHeight = global.BlockHeight()
+	}
+
 	snapshotManifest = nil
 }
 
@@ -580,7 +594,20 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	block.PrevFeeRateGovernor = lastSlotCtx.FeeRateGovernor
 	block.PrevNumSignatures = lastSlotCtx.NumSignatures
 	block.TotalEpochStake = lastSlotCtx.TotalEpochStake
-	block.BankhashStakes = lastSlotCtx.BankhashStakes
+
+	configureGlobalCtx(block)
+
+	if global.ManageLeaderSchedule() {
+		var exists bool
+		block.Leader, exists = global.LeaderForSlot(block.Slot)
+		if !exists {
+			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+		}
+	}
+
+	if global.ManageBlockHeight() {
+		block.BlockHeight = global.BlockHeight()
+	}
 }
 
 func configureGlobalCtx(block *b.Block) {
@@ -590,10 +617,24 @@ func configureGlobalCtx(block *b.Block) {
 	global.SetBlockHeight(block.BlockHeight)
 }
 
-func buildEpochStakesCache(snapshotManifest *snapshot.SnapshotManifest) {
+func buildInitialEpochStakesCache(snapshotManifest *snapshot.SnapshotManifest) {
 	for _, epochStake := range snapshotManifest.VersionedEpochStakes {
+		if epochStake.Epoch == snapshotManifest.Bank.Epoch {
+			for _, entry := range epochStake.Val.EpochAuthorizedVoters {
+				global.PutEpochAuthorizedVoter(entry.Key, entry.Val)
+			}
+		}
+
+		global.PutEpochTotalStake(epochStake.Epoch, epochStake.Val.TotalStake)
 		for _, entry := range epochStake.Val.Stakes.VoteAccounts {
-			global.PutEpochStakesEntry(epochStake.Epoch, entry.Key, entry.Stake)
+			voteAcct := &epochstakes.VoteAccount{Lamports: entry.Value.Lamports,
+				NodePubkey:        entry.Value.NodePubkey,
+				LastTimestampTs:   entry.Value.LastTimestampTs,
+				LastTimestampSlot: entry.Value.LastTimestampSlot,
+				Owner:             entry.Value.Owner,
+				Executable:        entry.Value.Executable,
+				RentEpoch:         entry.Value.RentEpoch}
+			global.PutEpochStakesEntry(epochStake.Epoch, entry.Key, entry.Stake, voteAcct)
 		}
 	}
 }
@@ -618,6 +659,7 @@ func ReplayBlocks(
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
 	global.SetCalcUnixTimeForClockSysvar(true)
+	global.SetManageBlockHeight(true)
 
 	var err error
 	var currentSlot uint64
@@ -635,13 +677,18 @@ func ReplayBlocks(
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
+	buildInitialEpochStakesCache(snapshotManifest)
+	forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 20)
+	forkChoice.Start()
+	global.SetForkChoice(forkChoice)
+
 	var statsCounter uint64
 	var timeAccumulator float64
 	var justCrossedEpochBoundary bool
 
 	var streamChan chan *b.Block
 	if blockChan == nil {
-		blockBuffer := 25
+		blockBuffer := 35
 		streamChan = make(chan *b.Block, blockBuffer)
 		blockConsumer := blockstream.NewBlockConsumer(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
 
@@ -652,8 +699,6 @@ func ReplayBlocks(
 	} else {
 		streamChan = blockChan
 	}
-
-	//unconfirmedBankhashStates := make(map[[32]byte]*unconfirmedBankhashState)
 
 	for block := range streamChan {
 		if ctx.Err() != nil {
@@ -666,12 +711,10 @@ func ReplayBlocks(
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		if currentSlot == startSlot {
-			configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx)
+			configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
 		} else {
 			configureBlock(block, replayCtx, lastSlotCtx)
 		}
-
-		configureGlobalCtx(block)
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
@@ -693,15 +736,17 @@ func ReplayBlocks(
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
 			}
+
+			if global.ManageLeaderSchedule() {
+				prepareLeaderSchedule(block.Epoch, epochSchedule, rpcc)
+			}
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
-			partitionedRewardsInfo = rewards.DeterminePartitionedStakingRewardsInfo(rpcc, epochSchedule, &replayCtx.Inflation, replayCtx.Capitalization, block.Epoch, block.Epoch-1, currentSlot, replayCtx.SlotsPerYear, replayCtx.CurrentFeatures)
-			if startSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-				panic("cannot bootstrap during beginning of epoch rewards period")
+			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
+				panic("bootstrapping during epoch rewards period is currently unsupported.")
 			}
 		}
 
 		block.Features = replayCtx.CurrentFeatures
-		block.PartitionedRewardsInfo = partitionedRewardsInfo
 
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
 			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
@@ -731,11 +776,8 @@ func ReplayBlocks(
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			break
-		} else {
-			//mlog.Log.Debugf("block replayed successfully.\n")
 		}
 
-		//addStakesAndConfirmBankhashes(unconfirmedBankhashStates, lastSlotCtx)
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
 		slotReplayDuration := time.Since(start)
@@ -786,14 +828,6 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 	slotCtx.LamportsBurnt += incineratorAcct.Lamports
 }
 
-func acctsEqual(a *accounts.Account, b *accounts.Account) bool {
-	return a.Lamports == b.Lamports &&
-		a.Executable == b.Executable &&
-		a.RentEpoch == b.RentEpoch &&
-		a.Owner == b.Owner &&
-		bytes.Equal(a.Data, b.Data)
-}
-
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
@@ -817,7 +851,6 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 		if eua == nil {
 			continue
 		}
-		////mlog.Log.Debugf("adding updated acct for bankhash: %s", pk)
 		if _, exists := alreadyAdded[eua.Key]; exists {
 			continue
 		}
@@ -853,11 +886,9 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		FeeRateGovernor: block.FeeRateGovernor,
 		NumSignatures:   block.NumSignatures,
 
-		AcctMapsMu:      &sync.Mutex{},
-		ModifiedAccts:   make(map[solana.PublicKey]bool),
-		WritableAccts:   make(map[solana.PublicKey]bool),
-		BankhashStakeMu: &sync.Mutex{},
-		BankhashStakes:  block.BankhashStakes,
+		AcctMapsMu:    &sync.Mutex{},
+		ModifiedAccts: make(map[solana.PublicKey]bool),
+		WritableAccts: make(map[solana.PublicKey]bool),
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,
@@ -948,12 +979,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	for _, txFeeInfo := range txFeeInfos {
 		txFeeAccumulator.Add(txFeeInfo)
 	}
-	/*wallDuration := time.Since(start)
-	var txDuration time.Duration
-	for _, workerTxDuration := range txDurations {
-		txDuration += workerTxDuration
-	}*/
-	//mlog.Log.Infof("completed %s parallel tx execution time in %s wall time.", txDuration, wallDuration)
 
 	return txFeeAccumulator
 }
@@ -964,10 +989,8 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	}
 
 	var sigverifyWg sync.WaitGroup
-	// Each Transaction's sigverify is done asynchronously. Make sure they're all done before we finish this block.
 	defer sigverifyWg.Wait()
 	start := time.Now()
-	//mlog.Log.Debugf("replaying slot %d, epoch %d", block.Slot, block.Epoch)
 	unresolvedBlock := &b.Block{
 		Transactions: make([]*solana.Transaction, len(block.Transactions)),
 		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
@@ -980,7 +1003,6 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	}
 
 	start = time.Now()
-	// gather up all accounts referenced in the block
 	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -988,9 +1010,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
-
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
+
 	if txParallelism > 0 {
 		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
@@ -1000,12 +1022,14 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 
 	start = time.Now()
 
+	// distribute tx fees to the slot leader
 	// skip leader handling if there are zero transactions in this block
-	if block.BlockReward != nil && len(block.Transactions) > 0 {
-		// distribute tx fees to the slot leader
+	if !global.ManageLeaderSchedule() && block.BlockReward != nil && len(block.Transactions) > 0 {
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
 		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
-		//mlog.Log.Debugf("from RPC fees for leader: %d, post-balance: %d (%s)", block.BlockReward.Lamports, block.BlockReward.PostBalance, block.BlockReward.Leader)
+	} else if global.ManageLeaderSchedule() && len(block.Transactions) > 0 {
+		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
+		slotCtx.RecordModifiedAcct(block.Leader)
 	}
 	metrics.GlobalBlockReplay.Reward.AddTimingSince(start)
 
@@ -1021,23 +1045,31 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 
 	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
+
+	start = time.Now()
+	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
+
+	confirmed := global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
+	for confirmed == forkchoice.BankhashNeedWait {
+		confirmed = global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
+	}
+
+	// this slot should be skipped.
+	if confirmed == forkchoice.BankhashNoSupermajority {
+		// TODO: return signal that slot should be skipped
+	}
+
 	if len(modifiedAccts) > 0 {
-		//mlog.Log.Debugf("updating accountsdb")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
-
-	//mlog.Log.Debugf("\ncalculating accts delta hash for %d eligible accounts. len of rentAccts = %d", len(writableAccts), len(rentAccts))
 
 	// EAH workaround
 	if slotCtx.HasEahWorkaround {
 		slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
 		return slotCtx, err
 	}
-
-	start = time.Now()
-	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
-	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
 	err = acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
 	if err != nil {

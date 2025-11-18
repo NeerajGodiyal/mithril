@@ -3,6 +3,7 @@ package accountsdb
 import (
 	"context"
 	"math"
+	"runtime"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -19,7 +20,7 @@ func (db *AccountsDb) GetAccountsBatch(ctx context.Context, slot uint64, pks []s
 	out := make([]*accounts.Account, n)
 
 	// Use a bounded semaphore so we don’t spawn unbounded I/O.
-	maxWorkers := 128 //runtime.NumCPU() * 2
+	maxWorkers := runtime.NumCPU() * 2
 	sem := make(chan struct{}, maxWorkers)
 
 	// Fan‑out jobs.

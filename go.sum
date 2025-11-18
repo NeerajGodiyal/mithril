@@ -115,6 +115,8 @@ github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261 h1:Y715
 github.com/Overclock-Validator/crypto v0.0.0-20250307094320-aaf52fac5261/go.mod h1:ZhRHOaVg8I1gg0VK4wmqOQPnlgPgKFT9McZ+TCW/hBA=
 github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5 h1:I1yDEdgKFwsA4BR7zfY6BGzUVxf04MhHNm/6OoD/Y44=
 github.com/Overclock-Validator/fastcache v0.0.0-20250516085958-ebf01de4f1f5/go.mod h1:3Vxi+ox/6cbjwyjmAnwdf8TSXWjPJKsIhEGb8opPIuw=
+github.com/Overclock-Validator/frand v0.0.0-20251113191226-96ce04ddc1a8 h1:Q7QbIeYib5JUtx7f1Q4GnaPdQ/XvxitgZMPQvf/7CW0=
+github.com/Overclock-Validator/frand v0.0.0-20251113191226-96ce04ddc1a8/go.mod h1:SvoqQH599ARmAzX0za/ZNvb2+2qt47ZpslDYFf4oaK0=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030 h1:Ca69Bqprgu6rHWdjBaJ11W4DoepKW+m80tMPEJcODWk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203114942-f339b3def030/go.mod h1:Poczuq3dbt+CwyTKgOjGaEwJOMP7YxQobF7QhgNcguk=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20241203115807-4a97a7c1b020 h1:AucEjS2Ki7apr3QAGb9uykeROqwExFIabtMkUa7zdbU=
@@ -155,6 +157,8 @@ github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250724222427-5
 github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250724222427-5ee6268e9e64/go.mod h1:eGid2BnlV//V7u9/SHtZGfBM7hY8insIBCR7oBwD2Gg=
 github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250725100536-f7215e35adce h1:BwnM2ojxHXWReSXcNTEHeuoQB1bOQam+MvPzBKo4p+M=
 github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250725100536-f7215e35adce/go.mod h1:eGid2BnlV//V7u9/SHtZGfBM7hY8insIBCR7oBwD2Gg=
+github.com/Overclock-Validator/weightedrand v0.0.0-20251113203832-5ac028321d0a h1:tzw/MMcuueuiIXQP8eN7yDAMGuYoiebyqmw9En4CMC8=
+github.com/Overclock-Validator/weightedrand v0.0.0-20251113203832-5ac028321d0a/go.mod h1:6s4SdiWMKESRRXILwdc+t6aPtQXugAZfu14QecC2w20=
 github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044 h1:ph9gnWIY116AWT/iCfXoPe9/cn2aWx2uJBuLdf/LyEE=
 github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044/go.mod h1:hEf1+Hyc8cRJzEKo448RtaFGZzpP2RVNrfBTTEvkThs=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
@@ -163,6 +167,8 @@ github.com/abcum/lcp v0.0.0-20201209214815-7a3f3840be81 h1:uHogIJ9bXH75ZYrXnVShH
 github.com/abcum/lcp v0.0.0-20201209214815-7a3f3840be81/go.mod h1:6ZvnjTZX1LNo1oLpfaJK8h+MXqHxcBFBIwkgsv+xlv0=
 github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d h1:licZJFw2RwpHMqeKTCYkitsPqHNxTmd4SNR5r94FGM8=
 github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d/go.mod h1:asat636LX7Bqt5lYEZ27JNDcqxfjdBQuJ/MM4CN/Lzo=
+github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da h1:KjTM2ks9d14ZYCvmHS9iAKVt9AyzRSqNU1qabPih5BY=
+github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da/go.mod h1:eHEWzANqSiWQsof+nXEI9bUVUyV6F53Fp89EuCh2EAA=
 github.com/aead/siphash v1.0.1 h1:FwHfE/T45KPKYuuSAKyyvE+oPWcaQ+CUmFW0bPlM+kg=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f h1:z8MkSJCUyTmW5YQlxsMLBlwA7GmjxC7L4ooicxqnhz8=
@@ -745,6 +751,8 @@ github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 h1:mPMvm
 github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1/go.mod h1:ye2e/VUEtE2BHE+G/QcKkcLQVAEJoYRFj5VUOQatCRE=
 github.com/mr-tron/base58 v1.2.0 h1:T/HDJBh4ZCPbU39/+c3rRvE0uKBQlU27+QI8LJ4t64o=
 github.com/mr-tron/base58 v1.2.0/go.mod h1:BinMc/sQntlIE1frQmRFPUoPA1Zkr8VRgBdjWI2mNwc=
+github.com/mroth/weightedrand v1.0.0 h1:V8JeHChvl2MP1sAoXq4brElOcza+jxLkRuwvtQu8L3E=
+github.com/mroth/weightedrand v1.0.0/go.mod h1:3p2SIcC8al1YMzGhAIoXD+r9olo/g/cdJgAD905gyNE=
 github.com/mwitkow/go-conntrack v0.0.0-20161129095857-cc309e4a2223/go.mod h1:qRWi+5nqEBWmkhHvq77mSJWrCKwh8bxhgT7d/eI7P4U=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
 github.com/nio-net/bls v1.0.0 h1:W1OplHsyNDQN7t96Hn0mKAOZOo+4QTe34+nZVokiTjY=
@@ -1314,6 +1322,7 @@ golang.org/x/sys v0.0.0-20190507160741-ecd444e8653b/go.mod h1:h1NjWce9XRLGQEsW7w
 golang.org/x/sys v0.0.0-20190516110030-61b9204099cb/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190606165138-5da285871e9c/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190624142023-c5567b49c5d0/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190726091711-fc99dfbffb4e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190804053845-51ab0e2deafa/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190904154756-749cb33beabd/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
@@ -1516,6 +1525,8 @@ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8T
 golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 h1:H2TDz8ibqkAF6YGhCdN3jS9O0/s90v0rJh3X/OLHEUk=
 golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2/go.mod h1:K8+ghG5WaK9qNqU5K3HdILfMLy1f3aNYFI/wnl100a8=
+gonum.org/v1/gonum v0.16.0 h1:5+ul4Swaf3ESvrOnidPp4GZbzf0mxVQpDCYUQE7OJfk=
+gonum.org/v1/gonum v0.16.0/go.mod h1:fef3am4MQ93R2HHpKnLk4/Tbh/s0+wqD5nfa6Pnwy4E=
 google.golang.org/api v0.4.0/go.mod h1:8k5glujaEP+g9n7WNsDg8QP6cUVNI86fCNMcbazEtwE=
 google.golang.org/api v0.7.0/go.mod h1:WtwebWUNSVBH/HAw79HIFXZNqEvBhG+Ra+ax0hx3E3M=
 google.golang.org/api v0.8.0/go.mod h1:o4eAsZoiT+ibD93RtjEohWalFOjRDx6CVaqeizhEnKg=
@@ -1682,6 +1693,8 @@ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9
 honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
 k8s.io/klog/v2 v2.100.1 h1:7WCHKK6K8fNhTqfBhISHQ97KrnJNFZMcQvKp7gP/tmg=
 k8s.io/klog/v2 v2.100.1/go.mod h1:y1WjHnz7Dj687irZUWR/WLkLc5N1YHtjLdmgWjndZn0=
+lukechampine.com/frand v1.4.2 h1:RzFIpOvkMXuPMBb9maa4ND4wjBn71E1Jpf8BzJHMaVw=
+lukechampine.com/frand v1.4.2/go.mod h1:4S/TM2ZgrKejMcKMbeLjISpJMO+/eZ1zu3vYX9dtj3s=
 lukechampine.com/uint128 v1.3.0 h1:cDdUVfRwDUDovz610ABgFD17nXD4/uDgVHl2sC3+sbo=
 lukechampine.com/uint128 v1.3.0/go.mod h1:c4eWIwlEGaxC/+H1VguhU4PHXNWDCDMUlWdIWl2j1gk=
 rsc.io/binaryregexp v0.2.0/go.mod h1:qTv7/COck+e2FymRvadv62gMdZztPaShugOCi3I+8D8=

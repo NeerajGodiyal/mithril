@@ -855,9 +855,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			err = VoteProgramProcessVote(execCtx, me, slotHashes, clock, &vote, signers, execCtx.Features)
-			if err == nil {
-				recordStakeForVotedBankhash(execCtx.SlotCtx, me.Key(), vote.Hash)
-			}
 		}
 	case VoteProgramInstrTypeUpdateVoteStateSwitch:
 		isUpdateVoteStateSwitch = true
@@ -893,9 +890,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			err = VoteProgramProcessVoteStateUpdate(execCtx, me, slotHashes, clock, &updateVoteState, signers, execCtx.Features)
-			if err == nil {
-				recordStakeForVotedBankhash(execCtx.SlotCtx, me.Key(), updateVoteState.Hash)
-			}
 		}
 
 	case VoteProgramInstrTypeCompactUpdateVoteStateSwitch:
@@ -934,9 +928,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			err = VoteProgramProcessVoteStateUpdate(execCtx, me, slotHashes, clock, updateVoteState, signers, execCtx.Features)
-			if err == nil {
-				recordStakeForVotedBankhash(execCtx.SlotCtx, me.Key(), updateVoteState.Hash)
-			}
 		}
 
 	case VoteProgramInstrTypeWithdraw:
@@ -1058,9 +1049,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			err = VoteProgramProcessTowerSync(execCtx, me, slotHashes, clock, towerSyncInstr, signers, execCtx.Features)
-			if err == nil {
-				recordStakeForVotedBankhash(execCtx.SlotCtx, me.Key(), towerSyncInstr.Hash)
-			}
 		}
 
 	default: // invalid instruction
@@ -1919,12 +1907,4 @@ func VoteProgramProcessTowerSync(execCtx *ExecutionCtx, voteAcct *BorrowedAccoun
 	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
-}
-
-func recordStakeForVotedBankhash(slotCtx *SlotCtx, voteAcctKey solana.PublicKey, votedHash [32]byte) {
-	if stake, exists := slotCtx.VoteAccts[voteAcctKey]; exists && stake > 0 {
-		slotCtx.BankhashStakeMu.Lock()
-		slotCtx.BankhashStakes[votedHash] += stake
-		slotCtx.BankhashStakeMu.Unlock()
-	}
 }

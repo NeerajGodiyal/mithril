@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
+	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
+	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
@@ -19,8 +21,13 @@ type GlobalCtx struct {
 	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochStakes                *epochstakes.EpochStakesCache
+	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
+	forkChoice                 *forkchoice.ForkChoiceService
 	slotsConfirmed             map[uint64]struct{}
+	leaderSchedule             *leaderschedule.LeaderSchedule
 	calcUnixTimeForClockSysvar bool
+	manageLeaderSchedule       bool
+	manageBlockHeight          bool
 	stakeCacheMutex            sync.Mutex
 	voteCacheMutex             sync.Mutex
 	slotsConfirmedMutex        sync.Mutex
@@ -45,6 +52,18 @@ func SetEpoch(epoch uint64) {
 	instance.SetEpoch(epoch)
 }
 
+func SetForkChoice(forkChoice *forkchoice.ForkChoiceService) {
+	instance.forkChoice = forkChoice
+}
+
+func SubmitBlockToForkChoiceService(slot uint64, txs []*solana.Transaction) {
+	instance.forkChoice.SubmitBlock(slot, txs)
+}
+
+func BankhashConfirmedForSlot(slot uint64, bankHash solana.Hash) int {
+	return instance.forkChoice.IsBankhashCorrect(slot, bankHash)
+}
+
 func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
 }
@@ -62,6 +81,17 @@ func DeleteStakeCacheItem(pubkey solana.PublicKey) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 	delete(instance.stakeCache, pubkey)
+}
+
+func PutEpochAuthorizedVoter(voteAcct solana.PublicKey, authorizedVoter solana.PublicKey) {
+	if instance.epochAuthorizedVoters == nil {
+		instance.epochAuthorizedVoters = epochstakes.NewEpochAuthorizedVotersCache()
+	}
+	instance.epochAuthorizedVoters.PutEntry(voteAcct, authorizedVoter)
+}
+
+func EpochAuthorizedVoters() *epochstakes.EpochAuthorizedVotersCache {
+	return instance.epochAuthorizedVoters
 }
 
 func PutSlotConfirmed(slot uint64) {
@@ -107,15 +137,35 @@ func VoteCache() map[solana.PublicKey]*sealevel.VoteStateVersions {
 	return instance.voteCache
 }
 
-func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64) {
+func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
 	if instance.epochStakes == nil {
 		instance.epochStakes = epochstakes.NewEpochStakesCache()
 	}
-	instance.epochStakes.PutEntry(epoch, pubkey, stake)
+	instance.epochStakes.PutEntry(epoch, pubkey, stake, voteAcct)
 }
 
 func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
 	return instance.epochStakes.EpochStakes(epoch)
+}
+
+func PutEpochTotalStake(epoch uint64, totalStake uint64) {
+	if instance.epochStakes == nil {
+		instance.epochStakes = epochstakes.NewEpochStakesCache()
+	}
+	instance.epochStakes.PutTotalEpochStake(epoch, totalStake)
+}
+
+func EpochTotalStake(epoch uint64) uint64 {
+	return instance.epochStakes.TotalStake(epoch)
+}
+
+func StakeForVoteAcct(epoch uint64, voteAcct solana.PublicKey) uint64 {
+	epochStakes := instance.epochStakes.EpochStakes(epoch)
+	return epochStakes[voteAcct]
+}
+
+func EpochStakesVoteAccts(epoch uint64) map[solana.PublicKey]*epochstakes.VoteAccount {
+	return instance.epochStakes.EpochStakesAccts(epoch)
 }
 
 func LatestBlockHash() [32]byte {
@@ -138,12 +188,36 @@ func TransactionCount() uint64 {
 	return instance.TransactionCount()
 }
 
-func SetCalcUnixTimeForClockSysvar(useOvercast bool) {
-	instance.calcUnixTimeForClockSysvar = useOvercast
+func SetCalcUnixTimeForClockSysvar(calcUnixTime bool) {
+	instance.calcUnixTimeForClockSysvar = calcUnixTime
 }
 
 func CalcUnixTimeForClockSysvar() bool {
 	return instance.calcUnixTimeForClockSysvar
+}
+
+func SetManageLeaderSchedule(manageLeaderSchedule bool) {
+	instance.manageLeaderSchedule = manageLeaderSchedule
+}
+
+func ManageLeaderSchedule() bool {
+	return instance.manageLeaderSchedule
+}
+
+func SetManageBlockHeight(manageBlockHeight bool) {
+	instance.manageBlockHeight = true
+}
+
+func ManageBlockHeight() bool {
+	return instance.manageBlockHeight
+}
+
+func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
+	instance.leaderSchedule = ls
+}
+
+func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
+	return instance.leaderSchedule.LeaderForSlot(slot)
 }
 
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
@@ -127,6 +128,7 @@ func (blockConsumer *BlockConsumer) DownloadInitialBlocks() {
 		idx := taskInfo.idx
 
 		block := blockConsumer.fetchAndParseBlock(slot)
+		global.SubmitBlockToForkChoiceService(block.Slot, block.Transactions)
 		blocks[idx] = block
 	})
 
@@ -150,6 +152,7 @@ func (blockConsumer *BlockConsumer) StartAsyncBlockStream() {
 	for ; blockConsumer.currentSlot < blockConsumer.endSlot; blockConsumer.currentSlot++ {
 		newBlock := blockConsumer.fetchAndParseBlock(blockConsumer.currentSlot)
 		if newBlock != nil {
+			global.SubmitBlockToForkChoiceService(newBlock.Slot, newBlock.Transactions)
 			blockConsumer.streamChan <- newBlock
 		}
 	}

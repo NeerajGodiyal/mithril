@@ -92,6 +92,14 @@ func CalculatePreviousEpochInflationRewards(epochSchedule *sealevel.SysvarEpochS
 	return uint64(validatorRewards)
 }
 
+func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.SysvarEpochSchedule) bool {
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	if slot < (firstSlotInEpoch + 243) {
+		return true
+	} else {
+		return false
+	}
+}
 func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
 	var totalStakingRewards uint64
 

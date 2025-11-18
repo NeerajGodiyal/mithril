@@ -4,7 +4,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
-	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -34,13 +33,11 @@ type Block struct {
 	UnixTimestamp                       int64
 	VoteAccts                           map[solana.PublicKey]uint64
 	VoteTimestamps                      map[solana.PublicKey]sealevel.BlockTimestamp
-	BankhashStakes                      map[[32]byte]uint64
 	TotalEpochStake                     uint64
 	Features                            *features.Features
 	UpdatedAccts                        []solana.PublicKey
 	ParentEpochUpdatedAccts             []*accounts.Account
 	EpochUpdatedAccts                   []*accounts.Account
-	PartitionedRewardsInfo              *rewards.PartitionedRewardDistributionInfo
 	Rewards                             []rpc.BlockReward
 	NumRewardPartitions                 uint64
 	LatestEvictedBlockhash              [32]byte

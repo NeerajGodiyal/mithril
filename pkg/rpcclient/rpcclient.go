@@ -5,10 +5,11 @@ import (
 )
 
 type RpcClient struct {
-	client *rpc.Client
+	client   *rpc.Client
+	endpoint string
 }
 
 func NewRpcClient(endpoint string) *RpcClient {
 	client := rpc.New(endpoint)
-	return &RpcClient{client: client}
+	return &RpcClient{client: client, endpoint: endpoint}
 }
