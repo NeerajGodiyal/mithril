@@ -1022,6 +1022,9 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		if size > uint64(len(mem)) {
 			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds stack access")
 		}
+		if size == 0 {
+			return emptySlice, nil
+		}
 		return unsafe.Pointer(&mem[0]), nil
 	case VaddrHeap >> 32:
 		if size == 0 {
