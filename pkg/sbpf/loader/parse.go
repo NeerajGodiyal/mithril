@@ -372,7 +372,7 @@ func (l *Loader) newDynIter() (*dynTableIter, error) {
 	iter := &dynTableIter{
 		l:        l,
 		off:      off,
-		count:    uint32(off / dynLen),
+		count:    uint32(size / dynLen),
 		elemSize: dynLen,
 	}
 
