@@ -176,6 +176,10 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 }
 
 func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
+	if len(tx.Message.Instructions) == 0 {
+		return nil, nil, errors.New("empty tx")
+	}
+
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
 	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
 
