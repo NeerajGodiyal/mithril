@@ -25,14 +25,11 @@ func SaturatingAddU8(a, b uint8) uint8 {
 // SaturatingMulU8 multiplies two uint8's together and saturates at the numerical boundary
 // if an overflow would have occurred.
 func SaturatingMulU8(a, b uint8) uint8 {
-	if a == 0 || b == 0 {
-		return 0
-	}
-	result := a * b
-	if result < a {
+	result := uint16(a) * uint16(b)
+	if result > math.MaxUint8 {
 		return math.MaxUint8
 	}
-	return result
+	return uint8(result)
 }
 
 // SaturatingSubU8 computes `a - b` for two uint8's and saturates at the numerical boundary
@@ -57,14 +54,11 @@ func SaturatingAddU16(a, b uint16) uint16 {
 // SaturatingMulU16 multiplies two uint16's together and saturates at the numerical boundary
 // if an overflow would have occurred.
 func SaturatingMulU16(a, b uint16) uint16 {
-	if a == 0 || b == 0 {
-		return 0
-	}
-	result := a * b
-	if result < a {
+	result := uint32(a) * uint32(b)
+	if result > math.MaxUint16 {
 		return math.MaxUint16
 	}
-	return result
+	return uint16(result)
 }
 
 // SaturatingSubU16 computes `a - b` for two uint16's and saturates at the numerical
