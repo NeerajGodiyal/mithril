@@ -191,7 +191,7 @@ func Decode32(out *[32]byte, encoded []byte) (ok bool) {
 	// Validate string
 	for _, c := range encoded {
 		idx := int(c) - int(inverseLUTOffset)
-		if idx > int(inverseLUTSentinel) {
+		if idx < 0 || idx > int(inverseLUTSentinel) {
 			idx = int(inverseLUTSentinel)
 		}
 		if inverseLUT[idx] == invalidChar {
