@@ -7,6 +7,7 @@ package safemath
 
 import (
 	"errors"
+	"math"
 	"math/bits"
 
 	"github.com/Overclock-Validator/wide"
@@ -32,11 +33,11 @@ func CheckedAddU8(a, b uint8) (uint8, error) {
 // CheckedMulU8 multiplies two uint8's together, returning an error
 // in the event of an overflow.
 func CheckedMulU8(a, b uint8) (uint8, error) {
-	result := a * b
-	if result < a {
+	result := uint16(a) * uint16(b)
+	if result > math.MaxUint8 {
 		return 0, ErrOverflowMul
 	}
-	return result, nil
+	return uint8(result), nil
 }
 
 // CheckedSubU8 computes `a - b` for two uint8's returning an error in the event
@@ -70,11 +71,11 @@ func CheckedAddU16(a, b uint16) (uint16, error) {
 // CheckedMulU16 multiplies two uint16's together, returning an error in the event
 // of an overflow.
 func CheckedMulU16(a, b uint16) (uint16, error) {
-	result := a * b
-	if result < a {
+	result := uint32(a) * uint32(b)
+	if result > math.MaxUint16 {
 		return 0, ErrOverflowMul
 	}
-	return result, nil
+	return uint16(result), nil
 }
 
 // CheckedSubU16 computes `a - b` for two uint16's, returning an error in the event
