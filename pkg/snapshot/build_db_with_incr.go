@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -119,10 +120,17 @@ func BuildAccountsDbWithIncr(
 		writer := task.TarBuffer
 
 		outFilename := filepath.Join(accountsDbDir, filename)
+
+		// validate that the path doesn't escape accountsDbDir (via '../' sequences)
+		cleanPath := filepath.Clean(outFilename)
+		if !strings.HasPrefix(cleanPath, filepath.Clean(accountsDbDir)+string(os.PathSeparator)) {
+			panic(fmt.Sprintf("invalid path in tar archive: %s", filename))
+		}
+
 		appendVecBytes := writer.Bytes()
-		err := os.WriteFile(outFilename, appendVecBytes, 0644)
+		err := os.WriteFile(cleanPath, appendVecBytes, 0644)
 		if err != nil {
-			mlog.Log.Errorf("err writing new file=%s: %v", outFilename, err)
+			mlog.Log.Errorf("err writing new file=%s: %v", cleanPath, err)
 			appendVecCopyingInProgress.Add(-1)
 			return
 		}
