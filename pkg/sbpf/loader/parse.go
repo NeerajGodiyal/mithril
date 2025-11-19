@@ -162,7 +162,12 @@ func (l *Loader) validateElfHeader() error {
 	if eh.Shoff < ehLen {
 		return fmt.Errorf("section header overlaps with file header")
 	}
-	if isOverlap(eh.Phoff, uint64(eh.Phnum)*phEntLen, eh.Shoff, uint64(eh.Shnum)*shEntLen) {
+
+	overlap, err := isOverlap(eh.Phoff, uint64(eh.Phnum)*phEntLen, eh.Shoff, uint64(eh.Shnum)*shEntLen)
+	if err != nil {
+		return err
+	}
+	if overlap {
 		return fmt.Errorf("program and section header overlap")
 	}
 
@@ -243,10 +248,20 @@ func (l *Loader) readSectionHeaderTable() error {
 		if sh.Off < ehLen {
 			return fmt.Errorf("section %d overlaps with file header", i)
 		}
-		if isOverlap(eh.Phoff, uint64(eh.Phnum)*phEntLen, sh.Off, sh.Size) {
+
+		overlap, err := isOverlap(eh.Phoff, uint64(eh.Phnum)*phEntLen, sh.Off, sh.Size)
+		if err != nil {
+			return err
+		}
+		if overlap {
 			return fmt.Errorf("section %d overlaps with program header", i)
 		}
-		if isOverlap(eh.Shoff, uint64(eh.Shnum)*shEntLen, sh.Off, sh.Size) {
+
+		overlap, err = isOverlap(eh.Shoff, uint64(eh.Shnum)*shEntLen, sh.Off, sh.Size)
+		if err != nil {
+			return err
+		}
+		if overlap {
 			return fmt.Errorf("section %d overlaps with section header", i)
 		}
 
@@ -836,13 +851,13 @@ func (l *Loader) getDynstr(name uint32) (string, error) {
 	return l.getString(l.shDynstr, name, maxSymbolNameLen)
 }
 
-func isOverlap(startA uint64, sizeA uint64, startB uint64, sizeB uint64) bool {
+func isOverlap(startA uint64, sizeA uint64, startB uint64, sizeB uint64) (bool, error) {
 	if startA > startB {
 		startA, sizeA, startB, sizeB = startB, sizeB, startA, sizeA
 	}
 	endA, endB := startA+sizeA, startB+sizeB
 	if endA < startA || endB < startB {
-		panic("isOverlap: integer overflow")
+		return false, fmt.Errorf("isOverlap: integer overflow")
 	}
-	return sizeA != 0 && sizeB != 0 && (startA == startB || endA > endB)
+	return sizeA != 0 && sizeB != 0 && (startA == startB || endA > endB), nil
 }
