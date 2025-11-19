@@ -891,15 +891,13 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 			var calleeAcct *BorrowedAccount
 			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
 			if err != nil {
-				//mlog.Log.Debugf("calling BorrowInstructionAccount for updateCallerAccount failed! %s", err)
 				return syscallErr(err)
 			}
-			calleeAcct.Drop()
+			defer calleeAcct.Drop()
 			err = updateCallerAccount(vm, acct.CallerAccount, calleeAcct)
 			if err != nil {
 				return syscallErr(err)
 			}
-			calleeAcct.Drop()
 		}
 	}
 
