@@ -641,15 +641,6 @@ func (authVoters *AuthorizedVoters) PurgeAuthorizedVoters(currentEpoch uint64) b
 		}
 	}
 
-	/*authVoters.AuthorizedVoters.Ascend(0, func(key uint64, value solana.PublicKey) bool {
-		if key == currentEpoch {
-			return false
-		} else {
-			expiredKeys = append(expiredKeys, key)
-			return true
-		}
-	})*/
-
 	for _, key := range expiredKeys {
 		_, success := authVoters.AuthorizedVoters.Delete(key)
 		if !success {

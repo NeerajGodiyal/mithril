@@ -542,7 +542,7 @@ func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *Borr
 			if uint64(len(callerAcct.SerializedData)) < postLen {
 				return InstrErrAccountDataTooSmall
 			}
-			for i := range callerAcct.SerializedData[postLen:] {
+			for i := postLen; i < uint64(len(callerAcct.SerializedData)); i++ {
 				callerAcct.SerializedData[i] = 0
 			}
 		}
@@ -826,8 +826,6 @@ func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, acc
 	return syscallSuccess(0)
 }
 
-//var SyscallInvokeSignedC = sbpf.SyscallFunc5(SyscallInvokeSignedCImpl)
-
 // SyscallInvokeSignedRustImpl is an implementation of the sol_invoke_signed_rust syscall
 func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
 	//mlog.Log.Debugf("SyscallInvokeSignedRust")
@@ -907,5 +905,3 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 
 	return syscallSuccess(0)
 }
-
-//var SyscallInvokeSignedRust = sbpf.SyscallFunc5(SyscallInvokeSignedRustImpl)
