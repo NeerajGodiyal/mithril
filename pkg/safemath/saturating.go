@@ -158,6 +158,13 @@ func SaturatingSubU64(a, b uint64) uint64 {
 }
 
 func SaturatingPow(n uint64, m uint32) uint64 {
+	if n == 0 {
+		if m == 0 {
+			return 1
+		}
+		return 0
+	}
+
 	if m == 0 {
 		return 1
 	}
@@ -166,14 +173,18 @@ func SaturatingPow(n uint64, m uint32) uint64 {
 		return n
 	}
 
+	if n == 1 {
+		return 1
+	}
+
 	result := n
 	for i := uint32(2); i <= m; i++ {
 		x := result * n
 		if (x / n) != result {
 			return math.MaxUint64
-		} else {
-			result = x
 		}
+		result = x
 	}
+
 	return result
 }
