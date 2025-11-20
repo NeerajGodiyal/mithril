@@ -172,6 +172,14 @@ func collectAndUpdateSysvarAcctsForAdh(slotCtx *sealevel.SlotCtx) []*accounts.Ac
 			newSlotHistoryBytes := slotHistory.MustMarshal()
 			copy(acct.Data, newSlotHistoryBytes)
 		}
+
+		if acct.Key == sealevel.SysvarRecentBlockHashesAddr {
+			recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
+			slotCtx.LatestEvictedBlockhash = recentBlockhashes.PushLatest(slotCtx.Blockhash, slotCtx.FeeRateGovernor.LamportsPerSignature)
+			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
+			copy(acct.Data, newRecentBlockhashesBytes)
+		}
+
 		sysvarAccts = append(sysvarAccts, acct)
 	}
 	return sysvarAccts

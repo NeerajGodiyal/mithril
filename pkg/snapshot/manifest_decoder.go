@@ -27,7 +27,7 @@ type HashAgePair struct {
 type BlockHashVec struct {
 	LastHashIndex uint64
 	LastHash      *[32]byte
-	Ages          []HashAgePair
+	HashAndAge    []HashAgePair
 	MaxAge        uint64
 }
 
@@ -289,14 +289,14 @@ func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		return err
 	}
 
-	//bhv.Ages = make([]HashAgePair, 0, numAges)
+	bhv.HashAndAge = make([]HashAgePair, 0, numAges)
 	for count := uint64(0); count < numAges; count++ {
 		var age HashAgePair
 		err = age.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		//bhv.Ages = append(bhv.Ages, age)
+		bhv.HashAndAge = append(bhv.HashAndAge, age)
 	}
 
 	bhv.MaxAge, err = decoder.ReadUint64(bin.LE)

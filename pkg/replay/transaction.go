@@ -46,6 +46,7 @@ var (
 	TxErrMaxLoadedAccountsDataSizeExceeded = errors.New("TxErrMaxLoadedAccountsDataSizeExceeded")
 	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
 	TxErrInvalidProgramForExecution        = errors.New("TxErrProgramAccountNotFound")
+	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
 )
 
 func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
@@ -426,6 +427,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		return nil, err
 	}
 	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
+
+	if !sealevel.IsTransactionAgeValid(tx, instrs, slotCtx) {
+		fmt.Printf("tx %s, tx age was not valid\n", tx.Signatures[0])
+		return nil, TxErrInvalidBlockhash
+	}
 
 	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
 

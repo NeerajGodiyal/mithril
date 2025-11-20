@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -308,15 +309,13 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to set recentblockhashes sysvar to accts")
 			}
 
-			decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
-			var recentBlockhashes sealevel.SysvarRecentBlockhashes
-			recentBlockhashes.MustUnmarshalWithDecoder(decoder)
-			block.LatestEvictedBlockhash = recentBlockhashes.PushLatest(block.Blockhash, block.FeeRateGovernor.LamportsPerSignature)
-			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
-			copy(recentBlockhashesAcct.Data, newRecentBlockhashesBytes)
-
-			sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
-			sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+			if sealevel.SysvarCache.RecentBlockHashes.Sysvar == nil {
+				decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
+				var recentBlockhashes sealevel.SysvarRecentBlockhashes
+				recentBlockhashes.MustUnmarshalWithDecoder(decoder)
+				sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
+				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+			}
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
 			if err != nil {
@@ -556,6 +555,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	rpcClient *rpcclient.RpcClient) {
+
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
 	block.AcctsLtHash = snapshotManifest.LtHash
@@ -579,6 +579,14 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	if global.ManageBlockHeight() {
 		block.BlockHeight = global.BlockHeight()
 	}
+
+	// we use the RecentBlockhashes sysvar to determine whether a tx has a blockhash of acceptable
+	// age, but due to how Agave's BlockhashQueue is implemented, the latest 151 blockhashes
+	// are valid, rather than 150. we therefore need the last blockhash that was evicted from
+	// the RecentBlockhashes sysvar, and that's what the code below does.
+	ages := snapshotManifest.Bank.BlockhashQueue.HashAndAge
+	sort.Slice(ages, func(i, j int) bool { return ages[i].Val.HashIndex > ages[j].Val.HashIndex })
+	block.LatestEvictedBlockhash = ages[150].Key
 
 	snapshotManifest = nil
 }
