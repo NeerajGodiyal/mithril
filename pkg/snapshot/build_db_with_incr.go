@@ -14,7 +14,6 @@ import (
 
 	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
@@ -33,7 +32,7 @@ func BuildAccountsDbWithIncr(
 	rpcEndpoint string,
 	rpcEndpointFile string,
 	blockDir string,
-	blockChan chan *block.Block,
+	overcastEndpoint string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, file, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
@@ -217,15 +216,26 @@ func BuildAccountsDbWithIncr(
 	}
 	mlog.Log.Infof("finished downloading incremental snapshot in %s to %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
 
-	opts := blockstream.BlockSourceOpts{
-		EndpointType: blockstream.BlockEndpointTypeRpc,
-		OutDir:       blockDir,
-		RpcPoolFile:  rpcEndpointFile,
-		StartSlot:    uint64(incrSlot),
+	var downloaderOpts blockstream.BackgroundBlockDownloaderOpts
+	if overcastEndpoint != "" {
+		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
+			SourceType:       blockstream.BackgroundBlockDownloaderSourceOvercast,
+			OutDir:           blockDir,
+			OvercastEndpoint: overcastEndpoint,
+			RpcPoolFile:      rpcEndpointFile,
+			StartSlot:        uint64(incrSlot),
+		}
+	} else {
+		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
+			SourceType:  blockstream.BackgroundBlockDownloaderSourceRpc,
+			OutDir:      blockDir,
+			RpcPoolFile: rpcEndpointFile,
+			StartSlot:   uint64(incrSlot),
+		}
 	}
 
-	blockSubscriber := blockstream.NewBlockSource(opts)
-	go blockSubscriber.Start()
+	catchupDownloader := blockstream.NewBlockDownloader(downloaderOpts)
+	go catchupDownloader.Start()
 
 	incrSnapshotStart := time.Now()
 	incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)

@@ -75,7 +75,7 @@ func Test_OvercastGrpc(f *testing.T) {
 		}
 
 		if err != nil {
-			panic(err) // dont use panic in your real project
+			panic(err)
 		}
 	}
 }

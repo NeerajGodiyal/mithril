@@ -289,10 +289,7 @@ func fetchBankhashForSlot(rpcc *rpcclient.RpcClient, slot uint64) ([]byte, error
 		}
 	}
 
-	block, err := block.FromBlockResult(blockResult, slot, rpcc)
-	if err != nil {
-		panic(fmt.Sprintf("error creating block from BlockResult: %s\n", err))
-	}
+	block := block.FromBlockResult(blockResult, slot, rpcc)
 
 	var count uint64
 	for _, tx := range block.Transactions {

@@ -6,20 +6,34 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, bool) {
+func IsNonceInstr(instr Instruction) bool {
 	if instr.ProgramId != a.SystemProgramAddr {
-		return solana.PublicKey{}, false
+		return false
 	}
+
 	if len(instr.Data) < 4 {
-		return solana.PublicKey{}, false
+		return false
+	}
+
+	if len(instr.Accounts) < 1 {
+		return false
 	}
 
 	decoder := bin.NewBinDecoder(instr.Data)
 	instructionType, err := decoder.ReadUint32(bin.LE)
 	if err != nil {
-		return solana.PublicKey{}, false
+		return false
 	}
+
 	if instructionType != SystemProgramInstrTypeAdvanceNonceAccount {
+		return false
+	}
+
+	return true
+}
+
+func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, bool) {
+	if !IsNonceInstr(instr) {
 		return solana.PublicKey{}, false
 	}
 

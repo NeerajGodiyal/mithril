@@ -4,6 +4,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/overcast"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -15,6 +16,8 @@ type Block struct {
 	BlockHeight                         uint64
 	Epoch                               uint64
 	Transactions                        []*solana.Transaction
+	Versions                            []uint8
+	Entries                             []*overcast.Entry
 	BankHash                            [32]byte
 	EpochAcctsHash                      []byte
 	EahWorkaroundBankhash               []byte
@@ -43,6 +46,15 @@ type Block struct {
 	LatestEvictedBlockhash              [32]byte
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
+}
+
+func (b *Block) FixupTxVersions() {
+	if len(b.Versions) == 0 {
+		return
+	}
+	for idx, tx := range b.Transactions {
+		tx.Message.SetVersion(solana.MessageVersion(b.Versions[idx]))
+	}
 }
 
 type BlockRewardsInfo struct {

@@ -30,7 +30,10 @@ func init() {
 		&node.Verifier,
 	)
 	cmd.AddCommand(
-		&node.Catchup,
+		&node.CatchupRpc,
+	)
+	cmd.AddCommand(
+		&node.CatchupOvercast,
 	)
 }
 

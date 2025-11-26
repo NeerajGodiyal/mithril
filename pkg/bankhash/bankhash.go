@@ -111,11 +111,6 @@ func calculateSingleAcctHash(acct accounts.Account) acctHash {
 	_, _ = hasher.Write(acct.Owner[:])
 	_, _ = hasher.Write(acct.Key[:])
 
-	/*h := sha256.New()
-	h.Write(acct.Data)
-
-	fmt.Printf("acct: pubkey %s, lamports %d, owner %s, rent_epoch %d, data hash: %s\n", acct.Key, acct.Lamports, solana.PublicKeyFromBytes(acct.Owner[:]), acct.RentEpoch, solana.HashFromBytes(h.Sum(nil)))*/
-
 	return newAcctHash(acct.Key, hasher.Sum(nil))
 }
 
@@ -177,11 +172,6 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 		return pubkeyCmp(acctHashes[i].Pubkey, acctHashes[j].Pubkey)
 	})
 
-	/*mlog.Log.Debugf("accounts modified, sorted by pubkey:\n")
-	for _, ah := range acctHashes {
-		mlog.Log.Debugf("pubkey: %s, hash: %s\n", ah.Pubkey, solana.PublicKeyFromBytes(ah.Hash[:]))
-	}*/
-
 	hashes := make([][]byte, len(acctHashes))
 	for idx, ah := range acctHashes {
 		hashes[idx] = make([]byte, 32)
@@ -239,30 +229,4 @@ func shouldIncludeEah(epochSchedule *sealevel.SysvarEpochSchedule, slotCtx *seal
 	stopSlot := safemath.SaturatingAddU64(firstSlotInEpoch, calculationOffsetStop)
 
 	return slotCtx.ParentSlot < stopSlot && slotCtx.Slot >= stopSlot
-}
-
-func calculateBankHash(slotCtx *sealevel.SlotCtx, acctsDeltaHash []byte, parentBankHash [32]byte, numSigs uint64, blockHash [32]byte) []byte {
-	hasher := sha256.New()
-	hasher.Write(parentBankHash[:])
-	hasher.Write(acctsDeltaHash[:])
-
-	var numSigsBytes [8]byte
-	binary.LittleEndian.PutUint64(numSigsBytes[:], numSigs)
-
-	hasher.Write(numSigsBytes[:])
-	hasher.Write(blockHash[:])
-
-	bankHash := hasher.Sum(nil)
-
-	// EAH must be worked into the bankhash for the slot that is 3/4 through the epoch
-	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
-	if shouldIncludeEah(epochSchedule, slotCtx) {
-		mlog.Log.Infof("EAH required for this bankhash")
-		hasher := sha256.New()
-		hasher.Write(bankHash)
-		hasher.Write(slotCtx.EpochsAcctHash)
-		bankHash = hasher.Sum(nil)
-	}
-
-	return bankHash
 }

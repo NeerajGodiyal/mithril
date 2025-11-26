@@ -1,6 +1,7 @@
 package block
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -9,16 +10,18 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {
+func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) *Block {
 	block := new(Block)
+	block.Slot = slot
 
 	for _, tx := range blockResult.Transactions {
 		txParsed, err := tx.GetTransaction()
 		if err != nil {
-			return nil, err
+			panic(fmt.Sprintf("parsing tx from rpc returned err: %s", err))
 		}
 		block.Transactions = append(block.Transactions, txParsed)
 		block.TxMetas = append(block.TxMetas, tx.Meta)
+		block.Versions = append(block.Versions, uint8(txParsed.Message.GetVersion()))
 	}
 
 	block.Blockhash = blockResult.Blockhash
@@ -56,7 +59,7 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 		block.NumSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
 	}
 
-	return block, nil
+	return block
 }
 
 func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {

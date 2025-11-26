@@ -330,7 +330,7 @@ func (state *UpgradeableLoaderState) MarshalWithEncoder(encoder *bin.Encoder) er
 	return err
 }
 
-func unmarshalUpgradeableLoaderState(data []byte) (*UpgradeableLoaderState, error) {
+func UnmarshalUpgradeableLoaderState(data []byte) (*UpgradeableLoaderState, error) {
 	state := new(UpgradeableLoaderState)
 	decoder := bin.NewBinDecoder(data)
 
@@ -1181,13 +1181,13 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 					return InstrErrUnsupportedProgramId
 				}
 			}
-			programAcctState, err = unmarshalUpgradeableLoaderState(paTmp.Data)
+			programAcctState, err = UnmarshalUpgradeableLoaderState(paTmp.Data)
 			if err != nil {
 				return err
 			}
 			metrics.GlobalBlockReplay.GetProgramAccount.AddTimingSince(start)
 		} else {
-			programAcctState, err = unmarshalUpgradeableLoaderState(programAcct.Data())
+			programAcctState, err = UnmarshalUpgradeableLoaderState(programAcct.Data())
 			if err != nil {
 				return err
 			}
@@ -1217,7 +1217,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			start = time.Now()
-			programDataAcctState, err := unmarshalUpgradeableLoaderState(programDataAcct.Data)
+			programDataAcctState, err := UnmarshalUpgradeableLoaderState(programDataAcct.Data)
 			if err != nil {
 				return err
 			}
@@ -1270,7 +1270,7 @@ func UpgradeableLoaderInitializeBuffer(execCtx *ExecutionCtx, txCtx *Transaction
 	}
 	defer buffer.Drop()
 
-	state, err := unmarshalUpgradeableLoaderState(buffer.Data())
+	state, err := UnmarshalUpgradeableLoaderState(buffer.Data())
 	if err != nil {
 		return err
 	}
@@ -1312,7 +1312,7 @@ func UpgradeableLoaderWrite(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 	}
 	defer buffer.Drop()
 
-	state, err := unmarshalUpgradeableLoaderState(buffer.Data())
+	state, err := UnmarshalUpgradeableLoaderState(buffer.Data())
 	if err != nil {
 		return err
 	}
@@ -1422,7 +1422,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	}
 	defer program.Drop()
 
-	programAcctState, err := unmarshalUpgradeableLoaderState(program.Data())
+	programAcctState, err := UnmarshalUpgradeableLoaderState(program.Data())
 	if err != nil {
 		return err
 	}
@@ -1449,7 +1449,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	}
 	defer buffer.Drop()
 
-	bufferAcctState, err := unmarshalUpgradeableLoaderState(buffer.Data())
+	bufferAcctState, err := UnmarshalUpgradeableLoaderState(buffer.Data())
 	if err != nil {
 		return err
 	}
@@ -1526,11 +1526,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 
 	var lamports uint64
 	minBalance := rent.MinimumBalance(programDataLen)
-	if minBalance > 1 {
-		lamports = minBalance
-	} else {
-		lamports = 1
-	}
+	lamports = max(minBalance, 1)
 	createAcctInstr := newCreateAccountInstruction(payerKey, programDataKey, lamports, programDataLen, programId)
 	createAcctInstr.Accounts = append(createAcctInstr.Accounts, AccountMeta{Pubkey: bufferKey, IsSigner: false, IsWritable: true})
 
@@ -1717,7 +1713,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return InstrErrIncorrectProgramId
 	}
 
-	programState, err := unmarshalUpgradeableLoaderState(program.Data())
+	programState, err := UnmarshalUpgradeableLoaderState(program.Data())
 	if err != nil {
 		return err
 	}
@@ -1738,7 +1734,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	}
 	defer buffer.Drop()
 
-	bufferState, err := unmarshalUpgradeableLoaderState(buffer.Data())
+	bufferState, err := UnmarshalUpgradeableLoaderState(buffer.Data())
 	if err != nil {
 		return err
 	}
@@ -1785,7 +1781,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 		return InstrErrInsufficientFunds
 	}
 
-	programDataState, err := unmarshalUpgradeableLoaderState(programData.Data())
+	programDataState, err := UnmarshalUpgradeableLoaderState(programData.Data())
 	if err != nil {
 		return err
 	}
@@ -1929,7 +1925,7 @@ func UpgradeableLoaderSetAuthority(execCtx *ExecutionCtx, txCtx *TransactionCtx,
 		}
 	}
 
-	accountState, err := unmarshalUpgradeableLoaderState(account.Data())
+	accountState, err := UnmarshalUpgradeableLoaderState(account.Data())
 	if err != nil {
 		return err
 	}
@@ -2056,7 +2052,7 @@ func UpgradeableLoaderSetAuthorityChecked(execCtx *ExecutionCtx, txCtx *Transact
 		return err
 	}
 
-	accountState, err := unmarshalUpgradeableLoaderState(account.Data())
+	accountState, err := UnmarshalUpgradeableLoaderState(account.Data())
 	if err != nil {
 		return err
 	}
@@ -2242,7 +2238,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 
 	closeKey := closeAcct.Key()
 
-	closeAcctState, err := unmarshalUpgradeableLoaderState(closeAcct.Data())
+	closeAcctState, err := UnmarshalUpgradeableLoaderState(closeAcct.Data())
 	if err != nil {
 		return err
 	}
@@ -2335,7 +2331,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 				return InstrErrInvalidArgument
 			}
 
-			programAcctState, err := unmarshalUpgradeableLoaderState(programAcct.Data())
+			programAcctState, err := UnmarshalUpgradeableLoaderState(programAcct.Data())
 			if err != nil {
 				return err
 			}
@@ -2428,7 +2424,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 		return InstrErrInvalidAccountOwner
 	}
 
-	programAcctState, err := unmarshalUpgradeableLoaderState(programAcct.Data())
+	programAcctState, err := UnmarshalUpgradeableLoaderState(programAcct.Data())
 	if err != nil {
 		return err
 	}
@@ -2464,7 +2460,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 
 	clockSlot := clock.Slot
 
-	programDataAcctState, err := unmarshalUpgradeableLoaderState(programDataAcct.Data())
+	programDataAcctState, err := UnmarshalUpgradeableLoaderState(programDataAcct.Data())
 	if err != nil {
 		return err
 	}

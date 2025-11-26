@@ -72,7 +72,7 @@ func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
 	}
 }
 
-func CalculateTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) *TxFeeInfo {
+func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) *TxFeeInfo {
 	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
 	secp256r1PrecompiledEnabled := f.IsActive(features.EnableSecp256r1Precompile)
 

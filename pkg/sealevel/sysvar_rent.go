@@ -3,9 +3,11 @@ package sealevel
 import (
 	"bytes"
 	"fmt"
+	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 )
 
@@ -53,7 +55,14 @@ func (sr *SysvarRent) MustUnmarshalWithDecoder(decoder *bin.Decoder) {
 }
 
 func (sr *SysvarRent) MinimumBalance(dataLen uint64) uint64 {
-	min := float64(((dataLen + rentAccountStorageOverhead) * sr.LamportsPerUint8Year) * uint64(sr.ExemptionThreshold))
+	dataLenWithOverhead := safemath.SaturatingAddU64(dataLen, rentAccountStorageOverhead)
+	lamportsPerYear := safemath.SaturatingMulU64(dataLenWithOverhead, sr.LamportsPerUint8Year)
+	min := float64(lamportsPerYear) * sr.ExemptionThreshold
+
+	// saturate at MaxUint64 if the result exceeds this numerical boundary
+	if min > float64(math.MaxUint64) {
+		return math.MaxUint64
+	}
 	return uint64(min)
 }
 

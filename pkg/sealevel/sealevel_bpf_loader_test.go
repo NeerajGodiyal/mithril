@@ -55,7 +55,7 @@ func TestExecute_Tx_BpfLoader_InitializeBuffer_Success(t *testing.T) {
 	bufferAcctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 	bufferAcctPostData := bufferAcctPost.Data
-	bufferAcctPostState, err := unmarshalUpgradeableLoaderState(bufferAcctPostData)
+	bufferAcctPostState, err := UnmarshalUpgradeableLoaderState(bufferAcctPostData)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeBuffer), bufferAcctPostState.Type)
 	assert.Equal(t, authorityAcct.Key, *bufferAcctPostState.Buffer.AuthorityAddress)
@@ -398,7 +398,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_Buffer_Success(t *testing.T) {
 	bufferAcctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 	bufferAcctPostData := bufferAcctPost.Data
-	bufferAcctPostState, err := unmarshalUpgradeableLoaderState(bufferAcctPostData)
+	bufferAcctPostState, err := UnmarshalUpgradeableLoaderState(bufferAcctPostData)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeBuffer), bufferAcctPostState.Type)
 	assert.Equal(t, newAuthorityAcct.Key, *bufferAcctPostState.Buffer.AuthorityAddress)
@@ -452,7 +452,7 @@ func TestExecute_Tx_BpfLoader_SetAuthority_ProgramData_Success(t *testing.T) {
 	bufferAcctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 	bufferAcctPostData := bufferAcctPost.Data
-	bufferAcctPostState, err := unmarshalUpgradeableLoaderState(bufferAcctPostData)
+	bufferAcctPostState, err := UnmarshalUpgradeableLoaderState(bufferAcctPostData)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeProgramData), bufferAcctPostState.Type)
 	assert.Equal(t, newAuthorityAcct.Key, *bufferAcctPostState.ProgramData.UpgradeAuthorityAddress)
@@ -910,7 +910,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_Buffer_Success(t *testing.T) {
 	bufferAcctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 	bufferAcctPostData := bufferAcctPost.Data
-	bufferAcctPostState, err := unmarshalUpgradeableLoaderState(bufferAcctPostData)
+	bufferAcctPostState, err := UnmarshalUpgradeableLoaderState(bufferAcctPostData)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeBuffer), bufferAcctPostState.Type)
 	assert.Equal(t, newAuthorityAcct.Key, *bufferAcctPostState.Buffer.AuthorityAddress)
@@ -966,7 +966,7 @@ func TestExecute_Tx_BpfLoader_SetAuthorityChecked_ProgramData_Success(t *testing
 	bufferAcctPost, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
 	bufferAcctPostData := bufferAcctPost.Data
-	bufferAcctPostState, err := unmarshalUpgradeableLoaderState(bufferAcctPostData)
+	bufferAcctPostState, err := UnmarshalUpgradeableLoaderState(bufferAcctPostData)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeProgramData), bufferAcctPostState.Type)
 	assert.Equal(t, newAuthorityAcct.Key, *bufferAcctPostState.ProgramData.UpgradeAuthorityAddress)
@@ -1455,7 +1455,7 @@ func TestExecute_Tx_BpfLoader_Close_Buffer_Success(t *testing.T) {
 
 	bufferAcctPostInstr, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
-	bufferAcctStatePostInstr, err := unmarshalUpgradeableLoaderState(bufferAcctPostInstr.Data)
+	bufferAcctStatePostInstr, err := UnmarshalUpgradeableLoaderState(bufferAcctPostInstr.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeUninitialized), bufferAcctStatePostInstr.Type) // ensure that buffer acct is now uninitialized
 	assert.Equal(t, uint64(0), bufferAcctPostInstr.Lamports)                                        // ensure that uninit acct now has 0 lamports
@@ -1645,7 +1645,7 @@ func TestExecute_Tx_BpfLoader_Close_Uninitialized_Success(t *testing.T) {
 
 	uninitAcctPostInstr, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
-	uninitAcctStatePostInstr, err := unmarshalUpgradeableLoaderState(uninitAcctPostInstr.Data)
+	uninitAcctStatePostInstr, err := UnmarshalUpgradeableLoaderState(uninitAcctPostInstr.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeUninitialized), uninitAcctStatePostInstr.Type) // ensure that uninit acct is still uninitialized
 	assert.Equal(t, uint64(0), uninitAcctPostInstr.Lamports)                                        // ensure that uninit acct now has 0 lamports
@@ -1796,7 +1796,7 @@ func TestExecute_Tx_BpfLoader_Close_ProgramData_Success(t *testing.T) {
 
 	bufferAcctPostInstr, err := txCtx.Accounts.GetAccount(1)
 	assert.NoError(t, err)
-	bufferAcctStatePostInstr, err := unmarshalUpgradeableLoaderState(bufferAcctPostInstr.Data)
+	bufferAcctStatePostInstr, err := UnmarshalUpgradeableLoaderState(bufferAcctPostInstr.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(UpgradeableLoaderStateTypeUninitialized), bufferAcctStatePostInstr.Type) // ensure that buffer acct is now uninitialized
 	assert.Equal(t, uint64(0), bufferAcctPostInstr.Lamports)                                        // ensure that uninit acct now has 0 lamports
@@ -2286,7 +2286,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_Success(t *testing.T) {
 	}
 
 	// ensure account state is correct
-	postAcctState, err := unmarshalUpgradeableLoaderState(postAcct.Data)
+	postAcctState, err := UnmarshalUpgradeableLoaderState(postAcct.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1234), postAcctState.ProgramData.Slot)
 	assert.Equal(t, authorityPubkey, *postAcctState.ProgramData.UpgradeAuthorityAddress)
@@ -2561,7 +2561,7 @@ func TestExecute_Tx_BpfLoader_ExtendProgram_With_Rent_Exemption_Payment_Success(
 	}
 
 	// ensure account state is correct
-	postAcctState, err := unmarshalUpgradeableLoaderState(programDataPost.Data)
+	postAcctState, err := UnmarshalUpgradeableLoaderState(programDataPost.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1234), postAcctState.ProgramData.Slot)
 	assert.Equal(t, authorityPubkey, *postAcctState.ProgramData.UpgradeAuthorityAddress)
@@ -2896,7 +2896,7 @@ func TestExecute_Tx_BpfLoader_DeployWithMaxDataLen_Success(t *testing.T) {
 		assert.Equal(t, validProgramBytes[count], programBytesPost[count])
 	}
 
-	programDataStatePost, err := unmarshalUpgradeableLoaderState(programDataPost.Data)
+	programDataStatePost, err := UnmarshalUpgradeableLoaderState(programDataPost.Data)
 	assert.NoError(t, err)
 	assert.Equal(t, authorityPubkey, *programDataStatePost.ProgramData.UpgradeAuthorityAddress)
 }

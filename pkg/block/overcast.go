@@ -6,26 +6,28 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-func FromOvercastMsg(resp *overcast.SlotResponse, slot uint64) (*Block, error) {
+func FromOvercastMsg(resp *overcast.SlotResponse) *Block {
 	block := new(Block)
-	block.Transactions = make([]*solana.Transaction, 0, 2000)
 	block.Slot = resp.Slot
+	block.Transactions = make([]*solana.Transaction, 0, 2000)
 
 	for _, entry := range resp.Entries {
 		for _, tx := range entry.Transactions {
-			convertedTx := overcastLegacyTransactionToTransaction(tx)
+			convertedTx, txVersion := overcastTransactionToTransaction(tx)
 			block.Transactions = append(block.Transactions, convertedTx)
 			block.NumSignatures += uint64(convertedTx.Message.Header.NumRequiredSignatures)
+			block.Versions = append(block.Versions, txVersion)
 		}
 	}
 
-	block.Blockhash = solana.MustHashFromBase58(string(resp.Entries[len(resp.Entries)-1].Hash))
+	block.Entries = resp.Entries
+	block.Blockhash = solana.HashFromBytes(resp.Entries[len(resp.Entries)-1].Hash[:])
 	block.BlockHeight = global.BlockHeight()
 
-	return block, nil
+	return block
 }
 
-func overcastLegacyTransactionToTransaction(overcastTx *overcast.VersionedTransaction) *solana.Transaction {
+func overcastTransactionToTransaction(overcastTx *overcast.VersionedTransaction) (*solana.Transaction, uint8) {
 	tx := &solana.Transaction{}
 
 	for _, s := range overcastTx.Signatures {
@@ -82,7 +84,12 @@ func overcastLegacyTransactionToTransaction(overcastTx *overcast.VersionedTransa
 		}
 	}
 
-	return tx
+	var version uint8
+	if isV0 {
+		version = 1
+	}
+
+	return tx, version
 }
 
 func overcastInstrToInstr(instr *overcast.CompiledInstruction) solana.CompiledInstruction {

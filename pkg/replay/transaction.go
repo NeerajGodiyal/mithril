@@ -21,7 +21,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/migration"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
-	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -49,116 +48,6 @@ var (
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
 )
 
-func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
-	txAcctMetas, err := tx.AccountMetaList()
-	if err != nil {
-		return nil, err
-	}
-
-	var programIdIdxs []uint64
-	instructionAcctPubkeys := make(map[solana.PublicKey]struct{})
-
-	for instrIdx, instr := range tx.Message.Instructions {
-		programIdIdxs = append(programIdIdxs, uint64(instr.ProgramIDIndex))
-		ias := acctMetasPerInstr[instrIdx]
-		for _, ia := range ias {
-			instructionAcctPubkeys[ia.Pubkey] = struct{}{}
-		}
-	}
-
-	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
-	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
-	var loadedBytesAccumulator uint32
-
-	for idx, acctMeta := range txAcctMetas {
-		var acct *accounts.Account
-		var isInstructionsSysvarAcct bool
-
-		_, instrContainsAcctMeta := instructionAcctPubkeys[acctMeta.PublicKey]
-		if acctMeta.PublicKey == sealevel.SysvarInstructionsAddr {
-			acct = instrsAcct
-			isInstructionsSysvarAcct = true
-		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !instrContainsAcctMeta {
-			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
-			if err != nil {
-				return nil, err
-			}
-			acct = &accounts.Account{Key: acctMeta.PublicKey, Owner: tmp.Owner, Executable: true, IsDummy: true}
-		} else {
-			acct, err = slotCtx.GetAccount(acctMeta.PublicKey)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if !isInstructionsSysvarAcct {
-			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(acct.Data)))
-			if loadedBytesAccumulator > loadedAcctBytesLimit {
-				return nil, TxErrMaxLoadedAccountsDataSizeExceeded
-			}
-		}
-
-		acctsForTx = append(acctsForTx, *acct)
-		convertedAcctMeta := &sealevel.AccountMeta{Pubkey: acctMeta.PublicKey, IsSigner: acctMeta.IsSigner, IsWritable: acctMeta.IsWritable}
-		convertedAcctMetas = append(convertedAcctMetas, convertedAcctMeta)
-	}
-
-	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
-	transactionAccts.AcctMetas = convertedAcctMetas
-
-	removeAcctsExecutableFlagChecks := slotCtx.Features.IsActive(features.RemoveAccountsExecutableFlagChecks)
-	validatedLoaders := make(map[solana.PublicKey]struct{})
-
-	for _, instr := range instrs {
-		if instr.ProgramId == a.NativeLoaderAddr {
-			continue
-		}
-
-		programAcct, err := slotCtx.GetAccount(instr.ProgramId)
-		if err != nil {
-			return nil, TxErrProgramAccountNotFound
-		}
-
-		if programAcct.Lamports == 0 {
-			return nil, TxErrProgramAccountNotFound
-		}
-
-		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
-			return nil, TxErrInvalidProgramForExecution
-		}
-
-		owner := programAcct.Owner
-		if owner == a.NativeLoaderAddr {
-			continue
-		}
-
-		_, exists := validatedLoaders[owner]
-		if !exists {
-			var ownerAcct *accounts.Account
-			ownerAcct, err = slotCtx.GetAccount(owner)
-			if err != nil {
-				ownerAcct, err = slotCtx.GetAccountFromAccountsDb(owner)
-				if err != nil {
-					return nil, TxErrInvalidProgramForExecution
-				}
-			}
-
-			if ownerAcct.Owner != a.NativeLoaderAddr || (!removeAcctsExecutableFlagChecks && !ownerAcct.Executable) {
-				return nil, TxErrInvalidProgramForExecution
-			}
-
-			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(ownerAcct.Data)))
-			if loadedBytesAccumulator > loadedAcctBytesLimit {
-				return nil, TxErrMaxLoadedAccountsDataSizeExceeded
-			}
-
-			validatedLoaders[owner] = struct{}{}
-		}
-	}
-
-	return transactionAccts, nil
-}
-
 func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
 	idx := uint64(tx.Message.Instructions[instrIdx].ProgramIDIndex)
 	return []uint64{idx}
@@ -177,10 +66,6 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 }
 
 func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
-	if len(tx.Message.Instructions) == 0 {
-		return nil, nil, errors.New("empty tx")
-	}
-
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
 	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
 
@@ -353,8 +238,8 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 	}
 }
 
-func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error, advanceNonceInstrSucceeded bool) (*fees.TxFeeInfo, error) {
-	txFeeInfo := fees.CalculateTxFees(tx, txMeta, instrs, computeBudgetLimits, slotCtx.Features)
+func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
+	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
 	p, err := slotCtx.GetAccount(payerAcctKey)
@@ -373,7 +258,7 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, txMeta *r
 	}
 	slotCtx.RecordModifiedAcct(payerAcctKey)
 
-	if len(instrs) >= 1 && advanceNonceInstrSucceeded {
+	if len(instrs) >= 1 {
 		instr := instrs[0]
 		noncePubkey, didAdvanceNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
 		if didAdvanceNonceAcct {
@@ -436,9 +321,15 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
 
 	start = time.Now()
-	transactionAccts, err := loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	var transactionAccts *sealevel.TransactionAccounts
+
+	if slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize) {
+		transactionAccts, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	} else {
+		transactionAccts, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	}
 	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, err, nil, false)
+		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, err, nil)
 	} else if err != nil {
 		return nil, err
 	}
@@ -603,7 +494,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account and advancing the nonce account if applicable
 	if instrErr != nil || rentStateErr != nil {
-		return handleFailedTx(slotCtx, tx, txMeta, instrs, computeBudgetLimits, instrErr, rentStateErr, execCtx.TransactionContext.NonceAcctAdvanced)
+		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, instrErr, rentStateErr)
 	}
 
 	txAcctMetas, err := tx.AccountMetaList()

@@ -44,8 +44,6 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for _, tx := range block.Transactions {
-		//mlog.Log.Debugf("resolveAddrTableLookups for transaction %d", idx)
-
 		if !tx.Message.IsVersioned() {
 			continue
 		}
@@ -58,7 +56,6 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 
 			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
 			if err != nil {
-				//mlog.Log.Debugf("unable to get address lookup table account: %s", addrTableKey)
 				skipLookup = true
 				break
 			}
@@ -452,7 +449,6 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			// already activated
 			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
 				f.EnableFeature(featureGate, *featureAcct.ActivatedAt)
-				//mlog.Log.Debugf("enabled *already* enabled feature: %s, %s", featureGate.Name, solana.PublicKeyFromBytes(featureGate.Address[:]))
 			}
 
 			if featureAcct.ActivatedAt == nil && startOfEpoch {
@@ -656,8 +652,8 @@ func ReplayBlocks(
 	rpcEndpoint string,
 	blockDir string,
 	txParallelism int,
-	blockChan chan *b.Block,
 	isLive bool,
+	useOvercast bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
@@ -666,7 +662,7 @@ func ReplayBlocks(
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
-	global.SetCalcUnixTimeForClockSysvar(true)
+	//global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageBlockHeight(true)
 
 	var err error
@@ -694,21 +690,37 @@ func ReplayBlocks(
 	var timeAccumulator float64
 	var justCrossedEpochBoundary bool
 
-	var streamChan chan *b.Block
-	if blockChan == nil {
-		blockBuffer := 35
-		streamChan = make(chan *b.Block, blockBuffer)
-		blockConsumer := blockstream.NewBlockConsumer(rpcc, streamChan, startSlot, endSlot, uint64(blockBuffer), blockDir)
-
-		if !isLive {
-			blockConsumer.DownloadInitialBlocks()
+	var opts *blockstream.BlockSourceOpts
+	if useOvercast {
+		opts = &blockstream.BlockSourceOpts{
+			SourceType: blockstream.BlockSourceOvercast,
+			RpcClient:  rpcc,
+			StartSlot:  startSlot,
+			EndSlot:    endSlot,
+			BlockDir:   blockDir,
 		}
-		go blockConsumer.StartAsyncBlockStream()
 	} else {
-		streamChan = blockChan
+		opts = &blockstream.BlockSourceOpts{
+			SourceType: blockstream.BlockSourceRpc,
+			RpcClient:  rpcc,
+			StartSlot:  startSlot,
+			EndSlot:    endSlot,
+			BlockDir:   blockDir,
+		}
 	}
+	blockStream := blockstream.NewBlockSource(opts)
 
-	for block := range streamChan {
+	if !isLive {
+		blockStream.DownloadInitialBlocks()
+	}
+	go blockStream.Start()
+
+	for {
+		block := blockStream.NextBlock()
+		if block == nil {
+			break
+		}
+
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			break
@@ -932,7 +944,6 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 			if txMeta.Err == nil && tx.IsVote() {
 				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
 			}
-			//mlog.Log.Debugf("tx %d returned error: %s\n", idx+1, txErr)
 		}
 
 		// check for success-failure return value divergences
@@ -956,8 +967,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
-
-	//start := time.Now()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(txParallelism)
