@@ -1,4 +1,3 @@
-# --version '3.0.11' --max_latency 150 --min_download_speed 5
 from distutils.log import debug
 import os
 import glob
@@ -315,14 +314,13 @@ def download(url: str):
 
     try:
         # dirty trick with wget. Details here - https://github.com/c29r3/solana-snapshot-finder/issues/11
+        cmd = ['wget', '--trust-server-names', url, f'-O{temp_fname}']
         if MAX_DOWNLOAD_SPEED_MB is not None:
-            process = subprocess.run(['wget', f'--limit-rate={MAX_DOWNLOAD_SPEED_MB}M', '--trust-server-names', url, f'-O{temp_fname}'], 
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
-        else:
-            process = subprocess.run(['wget', '--trust-server-names', url, f'-O{temp_fname}'], 
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
+            cmd.insert(1, f'--limit-rate={MAX_DOWNLOAD_SPEED_MB}M')
+
+        process = subprocess.run(cmd,
+                                 stdout=subprocess.PIPE,
+                                 universal_newlines=True)
 
         logger.info(f'Rename the downloaded file {temp_fname} --> {fname}')
         os.rename(temp_fname, f'{SNAPSHOT_PATH}/{fname}')
