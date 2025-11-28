@@ -6,7 +6,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
+	"github.com/ethereum/go-ethereum/crypto"
 	bin "github.com/gagliardetto/binary"
 	"golang.org/x/crypto/sha3"
 )
@@ -203,7 +203,7 @@ func Secp256k1ProgramExecute(execCtx *ExecutionCtx) error {
 		hasher.Write(msg)
 		messageHash := hasher.Sum(nil)
 
-		recoveredPubkeyBytes, err := secp256k1.RecoverPubkey(messageHash, signature)
+		recoveredPubkeyBytes, err := crypto.Ecrecover(messageHash, signature)
 		if err != nil {
 			return PrecompileErrSignature
 		}

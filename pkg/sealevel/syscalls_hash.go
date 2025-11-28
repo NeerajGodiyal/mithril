@@ -9,7 +9,7 @@ import (
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/iden3/go-iden3-crypto/poseidon"
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/sha3"
@@ -246,7 +246,7 @@ func SyscallSecp256k1RecoverImpl(vm sbpf.VM, hashAddr, recoveryIdVal, signatureA
 	copy(sigAndRecoveryId, signature)
 	sigAndRecoveryId[64] = byte(recoveryIdVal)
 
-	recoveredPubKey, err := secp256k1.RecoverPubkey(hash, sigAndRecoveryId)
+	recoveredPubKey, err := crypto.Ecrecover(hash, sigAndRecoveryId)
 	if err != nil {
 		return syscallSuccess(3) // Secp256k1RecoverError::InvalidSignature
 	}
