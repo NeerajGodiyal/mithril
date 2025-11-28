@@ -14,6 +14,7 @@ from requests import ReadTimeout, ConnectTimeout, HTTPError, Timeout, Connection
 from tqdm import tqdm
 from multiprocessing.dummy import Pool as ThreadPool
 import statistics
+import traceback
 
 parser = argparse.ArgumentParser(description='Solana snapshot finder')
 parser.add_argument('-t', '--threads-count', default=1000, type=int,
@@ -28,13 +29,13 @@ parser.add_argument('--min_download_speed', default=60, type=int, help='Minimum 
 parser.add_argument('--max_download_speed', type=int, 
 help='Maximum snapshot download speed in megabytes - https://github.com/c29r3/solana-snapshot-finder/issues/11. Example: --max_download_speed 192')
 parser.add_argument('--max_latency', default=40, type=int, help='The maximum value of latency (milliseconds). If latency > max_latency --> skip')
-parser.add_argument('--version', type=str, help='version of the snapshot required')
+parser.add_argument('--version', type=str, help='version of the snapshot required', required=True)
 parser.add_argument('--with_private_rpc', action="store_true", help='Enable adding and checking RPCs with the --private-rpc option.This slow down checking and searching but potentially increases'
                     ' the number of RPCs from which snapshots can be downloaded.')
 parser.add_argument('--measurement_time', default=7, type=int, help='Time in seconds during which the script will measure the download speed')
 parser.add_argument('--snapshot_path', type=str, default=".", help='The location where the snapshot will be downloaded (absolute path).'
                                                                      ' Example: /home/ubuntu/solana/validator-ledger')
-parser.add_argument('--num_of_retries', default=5, type=int, help='The number of retries if a suitable server for downloading the snapshot was not found')
+parser.add_argument('--num_of_retries', default=0, type=int, help='The number of retries if a suitable server for downloading the snapshot was not found')
 parser.add_argument('--sleep', default=30, type=int, help='Sleep before next retry (seconds)')
 parser.add_argument('--sort_order', default='slots_diff', type=str, help='Priority way to sort the found servers. latency or slots_diff')
 parser.add_argument('-b', '--blacklist', default='', type=str, help='If the same corrupted archive is constantly downloaded, you can exclude it.'
@@ -54,7 +55,7 @@ SPEED_MEASURE_TIME_SEC = args.measurement_time
 MAX_LATENCY = args.max_latency
 VERSION = args.version
 SNAPSHOT_PATH = args.snapshot_path if args.snapshot_path[-1] != '/' else args.snapshot_path[:-1]
-NUM_OF_MAX_ATTEMPTS = args.num_of_retries
+NUM_OF_MAX_ATTEMPTS = 1 + args.num_of_retries
 SLEEP_BEFORE_RETRY = args.sleep
 NUM_OF_ATTEMPTS = 1
 SORT_ORDER = args.sort_order
@@ -75,26 +76,17 @@ FULL_LOCAL_SNAPSHOTS = []
 unsuitable_servers = set()
 # Configure Logging
 logging.getLogger('urllib3').setLevel(logging.WARNING)
-if args.verbose:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(f'{SNAPSHOT_PATH}/snapshot-finder.log'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
+log_level = logging.DEBUG if args.verbose else logging.INFO
 
-else:
-    # logging.basicConfig(stream=sys.stdout, encoding='utf-8', level=logging.INFO, format='|%(asctime)s| %(message)s')
-        logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(f'{SNAPSHOT_PATH}/snapshot-finder.log'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
+
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(f"{SNAPSHOT_PATH}/snapshot-finder.log"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 
@@ -322,14 +314,13 @@ def download(url: str):
 
     try:
         # dirty trick with wget. Details here - https://github.com/c29r3/solana-snapshot-finder/issues/11
+        cmd = ['wget', '--trust-server-names', url, f'-O{temp_fname}']
         if MAX_DOWNLOAD_SPEED_MB is not None:
-            process = subprocess.run(['/usr/bin/wget', f'--limit-rate={MAX_DOWNLOAD_SPEED_MB}M', '--trust-server-names', url, f'-O{temp_fname}'], 
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
-        else:
-            process = subprocess.run(['/usr/bin/wget', '--trust-server-names', url, f'-O{temp_fname}'], 
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
+            cmd.insert(1, f'--limit-rate={MAX_DOWNLOAD_SPEED_MB}M')
+
+        process = subprocess.run(cmd,
+                                 stdout=subprocess.PIPE,
+                                 universal_newlines=True)
 
         logger.info(f'Rename the downloaded file {temp_fname} --> {fname}')
         os.rename(temp_fname, f'{SNAPSHOT_PATH}/{fname}')
@@ -407,11 +398,11 @@ def main_worker():
                 if not version_check(rpc_node["snapshot_address"], VERSION):
                     logger.info("version check failed")
                     continue
+                logger.info("version check succeeded")
             except:
-                import traceback
                 print(traceback.format_exc())
-                print("broken")
-            logger.info("version check succeeded")
+                logger.info("RPC node is broken")
+                continue
             down_speed_bytes = measure_speed(url=rpc_node["snapshot_address"], measure_time=SPEED_MEASURE_TIME_SEC)
             down_speed_mb = convert_size(down_speed_bytes)
             if down_speed_bytes < MIN_DOWNLOAD_SPEED_MB * 1e6:
