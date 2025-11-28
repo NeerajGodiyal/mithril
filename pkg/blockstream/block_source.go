@@ -12,7 +12,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/global"
-	"github.com/Overclock-Validator/mithril/pkg/overcast"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
@@ -89,33 +88,6 @@ func (blockSource *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, 
 		return nil, fmt.Errorf("decode error: %w", err)
 	}
 	out.FixupTxVersions()
-
-	// we no longer need the file anymore after use, so close and delete from file system
-	file.Close()
-	os.Remove(blockFilename)
-
-	return out, nil
-}
-
-func (blockSource *BlockSource) tryGetOvercastBlockFromFile(slot uint64) (*overcast.SlotResponse, error) {
-	if blockSource.blockDir == "" {
-		return nil, fmt.Errorf("no block directory specified")
-	}
-	blockFilename := filepath.Join(filepath.Clean(blockSource.blockDir), fmt.Sprintf("%d.json", slot))
-	file, err := os.Open(blockFilename)
-	if err != nil {
-		return nil, fmt.Errorf("error opening blockFilename=%s: %w", blockFilename, err)
-	}
-
-	// Create a decoder
-	decoder := json.NewDecoder(file)
-
-	out := &overcast.SlotResponse{}
-	// Decode JSON into target
-	err = decoder.Decode(out)
-	if err != nil {
-		return nil, fmt.Errorf("decode error: %w", err)
-	}
 
 	// we no longer need the file anymore after use, so close and delete from file system
 	file.Close()

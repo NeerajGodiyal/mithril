@@ -6,7 +6,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-func FromOvercastMsg(resp *overcast.SlotResponse) *Block {
+func FromOvercastStreamMsg(resp *overcast.SlotResponse) *Block {
 	block := new(Block)
 	block.Slot = resp.Slot
 	block.Transactions = make([]*solana.Transaction, 0, 2000)

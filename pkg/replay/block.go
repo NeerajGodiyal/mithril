@@ -21,7 +21,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -682,9 +681,9 @@ func ReplayBlocks(
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	buildInitialEpochStakesCache(snapshotManifest)
-	forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 20)
-	forkChoice.Start()
-	global.SetForkChoice(forkChoice)
+	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
+	//forkChoice.Start()
+	//global.SetForkChoice(forkChoice)
 
 	var statsCounter uint64
 	var timeAccumulator float64
@@ -725,9 +724,7 @@ func ReplayBlocks(
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			break
 		}
-
 		start := time.Now()
-
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		if currentSlot == startSlot {
@@ -1067,15 +1064,15 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
-	confirmed := global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
+	/*confirmed := global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
 	for confirmed == forkchoice.BankhashNeedWait {
 		confirmed = global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
-	}
+	}*/
 
 	// this slot should be skipped.
-	if confirmed == forkchoice.BankhashNoSupermajority {
+	/*if confirmed == forkchoice.BankhashNoSupermajority {
 		// TODO: return signal that slot should be skipped
-	}
+	}*/
 
 	if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
@@ -1094,6 +1091,5 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	}
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
-
 	return slotCtx, err
 }

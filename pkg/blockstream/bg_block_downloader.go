@@ -220,8 +220,10 @@ func (downloader *BackgroundBlockDownloader) startRpcStream() {
 	workerPool, _ := ants.NewPoolWithFunc(downloader.rpcPool.NumClients(), func(i interface{}) {
 		slot := i.(uint64)
 		block := downloader.fetchAndParseBlockFromRpc(slot)
-		blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", slot))
-		downloader.saveRpcBlockToFile(blockFilename, block, slot, false)
+		if block != nil {
+			blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", slot))
+			downloader.saveRpcBlockToFile(blockFilename, block, slot, false)
+		}
 	})
 
 	var err error
@@ -247,10 +249,14 @@ func (downloader *BackgroundBlockDownloader) startRpcDownloadForOvercastCatchup(
 	workerPool, _ := ants.NewPoolWithFunc(downloader.rpcPool.NumClients(), func(i interface{}) {
 		slot := i.(uint64)
 		block := downloader.fetchAndParseBlockFromRpc(slot)
-		blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", slot))
-		err := downloader.saveRpcBlockToFile(blockFilename, block, slot, true)
-		if err == errFileAlreadyExists {
-			done <- slot
+		if block != nil {
+			blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", slot))
+			err := downloader.saveRpcBlockToFile(blockFilename, block, slot, true)
+			if err == errFileAlreadyExists {
+				done <- slot
+			} else if err != nil {
+				mlog.Log.Infof("error saving slot %d to file: %s", slot, err)
+			}
 		}
 	})
 
@@ -267,8 +273,9 @@ func (downloader *BackgroundBlockDownloader) startRpcDownloadForOvercastCatchup(
 
 	for {
 		select {
-		case <-done:
+		case slot := <-done:
 			{
+				mlog.Log.Infof("stopping catchup rpc block fetch (final slot %d)\n", slot)
 				workerPool.Release()
 				ants.Release()
 				return
@@ -352,7 +359,7 @@ func (downloader *BackgroundBlockDownloader) saveOvercastBlockResponseToFile(fil
 	}
 	defer file.Close()
 
-	b := block.FromOvercastMsg(overcastBlock)
+	b := block.FromOvercastStreamMsg(overcastBlock)
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(b)
