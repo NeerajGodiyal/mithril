@@ -1,3 +1,5 @@
+# This python scripts is in path to deprecation, prefer this tool instead: 
+# https://github.com/Overclock-Validator/solana-snapshot-finder-go/tree/main
 from distutils.log import debug
 import os
 import glob
