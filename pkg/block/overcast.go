@@ -20,9 +20,26 @@ func FromOvercastStreamMsg(resp *overcast.SlotResponse) *Block {
 		}
 	}
 
-	block.Entries = resp.Entries
+	var offset uint64
+	block.Entries = make([]*TxEntry, len(resp.Entries))
+
+	for idx, entry := range resp.Entries {
+		numTransactionsInEntry := uint64(len(entry.Transactions))
+		txEntry := &TxEntry{NumHashes: entry.NumHashes,
+			Hash:    entry.Hash,
+			Indices: make([]uint64, len(entry.Transactions))}
+
+		for j := range numTransactionsInEntry {
+			txEntry.Indices[j] = offset + j
+		}
+
+		block.Entries[idx] = txEntry
+		offset += numTransactionsInEntry
+	}
+
 	block.Blockhash = solana.HashFromBytes(resp.Entries[len(resp.Entries)-1].Hash[:])
 	block.BlockHeight = global.BlockHeight()
+	block.FromOvercast = true
 
 	return block
 }
@@ -60,9 +77,9 @@ func overcastTransactionToTransaction(overcastTx *overcast.VersionedTransaction)
 	}
 
 	if isV0 {
-		tx.Message.RecentBlockhash = solana.Hash(overcastTx.GetMessageV0().RecentBlockhash)
+		tx.Message.RecentBlockhash = solana.HashFromBytes(overcastTx.GetMessageV0().RecentBlockhash)
 	} else {
-		tx.Message.RecentBlockhash = solana.Hash(overcastTx.GetMessageLegacy().RecentBlockhash)
+		tx.Message.RecentBlockhash = solana.HashFromBytes(overcastTx.GetMessageLegacy().RecentBlockhash)
 	}
 
 	var instrs []*overcast.CompiledInstruction
@@ -78,10 +95,11 @@ func overcastTransactionToTransaction(overcastTx *overcast.VersionedTransaction)
 	}
 
 	if isV0 {
-		for _, addrTableLookup := range overcastTx.GetMessageV0().AddressTableLookups {
-			convertedAtl := overcastAddrTableLookupToAddrTableLookup(addrTableLookup)
-			tx.Message.AddressTableLookups = append(tx.Message.AddressTableLookups, convertedAtl)
+		lookups := make([]solana.MessageAddressTableLookup, len(overcastTx.GetMessageV0().AddressTableLookups))
+		for idx, addrTableLookup := range overcastTx.GetMessageV0().AddressTableLookups {
+			lookups[idx] = overcastAddrTableLookupToAddrTableLookup(addrTableLookup)
 		}
+		tx.Message.SetAddressTableLookups(lookups)
 	}
 
 	var version uint8

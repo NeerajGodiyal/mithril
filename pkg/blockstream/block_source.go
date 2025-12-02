@@ -11,7 +11,9 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
-	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
+
+	//"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
@@ -74,6 +76,7 @@ func (blockSource *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, 
 	blockFilename := filepath.Join(filepath.Clean(blockSource.blockDir), fmt.Sprintf("%d.json", slot))
 	file, err := os.Open(blockFilename)
 	if err != nil {
+		mlog.Log.Infof("error opening block file %s: %s", blockFilename, err)
 		return nil, fmt.Errorf("error opening blockFilename=%s: %w", blockFilename, err)
 	}
 
@@ -85,7 +88,7 @@ func (blockSource *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, 
 	// Decode JSON into target
 	err = decoder.Decode(out)
 	if err != nil {
-		return nil, fmt.Errorf("decode error: %w", err)
+		return nil, fmt.Errorf("block decode error: %w", err)
 	}
 	out.FixupTxVersions()
 
@@ -96,7 +99,7 @@ func (blockSource *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, 
 	return out, nil
 }
 
-func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) *b.Block {
+func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) (*b.Block, error) {
 	var err error
 	var blockResult *rpc.GetBlockResult
 	var b *b.Block
@@ -104,7 +107,7 @@ func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) *b.Block {
 	if blockSource.sourceType == BlockSourceRpc {
 		blockResult, err = blockSource.rpcClient.GetBlockConfirmed(uint64(slot))
 		if err == rpcclient.SlotSkipped {
-			return nil
+			return nil, err
 		} else if err != nil {
 			panic(fmt.Sprintf("error fetching block: %s\n", err))
 		}
@@ -118,7 +121,7 @@ func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) *b.Block {
 					if err == nil {
 						break
 					} else if err == rpcclient.SlotSkipped {
-						return nil
+						return nil, err
 					} else if strings.Contains(err.Error(), "Block not available for slot") { // we're too early. wait for a bit.
 						time.Sleep(500 * time.Millisecond)
 					} else {
@@ -129,13 +132,14 @@ func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) *b.Block {
 		} else if blockSource.sourceType == BlockSourceOvercast {
 			b, err = blockSource.tryGetBlockFromFile(slot)
 			if err != nil {
-				// skipped block
-				return nil
+				return nil, rpcclient.SlotSkipped
 			}
+		} else {
+			panic("invalid source type - programming error")
 		}
 	}
 
-	return b
+	return b, nil
 }
 
 func (blockSource *BlockSource) DownloadInitialBlocks() {
@@ -148,9 +152,12 @@ func (blockSource *BlockSource) DownloadInitialBlocks() {
 		slot := taskInfo.slot
 		idx := taskInfo.idx
 
-		block := blockSource.fetchAndParseBlock(slot)
+		block, err := blockSource.fetchAndParseBlock(slot)
+		if err != nil {
+			mlog.Log.Infof("error retrieiving and parsing block %d: %s", slot, err)
+		}
 		if block != nil {
-			global.SubmitBlockToForkChoiceService(block.Slot, block.Transactions)
+			//global.SubmitBlockToForkChoiceService(block.Slot, block.Transactions)
 		}
 		blocks[idx] = block
 	})
@@ -173,9 +180,12 @@ func (blockSource *BlockSource) DownloadInitialBlocks() {
 
 func (blockSource *BlockSource) Start() {
 	for ; blockSource.currentSlot < blockSource.endSlot; blockSource.currentSlot++ {
-		newBlock := blockSource.fetchAndParseBlock(blockSource.currentSlot)
+		newBlock, err := blockSource.fetchAndParseBlock(blockSource.currentSlot)
+		if err != nil {
+			mlog.Log.Infof("error retrieiving and parsing block %d: %s", blockSource.currentSlot, err)
+		}
 		if newBlock != nil {
-			global.SubmitBlockToForkChoiceService(newBlock.Slot, newBlock.Transactions)
+			//global.SubmitBlockToForkChoiceService(newBlock.Slot, newBlock.Transactions)
 			blockSource.streamChan <- newBlock
 		}
 	}

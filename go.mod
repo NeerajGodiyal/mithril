@@ -203,7 +203,7 @@ require (
 	github.com/leslie-fei/fastcache v0.0.0-20240620024905-c9d4d2000ec4
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/lotusdblabs/lotusdb/v2 v2.1.0
-	github.com/maestroi/solana-snapshot-finder-go v0.0.8
+	github.com/maestroi/solana-snapshot-finder-go v0.1.3
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect

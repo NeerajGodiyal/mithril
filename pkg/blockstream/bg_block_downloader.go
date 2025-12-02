@@ -276,6 +276,7 @@ func (downloader *BackgroundBlockDownloader) startRpcDownloadForOvercastCatchup(
 		case slot := <-done:
 			{
 				mlog.Log.Infof("stopping catchup rpc block fetch (final slot %d)\n", slot)
+				time.Sleep(30 * time.Second)
 				workerPool.Release()
 				ants.Release()
 				return
@@ -302,11 +303,19 @@ func (downloader *BackgroundBlockDownloader) startOvercastStream() {
 		panic(err)
 	}
 
+	workerPool, _ := ants.NewPoolWithFunc(4, func(i interface{}) {
+		resp := i.(*overcast.SlotResponse)
+		blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", resp.Slot))
+		err = downloader.saveOvercastBlockResponseToFile(blockFilename, resp)
+		if err != nil {
+			mlog.Log.Infof("error writing block %d to file", resp.Slot)
+		}
+	})
+
 	for {
 		resp, err := stream.Recv()
 		if err == nil {
-			blockFilename := filepath.Join(filepath.Clean(downloader.outDir), fmt.Sprintf("%d.json", resp.Slot))
-			err = downloader.saveOvercastBlockResponseToFile(blockFilename, resp)
+			workerPool.Invoke(resp)
 		}
 	}
 }

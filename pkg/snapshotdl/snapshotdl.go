@@ -13,7 +13,7 @@ import (
 
 func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
 	cfg := config.Config{RPCAddress: endpoint, SnapshotPath: path, NumOfRetries: 5,
-		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100}
+		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100, FullThreshold: 100000}
 
 	referenceSlot, err := rpc.GetReferenceSlot(cfg.RPCAddress)
 	if err != nil {
@@ -45,7 +45,7 @@ func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
 
 func DownloadIncrementalSnapshot(endpoint string, path string, referenceSlot int, fullSnapshotSlot int) (string, int, int, error) {
 	cfg := config.Config{RPCAddress: endpoint, SnapshotPath: path, NumOfRetries: 5,
-		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100}
+		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100, FullThreshold: 100000}
 
 	var err error
 	nodes := rpc.FetchRPCNodes(cfg)

@@ -276,12 +276,12 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 	return txFeeInfo, relevantErr
 }
 
-func verifySignatures(tx *solana.Transaction, sigverifyWg *sync.WaitGroup) {
+func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.WaitGroup) {
 	defer sigverifyWg.Done()
 	start := time.Now()
 	err := tx.VerifySignatures()
 	if err != nil {
-		panic(fmt.Sprintf("error - tx %s had an invalid signature", tx.Signatures[0]))
+		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: %s", tx.Signatures[0], tx.Message.GetVersion(), err))
 	}
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
@@ -292,7 +292,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 	start := time.Now()
 	sigverifyWg.Add(1)
-	go verifySignatures(tx, sigverifyWg)
+	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
@@ -314,7 +314,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
 
 	if !sealevel.IsTransactionAgeValid(tx, instrs, slotCtx) {
-		fmt.Printf("tx %s, tx age was not valid\n", tx.Signatures[0])
 		return nil, TxErrInvalidBlockhash
 	}
 
@@ -343,23 +342,25 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	start = time.Now()
 	// check for pre-balance divergences
-	for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
-		txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
-		if err != nil {
-			panic(fmt.Sprintf("unable to get tx acct %d whilst checking for pre-balances divergences", count))
-		}
-		if dbgOpts.IsDebugTx(tx.Signatures[0]) {
-			// Avoid calling util.PrettyPrintAcct when not debug logging.
-			////mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
-		}
-
-		if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
-			if txAcct.Lamports != txMeta.PreBalances[count] {
-				panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
+	if txMeta != nil {
+		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
+			txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
+			if err != nil {
+				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for pre-balances divergences", count))
 			}
-		}
+			if dbgOpts.IsDebugTx(tx.Signatures[0]) {
+				// Avoid calling util.PrettyPrintAcct when not debug logging.
+				////mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
+			}
 
-		execCtx.TransactionContext.Accounts.Unlock(count)
+			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
+				if txAcct.Lamports != txMeta.PreBalances[count] {
+					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
+				}
+			}
+
+			execCtx.TransactionContext.Accounts.Unlock(count)
+		}
 	}
 	metrics.GlobalBlockReplay.PreBalanceDivergenceCheck.AddTimingSince(start)
 
@@ -372,7 +373,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
 
 	// check for fee divergences
-	if txFeeInfo.TotalFee != txMeta.Fee {
+	if txMeta != nil && txFeeInfo.TotalFee != txMeta.Fee {
 		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
@@ -460,7 +461,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	start = time.Now()
 	// check for post-balances divergences (but only if the tx succeeded)
-	if instrErr == nil && rentStateErr == nil {
+	if txMeta != nil && instrErr == nil && rentStateErr == nil {
 		var errBuf strings.Builder
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)

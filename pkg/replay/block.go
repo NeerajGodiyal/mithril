@@ -598,6 +598,10 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	block.PrevNumSignatures = lastSlotCtx.NumSignatures
 	block.TotalEpochStake = lastSlotCtx.TotalEpochStake
 
+	if global.ManageLeaderSchedule() {
+		block.LastBlockhash = lastSlotCtx.Blockhash
+	}
+
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
@@ -661,8 +665,9 @@ func ReplayBlocks(
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
-	//global.SetCalcUnixTimeForClockSysvar(true)
+	global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageBlockHeight(true)
+	global.SetManageLeaderSchedule(true)
 
 	var err error
 	var currentSlot uint64
@@ -934,7 +939,10 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
-		txMeta := block.TxMetas[idx]
+		var txMeta *rpc.TransactionMeta
+		if block.TxMetas != nil {
+			txMeta = block.TxMetas[idx]
+		}
 		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
 
 		if txErr != nil {
@@ -956,40 +964,58 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 }
 
 func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
-	do := make(chan int, len(block.Transactions))
-	done := make(chan int, len(block.Transactions))
-	go TopsortPlannerStream(block, do, done)
-
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
-	wg := &sync.WaitGroup{}
-	wg.Add(txParallelism)
-	for i := range txParallelism {
-		go func() {
+	if rblock.FromOvercast {
+		wg := &sync.WaitGroup{}
+		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
 			defer wg.Done()
-			for idx := range do {
-				txStart := time.Now()
-				tx := block.Transactions[idx]
-				txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
-				txErr := errs[idx]
-				// check for success-failure return value divergences
-				if txErr == nil && rblock.TxMetas[idx].Err != nil {
-					panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
-				} else if txErr != nil && rblock.TxMetas[idx].Err == nil {
-					panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
-				}
-				txDurations[i] += time.Since(txStart)
-				done <- idx
-			}
+			idx := i.(uint64)
+			txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], nil, dbgOpts, nil)
+		})
 
-		}()
+		for _, entry := range rblock.Entries {
+			for _, txIdx := range entry.Indices {
+				wg.Add(1)
+				workerPool.Invoke(txIdx)
+			}
+			wg.Wait()
+		}
+	} else {
+		do := make(chan int, len(block.Transactions))
+		done := make(chan int, len(block.Transactions))
+		go TopsortPlannerStream(block, do, done)
+
+		wg := &sync.WaitGroup{}
+		wg.Add(txParallelism)
+		for i := range txParallelism {
+			go func() {
+				defer wg.Done()
+				for idx := range do {
+					txStart := time.Now()
+					tx := block.Transactions[idx]
+					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
+					txErr := errs[idx]
+					// check for success-failure return value divergences
+					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
+					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+					}
+					txDurations[i] += time.Since(txStart)
+					done <- idx
+				}
+
+			}()
+		}
+
+		wg.Wait()
+		close(done)
 	}
 
-	wg.Wait()
-	close(done)
 	for _, txFeeInfo := range txFeeInfos {
 		txFeeAccumulator.Add(txFeeInfo)
 	}
@@ -1012,8 +1038,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	for i := range block.Transactions {
 		unresolvedBlock.Transactions[i] = &solana.Transaction{}
 		*(unresolvedBlock.Transactions[i]) = *block.Transactions[i]
-		unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
-		*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
+		if unresolvedBlock.TxMetas != nil && !block.FromOvercast {
+			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
+			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
+		}
 	}
 
 	start = time.Now()

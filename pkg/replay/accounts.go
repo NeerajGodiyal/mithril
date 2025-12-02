@@ -289,6 +289,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 
 		programAcct, err := slotCtx.GetAccount(instr.ProgramId)
 		if err != nil {
+			programAcct, err = slotCtx.GetAccountFromAccountsDb(instr.ProgramId)
 			return nil, TxErrProgramAccountNotFound
 		}
 
