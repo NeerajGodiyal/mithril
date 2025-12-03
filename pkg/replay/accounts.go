@@ -5,8 +5,8 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
-	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
@@ -73,7 +73,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 	validatedLoaders := make(map[solana.PublicKey]struct{})
 
 	for _, instr := range instrs {
-		if instr.ProgramId == a.NativeLoaderAddr {
+		if instr.ProgramId == addresses.NativeLoaderAddr {
 			continue
 		}
 
@@ -91,7 +91,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 		}
 
 		owner := programAcct.Owner
-		if owner == a.NativeLoaderAddr {
+		if owner == addresses.NativeLoaderAddr {
 			continue
 		}
 
@@ -106,7 +106,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 				}
 			}
 
-			if ownerAcct.Owner != a.NativeLoaderAddr || (!removeAcctsExecutableFlagChecks && !ownerAcct.Executable) {
+			if ownerAcct.Owner != addresses.NativeLoaderAddr || (!removeAcctsExecutableFlagChecks && !ownerAcct.Executable) {
 				return nil, TxErrInvalidProgramForExecution
 			}
 
@@ -154,11 +154,7 @@ func (accum *loadedAcctSizeAccumulatorSimd186) wasAlreadyCounted(pubkey solana.P
 	}
 
 	_, exists := accum.additionalLoadedAccts[pubkey]
-	if exists {
-		return true
-	}
-
-	return false
+	return exists
 }
 
 func (accum *loadedAcctSizeAccumulatorSimd186) add(amount uint64) error {
@@ -189,6 +185,7 @@ func (accum *loadedAcctSizeAccumulatorSimd186) collectAcct(acct *accounts.Accoun
 				if err != nil {
 					programDataAcct, err = accum.slotCtx.GetAccountFromAccountsDb(programDataAddr)
 					if err != nil {
+						mlog.Log.Infof("TxErrInvalidProgramForExecution [3]")
 						return TxErrInvalidProgramForExecution
 					}
 				}
@@ -283,26 +280,32 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 	removeAcctsExecutableFlagChecks := slotCtx.Features.IsActive(features.RemoveAccountsExecutableFlagChecks)
 
 	for _, instr := range instrs {
-		if instr.ProgramId == a.NativeLoaderAddr {
+		if instr.ProgramId == addresses.NativeLoaderAddr {
 			continue
 		}
 
 		programAcct, err := slotCtx.GetAccount(instr.ProgramId)
 		if err != nil {
 			programAcct, err = slotCtx.GetAccountFromAccountsDb(instr.ProgramId)
-			return nil, TxErrProgramAccountNotFound
+			if err != nil {
+				mlog.Log.Infof("TxErrProgramAccountNotFound [1]")
+				return nil, TxErrProgramAccountNotFound
+			}
 		}
 
 		if programAcct.Lamports == 0 {
+			mlog.Log.Infof("TxErrProgramAccountNotFound [2]")
 			return nil, TxErrProgramAccountNotFound
 		}
 
 		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
+			mlog.Log.Infof("TxErrInvalidProgramForExecution [1]")
 			return nil, TxErrInvalidProgramForExecution
 		}
 
 		owner := programAcct.Owner
-		if owner != a.NativeLoaderAddr && !isLoaderAcct(owner) {
+		if owner != addresses.NativeLoaderAddr && !isLoaderAcct(owner) {
+			mlog.Log.Infof("TxErrInvalidProgramForExecution [2]")
 			return nil, TxErrInvalidProgramForExecution
 		}
 	}

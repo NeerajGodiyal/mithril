@@ -44,7 +44,7 @@ var (
 	TxErrInsufficientFundsForRent          = errors.New("TxErrInsufficientFundsForRent")
 	TxErrMaxLoadedAccountsDataSizeExceeded = errors.New("TxErrMaxLoadedAccountsDataSizeExceeded")
 	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
-	TxErrInvalidProgramForExecution        = errors.New("TxErrProgramAccountNotFound")
+	TxErrInvalidProgramForExecution        = errors.New("TxErrInvalidProgramForExecution")
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
 )
 
