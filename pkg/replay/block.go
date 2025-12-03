@@ -667,7 +667,10 @@ func ReplayBlocks(
 
 	global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageBlockHeight(true)
-	global.SetManageLeaderSchedule(true)
+
+	if isLive {
+		global.SetManageLeaderSchedule(true)
+	}
 
 	var err error
 	var currentSlot uint64
