@@ -385,11 +385,6 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 	return accountInfos, accountInfoKeys, nil
 }
 
-type callerAccountsAndIndex struct {
-	index   uint64
-	account CallerAccount
-}
-
 func callerAccountFromAccountInfoC(vm sbpf.VM, execCtx *ExecutionCtx, callerAcctIdx uint64, accountInfo SolAccountInfoC, accountInfosAddr uint64) (CallerAccount, error) {
 
 	lamports, err := vm.Translate(accountInfo.LamportsAddr, 8, true)
@@ -487,14 +482,18 @@ func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, account
 }
 
 func updateCalleeAccount(execCtx *ExecutionCtx, callerAccount CallerAccount, calleeAccount *BorrowedAccount) error {
-	if calleeAccount.Account.Lamports != binary.LittleEndian.Uint64(callerAccount.Lamports) {
-		calleeAccount.Account.Lamports = binary.LittleEndian.Uint64(callerAccount.Lamports)
+	var err error
+
+	callerLamports := binary.LittleEndian.Uint64(callerAccount.Lamports)
+	if calleeAccount.Account.Lamports != callerLamports {
+		err = calleeAccount.SetLamports(callerLamports, execCtx.Features)
+		if err != nil {
+			return err
+		}
 	}
 
 	err1 := calleeAccount.CanDataBeResized(uint64(len(callerAccount.SerializedData)))
 	err2 := calleeAccount.DataCanBeChanged(execCtx.Features)
-
-	var err error
 
 	if err1 != nil {
 		err = err1

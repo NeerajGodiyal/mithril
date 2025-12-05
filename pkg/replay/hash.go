@@ -177,11 +177,6 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 		return bytes.Compare(a.Pubkey[:], b.Pubkey[:])
 	})
 
-	/*mlog.Log.Debugf("accounts modified, sorted by pubkey:\n")
-	for _, ah := range acctHashes {
-		mlog.Log.Debugf("pubkey: %s, hash: %s\n", ah.Pubkey, solana.PublicKeyFromBytes(ah.Hash[:]))
-	}*/
-
 	hashes := make([][]byte, len(acctHashes))
 	for idx, ah := range acctHashes {
 		hashes[idx] = make([]byte, 32)
