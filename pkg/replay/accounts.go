@@ -6,7 +6,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
@@ -181,12 +180,12 @@ func (accum *loadedAcctSizeAccumulatorSimd186) collectAcct(acct *accounts.Accoun
 		programDataAddr := acctState.Program.ProgramDataAddress
 		if err == nil && acctState.Type == sealevel.UpgradeableLoaderStateTypeProgram {
 			if !accum.wasAlreadyCounted(programDataAddr) {
+				// program data account not being found is not an error. Agave instead ignores it.
 				programDataAcct, err := accum.slotCtx.GetAccount(programDataAddr)
 				if err != nil {
 					programDataAcct, err = accum.slotCtx.GetAccountFromAccountsDb(programDataAddr)
 					if err != nil {
-						mlog.Log.Infof("TxErrInvalidProgramForExecution [3]")
-						return TxErrInvalidProgramForExecution
+						return nil
 					}
 				}
 				accum.accumulator = safemath.SaturatingAddU64(accum.accumulator, safemath.SaturatingAddU64(txAcctBaseSize, uint64(len(programDataAcct.Data))))
@@ -288,24 +287,20 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		if err != nil {
 			programAcct, err = slotCtx.GetAccountFromAccountsDb(instr.ProgramId)
 			if err != nil {
-				mlog.Log.Infof("TxErrProgramAccountNotFound [1]")
 				return nil, TxErrProgramAccountNotFound
 			}
 		}
 
 		if programAcct.Lamports == 0 {
-			mlog.Log.Infof("TxErrProgramAccountNotFound [2]")
 			return nil, TxErrProgramAccountNotFound
 		}
 
 		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
-			mlog.Log.Infof("TxErrInvalidProgramForExecution [1]")
 			return nil, TxErrInvalidProgramForExecution
 		}
 
 		owner := programAcct.Owner
 		if owner != addresses.NativeLoaderAddr && !isLoaderAcct(owner) {
-			mlog.Log.Infof("TxErrInvalidProgramForExecution [2]")
 			return nil, TxErrInvalidProgramForExecution
 		}
 	}

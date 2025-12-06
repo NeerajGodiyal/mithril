@@ -468,7 +468,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 			if err != nil {
 				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for post-balances divergences", count))
 			}
-			////mlog.Log.Debugf("txAcct.Key=%s", txAcct.Key)
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PostBalances[count] {
@@ -487,10 +486,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	metrics.GlobalBlockReplay.PostBalanceDivergenceCheck.AddTimingSince(start)
 
 	start = time.Now()
-	payerAcct, err := execCtx.TransactionContext.Accounts.GetAccount(0)
-	if err != nil {
-		panic(fmt.Sprintf("unable to get tx account to update payer acct state after failed tx: %s", err))
-	}
+	payerAcct := execCtx.TransactionContext.Accounts.Accounts[0]
 
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account and advancing the nonce account if applicable
