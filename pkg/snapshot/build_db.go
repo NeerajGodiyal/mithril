@@ -201,17 +201,31 @@ func BuildAccountsDb(
 		defer wg.Done()
 		err = readTar(wg, file, appendVecCopyingPool)
 	}()
+	wg.Wait()
+	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
+
+	mlog.Log.Infof("Closing shard logger.")
+	sl.Close()
+
 	var incrementalErr error
 	if incrementalFile != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			start := time.Now()
+			sl = NewShardLogger(numShards, logsDir, ss)
+			if err != nil {
+				mlog.Log.Errorf("processing snapshot: %v", err)
+			}
+
 			incrementalErr = readTar(wg, incrementalFile, appendVecCopyingPool)
 			mlog.Log.Infof("finished reading %s in %s", incrementalFile.Name(), time.Since(start))
 		}()
+		wg.Wait()
+		mlog.Log.Infof("Closing shard logger for incremental snapshot.")
+		sl.Close()
 	}
-	wg.Wait()
+
 	mlog.Log.Infof("done in %s. waiting for all tasks to complete.", time.Since(start))
 	if err != nil {
 		mlog.Log.Errorf("processing snapshot: %v", err)
@@ -223,8 +237,6 @@ func BuildAccountsDb(
 		return nil, nil, err
 	}
 
-	mlog.Log.Infof("Closing shard logger.")
-	sl.Close()
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 

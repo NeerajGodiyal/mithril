@@ -45,7 +45,7 @@ func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest) *ReplayCtx {
 	return epochCtx
 }
 
-func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64) *sealevel.SysvarStakeHistory {
+func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) *sealevel.SysvarStakeHistory {
 	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
 	if err != nil {
 		stakeHistoryAcct, err = acctsDb.GetAccount(prevSlotCtx.Slot, sealevel.SysvarStakeHistoryAddr)
@@ -59,7 +59,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	var stakeHistory sealevel.SysvarStakeHistory
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
-	newRateActivationEpoch := newWarmupCooldownRateEpoch(nil, nil)
+	newRateActivationEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
 	var wg sync.WaitGroup
 	var effective atomic.Uint64
@@ -175,7 +175,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 		panic("only partitioned rewards supported")
 	}
 
-	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch)
+	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch, epochSchedule, f)
 	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
 
 	return partitionedRewardsInfo
