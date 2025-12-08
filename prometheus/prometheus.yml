@@ -1,0 +1,8 @@
+# Sample Prometheus configuration file for scraping metrics from a Go application
+global:
+  # The default interval for scraping targets.
+  scrape_interval: 15s 
+scrape_configs:
+  - job_name: 'go_application_metrics'
+    static_configs:
+      - targets: ['{server}:9090']
