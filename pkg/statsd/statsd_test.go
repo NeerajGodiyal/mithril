@@ -1,187 +1,130 @@
 package statsd
 
 import (
-    package statsd
+	"testing"
+	"time"
 
-    import (
-        "math"
-        "testing"
-
-        "github.com/prometheus/client_golang/prometheus/testutil"
-    )
-
-    // TestCountAndGauge ensures Count and Gauge update Prometheus metrics correctly.
-    func TestCountAndGauge(t *testing.T) {
-        // Count metric: SnapshotTarBytesRead is registered as CountT with no labels
-        const wantCount = 5.0
-        if err := Count(SnapshotTarBytesRead, int64(wantCount), nil, 1); err != nil {
-            t.Fatalf("Count returned error: %v", err)
-        }
-
-        c := metricsCollection.counters[SnapshotTarBytesRead]
-        if c == nil {
-            t.Fatalf("counter for %v not registered", SnapshotTarBytesRead)
-        }
-
-        got := testutil.ToFloat64(c.WithLabelValues())
-        if got != wantCount {
-            t.Fatalf("counter value = %v, want %v", got, wantCount)
-        }
-
-        // Gauge metric: SnapshotWorkerPoolUtilization has one label (task)
-        wantGauge := 0.73
-        if err := Gauge(SnapshotWorkerPoolUtilization, wantGauge, []string{"index"}, 1); err != nil {
-            t.Fatalf("Gauge returned error: %v", err)
-        }
-
-        g := metricsCollection.gauges[SnapshotWorkerPoolUtilization]
-        if g == nil {
-            t.Fatalf("gauge for %v not registered", SnapshotWorkerPoolUtilization)
-        }
-
-        gotg := testutil.ToFloat64(g.WithLabelValues("index"))
-        if math.Abs(gotg-wantGauge) > 1e-9 {
-            t.Fatalf("gauge value = %v, want %v", gotg, wantGauge)
-        }
-    }
-
-    // TestDistributionAndTimingRegistration ensures histograms are registered and accept observations.
-    func TestDistributionAndTimingRegistration(t *testing.T) {
-        // Distribution metric: PreprocessBlock is registered with label "phase"
-        if metricsCollection.histograms[PreprocessBlock] == nil {
-            t.Fatalf("histogram for %v not registered", PreprocessBlock)
-        }
-
-        if err := Distribution(PreprocessBlock, 1.5, []string{"preprocess_block"}, 1); err != nil {
-            t.Fatalf("Distribution returned error: %v", err)
-        }
-
-        // Timing: ensure it observes without panic
-        if metricsCollection.histograms[TxLoop] == nil {
-            t.Fatalf("histogram for %v not registered", TxLoop)
-        }
-
-        if err := Timing(TxLoop, 123456789, []string{"tx_loop"}, 1); err != nil {
-            t.Fatalf("Timing returned error: %v", err)
-        }
-    }
-    import (
-        "math"
-        "testing"
-
-        "github.com/prometheus/client_golang/prometheus/testutil"
-    )
-
-    // TestCountAndGauge ensures Count and Gauge update Prometheus metrics correctly.
-    func TestCountAndGauge(t *testing.T) {
-        // Count metric: SnapshotTarBytesRead is registered as CountT with no labels
-        const wantCount = 5.0
-        if err := Count(SnapshotTarBytesRead, int64(wantCount), nil, 1); err != nil {
-            t.Fatalf("Count returned error: %v", err)
-        }
-
-        c := metricsCollection.counters[SnapshotTarBytesRead]
-        if c == nil {
-            t.Fatalf("counter for %v not registered", SnapshotTarBytesRead)
-        }
-
-        got := testutil.ToFloat64(c.WithLabelValues())
-        if got != wantCount {
-            t.Fatalf("counter value = %v, want %v", got, wantCount)
-        }
-
-        // Gauge metric: SnapshotWorkerPoolUtilization has one label (task)
-        wantGauge := 0.73
-        if err := Gauge(SnapshotWorkerPoolUtilization, wantGauge, []string{"index"}, 1); err != nil {
-            t.Fatalf("Gauge returned error: %v", err)
-        }
-
-        g := metricsCollection.gauges[SnapshotWorkerPoolUtilization]
-        if g == nil {
-            t.Fatalf("gauge for %v not registered", SnapshotWorkerPoolUtilization)
-        }
-
-        gotg := testutil.ToFloat64(g.WithLabelValues("index"))
-        if math.Abs(gotg-wantGauge) > 1e-9 {
-            t.Fatalf("gauge value = %v, want %v", gotg, wantGauge)
-        }
-    }
-
-    // TestDistributionAndTimingRegistration ensures histograms are registered and accept observations.
-    func TestDistributionAndTimingRegistration(t *testing.T) {
-        // Distribution metric: PreprocessBlock is registered with label "phase"
-        if metricsCollection.histograms[PreprocessBlock] == nil {
-            t.Fatalf("histogram for %v not registered", PreprocessBlock)
-        }
-
-        if err := Distribution(PreprocessBlock, 1.5, []string{"preprocess_block"}, 1); err != nil {
-            t.Fatalf("Distribution returned error: %v", err)
-        }
-
-        // Timing: ensure it observes without panic
-        if metricsCollection.histograms[TxLoop] == nil {
-            t.Fatalf("histogram for %v not registered", TxLoop)
-        }
-
-        if err := Timing(TxLoop, 123456789, []string{"tx_loop"}, 1); err != nil {
-            t.Fatalf("Timing returned error: %v", err)
-        }
-    }
-    "github.com/prometheus/client_golang/prometheus/testutil"
+	mithrilmetrics "github.com/Overclock-Validator/mithril/pkg/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 )
 
-// TestCountAndGauge ensures Count and Gauge update Prometheus metrics correctly.
-func TestCountAndGauge(t *testing.T) {
-    // Count metric: SnapshotTarBytesRead is registered as CountT with no labels
-    const wantCount = 5.0
-    if err := Count(SnapshotTarBytesRead, int64(wantCount), nil, 1); err != nil {
-        t.Fatalf("Count returned error: %v", err)
-    }
+func TestInitializeStatsdMetrics(t *testing.T) {
+	//metricsCollection := InitializeStatsdMetrics()
+	// Check that PreprocessBlock is in histograms
+	if _, ok := metricsCollection.histograms[PreprocessBlock]; !ok {
+		t.Errorf("Expected PreprocessBlock to be in histograms")
+	}
+	// Check that Epoch is in gauges
+	if _, ok := metricsCollection.gauges[Epoch]; !ok {
+		t.Errorf("Expected Epoch to be in gauges")
+	}
 
-    c := metricsCollection.counters[SnapshotTarBytesRead]
-    if c == nil {
-        t.Fatalf("counter for %v not registered", SnapshotTarBytesRead)
-    }
-
-    got := testutil.ToFloat64(c.WithLabelValues())
-    if got != wantCount {
-        t.Fatalf("counter value = %v, want %v", got, wantCount)
-    }
-
-    // Gauge metric: SnapshotWorkerPoolUtilization has one label (task)
-    wantGauge := 0.73
-    if err := Gauge(SnapshotWorkerPoolUtilization, wantGauge, []string{"index"}, 1); err != nil {
-        t.Fatalf("Gauge returned error: %v", err)
-    }
-
-    g := metricsCollection.gauges[SnapshotWorkerPoolUtilization]
-    if g == nil {
-        t.Fatalf("gauge for %v not registered", SnapshotWorkerPoolUtilization)
-    }
-
-    gotg := testutil.ToFloat64(g.WithLabelValues("index"))
-    if math.Abs(gotg-wantGauge) > 1e-9 {
-        t.Fatalf("gauge value = %v, want %v", gotg, wantGauge)
-    }
+	// Check that SnapshotTarBytesRead is in counters
+	if _, ok := metricsCollection.counters[SnapshotTarBytesRead]; !ok {
+		t.Errorf("Expected SnapshotTarBytesRead to be in counters")
+	}
 }
 
-// TestDistributionAndTimingRegistration ensures histograms are registered and accept observations.
-func TestDistributionAndTimingRegistration(t *testing.T) {
-    // Distribution metric: PreprocessBlock is registered with label "phase"
-    if metricsCollection.histograms[PreprocessBlock] == nil {
-        t.Fatalf("histogram for %v not registered", PreprocessBlock)
-    }
+func TestThatEveryMetricHasLabelsAndType(t *testing.T) {
+	for metric := range MetricToType {
+		if _, ok := MetricToLabels[metric]; !ok {
+			t.Errorf("Metric %v is missing labels in MetricToLabels", metric)
+		}
+	}
 
-    if err := Distribution(PreprocessBlock, 1.5, []string{"preprocess_block"}, 1); err != nil {
-        t.Fatalf("Distribution returned error: %v", err)
-    }
+	for metric := range MetricToLabels {
+		if _, ok := MetricToType[metric]; !ok {
+			t.Errorf("Metric %v is missing type in MetricToType", metric)
+		}
+	}
+}
 
-    // Timing: ensure it observes without panic
-    if metricsCollection.histograms[TxLoop] == nil {
-        t.Fatalf("histogram for %v not registered", TxLoop)
-    }
+func TestCountWithoutLabelValues(t *testing.T) {
 
-    if err := Timing(TxLoop, 123456789, []string{"tx_loop"}, 1); err != nil {
-        t.Fatalf("Timing returned error: %v", err)
-    }
+	val := float64(5)
+	Count(SnapshotTarBytesRead, int64(val), nil)
+	counterVec := metricsCollection.counters[SnapshotTarBytesRead]
+	metric, _ := counterVec.GetMetricWithLabelValues([]string{}...)
+	// check that the counter value is 5
+	m := &dto.Metric{}
+	metric.Write(m)
+	assert.Equal(t, m.GetCounter().GetValue(), val, "Counter value should be 5")
+}
+
+func TestCountWithLabelValues(t *testing.T) {
+	val := float64(10)
+	Count(TestCount, int64(val), []string{"testLabel"})
+	counterVec := metricsCollection.counters[TestCount]
+	metric, _ := counterVec.GetMetricWithLabelValues("testLabel")
+	// check that the counter value is 10
+	m := &dto.Metric{}
+	metric.Write(m)
+	assert.Equal(t, m.GetCounter().GetValue(), val, "Counter value should be 10")
+}
+
+func TestGaugeWithLabelValues(t *testing.T) {
+	val := float64(15)
+	Gauge(SnapshotWorkerPoolUtilization, val, []string{"testLabel"})
+	gaugeVec := metricsCollection.gauges[SnapshotWorkerPoolUtilization]
+	metric, _ := gaugeVec.GetMetricWithLabelValues([]string{"testLabel"}...)
+	// check that the gauge value is 15
+	m := &dto.Metric{}
+	metric.Write(m)
+	assert.Equal(t, m.GetGauge().GetValue(), val, "Gauge value should be 15")
+}
+
+func TestGaugeWithoutLabelValues(t *testing.T) {
+	val := float64(20)
+	Gauge(Epoch, val, nil)
+	gaugeVec := metricsCollection.gauges[Epoch]
+	metric, _ := gaugeVec.GetMetricWithLabelValues([]string{}...)
+	// check that the gauge value is 20
+	m := &dto.Metric{}
+	metric.Write(m)
+	assert.Equal(t, m.GetGauge().GetValue(), val, "Gauge value should be 20")
+}
+
+func TestTimingWithLabelValues(t *testing.T) {
+	val := uint64(25)
+	Timing(PreprocessBlock, val, []string{"testLabel"})
+	histogramVec := metricsCollection.histograms[PreprocessBlock]
+	metric, _ := histogramVec.GetMetricWithLabelValues([]string{"testLabel"}...)
+	// check that the histogram value is 25
+	mcollector := metric.(prometheus.Metric)
+	m := &dto.Metric{}
+	mcollector.Write(m)
+
+	assert.Equal(t, m.GetHistogram().GetSampleCount(), uint64(1), "Histogram sample count should be 1")
+	assert.Equal(t, uint64(m.GetHistogram().GetSampleSum()), val, "Histogram sample sum should be 25")
+}
+
+func TestTimingWithoutLabelValues(t *testing.T) {
+	val := uint64(30)
+	Timing(TaskIndexEntryCommitterLatency, val, []string{})
+	histogramVec := metricsCollection.histograms[TaskIndexEntryCommitterLatency]
+	metric, _ := histogramVec.GetMetricWithLabelValues([]string{}...)
+	// check that the histogram value is 30
+	mcollector := metric.(prometheus.Metric)
+	m := &dto.Metric{}
+	mcollector.Write(m)
+
+	assert.Equal(t, m.GetHistogram().GetSampleCount(), uint64(1), "Histogram sample count should be 1")
+	assert.Equal(t, uint64(m.GetHistogram().GetSampleSum()), val, "Histogram sample sum should be 30")
+}
+
+func TestBlockReplayMetrics(t *testing.T) {
+
+	// Instantiate mithrilmetrics.BlockReplay
+	blockReplay := &mithrilmetrics.BlockReplay{
+		Slot: 12345,
+	}
+
+	// Add some timings
+	blockReplay.PreprocessBlock.AddTiming(time.Millisecond * 100)
+	blockReplay.LoadBlockAccounts.AddTiming(time.Millisecond * 200)
+	blockReplay.TxLoop.AddTiming(time.Millisecond * 300)
+	// Sanity test to ensure that the function completes without error
+	SendBlockReplayMetrics(*blockReplay)
 }

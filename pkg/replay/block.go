@@ -807,11 +807,11 @@ func ReplayBlocks(
 
 		slotReplayDuration := time.Since(start)
 		mlog.Log.Infof("replayed slot %d - bankhash: %s  (slot replay time: %fs)", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash), slotReplayDuration.Seconds())
-		statsd.Count(statsd.SlotReplays, 1, nil, 1)
-		statsd.Distribution(statsd.SlotReplayDurationMs, float64(slotReplayDuration.Nanoseconds())/1e6, nil, 1)
-		statsd.Gauge(statsd.Epoch, float64(block.Epoch), nil, 1)
-		statsd.Gauge(statsd.Slot, float64(block.Slot), nil, 1)
-		statsd.Distribution(statsd.TxsPerBlock, float64(len(block.Transactions)), nil, 1)
+		statsd.Count(statsd.SlotReplays, 1, nil)
+		statsd.Timing(statsd.SlotReplayDurationMs, uint64(slotReplayDuration.Nanoseconds())/1e6, nil)
+		statsd.Gauge(statsd.Epoch, float64(block.Epoch), nil)
+		statsd.Gauge(statsd.Slot, float64(block.Slot), nil)
+		statsd.Timing(statsd.TxsPerBlock, uint64(len(block.Transactions)), nil)
 
 		if !justCrossedEpochBoundary {
 			statsCounter++

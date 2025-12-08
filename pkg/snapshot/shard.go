@@ -93,8 +93,8 @@ func (s *shardedSetter) processRequests(chanIndex int) {
 		}
 
 		if reqCount%100 == 0 {
-			statsd.Timing(statsd.TaskSetIfSlotHigherLatency, uint64(time.Since(start)), nil, 0.01)
-			statsd.Gauge(statsd.TasksSetIfSlotHigherQueueSize, float64(len(ch)), nil, 0.01)
+			statsd.Timing(statsd.TaskSetIfSlotHigherLatency, uint64(time.Since(start)), nil)
+			statsd.Gauge(statsd.TasksSetIfSlotHigherQueueSize, float64(len(ch)), nil)
 		}
 		reqCount++
 	}

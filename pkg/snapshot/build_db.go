@@ -87,7 +87,7 @@ func BuildAccountsDb(
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
 		tasks := indexEntryCommitterInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"}, 1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
@@ -95,13 +95,13 @@ func BuildAccountsDb(
 		for idx, entry := range task.IndexEntries {
 			sl.EnqueueRequest(task.Pubkeys[idx], entry)
 		}
-		statsd.Timing(statsd.TaskIndexEntryCommitterLatency, uint64(time.Since(start).Nanoseconds()), nil, 1)
+		statsd.Timing(statsd.TaskIndexEntryCommitterLatency, uint64(time.Since(start).Nanoseconds()), nil)
 		indexEntryCommitterInProgress.Add(-1)
 	})
 
 	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i interface{}) {
 		tasks := indexEntryBuilderInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"}, 1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
@@ -114,7 +114,7 @@ func BuildAccountsDb(
 		indexEntryBuilderInProgress.Add(-1)
 		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
 		wg.Add(1)
-		statsd.Timing(statsd.TasksIndexEntryBuilderLatency, uint64(time.Since(start)), nil, 1)
+		statsd.Timing(statsd.TasksIndexEntryBuilderLatency, uint64(time.Since(start)), nil)
 		err = indexEntryCommiterPool.Invoke(commitTask)
 		if err != nil {
 			mlog.Log.Errorf("error calling indexEntryCommiterPool.Invoke\n")
@@ -123,7 +123,7 @@ func BuildAccountsDb(
 
 	appendVecCopyingPool, _ := ants.NewPoolWithFunc(maxAppendVecCopying, func(i interface{}) {
 		tasks := appendVecCopyingInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"}, 1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(appendVecCopyingTask)
@@ -189,7 +189,7 @@ func BuildAccountsDb(
 		appendVecCopyingInProgress.Add(-1)
 		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
 		wg.Add(1)
-		statsd.Timing(statsd.TasksAppendVecCopyingLatency, uint64(time.Since(start)), nil, 1)
+		statsd.Timing(statsd.TasksAppendVecCopyingLatency, uint64(time.Since(start)), nil)
 		err = indexEntryBuilderPool.Invoke(nextTask)
 		if err != nil {
 			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
@@ -313,7 +313,7 @@ func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolW
 			mlog.Log.Errorf("err copying data to reader: %s\n", err)
 			return err
 		}
-		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil, 1)
+		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
 
 		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
 		wg.Add(1)
