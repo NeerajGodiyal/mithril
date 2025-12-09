@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -117,7 +116,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 func (accountsDb *AccountsDb) InitCaches() {
 	var err error
-	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10_000).
+	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -126,8 +125,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	// TODO: review size of program cache
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](10_000).
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](5000).
 		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
 			return 1
 		}).
@@ -136,7 +134,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](100000).
+	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10000).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -229,9 +227,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		acct.Slot = slot
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go accountsDb.storeAccountsInternal(accts, slot, &wg)
+	accountsDb.storeAccountsInternal(accts, slot)
 
 	for _, acct := range accts {
 		if acct == nil {
@@ -244,14 +240,11 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
 	}
-	wg.Wait()
 
 	return nil
 }
 
-func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64) {
 	fileId := accountsDb.LargestFileId.Add(1)
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
@@ -315,6 +308,10 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 				}
 
 				err = newAppendVecAcct.Marshal(existingAppendVecFile)
+				if err != nil {
+					panic(fmt.Sprintf("error marshaling appendvec for storage: %s", err))
+				}
+
 				existingAppendVecFile.Close()
 				continue
 			}
@@ -331,7 +328,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 		err = appendVecAcct.Marshal(appendVecAcctsBuf)
 		if err != nil {
-			panic(err)
+			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
 		}
 	}
 

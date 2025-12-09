@@ -1177,7 +1177,6 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
 				if err != nil {
-					//mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
 					return InstrErrUnsupportedProgramId
 				}
 			}
@@ -1208,7 +1207,6 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			if err != nil {
 				programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcctState.Program.ProgramDataAddress)
 				if err != nil {
-					//mlog.Log.Debugf("unable to get account %s as program data: %s", programAcctState.Program.ProgramDataAddress, err)
 					return InstrErrUnsupportedProgramId
 				}
 				metrics.GlobalBlockReplay.GetProgramDataUncachedAccountsDb.AddTimingSince(start)
@@ -1228,7 +1226,6 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 			programDataSlot := programDataAcctState.ProgramData.Slot
 			if programDataSlot >= execCtx.SlotCtx.Slot {
-				//mlog.Log.Debugf("programDataSlot (%d) >= execCtx.SlotCtx.Slot (%d)", programDataSlot, execCtx.SlotCtx.Slot)
 				return InstrErrInvalidAccountData
 			}
 

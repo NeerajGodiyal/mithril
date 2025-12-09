@@ -112,15 +112,13 @@ func NewStack(sbpfVer sbpfver.SbpfVersion) Stack {
 
 func (s *Stack) Finish() {
 	if UsePool {
-		go func() {
-			s.mem = s.mem[:StackMax]
-			clear(s.mem)
-			stackMemPool.Put(s.mem)
-			s.shadow = s.shadow[:StackDepth]
-			clear(s.shadow)
-			s.shadow = s.shadow[:1]
-			stackShadowPool.Put(s.shadow)
-		}()
+		s.mem = s.mem[:StackMax]
+		clear(s.mem)
+		stackMemPool.Put(s.mem)
+		s.shadow = s.shadow[:StackDepth]
+		clear(s.shadow)
+		s.shadow = s.shadow[:1]
+		stackShadowPool.Put(s.shadow)
 	}
 }
 

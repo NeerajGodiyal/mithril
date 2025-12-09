@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -111,8 +110,10 @@ func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) (*b.Block, error
 					break
 				} else if err == rpcclient.SlotSkipped {
 					return nil, err
-				} else if strings.Contains(err.Error(), "Block not available for slot") { // we're too early. wait for a bit.
+				} else if isSlotNotAvailableErr(err) { // we're too early. wait for a bit.
 					time.Sleep(500 * time.Millisecond)
+				} else if isRateLimitedErr(err) {
+					time.Sleep(2 * time.Second)
 				} else {
 					panic(fmt.Sprintf("error fetching block: %s\n", err))
 				}
@@ -129,8 +130,10 @@ func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) (*b.Block, error
 						break
 					} else if err == rpcclient.SlotSkipped {
 						return nil, err
-					} else if strings.Contains(err.Error(), "Block not available for slot") { // we're too early. wait for a bit.
+					} else if isSlotNotAvailableErr(err) { // we're too early. wait for a bit.
 						time.Sleep(500 * time.Millisecond)
+					} else if isRateLimitedErr(err) {
+						time.Sleep(2 * time.Second)
 					} else {
 						panic(fmt.Sprintf("error fetching block: %s\n", err))
 					}
