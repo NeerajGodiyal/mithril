@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
@@ -85,9 +84,9 @@ type Config struct {
 // ConfigFile holds the path to the config file (set via --config flag)
 var ConfigFile string
 
-// InitConfig loads configuration from TOML file if specified, and binds to command flags.
-// CLI flags take precedence over config file values.
-func InitConfig(cmd *cobra.Command) error {
+// InitConfig loads configuration from TOML file if specified.
+// CLI flag precedence is handled separately in initConfigAndBindFlags.
+func InitConfig() error {
 	if ConfigFile != "" {
 		// Get the directory and filename
 		dir := filepath.Dir(ConfigFile)
@@ -106,22 +105,9 @@ func InitConfig(cmd *cobra.Command) error {
 		}
 	}
 
-	// Bind all flags to viper - CLI flags override config file values
-	if err := viper.BindPFlags(cmd.Flags()); err != nil {
-		return fmt.Errorf("error binding flags: %w", err)
-	}
+	// Note: We don't bind flags here - precedence is handled manually
+	// by checking cmd.Flags().Lookup(name).Changed in initConfigAndBindFlags
 
-	return nil
-}
-
-// BindPersistentFlags binds persistent flags from parent commands
-func BindPersistentFlags(cmd *cobra.Command) error {
-	// Walk up the command tree and bind persistent flags
-	for c := cmd; c != nil; c = c.Parent() {
-		if err := viper.BindPFlags(c.PersistentFlags()); err != nil {
-			return fmt.Errorf("error binding persistent flags: %w", err)
-		}
-	}
 	return nil
 }
 

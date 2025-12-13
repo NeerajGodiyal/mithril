@@ -214,65 +214,68 @@ func init() {
 // After this runs, config values can be read from either CLI flags or config file,
 // with CLI flags taking precedence.
 func initConfigAndBindFlags(cmd *cobra.Command) error {
-	// Initialize config from file and bind flags
-	if err := config.InitConfig(cmd); err != nil {
+	// Initialize config from file (do NOT bind flags - we handle precedence manually)
+	if err := config.InitConfig(); err != nil {
 		return err
 	}
 
-	// Bind persistent flags from parent commands
-	if err := config.BindPersistentFlags(cmd); err != nil {
-		return err
+	// Check if a CLI flag was explicitly set by the user
+	flagChanged := func(name string) bool {
+		if f := cmd.Flags().Lookup(name); f != nil {
+			return f.Changed
+		}
+		return false
 	}
 
-	// Helper to get string from CLI flag first, then TOML nested key
+	// Helper to get string: CLI flag if explicitly set, otherwise TOML config
 	getString := func(cliKey, tomlKey string) string {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetString(cliKey)
 		}
 		return config.GetString(tomlKey)
 	}
 
-	// Helper to get int from CLI flag first, then TOML nested key
+	// Helper to get int: CLI flag if explicitly set, otherwise TOML config
 	getInt := func(cliKey, tomlKey string) int {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetInt(cliKey)
 		}
 		return config.GetInt(tomlKey)
 	}
 
-	// Helper to get int64 from CLI flag first, then TOML nested key
+	// Helper to get int64: CLI flag if explicitly set, otherwise TOML config
 	getInt64 := func(cliKey, tomlKey string) int64 {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetInt64(cliKey)
 		}
 		return config.GetInt64(tomlKey)
 	}
 
-	// Helper to get uint64 from CLI flag first, then TOML nested key
+	// Helper to get uint64: CLI flag if explicitly set, otherwise TOML config
 	getUint64 := func(cliKey, tomlKey string) uint64 {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetUint64(cliKey)
 		}
 		return config.GetUint64(tomlKey)
 	}
 
-	// Helper to get bool from CLI flag first, then TOML nested key
+	// Helper to get bool: CLI flag if explicitly set, otherwise TOML config
 	getBool := func(cliKey, tomlKey string) bool {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetBool(cliKey)
 		}
 		return config.GetBool(tomlKey)
 	}
 
-	// Helper to get string slice from CLI flag first, then TOML nested key
+	// Helper to get string slice: CLI flag if explicitly set, otherwise TOML config
 	getStringSlice := func(cliKey, tomlKey string) []string {
-		if config.IsSet(cliKey) {
+		if flagChanged(cliKey) {
 			return config.GetStringSlice(cliKey)
 		}
 		return config.GetStringSlice(tomlKey)
 	}
 
-	// Update variables from viper (CLI flags take precedence over TOML config)
+	// Update variables (CLI flags take precedence over TOML config when explicitly set)
 	// CLI flag names -> TOML nested keys (Firedancer-style)
 
 	// [replay] section
@@ -316,17 +319,17 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	metricsPath = getString("metrics-path", "reporting.metrics_path")
 
 	// Handle external package variables
-	if config.IsSet("zstd-decoder-concurrency") {
+	if flagChanged("zstd-decoder-concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
 	} else if config.IsSet("development.zstd_decoder_concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("development.zstd_decoder_concurrency")
 	}
-	if config.IsSet("max-concurrent-flushers") {
+	if flagChanged("max-concurrent-flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
 	} else if config.IsSet("development.max_concurrent_flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("development.max_concurrent_flushers")
 	}
-	if config.IsSet("use-pool") {
+	if flagChanged("use-pool") {
 		sbpf.UsePool = config.GetBool("use-pool")
 	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
