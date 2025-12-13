@@ -18,6 +18,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
@@ -33,6 +34,9 @@ var (
 	Verifier = cobra.Command{
 		Use:   "verifier",
 		Short: "Run mithril verifier node",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfigAndBindFlags(cmd)
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			cmd.SetContext(ctx)
@@ -44,6 +48,9 @@ var (
 	CatchupRpc = cobra.Command{
 		Use:   "catchup-rpc",
 		Short: "Catchup and run live from RPC",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfigAndBindFlags(cmd)
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			cmd.SetContext(ctx)
@@ -55,6 +62,9 @@ var (
 	CatchupOvercast = cobra.Command{
 		Use:   "catchup-overcast",
 		Short: "Catchup and run live from Overcast",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfigAndBindFlags(cmd)
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			cmd.SetContext(ctx)
@@ -151,6 +161,58 @@ func init() {
 	CatchupOvercast.Flags().StringVar(&blockDir, "blockdir", "/tmp/blocks", "Path containing slot.json files")
 	CatchupOvercast.Flags().StringVar(&scratchDir, "scratchdir", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 	CatchupOvercast.Flags().IntVar(&rpcPort, "rpc-server-port", 0, "RPC server port. Default off.")
+}
+
+// initConfigAndBindFlags loads TOML config file (if specified) and binds flags to viper.
+// After this runs, config values can be read from either CLI flags or config file,
+// with CLI flags taking precedence.
+func initConfigAndBindFlags(cmd *cobra.Command) error {
+	// Initialize config from file and bind flags
+	if err := config.InitConfig(cmd); err != nil {
+		return err
+	}
+
+	// Bind persistent flags from parent commands
+	if err := config.BindPersistentFlags(cmd); err != nil {
+		return err
+	}
+
+	// Update variables from viper (config file values, CLI flags override)
+	loadFromSnapshot = config.GetBool("snapshot")
+	loadFromAccountsDb = config.GetBool("accountsdb")
+	path = config.GetString("path")
+	incrementalSnapshotFilename = config.GetString("incremental-snapshot-filename")
+	outputDir = config.GetString("out")
+	scratchDir = config.GetString("scratchdir")
+	rpcEndpoint = config.GetString("rpc")
+	overcastEndpoint = config.GetString("overcast")
+	rpcEndpointFile = config.GetString("rpc-node-list")
+	snapshotDlPath = config.GetString("download-snapshot")
+	numReplaySlots = config.GetInt64("num-replay-slots")
+	endSlot = config.GetInt64("endslot")
+	pprofPort = config.GetInt64("pprofport")
+	blockDir = config.GetString("blockdir")
+	txParallelism = config.GetInt64("txpar")
+	debugTxs = config.GetStringSlice("debugtx")
+	debugAcctWrites = config.GetStringSlice("debugacctwrites")
+	metricsFilename = config.GetString("metrics-filename")
+	cpuprofFilename = config.GetString("cpuprof-filename")
+	paramArenaSizeMB = config.GetUint64("param-arena-size-mb")
+	borrowedAccountArenaSize = config.GetUint64("borrowed-account-arena-size")
+	rpcPort = config.GetInt("rpc-server-port")
+
+	// Handle external package variables
+	if config.IsSet("zstd-decoder-concurrency") {
+		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
+	}
+	if config.IsSet("max-concurrent-flushers") {
+		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
+	}
+	if config.IsSet("use-pool") {
+		sbpf.UsePool = config.GetBool("use-pool")
+	}
+
+	return nil
 }
 
 func runVerifier(c *cobra.Command, args []string) {

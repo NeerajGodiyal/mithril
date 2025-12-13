@@ -1,0 +1,111 @@
+# Mithril Configuration File
+# Copy this file and customize for your deployment.
+# CLI flags override these values when both are specified.
+
+# ============================================================================
+# PATHS
+# ============================================================================
+
+# Path of full snapshot or AccountsDB to load from (verifier mode)
+# path = "/path/to/snapshot-or-accountsdb"
+
+# Output path for writing AccountsDB data to
+# out = "/mnt/accountsdb"
+
+# Path containing slot.json files
+# blockdir = "/tmp/blocks"
+
+# Path for downloads (e.g. snapshots) and other temp state
+# scratchdir = "/tmp"
+
+# ============================================================================
+# RPC SETTINGS
+# ============================================================================
+
+# URL for RPC endpoint
+# rpc = "https://api.mainnet-beta.solana.com"
+
+# Path to file containing list of RPC nodes
+# rpc-node-list = "/path/to/rpcs.txt"
+
+# RPC server port. Set to 0 to disable (default).
+# When enabled, exposes a Solana-compatible JSON-RPC interface.
+# rpc-server-port = 8899
+
+# Overcast endpoint address (for catchup-overcast mode)
+# overcast = "localhost:9000"
+
+# ============================================================================
+# EXECUTION
+# ============================================================================
+
+# Transaction parallelism. Set to 0 for sequential execution,
+# or >0 to execute a topsort tx plan with the given number of workers.
+# txpar = 96
+
+# Size in MB for serialized parameter arena (0 to disable)
+# param-arena-size-mb = 512
+
+# Number of borrowed accounts to preallocate in arena (0 to disable)
+# borrowed-account-arena-size = 1024
+
+# ============================================================================
+# SNAPSHOT SETTINGS
+# ============================================================================
+
+# Load from a full snapshot (verifier mode)
+# snapshot = false
+
+# Load from AccountsDB (verifier mode)
+# accountsdb = false
+
+# Filename containing incremental snapshot
+# incremental-snapshot-filename = ""
+
+# Path to download snapshot to
+# download-snapshot = ""
+
+# Zstd decoder concurrency (defaults to NumCPU)
+# zstd-decoder-concurrency = 16
+
+# Bound for number of log shards to flush to Accounts DB Index at once
+# max-concurrent-flushers = 16
+
+# ============================================================================
+# REPLAY SETTINGS
+# ============================================================================
+
+# Number of slots to replay (verifier mode)
+# num-replay-slots = 0
+
+# Block at which to stop replaying, inclusive (verifier mode)
+# -1 means no limit
+# endslot = -1
+
+# ============================================================================
+# DEBUG / PROFILING
+# ============================================================================
+
+# Transaction signatures to enable debug logging for
+# debugtx = ["sig1", "sig2"]
+
+# Account pubkeys to enable debug logging of transactions that modify them
+# debugacctwrites = ["pubkey1", "pubkey2"]
+
+# Filename to write JSONL records of latencies
+# metrics-filename = "/tmp/metrics.jsonl"
+
+# Filename to write CPU profile
+# cpuprof-filename = "/tmp/cpuprof.pprof"
+
+# Port to serve HTTP pprof endpoint (-1 to disable)
+# pprofport = 6060
+
+# ============================================================================
+# MISC
+# ============================================================================
+
+# Enable/disable pool allocator for slices
+# use-pool = true
+
+

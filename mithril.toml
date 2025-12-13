@@ -1,0 +1,37 @@
+# Mithril Configuration for catchup-rpc mode
+# Usage: ./mithril catchup-rpc --config mithril.toml
+
+# ============================================================================
+# PATHS
+# ============================================================================
+
+# Output path for writing AccountsDB data to
+out = "/mnt/accountsdb"
+
+# Path containing slot.json files
+blockdir = "/mnt/scratch/blocks"
+
+# Path for downloads and other temp state
+scratchdir = "/mnt/scratch/scratch"
+
+# ============================================================================
+# RPC SETTINGS
+# ============================================================================
+
+# Primary RPC endpoint (Helius mainnet)
+# Replace YOUR_API_KEY with your actual API key
+rpc = "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY"
+
+# Path to file containing list of RPC nodes
+rpc-node-list = "/home/ubuntu/rpcs.txt"
+
+# RPC server port for Solana-compatible JSON-RPC interface
+rpc-server-port = 8899
+
+# ============================================================================
+# EXECUTION
+# ============================================================================
+
+# Transaction parallelism
+txpar = 96
+
