@@ -31,13 +31,10 @@ func init() {
 	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
 
 	cmd.AddCommand(
-		&node.Verifier,
+		&node.VerifyRange,
 	)
 	cmd.AddCommand(
-		&node.CatchupRpc,
-	)
-	cmd.AddCommand(
-		&node.CatchupOvercast,
+		&node.VerifyLive,
 	)
 }
 

@@ -226,10 +226,10 @@ func BuildAccountsDbWithIncr(
 		}
 	} else {
 		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
-			SourceType:  blockstream.BackgroundBlockDownloaderSourceRpc,
-			OutDir:      blockDir,
-			RpcEndpoint: rpcEndpoint,
-			StartSlot:   uint64(incrSlot),
+			SourceType:   blockstream.BackgroundBlockDownloaderSourceRpc,
+			OutDir:       blockDir,
+			RpcEndpoints: rpcEndpoints,
+			StartSlot:    uint64(incrSlot),
 		}
 	}
 

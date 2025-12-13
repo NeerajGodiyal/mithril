@@ -112,12 +112,21 @@
     # metrics_path = "/tmp/metrics.jsonl"
 
 # ============================================================================
-# [overcast] - Overcast integration
+# [block] - Block source configuration
 # ============================================================================
 
-[overcast]
-    # Overcast endpoint address (for catchup-overcast mode)
-    # endpoint = "localhost:9000"
+[block]
+    # Block source for verify-live mode: "rpc" or "overcast"
+    # source = "rpc"
 
+    # Overcast endpoint address (only used when source = "overcast")
+    # If source = "overcast" but no endpoint is provided, falls back to RPC
+    # overcast_endpoint = "localhost:9000"
+
+# ============================================================================
+# [snapshot] - Snapshot download configuration
+# ============================================================================
+
+[snapshot]
     # Path to download snapshot to
-    # download_snapshot_path = ""
+    # download_path = ""

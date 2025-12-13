@@ -59,10 +59,15 @@ type ReportingConfig struct {
 	MetricsPath string `toml:"metrics_path" mapstructure:"metrics_path"` // was: metrics-filename
 }
 
-// OvercastConfig holds Overcast-related configuration
-type OvercastConfig struct {
-	Endpoint             string `toml:"endpoint" mapstructure:"endpoint"`                           // was: overcast
-	DownloadSnapshotPath string `toml:"download_snapshot_path" mapstructure:"download_snapshot_path"` // was: download-snapshot
+// BlockConfig holds block source configuration
+type BlockConfig struct {
+	Source           string `toml:"source" mapstructure:"source"`                       // "rpc" or "overcast"
+	OvercastEndpoint string `toml:"overcast_endpoint" mapstructure:"overcast_endpoint"` // Overcast endpoint (optional)
+}
+
+// SnapshotConfig holds snapshot download configuration
+type SnapshotConfig struct {
+	DownloadPath string `toml:"download_path" mapstructure:"download_path"` // Path to download snapshot to
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)
@@ -75,9 +80,10 @@ type Config struct {
 	Ledger      LedgerConfig      `toml:"ledger" mapstructure:"ledger"`
 	Rpc         RpcConfig         `toml:"rpc" mapstructure:"rpc"`
 	Replay      ReplayConfig      `toml:"replay" mapstructure:"replay"`
+	Block       BlockConfig       `toml:"block" mapstructure:"block"`
+	Snapshot    SnapshotConfig    `toml:"snapshot" mapstructure:"snapshot"`
 	Development DevelopmentConfig `toml:"development" mapstructure:"development"`
 	Reporting   ReportingConfig   `toml:"reporting" mapstructure:"reporting"`
-	Overcast    OvercastConfig    `toml:"overcast" mapstructure:"overcast"`
 }
 
 // ConfigFile holds the path to the config file (set via --config flag)
