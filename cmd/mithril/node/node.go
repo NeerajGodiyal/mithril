@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -183,7 +184,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get string: CLI flag if explicitly set, otherwise TOML config
 	getString := func(cliKey, tomlKey string) string {
 		if flagChanged(cliKey) {
-			return config.GetString(cliKey)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				return f.Value.String()
+			}
 		}
 		return config.GetString(tomlKey)
 	}
@@ -191,7 +194,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get int: CLI flag if explicitly set, otherwise TOML config
 	getInt := func(cliKey, tomlKey string) int {
 		if flagChanged(cliKey) {
-			return config.GetInt(cliKey)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				if v, err := strconv.Atoi(f.Value.String()); err == nil {
+					return v
+				}
+			}
 		}
 		return config.GetInt(tomlKey)
 	}
@@ -199,7 +206,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get int64: CLI flag if explicitly set, otherwise TOML config
 	getInt64 := func(cliKey, tomlKey string) int64 {
 		if flagChanged(cliKey) {
-			return config.GetInt64(cliKey)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				if v, err := strconv.ParseInt(f.Value.String(), 10, 64); err == nil {
+					return v
+				}
+			}
 		}
 		return config.GetInt64(tomlKey)
 	}
@@ -207,7 +218,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get uint64: CLI flag if explicitly set, otherwise TOML config
 	getUint64 := func(cliKey, tomlKey string) uint64 {
 		if flagChanged(cliKey) {
-			return config.GetUint64(cliKey)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				if v, err := strconv.ParseUint(f.Value.String(), 10, 64); err == nil {
+					return v
+				}
+			}
 		}
 		return config.GetUint64(tomlKey)
 	}
@@ -215,7 +230,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get bool: CLI flag if explicitly set, otherwise TOML config
 	getBool := func(cliKey, tomlKey string) bool {
 		if flagChanged(cliKey) {
-			return config.GetBool(cliKey)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				return f.Value.String() == "true"
+			}
 		}
 		return config.GetBool(tomlKey)
 	}
@@ -223,7 +240,12 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Helper to get string slice: CLI flag if explicitly set, otherwise TOML config
 	getStringSlice := func(cliKey, tomlKey string) []string {
 		if flagChanged(cliKey) {
-			return config.GetStringSlice(cliKey)
+			// Get value directly from the flag, not viper (flags aren't bound)
+			if f := cmd.Flags().Lookup(cliKey); f != nil {
+				if ss, ok := f.Value.(interface{ GetSlice() []string }); ok {
+					return ss.GetSlice()
+				}
+			}
 		}
 		return config.GetStringSlice(tomlKey)
 	}
