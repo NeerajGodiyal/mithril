@@ -224,57 +224,111 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		return err
 	}
 
-	// Update variables from viper (config file values, CLI flags override)
-	// Uses dot notation for nested TOML sections (Firedancer-style)
+	// Helper to get string from CLI flag first, then TOML nested key
+	getString := func(cliKey, tomlKey string) string {
+		if config.IsSet(cliKey) {
+			return config.GetString(cliKey)
+		}
+		return config.GetString(tomlKey)
+	}
+
+	// Helper to get int from CLI flag first, then TOML nested key
+	getInt := func(cliKey, tomlKey string) int {
+		if config.IsSet(cliKey) {
+			return config.GetInt(cliKey)
+		}
+		return config.GetInt(tomlKey)
+	}
+
+	// Helper to get int64 from CLI flag first, then TOML nested key
+	getInt64 := func(cliKey, tomlKey string) int64 {
+		if config.IsSet(cliKey) {
+			return config.GetInt64(cliKey)
+		}
+		return config.GetInt64(tomlKey)
+	}
+
+	// Helper to get uint64 from CLI flag first, then TOML nested key
+	getUint64 := func(cliKey, tomlKey string) uint64 {
+		if config.IsSet(cliKey) {
+			return config.GetUint64(cliKey)
+		}
+		return config.GetUint64(tomlKey)
+	}
+
+	// Helper to get bool from CLI flag first, then TOML nested key
+	getBool := func(cliKey, tomlKey string) bool {
+		if config.IsSet(cliKey) {
+			return config.GetBool(cliKey)
+		}
+		return config.GetBool(tomlKey)
+	}
+
+	// Helper to get string slice from CLI flag first, then TOML nested key
+	getStringSlice := func(cliKey, tomlKey string) []string {
+		if config.IsSet(cliKey) {
+			return config.GetStringSlice(cliKey)
+		}
+		return config.GetStringSlice(tomlKey)
+	}
+
+	// Update variables from viper (CLI flags take precedence over TOML config)
+	// CLI flag names -> TOML nested keys (Firedancer-style)
 
 	// [replay] section
-	loadFromSnapshot = config.GetBool("replay.load_from_snapshot")
-	loadFromAccountsDb = config.GetBool("replay.load_from_accounts_db")
-	numReplaySlots = config.GetInt64("replay.num_slots")
-	endSlot = config.GetInt64("replay.end_slot")
-	txParallelism = config.GetInt64("replay.txpar")
+	loadFromSnapshot = getBool("load-from-snapshot", "replay.load_from_snapshot")
+	loadFromAccountsDb = getBool("load-from-accounts-db", "replay.load_from_accounts_db")
+	numReplaySlots = getInt64("num-slots", "replay.num_slots")
+	endSlot = getInt64("end-slot", "replay.end_slot")
+	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [ledger] section
-	snapshotArchivePath = config.GetString("ledger.snapshot_archive_path")
-	incrementalSnapshotFilename = config.GetString("ledger.incremental_snapshot")
-	accountsPath = config.GetString("ledger.accounts_path")
-	ledgerPath = config.GetString("ledger.path")
+	snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
+	incrementalSnapshotFilename = getString("incremental-snapshot", "ledger.incremental_snapshot")
+	accountsPath = getString("accounts-path", "ledger.accounts_path")
+	ledgerPath = getString("ledger-path", "ledger.path")
 
 	// [rpc] section
-	rpcEndpoint = config.GetString("rpc.rpc")
-	rpcEndpointFile = config.GetString("rpc.rpc_node_list")
-	rpcPort = config.GetInt("rpc.port")
+	rpcEndpoint = getString("rpc", "rpc.rpc")
+	rpcEndpointFile = getString("rpc-node-list", "rpc.rpc_node_list")
+	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
-	scratchDirectory = config.GetString("scratch_directory")
+	scratchDirectory = getString("scratch-directory", "scratch_directory")
 
 	// [overcast] section
-	overcastEndpoint = config.GetString("overcast.endpoint")
-	snapshotDlPath = config.GetString("overcast.download_snapshot_path")
+	overcastEndpoint = getString("overcast-endpoint", "overcast.endpoint")
+	snapshotDlPath = getString("download-snapshot-path", "overcast.download_snapshot_path")
 
 	// [development.pprof] section
-	pprofPort = config.GetInt64("development.pprof.port")
-	cpuprofPath = config.GetString("development.pprof.cpu_profile_path")
+	pprofPort = getInt64("pprof-port", "development.pprof.port")
+	cpuprofPath = getString("cpu-profile-path", "development.pprof.cpu_profile_path")
 
 	// [development.debug] section
-	debugTxs = config.GetStringSlice("development.debug.transaction_signatures")
-	debugAcctWrites = config.GetStringSlice("development.debug.account_writes")
+	debugTxs = getStringSlice("transaction-signatures", "development.debug.transaction_signatures")
+	debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
 
 	// [development] section
-	paramArenaSizeMB = config.GetUint64("development.param_arena_size_mb")
-	borrowedAccountArenaSize = config.GetUint64("development.borrowed_account_arena_size")
+	paramArenaSizeMB = getUint64("param-arena-size-mb", "development.param_arena_size_mb")
+	borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
 
 	// [reporting] section
-	metricsPath = config.GetString("reporting.metrics_path")
+	metricsPath = getString("metrics-path", "reporting.metrics_path")
 
 	// Handle external package variables
-	if config.IsSet("development.zstd_decoder_concurrency") {
+	if config.IsSet("zstd-decoder-concurrency") {
+		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
+	} else if config.IsSet("development.zstd_decoder_concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("development.zstd_decoder_concurrency")
 	}
-	if config.IsSet("development.max_concurrent_flushers") {
+	if config.IsSet("max-concurrent-flushers") {
+		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
+	} else if config.IsSet("development.max_concurrent_flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("development.max_concurrent_flushers")
 	}
-	if config.IsSet("development.use_pool") {
+	if config.IsSet("use-pool") {
+		sbpf.UsePool = config.GetBool("use-pool")
+	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
 	}
 
