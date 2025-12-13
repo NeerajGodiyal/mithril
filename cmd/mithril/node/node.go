@@ -191,7 +191,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		return config.GetString(tomlKey)
 	}
 
-	// Helper to get int: CLI flag if explicitly set, otherwise TOML config
+	// Helper to get int: CLI flag if explicitly set, then TOML config, then flag default
 	getInt := func(cliKey, tomlKey string) int {
 		if flagChanged(cliKey) {
 			if f := cmd.Flags().Lookup(cliKey); f != nil {
@@ -200,10 +200,19 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 				}
 			}
 		}
-		return config.GetInt(tomlKey)
+		if config.IsSet(tomlKey) {
+			return config.GetInt(tomlKey)
+		}
+		// Fall back to flag default value
+		if f := cmd.Flags().Lookup(cliKey); f != nil {
+			if v, err := strconv.Atoi(f.DefValue); err == nil {
+				return v
+			}
+		}
+		return 0
 	}
 
-	// Helper to get int64: CLI flag if explicitly set, otherwise TOML config
+	// Helper to get int64: CLI flag if explicitly set, then TOML config, then flag default
 	getInt64 := func(cliKey, tomlKey string) int64 {
 		if flagChanged(cliKey) {
 			if f := cmd.Flags().Lookup(cliKey); f != nil {
@@ -212,10 +221,19 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 				}
 			}
 		}
-		return config.GetInt64(tomlKey)
+		if config.IsSet(tomlKey) {
+			return config.GetInt64(tomlKey)
+		}
+		// Fall back to flag default value
+		if f := cmd.Flags().Lookup(cliKey); f != nil {
+			if v, err := strconv.ParseInt(f.DefValue, 10, 64); err == nil {
+				return v
+			}
+		}
+		return 0
 	}
 
-	// Helper to get uint64: CLI flag if explicitly set, otherwise TOML config
+	// Helper to get uint64: CLI flag if explicitly set, then TOML config, then flag default
 	getUint64 := func(cliKey, tomlKey string) uint64 {
 		if flagChanged(cliKey) {
 			if f := cmd.Flags().Lookup(cliKey); f != nil {
@@ -224,7 +242,16 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 				}
 			}
 		}
-		return config.GetUint64(tomlKey)
+		if config.IsSet(tomlKey) {
+			return config.GetUint64(tomlKey)
+		}
+		// Fall back to flag default value
+		if f := cmd.Flags().Lookup(cliKey); f != nil {
+			if v, err := strconv.ParseUint(f.DefValue, 10, 64); err == nil {
+				return v
+			}
+		}
+		return 0
 	}
 
 	// Helper to get bool: CLI flag if explicitly set, otherwise TOML config
