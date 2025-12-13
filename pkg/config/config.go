@@ -18,8 +18,8 @@ type LedgerConfig struct {
 
 // RpcConfig holds RPC-related configuration (matches Firedancer [rpc] section)
 type RpcConfig struct {
-	Rpc  string `toml:"rpc" mapstructure:"rpc"`   // UNCHANGED
-	Port int    `toml:"port" mapstructure:"port"` // was: rpc-server-port
+	Rpc  []string `toml:"rpc" mapstructure:"rpc"` // List of RPC endpoints
+	Port int      `toml:"port" mapstructure:"port"` // was: rpc-server-port
 }
 
 // ReplayConfig holds replay-related configuration

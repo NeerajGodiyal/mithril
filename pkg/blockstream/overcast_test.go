@@ -15,7 +15,7 @@ func TestOvercastRecvStream(t *testing.T) {
 		SourceType:       BackgroundBlockDownloaderSourceOvercast,
 		OutDir:           "/tmp/overcast_blocks",
 		OvercastEndpoint: "127.0.0.1:13370",
-		RpcEndpoint:      "https://api.mainnet-beta.solana.com",
+		RpcEndpoints:     []string{"https://api.mainnet-beta.solana.com"},
 		StartSlot:        382240100,
 	}
 

@@ -36,8 +36,10 @@
 # ============================================================================
 
 [rpc]
-    # URL for RPC endpoint (for fetching blocks and block downloads)
-    # rpc = "https://api.mainnet-beta.solana.com"
+    # RPC endpoint(s) for fetching blocks and block downloads
+    # Can be a single URL or a list of URLs for load balancing
+    # rpc = ["https://api.mainnet-beta.solana.com"]
+    # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
 
     # RPC server port. Set to 0 to disable (default).
     # When enabled, exposes a Solana-compatible JSON-RPC interface.

@@ -35,7 +35,7 @@ const (
 type BackgroundBlockDownloaderOpts struct {
 	WsEndpoint       string
 	LsEndpoint       string
-	RpcEndpoint      string
+	RpcEndpoints     []string // List of RPC endpoints for load balancing
 	OvercastEndpoint string
 	OutDir           string
 	SourceType       BackgroundBlockDownloaderSourceType
@@ -85,20 +85,20 @@ func NewBlockDownloader(opts BackgroundBlockDownloaderOpts) *BackgroundBlockDown
 				Endpoint: opts.LsEndpoint,
 				APIKey:   opts.LsApiKey,
 			})
-			rpcClient := rpcclient.NewRpcClient(opts.RpcEndpoint)
+			rpcClient := rpcclient.NewRpcClient(opts.RpcEndpoints[0])
 			downloader = &BackgroundBlockDownloader{laserStreamClient: lsClient, rpcClient: rpcClient, outDir: opts.OutDir, sourceType: opts.SourceType, output: opts.Channel}
 		}
 
 	case BackgroundBlockDownloaderSourceRpc:
 		{
-			pool := newRpcConnPool([]string{opts.RpcEndpoint})
+			pool := newRpcConnPool(opts.RpcEndpoints)
 			os.Mkdir(opts.OutDir, 0777)
 			downloader = &BackgroundBlockDownloader{rpcPool: pool, outDir: opts.OutDir, sourceType: opts.SourceType, startSlot: opts.StartSlot}
 		}
 
 	case BackgroundBlockDownloaderSourceOvercast:
 		{
-			pool := newRpcConnPool([]string{opts.RpcEndpoint})
+			pool := newRpcConnPool(opts.RpcEndpoints)
 			os.Mkdir(opts.OutDir, 0777)
 
 			downloader = &BackgroundBlockDownloader{

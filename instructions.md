@@ -15,11 +15,15 @@ Using a config file (recommended):
 go build ./cmd/mithril ; ./mithril catchup-rpc --config config.toml
 ```
 
-Or with CLI flags:
+Or with CLI flags (supports multiple RPC endpoints for load balancing):
 ```
 go build ./cmd/mithril ; ./mithril catchup-rpc --accounts-path <output_acctsdb_dir> -r <rpc_url> --txpar 96
 ```
-example:
+example with single endpoint:
 ```
 go build ./cmd/mithril ; ./mithril catchup-rpc --accounts-path /mnt/accounts_db/ -r http://your_rpc_node --txpar 96
+```
+example with multiple endpoints:
+```
+go build ./cmd/mithril ; ./mithril catchup-rpc --accounts-path /mnt/accounts_db/ -r http://rpc1,http://rpc2,http://rpc3 --txpar 96
 ```

@@ -79,7 +79,7 @@ var (
 	incrementalSnapshotFilename string
 	accountsPath     string
 	scratchDirectory string
-	rpcEndpoint      string
+	rpcEndpoints     []string
 	overcastEndpoint string
 	snapshotDlPath   string
 	numReplaySlots              int64
@@ -115,7 +115,7 @@ func init() {
 	Verifier.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
-	Verifier.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	Verifier.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
 	Verifier.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [development] section flags
@@ -145,7 +145,7 @@ func init() {
 	CatchupRpc.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
-	CatchupRpc.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	CatchupRpc.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
 	CatchupRpc.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -177,7 +177,7 @@ func init() {
 	CatchupOvercast.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
-	CatchupOvercast.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
+	CatchupOvercast.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
 	CatchupOvercast.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [overcast] section flags
@@ -289,7 +289,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	ledgerPath = getString("ledger-path", "ledger.path")
 
 	// [rpc] section
-	rpcEndpoint = getString("rpc", "rpc.rpc")
+	rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -366,8 +366,8 @@ func runVerifier(c *cobra.Command, args []string) {
 		defer pprof.StopCPUProfile()
 	}
 
-	if rpcEndpoint == "" {
-		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	if len(rpcEndpoints) == 0 {
+		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
 	if loadFromSnapshot {
@@ -472,7 +472,7 @@ func runVerifier(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -496,8 +496,8 @@ func runRpcCatchup(c *cobra.Command, args []string) {
 		defer pprof.StopCPUProfile()
 	}
 
-	if rpcEndpoint == "" {
-		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	if len(rpcEndpoints) == 0 {
+		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
 	mlog.Log.Infof("downloading full snapshot...")
@@ -508,7 +508,7 @@ func runRpcCatchup(c *cobra.Command, args []string) {
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, ledgerPath, "")
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, "")
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
@@ -547,7 +547,7 @@ func runRpcCatchup(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsPath, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, ledgerPath, int(txParallelism), true, false, dbgOpts, metricsWriter, rpcServer)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsPath, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), true, false, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -571,8 +571,8 @@ func runOvercastCatchup(c *cobra.Command, args []string) {
 		defer pprof.StopCPUProfile()
 	}
 
-	if rpcEndpoint == "" {
-		rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	if len(rpcEndpoints) == 0 {
+		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
 	if overcastEndpoint == "" {
@@ -587,7 +587,7 @@ func runOvercastCatchup(c *cobra.Command, args []string) {
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, ledgerPath, overcastEndpoint)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastEndpoint)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
@@ -626,7 +626,7 @@ func runOvercastCatchup(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsPath, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoint, ledgerPath, int(txParallelism), true, true, dbgOpts, metricsWriter, rpcServer)
+	replay.ReplayBlocks(c.Context(), accountsDb, accountsPath, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), true, true, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
