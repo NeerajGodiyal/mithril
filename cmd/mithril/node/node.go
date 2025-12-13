@@ -362,7 +362,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("downloading snapshot...")
 
 		var dlPath string
-		dlPath, _, _, err = snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDlPath)
+		dlPath, _, _, err = snapshotdl.DownloadSnapshot(rpcEndpoints[0], snapshotDlPath)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -469,9 +469,10 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
+	mlog.Log.Infof("using RPC endpoint: %s", rpcEndpoints[0])
 	mlog.Log.Infof("downloading full snapshot...")
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotPath, _, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
+	fullSnapshotPath, _, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot(rpcEndpoints[0], snapshotDownloadPath)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}

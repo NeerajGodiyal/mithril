@@ -205,8 +205,9 @@ func (downloader *BackgroundBlockDownloader) startRpcStream() {
 	slot := downloader.startSlot
 
 	if slot == 0 {
-		c := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+		c := downloader.rpcPool.Take()
 		slot, err = c.GetSlot()
+		downloader.rpcPool.Release(c)
 		if err != nil {
 			panic(err)
 		}
@@ -239,8 +240,9 @@ func (downloader *BackgroundBlockDownloader) startRpcDownloadForOvercastCatchup(
 	slot := downloader.startSlot
 
 	if slot == 0 {
-		c := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+		c := downloader.rpcPool.Take()
 		slot, err = c.GetSlot()
+		downloader.rpcPool.Release(c)
 		if err != nil {
 			panic(err)
 		}

@@ -209,7 +209,7 @@ func BuildAccountsDbWithIncr(
 	// download an incremental snapshot based on the full snapshot's slot number
 	mlog.Log.Infof("downloading incremental snapshot (%d)...", referenceSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot(rpcEndpoints[0], snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}
@@ -301,7 +301,7 @@ func BuildAccountsDbWithIncr(
 		panic(err)
 	}
 
-	rpcClient := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+	rpcClient := rpcclient.NewRpcClient(rpcEndpoints[0])
 	latestSlot, _ := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
