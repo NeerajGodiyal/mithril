@@ -1,111 +1,124 @@
 # Mithril Configuration File
 # Copy this file and customize for your deployment.
 # CLI flags override these values when both are specified.
+#
+# Configuration structure follows Firedancer conventions for familiarity.
 
 # ============================================================================
-# PATHS
+# TOP-LEVEL
 # ============================================================================
 
-# Path of full snapshot or AccountsDB to load from (verifier mode)
-# path = "/path/to/snapshot-or-accountsdb"
-
-# Output path for writing AccountsDB data to
-# out = "/mnt/accountsdb"
-
-# Path containing slot.json files
-# blockdir = "/tmp/blocks"
+# Name of this Mithril instance
+# name = "mithril1"
 
 # Path for downloads (e.g. snapshots) and other temp state
-# scratchdir = "/tmp"
+# scratch_directory = "/tmp"
 
 # ============================================================================
-# RPC SETTINGS
+# [ledger] - Ledger and storage paths
 # ============================================================================
 
-# URL for RPC endpoint
-# rpc = "https://api.mainnet-beta.solana.com"
+[ledger]
+    # Path containing slot.json files (block data)
+    # path = "/tmp/blocks"
 
-# Path to file containing list of RPC nodes
-# rpc-node-list = "/path/to/rpcs.txt"
+    # Output path for writing AccountsDB data to
+    # accounts_path = "/mnt/accountsdb"
 
-# RPC server port. Set to 0 to disable (default).
-# When enabled, exposes a Solana-compatible JSON-RPC interface.
-# rpc-server-port = 8899
+    # Path of full snapshot or AccountsDB to load from (verifier mode)
+    # snapshot_archive_path = "/path/to/snapshot-or-accountsdb"
 
-# Overcast endpoint address (for catchup-overcast mode)
-# overcast = "localhost:9000"
-
-# ============================================================================
-# EXECUTION
-# ============================================================================
-
-# Transaction parallelism. Set to 0 for sequential execution,
-# or >0 to execute a topsort tx plan with the given number of workers.
-# txpar = 96
-
-# Size in MB for serialized parameter arena (0 to disable)
-# param-arena-size-mb = 512
-
-# Number of borrowed accounts to preallocate in arena (0 to disable)
-# borrowed-account-arena-size = 1024
+    # Filename containing incremental snapshot
+    # incremental_snapshot = ""
 
 # ============================================================================
-# SNAPSHOT SETTINGS
+# [rpc] - RPC configuration
 # ============================================================================
 
-# Load from a full snapshot (verifier mode)
-# snapshot = false
+[rpc]
+    # URL for RPC endpoint (for fetching blocks)
+    # rpc = "https://api.mainnet-beta.solana.com"
 
-# Load from AccountsDB (verifier mode)
-# accountsdb = false
+    # Path to file containing list of RPC nodes
+    # rpc_node_list = "/path/to/rpcs.txt"
 
-# Filename containing incremental snapshot
-# incremental-snapshot-filename = ""
-
-# Path to download snapshot to
-# download-snapshot = ""
-
-# Zstd decoder concurrency (defaults to NumCPU)
-# zstd-decoder-concurrency = 16
-
-# Bound for number of log shards to flush to Accounts DB Index at once
-# max-concurrent-flushers = 16
+    # RPC server port. Set to 0 to disable (default).
+    # When enabled, exposes a Solana-compatible JSON-RPC interface.
+    # port = 8899
 
 # ============================================================================
-# REPLAY SETTINGS
+# [replay] - Block replay settings
 # ============================================================================
 
-# Number of slots to replay (verifier mode)
-# num-replay-slots = 0
+[replay]
+    # Transaction parallelism. Set to 0 for sequential execution,
+    # or >0 to execute a topsort tx plan with the given number of workers.
+    # txpar = 96
 
-# Block at which to stop replaying, inclusive (verifier mode)
-# -1 means no limit
-# endslot = -1
+    # Number of slots to replay (verifier mode)
+    # num_slots = 0
 
-# ============================================================================
-# DEBUG / PROFILING
-# ============================================================================
+    # Block at which to stop replaying, inclusive (verifier mode)
+    # -1 means no limit
+    # end_slot = -1
 
-# Transaction signatures to enable debug logging for
-# debugtx = ["sig1", "sig2"]
+    # Load from a full snapshot (verifier mode)
+    # load_from_snapshot = false
 
-# Account pubkeys to enable debug logging of transactions that modify them
-# debugacctwrites = ["pubkey1", "pubkey2"]
-
-# Filename to write JSONL records of latencies
-# metrics-filename = "/tmp/metrics.jsonl"
-
-# Filename to write CPU profile
-# cpuprof-filename = "/tmp/cpuprof.pprof"
-
-# Port to serve HTTP pprof endpoint (-1 to disable)
-# pprofport = 6060
+    # Load from AccountsDB (verifier mode)
+    # load_from_accounts_db = false
 
 # ============================================================================
-# MISC
+# [development] - Development and tuning options
 # ============================================================================
 
-# Enable/disable pool allocator for slices
-# use-pool = true
+[development]
+    # Zstd decoder concurrency (defaults to NumCPU)
+    # zstd_decoder_concurrency = 16
 
+    # Bound for number of log shards to flush to Accounts DB Index at once
+    # max_concurrent_flushers = 16
 
+    # Size in MB for serialized parameter arena (0 to disable)
+    # param_arena_size_mb = 512
+
+    # Number of borrowed accounts to preallocate in arena (0 to disable)
+    # borrowed_account_arena_size = 1024
+
+    # Enable/disable pool allocator for slices
+    # use_pool = true
+
+    # [development.pprof] - Profiling options
+    [development.pprof]
+        # Port to serve HTTP pprof endpoint (-1 to disable)
+        # port = 6060
+
+        # Filename to write CPU profile
+        # cpu_profile_path = "/tmp/cpuprof.pprof"
+
+    # [development.debug] - Debug logging options
+    [development.debug]
+        # Transaction signatures to enable debug logging for
+        # transaction_signatures = ["sig1", "sig2"]
+
+        # Account pubkeys to enable debug logging of transactions that modify them
+        # account_writes = ["pubkey1", "pubkey2"]
+
+# ============================================================================
+# [reporting] - Metrics and reporting
+# ============================================================================
+
+[reporting]
+    # Filename to write JSONL records of latencies
+    # metrics_path = "/tmp/metrics.jsonl"
+
+# ============================================================================
+# [overcast] - Overcast integration
+# ============================================================================
+
+[overcast]
+    # Overcast endpoint address (for catchup-overcast mode)
+    # endpoint = "localhost:9000"
+
+    # Path to download snapshot to
+    # download_snapshot_path = ""
