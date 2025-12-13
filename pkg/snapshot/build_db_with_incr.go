@@ -30,7 +30,6 @@ func BuildAccountsDbWithIncr(
 	referenceSlot int,
 	accountsDbDir string,
 	rpcEndpoint string,
-	rpcEndpointFile string,
 	blockDir string,
 	overcastEndpoint string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
@@ -222,14 +221,14 @@ func BuildAccountsDbWithIncr(
 			SourceType:       blockstream.BackgroundBlockDownloaderSourceOvercast,
 			OutDir:           blockDir,
 			OvercastEndpoint: overcastEndpoint,
-			RpcPoolFile:      rpcEndpointFile,
+			RpcEndpoint:      rpcEndpoint,
 			StartSlot:        uint64(incrSlot),
 		}
 	} else {
 		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
 			SourceType:  blockstream.BackgroundBlockDownloaderSourceRpc,
 			OutDir:      blockDir,
-			RpcPoolFile: rpcEndpointFile,
+			RpcEndpoint: rpcEndpoint,
 			StartSlot:   uint64(incrSlot),
 		}
 	}

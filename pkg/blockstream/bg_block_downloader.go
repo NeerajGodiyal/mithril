@@ -1,7 +1,6 @@
 package blockstream
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,7 +40,6 @@ type BackgroundBlockDownloaderOpts struct {
 	OutDir           string
 	SourceType       BackgroundBlockDownloaderSourceType
 	LsApiKey         string
-	RpcPoolFile      string
 	Channel          chan *block.Block
 	StartSlot        uint64
 }
@@ -93,16 +91,14 @@ func NewBlockDownloader(opts BackgroundBlockDownloaderOpts) *BackgroundBlockDown
 
 	case BackgroundBlockDownloaderSourceRpc:
 		{
-			addrs := parseRpcPoolFile(opts.RpcPoolFile)
-			pool := newRpcConnPool(addrs)
+			pool := newRpcConnPool([]string{opts.RpcEndpoint})
 			os.Mkdir(opts.OutDir, 0777)
 			downloader = &BackgroundBlockDownloader{rpcPool: pool, outDir: opts.OutDir, sourceType: opts.SourceType, startSlot: opts.StartSlot}
 		}
 
 	case BackgroundBlockDownloaderSourceOvercast:
 		{
-			addrs := parseRpcPoolFile(opts.RpcPoolFile)
-			pool := newRpcConnPool(addrs)
+			pool := newRpcConnPool([]string{opts.RpcEndpoint})
 			os.Mkdir(opts.OutDir, 0777)
 
 			downloader = &BackgroundBlockDownloader{
@@ -118,26 +114,6 @@ func NewBlockDownloader(opts BackgroundBlockDownloaderOpts) *BackgroundBlockDown
 	}
 
 	return downloader
-}
-
-func parseRpcPoolFile(path string) []string {
-	file, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-
-	var addrs []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		addrs = append(addrs, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	return addrs
 }
 
 func (downloader *BackgroundBlockDownloader) Start() {

@@ -18,9 +18,8 @@ type LedgerConfig struct {
 
 // RpcConfig holds RPC-related configuration (matches Firedancer [rpc] section)
 type RpcConfig struct {
-	Rpc         string `toml:"rpc" mapstructure:"rpc"`                   // UNCHANGED
-	RpcNodeList string `toml:"rpc_node_list" mapstructure:"rpc_node_list"` // was: rpc-node-list
-	Port        int    `toml:"port" mapstructure:"port"`                 // was: rpc-server-port
+	Rpc  string `toml:"rpc" mapstructure:"rpc"`   // UNCHANGED
+	Port int    `toml:"port" mapstructure:"port"` // was: rpc-server-port
 }
 
 // ReplayConfig holds replay-related configuration
@@ -84,25 +83,34 @@ type Config struct {
 // ConfigFile holds the path to the config file (set via --config flag)
 var ConfigFile string
 
-// InitConfig loads configuration from TOML file if specified.
+// InitConfig loads configuration from TOML file.
+// If no --config flag is provided, defaults to "config.toml" in current directory.
 // CLI flag precedence is handled separately in initConfigAndBindFlags.
 func InitConfig() error {
-	if ConfigFile != "" {
-		// Get the directory and filename
-		dir := filepath.Dir(ConfigFile)
-		filename := filepath.Base(ConfigFile)
+	configPath := ConfigFile
+	if configPath == "" {
+		configPath = "config.toml" // Default config file
+	}
 
-		// Remove extension for viper
-		ext := filepath.Ext(filename)
-		name := strings.TrimSuffix(filename, ext)
+	// Get the directory and filename
+	dir := filepath.Dir(configPath)
+	filename := filepath.Base(configPath)
 
-		viper.SetConfigName(name)
-		viper.SetConfigType("toml")
-		viper.AddConfigPath(dir)
+	// Remove extension for viper
+	ext := filepath.Ext(filename)
+	name := strings.TrimSuffix(filename, ext)
 
-		if err := viper.ReadInConfig(); err != nil {
+	viper.SetConfigName(name)
+	viper.SetConfigType("toml")
+	viper.AddConfigPath(dir)
+
+	// Try to read config file (not an error if default doesn't exist)
+	if err := viper.ReadInConfig(); err != nil {
+		// Only return error if user explicitly specified a config file
+		if ConfigFile != "" {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
+		// Default config.toml not found is fine, just continue without it
 	}
 
 	// Note: We don't bind flags here - precedence is handled manually

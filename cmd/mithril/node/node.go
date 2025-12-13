@@ -77,12 +77,11 @@ var (
 	loadFromAccountsDb          bool
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
-	accountsPath                string
-	scratchDirectory            string
-	rpcEndpoint                 string
-	overcastEndpoint            string
-	rpcEndpointFile             string
-	snapshotDlPath              string
+	accountsPath     string
+	scratchDirectory string
+	rpcEndpoint      string
+	overcastEndpoint string
+	snapshotDlPath   string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -147,7 +146,6 @@ func init() {
 
 	// [rpc] section flags
 	CatchupRpc.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
-	CatchupRpc.Flags().StringVarP(&rpcEndpointFile, "rpc-node-list", "n", "", "Path for RPC node list file")
 	CatchupRpc.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -180,7 +178,6 @@ func init() {
 
 	// [rpc] section flags
 	CatchupOvercast.Flags().StringVarP(&rpcEndpoint, "rpc", "r", "", "URL for RPC endpoint")
-	CatchupOvercast.Flags().StringVarP(&rpcEndpointFile, "rpc-node-list", "n", "", "Path for RPC node list file")
 	CatchupOvercast.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [overcast] section flags
@@ -293,7 +290,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 	// [rpc] section
 	rpcEndpoint = getString("rpc", "rpc.rpc")
-	rpcEndpointFile = getString("rpc-node-list", "rpc.rpc_node_list")
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -504,10 +500,6 @@ func runRpcCatchup(c *cobra.Command, args []string) {
 		rpcEndpoint = "https://api.mainnet-beta.solana.com"
 	}
 
-	if rpcEndpointFile == "" {
-		klog.Fatalf("must provide list of RPC nodes to use")
-	}
-
 	mlog.Log.Infof("downloading full snapshot...")
 	fullSnapshotDlStart := time.Now()
 	fullSnapshotPath, _, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath)
@@ -516,7 +508,7 @@ func runRpcCatchup(c *cobra.Command, args []string) {
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, rpcEndpointFile, ledgerPath, "")
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, ledgerPath, "")
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
@@ -583,10 +575,6 @@ func runOvercastCatchup(c *cobra.Command, args []string) {
 		rpcEndpoint = "https://api.mainnet-beta.solana.com"
 	}
 
-	if rpcEndpointFile == "" {
-		klog.Fatalf("must provide list of RPC nodes to use")
-	}
-
 	if overcastEndpoint == "" {
 		klog.Fatalf("must provide Overcast node address")
 	}
@@ -599,7 +587,7 @@ func runOvercastCatchup(c *cobra.Command, args []string) {
 	}
 	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, rpcEndpointFile, ledgerPath, overcastEndpoint)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoint, ledgerPath, overcastEndpoint)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
