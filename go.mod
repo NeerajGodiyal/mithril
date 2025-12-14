@@ -151,7 +151,7 @@ require (
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
 	github.com/Overclock-Validator/neostd v0.0.0-20250321114349-815aed984986
 	github.com/Overclock-Validator/sniper v0.0.0-20250213220840-26a9b2260d54
-	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20250725100536-f7215e35adce
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251214224939-3d8fd6b99fd2
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/aead/siphash v1.0.1
