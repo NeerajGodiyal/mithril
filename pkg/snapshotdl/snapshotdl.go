@@ -31,11 +31,17 @@ func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
 	var finalPath string
 	for _, rpc := range bestRPCs {
 		finalPath, err = snapshot.DownloadSnapshot(rpc, cfg, "snapshot-", referenceSlot)
-		if err == nil {
+		if err == nil && finalPath != "" {
 			break
+		} else if err != nil {
+			fmt.Printf("failed to download snapshot from %s: %v. trying next.\n", rpc, err)
 		} else {
-			fmt.Printf("failed to download snapshot from %s. trying next.\n", rpc)
+			fmt.Printf("snapshot download from %s returned empty path. trying next.\n", rpc)
 		}
+	}
+
+	if finalPath == "" {
+		return "", 0, 0, fmt.Errorf("failed to download snapshot from any RPC node")
 	}
 
 	snapshotSlot := extractFullSnapshotSlot(finalPath)

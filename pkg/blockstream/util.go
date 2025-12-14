@@ -7,5 +7,8 @@ func isSlotNotAvailableErr(err error) bool {
 }
 
 func isRateLimitedErr(err error) bool {
-	return strings.Contains(err.Error(), "rate limited")
+	errStr := err.Error()
+	return strings.Contains(errStr, "rate limited") ||
+		strings.Contains(errStr, "Too many requests") ||
+		strings.Contains(errStr, "429")
 }

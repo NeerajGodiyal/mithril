@@ -7,6 +7,7 @@ import (
 	"os/signal"
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -26,14 +27,14 @@ func init() {
 	klog.InitFlags(klogFlags)
 	cmd.PersistentFlags().AddGoFlagSet(klogFlags)
 
+	// Add config file flag
+	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
+
 	cmd.AddCommand(
-		&node.Verifier,
+		&node.VerifyRange,
 	)
 	cmd.AddCommand(
-		&node.CatchupRpc,
-	)
-	cmd.AddCommand(
-		&node.CatchupOvercast,
+		&node.VerifyLive,
 	)
 }
 

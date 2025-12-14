@@ -43,3 +43,4 @@ conformance/.DS_Store
 fixtures/.DS_Store
 pkg/.DS_Store
 .DS_Store
+mithril.toml

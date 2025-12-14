@@ -1,12 +1,10 @@
 package blockstream
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,12 +34,11 @@ const (
 type BackgroundBlockDownloaderOpts struct {
 	WsEndpoint       string
 	LsEndpoint       string
-	RpcEndpoint      string
+	RpcEndpoints     []string // List of RPC endpoints for load balancing
 	OvercastEndpoint string
 	OutDir           string
 	SourceType       BackgroundBlockDownloaderSourceType
 	LsApiKey         string
-	RpcPoolFile      string
 	Channel          chan *block.Block
 	StartSlot        uint64
 }
@@ -87,22 +84,20 @@ func NewBlockDownloader(opts BackgroundBlockDownloaderOpts) *BackgroundBlockDown
 				Endpoint: opts.LsEndpoint,
 				APIKey:   opts.LsApiKey,
 			})
-			rpcClient := rpcclient.NewRpcClient(opts.RpcEndpoint)
+			rpcClient := rpcclient.NewRpcClient(opts.RpcEndpoints[0])
 			downloader = &BackgroundBlockDownloader{laserStreamClient: lsClient, rpcClient: rpcClient, outDir: opts.OutDir, sourceType: opts.SourceType, output: opts.Channel}
 		}
 
 	case BackgroundBlockDownloaderSourceRpc:
 		{
-			addrs := parseRpcPoolFile(opts.RpcPoolFile)
-			pool := newRpcConnPool(addrs)
+			pool := newRpcConnPool(opts.RpcEndpoints)
 			os.Mkdir(opts.OutDir, 0777)
 			downloader = &BackgroundBlockDownloader{rpcPool: pool, outDir: opts.OutDir, sourceType: opts.SourceType, startSlot: opts.StartSlot}
 		}
 
 	case BackgroundBlockDownloaderSourceOvercast:
 		{
-			addrs := parseRpcPoolFile(opts.RpcPoolFile)
-			pool := newRpcConnPool(addrs)
+			pool := newRpcConnPool(opts.RpcEndpoints)
 			os.Mkdir(opts.OutDir, 0777)
 
 			downloader = &BackgroundBlockDownloader{
@@ -118,26 +113,6 @@ func NewBlockDownloader(opts BackgroundBlockDownloaderOpts) *BackgroundBlockDown
 	}
 
 	return downloader
-}
-
-func parseRpcPoolFile(path string) []string {
-	file, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-
-	var addrs []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		addrs = append(addrs, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	return addrs
 }
 
 func (downloader *BackgroundBlockDownloader) Start() {
@@ -230,8 +205,9 @@ func (downloader *BackgroundBlockDownloader) startRpcStream() {
 	slot := downloader.startSlot
 
 	if slot == 0 {
-		c := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+		c := downloader.rpcPool.Take()
 		slot, err = c.GetSlot()
+		downloader.rpcPool.Release(c)
 		if err != nil {
 			panic(err)
 		}
@@ -264,8 +240,9 @@ func (downloader *BackgroundBlockDownloader) startRpcDownloadForOvercastCatchup(
 	slot := downloader.startSlot
 
 	if slot == 0 {
-		c := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+		c := downloader.rpcPool.Take()
 		slot, err = c.GetSlot()
+		downloader.rpcPool.Release(c)
 		if err != nil {
 			panic(err)
 		}

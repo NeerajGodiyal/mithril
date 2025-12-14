@@ -1,0 +1,132 @@
+# Mithril Configuration File
+# Copy this file and customize for your deployment.
+# CLI flags override these values when both are specified.
+#
+# Configuration structure follows Firedancer conventions for familiarity.
+
+# ============================================================================
+# TOP-LEVEL
+# ============================================================================
+
+# Name of this Mithril instance
+# name = "mithril1"
+
+# Path for downloads (e.g. snapshots) and other temp state
+# scratch_directory = "/tmp"
+
+# ============================================================================
+# [ledger] - Ledger and storage paths
+# ============================================================================
+
+[ledger]
+    # Path containing slot.json files (block data)
+    # path = "/tmp/blocks"
+
+    # Output path for writing AccountsDB data to
+    # accounts_path = "/mnt/accountsdb"
+
+    # Path of full snapshot or AccountsDB to load from (verifier mode)
+    # snapshot_archive_path = "/path/to/snapshot-or-accountsdb"
+
+    # Filename containing incremental snapshot
+    # incremental_snapshot = ""
+
+# ============================================================================
+# [rpc] - RPC configuration
+# ============================================================================
+
+[rpc]
+    # RPC endpoint(s) for fetching blocks and block downloads
+    # Can be a single URL or a list of URLs for load balancing
+    # rpc = ["https://api.mainnet-beta.solana.com"]
+    # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
+
+    # RPC server port. Set to 0 to disable (default).
+    # When enabled, exposes a Solana-compatible JSON-RPC interface.
+    # port = 8899
+
+# ============================================================================
+# [replay] - Block replay settings
+# ============================================================================
+
+[replay]
+    # Transaction parallelism. Set to 0 for sequential execution,
+    # or >0 to execute a topsort tx plan with the given number of workers.
+    # txpar = 96
+
+    # Number of slots to replay (verifier mode)
+    # num_slots = 0
+
+    # Block at which to stop replaying, inclusive (verifier mode)
+    # -1 means no limit
+    # end_slot = -1
+
+    # Load from a full snapshot (verifier mode)
+    # load_from_snapshot = false
+
+    # Load from AccountsDB (verifier mode)
+    # load_from_accounts_db = false
+
+# ============================================================================
+# [development] - Development and tuning options
+# ============================================================================
+
+[development]
+    # Zstd decoder concurrency (defaults to NumCPU)
+    # zstd_decoder_concurrency = 16
+
+    # Bound for number of log shards to flush to Accounts DB Index at once
+    # max_concurrent_flushers = 16
+
+    # Size in MB for serialized parameter arena (0 to disable)
+    # param_arena_size_mb = 512
+
+    # Number of borrowed accounts to preallocate in arena (0 to disable)
+    # borrowed_account_arena_size = 1024
+
+    # Enable/disable pool allocator for slices
+    # use_pool = true
+
+    # [development.pprof] - Profiling options
+    [development.pprof]
+        # Port to serve HTTP pprof endpoint (-1 to disable)
+        # port = 6060
+
+        # Filename to write CPU profile
+        # cpu_profile_path = "/tmp/cpuprof.pprof"
+
+    # [development.debug] - Debug logging options
+    [development.debug]
+        # Transaction signatures to enable debug logging for
+        # transaction_signatures = ["sig1", "sig2"]
+
+        # Account pubkeys to enable debug logging of transactions that modify them
+        # account_writes = ["pubkey1", "pubkey2"]
+
+# ============================================================================
+# [reporting] - Metrics and reporting
+# ============================================================================
+
+[reporting]
+    # Filename to write JSONL records of latencies
+    # metrics_path = "/tmp/metrics.jsonl"
+
+# ============================================================================
+# [block] - Block source configuration
+# ============================================================================
+
+[block]
+    # Block source for verify-live mode: "rpc" or "overcast"
+    # source = "rpc"
+
+    # Overcast endpoint address (only used when source = "overcast")
+    # If source = "overcast" but no endpoint is provided, falls back to RPC
+    # overcast_endpoint = "localhost:9000"
+
+# ============================================================================
+# [snapshot] - Snapshot download configuration
+# ============================================================================
+
+[snapshot]
+    # Path to download snapshot to
+    # download_path = ""

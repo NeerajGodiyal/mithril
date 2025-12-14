@@ -29,8 +29,7 @@ func BuildAccountsDbWithIncr(
 	fullSnapshotSlot int,
 	referenceSlot int,
 	accountsDbDir string,
-	rpcEndpoint string,
-	rpcEndpointFile string,
+	rpcEndpoints []string,
 	blockDir string,
 	overcastEndpoint string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
@@ -210,7 +209,7 @@ func BuildAccountsDbWithIncr(
 	// download an incremental snapshot based on the full snapshot's slot number
 	mlog.Log.Infof("downloading incremental snapshot (%d)...", referenceSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot("https://api.mainnet-beta.solana.com", snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot(rpcEndpoints[0], snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
 	if err != nil {
 		klog.Fatalf("error downloading snapshot: %s", err)
 	}
@@ -222,15 +221,15 @@ func BuildAccountsDbWithIncr(
 			SourceType:       blockstream.BackgroundBlockDownloaderSourceOvercast,
 			OutDir:           blockDir,
 			OvercastEndpoint: overcastEndpoint,
-			RpcPoolFile:      rpcEndpointFile,
+			RpcEndpoints:     rpcEndpoints,
 			StartSlot:        uint64(incrSlot),
 		}
 	} else {
 		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
-			SourceType:  blockstream.BackgroundBlockDownloaderSourceRpc,
-			OutDir:      blockDir,
-			RpcPoolFile: rpcEndpointFile,
-			StartSlot:   uint64(incrSlot),
+			SourceType:   blockstream.BackgroundBlockDownloaderSourceRpc,
+			OutDir:       blockDir,
+			RpcEndpoints: rpcEndpoints,
+			StartSlot:    uint64(incrSlot),
 		}
 	}
 
@@ -302,7 +301,7 @@ func BuildAccountsDbWithIncr(
 		panic(err)
 	}
 
-	rpcClient := rpcclient.NewRpcClient("https://api.mainnet-beta.solana.com/")
+	rpcClient := rpcclient.NewRpcClient(rpcEndpoints[0])
 	latestSlot, _ := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
