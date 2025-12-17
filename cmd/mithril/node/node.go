@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -64,12 +65,12 @@ var (
 	loadFromAccountsDb          bool
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
-	accountsPath     string
-	scratchDirectory string
-	rpcEndpoints     []string
-	blockSource      string // "rpc" or "overcast"
-	overcastEndpoint string
-	snapshotDlPath   string
+	accountsPath                string
+	scratchDirectory            string
+	rpcEndpoints                []string
+	blockSource                 string // "rpc" or "overcast"
+	overcastEndpoint            string
+	snapshotDlPath              string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -304,6 +305,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	blockSource = getString("block-source", "block.source")
 	if blockSource == "" {
 		blockSource = "rpc" // default
+	}
+	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
+		return fmt.Errorf("blockSource=rpc but no endpoints were provided")
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
 
