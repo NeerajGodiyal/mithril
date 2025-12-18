@@ -27,7 +27,6 @@ type Account struct {
 	IsDummy    bool
 }
 
-// TODO: should probably be somewhere else
 const NativeLoaderAddrStr = "NativeLoader1111111111111111111111111111111"
 
 var NativeLoaderAddr = base58.MustDecodeFromString(NativeLoaderAddrStr)

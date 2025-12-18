@@ -165,12 +165,12 @@ func (accum *loadedAcctSizeAccumulatorSimd186) add(amount uint64) error {
 }
 
 func (accum *loadedAcctSizeAccumulatorSimd186) collectAcct(acct *accounts.Account) error {
-	if acct.Key == sealevel.SysvarInstructionsAddr {
+	if acct.Key == sealevel.SysvarInstructionsAddr || acct.Lamports == 0 {
 		return nil
 	}
 
 	acctLen := uint64(len(acct.Data))
-	accum.accumulator = safemath.SaturatingAddU64(accum.accumulator, acctLen)
+	accum.accumulator = safemath.SaturatingAddU64(accum.accumulator, safemath.SaturatingAddU64(acctLen, txAcctBaseSize))
 	if accum.accumulator > accum.limit {
 		return TxErrMaxLoadedAccountsDataSizeExceeded
 	}
@@ -219,7 +219,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		return nil, err
 	}
 
-	for _, pubkey := range acctKeys[1:] {
+	for _, pubkey := range acctKeys {
 		acct, err := slotCtx.GetAccount(pubkey)
 		if err != nil {
 			panic("should be impossible - programming error")
