@@ -2,18 +2,15 @@ package node
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"math"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
-	"syscall"
 	"time"
 
 	_ "net/http/pprof"

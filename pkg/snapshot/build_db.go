@@ -39,22 +39,19 @@ func BuildAccountsDb(
 	incrementalSnapshotFile string,
 	accountsDbDir string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
-	manifest, file, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
+	manifest, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
 	mlog.Log.Infof("parsed manifest from snapshotFile=%s", snapshotFile)
-	defer file.Close()
 
 	var incrementalManifest *SnapshotManifest
-	var incrementalFile *os.File
 	if incrementalSnapshotFile != "" {
-		incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotFile, accountsDbDir)
+		incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotFile, accountsDbDir)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
-		mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotFile)
-		defer incrementalFile.Close()
+		mlog.Log.Infof("parsed manifest from incrementalSnapshotFile=%s", incrementalSnapshotFile)
 	}
 
 	start := time.Now()
@@ -201,7 +198,7 @@ func BuildAccountsDb(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, file, appendVecCopyingPool)
+		err = readTar(ctx, wg, snapshotFile, appendVecCopyingPool)
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
@@ -210,18 +207,13 @@ func BuildAccountsDb(
 	sl.Close()
 
 	var incrementalErr error
-	if incrementalFile != nil {
+	if incrementalSnapshotFile != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			sl = NewShardLogger(numShards, logsDir, ss)
-			if err != nil {
-				mlog.Log.Errorf("processing snapshot: %v", err)
-			}
-
-			incrementalErr = readTar(ctx, wg, incrementalFile, appendVecCopyingPool)
-			mlog.Log.Infof("finished reading %s in %s", incrementalFile.Name(), time.Since(start))
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool)
+			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, time.Since(start))
 		}()
 		wg.Wait()
 		mlog.Log.Infof("Closing shard logger for incremental snapshot.")
@@ -290,11 +282,12 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
-func readTar(ctx context.Context, wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, err := newSnapshotReader(file)
+func readTar(ctx context.Context, wg *sync.WaitGroup, filename string, appendVecCopyingPool *ants.PoolWithFunc) error {
+	tarReader, closer, err := newSnapshotReader(filename)
 	if err != nil {
 		return err
 	}
+	defer closer.Close()
 
 	for {
 		if ctx.Err() != nil {

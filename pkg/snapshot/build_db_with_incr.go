@@ -35,12 +35,11 @@ func BuildAccountsDbWithIncr(
 	blockDir string,
 	overcastEndpoint string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
-	manifest, file, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
+	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
 	mlog.Log.Infof("parsed manifest from snapshotFile=%s", fullSnapshotFile)
-	defer file.Close()
 
 	start := time.Now()
 
@@ -52,7 +51,6 @@ func BuildAccountsDbWithIncr(
 	defer ants.Release()
 
 	var incrementalManifest *SnapshotManifest
-	var incrementalFile *os.File
 	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
@@ -195,7 +193,7 @@ func BuildAccountsDbWithIncr(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, file, appendVecCopyingPool)
+		err = readTar(ctx, wg, fullSnapshotFile, appendVecCopyingPool)
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
@@ -239,12 +237,11 @@ func BuildAccountsDbWithIncr(
 	go catchupDownloader.Start()
 
 	incrSnapshotStart := time.Now()
-	incrementalManifest, incrementalFile, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
+	incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 	}
 	mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotPath)
-	defer incrementalFile.Close()
 
 	var incrementalErr error
 
@@ -252,8 +249,8 @@ func BuildAccountsDbWithIncr(
 	go func() {
 		defer wg.Done()
 		start := time.Now()
-		incrementalErr = readTarIncr(wg, incrementalFile, appendVecCopyingPool)
-		mlog.Log.Infof("finished reading %s in %s", incrementalFile.Name(), time.Since(start))
+		incrementalErr = readTarIncr(ctx, wg, incrementalSnapshotPath, appendVecCopyingPool)
+		mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, time.Since(start))
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing incremental snapshot in %s.", time.Since(incrSnapshotStart))
@@ -312,13 +309,18 @@ func BuildAccountsDbWithIncr(
 	return accountsDb, incrementalManifest, nil
 }
 
-func readTarIncr(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, err := newSnapshotReader(file)
+func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appendVecCopyingPool *ants.PoolWithFunc) error {
+	tarReader, closer, err := newSnapshotReader(filename)
 	if err != nil {
 		return err
 	}
+	defer closer.Close()
 
 	for {
+		if ctx.Err() != nil {
+			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
+			return ctx.Err()
+		}
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			break

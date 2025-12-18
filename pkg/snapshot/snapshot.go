@@ -19,28 +19,25 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*SnapshotManifest, *os.File, error) {
+func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*SnapshotManifest, error) {
 	manifest := new(SnapshotManifest)
 
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, nil, err
+	if err := os.MkdirAll(accountsDbDir, 0775); err != nil {
+		return nil, err
 	}
 
-	if err = os.MkdirAll(accountsDbDir, 0775); err != nil {
-		return nil, nil, err
-	}
-	tarReader, err := newSnapshotReader(file)
+	tarReader, closer, err := newSnapshotReader(filename)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
+	defer closer.Close()
 
 	writer := new(bytes.Buffer)
 
 	for {
 		header, err := tarReader.Next()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		// identify manifest file, whose path is of the form "snapshots/SLOT/SLOT"
@@ -48,12 +45,12 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*Snap
 			if strings.Count(header.Name, "/") == 2 {
 				_, err := io.Copy(writer, tarReader)
 				if err != nil {
-					return nil, nil, err
+					return nil, err
 				}
 				err = os.WriteFile(filepath.Join(accountsDbDir, "manifest"), writer.Bytes(), 0644)
 				if err != nil {
 					mlog.Log.Errorf("err copying manifest file out: %s\n", err)
-					return nil, nil, err
+					return nil, err
 				}
 				break
 			}
@@ -63,7 +60,7 @@ func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*Snap
 	decoder := bin.NewBinDecoder(writer.Bytes())
 	err = manifest.UnmarshalWithDecoder(decoder)
 
-	return manifest, file, err
+	return manifest, err
 }
 
 type appendVecCopyingTask struct {
@@ -93,26 +90,20 @@ var (
 	ZstdDecoderConcurrency = runtime.NumCPU()
 )
 
-func readerForCompressionType(snapshotType int, file *os.File) (io.Reader, error) {
-	var reader io.Reader
-
-	bmr, err := NewBufMonReader(file)
-	if err != nil {
-		return nil, err
-	}
+func readerForCompressionType(snapshotType int, bmr *bufmonreader) (r io.Reader, err error) {
 	if snapshotType == snapshotTypeZst {
 		zstdReader, err := zstd.NewReader(bmr, zstd.WithDecoderConcurrency(ZstdDecoderConcurrency))
 		if err != nil {
 			return nil, err
 		}
-		reader = zstdReader
+		r = zstdReader
 	} else if snapshotType == snapshotTypeLz4 {
-		reader = lz4.NewReader(bmr)
+		r = lz4.NewReader(bmr)
 	} else {
 		panic("unknown snapshot type")
 	}
 
-	return reader, nil
+	return r, nil
 }
 
 func parseSnapshotType(snapshotFileName string) int {
@@ -130,14 +121,28 @@ func parseSnapshotType(snapshotFileName string) int {
 	return snapshotType
 }
 
-func newSnapshotReader(snapshotFile *os.File) (*tar.Reader, error) {
-	snapshotFile.Seek(0, io.SeekStart)
-	snapshotType := parseSnapshotType(snapshotFile.Name())
-	reader, err := readerForCompressionType(snapshotType, snapshotFile)
-	if err != nil {
-		return nil, err
+func newSnapshotReader(filename string) (*tar.Reader, io.Closer, error) {
+	snapshotType := parseSnapshotType(filename)
+	var bmr *bufmonreader
+	var err error
+	if strings.HasPrefix(filename, "https://") || strings.HasPrefix(filename, "http://") {
+		bmr, err = NewBufMonReaderHTTP(filename)
+	} else {
+		snapshotFile, err := os.Open(filename)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open %s: %w", filename, err)
+		}
+		bmr, err = NewBufMonReaderFromFile(snapshotFile)
 	}
-	return tar.NewReader(reader), nil
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, err := readerForCompressionType(snapshotType, bmr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening compression reader: %v", err)
+	}
+
+	return tar.NewReader(reader), bmr, nil
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {
