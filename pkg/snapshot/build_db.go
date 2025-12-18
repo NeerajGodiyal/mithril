@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -200,11 +201,6 @@ func BuildAccountsDb(
 		defer wg.Done()
 		err = readTar(ctx, wg, snapshotFile, appendVecCopyingPool)
 	}()
-	wg.Wait()
-	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
-
-	mlog.Log.Infof("Closing shard logger.")
-	sl.Close()
 
 	var incrementalErr error
 	if incrementalSnapshotFile != "" {
@@ -215,21 +211,17 @@ func BuildAccountsDb(
 			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool)
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, time.Since(start))
 		}()
-		wg.Wait()
-		mlog.Log.Infof("Closing shard logger for incremental snapshot.")
-		sl.Close()
 	}
 
-	mlog.Log.Infof("done in %s. waiting for all tasks to complete.", time.Since(start))
-	if err != nil {
-		mlog.Log.Errorf("processing snapshot: %v", err)
-	}
-	if incrementalErr != nil {
-		mlog.Log.Errorf("processing incremental snapshot: %v", err)
-	}
-	if err != nil || incrementalErr != nil {
+	wg.Wait()
+	if err := errors.Join(err, incrementalErr); err != nil {
+		mlog.Log.Errorf("failed while processing snapshots: %v", err)
 		return nil, nil, err
 	}
+	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", time.Since(start))
+	sl.Close()
+
+	mlog.Log.Infof("Snapshot indexing complete in %s", time.Since(start))
 
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
