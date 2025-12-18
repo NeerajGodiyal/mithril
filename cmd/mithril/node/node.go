@@ -40,9 +40,6 @@ var (
 			return initConfigAndBindFlags(cmd)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			cmd.SetContext(ctx)
-			defer cancel()
 			runVerifyRange(cmd, args)
 		},
 	}
@@ -54,9 +51,6 @@ var (
 			return initConfigAndBindFlags(cmd)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			cmd.SetContext(ctx)
-			defer cancel()
 			runVerifyLive(cmd, args)
 		},
 	}
@@ -350,6 +344,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 }
 
 func runVerifyRange(c *cobra.Command, args []string) {
+	ctx := c.Context()
 	if pprofPort != -1 {
 		startPprofHandlers(int(pprofPort))
 	}
@@ -393,7 +388,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 		}
@@ -420,7 +415,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
 
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(dlPath, incrementalSnapshotFilename, accountsPath)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, dlPath, incrementalSnapshotFilename, accountsPath)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", dlPath, err)
 		}
@@ -487,12 +482,13 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
 
 func runVerifyLive(c *cobra.Command, args []string) {
+	ctx := c.Context()
 	logVCSInfo()
 	snapshotDownloadPath := scratchDirectory
 
@@ -537,7 +533,7 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
@@ -576,7 +572,7 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(c.Context(), accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

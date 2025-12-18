@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 )
 
 func BuildAccountsDbWithIncr(
+	ctx context.Context,
 	fullSnapshotFile string,
 	snapshotDownloadPath string,
 	fullSnapshotSlot int,
@@ -193,7 +195,7 @@ func BuildAccountsDbWithIncr(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(wg, file, appendVecCopyingPool)
+		err = readTar(ctx, wg, file, appendVecCopyingPool)
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))

@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ var (
 )
 
 func BuildAccountsDb(
+	ctx context.Context,
 	snapshotFile string,
 	incrementalSnapshotFile string,
 	accountsDbDir string,
@@ -199,7 +201,7 @@ func BuildAccountsDb(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(wg, file, appendVecCopyingPool)
+		err = readTar(ctx, wg, file, appendVecCopyingPool)
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
@@ -218,7 +220,7 @@ func BuildAccountsDb(
 				mlog.Log.Errorf("processing snapshot: %v", err)
 			}
 
-			incrementalErr = readTar(wg, incrementalFile, appendVecCopyingPool)
+			incrementalErr = readTar(ctx, wg, incrementalFile, appendVecCopyingPool)
 			mlog.Log.Infof("finished reading %s in %s", incrementalFile.Name(), time.Since(start))
 		}()
 		wg.Wait()
@@ -288,13 +290,17 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
-func readTar(wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
+func readTar(ctx context.Context, wg *sync.WaitGroup, file *os.File, appendVecCopyingPool *ants.PoolWithFunc) error {
 	tarReader, err := newSnapshotReader(file)
 	if err != nil {
 		return err
 	}
 
 	for {
+		if ctx.Err() != nil {
+			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
+			return ctx.Err()
+		}
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			break
