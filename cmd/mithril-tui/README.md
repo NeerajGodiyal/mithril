@@ -51,6 +51,7 @@ If your node is running on a different host or port, specify the URL using the `
 ### Controls
 
 - **`q`** or **`Ctrl+C`**: Quit the application.
+- **`Tab`**: Cycle through metric filters (All, Machine, Mithril).
 - **`Up/Down Arrows`**: Scroll through the metrics list.
 
 ## Troubleshooting
