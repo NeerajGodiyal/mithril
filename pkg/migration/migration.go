@@ -2,19 +2,12 @@ package migration
 
 import (
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
-	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/gagliardetto/solana-go"
 )
 
-var migratingProgramCus = map[solana.PublicKey]uint64{
-	a.StakeProgramAddr: cu.CUStakeProgramDefaultComputeUnits,
-}
-
-var migratingBuiltins = map[solana.PublicKey]bool{
-	a.StakeProgramAddr:       true,
-	a.ConfigProgramAddr:      true,
-	a.AddressLookupTableAddr: true,
-}
+// These two maps are empty because there are no programs currently migrating
+var migratingProgramCus = map[solana.PublicKey]uint64{}
+var migratingBuiltins = map[solana.PublicKey]bool{}
 
 var alreadyMigratedBuiltins = map[solana.PublicKey]bool{
 	a.StakeProgramAddr:       true,
