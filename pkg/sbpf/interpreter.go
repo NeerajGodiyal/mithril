@@ -629,10 +629,10 @@ mainLoop:
 			r[ins.Dst()] &= r[ins.Src()]
 			pc++
 		case OpLsh32Imm:
-			r[ins.Dst()] <<= ins.Uimm() & 0x1f
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) << (ins.Uimm() & 0x1f))
 			pc++
 		case OpLsh32Reg:
-			r[ins.Dst()] <<= r[ins.Src()] & 0x1f
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) << (uint32(r[ins.Src()]) & 0x1f))
 			pc++
 		case OpLsh64Imm:
 			r[ins.Dst()] <<= uint64(ins.Imm()) & 0x3f
@@ -641,10 +641,10 @@ mainLoop:
 			r[ins.Dst()] <<= r[ins.Src()] & 0x3f
 			pc++
 		case OpRsh32Imm:
-			r[ins.Dst()] >>= ins.Uimm() & 0x1f
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) >> (ins.Uimm() & 0x1f))
 			pc++
 		case OpRsh32Reg:
-			r[ins.Dst()] >>= r[ins.Src()] & 0x1f
+			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) >> (uint32(r[ins.Src()]) & 0x1f))
 			pc++
 		case OpRsh64Imm:
 			r[ins.Dst()] >>= uint64(ins.Imm()) & 0x3f

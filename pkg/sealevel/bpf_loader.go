@@ -586,6 +586,9 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 				serializedData[l+3] = 0
 			}
 
+			// original_data_len, u32, filled with 0's
+			clear(serializedData[l+4 : l+8])
+
 			{
 				acctKey := [32]byte(borrowedAcct.Key())
 				copy(serializedData[l+8:l+40], acctKey[:])
@@ -602,6 +605,11 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 
 			// data in account
 			copy(serializedData[l+88:l+88+len(borrowedAcct.Data())], borrowedAcct.Data())
+
+			// zero the padding
+			paddingStart := l + 88 + len(borrowedAcct.Data())
+			paddingEnd := l + 88 + len(borrowedAcct.Data()) + int(numPaddingBytes)
+			clear(serializedData[paddingStart:paddingEnd])
 
 			// rent epoch
 			var rentEpoch uint64
@@ -991,8 +999,6 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 		return err
 	}
 
-	//computeRemainingPrev := execCtx.ComputeMeter.Remaining()
-
 	var parameterBytes []byte
 	var preLens []uint64
 
@@ -1026,8 +1032,6 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	start = time.Now()
 	ret, _, runErr := interpreter.Run()
 	metrics.GlobalBlockReplay.SbpfInterpreterRun.AddTimingSince(start)
-
-	//mlog.Log.Debugf("Program %s consumed %d of %d compute units", programId, computeRemainingPrev-execCtx.ComputeMeter.Remaining(), computeRemainingPrev)
 
 	if runErr != nil {
 		//mlog.Log.Debugf("program execution result: %s", runErr)
