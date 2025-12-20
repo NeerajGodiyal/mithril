@@ -199,7 +199,10 @@ func BuildAccountsDbWithIncr(
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
 
 	mlog.Log.Infof("Closing shard logger.")
-	sl.Close()
+	err = sl.Close(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
+	}
 
 	sl = NewShardLogger(numShards, logsDir, ss)
 	if err != nil {
@@ -260,7 +263,7 @@ func BuildAccountsDbWithIncr(
 	}
 
 	mlog.Log.Infof("Closing shard logger for incremental snapshot.")
-	sl.Close()
+	sl.Close(ctx)
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 

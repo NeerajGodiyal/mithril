@@ -219,7 +219,10 @@ func BuildAccountsDb(
 		return nil, nil, err
 	}
 	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", time.Since(start))
-	sl.Close()
+	err = sl.Close(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
+	}
 
 	mlog.Log.Infof("Snapshot indexing complete in %s", time.Since(start))
 

@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cespare/xxhash"
 	"github.com/gagliardetto/solana-go"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -198,17 +199,15 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 		s.writer.Write(vBytes[:24])
 
 		s.logSize += len(req.k) + vlen
-		if s.logSize > 256<<20 {
-			if err := s.flushLogToCache(); err != nil {
-				panic(err)
-			}
-		}
 	}
 }
 
-func (s *shard) flushLogToCache() error {
+func (s *shard) flushLogToCache(ctx context.Context) error {
 	start := time.Now()
-	s.flushSem.Acquire(context.TODO(), 1)
+	err := s.flushSem.Acquire(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("acquiring flush semaphore: %w", err)
+	}
 	waiting := time.Now()
 	defer s.flushSem.Release(1)
 	// Close/flush
@@ -273,21 +272,18 @@ func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIn
 }
 
 // Close closes all shards and their files
-func (sl *ShardLogger) Close() error {
+func (sl *ShardLogger) Close(ctx context.Context) error {
 	for _, s := range sl.shards {
 		close(s.requests)
 	}
 
 	sl.wg.Wait()
 
-	flushWg := &sync.WaitGroup{}
-	flushWg.Add(len(sl.shards))
+	flushWg := &errgroup.Group{}
 	for _, s := range sl.shards {
-		go func() {
-			defer flushWg.Done()
-			s.flushLogToCache()
-		}()
+		flushWg.Go(func() error {
+			return s.flushLogToCache(ctx)
+		})
 	}
-	flushWg.Wait()
-	return nil
+	return flushWg.Wait()
 }
