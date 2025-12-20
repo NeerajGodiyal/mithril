@@ -15,6 +15,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	FilterAll = iota
+	FilterMachine
+	FilterMithril
+)
+
 var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
@@ -24,6 +30,8 @@ type model struct {
 	url        string
 	err        error
 	lastUpdate time.Time
+	allRows    []table.Row
+	filterMode int
 }
 
 type tickMsg time.Time
@@ -47,6 +55,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			m.filterMode = (m.filterMode + 1) % 3
+			m.table.SetRows(m.filterRows())
 		}
 	case metricsMsg:
 		if msg.err != nil {
@@ -54,7 +65,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.table.SetRows(msg.rows)
+		m.allRows = msg.rows
+		m.table.SetRows(m.filterRows())
 		m.lastUpdate = time.Now()
 	case tickMsg:
 		return m, tea.Batch(
@@ -70,7 +82,24 @@ func (m model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error fetching metrics: %v\n\nPress q to quit.", m.err)
 	}
-	return baseStyle.Render(m.table.View()) + fmt.Sprintf("\nLast updated: %s\nPress q to quit.", m.lastUpdate.Format(time.TimeOnly))
+
+	filterName := "All Metrics"
+	switch m.filterMode {
+	case FilterMachine:
+		filterName = "Machine Metrics (Go/Process)"
+	case FilterMithril:
+		filterName = "Mithril Custom Metrics"
+	}
+
+	header := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("205")).
+		Bold(true).
+		Render(filterName)
+
+	return fmt.Sprintf("%s (Tab to switch metrics)\n%s\nLast updated: %s | q to quit",
+		header,
+		baseStyle.Render(m.table.View()),
+		m.lastUpdate.Format(time.TimeOnly))
 }
 
 func fetchMetrics(url string) tea.Cmd {
@@ -144,6 +173,25 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func (m model) filterRows() []table.Row {
+	if m.filterMode == FilterAll {
+		return m.allRows
+	}
+
+	var filtered []table.Row
+	for _, row := range m.allRows {
+		name := row[0]
+		isMachine := strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_") || strings.HasPrefix(name, "promhttp_")
+
+		if m.filterMode == FilterMachine && isMachine {
+			filtered = append(filtered, row)
+		} else if m.filterMode == FilterMithril && !isMachine {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func main() {

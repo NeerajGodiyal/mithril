@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 )
@@ -78,6 +79,44 @@ func TestFetchMetrics_ServerError(t *testing.T) {
 	assert.True(t, ok)
 	assert.Error(t, metricsMsg.err)
 	assert.Contains(t, metricsMsg.err.Error(), "500 Internal Server Error")
+}
+
+func TestFilterRows(t *testing.T) {
+	// Setup sample data
+	rows := []table.Row{
+		{"go_goroutines", "10", ""},
+		{"process_cpu_seconds", "123.45", ""},
+		{"promhttp_metric_handler_requests_total", "5", ""},
+		{"mithril_block_height", "1000", ""},
+		{"mithril_transaction_count", "500", ""},
+		{"other_metric", "1", ""},
+	}
+
+	m := model{
+		allRows: rows,
+	}
+
+	// Test FilterAll
+	m.filterMode = FilterAll
+	filtered := m.filterRows()
+	assert.Len(t, filtered, 6)
+	assert.Equal(t, rows, filtered)
+
+	// Test FilterMachine
+	m.filterMode = FilterMachine
+	filtered = m.filterRows()
+	assert.Len(t, filtered, 3)
+	assert.Equal(t, "go_goroutines", filtered[0][0])
+	assert.Equal(t, "process_cpu_seconds", filtered[1][0])
+	assert.Equal(t, "promhttp_metric_handler_requests_total", filtered[2][0])
+
+	// Test FilterMithril
+	m.filterMode = FilterMithril
+	filtered = m.filterRows()
+	assert.Len(t, filtered, 3)
+	assert.Equal(t, "mithril_block_height", filtered[0][0])
+	assert.Equal(t, "mithril_transaction_count", filtered[1][0])
+	assert.Equal(t, "other_metric", filtered[2][0])
 }
 
 // Mock tea.Msg for testing purposes if needed, though we cast directly above.
