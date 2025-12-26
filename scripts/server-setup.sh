@@ -622,12 +622,15 @@ mode_install() {
     echo "    This key allows you to log into the server remotely from another computer"
     echo "    (e.g. your personal laptop). After install, you'll SSH in using this key."
     echo
-    echo "    Supported formats:"
-    echo "      - ssh-ed25519 AAAA... (recommended)"
-    echo "      - sk-ssh-ed25519@openssh.com AAAA... (FIDO2 hardware key)"
-    echo "      - ssh-rsa AAAA..."
+    echo "    On your laptop, check if you have a key:"
+    echo "      cat ~/.ssh/id_ed25519.pub    (or id_rsa.pub)"
     echo
-    echo "    To get your public key, run this on your laptop: cat ~/.ssh/id_ed25519.pub"
+    echo "    If you don't have one, generate a new key on your laptop:"
+    echo "      ssh-keygen -t ed25519"
+    echo "      (You can optionally set a passphrase to protect the key)"
+    echo "      Then: cat ~/.ssh/id_ed25519.pub"
+    echo
+    echo "    Supported formats: ssh-ed25519, ssh-rsa, sk-ssh-ed25519 (FIDO2)"
     echo
     prompt SSH_PUBKEY "  Paste SSH public key" ""
     [[ -n "$SSH_PUBKEY" ]] || die "SSH public key is required to avoid lockout."
