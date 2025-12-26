@@ -614,8 +614,8 @@ mode_install() {
     choose_admin_user
 
     echo
-    prompt HOSTNAME "  Hostname for this server" "mithril-node"
-    [[ -n "$HOSTNAME" ]] || HOSTNAME="mithril-node"
+    read -r -p "  Hostname for this server [e.g. mithril-node]: " HOSTNAME
+    HOSTNAME="${HOSTNAME:-mithril-node}"
 
     echo
     echo "  SSH key for '$ADMIN_USER':"
