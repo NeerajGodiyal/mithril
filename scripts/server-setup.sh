@@ -727,22 +727,24 @@ mode_install() {
         echo "  You'll need to add your SSH key to /root/.ssh/authorized_keys after install."
     fi
 
-    # Remaining OS disk space option
+    # Remaining OS disk space option (single-drive only)
     local MAKE_OSDATA="no"
     local OSDATA_FS="ext4"
     local OSDATA_MP="/mnt/osdata"
 
     local REMAINING_GIB=$((OS_DISK_SIZE_GIB - ROOT_SIZE_GIB - 2))
     echo
-    echo "  Single-drive setup: Use remaining OS disk space for Mithril data?"
+    echo "  Do you have additional NVMe drives for Mithril storage?"
     echo ""
-    echo "    Most users: Press Enter to SKIP this."
-    echo "    After Ubuntu boots, use disk-setup.sh to configure your NVMe drives."
+    echo "    YES (most users): Press Enter to skip this."
+    echo "        After Ubuntu boots, run disk-setup.sh to format your other drives."
     echo ""
-    echo "    Only use 'Y' if this is your ONLY drive (no separate NVMe for Mithril)."
-    echo "    This creates a ${REMAINING_GIB} GiB partition at /mnt/mithril for scratch_directory."
+    echo "    NO (single drive only): Select 'Y' to create a partition now."
+    echo "        This uses the remaining ${REMAINING_GIB} GiB on this disk for Mithril's"
+    echo "        AccountsDB, blocks, and snapshots. You'll still run disk-setup.sh after"
+    echo "        boot, but it will use this pre-created partition."
     echo ""
-    if yesno "  Create partition for single-drive setup? [press Enter to skip]" "n"; then
+    if yesno "  Single-drive setup? (only if this is your ONLY drive)" "n"; then
         MAKE_OSDATA="yes"
         OSDATA_FS="ext4"
         OSDATA_MP="/mnt/mithril"
