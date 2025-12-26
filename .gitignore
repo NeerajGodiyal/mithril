@@ -44,3 +44,13 @@ fixtures/.DS_Store
 pkg/.DS_Store
 .DS_Store
 mithril.toml
+
+# Local development files
+go.work
+go.work.sum
+
+# AI handoff documents (not part of the repo)
+docs/snapshot-integration-handoff*.txt
+
+# Claude Code settings
+.claude/

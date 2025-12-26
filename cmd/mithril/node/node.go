@@ -340,6 +340,91 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// buildSnapshotConfig creates a snapshotdl.SnapshotConfig from the mithril config.
+// It starts with defaults and overrides with any values set in the TOML file.
+func buildSnapshotConfig() snapshotdl.SnapshotConfig {
+	cfg := snapshotdl.DefaultSnapshotConfig()
+
+	// Override with TOML values if set
+	if config.IsSet("snapshot.verbose") {
+		cfg.Verbose = config.GetBool("snapshot.verbose")
+	}
+	if config.IsSet("snapshot.save_to_disk") {
+		cfg.SaveToDisk = config.GetBool("snapshot.save_to_disk")
+	}
+	if config.IsSet("snapshot.download_path") {
+		cfg.DownloadPath = config.GetString("snapshot.download_path")
+	}
+	if config.IsSet("snapshot.stage1_warm_kib") {
+		cfg.Stage1WarmKiB = config.GetInt64("snapshot.stage1_warm_kib")
+	}
+	if config.IsSet("snapshot.stage1_window_kib") {
+		cfg.Stage1WindowKiB = config.GetInt64("snapshot.stage1_window_kib")
+	}
+	if config.IsSet("snapshot.stage1_windows") {
+		cfg.Stage1Windows = config.GetInt("snapshot.stage1_windows")
+	}
+	if config.IsSet("snapshot.stage1_timeout_ms") {
+		cfg.Stage1TimeoutMS = config.GetInt64("snapshot.stage1_timeout_ms")
+	}
+	if config.IsSet("snapshot.stage1_concurrency") {
+		cfg.Stage1Concurrency = config.GetInt("snapshot.stage1_concurrency")
+	}
+	if config.IsSet("snapshot.stage2_top_k") {
+		cfg.Stage2TopK = config.GetInt("snapshot.stage2_top_k")
+	}
+	if config.IsSet("snapshot.stage2_warm_sec") {
+		cfg.Stage2WarmSec = config.GetInt("snapshot.stage2_warm_sec")
+	}
+	if config.IsSet("snapshot.stage2_measure_sec") {
+		cfg.Stage2MeasureSec = config.GetInt("snapshot.stage2_measure_sec")
+	}
+	if config.IsSet("snapshot.stage2_min_ratio") {
+		cfg.Stage2MinRatio = config.GetFloat64("snapshot.stage2_min_ratio")
+	}
+	if config.IsSet("snapshot.stage2_min_abs_mbs") {
+		cfg.Stage2MinAbsMBs = config.GetFloat64("snapshot.stage2_min_abs_mbs")
+	}
+	if config.IsSet("snapshot.max_rtt_ms") {
+		cfg.MaxRTTMs = config.GetInt("snapshot.max_rtt_ms")
+	}
+	if config.IsSet("snapshot.tcp_timeout_ms") {
+		cfg.TCPTimeoutMs = config.GetInt("snapshot.tcp_timeout_ms")
+	}
+	if config.IsSet("snapshot.min_node_version") {
+		cfg.MinNodeVersion = config.GetString("snapshot.min_node_version")
+	}
+	if config.IsSet("snapshot.allowed_node_versions") {
+		cfg.AllowedNodeVersions = config.GetStringSlice("snapshot.allowed_node_versions")
+	}
+	if config.IsSet("snapshot.full_threshold") {
+		cfg.FullThreshold = config.GetInt("snapshot.full_threshold")
+	}
+	if config.IsSet("snapshot.incremental_threshold") {
+		cfg.IncrementalThreshold = config.GetInt("snapshot.incremental_threshold")
+	}
+	if config.IsSet("snapshot.safety_margin_slots") {
+		cfg.SafetyMarginSlots = config.GetInt("snapshot.safety_margin_slots")
+	}
+	if config.IsSet("snapshot.max_full_snapshots") {
+		cfg.MaxFullSnapshots = config.GetInt("snapshot.max_full_snapshots")
+	}
+	if config.IsSet("snapshot.delete_old_snapshots") {
+		cfg.DeleteOldSnapshots = config.GetBool("snapshot.delete_old_snapshots")
+	}
+	if config.IsSet("snapshot.worker_count") {
+		cfg.WorkerCount = config.GetInt("snapshot.worker_count")
+	}
+	if config.IsSet("snapshot.max_snapshot_url_attempts") {
+		cfg.MaxSnapshotURLAttempts = config.GetInt("snapshot.max_snapshot_url_attempts")
+	}
+	if config.IsSet("snapshot.min_incremental_speed_mbs") {
+		cfg.MinIncrementalSpeedMBs = config.GetFloat64("snapshot.min_incremental_speed_mbs")
+	}
+
+	return cfg
+}
+
 func runVerifyRange(c *cobra.Command, args []string) {
 	ctx := c.Context()
 	if pprofPort != -1 {
@@ -406,8 +491,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("downloading snapshot...")
 
+		snapCfg := buildSnapshotConfig()
 		var dlPath string
-		dlPath, _, _, err = snapshotdl.DownloadSnapshot(rpcEndpoints[0], snapshotDlPath)
+		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(rpcEndpoints[0], snapshotDlPath, snapCfg)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -515,14 +601,15 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
+	snapCfg := buildSnapshotConfig()
 	mlog.Log.Infof("using RPC endpoint: %s", rpcEndpoints[0])
-	mlog.Log.Infof("downloading full snapshot...")
+	mlog.Log.Infof("discovering best snapshot source...")
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotPath, _, fullSnapshotSlot, err := snapshotdl.DownloadSnapshot(rpcEndpoints[0], snapshotDownloadPath)
+	fullSnapshotURL, _, fullSnapshotSlot, err := snapshotdl.GetSnapshotURL(rpcEndpoints[0], snapCfg)
 	if err != nil {
-		klog.Fatalf("error downloading snapshot: %s", err)
+		klog.Fatalf("error getting snapshot URL: %s", err)
 	}
-	mlog.Log.Infof("finished downloading full snapshot in %s to %s", time.Since(fullSnapshotDlStart), fullSnapshotPath)
+	mlog.Log.Infof("found snapshot URL in %s: %s", time.Since(fullSnapshotDlStart), fullSnapshotURL)
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
 	var overcastAddr string
@@ -530,7 +617,7 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}

@@ -34,6 +34,7 @@ func BuildAccountsDbWithIncr(
 	rpcEndpoints []string,
 	blockDir string,
 	overcastEndpoint string,
+	snapCfg snapshotdl.SnapshotConfig,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
@@ -190,10 +191,22 @@ func BuildAccountsDbWithIncr(
 		}
 	})
 
+	// Determine save path for full snapshot if streaming from HTTP
+	var fullSavePath string
+	if snapCfg.SaveToDisk && (strings.HasPrefix(fullSnapshotFile, "http://") || strings.HasPrefix(fullSnapshotFile, "https://")) {
+		if snapshotDownloadPath != "" {
+			// Extract filename from URL and create save path
+			urlParts := strings.Split(fullSnapshotFile, "/")
+			filename := urlParts[len(urlParts)-1]
+			fullSavePath = filepath.Join(snapshotDownloadPath, filename)
+			mlog.Log.Infof("Will save full snapshot to %s while streaming", fullSavePath)
+		}
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, fullSnapshotFile, appendVecCopyingPool)
+		err = readTarWithSave(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool)
 	}()
 	wg.Wait()
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
@@ -205,18 +218,15 @@ func BuildAccountsDbWithIncr(
 	}
 
 	sl = NewShardLogger(numShards, logsDir, ss)
-	if err != nil {
-		mlog.Log.Errorf("processing snapshot: %v", err)
-	}
 
-	// download an incremental snapshot based on the full snapshot's slot number
-	mlog.Log.Infof("downloading incremental snapshot (%d)...", referenceSlot)
+	// Get incremental snapshot URL (tries same source first, then searches if needed)
+	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.DownloadIncrementalSnapshot(rpcEndpoints[0], snapshotDownloadPath, referenceSlot, fullSnapshotSlot)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 	if err != nil {
-		klog.Fatalf("error downloading snapshot: %s", err)
+		klog.Fatalf("error getting incremental snapshot URL: %s", err)
 	}
-	mlog.Log.Infof("finished downloading incremental snapshot in %s to %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
+	mlog.Log.Infof("found incremental snapshot URL in %s: %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
 
 	var downloaderOpts blockstream.BackgroundBlockDownloaderOpts
 	if overcastEndpoint != "" {
@@ -239,27 +249,70 @@ func BuildAccountsDbWithIncr(
 	catchupDownloader := blockstream.NewBlockDownloader(downloaderOpts)
 	go catchupDownloader.Start()
 
-	incrSnapshotStart := time.Now()
-	incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
-	}
-	mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotPath)
-
+	// Retry loop for incremental snapshot download
+	// If download fails mid-way (not context cancellation), re-discover sources and retry
+	maxIncrRetries := 3
 	var incrementalErr error
+	for incrAttempt := 0; incrAttempt < maxIncrRetries; incrAttempt++ {
+		if incrAttempt > 0 {
+			// Re-discover incremental snapshot URL (sources may have changed)
+			mlog.Log.Infof("Incremental download failed, re-discovering sources (attempt %d/%d)...", incrAttempt+1, maxIncrRetries)
+			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+			if err != nil {
+				mlog.Log.Errorf("Failed to re-discover incremental snapshot: %v", err)
+				continue
+			}
+			mlog.Log.Infof("Found new incremental snapshot URL: %s (slot %d)", incrementalSnapshotPath, incrSlot)
+		}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		start := time.Now()
-		incrementalErr = readTarIncr(ctx, wg, incrementalSnapshotPath, appendVecCopyingPool)
-		mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, time.Since(start))
-	}()
-	wg.Wait()
-	mlog.Log.Infof("done processing incremental snapshot in %s.", time.Since(incrSnapshotStart))
+		incrSnapshotStart := time.Now()
+		incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
+		if err != nil {
+			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
+			incrementalErr = fmt.Errorf("reading incremental snapshot manifest: %v", err)
+			continue
+		}
+		mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotPath)
 
-	if err != nil || incrementalErr != nil {
+		// Determine save path for incremental snapshot if streaming from HTTP
+		var incrSavePath string
+		if snapCfg.SaveToDisk && (strings.HasPrefix(incrementalSnapshotPath, "http://") || strings.HasPrefix(incrementalSnapshotPath, "https://")) {
+			if snapshotDownloadPath != "" {
+				// Extract filename from URL and create save path
+				urlParts := strings.Split(incrementalSnapshotPath, "/")
+				filename := urlParts[len(urlParts)-1]
+				incrSavePath = filepath.Join(snapshotDownloadPath, filename)
+				mlog.Log.Infof("Will save incremental snapshot to %s while streaming", incrSavePath)
+			}
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			incrementalErr = readTarIncrWithSave(ctx, wg, incrementalSnapshotPath, incrSavePath, appendVecCopyingPool)
+			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, time.Since(start))
+		}()
+		wg.Wait()
+		mlog.Log.Infof("done processing incremental snapshot in %s.", time.Since(incrSnapshotStart))
+
+		// Check if we should retry
+		if incrementalErr == nil {
+			break // Success
+		}
+		if ctx.Err() != nil {
+			// Context cancelled - don't retry, just exit
+			return nil, nil, ctx.Err()
+		}
+		// Download failed mid-way, will retry with re-discovery
+		mlog.Log.Errorf("Incremental download failed: %v", incrementalErr)
+	}
+
+	if err != nil {
 		return nil, nil, err
+	}
+	if incrementalErr != nil {
+		return nil, nil, fmt.Errorf("incremental snapshot download failed after %d attempts: %w", maxIncrRetries, incrementalErr)
 	}
 
 	mlog.Log.Infof("Closing shard logger for incremental snapshot.")
@@ -313,15 +366,32 @@ func BuildAccountsDbWithIncr(
 }
 
 func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, closer, err := newSnapshotReader(filename)
+	return readTarIncrWithSave(ctx, wg, filename, "", appendVecCopyingPool)
+}
+
+func readTarIncrWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc) error {
+	tarReader, closer, err := newSnapshotReaderWithSave(filename, savePath)
 	if err != nil {
 		return err
 	}
 	defer closer.Close()
 
+	// cleanupPartial deletes the partial download file if it exists
+	cleanupPartial := func(reason string) {
+		if savePath != "" {
+			if _, statErr := os.Stat(savePath); statErr == nil {
+				mlog.Log.Infof("Deleting partial incremental download %s (%s)", savePath, reason)
+				if rmErr := os.Remove(savePath); rmErr != nil {
+					mlog.Log.Errorf("Failed to delete partial incremental download %s: %v", savePath, rmErr)
+				}
+			}
+		}
+	}
+
 	for {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
+			cleanupPartial("cancelled")
 			return ctx.Err()
 		}
 		header, err := tarReader.Next()
@@ -329,6 +399,7 @@ func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appen
 			break
 		} else if err != nil {
 			mlog.Log.Errorf("reading next tar: %s\n", err)
+			cleanupPartial("read error")
 			return err
 		}
 
@@ -340,6 +411,7 @@ func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appen
 		tarBytesRead, err := io.Copy(writer, tarReader)
 		if err != nil {
 			mlog.Log.Errorf("err copying data to reader: %s\n", err)
+			cleanupPartial("copy error")
 			return err
 		}
 		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
@@ -349,6 +421,7 @@ func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appen
 		err = appendVecCopyingPool.Invoke(task)
 		if err != nil {
 			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke: %v", err)
+			cleanupPartial("pool error")
 			return err
 		}
 	}

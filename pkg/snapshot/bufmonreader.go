@@ -47,6 +47,13 @@ func NewBufMonReaderFromFile(file *os.File) (*bufmonreader, error) {
 }
 
 func NewBufMonReaderHTTP(url string) (*bufmonreader, error) {
+	return NewBufMonReaderHTTPWithSave(url, "")
+}
+
+// NewBufMonReaderHTTPWithSave streams from HTTP URL and optionally saves to disk.
+// If savePath is non-empty, the data will be written to disk while streaming.
+// Returns: (*bufmonreader, error)
+func NewBufMonReaderHTTPWithSave(url string, savePath string) (*bufmonreader, error) {
 	resp, err := http.Head(url)
 	if err != nil {
 		return nil, fmt.Errorf("HEAD %s: %v", url, err)
@@ -56,6 +63,7 @@ func NewBufMonReaderHTTP(url string) (*bufmonreader, error) {
 	}
 	totalSize := resp.ContentLength
 	resp.Body.Close()
+
 	resp, err = http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %v", url, err)
@@ -64,13 +72,47 @@ func NewBufMonReaderHTTP(url string) (*bufmonreader, error) {
 		return nil, fmt.Errorf("GET %s: had not-ok status: %s", url, resp.Status)
 	}
 
+	var reader io.Reader = resp.Body
+	var closer io.Closer = resp.Body
+
+	// If savePath is provided, use TeeReader to write to disk while streaming
+	if savePath != "" {
+		mlog.Log.Infof("Saving snapshot to %s while streaming...", savePath)
+		outFile, err := os.Create(savePath)
+		if err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("creating save file %s: %v", savePath, err)
+		}
+
+		// TeeReader splits the stream: data goes to both the tar reader AND the file
+		reader = io.TeeReader(resp.Body, outFile)
+
+		// Create a multi-closer that closes both the HTTP body and the file
+		closer = &multiCloser{closers: []io.Closer{resp.Body, outFile}}
+	}
+
 	return &bufmonreader{
 		name:      url,
-		b:         resp.Body,
-		c:         resp.Body,
+		b:         reader,
+		c:         closer,
 		totalSize: totalSize,
 		startTime: time.Now(),
 	}, nil
+}
+
+// multiCloser closes multiple io.Closers
+type multiCloser struct {
+	closers []io.Closer
+}
+
+func (mc *multiCloser) Close() error {
+	var firstErr error
+	for _, c := range mc.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (x *bufmonreader) Read(p []byte) (int, error) {

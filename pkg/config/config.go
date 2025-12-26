@@ -68,6 +68,48 @@ type BlockConfig struct {
 // SnapshotConfig holds snapshot download configuration
 type SnapshotConfig struct {
 	DownloadPath string `toml:"download_path" mapstructure:"download_path"` // Path to download snapshot to
+	SaveToDisk   bool   `toml:"save_to_disk" mapstructure:"save_to_disk"`   // Save snapshots while streaming (requires download_path)
+
+	// Output verbosity
+	Verbose bool `toml:"verbose" mapstructure:"verbose"` // Enable detailed statistics output
+
+	// Stage 1: Fast parallel triage
+	Stage1WarmKiB     int64 `toml:"stage1_warm_kib" mapstructure:"stage1_warm_kib"`
+	Stage1WindowKiB   int64 `toml:"stage1_window_kib" mapstructure:"stage1_window_kib"`
+	Stage1Windows     int   `toml:"stage1_windows" mapstructure:"stage1_windows"`
+	Stage1TimeoutMS   int64 `toml:"stage1_timeout_ms" mapstructure:"stage1_timeout_ms"`
+	Stage1Concurrency int   `toml:"stage1_concurrency" mapstructure:"stage1_concurrency"`
+
+	// Stage 2: Sustained speed test
+	Stage2TopK       int     `toml:"stage2_top_k" mapstructure:"stage2_top_k"`
+	Stage2WarmSec    int     `toml:"stage2_warm_sec" mapstructure:"stage2_warm_sec"`
+	Stage2MeasureSec int     `toml:"stage2_measure_sec" mapstructure:"stage2_measure_sec"`
+	Stage2MinRatio   float64 `toml:"stage2_min_ratio" mapstructure:"stage2_min_ratio"`
+	Stage2MinAbsMBs  float64 `toml:"stage2_min_abs_mbs" mapstructure:"stage2_min_abs_mbs"`
+
+	// Node filtering
+	MaxRTTMs            int      `toml:"max_rtt_ms" mapstructure:"max_rtt_ms"`
+	TCPTimeoutMs        int      `toml:"tcp_timeout_ms" mapstructure:"tcp_timeout_ms"`
+	MinNodeVersion      string   `toml:"min_node_version" mapstructure:"min_node_version"`
+	AllowedNodeVersions []string `toml:"allowed_node_versions" mapstructure:"allowed_node_versions"`
+
+	// Snapshot age thresholds
+	FullThreshold        int `toml:"full_threshold" mapstructure:"full_threshold"`
+	IncrementalThreshold int `toml:"incremental_threshold" mapstructure:"incremental_threshold"`
+	SafetyMarginSlots    int `toml:"safety_margin_slots" mapstructure:"safety_margin_slots"`
+
+	// Retention
+	MaxFullSnapshots   int  `toml:"max_full_snapshots" mapstructure:"max_full_snapshots"`
+	DeleteOldSnapshots bool `toml:"delete_old_snapshots" mapstructure:"delete_old_snapshots"`
+
+	// Performance
+	WorkerCount int `toml:"worker_count" mapstructure:"worker_count"`
+
+	// Fallback resilience
+	MaxSnapshotURLAttempts int `toml:"max_snapshot_url_attempts" mapstructure:"max_snapshot_url_attempts"`
+
+	// Incremental snapshot selection
+	MinIncrementalSpeedMBs float64 `toml:"min_incremental_speed_mbs" mapstructure:"min_incremental_speed_mbs"`
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)
@@ -158,4 +200,9 @@ func GetStringSlice(key string) []string {
 // IsSet returns true if a key has been set (either via config file or flag)
 func IsSet(key string) bool {
 	return viper.IsSet(key)
+}
+
+// GetFloat64 returns a float64 value from viper (config file or flag)
+func GetFloat64(key string) float64 {
+	return viper.GetFloat64(key)
 }

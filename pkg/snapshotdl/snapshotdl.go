@@ -1,9 +1,11 @@
 package snapshotdl
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/config"
@@ -11,96 +13,472 @@ import (
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/snapshot"
 )
 
+// SnapshotConfig holds configuration for snapshot downloading.
+// This can be populated from CLI flags or TOML config.
+type SnapshotConfig struct {
+	// Stage 1: Fast parallel triage
+	Stage1WarmKiB     int64
+	Stage1WindowKiB   int64
+	Stage1Windows     int
+	Stage1TimeoutMS   int64
+	Stage1Concurrency int
+
+	// Stage 2: Sustained speed test for top candidates
+	Stage2TopK       int
+	Stage2WarmSec    int
+	Stage2MeasureSec int
+	Stage2MinRatio   float64
+	Stage2MinAbsMBs  float64
+
+	// Node filtering
+	MaxRTTMs            int
+	TCPTimeoutMs        int
+	MinNodeVersion      string
+	AllowedNodeVersions []string
+
+	// Snapshot age thresholds (slots)
+	FullThreshold        int
+	IncrementalThreshold int
+
+	// Retention
+	MaxFullSnapshots   int
+	DeleteOldSnapshots bool
+
+	// Safety
+	SafetyMarginSlots int
+
+	// Worker settings
+	WorkerCount int
+
+	// Output verbosity
+	Verbose bool
+
+	// Disk saving
+	SaveToDisk   bool   // Save snapshots to disk while streaming
+	DownloadPath string // Path to save snapshots to (only used if SaveToDisk=true)
+
+	// Fallback resilience
+	MaxSnapshotURLAttempts int // Number of ranked nodes to try when getting snapshot URLs (0 = try all)
+
+	// Incremental snapshot selection
+	MinIncrementalSpeedMBs float64 // Minimum speed for incremental sources (MB/s, 0 = no minimum)
+}
+
+// DefaultSnapshotConfig returns production-ready defaults matching solana-snapshot-finder-go
+func DefaultSnapshotConfig() SnapshotConfig {
+	return SnapshotConfig{
+		// Stage 1: Fast parallel downloads for quick triage
+		Stage1WarmKiB:     512,  // 512 KiB warmup
+		Stage1WindowKiB:   512,  // 512 KiB measurement windows
+		Stage1Windows:     4,    // 4 windows = 2 MiB total per node
+		Stage1TimeoutMS:   3000, // 3 second timeout per node
+		Stage1Concurrency: 0,    // Auto (number of CPU cores)
+
+		// Stage 2: Sustained speed test for top candidates
+		Stage2TopK:       8,   // Test top 8 from stage 1
+		Stage2WarmSec:    2,   // 2 second warmup
+		Stage2MeasureSec: 2,   // 2 second measurement
+		Stage2MinRatio:   0.6, // Collapse if speed drops below 60%
+		Stage2MinAbsMBs:  0.0, // Disabled (0 = no minimum)
+
+		// Node filtering
+		MaxRTTMs:            200,     // 200ms max RTT
+		TCPTimeoutMs:        1000,    // 1 second TCP precheck
+		MinNodeVersion:      "2.2.0", // Minimum Agave 2.2.0
+		AllowedNodeVersions: nil,     // Accept all versions >= minimum
+
+		// Snapshot age thresholds
+		FullThreshold:        100000, // Full snapshots up to 100k slots old (Agave 3.0+)
+		IncrementalThreshold: 200,    // Allow slightly ahead incrementals
+
+		// Retention
+		MaxFullSnapshots:   2,     // Keep last 2 full snapshots
+		DeleteOldSnapshots: false, // Let mithril manage deletion
+
+		// Safety
+		SafetyMarginSlots: 5000, // Warn if <5000 slots until expiration
+
+		// Workers
+		WorkerCount: 100, // Concurrent node evaluation workers
+
+		// Output
+		Verbose: false, // Quiet by default
+
+		// Disk saving
+		SaveToDisk:   false, // Stream only by default (save disk space)
+		DownloadPath: "",    // No download path by default
+
+		// Fallback resilience
+		MaxSnapshotURLAttempts: 3, // Try top 3 ranked nodes before giving up
+
+		// Incremental selection
+		MinIncrementalSpeedMBs: 2.0, // Minimum 2 MB/s for incrementals (~8min for 1GB)
+	}
+}
+
+// toInternalConfig converts SnapshotConfig to snapshot-finder's config.Config
+func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.Config {
+	return config.Config{
+		RPCAddresses:         []string{endpoint},
+		SnapshotPath:         path,
+		NumOfRetries:         5,
+		SleepBeforeRetry:     2,
+		EnableBlacklist:      false,
+		WhitelistMode:        "disabled",
+		WorkerCount:          sc.WorkerCount,
+		FullThreshold:        sc.FullThreshold,
+		IncrementalThreshold: sc.IncrementalThreshold,
+		Stage1WarmKiB:        sc.Stage1WarmKiB,
+		Stage1WindowKiB:      sc.Stage1WindowKiB,
+		Stage1Windows:        sc.Stage1Windows,
+		Stage1TimeoutMS:      sc.Stage1TimeoutMS,
+		Stage1Concurrency:    sc.Stage1Concurrency,
+		Stage2TopK:           sc.Stage2TopK,
+		Stage2WarmSec:        sc.Stage2WarmSec,
+		Stage2MeasureSec:     sc.Stage2MeasureSec,
+		Stage2MinRatio:       sc.Stage2MinRatio,
+		Stage2MinAbsMBs:      sc.Stage2MinAbsMBs,
+		MaxRTTMs:             sc.MaxRTTMs,
+		TCPTimeoutMs:         sc.TCPTimeoutMs,
+		MinNodeVersion:       sc.MinNodeVersion,
+		AllowedNodeVersions:  sc.AllowedNodeVersions,
+		MaxFullSnapshots:     sc.MaxFullSnapshots,
+		DeleteOldSnapshots:   sc.DeleteOldSnapshots,
+		SafetyMarginSlots:    sc.SafetyMarginSlots,
+	}
+}
+
+// formatProbeStats formats ProbeStats for mithril's logging style
+func formatProbeStats(stats *rpc.ProbeStats, cfg config.Config) {
+	if stats == nil {
+		return
+	}
+
+	mlog.Log.Infof("=== Snapshot Node Discovery Statistics ===")
+	mlog.Log.Infof("Total nodes discovered: %d", stats.TotalNodes)
+	mlog.Log.Infof("TCP connectivity passed: %d", stats.TotalNodes-stats.TCPFailed)
+	mlog.Log.Infof("Nodes with any snapshot: %d", stats.HasAnySnapshot)
+	mlog.Log.Infof("Nodes with incremental: %d (usable: %d)", stats.WithIncremental, stats.WithUsableInc)
+
+	if cfg.MinNodeVersion != "" || len(cfg.AllowedNodeVersions) > 0 {
+		mlog.Log.Infof("After version filter: %d", stats.AfterVersionFilter)
+	}
+	if cfg.MaxRTTMs > 0 {
+		mlog.Log.Infof("After RTT filter (<%dms): %d", cfg.MaxRTTMs, stats.AfterRTTFilter)
+	}
+	mlog.Log.Infof("After age filters (full<%d, incr<%d slots): full=%d, incr=%d",
+		cfg.FullThreshold, cfg.IncrementalThreshold,
+		stats.AfterFullAgeFilter, stats.AfterIncAgeFilter)
+	mlog.Log.Infof("Final eligible nodes: %d", stats.Eligible)
+	mlog.Log.Infof("==========================================")
+}
+
+// DownloadSnapshot downloads a full snapshot from the best available RPC node.
+// It returns: (downloadPath, referenceSlot, snapshotSlot, error)
+//
+// This function:
+// 1. Gets the reference slot from the network
+// 2. Discovers available RPC nodes from the cluster
+// 3. Evaluates nodes for snapshot availability and download speed
+// 4. Downloads from the fastest node with a recent snapshot
 func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
-	cfg := config.Config{RPCAddress: endpoint, SnapshotPath: path, NumOfRetries: 5,
-		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100, FullThreshold: 100000}
+	return DownloadSnapshotWithConfig(endpoint, path, DefaultSnapshotConfig())
+}
 
-	referenceSlot, err := rpc.GetReferenceSlot(cfg.RPCAddress)
+// GetSnapshotURL discovers the best RPC node and returns the HTTP URL for streaming.
+// Returns: (httpURL, referenceSlot, snapshotSlot, error)
+//
+// This function:
+// 1. Gets the reference slot from the network
+// 2. Discovers available RPC nodes from the cluster
+// 3. Evaluates nodes for snapshot availability and download speed
+// 4. Returns HTTP URL from the fastest node (for streaming)
+//
+// The returned URL can be passed directly to snapshot processing functions
+// which will stream the data from HTTP (no disk download required).
+func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(endpoint, "")
+	ctx := context.Background()
+
+	// Step 1: Get reference slot from multiple RPCs for reliability
+	mlog.Log.Infof("Getting reference slot from RPC(s)...")
+	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error getting reference slot: %s", err)
+		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", err)
 	}
+	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
 
-	nodes := rpc.FetchRPCNodes(cfg)
+	// Step 2: Fetch cluster nodes
+	mlog.Log.Infof("Discovering RPC nodes from cluster...")
+	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no rpc nodes available")
+		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	}
+	mlog.Log.Infof("Found %d potential snapshot sources", len(nodes))
+
+	// Step 3: Evaluate nodes with version tracking and statistics
+	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
+	evaluateStart := time.Now()
+	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
+
+	// Print statistics if verbose mode
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
 	}
 
-	results := rpc.EvaluateNodesWithVersions(nodes, cfg, referenceSlot)
-	bestRPCs := rpc.SortBestRPCs(results)
+	// Step 4: Sort and select best nodes by download speed
+	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	if len(bestNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
+	}
 
-	var finalPath string
-	for _, rpc := range bestRPCs {
-		finalPath, err = snapshot.DownloadSnapshot(rpc, cfg, "snapshot-", referenceSlot)
-		if err == nil && finalPath != "" {
+	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
+	// NOTE: This fallback pattern is useful for resilience - if the #1 ranked node's
+	// HTTP endpoint is down or snapshot was deleted, we try the next best nodes.
+	// This pattern could be extracted to snapshot-finder library for reuse.
+	var snapshotURL string
+	var snapshotSlot int
+	var selectedNodeRPC string
+	var selectedRank int
+	var selectedSpeed float64
+	var urlErr error
+
+	maxAttempts := snapCfg.MaxSnapshotURLAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = len(bestNodes) // 0 means try all available nodes
+	}
+
+	for i, nodeRPC := range bestNodes {
+		if i >= maxAttempts {
 			break
-		} else if err != nil {
-			fmt.Printf("failed to download snapshot from %s: %v. trying next.\n", rpc, err)
+		}
+
+		if i > 0 {
+			// We're on a fallback attempt
+			mlog.Log.Infof("Trying fallback source #%d: %s", i+1, nodeRPC)
+		}
+
+		if snapCfg.Verbose {
+			mlog.Log.Infof("Getting snapshot URL from: %s (rank #%d)", nodeRPC, i+1)
+		}
+		urlInfo, err := snapshot.GetSnapshotURL(ctx, nodeRPC, "full")
+
+		if err == nil && urlInfo != nil {
+			// Find the speed for this node from rankedNodes
+			for _, rn := range rankedNodes {
+				if rn.Result.RPC == nodeRPC {
+					selectedSpeed = rn.S1.MedianMBs
+					break
+				}
+			}
+			selectedNodeRPC = nodeRPC
+			selectedRank = i + 1
+			snapshotURL = urlInfo.URL
+			snapshotSlot = urlInfo.Slot
+			break
+		}
+
+		if err != nil {
+			if snapCfg.Verbose {
+				mlog.Log.Infof("Failed to get snapshot URL from %s: %v. Trying next...", nodeRPC, err)
+			}
+			urlErr = err
 		} else {
-			fmt.Printf("snapshot download from %s returned empty path. trying next.\n", rpc)
+			if snapCfg.Verbose {
+				mlog.Log.Infof("GetSnapshotURL from %s returned nil. Trying next...", nodeRPC)
+			}
+		}
+	}
+
+	if snapshotURL == "" {
+		return "", 0, 0, fmt.Errorf("failed to get snapshot URL from any RPC node (tried %d nodes, last error: %v)", maxAttempts, urlErr)
+	}
+
+	// Always log the selected source (even in non-verbose mode)
+	mlog.Log.Infof("📸 Full snapshot source: %s (rank #%d, %.1f MB/s, slot %d)",
+		selectedNodeRPC, selectedRank, selectedSpeed, snapshotSlot)
+	return snapshotURL, referenceSlot, snapshotSlot, nil
+}
+
+// DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
+func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(endpoint, path)
+	ctx := context.Background()
+
+	// Step 1: Get reference slot from multiple RPCs for reliability
+	mlog.Log.Infof("Getting reference slot from RPC(s)...")
+	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", err)
+	}
+	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+
+	// Step 2: Fetch cluster nodes
+	mlog.Log.Infof("Discovering RPC nodes from cluster...")
+	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	}
+	mlog.Log.Infof("Found %d potential snapshot sources", len(nodes))
+
+	// Step 3: Evaluate nodes with version tracking and statistics
+	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
+	evaluateStart := time.Now()
+	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
+
+	// Print statistics if verbose mode
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
+	}
+
+	// Step 4: Sort and select best nodes by download speed
+	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	if len(bestNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
+	}
+
+	// Step 5: Download snapshot from best nodes (with configurable fallback)
+	var finalPath string
+	var downloadErr error
+
+	maxAttempts := snapCfg.MaxSnapshotURLAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = len(bestNodes) // 0 means try all available nodes
+	}
+
+	for i, nodeRPC := range bestNodes {
+		if i >= maxAttempts {
+			break
+		}
+
+		if i > 0 {
+			mlog.Log.Infof("Trying fallback source #%d: %s", i+1, nodeRPC)
+		}
+
+		mlog.Log.Infof("Downloading from: %s (rank #%d)", nodeRPC, i+1)
+		downloadStart := time.Now()
+		finalPath, downloadErr = snapshot.DownloadSnapshotWithContext(
+			ctx, nodeRPC, cfg, "snapshot-", referenceSlot, nil)
+
+		if downloadErr == nil && finalPath != "" {
+			mlog.Log.Infof("Successfully downloaded snapshot from %s in %s", nodeRPC, time.Since(downloadStart))
+			break
+		}
+
+		if downloadErr != nil {
+			mlog.Log.Infof("Failed to download from %s: %v. Trying next...", nodeRPC, downloadErr)
+		} else {
+			mlog.Log.Infof("Download from %s returned empty path. Trying next...", nodeRPC)
 		}
 	}
 
 	if finalPath == "" {
-		return "", 0, 0, fmt.Errorf("failed to download snapshot from any RPC node")
+		return "", 0, 0, fmt.Errorf("failed to download snapshot from any RPC node (tried %d nodes, last error: %v)", maxAttempts, downloadErr)
 	}
 
-	snapshotSlot := extractFullSnapshotSlot(finalPath)
+	// Step 6: Extract slot from downloaded snapshot
+	snapshotSlot, err := snapshot.ExtractFullSnapshotSlot(finalPath)
+	if err != nil {
+		// Fallback to old parsing method for backward compatibility
+		snapshotSlot = extractFullSnapshotSlot(finalPath)
+	}
 
+	mlog.Log.Infof("Downloaded full snapshot: slot=%d, path=%s", snapshotSlot, finalPath)
 	return finalPath, referenceSlot, snapshotSlot, nil
 }
 
+// DownloadIncrementalSnapshot downloads an incremental snapshot that matches
+// the given fullSnapshotSlot.
+//
+// It returns: (downloadPath, baseSlot, endSlot, error)
+//
+// This function uses the new FindMatchingIncremental API to search across
+// ranked nodes for an incremental snapshot that matches the full snapshot.
 func DownloadIncrementalSnapshot(endpoint string, path string, referenceSlot int, fullSnapshotSlot int) (string, int, int, error) {
-	cfg := config.Config{RPCAddress: endpoint, SnapshotPath: path, NumOfRetries: 5,
-		MinDownloadSpeed: 100, MaxLatency: 10, WorkerCount: 100, FullThreshold: 100000}
+	return DownloadIncrementalSnapshotWithConfig(endpoint, path, referenceSlot, fullSnapshotSlot, DefaultSnapshotConfig())
+}
 
-	var err error
-	nodes := rpc.FetchRPCNodes(cfg)
+// DownloadIncrementalSnapshotWithConfig is like DownloadIncrementalSnapshot but accepts custom config
+func DownloadIncrementalSnapshotWithConfig(endpoint string, path string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(endpoint, path)
+	ctx := context.Background()
+
+	mlog.Log.Infof("Searching for incremental snapshot matching full slot %d...", fullSnapshotSlot)
+
+	// Step 1: Get cluster nodes
+	nodes := rpc.FetchClusterNodes(cfg, endpoint)
 	if len(nodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no rpc nodes available")
+		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
 
-	results := rpc.EvaluateNodesWithVersions(nodes, cfg, referenceSlot)
-	bestRPCs := rpc.SortBestRPCs(results)
+	// Step 2: Evaluate nodes
+	evaluateStart := time.Now()
+	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
-	var finalPath string
-	var incrSlotNum, slotNum int
-	for _, rpc := range bestRPCs {
-		finalPath, err = snapshot.DownloadSnapshot(rpc, cfg, "incremental", referenceSlot)
-		if err == nil {
-			slotNum, incrSlotNum = ExtractIncrementalSnapshotSlots(finalPath)
-			if slotNum == fullSnapshotSlot {
-				break
-			} else {
-				mlog.Log.Infof("downloaded incremental snapshot for slot %d, need %d. trying another download source.", slotNum, fullSnapshotSlot)
-			}
-		} else {
-			fmt.Printf("failed to download snapshot from %s. trying next.\n", rpc)
-		}
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
 	}
 
-	return finalPath, slotNum, incrSlotNum, nil
-}
+	// Step 3: Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
+	// This ensures we don't get nodes that haven't seen our full snapshot yet
+	bestNodes, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
+		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 
-// expected format of incr snapshot fn: snapshot-362871357-2m6Qctcrk54WooSWdHdu8Wjz49vzp6hpT5gXTJJUgT2C.tar.zst
-func extractFullSnapshotSlot(path string) int {
-	parts := strings.Split(path, "/")
-	filename := parts[len(parts)-1]
-
-	parts = strings.Split(filename, "-")
-	if len(parts) < 3 {
-		panic(fmt.Sprintf("invalid full snapshot filename format: %s", path))
+	if len(bestNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with snapshots >= slot %d", fullSnapshotSlot)
 	}
 
-	slotStr := parts[1]
-	slot, err := strconv.Atoi(slotStr)
+	mlog.Log.Infof("Found %d nodes with matching full snapshot", len(bestNodes))
+
+	// Step 4: Use the new FindMatchingIncremental API
+	// This searches ranked nodes for an incremental that matches fullSnapshotSlot
+	mlog.Log.Infof("Searching for matching incremental snapshot...")
+	incrInfo, err := rpc.FindMatchingIncremental(rankedNodes, int64(fullSnapshotSlot), 5000)
 	if err != nil {
-		panic(err)
+		return "", 0, 0, fmt.Errorf("failed to find matching incremental: %w", err)
 	}
 
-	return slot
+	if incrInfo == nil {
+		return "", 0, 0, fmt.Errorf("no matching incremental snapshot found for base slot %d", fullSnapshotSlot)
+	}
+
+	mlog.Log.Infof("Found matching incremental on %s: base=%d, end=%d",
+		incrInfo.NodeRPC, incrInfo.BaseSlot, incrInfo.EndSlot)
+
+	// Step 5: Download the incremental snapshot
+	downloadStart := time.Now()
+	finalPath, err := snapshot.DownloadSnapshotWithContext(
+		ctx, incrInfo.NodeRPC, cfg, "incremental", referenceSlot, nil)
+
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("failed to download incremental from %s: %w", incrInfo.NodeRPC, err)
+	}
+
+	mlog.Log.Infof("Downloaded incremental snapshot from %s in %s", incrInfo.NodeRPC, time.Since(downloadStart))
+
+	// Step 6: Verify the downloaded snapshot matches expected slots
+	baseSlot, endSlot, err := snapshot.ExtractIncrementalSnapshotSlots(finalPath)
+	if err != nil {
+		// Fallback to old parsing
+		baseSlot, endSlot = ExtractIncrementalSnapshotSlots(finalPath)
+	}
+
+	if baseSlot != int(incrInfo.BaseSlot) {
+		mlog.Log.Infof("WARNING: Downloaded incremental has base slot %d, expected %d", baseSlot, incrInfo.BaseSlot)
+	}
+
+	mlog.Log.Infof("Downloaded incremental snapshot: base=%d, end=%d, path=%s", baseSlot, endSlot, finalPath)
+	return finalPath, baseSlot, endSlot, nil
 }
 
-// expected format of incr snapshot fn: incremental-snapshot-361569776-XXXX-....
+// ExtractIncrementalSnapshotSlots extracts the base and end slots from an
+// incremental snapshot filename.
+//
+// Expected format: incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst
+// Returns: (baseSlot, endSlot)
 func ExtractIncrementalSnapshotSlots(path string) (int, int) {
 	parts := strings.Split(path, "/")
 	filename := parts[len(parts)-1]
@@ -113,13 +491,230 @@ func ExtractIncrementalSnapshotSlots(path string) (int, int) {
 	slotStr := parts[2]
 	slot, err := strconv.Atoi(slotStr)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("failed to parse base slot from %s: %v", path, err))
 	}
 
 	incrSlotStr := parts[3]
 	incrSlot, err := strconv.Atoi(incrSlotStr)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("failed to parse end slot from %s: %v", path, err))
 	}
+
 	return slot, incrSlot
+}
+
+// extractFullSnapshotSlot extracts the slot from a full snapshot filename.
+//
+// Expected format: snapshot-{slot}-{hash}.tar.zst
+// Returns: slot number
+//
+// This is kept for backward compatibility but now also uses the new API
+func extractFullSnapshotSlot(path string) int {
+	parts := strings.Split(path, "/")
+	filename := parts[len(parts)-1]
+
+	parts = strings.Split(filename, "-")
+	if len(parts) < 3 {
+		panic(fmt.Sprintf("invalid full snapshot filename format: %s", path))
+	}
+
+	slotStr := parts[1]
+	slot, err := strconv.Atoi(slotStr)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse slot from %s: %v", path, err))
+	}
+
+	return slot
+}
+
+// GetIncrementalSnapshotURL finds an incremental snapshot URL that matches the full snapshot.
+// It first tries the same source as the full snapshot, then searches other nodes if needed.
+// Returns: (httpURL, baseSlot, endSlot, error)
+//
+// Fallback strategy (different from full snapshot):
+// 1. Try the same node that provided the full snapshot (fastest, most likely match)
+// 2. If that fails, find ALL nodes with matching base slot (more flexible than full snapshot)
+// 3. Among matching nodes, prioritize by:
+//    a. Freshness (highest end slot = most recent incremental)
+//    b. Speed (faster downloads preferred when end slots are equal)
+// 4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
+func GetIncrementalSnapshotURL(endpoint string, fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(endpoint, "")
+	ctx := context.Background()
+
+	// Extract the source node RPC from the full snapshot URL
+	// Example: "http://node.example.com:8899/snapshot-123-abc.tar.zst" -> "http://node.example.com:8899"
+	var sourceNodeRPC string
+	if strings.HasPrefix(fullSnapshotURL, "http://") || strings.HasPrefix(fullSnapshotURL, "https://") {
+		parts := strings.Split(fullSnapshotURL, "/")
+		if len(parts) >= 3 {
+			sourceNodeRPC = strings.Join(parts[:3], "/") // protocol + // + host:port
+		}
+	}
+
+	// Step 1: Try to get incremental from the same source as the full snapshot
+	if sourceNodeRPC != "" {
+		mlog.Log.Infof("Checking same source for incremental (base slot %d): %s", fullSnapshotSlot, sourceNodeRPC)
+		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
+
+		if err == nil && urlInfo != nil && urlInfo.BaseSlot == fullSnapshotSlot {
+			mlog.Log.Infof("📸 Incremental snapshot source: %s (same as full, base=%d, end=%d)",
+				sourceNodeRPC, urlInfo.BaseSlot, urlInfo.Slot)
+			return urlInfo.URL, urlInfo.BaseSlot, urlInfo.Slot, nil
+		}
+		mlog.Log.Infof("Same source unavailable for incremental. Searching cluster...")
+	}
+
+	// Step 2: Fallback - search all nodes for matching incremental
+	// For incrementals, we need to be more flexible: find ANY node with matching base slot,
+	// then prefer fresher incrementals (higher end slot) with reasonable speed
+	mlog.Log.Infof("Searching cluster for incremental snapshot matching full slot %d...", fullSnapshotSlot)
+
+	// Get cluster nodes
+	nodes := rpc.FetchClusterNodes(cfg, endpoint)
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	}
+
+	// Evaluate nodes
+	evaluateStart := time.Now()
+	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
+
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
+	}
+
+	// Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
+	_, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
+		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
+
+	if len(rankedNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with snapshots >= slot %d", fullSnapshotSlot)
+	}
+
+	// Filter to only nodes with matching base slot
+	var matchingNodes []rpc.RankedNode
+	for _, node := range rankedNodes {
+		if node.Result.HasInc && node.Result.IncBase == int64(fullSnapshotSlot) {
+			matchingNodes = append(matchingNodes, node)
+		}
+	}
+
+	if len(matchingNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d", fullSnapshotSlot)
+	}
+
+	// Filter out nodes that are too slow (incrementals are ~1GB, don't want 15min downloads)
+	if snapCfg.MinIncrementalSpeedMBs > 0 {
+		var fastEnoughNodes []rpc.RankedNode
+		for _, node := range matchingNodes {
+			if node.S1.MedianMBs >= snapCfg.MinIncrementalSpeedMBs {
+				fastEnoughNodes = append(fastEnoughNodes, node)
+			}
+		}
+		if len(fastEnoughNodes) > 0 {
+			matchingNodes = fastEnoughNodes
+			if snapCfg.Verbose {
+				mlog.Log.Infof("Filtered to %d nodes with speed >= %.1f MB/s",
+					len(matchingNodes), snapCfg.MinIncrementalSpeedMBs)
+			}
+		} else {
+			// No nodes meet speed requirement, continue with all matching nodes
+			if snapCfg.Verbose {
+				mlog.Log.Infof("No nodes meet minimum speed %.1f MB/s, using all %d matching nodes",
+					snapCfg.MinIncrementalSpeedMBs, len(matchingNodes))
+			}
+		}
+	}
+
+	// Sort by end slot descending (freshest first), then by speed
+	// Note: This sorts in-place
+	for i := 0; i < len(matchingNodes)-1; i++ {
+		for j := i + 1; j < len(matchingNodes); j++ {
+			// Sort by end slot descending
+			if matchingNodes[j].Result.IncSlot > matchingNodes[i].Result.IncSlot {
+				matchingNodes[i], matchingNodes[j] = matchingNodes[j], matchingNodes[i]
+			} else if matchingNodes[j].Result.IncSlot == matchingNodes[i].Result.IncSlot {
+				// If same end slot, prefer faster node
+				if matchingNodes[j].S1.MedianMBs > matchingNodes[i].S1.MedianMBs {
+					matchingNodes[i], matchingNodes[j] = matchingNodes[j], matchingNodes[i]
+				}
+			}
+		}
+	}
+
+	mlog.Log.Infof("Found %d nodes with matching base slot %d", len(matchingNodes), fullSnapshotSlot)
+	if snapCfg.Verbose && len(matchingNodes) > 0 {
+		mlog.Log.Infof("Top candidates with matching base:")
+		for i := 0; i < min(3, len(matchingNodes)); i++ {
+			node := matchingNodes[i]
+			mlog.Log.Infof("  #%d: %s (end slot: %d, %.1f MB/s)",
+				i+1, node.Result.RPC, node.Result.IncSlot, node.S1.MedianMBs)
+		}
+	}
+
+	// Try multiple candidates with matching base slot for resilience
+	maxAttempts := snapCfg.MaxSnapshotURLAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = len(matchingNodes) // Try all if configured
+	}
+
+	var incrURL string
+	var incrBaseSlot, incrEndSlot int
+	var selectedNode string
+	var urlErr error
+
+	for i := 0; i < min(maxAttempts, len(matchingNodes)); i++ {
+		node := matchingNodes[i]
+
+		if i > 0 {
+			mlog.Log.Infof("Trying fallback incremental source #%d: %s (end slot: %d)",
+				i+1, node.Result.RPC, node.Result.IncSlot)
+		}
+
+		if snapCfg.Verbose {
+			mlog.Log.Infof("Getting incremental URL from %s (base=%d, end=%d)",
+				node.Result.RPC, node.Result.IncBase, node.Result.IncSlot)
+		}
+
+		urlInfo, err := snapshot.GetSnapshotURL(ctx, node.Result.RPC, "incremental")
+		if err == nil && urlInfo != nil {
+			// Verify base slot still matches (could have changed since evaluation)
+			if urlInfo.BaseSlot == fullSnapshotSlot {
+				incrURL = urlInfo.URL
+				incrBaseSlot = urlInfo.BaseSlot
+				incrEndSlot = urlInfo.Slot
+				selectedNode = node.Result.RPC
+				break
+			}
+			if snapCfg.Verbose {
+				mlog.Log.Infof("Base slot mismatch: got %d, need %d. Trying next...",
+					urlInfo.BaseSlot, fullSnapshotSlot)
+			}
+		} else {
+			if snapCfg.Verbose {
+				mlog.Log.Infof("Failed to get URL from %s: %v. Trying next...", node.Result.RPC, err)
+			}
+			urlErr = err
+		}
+	}
+
+	if incrURL == "" {
+		return "", 0, 0, fmt.Errorf("failed to get incremental URL from any matching node (tried %d nodes, last error: %v)",
+			min(maxAttempts, len(matchingNodes)), urlErr)
+	}
+
+	// Always log the selected source
+	mlog.Log.Infof("📸 Incremental snapshot source: %s (base=%d, end=%d)",
+		selectedNode, incrBaseSlot, incrEndSlot)
+	return incrURL, incrBaseSlot, incrEndSlot, nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

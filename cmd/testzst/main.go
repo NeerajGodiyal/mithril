@@ -21,7 +21,7 @@ func main() {
 		mlog.Log.Errorf("opening zstdFilename=%s: %v", *zstdFilename, err)
 		os.Exit(1)
 	}
-	bmr, err := snapshot.NewBufMonReader(file)
+	bmr, err := snapshot.NewBufMonReaderFromFile(file)
 	if err != nil {
 		mlog.Log.Errorf("making BufMonReader: %v", err)
 		os.Exit(1)
