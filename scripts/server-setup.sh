@@ -1095,7 +1095,6 @@ CHROOT2
     echo "  │ [✓] UFW firewall: $([ "$ENABLE_UFW" == "yes" ] && echo "enabled (SSH allowed)" || echo "configured but NOT enabled")"
     echo "  │ [✓] Unattended security updates: enabled"
     echo "  │ [✓] Time sync (chrony): enabled"
-    echo "  │ [✓] Entropy (haveged): enabled"
     echo "  │ [✓] Journald limits: 2GB max"
     echo "  │ [✓] Root partition: ${ROOT_SIZE_GIB} GiB (errors=remount-ro)"
     [[ "$CREATE_SWAP" == "yes" ]] && \
@@ -1105,9 +1104,27 @@ CHROOT2
     echo "  │ [✓] Network: $([ "$NET_MODE" == "1" ] && echo "DHCP" || echo "Static") via MAC match"
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo
+    echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+    echo "  │ SSH KEY VERIFICATION                                                    │"
+    echo "  ├─────────────────────────────────────────────────────────────────────────┤"
+    echo "  │ Your SSH key has been installed:                                        │"
+    echo "  │   /home/$ADMIN_USER/.ssh/authorized_keys                                │"
+    echo "  └─────────────────────────────────────────────────────────────────────────┘"
+    echo
+    echo "  Installed key (verify this matches your key):"
+    echo "  ${GREEN}$(cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys | head -1 | cut -c1-72)...${NC}"
+    echo
+    echo "  To manually verify: cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys"
+    echo
     echo "  NEXT STEPS:"
-    echo "    1. In your provider panel: DISABLE Rescue boot"
-    echo "    2. Reboot the server from disk"
+    echo "    1. Verify the SSH key above matches your key"
+    echo "    2. Reboot into the new Ubuntu install:"
+    echo
+    echo "       ${GREEN}reboot${NC}"
+    echo
+    echo "       Note: Hetzner rescue mode is one-boot-only, so reboot goes to Ubuntu."
+    echo "       Other providers: Disable rescue/live boot in your panel first."
+    echo
     echo "    3. SSH in with your key:"
     echo
     echo "       ssh -i ~/.ssh/id_ed25519 $ADMIN_USER@<server_ip>"

@@ -15,10 +15,10 @@ curl -O https://raw.githubusercontent.com/Overclock-Validator/mithril/main/scrip
 chmod +x server-setup.sh
 sudo ./server-setup.sh install
 
-# 2. Reboot into the new Ubuntu install
-#    - Cloud/Hetzner: Disable rescue mode in your provider panel, then reboot
-#    - Home server: Remove USB/live media and reboot
-#    - The script will tell you when it's done
+# 2. Verify your SSH key was installed (the script will show it)
+#    Then reboot into Ubuntu:
+reboot
+#    Note: Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.
 
 # 3. SSH in as your admin user (NOT root)
 ssh -i ~/.ssh/YOUR_KEY YOUR_USERNAME@YOUR_SERVER_IP
