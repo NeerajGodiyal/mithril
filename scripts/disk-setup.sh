@@ -184,6 +184,31 @@ get_root_disk() {
     echo "/dev/$root_pk"
 }
 
+# SAFETY: Check if a path is on the root/OS disk
+# Returns 0 (true) if the path is on the OS disk, 1 (false) otherwise
+path_on_root_disk() {
+    local path="$1"
+    local root_disk
+    root_disk=$(get_root_disk)
+
+    # In rescue mode, there's no root disk to protect
+    [[ "$root_disk" == "none" ]] && return 1
+
+    # Get the device backing this path
+    local path_device path_disk
+    path_device="$(findmnt -n -o SOURCE --target "$path" 2>/dev/null || true)"
+
+    # If path isn't mounted, it's not on root disk
+    [[ -z "$path_device" ]] && return 1
+
+    # Get the parent disk of this device
+    path_disk="$(lsblk -no PKNAME "$path_device" 2>/dev/null || true)"
+    [[ -z "$path_disk" ]] && return 1
+
+    # Compare with root disk
+    [[ "/dev/$path_disk" == "$root_disk" ]]
+}
+
 list_nvme_disks() {
     lsblk -dn -o NAME,TYPE | awk '$2=="disk" && $1~/^nvme/ {print "/dev/"$1}'
 }
@@ -551,10 +576,10 @@ show_status() {
 
     echo "--- Mithril Directories ---"
     local mithril_dirs=(
-        "/data/mithril/accountsdb"
-        "/data/mithril/blockstore"
-        "/data/mithril/snapshots"
-        "/fast-nvme/mithril"
+        "/mnt/accountsdb"
+        "/mnt/ledger"
+        "/mnt/ledger/snapshots"
+        "/mnt/ledger/blockstore"
     )
 
     for dir in "${mithril_dirs[@]}"; do
@@ -727,8 +752,8 @@ interactive_setup() {
     fi
 
     # Configuration collection
-    local accountsdb_disk="" accountsdb_mount="/fast-nvme/mithril"
-    local data_disk="" data_mount="/data/mithril"
+    local accountsdb_disk="" accountsdb_mount="/mnt/accountsdb"
+    local data_disk="" data_mount="/mnt/ledger"
     local accountsdb_fstype="" data_fstype=""
 
     echo ""
@@ -811,12 +836,12 @@ interactive_setup() {
     echo "  STEP 3: Mount Points"
     echo ""
 
-    read -r -p "  AccountsDB mount point [/fast-nvme/mithril]: " input
-    accountsdb_mount="${input:-/fast-nvme/mithril}"
+    read -r -p "  AccountsDB mount point [/mnt/accountsdb]: " input
+    accountsdb_mount="${input:-/mnt/accountsdb}"
 
     if [[ -n "$data_disk" ]]; then
-        read -r -p "  Snapshots/Blockstore mount point [/data/mithril]: " input
-        data_mount="${input:-/data/mithril}"
+        read -r -p "  Ledger mount point (snapshots + blockstore) [/mnt/ledger]: " input
+        data_mount="${input:-/mnt/ledger}"
     fi
 
     # Summary and confirmation
@@ -831,7 +856,7 @@ interactive_setup() {
         printf "  │ AccountsDB:  %-58s │\n" "$accountsdb_disk -> $accountsdb_mount"
         printf "  │              %-58s │\n" "Model: $adb_model"
         printf "  │              %-58s │\n" "Filesystem: $accountsdb_fstype"
-        echo "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
     else
         echo "  │ AccountsDB:  (skipped - using existing)                                │"
     fi
@@ -839,10 +864,10 @@ interactive_setup() {
     if [[ -n "$data_disk" ]]; then
         local data_model
         data_model=$(disk_model "$data_disk")
-        printf "  │ Data:        %-58s │\n" "$data_disk -> $data_mount"
+        printf "  │ Ledger:      %-58s │\n" "$data_disk -> $data_mount"
         printf "  │              %-58s │\n" "Model: $data_model"
         printf "  │              %-58s │\n" "Filesystem: $data_fstype"
-        echo "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
     elif [[ -n "$accountsdb_disk" ]]; then
         echo "  │ Data:        (same drive as AccountsDB)                                │"
     fi
@@ -957,10 +982,9 @@ find_mithril_dirs() {
 
     # Check common locations
     local common_paths=(
-        "/fast-nvme/mithril"
-        "/data/mithril"
+        "/mnt/accountsdb"
+        "/mnt/ledger"
         "/mnt/mithril"
-        "/mithril"
     )
 
     for path in "${common_paths[@]}"; do
@@ -998,7 +1022,7 @@ clean_subdir() {
     if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
         warn "No Mithril data directories found"
         echo ""
-        echo "  Checked: /fast-nvme/mithril, /data/mithril, /mnt/mithril"
+        echo "  Checked: /mnt/accountsdb, /mnt/ledger, /mnt/mithril"
         return 1
     fi
 
@@ -1010,6 +1034,11 @@ clean_subdir() {
 
     for mithril_dir in "${mithril_dirs[@]}"; do
         if [[ -d "$mithril_dir/$subdir_name" ]]; then
+            # SAFETY: Never delete anything on the OS disk
+            if path_on_root_disk "$mithril_dir/$subdir_name"; then
+                warn "SKIPPING $mithril_dir/$subdir_name - on OS disk (safety protection)"
+                continue
+            fi
             local size
             size=$(dir_size "$mithril_dir/$subdir_name")
             paths_to_clean+=("$mithril_dir/$subdir_name")
@@ -1085,6 +1114,11 @@ clean_all() {
     echo ""
 
     for mithril_dir in "${mithril_dirs[@]}"; do
+        # SAFETY: Never delete anything on the OS disk
+        if path_on_root_disk "$mithril_dir"; then
+            warn "SKIPPING $mithril_dir - on OS disk (safety protection)"
+            continue
+        fi
         echo "    $mithril_dir"
         for subdir in accountsdb snapshots blockstore; do
             if [[ -d "$mithril_dir/$subdir" ]]; then
