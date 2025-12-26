@@ -94,6 +94,34 @@ The script will:
 
 After installation, disable rescue boot in your provider panel and reboot.
 
+### After Install: What To Do Next
+
+After rebooting, you'll need to connect as your new admin user (not root):
+
+```bash
+# SSH to your server as the admin user you created (default: ubuntu)
+ssh ubuntu@YOUR_SERVER_IP
+```
+
+> **Note:** You're now logged in as `ubuntu` (or whatever username you chose), not `root`. This user has `sudo` privileges for admin tasks.
+
+From here, clone the Mithril repo and run the remaining setup scripts:
+
+```bash
+# Clone the mithril repository
+git clone https://github.com/Overclock-Validator/mithril.git
+cd mithril
+
+# Run disk setup (benchmarks and formats drives)
+sudo ./scripts/disk-setup.sh --benchmark    # Safe: just shows drive speeds
+sudo ./scripts/disk-setup.sh --setup        # Formats drives - follow prompts
+
+# Run performance tuning
+sudo ./scripts/performance-tune.sh          # Interactive mode - explains each change
+```
+
+**Why `sudo`?** The disk and performance scripts need administrator privileges to format drives, change system settings, etc. Your admin user can run these commands with `sudo`.
+
 ### Harden Mode (Existing Ubuntu)
 
 Safe to run on an existing Ubuntu system:
