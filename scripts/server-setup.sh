@@ -91,7 +91,15 @@ list_disks() {
 }
 
 disk_summary() {
-    lsblk -dn -o NAME,SIZE,MODEL,SERIAL,TYPE | awk '$5=="disk"{printf "  /dev/%-10s  %-8s  %-20s  %s\n",$1,$2,$3,$4}'
+    # Use lsblk with explicit output to handle empty MODEL/SERIAL fields
+    local disk name size model serial
+    for disk in $(list_disks); do
+        name=$(basename "$disk")
+        size=$(lsblk -dn -o SIZE "$disk" 2>/dev/null | tr -d ' ')
+        model=$(lsblk -dn -o MODEL "$disk" 2>/dev/null | sed 's/^ *//;s/ *$//')
+        serial=$(lsblk -dn -o SERIAL "$disk" 2>/dev/null | sed 's/^ *//;s/ *$//')
+        printf "  /dev/%-10s  %-8s  %-30s  %s\n" "$name" "$size" "${model:-(unknown)}" "${serial:-}"
+    done
 }
 
 part_path() {
