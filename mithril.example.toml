@@ -168,12 +168,10 @@
     # stage2_top_k = 8
 
     # Warmup duration before measurement (seconds)
-    # Recommended: 3 seconds for home internet (more variable), 1-2 for datacenter
-    # stage2_warm_sec = 3
+    # stage2_warm_sec = 2
 
     # Measurement duration (seconds)
-    # Recommended: 3 seconds for home internet (more variable), 1-2 for datacenter
-    # stage2_measure_sec = 3
+    # stage2_measure_sec = 2
 
     # Minimum speed ratio (collapse if speed drops below this * peak)
     # stage2_min_ratio = 0.6
