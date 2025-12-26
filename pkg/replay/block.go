@@ -586,7 +586,12 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	snapshotManifest = nil
 }
 
-func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.SlotCtx) {
+func configureBlock(block *b.Block,
+	epochCtx *ReplayCtx,
+	lastSlotCtx *sealevel.SlotCtx,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	rpcClient *rpcclient.RpcClient) {
+
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
@@ -605,6 +610,10 @@ func configureBlock(block *b.Block, epochCtx *ReplayCtx, lastSlotCtx *sealevel.S
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
+		// if we've crossed an epoch boundary, fetch the new leader schedule
+		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
+			prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
@@ -738,7 +747,7 @@ func ReplayBlocks(
 		if currentSlot == startSlot {
 			configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
 		} else {
-			configureBlock(block, replayCtx, lastSlotCtx)
+			configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc)
 		}
 
 		// epoch boundary
@@ -760,10 +769,6 @@ func ReplayBlocks(
 				block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentFeaturesActivatedInFirstSlot...)
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
-			}
-
-			if global.ManageLeaderSchedule() {
-				prepareLeaderSchedule(block.Epoch, epochSchedule, rpcc)
 			}
 		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
 			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
