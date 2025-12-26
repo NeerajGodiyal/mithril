@@ -15,9 +15,11 @@ curl -O https://raw.githubusercontent.com/Overclock-Validator/mithril/main/scrip
 chmod +x server-setup.sh
 sudo ./server-setup.sh install
 
-# 2. Verify your SSH key was installed (the script will show it)
-#    To manually check:
+# 2. Verify your SSH key was installed (the script shows it at completion)
+#    To manually re-check after script finishes (remount first):
+mount /dev/nvme0n1p2 /mnt   # Replace with your OS disk partition
 cat /mnt/home/YOUR_USERNAME/.ssh/authorized_keys
+umount /mnt
 #    Then reboot into Ubuntu:
 reboot
 #    Note: Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.

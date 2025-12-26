@@ -1120,9 +1120,7 @@ CHROOT2
     echo
     echo "  NEXT STEPS:"
     echo "    1. Verify the SSH key above matches yours"
-    echo "       To view the full key:"
-    echo
-    echo "       cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys"
+    echo "       (To re-check: mount $ROOT_PART /mnt && cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys)"
     echo
     echo "    2. Reboot into Ubuntu:"
     echo
