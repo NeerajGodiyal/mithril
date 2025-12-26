@@ -619,13 +619,13 @@ mode_install() {
 
     echo
     echo "  SSH key for '$ADMIN_USER':"
-    echo "    This key allows you to log into the server remotely from another computer"
-    echo "    (e.g. your personal laptop). After install, you'll SSH in using this key."
+    echo "    This key allows you to log into the server remotely."
+    echo "    After install, you'll SSH in from your personal computer using this key."
     echo
-    echo "    On your laptop, check if you have a key:"
+    echo "    On the computer you'll use to access this server, check if you have a key:"
     echo "      cat ~/.ssh/id_ed25519.pub    (or id_rsa.pub)"
     echo
-    echo "    If you don't have one, generate a new key on your laptop:"
+    echo "    If you don't have one, generate a new key:"
     echo "      ssh-keygen -t ed25519"
     echo "      (You can optionally set a passphrase to protect the key)"
     echo "      Then: cat ~/.ssh/id_ed25519.pub"
