@@ -16,6 +16,8 @@ chmod +x server-setup.sh
 sudo ./server-setup.sh install
 
 # 2. Verify your SSH key was installed (the script will show it)
+#    To manually check:
+cat /mnt/home/YOUR_USERNAME/.ssh/authorized_keys
 #    Then reboot into Ubuntu:
 reboot
 #    Note: Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.
