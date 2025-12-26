@@ -104,9 +104,13 @@ disk_summary() {
 
 part_path() {
     # NVMe: /dev/nvme0n1p1 ; SATA: /dev/sda1
+    # Detect by name pattern, not by checking if device exists (partitions may not exist yet)
     local disk="$1" partnum="$2"
-    local p="${disk}p${partnum}"
-    [[ -b "$p" ]] && echo "$p" || echo "${disk}${partnum}"
+    if [[ "$disk" == *nvme* ]]; then
+        echo "${disk}p${partnum}"
+    else
+        echo "${disk}${partnum}"
+    fi
 }
 
 # Check if disk has any mounted partitions
@@ -609,10 +613,11 @@ mode_install() {
 
     echo
     echo "  How big should the Ubuntu root partition '/' be?"
-    echo "    Typical: 50-80 GiB (enough for OS + packages + logs)"
+    echo "    64 GiB is recommended (plenty for Ubuntu + packages + system logs)"
     echo "    Disk size: ${OS_DISK_SIZE_GIB} GiB available"
     echo "    The rest of the disk can be used for Mithril data later."
-    prompt ROOT_SIZE_GIB "  Root (/) size in GiB" "80"
+    echo ""
+    prompt ROOT_SIZE_GIB "  Root (/) size in GiB [press Enter for recommended]" "64"
     [[ "$ROOT_SIZE_GIB" =~ ^[0-9]+$ ]] || die "Root size must be a number (GiB)."
 
     # Validate root size fits on disk (need ~2 GiB for EFI + some headroom)
@@ -632,19 +637,44 @@ mode_install() {
     # Swap file option (OOM prevention safety net)
     local CREATE_SWAP="no"
     local SWAP_SIZE_GIB="4"
+
+    # Detect system RAM and calculate recommended swap
+    local SYSTEM_RAM_GIB
+    SYSTEM_RAM_GIB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo "16")
+
+    # Swap recommendation: ~25% of RAM for systems with 16GB+, minimum 4GB
+    local RECOMMENDED_SWAP
+    if [[ "$SYSTEM_RAM_GIB" -ge 32 ]]; then
+        RECOMMENDED_SWAP="8"
+    elif [[ "$SYSTEM_RAM_GIB" -ge 16 ]]; then
+        RECOMMENDED_SWAP="4"
+    else
+        # For smaller RAM systems, use ~50% of RAM
+        RECOMMENDED_SWAP=$(( SYSTEM_RAM_GIB / 2 ))
+        [[ "$RECOMMENDED_SWAP" -lt 2 ]] && RECOMMENDED_SWAP="2"
+    fi
+    SWAP_SIZE_GIB="$RECOMMENDED_SWAP"
+
     echo
     echo "  Create a swap file? (Recommended - prevents OOM crashes during memory spikes)"
+    echo "    Detected RAM: ${SYSTEM_RAM_GIB} GiB"
     echo "    Swap provides a safety net when RAM is exhausted."
-    echo "    4-8 GiB is typical for Mithril nodes."
+    echo "    Recommended: ${RECOMMENDED_SWAP} GiB for your system"
+    echo "      (More RAM = less swap needed; less RAM = more swap helps)"
+    echo ""
     if yesno "  Create swap file?" "y"; then
         CREATE_SWAP="yes"
-        prompt SWAP_SIZE_GIB "  Swap size in GiB" "4"
+        prompt SWAP_SIZE_GIB "  Swap size in GiB [press Enter for recommended]" "$RECOMMENDED_SWAP"
         [[ "$SWAP_SIZE_GIB" =~ ^[0-9]+$ ]] || die "Swap size must be a number (GiB)."
     fi
 
     # UFW firewall option
     echo
-    echo "  Enable UFW firewall? (Recommended - allows SSH, blocks everything else)"
+    echo "  Enable UFW firewall? (Recommended)"
+    echo "    - Blocks unsolicited incoming connections"
+    echo "    - Allows SSH (port 22) incoming"
+    echo "    - Allows ALL outgoing connections (RPC, Overcast, etc.)"
+    echo ""
     local ENABLE_UFW="yes"
     if yesno "  Enable UFW firewall?" "y"; then
         ENABLE_UFW="yes"
@@ -656,10 +686,11 @@ mode_install() {
     # Root SSH access option (advanced)
     local ROOT_SSH_MODE="no"
     echo
-    echo "  Root SSH access:"
-    echo "    Default: root SSH login disabled (use '$ADMIN_USER' + sudo)"
-    echo "    Advanced: allow root login with SSH key only (for break-glass access)"
-    if yesno "  Allow root SSH login with key only? (advanced)" "n"; then
+    echo "  Root SSH access (advanced):"
+    echo "    Most users should press Enter to skip this."
+    echo "    Selecting 'Y' allows root login with SSH key (break-glass access)."
+    echo ""
+    if yesno "  Allow root SSH login? [press Enter to skip]" "n"; then
         ROOT_SSH_MODE="prohibit-password"
         warn "Root SSH will be allowed with key authentication only."
         echo "  You'll need to add your SSH key to /root/.ssh/authorized_keys after install."
@@ -670,16 +701,22 @@ mode_install() {
     local OSDATA_FS="ext4"
     local OSDATA_MP="/mnt/osdata"
 
-    if yesno "  Use remaining OS disk space for a data partition?" "y"; then
+    local REMAINING_GIB=$((OS_DISK_SIZE_GIB - ROOT_SIZE_GIB - 2))
+    echo
+    echo "  Single-drive setup: Use remaining OS disk space for Mithril data?"
+    echo ""
+    echo "    Most users: Press Enter to SKIP this."
+    echo "    After Ubuntu boots, use disk-setup.sh to configure your NVMe drives."
+    echo ""
+    echo "    Only use 'Y' if this is your ONLY drive (no separate NVMe for Mithril)."
+    echo "    This creates a ${REMAINING_GIB} GiB partition at /mnt/mithril for scratch_directory."
+    echo ""
+    if yesno "  Create partition for single-drive setup? [press Enter to skip]" "n"; then
         MAKE_OSDATA="yes"
-        echo
-        echo "  Choose filesystem for the OS disk data partition:"
-        echo "    - ext4 (default, recommended)"
-        echo "    - xfs"
-        read -r -p "  Filesystem (ext4/xfs) [ext4]: " OSDATA_FS
-        OSDATA_FS="${OSDATA_FS:-ext4}"
-        [[ "$OSDATA_FS" == "ext4" || "$OSDATA_FS" == "xfs" ]] || die "Invalid fs: $OSDATA_FS"
-        prompt OSDATA_MP "  Mountpoint for OS-disk data partition" "/mnt/osdata"
+        OSDATA_FS="ext4"
+        OSDATA_MP="/mnt/mithril"
+        info "Will create ${REMAINING_GIB} GiB ext4 partition at /mnt/mithril"
+        info "Set scratch_directory = \"/mnt/mithril\" in mithril.toml"
     fi
 
     # Network interface detection + MAC address for reliable naming
@@ -688,25 +725,22 @@ mode_install() {
     IFACE_MAC="$(get_mac "$IFACE")"
 
     echo
-    echo "  Network config for installed Ubuntu:"
+    echo "  Network configuration:"
     echo "    Detected interface: $IFACE"
     [[ -n "$IFACE_MAC" ]] && echo "    MAC address: $IFACE_MAC"
     echo
-    echo "    1) DHCP (recommended if your provider supports it)"
-    echo "    2) Static (use values detected from rescue as defaults)"
-    read -r -p "  Choose 1 or 2 [1]: " NET_MODE
+    echo "    DHCP = automatic network settings (works for most server providers)"
+    echo "    Static = manually specify IP addresses (advanced)"
+    echo
+    echo "    Most users: Press Enter to use DHCP."
+    echo
+    echo "    1) DHCP (automatic - recommended)"
+    echo "    2) Static IP (advanced)"
+    read -r -p "  Choose [press Enter for DHCP]: " NET_MODE
     NET_MODE="${NET_MODE:-1}"
 
     local IP4_CIDR="" GW4="" IP6_CIDR="" GW6="" DHCP6="yes"
-    if [[ "$NET_MODE" == "1" ]]; then
-        echo
-        echo "  Enable IPv6 DHCP? (Some providers don't support DHCPv6)"
-        if yesno "  Enable IPv6 via DHCP?" "y"; then
-            DHCP6="yes"
-        else
-            DHCP6="no"
-        fi
-    fi
+    # IPv6 is always enabled for DHCP (harmless if unsupported by provider)
 
     if [[ "$NET_MODE" == "2" ]]; then
         local DEF_IP4 DEF_GW4 DEF_IP6 DEF_GW6
@@ -745,7 +779,7 @@ mode_install() {
     echo "  │ Data partition:   remaining space -> $OSDATA_MP ($OSDATA_FS)"
     echo "  │ Hostname:         $HOSTNAME"
     echo "  │ Admin user:       $ADMIN_USER"
-    echo "  │ Network:          $([ "$NET_MODE" == "1" ] && echo "DHCP (IPv6: $DHCP6)" || echo "Static")"
+    echo "  │ Network:          $([ "$NET_MODE" == "1" ] && echo "DHCP" || echo "Static")"
     [[ -n "$IFACE_MAC" ]] && \
     echo "  │ Interface match:  MAC $IFACE_MAC"
     echo "  │ UFW firewall:     $ENABLE_UFW"
