@@ -24,7 +24,8 @@ umount /mnt
 reboot
 #    Note: Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.
 
-# 3. SSH in as your admin user (NOT root)
+# 3. Clear old SSH host key (if you SSHed to rescue), then connect
+ssh-keygen -R YOUR_SERVER_IP
 ssh -i ~/.ssh/YOUR_KEY YOUR_USERNAME@YOUR_SERVER_IP
 # Tip: Add an entry to ~/.ssh/config to avoid typing the key path each time
 

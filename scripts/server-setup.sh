@@ -1128,8 +1128,9 @@ CHROOT2
     echo
     echo "       (Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.)"
     echo
-    echo "    3. SSH in as your admin user (NOT root):"
+    echo "    3. Clear old SSH host key (if you SSHed to rescue), then connect:"
     echo
+    echo "       ssh-keygen -R YOUR_SERVER_IP"
     echo "       ssh -i ~/.ssh/YOUR_KEY $ADMIN_USER@YOUR_SERVER_IP"
     echo
     echo "    4. Clone repo and run remaining setup:"
