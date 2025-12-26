@@ -1,10 +1,63 @@
 # Mithril System Setup Guide
 
-This guide walks you through setting up your Ubuntu system to run Mithril optimally. These scripts are **optional** but recommended for best performance.
+These scripts are **optional** but recommended for optimal Mithril performance.
 
-> **New to Linux?** Don't worry! This guide explains each step in detail. If you get stuck, join our [Discord](https://discord.gg/overclock) and ask in `#mithril-hardware`.
+---
 
-> **Note:** All commands in this guide assume you're in the mithril repository root directory (e.g., `~/mithril`). If you cloned elsewhere, adjust paths accordingly.
+## Quick Start
+
+Run these commands in order. Detailed explanations for each step are in the sections below.
+
+**Fresh Ubuntu install (rescue/live boot):**
+```bash
+# 1. Download and run install script (as root)
+curl -O https://raw.githubusercontent.com/Overclock-Validator/mithril/main/scripts/server-setup.sh
+chmod +x server-setup.sh
+sudo ./server-setup.sh install
+
+# 2. Reboot into the new Ubuntu install
+#    - Cloud/Hetzner: Disable rescue mode in your provider panel, then reboot
+#    - Home server: Remove USB/live media and reboot
+#    - The script will tell you when it's done
+
+# 3. SSH in as your admin user (NOT root)
+ssh -i ~/.ssh/YOUR_KEY YOUR_USERNAME@YOUR_SERVER_IP
+# Tip: Add an entry to ~/.ssh/config to avoid typing the key path each time
+
+# 4. Clone repo and run remaining setup
+git clone https://github.com/Overclock-Validator/mithril.git
+cd mithril
+chmod +x scripts/*.sh
+sudo ./scripts/disk-setup.sh --benchmark    # Find fastest drive
+sudo ./scripts/disk-setup.sh --setup        # Format and mount drives
+sudo ./scripts/performance-tune.sh          # Apply performance tuning
+```
+
+**Existing Ubuntu (just hardening + setup):**
+```bash
+git clone https://github.com/Overclock-Validator/mithril.git
+cd mithril
+chmod +x scripts/*.sh
+sudo ./scripts/server-setup.sh harden       # Add SSH keys, firewall, fail2ban
+sudo ./scripts/disk-setup.sh --benchmark    # Find fastest drive
+sudo ./scripts/disk-setup.sh --setup        # Format and mount drives
+sudo ./scripts/performance-tune.sh          # Apply performance tuning
+```
+
+**Resetting Mithril data** (when needed):
+```bash
+sudo ./scripts/disk-setup.sh --delete-accountsdb  # After bankhash mismatch / bug fix
+sudo ./scripts/disk-setup.sh --delete-blockstore  # After restarting from new snapshot
+sudo ./scripts/disk-setup.sh --delete-all         # Complete reset
+```
+
+---
+
+## Detailed Guide
+
+> **New to Linux?** The sections below explain each step in detail. If you get stuck, join our [Discord](https://discord.gg/overclock) and ask in `#mithril-hardware`.
+
+> **Note:** All commands assume you're in the mithril repository root directory (e.g., `~/mithril`).
 
 ---
 
@@ -181,6 +234,8 @@ When Mithril verifies blocks, it constantly looks up account data. These lookups
 Snapshots and blockstore are different - they read/write in order (sequentially), which almost any modern SSD handles well.
 
 ### Single Drive vs Two Drives
+
+**Two drives aren't required** - Mithril runs well on a single high-quality NVMe (like a Samsung 990 Pro). Two drives are ideal for I/O isolation but not necessary for good performance.
 
 **If you have ONE NVMe drive:**
 - Put everything on it
@@ -445,7 +500,12 @@ This displays:
 
 ## Resetting Mithril Data
 
-Sometimes you need to start fresh. These commands delete Mithril data so you can re-sync from scratch.
+Mithril stores three types of data that can be reset independently:
+- **AccountsDB** - Solana account state (~500 GB)
+- **Snapshots** - Downloaded network state files (~100 GB)
+- **Blockstore** - Verified blocks (size varies)
+
+Sometimes you need to start fresh. These commands delete this data so you can re-sync from scratch.
 
 ### Delete AccountsDB Only
 
@@ -455,7 +515,12 @@ Forces Mithril to rebuild from a fresh snapshot on next run:
 sudo ./scripts/disk-setup.sh --delete-accountsdb
 ```
 
-**When to use:** AccountsDB got corrupted, or you want a clean slate without re-downloading snapshots.
+**When to use:**
+- After encountering errors during block replay (e.g., bankhash mismatch) where AccountsDB state has diverged from mainnet
+- After updating Mithril to a patched version that fixes a bug you hit
+- AccountsDB got corrupted, or you want a clean slate without re-downloading snapshots
+
+After deleting, Mithril will fetch a fresh snapshot on next run and rebuild AccountsDB from scratch.
 
 ### Delete Snapshots Only
 
@@ -467,6 +532,8 @@ sudo ./scripts/disk-setup.sh --delete-snapshots
 
 **When to use:** Snapshots are old or corrupted.
 
+> **Tip:** We recommend retaining snapshots when possible (current + previous) as they're helpful for debugging. If you encounter issues, having the snapshot you synced from makes it easier for the Mithril team to reproduce and fix bugs. Only delete if you need disk space.
+
 ### Delete Blockstore Only
 
 Removes stored blocks (Mithril will rebuild them):
@@ -475,7 +542,10 @@ Removes stored blocks (Mithril will rebuild them):
 sudo ./scripts/disk-setup.sh --delete-blockstore
 ```
 
-**When to use:** You want to clear block history but keep AccountsDB.
+**When to use:**
+- After restarting from a new snapshot (older blocks are no longer relevant)
+- You want to clear block history but keep AccountsDB
+- Reclaiming disk space from old block data
 
 ### Delete Everything
 

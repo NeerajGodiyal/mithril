@@ -169,9 +169,18 @@ confirm_destructive() {
 get_root_disk() {
     local root_src root_pk
     root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    [[ -n "$root_src" ]] || die "Cannot detect root filesystem source"
+
+    # Handle rescue mode where root is overlay/tmpfs/loop
+    if [[ -z "$root_src" ]] || [[ "$root_src" == "overlay" ]] || [[ "$root_src" == tmpfs* ]] || [[ "$root_src" == /dev/loop* ]]; then
+        echo "none"  # No physical root disk (rescue/live mode)
+        return 0
+    fi
+
     root_pk="$(lsblk -no PKNAME "$root_src" 2>/dev/null || true)"
-    [[ -n "$root_pk" ]] || die "Cannot resolve root disk from $root_src"
+    if [[ -z "$root_pk" ]]; then
+        echo "none"  # Can't determine parent disk
+        return 0
+    fi
     echo "/dev/$root_pk"
 }
 
@@ -515,7 +524,11 @@ show_status() {
 
     local root_disk
     root_disk=$(get_root_disk)
-    echo "Root disk: $root_disk (will never be modified)"
+    if [[ "$root_disk" == "none" ]]; then
+        echo "Mode: Rescue/Live (no physical root disk)"
+    else
+        echo "Root disk: $root_disk (will never be modified)"
+    fi
     echo ""
 
     echo "--- NVMe Drives ---"
@@ -678,7 +691,11 @@ interactive_setup() {
     local root_disk
     root_disk=$(get_root_disk)
 
-    echo "  Root disk: $root_disk (will NEVER be touched)"
+    if [[ "$root_disk" == "none" ]]; then
+        echo "  Rescue/Live mode detected - no physical root disk to protect"
+    else
+        echo "  Root disk: $root_disk (will NEVER be touched)"
+    fi
     echo ""
 
     # Find available disks

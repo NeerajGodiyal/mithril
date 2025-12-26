@@ -949,16 +949,22 @@ mode_install() {
     info "Configuring installed Ubuntu system..."
     chroot /mnt /bin/bash -euxo pipefail <<CHROOT
 export DEBIAN_FRONTEND=noninteractive
+
+# Add universe repository (needed for fail2ban and other packages)
+# debootstrap only sets up main by default
+cat > /etc/apt/sources.list <<'SOURCES'
+deb http://archive.ubuntu.com/ubuntu noble main restricted universe
+deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe
+deb http://archive.ubuntu.com/ubuntu noble-security main restricted universe
+SOURCES
+
 apt-get update
 apt-get install -y linux-generic grub-efi-amd64 openssh-server sudo \
                    fail2ban ufw unattended-upgrades netplan.io xfsprogs \
-                   chrony haveged
+                   chrony
 
 # Time synchronization (critical for blockchain nodes)
 systemctl enable chrony >/dev/null 2>&1 || true
-
-# Entropy generation (important for cryptographic operations)
-systemctl enable haveged >/dev/null 2>&1 || true
 
 # Journald limits (prevent logs from filling disk)
 mkdir -p /etc/systemd/journald.conf.d
