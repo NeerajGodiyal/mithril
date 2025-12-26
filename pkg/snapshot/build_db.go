@@ -28,6 +28,24 @@ const (
 	maxAppendVecCopying    = 500
 )
 
+// cleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
+// This prevents corruption from Ctrl+C or partial downloads.
+func cleanAccountsDbDir(accountsDbDir string) {
+	// List of all files/directories that may be left from a previous incomplete run
+	artifacts := []string{
+		"accounts",
+		"mithril_db",
+		"mithril_db_log_shards",
+		"bankhash_db",
+		"largest_file_id",
+		"bank_hash",
+		"manifest",
+	}
+	for _, artifact := range artifacts {
+		os.RemoveAll(filepath.Join(accountsDbDir, artifact))
+	}
+}
+
 var (
 	indexEntryCommitterInProgress = &atomic.Int64{}
 	indexEntryBuilderInProgress   = &atomic.Int64{}
@@ -40,6 +58,9 @@ func BuildAccountsDb(
 	incrementalSnapshotFile string,
 	accountsDbDir string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
+	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
+	cleanAccountsDbDir(accountsDbDir)
+
 	manifest, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
@@ -69,6 +90,7 @@ func BuildAccountsDb(
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
+
 	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,

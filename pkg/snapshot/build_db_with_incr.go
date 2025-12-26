@@ -36,6 +36,9 @@ func BuildAccountsDbWithIncr(
 	overcastEndpoint string,
 	snapCfg snapshotdl.SnapshotConfig,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
+	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
+	cleanAccountsDbDir(accountsDbDir)
+
 	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
@@ -57,6 +60,7 @@ func BuildAccountsDbWithIncr(
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
+
 	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
