@@ -874,6 +874,19 @@ mode_install() {
         mount "$OSDATA_PART" "/mnt$OSDATA_MP"
     fi
 
+    # Ensure debootstrap has Ubuntu 24.04 (noble) script
+    # Debian's debootstrap may not include Ubuntu scripts
+    if [[ ! -f /usr/share/debootstrap/scripts/noble ]]; then
+        info "Downloading Ubuntu 24.04 debootstrap script..."
+        # Download from Ubuntu's debootstrap package
+        local DEBOOTSTRAP_URL="https://changelogs.ubuntu.com/changelogs/pool/main/d/debootstrap/debootstrap_1.0.137ubuntu2/debootstrap-1.0.137ubuntu2/scripts/noble"
+        if ! curl -fsSL "$DEBOOTSTRAP_URL" -o /usr/share/debootstrap/scripts/noble 2>/dev/null; then
+            # Fallback: noble is compatible with gutsy script (same as other Ubuntu releases)
+            warn "Could not download noble script, creating symlink from gutsy..."
+            ln -sf gutsy /usr/share/debootstrap/scripts/noble
+        fi
+    fi
+
     info "Installing Ubuntu 24.04 (noble) via debootstrap..."
     debootstrap --arch amd64 noble /mnt http://archive.ubuntu.com/ubuntu/
 
