@@ -809,7 +809,7 @@ apply_advanced_mount_opts() {
     local new_opts="$1"
 
     echo ""
-    read -r -p "  Enter the ext4 mountpoint to modify (e.g., /mnt/mithril): " mp
+    read -r -p "  Enter the ext4 mountpoint to modify (e.g., /mnt/mithril-accounts): " mp
 
     if [[ -z "$mp" ]]; then
         echo "  Skipping"

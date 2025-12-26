@@ -308,7 +308,7 @@ If you're doing a fresh Ubuntu installation and want to optimize for Mithril, he
 1. Choose "Something else" (manual partitioning) during installation
 2. Create the EFI partition first (if UEFI boot)
 3. Create the OS partition and set mount point to `/`
-4. Create the Mithril data partition and set mount point (e.g., `/mnt/mithril`)
+4. Create the Mithril data partition and set mount point (e.g., `/mnt/mithril-accounts`)
 5. Leave the remaining space unallocated (do not create a partition)
 
 ### Getting Disk Info for Manual Setup

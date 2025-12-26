@@ -92,8 +92,9 @@ Then edit `mithril.toml` to customize for your setup:
 ```toml
 name = "mithril"
 
-# Directory for AccountsDB - use your fastest NVMe
-scratch_directory = "/fast-nvme/mithril"
+[ledger]
+    # AccountsDB path - use your fastest NVMe
+    accounts_path = "/mnt/mithril-accounts"
 
 [rpc]
     # RPC endpoints for fetching blocks and reference slot
@@ -102,7 +103,7 @@ scratch_directory = "/fast-nvme/mithril"
 [snapshot]
     # Optional: save snapshots to disk while streaming
     # save_to_disk = true
-    # download_path = "/slower-nvme/snapshots"
+    # download_path = "/mnt/mithril-ledger/snapshots"
 
     # Verbose output shows detailed node discovery statistics
     # verbose = true
@@ -125,13 +126,13 @@ See `mithril.example.toml` for all available configuration options.
 
 ### Directory Structure
 
-After running, your scratch directory will contain:
+Following Agave conventions, Mithril uses separate mount points:
 
 ```
-/fast-nvme/mithril/
-├── accountsdb/     # Account state database (high IOPS)
-├── blockstore/     # Verified blocks
-└── logs/           # Shard logs
+/mnt/mithril-accounts/   # AccountsDB (needs high IOPS - use fastest drive)
+/mnt/mithril-ledger/     # Blockstore and snapshots (can use slower drive)
+    ├── blockstore/
+    └── snapshots/
 ```
 
 ### Current Limitations

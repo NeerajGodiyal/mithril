@@ -527,7 +527,7 @@ show_disk_info() {
 
     echo "--- Example fstab Entry ---"
     echo ""
-    echo "  UUID=<your-uuid>  /mnt/mithril  ext4  defaults,noatime,nofail  0  2"
+    echo "  UUID=<your-uuid>  /mnt/mithril-accounts  ext4  defaults,noatime,nofail  0  2"
     echo ""
     echo "  The 'noatime' option reduces unnecessary writes (better for SSDs)."
     echo "  The 'nofail' option allows boot to continue if the drive is missing."
@@ -576,10 +576,10 @@ show_status() {
 
     echo "--- Mithril Directories ---"
     local mithril_dirs=(
-        "/mnt/accountsdb"
-        "/mnt/ledger"
-        "/mnt/ledger/snapshots"
-        "/mnt/ledger/blockstore"
+        "/mnt/mithril-accounts"
+        "/mnt/mithril-ledger"
+        "/mnt/mithril-ledger/snapshots"
+        "/mnt/mithril-ledger/blockstore"
     )
 
     for dir in "${mithril_dirs[@]}"; do
@@ -752,8 +752,8 @@ interactive_setup() {
     fi
 
     # Configuration collection
-    local accountsdb_disk="" accountsdb_mount="/mnt/accountsdb"
-    local data_disk="" data_mount="/mnt/ledger"
+    local accountsdb_disk="" accountsdb_mount="/mnt/mithril-accounts"
+    local data_disk="" data_mount="/mnt/mithril-ledger"
     local accountsdb_fstype="" data_fstype=""
 
     echo ""
@@ -836,12 +836,12 @@ interactive_setup() {
     echo "  STEP 3: Mount Points"
     echo ""
 
-    read -r -p "  AccountsDB mount point [/mnt/accountsdb]: " input
-    accountsdb_mount="${input:-/mnt/accountsdb}"
+    read -r -p "  AccountsDB mount point [/mnt/mithril-accounts]: " input
+    accountsdb_mount="${input:-/mnt/mithril-accounts}"
 
     if [[ -n "$data_disk" ]]; then
-        read -r -p "  Ledger mount point (snapshots + blockstore) [/mnt/ledger]: " input
-        data_mount="${input:-/mnt/ledger}"
+        read -r -p "  Ledger mount point (snapshots + blockstore) [/mnt/mithril-ledger]: " input
+        data_mount="${input:-/mnt/mithril-ledger}"
     fi
 
     # Summary and confirmation
@@ -982,9 +982,8 @@ find_mithril_dirs() {
 
     # Check common locations
     local common_paths=(
-        "/mnt/accountsdb"
-        "/mnt/ledger"
-        "/mnt/mithril"
+        "/mnt/mithril-accounts"
+        "/mnt/mithril-ledger"
     )
 
     for path in "${common_paths[@]}"; do
@@ -1022,7 +1021,7 @@ clean_subdir() {
     if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
         warn "No Mithril data directories found"
         echo ""
-        echo "  Checked: /mnt/accountsdb, /mnt/ledger, /mnt/mithril"
+        echo "  Checked: /mnt/mithril-accounts, /mnt/mithril-ledger"
         return 1
     fi
 
