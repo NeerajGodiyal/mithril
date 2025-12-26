@@ -33,8 +33,7 @@ ssh -i ~/.ssh/YOUR_KEY YOUR_USERNAME@YOUR_SERVER_IP
 git clone https://github.com/Overclock-Validator/mithril.git
 cd mithril
 chmod +x scripts/*.sh
-sudo ./scripts/disk-setup.sh --benchmark    # Find fastest drive
-sudo ./scripts/disk-setup.sh --setup        # Format and mount drives
+sudo ./scripts/disk-setup.sh --setup        # Configure storage (offers benchmarks)
 sudo ./scripts/performance-tune.sh          # Apply performance tuning
 ```
 
@@ -44,8 +43,7 @@ git clone https://github.com/Overclock-Validator/mithril.git
 cd mithril
 chmod +x scripts/*.sh
 sudo ./scripts/server-setup.sh harden       # Add SSH keys, firewall, fail2ban
-sudo ./scripts/disk-setup.sh --benchmark    # Find fastest drive
-sudo ./scripts/disk-setup.sh --setup        # Format and mount drives
+sudo ./scripts/disk-setup.sh --setup        # Configure storage (offers benchmarks)
 sudo ./scripts/performance-tune.sh          # Apply performance tuning
 ```
 

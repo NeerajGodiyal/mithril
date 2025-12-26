@@ -22,9 +22,8 @@ set -euo pipefail
 #   1. ./server-setup.sh install   # Fresh OS install (from rescue boot)
 #   2. Reboot into new OS
 #   3. ./server-setup.sh harden    # (if needed) add keys, security packages
-#   4. ./scripts/disk-setup.sh --benchmark  # Find fastest drive
-#   5. ./scripts/disk-setup.sh --setup      # Format drives for Mithril
-#   6. ./scripts/performance-tune.sh        # Apply performance optimizations
+#   4. ./scripts/disk-setup.sh --setup      # Format drives for Mithril (offers benchmarks)
+#   5. ./scripts/performance-tune.sh        # Apply performance optimizations
 #
 # DESIGN GOALS:
 #   - Explain what is happening before doing it
@@ -505,9 +504,8 @@ mode_harden() {
     echo "    - Your SSH key matches what's in authorized_keys"
     echo
     echo "  Next steps for Mithril:"
-    echo "    1. Configure storage:    sudo ./scripts/disk-setup.sh --benchmark"
-    echo "    2. Format drives:        sudo ./scripts/disk-setup.sh --setup"
-    echo "    3. Apply optimizations:  sudo ./scripts/performance-tune.sh"
+    echo "    1. Configure storage:    sudo ./scripts/disk-setup.sh --setup"
+    echo "    2. Apply optimizations:  sudo ./scripts/performance-tune.sh"
     echo "================================================================================"
     echo
 }
@@ -1142,7 +1140,6 @@ CHROOT2
     echo "       git clone https://github.com/Overclock-Validator/mithril.git"
     echo "       cd mithril"
     echo "       chmod +x scripts/*.sh"
-    echo "       sudo ./scripts/disk-setup.sh --benchmark"
     echo "       sudo ./scripts/disk-setup.sh --setup"
     echo "       sudo ./scripts/performance-tune.sh"
     echo
@@ -1170,8 +1167,7 @@ Usage:
 This script handles OS installation and security hardening.
 
 For storage and performance tuning (run AFTER this script):
-  sudo ./scripts/disk-setup.sh --benchmark   # Find fastest NVMe
-  sudo ./scripts/disk-setup.sh --setup       # Format drives for Mithril
+  sudo ./scripts/disk-setup.sh --setup       # Configure storage (offers benchmarks)
   sudo ./scripts/performance-tune.sh         # Kernel/IO optimizations
 EOF
 }
