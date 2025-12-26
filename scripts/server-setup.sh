@@ -568,26 +568,48 @@ mode_install() {
     disk_summary
     echo
 
-    echo "  Choose ONE disk to install Ubuntu onto (this disk WILL be erased)."
-    echo "    Tip: If you have multiple drives, Ubuntu can go on a slower one."
-    echo "         Save your fastest NVMe for AccountsDB (configured later in disk-setup.sh)."
-    echo ""
-    read -r -p "  OS disk (e.g. /dev/nvme0n1): " OS_DISK
-    [[ -b "$OS_DISK" ]] || die "Not a block device: $OS_DISK"
+    # Loop until valid disk is selected
+    while true; do
+        echo "  Choose ONE disk to install Ubuntu onto (this disk WILL be erased)."
+        echo "    Tip: If you have multiple drives, Ubuntu can go on a slower one."
+        echo "         Save your fastest NVMe for AccountsDB (configured later in disk-setup.sh)."
+        echo "    (Press Ctrl+C to exit)"
+        echo ""
+        read -r -p "  OS disk (e.g. /dev/nvme0n1): " OS_DISK
 
-    # Safety checks
-    if disk_has_mounts "$OS_DISK"; then
-        echo
-        warn "Disk $OS_DISK has mounted partitions!"
-        echo "  Current mounts:"
-        lsblk -o NAME,MOUNTPOINT "$OS_DISK" | grep -v '^$' | sed 's/^/    /'
-        echo
-        die "Refusing to erase a disk with mounted partitions. Unmount first or choose another disk."
-    fi
+        # Validate block device
+        if [[ ! -b "$OS_DISK" ]]; then
+            echo
+            warn "Not a block device: $OS_DISK"
+            echo "  Please enter a valid disk from the list above."
+            echo
+            continue
+        fi
 
-    if disk_contains_root "$OS_DISK"; then
-        die "Disk $OS_DISK appears to contain the running root filesystem. This shouldn't happen in rescue mode."
-    fi
+        # Safety checks
+        if disk_has_mounts "$OS_DISK"; then
+            echo
+            warn "Disk $OS_DISK has mounted partitions!"
+            echo "  Current mounts:"
+            lsblk -o NAME,MOUNTPOINT "$OS_DISK" | grep -v '^$' | sed 's/^/    /'
+            echo
+            warn "Refusing to erase a disk with mounted partitions."
+            echo "  Unmount first or choose another disk."
+            echo
+            continue
+        fi
+
+        if disk_contains_root "$OS_DISK"; then
+            echo
+            warn "Disk $OS_DISK appears to contain the running root filesystem."
+            echo "  This shouldn't happen in rescue mode. Choose another disk."
+            echo
+            continue
+        fi
+
+        # Valid disk selected
+        break
+    done
 
     choose_admin_user
 
