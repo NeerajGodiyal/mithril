@@ -569,6 +569,9 @@ mode_install() {
     echo
 
     echo "  Choose ONE disk to install Ubuntu onto (this disk WILL be erased)."
+    echo "    Tip: If you have multiple drives, Ubuntu can go on a slower one."
+    echo "         Save your fastest NVMe for AccountsDB (configured later in disk-setup.sh)."
+    echo ""
     read -r -p "  OS disk (e.g. /dev/nvme0n1): " OS_DISK
     [[ -b "$OS_DISK" ]] || die "Not a block device: $OS_DISK"
 
