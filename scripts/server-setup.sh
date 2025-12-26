@@ -962,7 +962,7 @@ SOURCES
 apt-get update -qq
 apt-get install -y -qq linux-generic grub-efi-amd64 openssh-server sudo \
                    fail2ban ufw unattended-upgrades netplan.io xfsprogs \
-                   chrony
+                   chrony git curl
 
 # Time synchronization (critical for blockchain nodes)
 systemctl enable chrony >/dev/null 2>&1 || true
