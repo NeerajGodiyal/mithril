@@ -809,8 +809,8 @@ mode_install() {
     # Install prerequisites in rescue
     info "Installing prerequisites in rescue environment..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y debootstrap grub-efi-amd64 efibootmgr xfsprogs
+    apt-get update -qq
+    apt-get install -y -qq debootstrap grub-efi-amd64 efibootmgr xfsprogs
 
     # Partition OS disk
     info "Partitioning OS disk..."
@@ -871,6 +871,7 @@ mode_install() {
     debootstrap --arch amd64 noble /mnt http://archive.ubuntu.com/ubuntu/
 
     mount --bind /dev  /mnt/dev
+    mount --bind /dev/pts /mnt/dev/pts
     mount --bind /proc /mnt/proc
     mount --bind /sys  /mnt/sys
 
@@ -958,8 +959,8 @@ deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe
 deb http://archive.ubuntu.com/ubuntu noble-security main restricted universe
 SOURCES
 
-apt-get update
-apt-get install -y linux-generic grub-efi-amd64 openssh-server sudo \
+apt-get update -qq
+apt-get install -y -qq linux-generic grub-efi-amd64 openssh-server sudo \
                    fail2ban ufw unattended-upgrades netplan.io xfsprogs \
                    chrony
 
@@ -1105,40 +1106,43 @@ CHROOT2
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo
     echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
-    echo "  │ SSH KEY VERIFICATION                                                    │"
-    echo "  ├─────────────────────────────────────────────────────────────────────────┤"
-    echo "  │ Your SSH key has been installed:                                        │"
+    echo "  │ DISK LAYOUT                                                             │"
+    echo "  └─────────────────────────────────────────────────────────────────────────┘"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT "$OS_DISK" 2>/dev/null | sed 's/^/  /'
+    echo
+    echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+    echo "  │ SSH KEY INSTALLED                                                       │"
     echo "  │   /home/$ADMIN_USER/.ssh/authorized_keys                                │"
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo
-    echo "  Installed key (verify this matches your key):"
-    echo "  ${GREEN}$(cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys | head -1 | cut -c1-72)...${NC}"
-    echo
-    echo "  To manually verify: cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys"
+    echo "  Installed key (verify this matches yours):"
+    echo -e "  ${GREEN}$(cat /mnt/home/$ADMIN_USER/.ssh/authorized_keys | head -1 | cut -c1-72)...${NC}"
     echo
     echo "  NEXT STEPS:"
-    echo "    1. Verify the SSH key above matches your key"
-    echo "    2. Reboot into the new Ubuntu install:"
+    echo "    1. Verify the SSH key above matches yours"
+    echo "    2. Reboot into Ubuntu:"
     echo
-    echo "       ${GREEN}reboot${NC}"
+    echo -e "       ${GREEN}reboot${NC}"
     echo
-    echo "       Note: Hetzner rescue mode is one-boot-only, so reboot goes to Ubuntu."
-    echo "       Other providers: Disable rescue/live boot in your panel first."
+    echo "       (Hetzner rescue is one-boot-only. Other providers: disable rescue mode first.)"
     echo
-    echo "    3. SSH in with your key:"
+    echo "    3. SSH in as your admin user (NOT root):"
     echo
-    echo "       ssh -i ~/.ssh/id_ed25519 $ADMIN_USER@<server_ip>"
+    echo "       ssh -i ~/.ssh/YOUR_KEY $ADMIN_USER@YOUR_SERVER_IP"
     echo
-    echo "  ${YELLOW}Can't connect after reboot?${NC}"
-    echo "    - Check your provider's firewall/security groups (port 22)"
-    echo "    - Verify the server booted (check provider console)"
-    echo "    - Check provider's serial console for boot errors"
+    echo "    4. Clone repo and run remaining setup:"
     echo
-    echo "  After first boot, set up Mithril:"
-    echo "    cd mithril"
-    echo "    sudo ./scripts/disk-setup.sh --benchmark   # Find fastest drive"
-    echo "    sudo ./scripts/disk-setup.sh --setup       # Format for Mithril"
-    echo "    sudo ./scripts/performance-tune.sh         # Apply optimizations"
+    echo "       git clone https://github.com/Overclock-Validator/mithril.git"
+    echo "       cd mithril"
+    echo "       chmod +x scripts/*.sh"
+    echo "       sudo ./scripts/disk-setup.sh --benchmark"
+    echo "       sudo ./scripts/disk-setup.sh --setup"
+    echo "       sudo ./scripts/performance-tune.sh"
+    echo
+    echo -e "  ${YELLOW}Can't connect after reboot?${NC}"
+    echo "    - Check provider firewall/security groups (port 22)"
+    echo "    - Check provider console to verify server booted"
+    echo "    - Use provider's serial/VNC console to debug boot issues"
     echo "================================================================================"
     echo
 }
