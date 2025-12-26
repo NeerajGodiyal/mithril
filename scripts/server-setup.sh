@@ -695,7 +695,7 @@ mode_install() {
     echo ""
     if yesno "  Create swap file?" "y"; then
         CREATE_SWAP="yes"
-        prompt SWAP_SIZE_GIB "  Swap size in GiB [press Enter for recommended]" "$RECOMMENDED_SWAP"
+        prompt SWAP_SIZE_GIB "  Swap size in GiB [press Enter for ${RECOMMENDED_SWAP} GiB]" "$RECOMMENDED_SWAP"
         [[ "$SWAP_SIZE_GIB" =~ ^[0-9]+$ ]] || die "Swap size must be a number (GiB)."
     fi
 
@@ -718,10 +718,10 @@ mode_install() {
     local ROOT_SSH_MODE="no"
     echo
     echo "  Root SSH access (advanced):"
-    echo "    Most users should press Enter to skip this."
+    echo "    Most users should select 'N' (the default)."
     echo "    Selecting 'Y' allows root login with SSH key (break-glass access)."
     echo ""
-    if yesno "  Allow root SSH login? [press Enter to skip]" "n"; then
+    if yesno "  Allow root SSH login?" "n"; then
         ROOT_SSH_MODE="prohibit-password"
         warn "Root SSH will be allowed with key authentication only."
         echo "  You'll need to add your SSH key to /root/.ssh/authorized_keys after install."
