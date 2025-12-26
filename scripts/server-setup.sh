@@ -994,6 +994,10 @@ EOF
 id -u "$ADMIN_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos "" "$ADMIN_USER"
 usermod -aG sudo "$ADMIN_USER" || true
 
+# Passwordless sudo (no password set, so sudo group alone won't work)
+echo "$ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$ADMIN_USER
+chmod 440 /etc/sudoers.d/$ADMIN_USER
+
 home="\$(getent passwd "$ADMIN_USER" | cut -d: -f6)"
 install -d -m 0700 -o "$ADMIN_USER" -g "$ADMIN_USER" "\$home/.ssh"
 touch "\$home/.ssh/authorized_keys"
