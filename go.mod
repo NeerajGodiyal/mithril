@@ -24,7 +24,6 @@ require (
 	github.com/mr-tron/base58 v1.2.0
 	github.com/novifinancial/serde-reflection/serde-generate/runtime/golang v0.0.0-20220519162058-e5cd3c3b3f3a
 	github.com/prometheus/client_golang v1.20.4
-	github.com/prometheus/common v0.67.4
 	github.com/segmentio/textio v1.2.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
@@ -50,6 +49,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/onsi/gomega v1.27.6 // indirect
+	github.com/prometheus/common v0.67.4 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zeebo/assert v1.3.0 // indirect
@@ -108,7 +108,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251214224939-3d8fd6b99fd2
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251226044135-bdeaafa5ef54
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
