@@ -1594,7 +1594,7 @@ main() {
         do_noatime=true
         do_io_scheduler=true
         do_readahead=true
-        do_hugepages=true
+        # do_hugepages excluded - THP options are all "disable/limit", not a positive optimization
     fi
 
     # If specific options given, run only those
@@ -1641,9 +1641,13 @@ main() {
             set_readahead
         fi
 
-        if yesno "Configure Transparent Huge Pages?" y; then
-            configure_hugepages
-        fi
+        # THP (Transparent Huge Pages) configuration commented out.
+        # All THP options are essentially "disable or limit" - not a positive optimization.
+        # Modern kernels default to "madvise" which is already reasonable.
+        # Uncomment if you need to force "never" for extreme latency sensitivity:
+        # if yesno "Configure Transparent Huge Pages?"; then
+        #     configure_hugepages
+        # fi
 
         echo ""
         if yesno "Show Go runtime tuning recommendations?" y; then
