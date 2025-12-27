@@ -322,17 +322,19 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	}
 
 	// Step 3: Evaluate nodes with version tracking and statistics
+	mlog.Log.Infof("Probing %d nodes for snapshot availability...", len(nodes))
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
+	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
 	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return nil, fmt.Errorf("no suitable nodes found with snapshots")
 	}
 
-	// Only print detailed stats in verbose mode (after filtering is complete)
-	if snapCfg.Verbose && stats != nil {
+	// Print histogram stats (after filtering is complete)
+	if stats != nil {
 		formatProbeStats(stats, cfg)
 	}
 
