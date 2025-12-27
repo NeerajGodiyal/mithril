@@ -828,14 +828,18 @@ configure_advanced_mount_options() {
     echo "    3) Enable data=writeback only (moderate risk)"
     echo "    4) Enable both (highest risk, highest performance)"
     echo ""
-    read -r -p "  Choice [1/2/3/4]: " choice
 
-    case "$choice" in
-        2) apply_advanced_mount_opts "barrier=0" ;;
-        3) apply_advanced_mount_opts "data=writeback" ;;
-        4) apply_advanced_mount_opts "barrier=0,data=writeback" ;;
-        *) echo "  Keeping safe defaults"; return ;;
-    esac
+    local choice
+    while true; do
+        read -r -p "  Choice [1-4]: " choice
+        case "$choice" in
+            1) echo "  Keeping safe defaults"; return ;;
+            2) apply_advanced_mount_opts "barrier=0"; break ;;
+            3) apply_advanced_mount_opts "data=writeback"; break ;;
+            4) apply_advanced_mount_opts "barrier=0,data=writeback"; break ;;
+            *) echo "  Invalid choice. Please enter 1-4." ;;
+        esac
+    done
 }
 
 apply_advanced_mount_opts() {
@@ -1008,14 +1012,17 @@ set_io_scheduler() {
     echo "    2) kyber (alternative for mixed sequential/random workloads)"
     echo "    3) skip  (leave current settings)"
     echo ""
-    read -r -p "  Choice [1/2/3]: " choice
 
-    local scheduler
-    case "$choice" in
-        1) scheduler="none" ;;
-        2) scheduler="kyber" ;;
-        *) echo "  Skipping I/O scheduler configuration"; return ;;
-    esac
+    local scheduler choice
+    while true; do
+        read -r -p "  Choice [1/2/3]: " choice
+        case "$choice" in
+            1) scheduler="none"; break ;;
+            2) scheduler="kyber"; break ;;
+            3) echo "  Skipping I/O scheduler configuration"; return ;;
+            *) echo "  Invalid choice. Please enter 1, 2, or 3." ;;
+        esac
+    done
 
     local service_file="/etc/systemd/system/mithril-io-scheduler.service"
 
@@ -1139,17 +1146,20 @@ set_readahead() {
                 echo "    4) 512 KB  - Sequential throughput (snapshots/blocks)"
                 echo "    5) 1024 KB - Maximum throughput (streaming snapshots)"
                 echo "    6) Skip this device"
-                read -r -p "    Choice for /dev/$dev [1-6]: " ra_choice </dev/tty
 
-                local ra_kb
-                case "$ra_choice" in
-                    1) ra_kb=64 ;;
-                    2) ra_kb=128 ;;
-                    3) ra_kb=256 ;;
-                    4) ra_kb=512 ;;
-                    5) ra_kb=1024 ;;
-                    *) echo "    Skipping /dev/$dev"; continue ;;
-                esac
+                local ra_kb ra_choice
+                while true; do
+                    read -r -p "    Choice for /dev/$dev [1-6]: " ra_choice </dev/tty
+                    case "$ra_choice" in
+                        1) ra_kb=64; break ;;
+                        2) ra_kb=128; break ;;
+                        3) ra_kb=256; break ;;
+                        4) ra_kb=512; break ;;
+                        5) ra_kb=1024; break ;;
+                        6) echo "    Skipping /dev/$dev"; continue 2 ;;
+                        *) echo "    Invalid choice. Please enter 1-6." ;;
+                    esac
+                done
 
                 # Track the setting for this device
                 device_readahead[$dev]=$ra_kb
@@ -1172,16 +1182,20 @@ set_readahead() {
     echo "    2) 128 KB - Low latency (good default)"
     echo "    3) 256 KB - Balanced"
     echo "    4) 512 KB - Sequential throughput"
-    read -r -p "  Choice [1/2/3/4]: " choice
+    echo "    5) Skip   - Leave current settings"
 
-    local ra_kb
-    case "$choice" in
-        1) ra_kb=64 ;;
-        2) ra_kb=128 ;;
-        3) ra_kb=256 ;;
-        4) ra_kb=512 ;;
-        *) echo "  Skipping read-ahead configuration"; return ;;
-    esac
+    local ra_kb choice
+    while true; do
+        read -r -p "  Choice [1-5]: " choice
+        case "$choice" in
+            1) ra_kb=64; break ;;
+            2) ra_kb=128; break ;;
+            3) ra_kb=256; break ;;
+            4) ra_kb=512; break ;;
+            5) echo "  Skipping read-ahead configuration"; return ;;
+            *) echo "  Invalid choice. Please enter 1-5." ;;
+        esac
+    done
 
     # Apply to all devices
     for dev in /sys/block/nvme*/queue/read_ahead_kb; do
@@ -1305,31 +1319,52 @@ configure_hugepages() {
     echo ""
 
     if $DRY_RUN; then
-        echo "  [DRY-RUN] Would set THP to 'madvise'"
-        echo "  [DRY-RUN] Would set THP defrag to 'defer+madvise'"
+        echo "  [DRY-RUN] Would prompt for THP setting"
         return
     fi
 
-    # Set THP to madvise
+    echo "  Choose THP setting:"
+    echo "    1) madvise (RECOMMENDED - app-controlled, prevents unexpected latency)"
+    echo "    2) never   (most conservative - disables THP entirely)"
+    echo "    3) always  (NOT recommended - can cause latency spikes)"
+    echo "    4) skip    (keep current setting: ${current_thp})"
+    echo ""
+
+    local thp_setting choice
+    while true; do
+        read -r -p "  Choice [1-4]: " choice
+        case "$choice" in
+            1) thp_setting="madvise"; break ;;
+            2) thp_setting="never"; break ;;
+            3) thp_setting="always"; break ;;
+            4) echo "  Keeping current THP setting"; return ;;
+            *) echo "  Invalid choice. Please enter 1-4." ;;
+        esac
+    done
+
+    # Set THP
     if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
-        echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+        echo "$thp_setting" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
     fi
 
-    # Set defrag to defer+madvise (reduces latency from background compaction)
+    # Set defrag based on THP setting
+    local defrag_setting="defer+madvise"
+    if [[ "$thp_setting" == "never" ]]; then
+        defrag_setting="never"
+    fi
     if [[ -f /sys/kernel/mm/transparent_hugepage/defrag ]]; then
-        echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+        echo "$defrag_setting" > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
     fi
 
-    # Make persistent via sysctl config
+    # Make persistent via tmpfiles.d config
     local thp_config="/etc/tmpfiles.d/mithril-thp.conf"
-    cat >"${thp_config}" <<'EOF'
-# Mithril: Set THP to madvise (application-controlled)
-w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise
-w /sys/kernel/mm/transparent_hugepage/defrag - - - - defer+madvise
+    cat >"${thp_config}" <<EOF
+# Mithril: Set THP to ${thp_setting}
+w /sys/kernel/mm/transparent_hugepage/enabled - - - - ${thp_setting}
+w /sys/kernel/mm/transparent_hugepage/defrag - - - - ${defrag_setting}
 EOF
 
-    success "THP set to 'madvise'"
-    echo "  Applications can now request huge pages via madvise()"
+    success "THP set to '${thp_setting}'"
 }
 
 # ------------------------------------------------------------------------------
