@@ -644,99 +644,99 @@ apply_noatime() {
     }'
     echo ""
 
-    # Show Mithril-specific mount points for convenience
+    # Find Mithril mount points that need noatime
     local mithril_mounts=()
+    local needs_noatime=()
     for mnt in /mnt/mithril-accounts /mnt/mithril-ledger; do
         if findmnt -n "$mnt" >/dev/null 2>&1; then
             mithril_mounts+=("$mnt")
+            if ! findmnt -rn -o OPTIONS "$mnt" | grep -q noatime; then
+                needs_noatime+=("$mnt")
+            fi
         fi
     done
 
     if [[ ${#mithril_mounts[@]} -gt 0 ]]; then
-        echo "  Mithril mount points (recommended to add noatime):"
+        echo "  Mithril mount points:"
         for mnt in "${mithril_mounts[@]}"; do
-            local has_noatime=""
-            findmnt -rn -o OPTIONS "$mnt" | grep -q noatime && has_noatime=" (already has noatime)"
-            echo "    $mnt$has_noatime"
+            local status="needs noatime"
+            findmnt -rn -o OPTIONS "$mnt" | grep -q noatime && status="already has noatime"
+            echo "    $mnt ($status)"
         done
         echo ""
     fi
 
     if $DRY_RUN; then
-        echo "  [DRY-RUN] Would prompt for mountpoint and update /etc/fstab"
+        echo "  [DRY-RUN] Would add noatime to ${#needs_noatime[@]} mount(s)"
         return
     fi
 
-    # Interactive: ask which mountpoint to optimize
-    local prompt_examples="e.g., /"
-    if [[ ${#mithril_mounts[@]} -gt 0 ]]; then
-        prompt_examples="e.g., ${mithril_mounts[0]}${mithril_mounts[1]:+, ${mithril_mounts[1]}}"
+    # If all mounts already have noatime, we're done
+    if [[ ${#needs_noatime[@]} -eq 0 ]]; then
+        if [[ ${#mithril_mounts[@]} -gt 0 ]]; then
+            success "All Mithril mounts already have noatime"
+        else
+            echo "  No Mithril mounts detected. Skipping."
+        fi
+        return
     fi
-    read -r -p "  Enter the mountpoint to add noatime ($prompt_examples), or 'skip': " mp
 
-    if [[ "$mp" == "skip" || -z "$mp" ]]; then
+    # Ask once for all mounts
+    echo "  Add noatime to: ${needs_noatime[*]}"
+    read -r -p "  Apply noatime to all Mithril mounts? [Y/n]: " response
+    if [[ "$response" =~ ^[Nn] ]]; then
         echo "  Skipping noatime configuration"
         return
     fi
 
-    # Verify it's a valid mountpoint
-    if ! findmnt -n "$mp" >/dev/null 2>&1; then
-        warn "'$mp' is not a current mountpoint"
-        return
-    fi
-
-    # Backup fstab
+    # Backup fstab once
     cp /etc/fstab /etc/fstab.bak.$(date +%Y%m%d_%H%M%S)
     echo "  Backed up /etc/fstab"
 
-    # Check if noatime is already present
-    if grep -E "^\s*[^#].*\s${mp}\s" /etc/fstab | grep -q noatime; then
-        success "'noatime' already present for ${mp}"
-        return
-    fi
+    local remount_list=()
 
-    # Add noatime to the mount options using awk for robust parsing
-    # awk properly handles varying whitespace (tabs/spaces) in fstab
-    local temp_fstab="/etc/fstab.tmp.$$"
+    for mp in "${needs_noatime[@]}"; do
+        # Add noatime to the mount options using awk
+        local temp_fstab="/etc/fstab.tmp.$$"
 
-    if awk -v mp="$mp" '
-        BEGIN { found = 0 }
-        {
-            # Skip comments and empty lines
-            if (/^[[:space:]]*#/ || /^[[:space:]]*$/) {
-                print
-                next
-            }
-
-            # Parse fstab fields (split handles any whitespace)
-            n = split($0, fields)
-            if (n >= 4 && fields[2] == mp) {
-                # Found the mountpoint - add noatime if not present
-                if (fields[4] !~ /noatime/) {
-                    fields[4] = fields[4] ",noatime"
+        if awk -v mp="$mp" '
+            BEGIN { found = 0 }
+            {
+                if (/^[[:space:]]*#/ || /^[[:space:]]*$/) {
+                    print
+                    next
                 }
-                # Reconstruct the line preserving original structure
-                printf "%s\t%s\t%s\t%s", fields[1], fields[2], fields[3], fields[4]
-                for (i = 5; i <= n; i++) printf "\t%s", fields[i]
-                printf "\n"
-                found = 1
-            } else {
-                print
+                n = split($0, fields)
+                if (n >= 4 && fields[2] == mp) {
+                    if (fields[4] !~ /noatime/) {
+                        fields[4] = fields[4] ",noatime"
+                    }
+                    printf "%s\t%s\t%s\t%s", fields[1], fields[2], fields[3], fields[4]
+                    for (i = 5; i <= n; i++) printf "\t%s", fields[i]
+                    printf "\n"
+                    found = 1
+                } else {
+                    print
+                }
             }
-        }
-        END { exit (found ? 0 : 1) }
-    ' /etc/fstab > "$temp_fstab"; then
-        mv "$temp_fstab" /etc/fstab
-        success "Added 'noatime' to ${mp} in /etc/fstab"
+            END { exit (found ? 0 : 1) }
+        ' /etc/fstab > "$temp_fstab"; then
+            mv "$temp_fstab" /etc/fstab
+            success "Added noatime to ${mp}"
+            remount_list+=("$mp")
+        else
+            rm -f "$temp_fstab"
+            warn "Failed to add noatime to ${mp}"
+        fi
+    done
+
+    if [[ ${#remount_list[@]} -gt 0 ]]; then
         echo ""
-        echo "  ${YELLOW}IMPORTANT:${NC} You need to either:"
-        echo "    1. Reboot the system, OR"
-        echo "    2. Remount: sudo mount -o remount,noatime ${mp}"
+        echo "  ${YELLOW}IMPORTANT:${NC} Changes take effect after reboot, or remount now:"
+        for mp in "${remount_list[@]}"; do
+            echo "    sudo mount -o remount,noatime ${mp}"
+        done
         echo ""
-    else
-        rm -f "$temp_fstab"
-        warn "Failed to modify /etc/fstab (mountpoint not found or already has noatime)"
-        echo "  You may need to add 'noatime' manually"
     fi
 }
 
