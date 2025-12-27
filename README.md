@@ -21,7 +21,7 @@ The `verify-live` command allows Mithril to bootstrap from a Solana snapshot and
 - We haven't extensively tested a wide range of hardware yet - join the `#mithril-hardware` channel on the [Overclock Validator Discord](https://discord.gg/KHAs9ujrN8) to discuss hardware configurations
 
 **Storage**
-- Minimum 1 TB PCIe 4.0 NVMe SSD (more storage is better)
+- Minimum 1 TB PCIe 4.0 NVMe SSD (more storage can be nice, espeecially to retain larger ledger size)
 - Two NVMe drives preferable for optimal performance:
   - **Fast NVMe**: Mithril's AccountsDB (requires high IOPS)
   - **Secondary NVMe**: Block storage and snapshots (can be slower)
@@ -101,20 +101,13 @@ go build -o mithril ./cmd/mithril
 
 ### Configuration
 
-If you used the setup scripts, copy the starter config which has the default paths pre-configured:
-
-```bash
-cp mithril.starter.toml mithril.toml
-```
-
-Or copy the example config for more customization options:
+Copy the example config to get started:
 
 ```bash
 cp mithril.example.toml mithril.toml
-nano mithril.toml  # or use vim
 ```
 
-Edit the config to customize for your setup:
+The example config comes with sensible defaults and is ready to use immediately. Key settings to review:
 
 ```toml
 name = "mithril"
@@ -122,6 +115,7 @@ name = "mithril"
 [ledger]
     # AccountsDB path - use your fastest NVMe
     accounts_path = "/mnt/mithril-accounts"
+    path = "/mnt/mithril-ledger/blockstore"
 
 [rpc]
     # RPC endpoint(s) for fetching blocks
@@ -130,16 +124,21 @@ name = "mithril"
     # Enable Mithril's RPC server (optional)
     # port = 8899
 
+[replay]
+    # Transaction parallelism - recommended: 2x your CPU core count
+    # e.g., 192 for a 96-core machine, 24 for a 12-core machine
+    txpar = 24
+
 [snapshot]
-    # Optional: save snapshots to disk while streaming
+    # Save snapshots to disk while streaming (optional)
     # save_to_disk = true
-    # download_path = "/mnt/mithril-ledger/snapshots"
+    download_path = "/mnt/mithril-ledger/snapshots"
 
     # Verbose output shows detailed node discovery statistics
     # verbose = true
 ```
 
-See `mithril.example.toml` for all available configuration options.
+See `mithril.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
 
 ### Running verify-live
 
