@@ -71,6 +71,7 @@
 #   --readahead     Configure disk read-ahead buffer
 #   --hugepages     Configure transparent huge pages
 #   --go-tuning     Show Go runtime tuning recommendations
+#   --goamd64       Configure GOAMD64 for optimized builds (detects CPU capabilities)
 #   --dry-run       Show what would be done without making changes
 #   --status        Show current system tuning status
 #   --help          Show this help message
@@ -1518,6 +1519,108 @@ show_go_tuning() {
     echo ""
 }
 
+# Configure GOAMD64 in shell profile
+configure_goamd64() {
+    info "Configuring GOAMD64 for Optimized Go Builds"
+    echo ""
+
+    # Detect CPU capabilities
+    local has_avx2=false
+    local has_avx512=false
+    local cpu_model=""
+    local goamd64_level=""
+
+    if [[ -f /proc/cpuinfo ]]; then
+        cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | xargs)
+        grep -q "avx2" /proc/cpuinfo && has_avx2=true
+        grep -q "avx512" /proc/cpuinfo && has_avx512=true
+    fi
+
+    if [[ -n "$cpu_model" ]]; then
+        echo "  Your CPU: ${cpu_model}"
+        echo ""
+    fi
+
+    # Determine recommended level
+    if $has_avx512; then
+        goamd64_level="v4"
+        success "Your CPU supports AVX-512 → GOAMD64=v4"
+    elif $has_avx2; then
+        goamd64_level="v3"
+        success "Your CPU supports AVX2 → GOAMD64=v3"
+    else
+        warn "Your CPU only supports baseline (v1) - no optimization needed"
+        echo "  The default GOAMD64=v1 is appropriate for your system."
+        return 0
+    fi
+    echo ""
+
+    # Check if already configured
+    local bashrc="$HOME/.bashrc"
+    local profile="$HOME/.profile"
+    local target_file=""
+
+    if [[ -f "$bashrc" ]] && grep -q "export GOAMD64=" "$bashrc" 2>/dev/null; then
+        local current
+        current=$(grep "export GOAMD64=" "$bashrc" | tail -1 | cut -d= -f2)
+        if [[ "$current" == "$goamd64_level" ]]; then
+            success "GOAMD64=$goamd64_level already configured in $bashrc"
+            return 0
+        else
+            warn "GOAMD64 already set to $current in $bashrc"
+            echo "  Current: GOAMD64=$current"
+            echo "  Recommended: GOAMD64=$goamd64_level"
+            echo ""
+            if ! prompt_yes_no "Update to GOAMD64=$goamd64_level?"; then
+                echo "  Skipped."
+                return 0
+            fi
+            # Remove old setting and add new one
+            if $DRY_RUN; then
+                echo "  [DRY RUN] Would update GOAMD64 in $bashrc"
+            else
+                sed -i '/export GOAMD64=/d' "$bashrc"
+                echo "export GOAMD64=$goamd64_level" >> "$bashrc"
+                success "Updated GOAMD64=$goamd64_level in $bashrc"
+            fi
+            return 0
+        fi
+    fi
+
+    # Not configured yet - add it
+    if [[ -f "$bashrc" ]]; then
+        target_file="$bashrc"
+    elif [[ -f "$profile" ]]; then
+        target_file="$profile"
+    else
+        target_file="$bashrc"  # Create bashrc if neither exists
+    fi
+
+    echo "  GOAMD64=$goamd64_level enables CPU-optimized code generation."
+    echo "  This can improve performance for compute-intensive operations."
+    echo ""
+    if ! prompt_yes_no "Add 'export GOAMD64=$goamd64_level' to $target_file?"; then
+        echo "  Skipped."
+        echo ""
+        echo "  To configure manually, run:"
+        echo "    echo 'export GOAMD64=$goamd64_level' >> $target_file"
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        echo "  [DRY RUN] Would add GOAMD64=$goamd64_level to $target_file"
+    else
+        echo "" >> "$target_file"
+        echo "# GOAMD64 for optimized Go builds (added by mithril performance-tune.sh)" >> "$target_file"
+        echo "export GOAMD64=$goamd64_level" >> "$target_file"
+        success "Added GOAMD64=$goamd64_level to $target_file"
+        echo ""
+        echo "  To apply now, run: source $target_file"
+        echo "  Or start a new terminal session."
+    fi
+    echo ""
+}
+
 # ------------------------------------------------------------------------------
 # Main Entry Point
 # ------------------------------------------------------------------------------
@@ -1538,6 +1641,7 @@ main() {
     local do_readahead=false
     local do_hugepages=false
     local do_go_tuning=false
+    local do_goamd64=false
     local do_status=false
 
     # Parse arguments
@@ -1553,6 +1657,7 @@ main() {
             --readahead)    do_readahead=true ;;
             --hugepages)    do_hugepages=true ;;
             --go-tuning)    do_go_tuning=true ;;
+            --goamd64)      do_goamd64=true ;;
             --dry-run)      DRY_RUN=true ;;
             --status)       do_status=true ;;
             --help|-h)      show_help ;;
@@ -1570,6 +1675,12 @@ main() {
     # Go tuning is informational, doesn't require root
     if $do_go_tuning; then
         show_go_tuning
+        exit 0
+    fi
+
+    # GOAMD64 configuration modifies user's bashrc, doesn't require root
+    if $do_goamd64; then
+        configure_goamd64
         exit 0
     fi
 

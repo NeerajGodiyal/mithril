@@ -491,13 +491,16 @@ sudo ./scripts/performance-tune.sh --all --dry-run
 Mithril is written in Go. The script can show you Go-specific optimizations:
 
 ```bash
-./scripts/performance-tune.sh --go-tuning
+./scripts/performance-tune.sh --go-tuning   # View Go runtime tuning tips
+./scripts/performance-tune.sh --goamd64     # Auto-configure GOAMD64 for your CPU
 ```
 
-This displays:
+**`--go-tuning`** displays:
 - Environment variables for garbage collection tuning
 - Build-time CPU optimizations (GOAMD64)
 - Diagnostic commands for latency issues
+
+**`--goamd64`** auto-detects your CPU capabilities (AVX2, AVX-512) and configures GOAMD64 in your shell profile for optimized Go builds. After running, rebuild Mithril to get CPU-optimized binaries.
 
 ---
 
@@ -645,6 +648,7 @@ sudo ./scripts/performance-tune.sh               # Interactive mode
 sudo ./scripts/performance-tune.sh --all         # Apply all optimizations
 sudo ./scripts/performance-tune.sh --status      # Show current settings
 ./scripts/performance-tune.sh --go-tuning        # Go runtime tips
+./scripts/performance-tune.sh --goamd64          # Configure GOAMD64 for CPU
 
 # Reset Data
 sudo ./scripts/disk-setup.sh --delete-accountsdb # Delete AccountsDB

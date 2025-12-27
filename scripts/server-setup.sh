@@ -287,7 +287,8 @@ check_security_status() {
 install_security_packages() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y openssh-server sudo fail2ban ufw unattended-upgrades
+    apt-get install -y openssh-server sudo fail2ban ufw unattended-upgrades \
+                       htop iotop vim nano tmux
 }
 
 configure_fail2ban() {
@@ -960,7 +961,7 @@ SOURCES
 apt-get update -qq
 apt-get install -y -qq linux-generic grub-efi-amd64 openssh-server sudo \
                    fail2ban ufw unattended-upgrades netplan.io xfsprogs \
-                   chrony git curl
+                   chrony git curl wget htop iotop vim nano tmux
 
 # Time synchronization (critical for blockchain nodes)
 systemctl enable chrony >/dev/null 2>&1 || true
