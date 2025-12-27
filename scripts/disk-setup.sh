@@ -499,7 +499,7 @@ run_benchmarks() {
         local model size note=""
         model=$(disk_model "$disk")
         size=$(disk_size "$disk")
-        [[ "$disk" == "$root_disk" ]] && note=" (ROOT - will skip)"
+        [[ "$disk" == "$root_disk" ]] && note=" (OS)"
         printf "  │ %-12s  %-8s  %-45s│\n" "$disk" "$size" "$model"
         if [[ -n "$note" ]]; then
             printf "  │              ${YELLOW}%s${NC}%-*s│\n" "$note" $((54 - ${#note})) ""
@@ -525,18 +525,12 @@ run_benchmarks() {
     fi
     echo ""
 
-    # Count drives to test (excluding root)
-    local drives_to_test=0
-    for disk in "${nvme_disks[@]}"; do
-        [[ "$disk" != "$root_disk" ]] && drives_to_test=$((drives_to_test + 1))
-    done
-
-    echo "  Running benchmarks on $drives_to_test drive(s)..."
-    [[ "$root_disk" != "none" ]] && echo "  (Skipping $root_disk - contains OS)"
+    echo "  Running benchmarks on ${#nvme_disks[@]} drive(s)..."
     echo ""
 
     declare -A results
     declare -A disk_models
+    declare -A disk_is_os
     local metric_label="MB/s"
     local metric_desc="sequential"
 
@@ -546,11 +540,14 @@ run_benchmarks() {
     fi
 
     for disk in "${nvme_disks[@]}"; do
-        [[ "$disk" == "$root_disk" ]] && continue
-
         local model
         model=$(disk_model "$disk")
         disk_models[$disk]="$model"
+        disk_is_os[$disk]="no"
+        [[ "$disk" == "$root_disk" ]] && disk_is_os[$disk]="yes"
+
+        local display_note=""
+        [[ "$disk" == "$root_disk" ]] && display_note=" (OS)"
 
         # Run appropriate benchmark in background with spinner
         if $use_fio; then
@@ -560,7 +557,7 @@ run_benchmarks() {
         fi
 
         local bench_pid=$!
-        spinner $bench_pid "Testing $disk ($model)"
+        spinner $bench_pid "Testing $disk ($model)$display_note"
         wait $bench_pid 2>/dev/null || true
 
         local result
@@ -569,7 +566,7 @@ run_benchmarks() {
 
         results[$disk]="$result"
 
-        success "  $disk: ${result} ${metric_label}"
+        success "  $disk: ${result} ${metric_label}$display_note"
     done
 
     echo ""
@@ -586,26 +583,32 @@ run_benchmarks() {
     for disk in "${!results[@]}"; do
         local speed="${results[$disk]}"
         local model="${disk_models[$disk]}"
-        local size size_gb
+        local size size_gb os_marker=""
         size=$(disk_size "$disk")
         size_gb=$(size_to_gb "$size")
 
-        # Truncate model if too long
-        [[ ${#model} -gt 32 ]] && model="${model:0:29}..."
+        # Mark OS disk
+        [[ "${disk_is_os[$disk]}" == "yes" ]] && os_marker=" (OS)"
 
-        printf "  │ %-12s  %6s %-5s  %-8s  %-32s│\n" "$disk" "$speed" "$metric_label" "$size" "$model"
+        # Truncate model if too long (account for OS marker)
+        local max_model_len=$((32 - ${#os_marker}))
+        [[ ${#model} -gt $max_model_len ]] && model="${model:0:$((max_model_len - 3))}..."
 
-        # Track absolute best (regardless of size)
-        if awk "BEGIN {exit !($speed > $best_speed)}" 2>/dev/null; then
-            best_speed="$speed"
-            best_disk="$disk"
-        fi
+        printf "  │ %-12s  %6s %-5s  %-8s  %-32s│\n" "$disk" "$speed" "$metric_label" "$size" "${model}${os_marker}"
 
-        # Track best drive that's large enough for AccountsDB (>= 700GB)
-        if [[ "$size_gb" -ge "$MIN_ACCOUNTSDB_SIZE_GB" ]]; then
-            if awk "BEGIN {exit !($speed > $best_large_speed)}" 2>/dev/null; then
-                best_large_speed="$speed"
-                best_large_disk="$disk"
+        # Track absolute best non-OS disk (regardless of size)
+        if [[ "${disk_is_os[$disk]}" != "yes" ]]; then
+            if awk "BEGIN {exit !($speed > $best_speed)}" 2>/dev/null; then
+                best_speed="$speed"
+                best_disk="$disk"
+            fi
+
+            # Track best drive that's large enough for AccountsDB (>= 700GB)
+            if [[ "$size_gb" -ge "$MIN_ACCOUNTSDB_SIZE_GB" ]]; then
+                if awk "BEGIN {exit !($speed > $best_large_speed)}" 2>/dev/null; then
+                    best_large_speed="$speed"
+                    best_large_disk="$disk"
+                fi
             fi
         fi
     done
@@ -670,6 +673,12 @@ run_benchmarks() {
         echo ""
         echo "  AccountsDB currently needs ~500GB and is growing."
         echo "  You may run out of space. Consider a larger drive."
+    elif [[ ${#results[@]} -gt 0 ]]; then
+        # Only OS disk(s) available - show performance for reference
+        echo "  Only OS disk(s) tested. Performance shown above for reference."
+        echo ""
+        echo "  In single-drive mode, the setup will create a partition on the OS disk"
+        echo "  for Mithril data. Use --setup to proceed."
     fi
 }
 
