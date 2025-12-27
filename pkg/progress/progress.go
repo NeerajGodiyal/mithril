@@ -224,8 +224,8 @@ func NewDualProgress() *DualProgress {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	return &DualProgress{
-		Download: NewProgressBar("Snapshot Download"),
-		Build:    NewProgressBar("AccountsDB Build"),
+		Download: NewProgressBar("Download (zstd)"),
+		Build:    NewProgressBar("AccountsDB"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 		output:   os.Stdout,
@@ -243,7 +243,18 @@ func (d *DualProgress) Start() {
 	d.started = true
 	d.mu.Unlock()
 
-	// Print initial empty lines
+	// Print pipeline description
+	if d.useColor {
+		fmt.Fprintf(d.output, "%s", colorDim)
+	}
+	fmt.Fprintln(d.output, "  Pipeline: Snapshot (.tar.zst) → decompress (~3x) → extract AppendVecs → AccountsDB")
+	fmt.Fprintln(d.output, "            Then: Incremental snapshot → Apply deltas → Fetch blocks (RPC) → Replay")
+	if d.useColor {
+		fmt.Fprintf(d.output, "%s", colorReset)
+	}
+	fmt.Fprintln(d.output)
+
+	// Print initial empty lines for progress bars
 	fmt.Fprintln(d.output)
 	fmt.Fprintln(d.output)
 
