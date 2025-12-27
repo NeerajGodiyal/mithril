@@ -58,6 +58,12 @@ The scripts create the following directory structure (following Agave convention
     └── snapshots/
 ```
 
+After running the disk setup script, set ownership so Mithril can write to these directories:
+
+```bash
+sudo chown -R $USER:$USER /mnt/mithril-accounts /mnt/mithril-ledger
+```
+
 **Step 3: Install build dependencies**
 
 Mithril requires a C compiler for CGO dependencies:
