@@ -8,7 +8,6 @@ import (
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
 	"github.com/Overclock-Validator/mithril/pkg/config"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -203,12 +204,10 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 }
 
 func (s *shard) flushLogToCache(ctx context.Context) error {
-	start := time.Now()
 	err := s.flushSem.Acquire(ctx, 1)
 	if err != nil {
 		return fmt.Errorf("acquiring flush semaphore: %w", err)
 	}
-	waiting := time.Now()
 	defer s.flushSem.Release(1)
 	// Close/flush
 	if err := s.writer.Flush(); err != nil {
@@ -246,12 +245,7 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 		// Flush to cache
 		s.ss.EnqueueRequest(k, v)
 	}
-	mlog.Log.Infof("log shard=%d waited %s and flushed size=%.2f MiB in %s",
-		s.id,
-		waiting.Sub(start),
-		float64(s.logSize)/float64(1<<20),
-		time.Since(start),
-	)
+	// Note: per-shard logging removed in favor of progress bar
 
 	// Truncate file and replace file/writer pointers
 	newFile, err := os.Create(filename)
@@ -273,16 +267,29 @@ func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIn
 
 // Close closes all shards and their files
 func (sl *ShardLogger) Close(ctx context.Context) error {
+	return sl.CloseWithProgress(ctx, nil)
+}
+
+// CloseWithProgress closes all shards with optional progress callback.
+// The callback is called after each shard flush completes with (completed, total) counts.
+func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(completed, total int)) error {
 	for _, s := range sl.shards {
 		close(s.requests)
 	}
 
 	sl.wg.Wait()
 
+	total := len(sl.shards)
+	var completed atomic.Int32
+
 	flushWg := &errgroup.Group{}
 	for _, s := range sl.shards {
 		flushWg.Go(func() error {
-			return s.flushLogToCache(ctx)
+			err := s.flushLogToCache(ctx)
+			if onProgress != nil {
+				onProgress(int(completed.Add(1)), total)
+			}
+			return err
 		})
 	}
 	return flushWg.Wait()

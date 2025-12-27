@@ -607,8 +607,6 @@ func runVerifyLive(c *cobra.Command, args []string) {
 	}
 
 	snapCfg := buildSnapshotConfig()
-	mlog.Log.Infof("using RPC endpoint: %s", rpcEndpoints[0])
-	mlog.Log.Infof("discovering best snapshot source...")
 	fullSnapshotDlStart := time.Now()
 	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
 	if err != nil {

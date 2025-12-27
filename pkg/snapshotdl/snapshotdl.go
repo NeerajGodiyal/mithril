@@ -244,7 +244,7 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 	}
 
 	// Step 4: Sort and select best nodes by download speed
-	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -255,9 +255,6 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 	// This pattern could be extracted to snapshot-finder library for reuse.
 	var snapshotURL string
 	var snapshotSlot int
-	var selectedNodeRPC string
-	var selectedRank int
-	var selectedSpeed float64
 	var urlErr error
 
 	maxAttempts := snapCfg.MaxSnapshotURLAttempts
@@ -281,15 +278,6 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, nodeRPC, "full")
 
 		if err == nil && urlInfo != nil {
-			// Find the speed for this node from rankedNodes
-			for _, rn := range rankedNodes {
-				if rn.Result.RPC == nodeRPC {
-					selectedSpeed = rn.S1.MedianMBs
-					break
-				}
-			}
-			selectedNodeRPC = nodeRPC
-			selectedRank = i + 1
 			snapshotURL = urlInfo.URL
 			snapshotSlot = urlInfo.Slot
 			break
@@ -311,9 +299,6 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 		return "", 0, 0, fmt.Errorf("failed to get snapshot URL from any RPC node (tried %d nodes, last error: %v)", maxAttempts, urlErr)
 	}
 
-	// Always log the selected source (even in non-verbose mode)
-	mlog.Log.Infof("📸 Full snapshot source: %s (rank #%d, %.1f MB/s, slot %d)",
-		selectedNodeRPC, selectedRank, selectedSpeed, snapshotSlot)
 	return snapshotURL, referenceSlot, snapshotSlot, nil
 }
 
@@ -327,29 +312,25 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	ctx := context.Background()
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
-	mlog.Log.Infof("Getting reference slot from RPC(s)...")
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
 	if err != nil {
 		return nil, fmt.Errorf("error getting reference slot: %w", err)
 	}
-	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+	if snapCfg.Verbose {
+		mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+	}
 
 	// Step 2: Fetch cluster nodes
-	mlog.Log.Infof("Discovering RPC nodes from cluster...")
 	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no rpc nodes available from cluster")
 	}
-	mlog.Log.Infof("Found %d potential snapshot sources", len(nodes))
 
 	// Step 3: Evaluate nodes with version tracking and statistics
-	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
-	// Print statistics if verbose mode
-	if snapCfg.Verbose && stats != nil {
+	// Always print the filtering histogram
+	if stats != nil {
 		formatProbeStats(stats, cfg)
 	}
 
@@ -363,7 +344,6 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	var snapshotURL string
 	var snapshotSlot int
 	var selectedNodeRPC string
-	var selectedRank int
 	var selectedSpeed float64
 	var selectedVersion string
 	var urlErr error
@@ -402,7 +382,6 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 				}
 			}
 			selectedNodeRPC = nodeRPC
-			selectedRank = i + 1
 			snapshotURL = urlInfo.URL
 			snapshotSlot = urlInfo.Slot
 			break
@@ -429,10 +408,6 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	if idx := strings.Index(nodeIP, "://"); idx != -1 {
 		nodeIP = nodeIP[idx+3:]
 	}
-
-	// Always log the selected source
-	mlog.Log.Infof("📸 Full snapshot source: %s (rank #%d, %.1f MB/s, slot %d)",
-		selectedNodeRPC, selectedRank, selectedSpeed, snapshotSlot)
 
 	return &SnapshotInfo{
 		URL:           snapshotURL,

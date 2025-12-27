@@ -182,6 +182,10 @@ func formatSizeProgress(current, total int64) string {
 	currentGB := float64(current) / float64(gib)
 	totalGB := float64(total) / float64(gib)
 	if total > 0 {
+		// Cap display when current exceeds total (estimate was low)
+		if current > total {
+			return fmt.Sprintf("%5.1f/%5.1f GB", currentGB, currentGB)
+		}
 		return fmt.Sprintf("%5.1f/%5.1f GB", currentGB, totalGB)
 	}
 	return fmt.Sprintf("%5.1f/  ??? GB", currentGB)
@@ -224,8 +228,8 @@ func NewDualProgress() *DualProgress {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	return &DualProgress{
-		Download: NewProgressBar("Download (zstd)"),
-		Build:    NewProgressBar("AccountsDB"),
+		Download: NewProgressBar("Snapshot"),
+		Build:    NewProgressBar("Extract"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 		output:   os.Stdout,
@@ -308,9 +312,92 @@ func (d *DualProgress) Stop() {
 	<-d.doneCh
 }
 
-// PrintBanner prints the Mithril ASCII art banner
+// IndexingProgress tracks shard flush progress
+type IndexingProgress struct {
+	label     string
+	total     int
+	completed atomic.Int32
+	startTime time.Time
+	output    io.Writer
+	useColor  bool
+	mu        sync.Mutex
+	started   bool
+}
+
+// NewIndexingProgress creates a new indexing progress display
+func NewIndexingProgress(label string) *IndexingProgress {
+	return &IndexingProgress{
+		label:     label,
+		startTime: time.Now(),
+		output:    os.Stdout,
+		useColor:  term.IsTerminal(int(os.Stdout.Fd())),
+	}
+}
+
+// Start initializes the display with total count
+func (p *IndexingProgress) Start(total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.total = total
+	p.started = true
+	p.startTime = time.Now()
+	fmt.Fprintln(p.output) // Reserve line for progress
+}
+
+// Update updates progress and re-renders
+func (p *IndexingProgress) Update(completed, total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.started {
+		return
+	}
+
+	p.completed.Store(int32(completed))
+	p.total = total
+
+	// Move up and clear line
+	if p.useColor {
+		fmt.Fprint(p.output, moveUp+clearLine)
+	}
+
+	percent := float64(completed) / float64(total) * 100
+	filled := int(percent / 100 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	elapsed := time.Since(p.startTime)
+	var eta string
+	if completed > 0 && completed < total {
+		remaining := elapsed * time.Duration(total-completed) / time.Duration(completed)
+		eta = formatDuration(remaining)
+	} else if completed >= total {
+		eta = "done"
+	} else {
+		eta = "--:--"
+	}
+
+	if p.useColor {
+		fmt.Fprintf(p.output, "%s%-18s%s [%s%s%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
+			colorTeal, p.label, colorReset,
+			colorTeal, bar, colorReset,
+			percent, completed, total, eta)
+	} else {
+		fmt.Fprintf(p.output, "%-18s [%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
+			p.label, bar, percent, completed, total, eta)
+	}
+}
+
+// Finish marks completion
+func (p *IndexingProgress) Finish() {
+	p.Update(p.total, p.total)
+}
+
+// PrintBanner prints the Mithril ASCII art banner centered in the terminal
 func PrintBanner() {
-	banner := `
+	const logo = `
                _______ __________________          _______ _________ _
               (       )\__   __/\__   __/|\     /|(  ____ )\__   __/( \
     .         | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (            .
@@ -321,17 +408,48 @@ func PrintBanner() {
               |/     \|\_______/   )_(   |/     \||/   \__/\_______/(_______/
 `
 
+	// Split and strip common indent
+	lines := strings.Split(strings.Trim(logo, "\n"), "\n")
+	minIndent := len(lines[0])
+	for _, ln := range lines {
+		indent := len(ln) - len(strings.TrimLeft(ln, " \t"))
+		if indent < minIndent {
+			minIndent = indent
+		}
+	}
+	for i := range lines {
+		if len(lines[i]) > minIndent {
+			lines[i] = lines[i][minIndent:]
+		}
+	}
+
+	// Get terminal width for centering (fallback to banner width)
+	termWidth, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || termWidth == 0 {
+		termWidth = 80 // reasonable default
+	}
+
+	// Find max line width for centering
+	maxWidth := 0
+	for _, ln := range lines {
+		if len(ln) > maxWidth {
+			maxWidth = len(ln)
+		}
+	}
+
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
-	lines := strings.Split(banner, "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
+	fmt.Println() // blank line above
+	for _, ln := range lines {
+		leftPad := (termWidth - maxWidth) / 2
+		if leftPad < 0 {
+			leftPad = 0
 		}
+		padding := strings.Repeat(" ", leftPad)
 		if useColor {
-			fmt.Printf("%s%s%s\n", colorTeal, line, colorReset)
+			fmt.Printf("%s%s%s%s\n", padding, colorTeal, ln, colorReset)
 		} else {
-			fmt.Println(line)
+			fmt.Printf("%s%s\n", padding, ln)
 		}
 	}
 	// Add empty lines below the banner for visual separation
@@ -360,12 +478,12 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	fmt.Println("  ┌────────────────────────────────────────────────────────────┐")
 	fmt.Printf("  │  %-58s│\n", "✓ Full Snapshot Source Selected")
 	fmt.Println("  │                                                            │")
-	fmt.Printf("  │    %-12s %-44s│\n", "IP:", nodeIP)
-	fmt.Printf("  │    %-12s %-44d│\n", "Slot:", slot)
-	fmt.Printf("  │    %-12s %-44s│\n", "Age:", fmt.Sprintf("%d slots behind", age))
-	fmt.Printf("  │    %-12s %-44s│\n", "Version:", version)
-	fmt.Printf("  │    %-12s %-44s│\n", "Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
-	fmt.Printf("  │    %-12s %-44s│\n", "Found in:", searchDuration.Round(time.Second).String())
+	fmt.Printf("  │   %-12s %-44s│\n", "IP:", nodeIP)
+	fmt.Printf("  │   %-12s %-44d│\n", "Slot:", slot)
+	fmt.Printf("  │   %-12s %-44s│\n", "Age:", fmt.Sprintf("%d slots behind", age))
+	fmt.Printf("  │   %-12s %-44s│\n", "Version:", version)
+	fmt.Printf("  │   %-12s %-44s│\n", "Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
+	fmt.Printf("  │   %-12s %-44s│\n", "Found in:", searchDuration.Round(time.Second).String())
 	fmt.Println("  └────────────────────────────────────────────────────────────┘")
 	if useColor {
 		fmt.Printf("%s", colorReset)

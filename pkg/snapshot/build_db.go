@@ -242,7 +242,13 @@ func BuildAccountsDb(
 		return nil, nil, err
 	}
 	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", time.Since(start))
-	err = sl.Close(ctx)
+
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Indexing")
+	indexProgress.Start(numShards)
+	err = sl.CloseWithProgress(ctx, func(completed, total int) {
+		indexProgress.Update(completed, total)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}

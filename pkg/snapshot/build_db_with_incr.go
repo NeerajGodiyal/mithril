@@ -228,8 +228,12 @@ func BuildAccountsDbWithIncr(
 
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
 
-	mlog.Log.Infof("Closing shard logger.")
-	err = sl.Close(ctx)
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Indexing")
+	indexProgress.Start(numShards)
+	err = sl.CloseWithProgress(ctx, func(completed, total int) {
+		indexProgress.Update(completed, total)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
@@ -332,8 +336,12 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, fmt.Errorf("incremental snapshot download failed after %d attempts: %w", maxIncrRetries, incrementalErr)
 	}
 
-	mlog.Log.Infof("Closing shard logger for incremental snapshot.")
-	sl.Close(ctx)
+	// Show indexing progress for incremental shard flush
+	incrIndexProgress := progress.NewIndexingProgress("Indexing (incr)")
+	incrIndexProgress.Start(numShards)
+	sl.CloseWithProgress(ctx, func(completed, total int) {
+		incrIndexProgress.Update(completed, total)
+	})
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 
