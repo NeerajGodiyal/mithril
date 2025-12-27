@@ -140,7 +140,7 @@ spinner() {
         printf "\r  %s %s... " "${spin:i++%${#spin}:1}" "$msg"
         sleep 0.1
     done
-    printf "\r  %-40s\n" ""
+    printf "\r%-80s\n" ""
 }
 
 check_root() {
