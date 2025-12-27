@@ -1078,10 +1078,10 @@ interactive_setup() {
         echo "  (Choose your FASTEST drive based on benchmarks)"
         echo ""
 
-        # Build selection options - include OS drive if it has enough free space
+        # Build selection options - include OS drive if it has meaningful free space
         local select_options=("${available_disks[@]}")
         local os_drive_option=""
-        if [[ "$root_disk" != "none" && "$root_free_space_gb" -ge "$MIN_ACCOUNTSDB_SIZE_GB" ]]; then
+        if [[ "$root_disk" != "none" && "$root_free_space_gb" -ge 100 ]]; then
             os_drive_option="$root_disk (OS - partition only, ${root_free_space_gb}GB free)"
             select_options+=("$os_drive_option")
         fi
@@ -1128,14 +1128,32 @@ interactive_setup() {
             [[ "$disk" != "$accountsdb_disk" ]] && remaining_disks+=("$disk")
         done
 
-        if [[ ${#remaining_disks[@]} -gt 0 ]]; then
+        # Build selection options for data drive
+        local data_select_options=("${remaining_disks[@]}")
+        local data_os_drive_option=""
+
+        # Include OS drive if it has free space and wasn't used for AccountsDB
+        if [[ "$root_disk" != "none" && "$root_free_space_gb" -ge 100 && "$accountsdb_disk" != "$root_disk" ]]; then
+            data_os_drive_option="$root_disk (OS - partition only, ${root_free_space_gb}GB free)"
+            data_select_options+=("$data_os_drive_option")
+        fi
+        data_select_options+=("Use same drive as AccountsDB" "Skip")
+
+        if [[ ${#data_select_options[@]} -gt 2 ]]; then  # More than just "Use same" and "Skip"
             echo "  Would you like to use a separate drive for snapshots/blockstore?"
             echo "  (This can be a slower drive)"
             echo ""
-            select disk in "${remaining_disks[@]}" "Use same drive as AccountsDB" "Skip"; do
+            select disk in "${data_select_options[@]}"; do
                 case "$disk" in
                     "Use same drive as AccountsDB"|"Skip")
                         data_disk=""
+                        ;;
+                    "$data_os_drive_option")
+                        # OS drive selected for data
+                        data_disk="$root_disk"
+                        use_root_partition=true
+                        echo ""
+                        echo -e "  ${YELLOW}Note: Will create partition on OS disk for snapshots/blockstore${NC}"
                         ;;
                     *)
                         if [[ -n "$disk" ]]; then
@@ -1147,11 +1165,16 @@ interactive_setup() {
             done
 
             if [[ -n "$data_disk" ]]; then
-                if disk_has_mounts "$data_disk"; then
+                if [[ "$data_disk" == "$root_disk" ]]; then
+                    # OS drive - recommend ext4 for mixed workload
+                    echo "  Filesystem recommendation: ext4 (safer for mixed OS/data workload)"
+                    data_fstype=$(ask_filesystem "$data_disk" "general")
+                elif disk_has_mounts "$data_disk"; then
                     die "Drive $data_disk has mounted partitions. Unmount first."
+                else
+                    # Ask filesystem for data drive (snapshots/blockstore)
+                    data_fstype=$(ask_filesystem "$data_disk" "data")
                 fi
-                # Ask filesystem for data drive (snapshots/blockstore)
-                data_fstype=$(ask_filesystem "$data_disk" "data")
             fi
         fi
     fi
@@ -1170,7 +1193,7 @@ interactive_setup() {
         printf "  │ AccountsDB:  %-58s │\n" "$accountsdb_disk -> $accountsdb_mount"
         printf "  │              %-58s │\n" "Model: $adb_model"
         printf "  │              %-58s │\n" "Filesystem: $accountsdb_fstype"
-        if $use_root_partition; then
+        if [[ "$accountsdb_disk" == "$root_disk" ]]; then
             echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}             │"
         else
             echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
@@ -1185,7 +1208,11 @@ interactive_setup() {
         printf "  │ Ledger:      %-58s │\n" "$data_disk -> $data_mount"
         printf "  │              %-58s │\n" "Model: $data_model"
         printf "  │              %-58s │\n" "Filesystem: $data_fstype"
-        echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        if [[ "$data_disk" == "$root_disk" ]]; then
+            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}             │"
+        else
+            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        fi
     elif [[ -n "$accountsdb_disk" ]]; then
         echo "  │ Data:        (same drive as AccountsDB)                                │"
     fi
@@ -1228,12 +1255,19 @@ interactive_setup() {
     fi
 
     # Final confirmation
-    if $use_root_partition; then
+    local uses_os_partition=false
+    [[ "$accountsdb_disk" == "$root_disk" || "$data_disk" == "$root_disk" ]] && uses_os_partition=true
+
+    if $uses_os_partition; then
+        # At least one drive is the OS disk - confirm partition
         confirm_destructive "PARTITION ${root_disk}"
-    else
-        local disks_to_erase=""
-        [[ -n "$accountsdb_disk" ]] && disks_to_erase="$accountsdb_disk"
-        [[ -n "$data_disk" ]] && disks_to_erase="$disks_to_erase $data_disk"
+    fi
+
+    # Confirm erase for any non-OS disks
+    local disks_to_erase=""
+    [[ -n "$accountsdb_disk" && "$accountsdb_disk" != "$root_disk" ]] && disks_to_erase="$accountsdb_disk"
+    [[ -n "$data_disk" && "$data_disk" != "$root_disk" ]] && disks_to_erase="$disks_to_erase $data_disk"
+    if [[ -n "$disks_to_erase" ]]; then
         confirm_destructive "ERASE${disks_to_erase}"
     fi
 
@@ -1244,10 +1278,10 @@ interactive_setup() {
     if [[ -n "$accountsdb_disk" ]]; then
         local accountsdb_part
 
-        if $use_root_partition; then
-            # Single-drive mode: create partition on OS disk (don't wipe it!)
+        if [[ "$accountsdb_disk" == "$root_disk" ]]; then
+            # OS drive - create partition instead of wiping
             echo ""
-            echo -e "  ${YELLOW}Creating partition on OS disk...${NC}"
+            echo -e "  ${YELLOW}Creating partition on OS disk for AccountsDB...${NC}"
             echo "  This may take a moment. Do NOT interrupt."
             echo ""
             accountsdb_part=$(create_partition_on_disk "$accountsdb_disk" "$accountsdb_fstype" "mithril")
@@ -1266,8 +1300,8 @@ interactive_setup() {
             mkdir -p "$accountsdb_mount/blockstore"
         fi
 
-        if $use_root_partition; then
-            success "Mithril partition created on OS disk: $accountsdb_part -> $accountsdb_mount ($accountsdb_fstype)"
+        if [[ "$accountsdb_disk" == "$root_disk" ]]; then
+            success "AccountsDB partition created on OS disk: $accountsdb_part -> $accountsdb_mount ($accountsdb_fstype)"
         else
             success "AccountsDB drive configured: $accountsdb_disk -> $accountsdb_mount ($accountsdb_fstype)"
         fi
@@ -1276,7 +1310,18 @@ interactive_setup() {
     # Format data disk
     if [[ -n "$data_disk" ]]; then
         local data_part
-        data_part=$(format_disk "$data_disk" "$data_fstype" "blockstore")
+
+        if [[ "$data_disk" == "$root_disk" ]]; then
+            # OS drive - create partition instead of wiping
+            echo ""
+            echo -e "  ${YELLOW}Creating partition on OS disk for snapshots/blockstore...${NC}"
+            echo "  This may take a moment. Do NOT interrupt."
+            echo ""
+            data_part=$(create_partition_on_disk "$data_disk" "$data_fstype" "ledger")
+        else
+            # Normal mode: format entire disk
+            data_part=$(format_disk "$data_disk" "$data_fstype" "blockstore")
+        fi
 
         mkdir -p "$data_mount"
         mount "$data_part" "$data_mount"
@@ -1285,7 +1330,11 @@ interactive_setup() {
         mkdir -p "$data_mount/snapshots"
         mkdir -p "$data_mount/blockstore"
 
-        success "Data drive configured: $data_disk -> $data_mount ($data_fstype)"
+        if [[ "$data_disk" == "$root_disk" ]]; then
+            success "Ledger partition created on OS disk: $data_part -> $data_mount ($data_fstype)"
+        else
+            success "Data drive configured: $data_disk -> $data_mount ($data_fstype)"
+        fi
     fi
 
     echo ""
