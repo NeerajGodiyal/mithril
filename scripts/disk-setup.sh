@@ -413,7 +413,7 @@ get_last_partition_end_gb() {
 }
 
 # Create a partition on existing disk (without wiping)
-# Returns the new partition path
+# Returns the new partition path via stdout (all status goes to stderr)
 create_partition_on_disk() {
     local disk="$1"
     local fstype="$2"
@@ -442,12 +442,13 @@ create_partition_on_disk() {
     local next_partnum
     next_partnum=$(( $(parted -s "$disk" print 2>/dev/null | grep -cE "^\s*[0-9]+") + 1 ))
 
-    info "Creating partition on $disk..."
-    echo "  Start: ${start_gb}GB, End: ${end_gb}GB"
-    echo "  Over-provisioning: 20% of remaining space left unallocated"
+    # All status messages go to stderr so only the partition path is returned via stdout
+    info "Creating partition on $disk..." >&2
+    echo "  Start: ${start_gb}GB, End: ${end_gb}GB" >&2
+    echo "  Over-provisioning: 20% of remaining space left unallocated" >&2
 
     # Create the partition
-    parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB"
+    parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB" >&2
 
     # Wait for partition to appear
     sleep 1
@@ -464,10 +465,10 @@ create_partition_on_disk() {
     # Format the partition
     case "$fstype" in
         ext4)
-            mkfs.ext4 -F -L "$label" "$part"
+            mkfs.ext4 -F -L "$label" "$part" >&2
             ;;
         xfs)
-            mkfs.xfs -f -L "$label" "$part"
+            mkfs.xfs -f -L "$label" "$part" >&2
             ;;
         *)
             die "Unknown filesystem: $fstype"
@@ -851,18 +852,19 @@ show_status() {
 format_disk() {
     local disk="$1" fstype="$2" label="$3" overprovision="${4:-20}"
 
-    info "Formatting $disk..."
+    # All status messages go to stderr so only the partition path is returned via stdout
+    info "Formatting $disk..." >&2
 
     # Calculate partition size (leave space for over-provisioning)
     local use_percent=$((100 - overprovision))
 
-    echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)"
-    echo "  This improves SSD longevity and maintains consistent performance."
+    echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)" >&2
+    echo "  This improves SSD longevity and maintains consistent performance." >&2
 
     # Wipe and create GPT
-    wipefs -a "$disk"
-    parted -s "$disk" mklabel gpt
-    parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
+    wipefs -a "$disk" >&2
+    parted -s "$disk" mklabel gpt >&2
+    parted -s "$disk" mkpart primary 1MiB "${use_percent}%" >&2
 
     # Wait for partition to appear
     sleep 1
@@ -879,10 +881,10 @@ format_disk() {
     # Format
     case "$fstype" in
         ext4)
-            mkfs.ext4 -F -L "$label" "$part"
+            mkfs.ext4 -F -L "$label" "$part" >&2
             ;;
         xfs)
-            mkfs.xfs -f -L "$label" "$part"
+            mkfs.xfs -f -L "$label" "$part" >&2
             ;;
         *)
             die "Unknown filesystem: $fstype"
