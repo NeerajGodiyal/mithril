@@ -375,10 +375,16 @@ func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename strin
 
 	// Set up download progress callback
 	if dp != nil && bmr != nil {
-		dp.Download.SetTotal(bmr.TotalSize())
+		downloadTotal := bmr.TotalSize()
+		dp.Download.SetTotal(downloadTotal)
 		bmr.SetProgressCallback(func(bytesRead, totalBytes int64) {
 			dp.Download.Add(bytesRead - dp.Download.Current())
 		})
+
+		// Estimate build total based on typical zstd compression ratio (~3x expansion)
+		// This gives a rough ETA; actual decompressed size varies by snapshot content
+		estimatedBuildTotal := downloadTotal * 3
+		dp.Build.SetTotal(estimatedBuildTotal)
 	}
 
 	// cleanupPartial deletes the partial download file if it exists
