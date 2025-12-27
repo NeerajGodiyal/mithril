@@ -390,7 +390,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 						selectedSpeed = rn.S1.MedianMBs
 					}
 					selectedVersion = rn.Result.Version
-					selectedRTT = int(rn.Result.Latency * 1000) // Convert seconds to ms
+					selectedRTT = int(rn.Result.Latency) // Already in ms
 					break
 				}
 			}
