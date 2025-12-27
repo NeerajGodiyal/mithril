@@ -249,7 +249,7 @@ func init() {
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
 		addr := ":9090"
-		mlog.Log.Infof("Prometheus metrics server starting on %s/metrics", addr)
+		// Start silently - errors are still logged if binding fails
 		if err := http.ListenAndServe(addr, nil); err != nil {
 			mlog.Log.Errorf("Prometheus metrics server failed: %v", err)
 		}
