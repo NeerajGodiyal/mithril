@@ -982,13 +982,15 @@ interactive_setup() {
     local single_drive_mode=false
     local root_free_space_gb=0
 
+    # Check for free space on root disk (used in both single and multi-drive modes)
+    if [[ "$root_disk" != "none" ]]; then
+        root_free_space_gb=$(get_disk_free_space_gb "$root_disk")
+    fi
+
     if [[ ${#available_disks[@]} -eq 0 ]]; then
         if [[ "$root_disk" == "none" ]]; then
             die "No NVMe drives detected and no root disk. Cannot proceed."
         fi
-
-        # Check for free space on root disk
-        root_free_space_gb=$(get_disk_free_space_gb "$root_disk")
 
         if [[ "$root_free_space_gb" -lt 100 ]]; then
             die "No non-root NVMe drives available and root disk has insufficient free space (${root_free_space_gb}GB < 100GB minimum)."
@@ -1075,9 +1077,26 @@ interactive_setup() {
         echo "  Which drive should be used for AccountsDB?"
         echo "  (Choose your FASTEST drive based on benchmarks)"
         echo ""
-        select disk in "${available_disks[@]}" "Skip (use existing)"; do
+
+        # Build selection options - include OS drive if it has enough free space
+        local select_options=("${available_disks[@]}")
+        local os_drive_option=""
+        if [[ "$root_disk" != "none" && "$root_free_space_gb" -ge "$MIN_ACCOUNTSDB_SIZE_GB" ]]; then
+            os_drive_option="$root_disk (OS - partition only, ${root_free_space_gb}GB free)"
+            select_options+=("$os_drive_option")
+        fi
+        select_options+=("Skip (use existing)")
+
+        select disk in "${select_options[@]}"; do
             if [[ "$disk" == "Skip (use existing)" ]]; then
                 accountsdb_disk=""
+                break
+            elif [[ "$disk" == "$os_drive_option" ]]; then
+                # OS drive selected - use partition mode
+                accountsdb_disk="$root_disk"
+                use_root_partition=true
+                echo ""
+                echo -e "  ${YELLOW}Note: Will create partition on OS disk (existing partitions preserved)${NC}"
                 break
             elif [[ -n "$disk" ]]; then
                 accountsdb_disk="$disk"
@@ -1086,11 +1105,17 @@ interactive_setup() {
         done
 
         if [[ -n "$accountsdb_disk" ]]; then
-            if disk_has_mounts "$accountsdb_disk"; then
-                die "Drive $accountsdb_disk has mounted partitions. Unmount first."
+            if $use_root_partition; then
+                # OS drive - recommend ext4 for mixed workload
+                echo "  Filesystem recommendation: ext4 (safer for mixed OS/data workload)"
+                accountsdb_fstype=$(ask_filesystem "$accountsdb_disk" "general")
+            else
+                if disk_has_mounts "$accountsdb_disk"; then
+                    die "Drive $accountsdb_disk has mounted partitions. Unmount first."
+                fi
+                # Ask filesystem for AccountsDB drive
+                accountsdb_fstype=$(ask_filesystem "$accountsdb_disk" "accountsdb")
             fi
-            # Ask filesystem for AccountsDB drive
-            accountsdb_fstype=$(ask_filesystem "$accountsdb_disk" "accountsdb")
         fi
 
         echo ""
