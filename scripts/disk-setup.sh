@@ -864,8 +864,17 @@ format_disk() {
     parted -s "$disk" mklabel gpt
     parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
 
+    # Wait for partition to appear
+    sleep 1
+    partprobe "$disk" 2>/dev/null || true
+    sleep 1
+
     local part
     part=$(part_path "$disk" 1)
+
+    if [[ ! -b "$part" ]]; then
+        die "Failed to create partition. Expected $part but it doesn't exist."
+    fi
 
     # Format
     case "$fstype" in
