@@ -223,7 +223,7 @@ func NewDualProgress() *DualProgress {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	return &DualProgress{
-		Download: NewProgressBar("Download (.tar.zst)"),
+		Download: NewProgressBar("Full Snapshot (.tar.zst)"),
 		Extract:  NewProgressBar("Extract (AppendVecs)"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
@@ -279,12 +279,12 @@ func (d *DualProgress) Start() {
 	d.started = true
 	d.mu.Unlock()
 
-	// Print pipeline description
+	// Print pipeline description showing parallel operations
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
-	fmt.Fprintln(d.output, "  Pipeline: Download (.tar.zst) → Extract (AppendVecs) → Flush (shard logs)")
-	fmt.Fprintln(d.output, "            Then: Incremental snapshot → Fetch blocks (RPC) → Replay")
+	fmt.Fprintln(d.output, "  Pipeline: Full Snapshot Download + Extract (parallel) → Flush (shard logs)")
+	fmt.Fprintln(d.output, "            Then: Re-fetch incremental snapshot → Flush → Fetch blocks (RPC) → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
