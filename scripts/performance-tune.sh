@@ -111,12 +111,23 @@ warn() {
     echo -e "${YELLOW}[WARN]${NC} $*"
 }
 
-# Ask yes/no question
+# Ask yes/no question with configurable default
+# Usage: yesno "prompt" [default]
+#   default: "y" for default yes [Y/n], "n" for default no [y/N]
 yesno() {
     local prompt="$1"
+    local default="${2:-n}"  # Default to "no" if not specified
     local answer
-    read -r -p "$prompt [y/N]: " answer
-    [[ "${answer,,}" == "y" ]]
+
+    if [[ "${default,,}" == "y" ]]; then
+        read -r -p "$prompt [Y/n]: " answer
+        # Default yes: return true unless explicitly "n"
+        [[ ! "${answer,,}" =~ ^n ]]
+    else
+        read -r -p "$prompt [y/N]: " answer
+        # Default no: return true only if explicitly "y"
+        [[ "${answer,,}" == "y" ]]
+    fi
 }
 
 # Check if running as root
@@ -1111,7 +1122,7 @@ set_readahead() {
         echo "  (Recommended: smaller read-ahead for AccountsDB, larger for snapshots)"
         echo ""
 
-        if yesno "  Configure devices separately?"; then
+        if yesno "  Configure devices separately?" y; then
             while read -r dev size; do
                 echo ""
                 echo "  /dev/$dev (${size}):"
@@ -1564,19 +1575,19 @@ main() {
         echo "=== BASIC OPTIMIZATIONS ==="
         echo ""
 
-        if yesno "Enable weekly SSD TRIM?"; then
+        if yesno "Enable weekly SSD TRIM?" y; then
             enable_trim
         fi
 
-        if yesno "Apply kernel performance tuning (sysctl)?"; then
+        if yesno "Apply kernel performance tuning (sysctl)?" y; then
             apply_sysctls
         fi
 
-        if yesno "Set CPU to performance mode?"; then
+        if yesno "Set CPU to performance mode?" y; then
             set_cpu_perf
         fi
 
-        if yesno "Configure noatime mount option?"; then
+        if yesno "Configure noatime mount option?" y; then
             apply_noatime
         fi
 
@@ -1584,15 +1595,15 @@ main() {
         echo "=== ADVANCED OPTIMIZATIONS ==="
         echo ""
 
-        if yesno "Configure I/O scheduler for NVMe? (kyber/none)"; then
+        if yesno "Configure I/O scheduler for NVMe? (kyber/none)" y; then
             set_io_scheduler
         fi
 
-        if yesno "Configure disk read-ahead? (per-device tuning available)"; then
+        if yesno "Configure disk read-ahead? (per-device tuning available)" y; then
             set_readahead
         fi
 
-        if yesno "Configure Transparent Huge Pages?"; then
+        if yesno "Configure Transparent Huge Pages?" y; then
             configure_hugepages
         fi
 
@@ -1605,7 +1616,7 @@ main() {
         fi
 
         echo ""
-        if yesno "Show Go runtime tuning recommendations?"; then
+        if yesno "Show Go runtime tuning recommendations?" y; then
             show_go_tuning
         fi
     fi
