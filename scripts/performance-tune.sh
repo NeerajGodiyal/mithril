@@ -644,13 +644,35 @@ apply_noatime() {
     }'
     echo ""
 
+    # Show Mithril-specific mount points for convenience
+    local mithril_mounts=()
+    for mnt in /mnt/mithril-accounts /mnt/mithril-ledger; do
+        if findmnt -n "$mnt" >/dev/null 2>&1; then
+            mithril_mounts+=("$mnt")
+        fi
+    done
+
+    if [[ ${#mithril_mounts[@]} -gt 0 ]]; then
+        echo "  Mithril mount points (recommended to add noatime):"
+        for mnt in "${mithril_mounts[@]}"; do
+            local has_noatime=""
+            findmnt -rn -o OPTIONS "$mnt" | grep -q noatime && has_noatime=" (already has noatime)"
+            echo "    $mnt$has_noatime"
+        done
+        echo ""
+    fi
+
     if $DRY_RUN; then
         echo "  [DRY-RUN] Would prompt for mountpoint and update /etc/fstab"
         return
     fi
 
     # Interactive: ask which mountpoint to optimize
-    read -r -p "  Enter the mountpoint to add noatime (e.g., / or /mnt/data), or 'skip': " mp
+    local prompt_examples="e.g., /"
+    if [[ ${#mithril_mounts[@]} -gt 0 ]]; then
+        prompt_examples="e.g., ${mithril_mounts[0]}${mithril_mounts[1]:+, ${mithril_mounts[1]}}"
+    fi
+    read -r -p "  Enter the mountpoint to add noatime ($prompt_examples), or 'skip': " mp
 
     if [[ "$mp" == "skip" || -z "$mp" ]]; then
         echo "  Skipping noatime configuration"
