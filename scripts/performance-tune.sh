@@ -1139,7 +1139,7 @@ set_readahead() {
                 echo "    4) 512 KB  - Sequential throughput (snapshots/blocks)"
                 echo "    5) 1024 KB - Maximum throughput (streaming snapshots)"
                 echo "    6) Skip this device"
-                read -r -p "    Choice for /dev/$dev [1-6]: " ra_choice
+                read -r -p "    Choice for /dev/$dev [1-6]: " ra_choice </dev/tty
 
                 local ra_kb
                 case "$ra_choice" in
