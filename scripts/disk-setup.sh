@@ -87,7 +87,7 @@
 #   ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info
 #
 # DELETE OPTIONS (for resetting Mithril - start fresh):
-#   --delete-accountsdb  Clear AccountsDB (forces new snapshot sync)
+#   --delete-accounts    Clear accounts data (forces new snapshot sync)
 #   --delete-snapshots   Clear downloaded snapshots
 #   --delete-blockstore  Clear verified blocks
 #   --delete-all         Clear everything (complete reset)
@@ -1414,11 +1414,11 @@ clean_subdir() {
     success "$description has been deleted"
 }
 
-clean_accountsdb() {
-    info "DELETING AccountsDB"
+clean_accounts() {
+    info "DELETING Accounts data"
     echo ""
 
-    # AccountsDB artifacts (stored directly in mount point, not a subdirectory)
+    # Accounts artifacts (stored directly in mount point, not a subdirectory)
     local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
 
     # Find Mithril directories
@@ -1434,7 +1434,7 @@ clean_accountsdb() {
     # Find all matching artifacts
     local paths_to_clean=()
 
-    echo "  Found AccountsDB artifacts:"
+    echo "  Found accounts artifacts:"
     echo ""
 
     for mithril_dir in "${mithril_dirs[@]}"; do
@@ -1454,13 +1454,13 @@ clean_accountsdb() {
     done
 
     if [[ ${#paths_to_clean[@]} -eq 0 ]]; then
-        echo "  No AccountsDB artifacts found to delete."
+        echo "  No accounts artifacts found to delete."
         return 0
     fi
 
     echo ""
 
-    if ! yesno "  Delete these AccountsDB files?" "n"; then
+    if ! yesno "  Delete these accounts files?" "n"; then
         die "Aborted"
     fi
 
@@ -1472,9 +1472,9 @@ clean_accountsdb() {
     done
 
     echo ""
-    success "AccountsDB has been deleted"
+    success "Accounts data has been deleted"
     echo ""
-    echo "  On next run, Mithril will rebuild AccountsDB from a fresh snapshot."
+    echo "  On next run, Mithril will rebuild accounts from a fresh snapshot."
 }
 
 clean_snapshots() {
@@ -1492,11 +1492,11 @@ clean_blockstore() {
 clean_all() {
     info "DELETING ALL MITHRIL DATA"
     echo ""
-    echo "  This will delete AccountsDB, Snapshots, AND Blockstore."
+    echo "  This will delete Accounts, Snapshots, AND Blockstore."
     echo ""
 
-    # AccountsDB artifacts (stored directly in mount point)
-    local accountsdb_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+    # Accounts artifacts (stored directly in mount point)
+    local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
 
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
@@ -1520,8 +1520,8 @@ clean_all() {
         fi
         echo "    $mithril_dir"
 
-        # Check for AccountsDB artifacts at root level
-        for artifact in "${accountsdb_artifacts[@]}"; do
+        # Check for accounts artifacts at root level
+        for artifact in "${accounts_artifacts[@]}"; do
             if [[ -e "$mithril_dir/$artifact" ]]; then
                 local size
                 size=$(dir_size "$mithril_dir/$artifact")
@@ -1590,9 +1590,9 @@ main() {
             check_disk_deps
             interactive_setup
             ;;
-        --delete-accountsdb)
+        --delete-accounts)
             check_root
-            clean_accountsdb
+            clean_accounts
             ;;
         --delete-snapshots)
             check_root
@@ -1626,7 +1626,7 @@ main() {
             echo "  ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info"
             echo ""
             echo "Delete commands (for resetting Mithril):"
-            echo "  sudo ./scripts/disk-setup.sh --delete-accountsdb  # Delete AccountsDB only"
+            echo "  sudo ./scripts/disk-setup.sh --delete-accounts    # Delete accounts only"
             echo "  sudo ./scripts/disk-setup.sh --delete-snapshots   # Delete snapshots only"
             echo "  sudo ./scripts/disk-setup.sh --delete-blockstore  # Delete blockstore only"
             echo "  sudo ./scripts/disk-setup.sh --delete-all         # Delete everything"
