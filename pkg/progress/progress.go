@@ -283,8 +283,8 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
-	fmt.Fprintln(d.output, "  Pipeline: Full Snapshot Download + Extract (parallel) → Flush (shard logs)")
-	fmt.Fprintln(d.output, "            Then: Re-fetch incremental snapshot → Flush → Fetch blocks (RPC) → Replay")
+	fmt.Fprintln(d.output, "  Pipeline: Download ⟷ Extract (concurrent) → Flush (shard logs)")
+	fmt.Fprintln(d.output, "            Then: Re-fetch incremental → Flush → Fetch blocks (RPC) → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
