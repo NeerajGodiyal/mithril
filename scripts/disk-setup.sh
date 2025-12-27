@@ -1192,7 +1192,7 @@ interactive_setup() {
 
     echo "  │                                                                          │"
     echo "  │ Directory structure to be created:                                       │"
-    printf "  │   %-68s │\n" "$accountsdb_mount/accountsdb"
+    printf "  │   %-68s │\n" "$accountsdb_mount (AccountsDB data)"
     if [[ -n "$data_disk" ]]; then
         printf "  │   %-68s │\n" "$data_mount/snapshots"
         printf "  │   %-68s │\n" "$data_mount/blockstore"
@@ -1219,7 +1219,7 @@ interactive_setup() {
             fi
         fi
 
-        mkdir -p "$accountsdb_mount/accountsdb"
+        mkdir -p "$accountsdb_mount"
         mkdir -p "$accountsdb_mount/snapshots"
         mkdir -p "$accountsdb_mount/blockstore"
 
@@ -1260,8 +1260,7 @@ interactive_setup() {
         mount "$accountsdb_part" "$accountsdb_mount"
         add_fstab_entry "$accountsdb_part" "$accountsdb_mount" "$accountsdb_fstype"
 
-        # Create subdirectories
-        mkdir -p "$accountsdb_mount/accountsdb"
+        # Create subdirectories for snapshots/blockstore if no separate data disk
         if [[ -z "$data_disk" ]]; then
             mkdir -p "$accountsdb_mount/snapshots"
             mkdir -p "$accountsdb_mount/blockstore"
@@ -1296,12 +1295,17 @@ interactive_setup() {
     echo "  │                                                                          │"
     echo "  │ Update your mithril.toml:                                                │"
     echo "  │                                                                          │"
-    printf "  │   scratch_directory = \"%s\"%-*s│\n" "$accountsdb_mount" $((38 - ${#accountsdb_mount})) ""
+    # Determine paths based on whether there's a separate data disk
+    local ledger_base="$accountsdb_mount"
+    [[ -n "$data_disk" ]] && ledger_base="$data_mount"
+    printf "  │   scratch_directory = \"%s\"%-*s│\n" "$ledger_base" $((38 - ${#ledger_base})) ""
     echo "  │                                                                          │"
-    if [[ -n "$data_disk" ]]; then
-        echo "  │   [snapshot]                                                             │"
-        printf "  │       download_path = \"%s/snapshots\"%-*s│\n" "$data_mount" $((28 - ${#data_mount})) ""
-    fi
+    echo "  │   [ledger]                                                               │"
+    printf "  │       accounts_path = \"%s\"%-*s│\n" "$accountsdb_mount" $((34 - ${#accountsdb_mount})) ""
+    printf "  │       path = \"%s/blockstore\"%-*s│\n" "$ledger_base" $((30 - ${#ledger_base})) ""
+    echo "  │                                                                          │"
+    echo "  │   [snapshot]                                                             │"
+    printf "  │       download_path = \"%s/snapshots\"%-*s│\n" "$ledger_base" $((28 - ${#ledger_base})) ""
     echo "  │                                                                          │"
     echo "  │ Next: Run performance-tune.sh to optimize I/O settings                   │"
     echo "  │                                                                          │"
@@ -1411,7 +1415,64 @@ clean_subdir() {
 }
 
 clean_accountsdb() {
-    clean_subdir "accountsdb" "AccountsDB"
+    info "DELETING AccountsDB"
+    echo ""
+
+    # AccountsDB artifacts (stored directly in mount point, not a subdirectory)
+    local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        warn "No Mithril data directories found"
+        echo ""
+        echo "  Checked: /mnt/mithril-accounts, /mnt/mithril-ledger"
+        return 1
+    fi
+
+    # Find all matching artifacts
+    local paths_to_clean=()
+
+    echo "  Found AccountsDB artifacts:"
+    echo ""
+
+    for mithril_dir in "${mithril_dirs[@]}"; do
+        for artifact in "${artifacts[@]}"; do
+            if [[ -e "$mithril_dir/$artifact" ]]; then
+                # SAFETY: Never delete anything on the OS disk
+                if path_on_root_disk "$mithril_dir/$artifact"; then
+                    warn "SKIPPING $mithril_dir/$artifact - on OS disk (safety protection)"
+                    continue
+                fi
+                local size
+                size=$(dir_size "$mithril_dir/$artifact")
+                paths_to_clean+=("$mithril_dir/$artifact")
+                echo "    $mithril_dir/$artifact  ($size)"
+            fi
+        done
+    done
+
+    if [[ ${#paths_to_clean[@]} -eq 0 ]]; then
+        echo "  No AccountsDB artifacts found to delete."
+        return 0
+    fi
+
+    echo ""
+
+    if ! yesno "  Delete these AccountsDB files?" "n"; then
+        die "Aborted"
+    fi
+
+    echo ""
+
+    for path in "${paths_to_clean[@]}"; do
+        echo "  Deleting $path..."
+        rm -rf "$path"
+    done
+
+    echo ""
+    success "AccountsDB has been deleted"
     echo ""
     echo "  On next run, Mithril will rebuild AccountsDB from a fresh snapshot."
 }
@@ -1434,6 +1495,9 @@ clean_all() {
     echo "  This will delete AccountsDB, Snapshots, AND Blockstore."
     echo ""
 
+    # AccountsDB artifacts (stored directly in mount point)
+    local accountsdb_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
 
@@ -1442,7 +1506,7 @@ clean_all() {
         return 1
     fi
 
-    # Find all subdirectories
+    # Find all data to clean
     local paths_to_clean=()
 
     echo "  Found Mithril directories:"
@@ -1455,7 +1519,19 @@ clean_all() {
             continue
         fi
         echo "    $mithril_dir"
-        for subdir in accountsdb snapshots blockstore; do
+
+        # Check for AccountsDB artifacts at root level
+        for artifact in "${accountsdb_artifacts[@]}"; do
+            if [[ -e "$mithril_dir/$artifact" ]]; then
+                local size
+                size=$(dir_size "$mithril_dir/$artifact")
+                paths_to_clean+=("$mithril_dir/$artifact")
+                echo "      $artifact  ($size)"
+            fi
+        done
+
+        # Check for subdirectories (snapshots, blockstore)
+        for subdir in snapshots blockstore; do
             if [[ -d "$mithril_dir/$subdir" ]]; then
                 local size
                 size=$(dir_size "$mithril_dir/$subdir")

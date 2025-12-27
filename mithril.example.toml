@@ -23,7 +23,7 @@
     # path = "/mnt/mithril-ledger/blockstore"
 
     # Output path for writing AccountsDB data to
-    # accounts_path = "/mnt/mithril-accounts/accountsdb"
+    # accounts_path = "/mnt/mithril-accounts"
 
     # Path of full snapshot or AccountsDB to load from (verifier mode)
     # snapshot_archive_path = "/mnt/mithril-ledger/snapshots"
