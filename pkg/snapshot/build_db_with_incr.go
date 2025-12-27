@@ -36,7 +36,7 @@ func BuildAccountsDbWithIncr(
 	blockDir string,
 	overcastEndpoint string,
 	snapCfg snapshotdl.SnapshotConfig,
-	dp *progress.DualProgress,
+	tp *progress.TripleProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	cleanAccountsDbDir(accountsDbDir)
@@ -78,6 +78,31 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, err
 	}
 	sl := NewShardLogger(numShards, logsDir, ss)
+
+	// Wire up shard progress tracking for TripleProgress display
+	if tp != nil {
+		sl.SetProgressCallback(func(bytesDone, totalBytes int64) {
+			// During streaming phase (bytesDone == 0): show totalBytes as progress
+			// This tracks indexing throughput (bytes written to shard logs)
+			// During flush phase (bytesDone > 0): show flush progress
+			if bytesDone == 0 {
+				// Streaming phase: totalBytes is both current and target
+				// This shows indexing rate without a completion percentage
+				tp.Shard.SetTotal(totalBytes)
+				current := tp.Shard.Current()
+				if totalBytes > current {
+					tp.Shard.Add(totalBytes - current)
+				}
+			} else {
+				// Flush phase: show bytesDone / totalBytes
+				tp.Shard.SetTotal(totalBytes)
+				current := tp.Shard.Current()
+				if bytesDone > current {
+					tp.Shard.Add(bytesDone - current)
+				}
+			}
+		})
+	}
 
 	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
 		tasks := indexEntryCommitterInProgress.Add(1)
@@ -210,20 +235,20 @@ func BuildAccountsDbWithIncr(
 	}
 
 	// Start progress display if provided
-	if dp != nil {
-		dp.Start()
+	if tp != nil {
+		tp.Start()
 	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTarWithProgress(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool, dp)
+		err = readTarWithProgress(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool, tp)
 	}()
 	wg.Wait()
 
 	// Stop progress display after full snapshot is processed
-	if dp != nil {
-		dp.Stop()
+	if tp != nil {
+		tp.Stop()
 	}
 
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))

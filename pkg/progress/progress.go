@@ -3,6 +3,7 @@ package progress
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -15,10 +16,11 @@ import (
 const (
 	barWidth       = 40
 	updateInterval = 500 * time.Millisecond
-	ewmaTau        = 5.0 // seconds for EWMA smoothing
+	ewmaTau        = 60.0 // seconds for EWMA smoothing (matches old shard.go)
 
-	// Teal/cyan color
-	colorTeal  = "\x1b[38;2;0;188;212m"
+	// Teal/cyan color (using 256-color mode for wider terminal compatibility)
+	// Index 85 is a teal/cyan in the 256-color palette
+	colorTeal  = "\x1b[38;5;85m"
 	colorReset = "\x1b[0m"
 	colorDim   = "\x1b[2m"
 
@@ -93,29 +95,19 @@ func (p *ProgressBar) updateThroughput() float64 {
 
 	bytesPerSec := float64(current-p.lastBytes) / elapsed
 
-	// EWMA: weight = 1 - e^(-elapsed/tau)
-	weight := 1.0 - exp(-elapsed/ewmaTau)
+	// Time-based EWMA: alpha = 1 - e^(-elapsed/tau)
+	// This gives more weight to recent samples when updates are frequent,
+	// and smooths over longer periods when updates are sparse
+	alpha := 1.0 - math.Exp(-elapsed/ewmaTau)
 	if p.ewmaThroughput == 0 {
 		p.ewmaThroughput = bytesPerSec
 	} else {
-		p.ewmaThroughput = weight*bytesPerSec + (1-weight)*p.ewmaThroughput
+		p.ewmaThroughput = alpha*bytesPerSec + (1-alpha)*p.ewmaThroughput
 	}
 
 	p.lastUpdate = now
 	p.lastBytes = current
 	return p.ewmaThroughput
-}
-
-// Simple exp approximation to avoid importing math
-func exp(x float64) float64 {
-	if x > 0 {
-		return 1 + x + x*x/2 + x*x*x/6
-	}
-	inv := 1 - x + x*x/2 - x*x*x/6
-	if inv <= 0 {
-		return 0
-	}
-	return 1 / inv
 }
 
 // Render returns the progress bar string
@@ -208,21 +200,176 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
+// TripleProgress manages three progress bars displayed simultaneously:
+// - Download: compressed snapshot bytes from network
+// - Extract: decompressed tar bytes (AppendVec files)
+// - Shard: bytes flushed from shard logs to cache
+type TripleProgress struct {
+	Download *ProgressBar
+	Extract  *ProgressBar
+	Shard    *ProgressBar
+
+	mu            sync.Mutex
+	started       bool
+	done          bool
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+	output        io.Writer
+	useColor      bool
+	downloadTotal int64 // cached download total for ratio calculation
+}
+
+// NewTripleProgress creates a new triple progress display
+func NewTripleProgress() *TripleProgress {
+	// Check if stdout is a TTY
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+
+	return &TripleProgress{
+		Download: NewProgressBar("Snapshot"),
+		Extract:  NewProgressBar("Extract"),
+		Shard:    NewProgressBar("Indexing"),
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+		output:   os.Stdout,
+		useColor: useColor,
+	}
+}
+
+// SetDownloadTotal sets the known download total and enables dynamic estimation
+func (t *TripleProgress) SetDownloadTotal(total int64) {
+	t.mu.Lock()
+	t.downloadTotal = total
+	t.mu.Unlock()
+	t.Download.SetTotal(total)
+}
+
+// updateEstimates dynamically adjusts Extract total based on observed compression ratio
+func (t *TripleProgress) updateEstimates() {
+	downloadCurrent := t.Download.Current()
+	extractCurrent := t.Extract.Current()
+
+	// Need at least 1MB of data to calculate a meaningful ratio
+	const minBytes = 1 << 20 // 1 MB
+	if downloadCurrent < minBytes || extractCurrent == 0 {
+		return
+	}
+
+	t.mu.Lock()
+	downloadTotal := t.downloadTotal
+	t.mu.Unlock()
+
+	if downloadTotal <= 0 {
+		return
+	}
+
+	// Calculate observed compression ratio for Extract
+	ratio := float64(extractCurrent) / float64(downloadCurrent)
+	if ratio < 2.0 {
+		ratio = 2.0
+	} else if ratio > 10.0 {
+		ratio = 10.0
+	}
+	t.Extract.SetTotal(int64(float64(downloadTotal) * ratio))
+}
+
+// Start begins the progress display update loop
+func (t *TripleProgress) Start() {
+	t.mu.Lock()
+	if t.started {
+		t.mu.Unlock()
+		return
+	}
+	t.started = true
+	t.mu.Unlock()
+
+	// Print pipeline description
+	if t.useColor {
+		fmt.Fprintf(t.output, "%s", colorDim)
+	}
+	fmt.Fprintln(t.output, "  Pipeline: Snapshot (.tar.zst) → Decompress → Extract AppendVecs → Build Index → Cache")
+	fmt.Fprintln(t.output, "            Then: Incremental snapshot → Apply deltas → Fetch blocks (RPC) → Replay")
+	if t.useColor {
+		fmt.Fprintf(t.output, "%s", colorReset)
+	}
+	fmt.Fprintln(t.output)
+
+	// Print initial empty lines for progress bars (3 bars)
+	fmt.Fprintln(t.output)
+	fmt.Fprintln(t.output)
+	fmt.Fprintln(t.output)
+
+	go t.updateLoop()
+}
+
+// updateLoop periodically updates the display
+func (t *TripleProgress) updateLoop() {
+	ticker := time.NewTicker(updateInterval)
+	defer ticker.Stop()
+	defer close(t.doneCh)
+
+	for {
+		select {
+		case <-t.stopCh:
+			t.updateEstimates()
+			t.render()
+			return
+		case <-ticker.C:
+			t.updateEstimates()
+			t.render()
+		}
+	}
+}
+
+// render updates the display with all three bars
+func (t *TripleProgress) render() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Move up three lines and clear
+	if t.useColor {
+		fmt.Fprint(t.output, moveUp+clearLine)
+		fmt.Fprint(t.output, moveUp+clearLine)
+		fmt.Fprint(t.output, moveUp+clearLine)
+	}
+
+	// Render all three bars
+	fmt.Fprintln(t.output, t.Download.Render(t.useColor))
+	fmt.Fprintln(t.output, t.Extract.Render(t.useColor))
+	fmt.Fprintln(t.output, t.Shard.Render(t.useColor))
+}
+
+// Stop stops the progress display
+func (t *TripleProgress) Stop() {
+	t.mu.Lock()
+	if t.done {
+		t.mu.Unlock()
+		return
+	}
+	t.done = true
+	t.mu.Unlock()
+
+	close(t.stopCh)
+	<-t.doneCh
+}
+
 // DualProgress manages two progress bars displayed simultaneously
+// Deprecated: Use TripleProgress for full pipeline visibility
 type DualProgress struct {
 	Download *ProgressBar
 	Build    *ProgressBar
 
-	mu       sync.Mutex
-	started  bool
-	done     bool
-	stopCh   chan struct{}
-	doneCh   chan struct{}
-	output   io.Writer
-	useColor bool
+	mu            sync.Mutex
+	started       bool
+	done          bool
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+	output        io.Writer
+	useColor      bool
+	downloadTotal int64 // cached download total for ratio calculation
 }
 
 // NewDualProgress creates a new dual progress display
+// Deprecated: Use NewTripleProgress for full pipeline visibility
 func NewDualProgress() *DualProgress {
 	// Check if stdout is a TTY
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
@@ -235,6 +382,50 @@ func NewDualProgress() *DualProgress {
 		output:   os.Stdout,
 		useColor: useColor,
 	}
+}
+
+// SetDownloadTotal sets the known download total and enables dynamic Build estimation
+func (d *DualProgress) SetDownloadTotal(total int64) {
+	d.mu.Lock()
+	d.downloadTotal = total
+	d.mu.Unlock()
+	d.Download.SetTotal(total)
+}
+
+// updateBuildEstimate dynamically adjusts Build total based on observed compression ratio
+// This is called in the update loop to refine the estimate as we get more data
+func (d *DualProgress) updateBuildEstimate() {
+	downloadCurrent := d.Download.Current()
+	buildCurrent := d.Build.Current()
+
+	// Need at least 1MB of data to calculate a meaningful ratio
+	const minBytes = 1 << 20 // 1 MB
+	if downloadCurrent < minBytes || buildCurrent == 0 {
+		return
+	}
+
+	d.mu.Lock()
+	downloadTotal := d.downloadTotal
+	d.mu.Unlock()
+
+	if downloadTotal <= 0 {
+		return
+	}
+
+	// Calculate observed compression ratio
+	// ratio = decompressed / compressed
+	ratio := float64(buildCurrent) / float64(downloadCurrent)
+
+	// Clamp ratio to reasonable bounds (2x to 10x compression is typical for zstd)
+	if ratio < 2.0 {
+		ratio = 2.0
+	} else if ratio > 10.0 {
+		ratio = 10.0
+	}
+
+	// Update build total estimate
+	estimatedBuildTotal := int64(float64(downloadTotal) * ratio)
+	d.Build.SetTotal(estimatedBuildTotal)
 }
 
 // Start begins the progress display update loop
@@ -274,9 +465,11 @@ func (d *DualProgress) updateLoop() {
 	for {
 		select {
 		case <-d.stopCh:
-			d.render() // Final render
+			d.updateBuildEstimate() // Final estimate update
+			d.render()              // Final render
 			return
 		case <-ticker.C:
+			d.updateBuildEstimate() // Refine Build total based on observed ratio
 			d.render()
 		}
 	}

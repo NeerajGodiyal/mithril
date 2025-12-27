@@ -631,10 +631,10 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	// Create progress display for snapshot download and AccountsDB build
-	dp := progress.NewDualProgress()
+	// Create progress display for snapshot download, extract, and shard commit
+	tp := progress.NewTripleProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, tp)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
