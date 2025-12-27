@@ -76,8 +76,8 @@ func DefaultSnapshotConfig() SnapshotConfig {
 
 		// Stage 2: Sustained speed test for top candidates
 		Stage2TopK:       8,   // Test top 8 from stage 1
-		Stage2WarmSec:    3,   // 3 second warmup (recommended for home internet, 1-2 for datacenter)
-		Stage2MeasureSec: 3,   // 3 second measurement (recommended for home internet, 1-2 for datacenter)
+		Stage2WarmSec:    2,   // 2 second warmup
+		Stage2MeasureSec: 2,   // 2 second measurement
 		Stage2MinRatio:   0.6, // Collapse if speed drops below 60%
 		Stage2MinAbsMBs:  0.0, // Disabled (0 = no minimum)
 
