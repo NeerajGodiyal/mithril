@@ -30,7 +30,7 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/vbauerster/mpb/v8 v8.4.0
 	golang.org/x/sync v0.17.0
-	golang.org/x/sys v0.37.0
+	golang.org/x/sys v0.39.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/klog/v2 v2.100.1
 )
@@ -108,7 +108,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251226044135-bdeaafa5ef54
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251227231433-4cd06442b410
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
@@ -162,7 +162,7 @@ require (
 	golang.org/x/crypto v0.43.0
 	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
 	golang.org/x/net v0.46.0 // indirect
-	golang.org/x/term v0.36.0 // indirect
+	golang.org/x/term v0.38.0
 	golang.org/x/time v0.9.0 // indirect
 	google.golang.org/protobuf v1.36.10
 )

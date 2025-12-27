@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -121,12 +122,20 @@ func (s *shardedSetter) Stop() {
 	s.wg.Wait()
 }
 
+// ShardProgressCallback is called with (bytesDone, totalBytes) to report shard flush progress
+type ShardProgressCallback func(bytesDone, totalBytes int64)
+
 // ShardLogger manages multiple sharded log files
 type ShardLogger struct {
 	shards     []*shard
 	filePrefix string
 	wg         *sync.WaitGroup
 	flushSem   *semaphore.Weighted
+
+	// Progress tracking
+	totalBytes atomic.Int64 // total bytes written to shard logs
+	bytesDone  atomic.Int64 // bytes flushed to cache
+	onProgress ShardProgressCallback
 }
 
 // shard represents a single log shard
@@ -138,6 +147,7 @@ type shard struct {
 	logSize  int
 	ss       *shardedSetter
 	flushSem *semaphore.Weighted
+	parent   *ShardLogger // parent for progress reporting
 }
 
 // NewShardLogger creates a new ShardLogger with the specified number of
@@ -156,15 +166,31 @@ func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter) *ShardL
 
 	sl.wg.Add(numShards)
 	for i := range numShards {
-		sl.shards[i] = newShard(i, filePrefix, ss, sl.flushSem)
+		sl.shards[i] = newShard(i, filePrefix, ss, sl.flushSem, sl)
 		go sl.shards[i].processRequests(sl.wg)
 	}
 
 	return sl
 }
 
+// SetProgressCallback sets a callback to receive progress updates during shard flushes.
+// The callback receives (bytesDone, totalBytes) and is called as bytes are flushed to cache.
+func (sl *ShardLogger) SetProgressCallback(cb ShardProgressCallback) {
+	sl.onProgress = cb
+}
+
+// TotalBytes returns the total bytes written to shard logs
+func (sl *ShardLogger) TotalBytes() int64 {
+	return sl.totalBytes.Load()
+}
+
+// BytesDone returns the bytes that have been flushed to cache
+func (sl *ShardLogger) BytesDone() int64 {
+	return sl.bytesDone.Load()
+}
+
 // newShard creates a new shard with the given ID
-func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.Weighted) *shard {
+func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.Weighted, parent *ShardLogger) *shard {
 	filename := filepath.Join(filePrefix, fmt.Sprintf("%03d", id))
 	file, err := os.Create(filename)
 	if err != nil {
@@ -178,6 +204,7 @@ func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.
 		requests: make(chan shardRequest, 100),
 		ss:       ss,
 		flushSem: flushSem,
+		parent:   parent,
 	}
 
 	return s
@@ -198,17 +225,26 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 		binary.LittleEndian.PutUint64(vBytes[16:24], req.v.Offset)
 		s.writer.Write(vBytes[:24])
 
-		s.logSize += len(req.k) + vlen
+		bytesWritten := int64(len(req.k) + vlen)
+		s.logSize += int(bytesWritten)
+
+		// Track total bytes for progress reporting and notify callback
+		if s.parent != nil {
+			total := s.parent.totalBytes.Add(bytesWritten)
+			if s.parent.onProgress != nil {
+				// Notify with bytesDone=0 during streaming (before flush)
+				// The callback can use totalBytes to show indexing progress
+				s.parent.onProgress(0, total)
+			}
+		}
 	}
 }
 
 func (s *shard) flushLogToCache(ctx context.Context) error {
-	start := time.Now()
 	err := s.flushSem.Acquire(ctx, 1)
 	if err != nil {
 		return fmt.Errorf("acquiring flush semaphore: %w", err)
 	}
-	waiting := time.Now()
 	defer s.flushSem.Release(1)
 	// Close/flush
 	if err := s.writer.Flush(); err != nil {
@@ -227,6 +263,7 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 	defer file.Close()
 	reader := bufio.NewReader(file)
 	var buf [32 + vlen]byte
+	const recordSize = int64(32 + vlen)
 	for {
 		_, err := io.ReadFull(reader, buf[:32+vlen])
 		if err == io.EOF {
@@ -245,13 +282,15 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 
 		// Flush to cache
 		s.ss.EnqueueRequest(k, v)
+
+		// Track progress
+		if s.parent != nil {
+			done := s.parent.bytesDone.Add(recordSize)
+			if s.parent.onProgress != nil {
+				s.parent.onProgress(done, s.parent.totalBytes.Load())
+			}
+		}
 	}
-	mlog.Log.Infof("log shard=%d waited %s and flushed size=%.2f MiB in %s",
-		s.id,
-		waiting.Sub(start),
-		float64(s.logSize)/float64(1<<20),
-		time.Since(start),
-	)
 
 	// Truncate file and replace file/writer pointers
 	newFile, err := os.Create(filename)
@@ -273,16 +312,29 @@ func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIn
 
 // Close closes all shards and their files
 func (sl *ShardLogger) Close(ctx context.Context) error {
+	return sl.CloseWithProgress(ctx, nil)
+}
+
+// CloseWithProgress closes all shards with optional progress callback.
+// The callback is called after each shard flush completes with (completed, total) counts.
+func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(completed, total int)) error {
 	for _, s := range sl.shards {
 		close(s.requests)
 	}
 
 	sl.wg.Wait()
 
+	total := len(sl.shards)
+	var completed atomic.Int32
+
 	flushWg := &errgroup.Group{}
 	for _, s := range sl.shards {
 		flushWg.Go(func() error {
-			return s.flushLogToCache(ctx)
+			err := s.flushLogToCache(ctx)
+			if onProgress != nil {
+				onProgress(int(completed.Add(1)), total)
+			}
+			return err
 		})
 	}
 	return flushWg.Wait()

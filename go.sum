@@ -18,8 +18,8 @@ github.com/Overclock-Validator/frand v0.0.0-20251113191226-96ce04ddc1a8 h1:Q7QbI
 github.com/Overclock-Validator/frand v0.0.0-20251113191226-96ce04ddc1a8/go.mod h1:SvoqQH599ARmAzX0za/ZNvb2+2qt47ZpslDYFf4oaK0=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20250309203346-2a67ed08a105 h1:mP6FWHZ8ddcmbE8UTrVVI2Mi2c24aqX/8p12Vn6zokQ=
 github.com/Overclock-Validator/gnark-crypto v0.0.0-20250309203346-2a67ed08a105/go.mod h1:Poczuq3dbt+CwyTKgOjGaEwJOMP7YxQobF7QhgNcguk=
-github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251226044135-bdeaafa5ef54 h1:a5q75DvvOqcXauzdSWiCI3GCDE8q1Bl4PfVqAyVhwLk=
-github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251226044135-bdeaafa5ef54/go.mod h1:XbqbvMA2NKeosY0w3WdBOpCg2eYJesBjfE4cNt9HSE8=
+github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251227231433-4cd06442b410 h1:1HMKwe78KDVIhN6lENWxd6bjdMyS+WkXWid3K9PH3I8=
+github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251227231433-4cd06442b410/go.mod h1:5Ta/wyu0gfzgktCaW1N9vjSwM81Dy3tdty9ruJgBm88=
 github.com/Overclock-Validator/weightedrand v0.0.0-20251113203832-5ac028321d0a h1:tzw/MMcuueuiIXQP8eN7yDAMGuYoiebyqmw9En4CMC8=
 github.com/Overclock-Validator/weightedrand v0.0.0-20251113203832-5ac028321d0a/go.mod h1:6s4SdiWMKESRRXILwdc+t6aPtQXugAZfu14QecC2w20=
 github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044 h1:ph9gnWIY116AWT/iCfXoPe9/cn2aWx2uJBuLdf/LyEE=
@@ -449,12 +449,12 @@ golang.org/x/sys v0.0.0-20220704084225-05e143d24a9e/go.mod h1:oPkhp1MJrh7nUepCBc
 golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.0.0-20220811171246-fbc7d0a398ab/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
-golang.org/x/sys v0.37.0 h1:fdNQudmxPjkdUTPnLn5mdQv7Zwvbvpaxqs831goi9kQ=
-golang.org/x/sys v0.37.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
+golang.org/x/sys v0.39.0 h1:CvCKL8MeisomCi6qNZ+wbb0DN9E5AATixKsvNtMoMFk=
+golang.org/x/sys v0.39.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
 golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod h1:bj7SfCRtBDWHUb9snDiAeCFNEtKQo2Wmx5Cou7ajbmo=
 golang.org/x/term v0.0.0-20210927222741-03fcf44c2211/go.mod h1:jbD1KX2456YbFQfuXm/mYQcufACuNUgVhRMnK/tPxf8=
-golang.org/x/term v0.36.0 h1:zMPR+aF8gfksFprF/Nc/rd1wRS1EI6nDBGyWAvDzx2Q=
-golang.org/x/term v0.36.0/go.mod h1:Qu394IJq6V6dCBRgwqshf3mPF85AqzYEzofzRdZkWss=
+golang.org/x/term v0.38.0 h1:PQ5pkm/rLO6HnxFR7N2lJHOZX6Kez5Y1gDSJla6jo7Q=
+golang.org/x/term v0.38.0/go.mod h1:bSEAKrOT1W+VSu9TSCMtoGEOUcKxOKgl3LE5QEF/xVg=
 golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
 golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
 golang.org/x/text v0.3.6/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=

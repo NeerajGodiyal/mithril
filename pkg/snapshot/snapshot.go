@@ -129,6 +129,18 @@ func newSnapshotReader(filename string) (*tar.Reader, io.Closer, error) {
 // If filename is an HTTP URL and savePath is non-empty, the data will be saved
 // to disk while streaming (using io.TeeReader for parallel download+processing+saving).
 func newSnapshotReaderWithSave(filename string, savePath string) (*tar.Reader, io.Closer, error) {
+	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(filename, savePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Return closer, bmr is not exposed in this version
+	_ = bmr
+	return tarReader, closer, nil
+}
+
+// newSnapshotReaderWithProgress creates a tar reader and also returns the bufmonreader
+// for progress tracking. Use bufmonreader.SetProgressCallback() to receive progress updates.
+func newSnapshotReaderWithProgress(filename string, savePath string) (*tar.Reader, *bufmonreader, io.Closer, error) {
 	snapshotType := parseSnapshotType(filename)
 	var bmr *bufmonreader
 	var err error
@@ -137,19 +149,19 @@ func newSnapshotReaderWithSave(filename string, savePath string) (*tar.Reader, i
 	} else {
 		snapshotFile, err := os.Open(filename)
 		if err != nil {
-			return nil, nil, fmt.Errorf("open %s: %w", filename, err)
+			return nil, nil, nil, fmt.Errorf("open %s: %w", filename, err)
 		}
 		bmr, err = NewBufMonReaderFromFile(snapshotFile)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	reader, err := readerForCompressionType(snapshotType, bmr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening compression reader: %v", err)
+		return nil, nil, nil, fmt.Errorf("opening compression reader: %v", err)
 	}
 
-	return tar.NewReader(reader), bmr, nil
+	return tar.NewReader(reader), bmr, bmr, nil
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {

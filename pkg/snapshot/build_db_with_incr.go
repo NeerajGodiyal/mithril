@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
@@ -35,7 +36,11 @@ func BuildAccountsDbWithIncr(
 	blockDir string,
 	overcastEndpoint string,
 	snapCfg snapshotdl.SnapshotConfig,
+	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
+	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
+	cleanAccountsDbDir(accountsDbDir)
+
 	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
@@ -57,6 +62,7 @@ func BuildAccountsDbWithIncr(
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
+
 	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
@@ -203,16 +209,31 @@ func BuildAccountsDbWithIncr(
 		}
 	}
 
+	// Start progress display if provided
+	if dp != nil {
+		dp.Start()
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTarWithSave(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool)
+		err = readTarWithProgress(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool, dp)
 	}()
 	wg.Wait()
+
+	// Stop progress display after full snapshot is processed
+	if dp != nil {
+		dp.Stop()
+	}
+
 	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
 
-	mlog.Log.Infof("Closing shard logger.")
-	err = sl.Close(ctx)
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
+	indexProgress.Start(numShards)
+	err = sl.CloseWithProgress(ctx, func(completed, total int) {
+		indexProgress.Update(completed, total)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
@@ -315,8 +336,12 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, fmt.Errorf("incremental snapshot download failed after %d attempts: %w", maxIncrRetries, incrementalErr)
 	}
 
-	mlog.Log.Infof("Closing shard logger for incremental snapshot.")
-	sl.Close(ctx)
+	// Show indexing progress for incremental shard flush
+	incrIndexProgress := progress.NewIndexingProgress("Flush (incr shards)")
+	incrIndexProgress.Start(numShards)
+	sl.CloseWithProgress(ctx, func(completed, total int) {
+		incrIndexProgress.Update(completed, total)
+	})
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 

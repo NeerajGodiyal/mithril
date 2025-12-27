@@ -106,7 +106,7 @@ go build -o mithril ./cmd/mithril
 Copy the example config to get started:
 
 ```bash
-cp mithril.example.toml mithril.toml
+cp config.example.toml mithril.toml
 ```
 
 The example config comes with sensible defaults and is ready to use immediately. Key settings to review:
@@ -140,7 +140,7 @@ name = "mithril"
     # verbose = true
 ```
 
-See `mithril.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
+See `config.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
 
 ### Running verify-live
 
