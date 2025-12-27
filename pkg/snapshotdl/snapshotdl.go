@@ -164,29 +164,21 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 	}
 }
 
-// formatProbeStats formats ProbeStats for mithril's logging style
+// formatProbeStats formats ProbeStats using the full report format like solana-snapshot-finder-go
 func formatProbeStats(stats *rpc.ProbeStats, cfg config.Config) {
 	if stats == nil {
 		return
 	}
 
-	mlog.Log.Infof("=== Snapshot Node Discovery Statistics ===")
-	mlog.Log.Infof("Total nodes discovered: %d", stats.TotalNodes)
-	mlog.Log.Infof("TCP connectivity passed: %d", stats.TotalNodes-stats.TCPFailed)
-	mlog.Log.Infof("Nodes with any snapshot: %d", stats.HasAnySnapshot)
-	mlog.Log.Infof("Nodes with incremental: %d (usable: %d)", stats.WithIncremental, stats.WithUsableInc)
-
-	if cfg.MinNodeVersion != "" || len(cfg.AllowedNodeVersions) > 0 {
-		mlog.Log.Infof("After version filter: %d", stats.AfterVersionFilter)
+	// Use the library's built-in report printer for full histogram
+	filterCfg := rpc.FilterConfig{
+		MaxRTTMs:        cfg.MaxRTTMs,
+		FullThreshold:   cfg.FullThreshold,
+		IncThreshold:    cfg.IncrementalThreshold,
+		MinVersion:      cfg.MinNodeVersion,
+		AllowedVersions: cfg.AllowedNodeVersions,
 	}
-	if cfg.MaxRTTMs > 0 {
-		mlog.Log.Infof("After RTT filter (<%dms): %d", cfg.MaxRTTMs, stats.AfterRTTFilter)
-	}
-	mlog.Log.Infof("After age filters (full<%d, incr<%d slots): full=%d, incr=%d",
-		cfg.FullThreshold, cfg.IncrementalThreshold,
-		stats.AfterFullAgeFilter, stats.AfterIncAgeFilter)
-	mlog.Log.Infof("Final eligible nodes: %d", stats.Eligible)
-	mlog.Log.Infof("==========================================")
+	stats.PrintReport(filterCfg)
 }
 
 // DownloadSnapshot downloads a full snapshot from the best available RPC node.
