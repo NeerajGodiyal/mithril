@@ -1131,18 +1131,7 @@ interactive_setup() {
         fi
     fi
 
-    # Mount points
-    echo ""
-    echo "  STEP 3: Mount Points"
-    echo ""
-
-    read -r -p "  AccountsDB mount point [/mnt/mithril-accounts]: " input
-    accountsdb_mount="${input:-/mnt/mithril-accounts}"
-
-    if [[ -n "$data_disk" ]]; then
-        read -r -p "  Ledger mount point (snapshots + blockstore) [/mnt/mithril-ledger]: " input
-        data_mount="${input:-/mnt/mithril-ledger}"
-    fi
+    # Mount points use defaults: /mnt/mithril-accounts and /mnt/mithril-ledger
 
     # Summary and confirmation
     echo ""
