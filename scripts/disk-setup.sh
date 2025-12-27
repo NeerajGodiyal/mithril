@@ -420,7 +420,7 @@ create_partition_on_disk() {
     local label="$3"
     local size_gb="${4:-0}"  # 0 = use all remaining space (minus over-provisioning)
 
-    local start_gb end_gb disk_size_gb free_space_gb
+    local start_gb end_gb disk_size_gb free_space_gb next_partnum part
 
     # Get disk total size
     disk_size_gb=$(size_to_gb "$(disk_size "$disk")")
@@ -439,30 +439,30 @@ create_partition_on_disk() {
     fi
 
     # Find next partition number
-    local next_partnum
     next_partnum=$(( $(parted -s "$disk" print 2>/dev/null | grep -cE "^\s*[0-9]+") + 1 ))
 
     # All status messages go to stderr so only the partition path is returned via stdout
-    info "Creating partition on $disk..." >&2
-    echo "  Start: ${start_gb}GB, End: ${end_gb}GB" >&2
-    echo "  Over-provisioning: 20% of remaining space left unallocated" >&2
+    {
+        info "Creating partition on $disk..."
+        echo "  Start: ${start_gb}GB, End: ${end_gb}GB"
+        echo "  Over-provisioning: 20% of remaining space left unallocated"
 
-    # Create the partition
-    parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB" >&2
+        # Create the partition
+        parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB"
 
-    # Wait for partition to appear
-    sleep 1
-    partprobe "$disk" 2>/dev/null || true
-    sleep 1
+        # Wait for partition to appear
+        sleep 1
+        partprobe "$disk" 2>/dev/null || true
+        sleep 1
+    } >&2
 
-    local part
     part=$(part_path "$disk" "$next_partnum")
 
     if [[ ! -b "$part" ]]; then
         die "Failed to create partition. Expected $part but it doesn't exist."
     fi
 
-    # Format the partition
+    # Format the partition (output to stderr)
     case "$fstype" in
         ext4)
             mkfs.ext4 -F -L "$label" "$part" >&2
@@ -475,6 +475,7 @@ create_partition_on_disk() {
             ;;
     esac
 
+    # Only the partition path goes to stdout
     echo "$part"
 }
 
@@ -865,34 +866,33 @@ show_status() {
 
 format_disk() {
     local disk="$1" fstype="$2" label="$3" overprovision="${4:-20}"
+    local use_percent=$((100 - overprovision))
+    local part
 
     # All status messages go to stderr so only the partition path is returned via stdout
-    info "Formatting $disk..." >&2
+    {
+        info "Formatting $disk..."
+        echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)"
+        echo "  This improves SSD longevity and maintains consistent performance."
 
-    # Calculate partition size (leave space for over-provisioning)
-    local use_percent=$((100 - overprovision))
+        # Wipe and create GPT
+        wipefs -a "$disk"
+        parted -s "$disk" mklabel gpt
+        parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
 
-    echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)" >&2
-    echo "  This improves SSD longevity and maintains consistent performance." >&2
+        # Wait for partition to appear
+        sleep 1
+        partprobe "$disk" 2>/dev/null || true
+        sleep 1
+    } >&2
 
-    # Wipe and create GPT
-    wipefs -a "$disk" >&2
-    parted -s "$disk" mklabel gpt >&2
-    parted -s "$disk" mkpart primary 1MiB "${use_percent}%" >&2
-
-    # Wait for partition to appear
-    sleep 1
-    partprobe "$disk" 2>/dev/null || true
-    sleep 1
-
-    local part
     part=$(part_path "$disk" 1)
 
     if [[ ! -b "$part" ]]; then
         die "Failed to create partition. Expected $part but it doesn't exist."
     fi
 
-    # Format
+    # Format (output to stderr)
     case "$fstype" in
         ext4)
             mkfs.ext4 -F -L "$label" "$part" >&2
@@ -905,6 +905,7 @@ format_disk() {
             ;;
     esac
 
+    # Only the partition path goes to stdout
     echo "$part"
 }
 
