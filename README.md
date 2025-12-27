@@ -21,7 +21,7 @@ The `verify-live` command allows Mithril to bootstrap from a Solana snapshot and
 - We haven't extensively tested a wide range of hardware yet - join the `#mithril-hardware` channel on the [Overclock Validator Discord](https://discord.gg/KHAs9ujrN8) to discuss hardware configurations
 
 **Storage**
-- Minimum 1 TB PCIe 4.0 NVMe SSD (more is better)
+- Minimum 1 TB PCIe 4.0 NVMe SSD (more storage is better)
 - Two NVMe drives preferable for optimal performance:
   - **Fast NVMe**: Mithril's AccountsDB (requires high IOPS)
   - **Secondary NVMe**: Block storage and snapshots (can be slower)
@@ -87,7 +87,13 @@ go build -o mithril ./cmd/mithril
 
 ### Configuration
 
-Create your configuration file by copying the example:
+If you used the setup scripts, copy the starter config which has the default paths pre-configured:
+
+```bash
+cp mithril.starter.toml mithril.toml
+```
+
+Or copy the example config for more customization options:
 
 ```bash
 cp mithril.example.toml mithril.toml
