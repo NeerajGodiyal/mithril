@@ -162,6 +162,7 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 		MaxFullSnapshots:     sc.MaxFullSnapshots,
 		DeleteOldSnapshots:   sc.DeleteOldSnapshots,
 		SafetyMarginSlots:    sc.SafetyMarginSlots,
+		Quiet:                true, // Mithril prints its own summary
 	}
 }
 
