@@ -789,7 +789,7 @@ show_status() {
     if [[ "$root_disk" == "none" ]]; then
         echo "Mode: Rescue/Live (no physical root disk)"
     else
-        echo "Root disk: $root_disk (will never be modified)"
+        echo "Root disk: $root_disk (OS - existing partitions preserved)"
     fi
     echo ""
 
