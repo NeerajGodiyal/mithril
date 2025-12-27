@@ -368,6 +368,112 @@ size_to_gb() {
 # Minimum size for AccountsDB in GB (currently ~500GB, reserve 700GB to be safe)
 MIN_ACCOUNTSDB_SIZE_GB=700
 
+# Get unallocated (free) space on a disk in GB
+# Returns the largest contiguous free space
+get_disk_free_space_gb() {
+    local disk="$1"
+
+    # Use parted to find free space
+    # parted output example: "1049kB  500GB  500GB  Free Space"
+    local free_space
+    free_space=$(parted -s "$disk" unit GB print free 2>/dev/null | \
+        grep -i "free space" | \
+        awk '{print $3}' | \
+        sed 's/GB//' | \
+        sort -rn | \
+        head -1)
+
+    if [[ -z "$free_space" ]]; then
+        echo "0"
+    else
+        # Round to integer
+        printf "%.0f" "$free_space"
+    fi
+}
+
+# Get the end position of the last partition in GB (for creating new partition)
+get_last_partition_end_gb() {
+    local disk="$1"
+
+    local end_pos
+    end_pos=$(parted -s "$disk" unit GB print 2>/dev/null | \
+        grep -E "^\s*[0-9]+" | \
+        tail -1 | \
+        awk '{print $3}' | \
+        sed 's/GB//')
+
+    if [[ -z "$end_pos" ]]; then
+        echo "1"  # Start at 1GB if no partitions
+    else
+        printf "%.0f" "$end_pos"
+    fi
+}
+
+# Create a partition on existing disk (without wiping)
+# Returns the new partition path
+create_partition_on_disk() {
+    local disk="$1"
+    local fstype="$2"
+    local label="$3"
+    local size_gb="${4:-0}"  # 0 = use all remaining space (minus over-provisioning)
+
+    local start_gb end_gb disk_size_gb free_space_gb
+
+    # Get disk total size
+    disk_size_gb=$(size_to_gb "$(disk_size "$disk")")
+
+    # Get where to start (after last partition)
+    start_gb=$(get_last_partition_end_gb "$disk")
+
+    # Calculate end position
+    if [[ "$size_gb" -eq 0 ]]; then
+        # Use 80% of remaining space (20% over-provisioning)
+        free_space_gb=$((disk_size_gb - start_gb))
+        local usable_gb=$((free_space_gb * 80 / 100))
+        end_gb=$((start_gb + usable_gb))
+    else
+        end_gb=$((start_gb + size_gb))
+    fi
+
+    # Find next partition number
+    local next_partnum
+    next_partnum=$(( $(parted -s "$disk" print 2>/dev/null | grep -cE "^\s*[0-9]+") + 1 ))
+
+    info "Creating partition on $disk..."
+    echo "  Start: ${start_gb}GB, End: ${end_gb}GB"
+    echo "  Over-provisioning: 20% of remaining space left unallocated"
+
+    # Create the partition
+    parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB"
+
+    # Wait for partition to appear
+    sleep 1
+    partprobe "$disk" 2>/dev/null || true
+    sleep 1
+
+    local part
+    part=$(part_path "$disk" "$next_partnum")
+
+    if [[ ! -b "$part" ]]; then
+        die "Failed to create partition. Expected $part but it doesn't exist."
+    fi
+
+    # Format the partition
+    case "$fstype" in
+        ext4)
+            mkfs.ext4 -F -L "$label" "$part"
+            ;;
+        xfs)
+            mkfs.xfs -f -L "$label" "$part"
+            ;;
+        *)
+            die "Unknown filesystem: $fstype"
+            ;;
+    esac
+
+    echo "$part"
+}
+
 run_benchmarks() {
     info "Benchmarking NVMe drives..."
     echo ""
@@ -856,36 +962,90 @@ interactive_setup() {
         available_disks+=("$disk")
     done
 
+    # Handle single-drive scenario (only the OS disk is available)
+    local single_drive_mode=false
+    local root_free_space_gb=0
+
     if [[ ${#available_disks[@]} -eq 0 ]]; then
-        die "No non-root NVMe drives available for setup"
-    fi
+        if [[ "$root_disk" == "none" ]]; then
+            die "No NVMe drives detected and no root disk. Cannot proceed."
+        fi
 
-    echo "  Available NVMe drives for Mithril:"
-    for disk in "${available_disks[@]}"; do
-        local info
-        info=$(disk_info "$disk")
-        local mounted=""
-        disk_has_mounts "$disk" && mounted=" ${YELLOW}(HAS MOUNTED PARTITIONS)${NC}"
-        echo -e "    $disk: $info$mounted"
-    done
-    echo ""
+        # Check for free space on root disk
+        root_free_space_gb=$(get_disk_free_space_gb "$root_disk")
 
-    if yesno "  Would you like to run benchmarks first to find the fastest drive?" "y"; then
-        run_benchmarks
+        if [[ "$root_free_space_gb" -lt 100 ]]; then
+            die "No non-root NVMe drives available and root disk has insufficient free space (${root_free_space_gb}GB < 100GB minimum)."
+        fi
+
+        single_drive_mode=true
+
         echo ""
+        echo -e "  ${YELLOW}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "  ${YELLOW}║                    SINGLE-DRIVE MODE DETECTED                        ║${NC}"
+        echo -e "  ${YELLOW}╠═══════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "  ${YELLOW}║${NC}  Your only NVMe drive ($root_disk) contains the OS.                   ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}  Free space available: ${root_free_space_gb}GB                                          ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}                                                                       ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}  This script can create partitions for Mithril on the same drive.    ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}                                                                       ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║  ⚠  IMPORTANT NOTES:                                                   ║${NC}"
+        echo -e "  ${YELLOW}║${NC}    • I/O will be shared with the OS (slightly reduced performance)   ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}    • This script assumes Ubuntu - errors may occur on other distros  ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}║${NC}    • OS partitions will NOT be touched - only free space is used     ${YELLOW}║${NC}"
+        echo -e "  ${YELLOW}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+
+        if ! yesno "  Create Mithril partitions on $root_disk using ${root_free_space_gb}GB free space?" "y"; then
+            echo ""
+            echo "  Alternatives:"
+            echo "    1. Add another NVMe drive for dedicated Mithril storage"
+            echo "    2. Manually partition using: fdisk $root_disk"
+            echo "    3. Use existing directories without dedicated partitions"
+            echo ""
+            die "Setup cancelled. Re-run when ready."
+        fi
+    else
+        echo "  Available NVMe drives for Mithril:"
+        for disk in "${available_disks[@]}"; do
+            local info
+            info=$(disk_info "$disk")
+            local mounted=""
+            disk_has_mounts "$disk" && mounted=" ${YELLOW}(HAS MOUNTED PARTITIONS)${NC}"
+            echo -e "    $disk: $info$mounted"
+        done
+        echo ""
+
+        if yesno "  Would you like to run benchmarks first to find the fastest drive?" "y"; then
+            run_benchmarks
+            echo ""
+        fi
     fi
 
     # Configuration collection
     local accountsdb_disk="" accountsdb_mount="/mnt/mithril-accounts"
     local data_disk="" data_mount="/mnt/mithril-ledger"
     local accountsdb_fstype="" data_fstype=""
+    local use_root_partition=false
 
     echo ""
     echo "  STEP 1: AccountsDB Drive (most important - needs fastest drive)"
     echo ""
 
-    if [[ ${#available_disks[@]} -eq 1 ]]; then
-        echo "  Only one drive available: ${available_disks[0]}"
+    if $single_drive_mode; then
+        # Single-drive mode - create partition on root disk
+        use_root_partition=true
+        accountsdb_disk="$root_disk"
+
+        echo "  Creating partition on OS disk: $root_disk"
+        echo "  Free space: ${root_free_space_gb}GB"
+        echo ""
+
+        # For single-drive, recommend ext4 for simplicity
+        echo "  Filesystem recommendation: ext4 (safer for mixed OS/data workload)"
+        accountsdb_fstype=$(ask_filesystem "$root_disk" "general")
+    elif [[ ${#available_disks[@]} -eq 1 ]]; then
+        echo "  Only one non-OS drive available: ${available_disks[0]}"
         echo "  AccountsDB, snapshots, and blockstore will share this drive."
         accountsdb_disk="${available_disks[0]}"
 
@@ -980,7 +1140,11 @@ interactive_setup() {
         printf "  │ AccountsDB:  %-58s │\n" "$accountsdb_disk -> $accountsdb_mount"
         printf "  │              %-58s │\n" "Model: $adb_model"
         printf "  │              %-58s │\n" "Filesystem: $accountsdb_fstype"
-        echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        if $use_root_partition; then
+            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}             │"
+        else
+            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+        fi
     else
         echo "  │ AccountsDB:  (skipped - using existing)                                │"
     fi
@@ -1034,19 +1198,33 @@ interactive_setup() {
     fi
 
     # Final confirmation
-    local disks_to_erase=""
-    [[ -n "$accountsdb_disk" ]] && disks_to_erase="$accountsdb_disk"
-    [[ -n "$data_disk" ]] && disks_to_erase="$disks_to_erase $data_disk"
-
-    confirm_destructive "ERASE${disks_to_erase}"
+    if $use_root_partition; then
+        confirm_destructive "PARTITION ${root_disk}"
+    else
+        local disks_to_erase=""
+        [[ -n "$accountsdb_disk" ]] && disks_to_erase="$accountsdb_disk"
+        [[ -n "$data_disk" ]] && disks_to_erase="$disks_to_erase $data_disk"
+        confirm_destructive "ERASE${disks_to_erase}"
+    fi
 
     # Execute setup
     info "Starting disk setup..."
 
-    # Format AccountsDB disk
+    # Format/partition AccountsDB disk
     if [[ -n "$accountsdb_disk" ]]; then
         local accountsdb_part
-        accountsdb_part=$(format_disk "$accountsdb_disk" "$accountsdb_fstype" "accountsdb")
+
+        if $use_root_partition; then
+            # Single-drive mode: create partition on OS disk (don't wipe it!)
+            echo ""
+            echo -e "  ${YELLOW}Creating partition on OS disk...${NC}"
+            echo "  This may take a moment. Do NOT interrupt."
+            echo ""
+            accountsdb_part=$(create_partition_on_disk "$accountsdb_disk" "$accountsdb_fstype" "mithril")
+        else
+            # Normal mode: format entire disk
+            accountsdb_part=$(format_disk "$accountsdb_disk" "$accountsdb_fstype" "accountsdb")
+        fi
 
         mkdir -p "$accountsdb_mount"
         mount "$accountsdb_part" "$accountsdb_mount"
@@ -1059,7 +1237,11 @@ interactive_setup() {
             mkdir -p "$accountsdb_mount/blockstore"
         fi
 
-        success "AccountsDB drive configured: $accountsdb_disk -> $accountsdb_mount ($accountsdb_fstype)"
+        if $use_root_partition; then
+            success "Mithril partition created on OS disk: $accountsdb_part -> $accountsdb_mount ($accountsdb_fstype)"
+        else
+            success "AccountsDB drive configured: $accountsdb_disk -> $accountsdb_mount ($accountsdb_fstype)"
+        fi
     fi
 
     # Format data disk
