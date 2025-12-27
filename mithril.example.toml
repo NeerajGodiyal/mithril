@@ -12,7 +12,7 @@
 # name = "mithril1"
 
 # Path for downloads (e.g. snapshots) and other temp state
-# scratch_directory = "/tmp"
+# scratch_directory = "/mnt/mithril-ledger"
 
 # ============================================================================
 # [ledger] - Ledger and storage paths
@@ -20,13 +20,13 @@
 
 [ledger]
     # Path containing slot.json files (block data)
-    # path = "/tmp/blocks"
+    # path = "/mnt/mithril-ledger/blockstore"
 
     # Output path for writing AccountsDB data to
-    # accounts_path = "/mnt/mithril-accounts"
+    # accounts_path = "/mnt/mithril-accounts/accountsdb"
 
     # Path of full snapshot or AccountsDB to load from (verifier mode)
-    # snapshot_archive_path = "/path/to/snapshot-or-accountsdb"
+    # snapshot_archive_path = "/mnt/mithril-ledger/snapshots"
 
     # Filename containing incremental snapshot
     # incremental_snapshot = ""
@@ -129,7 +129,7 @@
 
 [snapshot]
     # Path to download snapshot to (only used if save_to_disk = true)
-    # download_path = ""
+    # download_path = "/mnt/mithril-ledger/snapshots"
 
     # Save snapshots to disk while streaming (requires download_path)
     # When true: streams from network while saving to disk and processing (parallel)
