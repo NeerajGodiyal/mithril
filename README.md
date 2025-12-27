@@ -58,7 +58,15 @@ The scripts create the following directory structure (following Agave convention
     └── snapshots/
 ```
 
-**Step 3: Install Go 1.25 or later**
+**Step 3: Install build dependencies**
+
+Mithril requires a C compiler for CGO dependencies:
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential
+```
+
+**Step 4: Install Go 1.25 or later**
 
 Go 1.25 introduced the "green tea" garbage collector improvements which provide better performance for memory-intensive applications like Mithril.
 
@@ -79,7 +87,7 @@ source ~/.bashrc
 go version
 ```
 
-**Step 4: Build Mithril**
+**Step 5: Build Mithril**
 
 ```bash
 go build -o mithril ./cmd/mithril
