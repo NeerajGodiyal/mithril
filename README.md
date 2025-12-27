@@ -54,20 +54,17 @@ We provide helper scripts for setting up your system. See the [scripts documenta
 Go 1.25 introduced the "green tea" garbage collector improvements which provide better performance for memory-intensive applications like Mithril.
 
 ```bash
-# Determine your architecture
-ARCH=$(uname -m)
-if [ "$ARCH" = "x86_64" ]; then
-    GOARCH="amd64"
-elif [ "$ARCH" = "aarch64" ]; then
-    GOARCH="arm64"
-else
-    echo "Unsupported architecture: $ARCH"
-    exit 1
-fi
+# Set Go version and detect architecture
+GO_VERSION="1.25.0"
+case $(uname -m) in
+    x86_64)  GOARCH="amd64" ;;
+    aarch64) GOARCH="arm64" ;;
+    *) echo "Unsupported architecture"; exit 1 ;;
+esac
 
-# Download and install Go 1.25
-wget https://go.dev/dl/go1.25.0.linux-${GOARCH}.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.0.linux-${GOARCH}.tar.gz
+# Download and install
+wget "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
 source ~/.bashrc
 go version
