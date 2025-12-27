@@ -1650,16 +1650,17 @@ main() {
         fi
 
         echo ""
+        if yesno "Show Go runtime tuning recommendations?" y; then
+            show_go_tuning
+        fi
+
+        echo ""
         echo "=== EXPERIMENTAL OPTIMIZATIONS ==="
+        echo "(These options trade safety for performance - use with caution)"
         echo ""
 
         if yesno "Configure advanced ext4 mount options? (barrier=0, data=writeback - RISKY)"; then
             configure_advanced_mount_options
-        fi
-
-        echo ""
-        if yesno "Show Go runtime tuning recommendations?" y; then
-            show_go_tuning
         fi
     fi
 
