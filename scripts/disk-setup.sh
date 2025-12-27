@@ -412,15 +412,18 @@ get_last_partition_end_gb() {
     fi
 }
 
+# Global variable set by format functions (avoids command substitution stdout issues)
+FORMATTED_PARTITION=""
+
 # Create a partition on existing disk (without wiping)
-# Returns the new partition path via stdout (all status goes to stderr)
+# Sets FORMATTED_PARTITION to the new partition path
 create_partition_on_disk() {
     local disk="$1"
     local fstype="$2"
     local label="$3"
     local size_gb="${4:-0}"  # 0 = use all remaining space (minus over-provisioning)
 
-    local start_gb end_gb disk_size_gb free_space_gb next_partnum part
+    local start_gb end_gb disk_size_gb free_space_gb next_partnum
 
     # Get disk total size
     disk_size_gb=$(size_to_gb "$(disk_size "$disk")")
@@ -441,42 +444,37 @@ create_partition_on_disk() {
     # Find next partition number
     next_partnum=$(( $(parted -s "$disk" print 2>/dev/null | grep -cE "^\s*[0-9]+") + 1 ))
 
-    # All status messages go to stderr so only the partition path is returned via stdout
-    {
-        info "Creating partition on $disk..."
-        echo "  Start: ${start_gb}GB, End: ${end_gb}GB"
-        echo "  Over-provisioning: 20% of remaining space left unallocated"
+    info "Creating partition on $disk..."
+    echo "  Start: ${start_gb}GB, End: ${end_gb}GB"
+    echo "  Over-provisioning: 20% of remaining space left unallocated"
 
-        # Create the partition
-        parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB"
+    # Create the partition
+    parted -s "$disk" mkpart primary "${start_gb}GB" "${end_gb}GB"
 
-        # Wait for partition to appear
-        sleep 1
-        partprobe "$disk" 2>/dev/null || true
-        sleep 1
-    } >&2
+    # Wait for partition to appear
+    sleep 1
+    partprobe "$disk" 2>/dev/null || true
+    sleep 1
 
-    part=$(part_path "$disk" "$next_partnum")
+    FORMATTED_PARTITION=$(part_path "$disk" "$next_partnum")
 
-    if [[ ! -b "$part" ]]; then
-        die "Failed to create partition. Expected $part but it doesn't exist."
+    if [[ ! -b "$FORMATTED_PARTITION" ]]; then
+        die "Failed to create partition. Expected $FORMATTED_PARTITION but it doesn't exist."
     fi
 
-    # Format the partition (output to stderr)
+    # Format the partition
+    info "Formatting $FORMATTED_PARTITION with $fstype..."
     case "$fstype" in
         ext4)
-            mkfs.ext4 -F -L "$label" "$part" >&2
+            mkfs.ext4 -F -L "$label" "$FORMATTED_PARTITION"
             ;;
         xfs)
-            mkfs.xfs -f -L "$label" "$part" >&2
+            mkfs.xfs -f -L "$label" "$FORMATTED_PARTITION"
             ;;
         *)
             die "Unknown filesystem: $fstype"
             ;;
     esac
-
-    # Only the partition path goes to stdout
-    echo "$part"
 }
 
 run_benchmarks() {
@@ -864,49 +862,45 @@ show_status() {
 # Setup
 # ------------------------------------------------------------------------------
 
+# Format entire disk (wipes all data)
+# Sets FORMATTED_PARTITION to the new partition path
 format_disk() {
     local disk="$1" fstype="$2" label="$3" overprovision="${4:-20}"
     local use_percent=$((100 - overprovision))
-    local part
 
-    # All status messages go to stderr so only the partition path is returned via stdout
-    {
-        info "Formatting $disk..."
-        echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)"
-        echo "  This improves SSD longevity and maintains consistent performance."
+    info "Formatting $disk..."
+    echo "  Over-provisioning: ${overprovision}% unallocated (${use_percent}% usable)"
+    echo "  This improves SSD longevity and maintains consistent performance."
 
-        # Wipe and create GPT
-        wipefs -a "$disk"
-        parted -s "$disk" mklabel gpt
-        parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
+    # Wipe and create GPT
+    wipefs -a "$disk"
+    parted -s "$disk" mklabel gpt
+    parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
 
-        # Wait for partition to appear
-        sleep 1
-        partprobe "$disk" 2>/dev/null || true
-        sleep 1
-    } >&2
+    # Wait for partition to appear
+    sleep 1
+    partprobe "$disk" 2>/dev/null || true
+    sleep 1
 
-    part=$(part_path "$disk" 1)
+    FORMATTED_PARTITION=$(part_path "$disk" 1)
 
-    if [[ ! -b "$part" ]]; then
-        die "Failed to create partition. Expected $part but it doesn't exist."
+    if [[ ! -b "$FORMATTED_PARTITION" ]]; then
+        die "Failed to create partition. Expected $FORMATTED_PARTITION but it doesn't exist."
     fi
 
-    # Format (output to stderr)
+    # Format the partition
+    info "Formatting $FORMATTED_PARTITION with $fstype..."
     case "$fstype" in
         ext4)
-            mkfs.ext4 -F -L "$label" "$part" >&2
+            mkfs.ext4 -F -L "$label" "$FORMATTED_PARTITION"
             ;;
         xfs)
-            mkfs.xfs -f -L "$label" "$part" >&2
+            mkfs.xfs -f -L "$label" "$FORMATTED_PARTITION"
             ;;
         *)
             die "Unknown filesystem: $fstype"
             ;;
     esac
-
-    # Only the partition path goes to stdout
-    echo "$part"
 }
 
 ask_filesystem() {
@@ -1305,19 +1299,20 @@ interactive_setup() {
 
     # Format/partition AccountsDB disk
     if [[ -n "$accountsdb_disk" ]]; then
-        local accountsdb_part
-
         if [[ "$accountsdb_disk" == "$root_disk" ]]; then
             # OS drive - create partition instead of wiping
             echo ""
             echo -e "  ${YELLOW}Creating partition on OS disk for AccountsDB...${NC}"
             echo "  This may take a moment. Do NOT interrupt."
             echo ""
-            accountsdb_part=$(create_partition_on_disk "$accountsdb_disk" "$accountsdb_fstype" "mithril")
+            create_partition_on_disk "$accountsdb_disk" "$accountsdb_fstype" "mithril"
         else
             # Normal mode: format entire disk
-            accountsdb_part=$(format_disk "$accountsdb_disk" "$accountsdb_fstype" "accountsdb")
+            format_disk "$accountsdb_disk" "$accountsdb_fstype" "accountsdb"
         fi
+
+        # FORMATTED_PARTITION is set by the format functions
+        local accountsdb_part="$FORMATTED_PARTITION"
 
         mkdir -p "$accountsdb_mount"
         mount "$accountsdb_part" "$accountsdb_mount"
@@ -1338,19 +1333,20 @@ interactive_setup() {
 
     # Format data disk
     if [[ -n "$data_disk" ]]; then
-        local data_part
-
         if [[ "$data_disk" == "$root_disk" ]]; then
             # OS drive - create partition instead of wiping
             echo ""
             echo -e "  ${YELLOW}Creating partition on OS disk for snapshots/blockstore...${NC}"
             echo "  This may take a moment. Do NOT interrupt."
             echo ""
-            data_part=$(create_partition_on_disk "$data_disk" "$data_fstype" "ledger")
+            create_partition_on_disk "$data_disk" "$data_fstype" "ledger"
         else
             # Normal mode: format entire disk
-            data_part=$(format_disk "$data_disk" "$data_fstype" "blockstore")
+            format_disk "$data_disk" "$data_fstype" "blockstore"
         fi
+
+        # FORMATTED_PARTITION is set by the format functions
+        local data_part="$FORMATTED_PARTITION"
 
         mkdir -p "$data_mount"
         mount "$data_part" "$data_mount"
