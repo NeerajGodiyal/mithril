@@ -764,25 +764,26 @@ ask_filesystem() {
     local model
     model=$(disk_model "$disk")
 
-    echo ""
-    echo "  Filesystem for $disk ($model):"
-    echo ""
-    echo "    ext4: Mature, widely supported"
-    echo "          + Better for small random I/O (like AccountsDB)"
-    echo "          + Can shrink partitions offline"
-    echo "          + Safer default choice"
-    echo ""
-    echo "    xfs:  High-performance for parallel/sequential I/O"
-    echo "          + May be better for snapshots/blockstore"
-    echo "          - Cannot shrink (must reformat to resize down)"
-    echo ""
+    # All prompts go to stderr so they don't get captured in command substitution
+    echo "" >&2
+    echo "  Filesystem for $disk ($model):" >&2
+    echo "" >&2
+    echo "    ext4: Mature, widely supported" >&2
+    echo "          + Better for small random I/O (like AccountsDB)" >&2
+    echo "          + Can shrink partitions offline" >&2
+    echo "          + Safer default choice" >&2
+    echo "" >&2
+    echo "    xfs:  High-performance for parallel/sequential I/O" >&2
+    echo "          + May be better for snapshots/blockstore" >&2
+    echo "          - Cannot shrink (must reformat to resize down)" >&2
+    echo "" >&2
 
     if [[ "$purpose" == "accountsdb" ]]; then
-        echo "  For AccountsDB (random I/O): ext4 recommended"
+        echo "  For AccountsDB (random I/O): ext4 recommended" >&2
     elif [[ "$purpose" == "data" ]]; then
-        echo "  For snapshots/blockstore (sequential I/O): xfs may have edge"
+        echo "  For snapshots/blockstore (sequential I/O): xfs may have edge" >&2
     fi
-    echo ""
+    echo "" >&2
 
     local choice
     while true; do
@@ -794,7 +795,7 @@ ask_filesystem() {
             ext4|1) echo "ext4"; return ;;
             xfs|2)  echo "xfs"; return ;;
             *)
-                echo "  Invalid choice '$choice'. Please enter 'ext4' or 'xfs'."
+                echo "  Invalid choice '$choice'. Please enter 'ext4' or 'xfs'." >&2
                 ;;
         esac
     done
