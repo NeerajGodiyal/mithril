@@ -2,7 +2,9 @@
 
 Mithril is a Solana full node client written in Golang with the goal of serving as a "verifying full node" with lower hardware requirements than that of Solana validators and RPC nodes. This project is being developed upon the foundations of [Radiance](https://github.com/firedancer-io/radiance), which was built by Richard Patel (@ripatel) with contributions from @leoluk.
 
-This project is under active development. We are completing an audit with Runtime Verification and you can expect a more polished and feature-rich Alpha release in early Q1 2026. Until then, all code is likely to be incomplete, buggy, and/or improperly tested at any particular point in time. Please check the dev branch for the latest version of the codebase.
+This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release in early Q1 2026.
+
+While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the dev branch for the latest updates.
 
 ---
 
@@ -29,7 +31,7 @@ The `verify-live` command allows Mithril to bootstrap from a Solana snapshot and
 - **Filesystem**: We are still testing optimal filesystem configurations (xfs vs ext4) - more guidance coming soon
 
 **Network**
-- Mithril works on home internet connections
+- Mithril works on a home internet connections
 - Slower internet speeds will result in longer snapshot download times
 - The integrated snapshot finder automatically selects the fastest available snapshot source
 
@@ -47,12 +49,12 @@ cd mithril
 We provide helper scripts for setting up your system. See the [scripts documentation](scripts/README.md) for a detailed walkthrough:
 - **Server Setup** - Fresh Ubuntu install (rescue mode) or security hardening (existing Ubuntu)
 - **Disk Setup** - Benchmark NVMe drives, format with optimal settings, reset Mithril data
-- **Performance Tuning** - Kernel settings, I/O scheduler, CPU optimization
+- **Performance Tuning** - Kernel settings, CPU optimization, etc.
 
 The scripts create the following directory structure (following Agave conventions):
 
 ```
-/mnt/mithril-accounts/   # AccountsDB (needs high IOPS - use fastest drive)
+/mnt/mithril-accounts/   # AccountsDB (needs higher random IOPS - use fastest drive)
 /mnt/mithril-ledger/     # Blockstore and snapshots (can use slower drive)
     ├── blockstore/
     └── snapshots/
