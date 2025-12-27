@@ -122,11 +122,18 @@ func parseSnapshotType(snapshotFileName string) int {
 }
 
 func newSnapshotReader(filename string) (*tar.Reader, io.Closer, error) {
+	return newSnapshotReaderWithSave(filename, "")
+}
+
+// newSnapshotReaderWithSave creates a tar reader for a snapshot file or HTTP URL.
+// If filename is an HTTP URL and savePath is non-empty, the data will be saved
+// to disk while streaming (using io.TeeReader for parallel download+processing+saving).
+func newSnapshotReaderWithSave(filename string, savePath string) (*tar.Reader, io.Closer, error) {
 	snapshotType := parseSnapshotType(filename)
 	var bmr *bufmonreader
 	var err error
 	if strings.HasPrefix(filename, "https://") || strings.HasPrefix(filename, "http://") {
-		bmr, err = NewBufMonReaderHTTP(filename)
+		bmr, err = NewBufMonReaderHTTPWithSave(filename, savePath)
 	} else {
 		snapshotFile, err := os.Open(filename)
 		if err != nil {
