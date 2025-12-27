@@ -119,7 +119,16 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 cleanup() {
     rm -f /tmp/mithril_bench_* 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+# Handle Ctrl+C gracefully
+interrupt_handler() {
+    echo ""
+    echo "Interrupted."
+    cleanup
+    exit 130
+}
+trap cleanup EXIT
+trap interrupt_handler INT TERM
 
 # Spinner for long-running operations
 spinner() {
