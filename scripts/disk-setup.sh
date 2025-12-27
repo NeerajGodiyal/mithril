@@ -138,6 +138,37 @@ check_root() {
     [[ $EUID -eq 0 ]] || die "This script must be run as root. Try: sudo $0"
 }
 
+# Check and install required dependencies for disk operations
+check_disk_deps() {
+    local missing=()
+
+    # Check for required commands
+    command -v parted >/dev/null 2>&1 || missing+=("parted")
+    command -v wipefs >/dev/null 2>&1 || missing+=("util-linux")  # wipefs is in util-linux
+    command -v mkfs.ext4 >/dev/null 2>&1 || missing+=("e2fsprogs")
+    command -v mkfs.xfs >/dev/null 2>&1 || missing+=("xfsprogs")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo ""
+        warn "Missing required tools: ${missing[*]}"
+        echo ""
+        echo "These tools are needed for disk formatting operations."
+        echo ""
+
+        if yesno "Install missing dependencies now?"; then
+            echo ""
+            info "Installing: ${missing[*]}..."
+            if apt-get update -qq && apt-get install -y -qq "${missing[@]}"; then
+                info "Dependencies installed successfully."
+            else
+                die "Failed to install dependencies. Please install manually: sudo apt install ${missing[*]}"
+            fi
+        else
+            die "Cannot proceed without required tools. Install with: sudo apt install ${missing[*]}"
+        fi
+    fi
+}
+
 yesno() {
     local prompt="$1" default="${2:-n}"
     local hint="[y/N]"
@@ -669,10 +700,18 @@ ask_filesystem() {
     fi
     echo ""
 
-    select fs in "ext4 (recommended)" "xfs"; do
-        case "$fs" in
-            "ext4"*) echo "ext4"; return ;;
-            "xfs"*)  echo "xfs"; return ;;
+    local choice
+    while true; do
+        read -r -p "Enter filesystem (ext4/xfs) [ext4]: " choice
+        choice="${choice:-ext4}"  # Default to ext4
+        choice="${choice,,}"      # Lowercase
+
+        case "$choice" in
+            ext4|1) echo "ext4"; return ;;
+            xfs|2)  echo "xfs"; return ;;
+            *)
+                echo "  Invalid choice '$choice'. Please enter 'ext4' or 'xfs'."
+                ;;
         esac
     done
 }
@@ -1175,6 +1214,7 @@ main() {
             ;;
         --setup)
             check_root
+            check_disk_deps
             interactive_setup
             ;;
         --delete-accountsdb)
