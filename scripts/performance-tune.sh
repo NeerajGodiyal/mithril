@@ -1614,7 +1614,7 @@ main() {
         echo "Run with --help to see available options."
         echo ""
 
-        echo "=== BASIC OPTIMIZATIONS ==="
+        echo "=== RECOMMENDED OPTIMIZATIONS ==="
         echo ""
 
         if yesno "Enable weekly SSD TRIM?" y; then
@@ -1632,10 +1632,6 @@ main() {
         if yesno "Configure noatime mount option?" y; then
             apply_noatime
         fi
-
-        echo ""
-        echo "=== ADVANCED OPTIMIZATIONS ==="
-        echo ""
 
         if yesno "Configure I/O scheduler for NVMe?"; then
             set_io_scheduler
