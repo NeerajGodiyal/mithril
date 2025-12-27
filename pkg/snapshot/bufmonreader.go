@@ -11,13 +11,17 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
+// ProgressCallback is called with (bytesRead, totalBytes) to report download progress
+type ProgressCallback func(bytesRead, totalBytes int64)
+
 type bufmonreader struct {
-	name      string
-	b         io.Reader
-	c         io.Closer
-	bytesRead int64
-	totalSize int64
-	startTime time.Time
+	name       string
+	b          io.Reader
+	c          io.Closer
+	bytesRead  int64
+	totalSize  int64
+	startTime  time.Time
+	onProgress ProgressCallback
 }
 
 const gib = 1 << 30
@@ -115,12 +119,27 @@ func (mc *multiCloser) Close() error {
 	return firstErr
 }
 
+// SetProgressCallback sets an optional callback to receive progress updates.
+// The callback is invoked on each Read() with (bytesRead, totalBytes).
+func (x *bufmonreader) SetProgressCallback(cb ProgressCallback) {
+	x.onProgress = cb
+}
+
+// TotalSize returns the total size of the data being read
+func (x *bufmonreader) TotalSize() int64 {
+	return x.totalSize
+}
+
 func (x *bufmonreader) Read(p []byte) (int, error) {
 	n, err := x.b.Read(p)
 	before := x.bytesRead
 	x.bytesRead += int64(n)
 
-	if (x.bytesRead / gib) > (before / gib) {
+	// Call progress callback if set
+	if x.onProgress != nil {
+		x.onProgress(x.bytesRead, x.totalSize)
+	} else if (x.bytesRead / gib) > (before / gib) {
+		// Fallback to logging every GiB if no callback is set
 		percentComplete := float64(x.bytesRead) / float64(x.totalSize) * 100
 
 		elapsed := time.Since(x.startTime)

@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
@@ -572,6 +573,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 func runVerifyLive(c *cobra.Command, args []string) {
 	ctx := c.Context()
+
+	// Print the Mithril banner
+	progress.PrintBanner()
+
 	logVCSInfo()
 	snapshotDownloadPath := scratchDirectory
 
@@ -605,11 +610,22 @@ func runVerifyLive(c *cobra.Command, args []string) {
 	mlog.Log.Infof("using RPC endpoint: %s", rpcEndpoints[0])
 	mlog.Log.Infof("discovering best snapshot source...")
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotURL, _, fullSnapshotSlot, err := snapshotdl.GetSnapshotURL(rpcEndpoints[0], snapCfg)
+	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
 	if err != nil {
 		klog.Fatalf("error getting snapshot URL: %s", err)
 	}
-	mlog.Log.Infof("found snapshot URL in %s: %s", time.Since(fullSnapshotDlStart), fullSnapshotURL)
+	fullSnapshotURL := fullSnapshotInfo.URL
+	fullSnapshotSlot := fullSnapshotInfo.Slot
+
+	// Print a clean summary of the selected snapshot source
+	progress.PrintSnapshotSourceSummary(
+		fullSnapshotInfo.NodeIP,
+		fullSnapshotInfo.Slot,
+		fullSnapshotInfo.ReferenceSlot,
+		fullSnapshotInfo.NodeVersion,
+		fullSnapshotInfo.SpeedMBs,
+		time.Since(fullSnapshotDlStart),
+	)
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
 	var overcastAddr string
@@ -617,7 +633,10 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg)
+	// Create progress display for snapshot download and AccountsDB build
+	dp := progress.NewDualProgress()
+
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}

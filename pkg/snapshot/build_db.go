@@ -16,6 +16,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/panjf2000/ants/v2"
 
@@ -27,6 +28,24 @@ const (
 	maxIndexEntryBuilder   = 500
 	maxAppendVecCopying    = 500
 )
+
+// cleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
+// This prevents corruption from Ctrl+C or partial downloads.
+func cleanAccountsDbDir(accountsDbDir string) {
+	// List of all files/directories that may be left from a previous incomplete run
+	artifacts := []string{
+		"accounts",
+		"mithril_db",
+		"mithril_db_log_shards",
+		"bankhash_db",
+		"largest_file_id",
+		"bank_hash",
+		"manifest",
+	}
+	for _, artifact := range artifacts {
+		os.RemoveAll(filepath.Join(accountsDbDir, artifact))
+	}
+}
 
 var (
 	indexEntryCommitterInProgress = &atomic.Int64{}
@@ -40,6 +59,9 @@ func BuildAccountsDb(
 	incrementalSnapshotFile string,
 	accountsDbDir string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
+	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
+	cleanAccountsDbDir(accountsDbDir)
+
 	manifest, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
@@ -69,6 +91,7 @@ func BuildAccountsDb(
 
 	numShards := 256
 	dbFn := filepath.Join(accountsDbDir, "mithril_db")
+
 	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
 		Shards:     uint32(numShards),
 		MemoryType: fastcache.MMAP,
@@ -327,6 +350,81 @@ func readTarWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, s
 			return err
 		}
 		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
+
+		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
+		wg.Add(1)
+		err = appendVecCopyingPool.Invoke(task)
+		if err != nil {
+			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke: %v", err)
+			cleanupPartial("pool error")
+			return err
+		}
+	}
+
+	return nil
+}
+
+// readTarWithProgress is like readTarWithSave but reports progress to a DualProgress display.
+// If dp is nil, it falls back to the standard behavior without progress reporting.
+func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc, dp *progress.DualProgress) error {
+	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(filename, savePath)
+	if err != nil {
+		return err
+	}
+	defer closer.Close()
+
+	// Set up download progress callback
+	if dp != nil && bmr != nil {
+		dp.Download.SetTotal(bmr.TotalSize())
+		bmr.SetProgressCallback(func(bytesRead, totalBytes int64) {
+			dp.Download.Add(bytesRead - dp.Download.Current())
+		})
+	}
+
+	// cleanupPartial deletes the partial download file if it exists
+	cleanupPartial := func(reason string) {
+		if savePath != "" {
+			if _, statErr := os.Stat(savePath); statErr == nil {
+				mlog.Log.Infof("Deleting partial download %s (%s)", savePath, reason)
+				if rmErr := os.Remove(savePath); rmErr != nil {
+					mlog.Log.Errorf("Failed to delete partial download %s: %v", savePath, rmErr)
+				}
+			}
+		}
+	}
+
+	for {
+		if ctx.Err() != nil {
+			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
+			cleanupPartial("cancelled")
+			return ctx.Err()
+		}
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			mlog.Log.Errorf("reading next tar: %s\n", err)
+			cleanupPartial("read error")
+			return err
+		}
+
+		if !isAppendVec(header.Name) {
+			continue
+		}
+
+		writer := bytes.NewBuffer(make([]byte, 0, header.Size))
+		tarBytesRead, err := io.Copy(writer, tarReader)
+		if err != nil {
+			mlog.Log.Errorf("err copying data to reader: %s\n", err)
+			cleanupPartial("copy error")
+			return err
+		}
+		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
+
+		// Update build progress
+		if dp != nil {
+			dp.Build.Add(tarBytesRead)
+		}
 
 		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
 		wg.Add(1)
