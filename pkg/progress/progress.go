@@ -279,12 +279,11 @@ func (d *DualProgress) Start() {
 	d.started = true
 	d.mu.Unlock()
 
-	// Print pipeline description showing parallel operations
+	// Print pipeline description using stages (same stage = parallel)
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
-	fmt.Fprintln(d.output, "  Pipeline: Download ⟷ Extract (concurrent) → Flush (shard logs)")
-	fmt.Fprintln(d.output, "            Then: Re-fetch incremental → Flush → Fetch blocks (RPC) → Replay")
+	fmt.Fprintln(d.output, "  [1] Download + Extract → [2] Flush → [3] Incremental → [4] Fetch blocks → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
