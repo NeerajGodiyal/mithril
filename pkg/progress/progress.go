@@ -283,7 +283,8 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
-	fmt.Fprintln(d.output, "  [1] Snapshot Download + Extract → [2] Flush → [3] Incremental Snapshot → [4] Blocks → Replay")
+	fmt.Fprintln(d.output, "  [1] Snapshot Download + Extract AppendVecs → [2] Flush Index")
+	fmt.Fprintln(d.output, "  [3] Download Incremental + Process → [4] Fetch Blocks → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
