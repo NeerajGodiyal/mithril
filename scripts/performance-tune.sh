@@ -1595,7 +1595,7 @@ main() {
         echo "=== ADVANCED OPTIMIZATIONS ==="
         echo ""
 
-        if yesno "Configure I/O scheduler for NVMe? (kyber/none)" y; then
+        if yesno "Configure I/O scheduler for NVMe?" y; then
             set_io_scheduler
         fi
 
