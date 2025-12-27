@@ -39,7 +39,6 @@ func init() {
 }
 
 func main() {
-	mlog.Log.Infof("mithril verifying node\n")
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	cobra.CheckErr(cmd.ExecuteContext(ctx))

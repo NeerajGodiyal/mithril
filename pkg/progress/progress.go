@@ -323,6 +323,9 @@ func PrintBanner() {
 			fmt.Println(line)
 		}
 	}
+	// Add empty lines below the banner for visual separation
+	fmt.Println()
+	fmt.Println()
 	fmt.Println()
 }
 
