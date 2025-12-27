@@ -278,9 +278,12 @@ disk_size() {
 
 part_path() {
     local disk="$1" partnum="$2"
-    # NVMe uses 'p' prefix: /dev/nvme0n1p1
-    local p="${disk}p${partnum}"
-    [[ -b "$p" ]] && echo "$p" || echo "${disk}${partnum}"
+    # NVMe uses 'p' prefix: /dev/nvme0n1p1, traditional drives use just number: /dev/sda1
+    if [[ "$disk" == *nvme* || "$disk" == *mmcblk* || "$disk" == *loop* ]]; then
+        echo "${disk}p${partnum}"
+    else
+        echo "${disk}${partnum}"
+    fi
 }
 
 # ------------------------------------------------------------------------------
