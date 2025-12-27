@@ -512,6 +512,21 @@ run_benchmarks() {
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo ""
 
+    # Ensure fio is installed for accurate benchmarking
+    if ! has_fio; then
+        echo "  Installing fio for accurate random I/O benchmarking..."
+        if apt-get update -qq && apt-get install -y -qq fio; then
+            echo "  fio installed successfully."
+        else
+            if has_hdparm; then
+                warn "Failed to install fio - falling back to hdparm (less accurate)"
+            else
+                die "Failed to install fio and hdparm not available. Install manually: sudo apt install fio"
+            fi
+        fi
+        echo ""
+    fi
+
     # Determine benchmark mode based on available tools
     local use_fio=false
     local use_hdparm=false
@@ -523,7 +538,6 @@ run_benchmarks() {
     elif has_hdparm; then
         use_hdparm=true
         warn "fio not installed - using hdparm sequential read test (less accurate)"
-        echo "  For better results, install fio: sudo apt install fio"
     else
         die "Neither fio nor hdparm installed. Install fio: sudo apt install fio"
     fi
