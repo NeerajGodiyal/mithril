@@ -339,6 +339,26 @@ benchmark_sequential_read() {
     echo "${speed:-0}"
 }
 
+# Convert human-readable size (e.g., "1.9T", "476.9G") to GB
+size_to_gb() {
+    local size="$1"
+    local num unit
+
+    # Extract number and unit
+    num=$(echo "$size" | grep -oP '[\d.]+')
+    unit=$(echo "$size" | grep -oP '[A-Za-z]+$')
+
+    case "${unit^^}" in
+        T|TB)  awk "BEGIN {printf \"%.0f\", $num * 1024}" ;;
+        G|GB)  awk "BEGIN {printf \"%.0f\", $num}" ;;
+        M|MB)  awk "BEGIN {printf \"%.0f\", $num / 1024}" ;;
+        *)     echo "0" ;;
+    esac
+}
+
+# Minimum size for AccountsDB in GB (currently ~500GB, reserve 700GB to be safe)
+MIN_ACCOUNTSDB_SIZE_GB=700
+
 run_benchmarks() {
     info "Benchmarking NVMe drives..."
     echo ""
@@ -438,31 +458,73 @@ run_benchmarks() {
     echo "  ├─────────────────────────────────────────────────────────────────────────┤"
 
     local best_disk="" best_speed=0
+    local best_large_disk="" best_large_speed=0
+    local fastest_too_small=""
+
     for disk in "${!results[@]}"; do
         local speed="${results[$disk]}"
         local model="${disk_models[$disk]}"
-        local size
+        local size size_gb
         size=$(disk_size "$disk")
+        size_gb=$(size_to_gb "$size")
 
         # Truncate model if too long
         [[ ${#model} -gt 32 ]] && model="${model:0:29}..."
 
         printf "  │ %-12s  %6s %-5s  %-8s  %-32s│\n" "$disk" "$speed" "$metric_label" "$size" "$model"
 
-        # Track best (use awk for float comparison - more portable than bc)
+        # Track absolute best (regardless of size)
         if awk "BEGIN {exit !($speed > $best_speed)}" 2>/dev/null; then
             best_speed="$speed"
             best_disk="$disk"
+        fi
+
+        # Track best drive that's large enough for AccountsDB (>= 700GB)
+        if [[ "$size_gb" -ge "$MIN_ACCOUNTSDB_SIZE_GB" ]]; then
+            if awk "BEGIN {exit !($speed > $best_large_speed)}" 2>/dev/null; then
+                best_large_speed="$speed"
+                best_large_disk="$disk"
+            fi
         fi
     done
 
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo ""
 
+    # Determine which disk to recommend
+    local recommended_disk="$best_disk"
+    local best_size_gb
+
     if [[ -n "$best_disk" ]]; then
-        local best_model="${disk_models[$best_disk]}"
-        success "Recommended for AccountsDB (fastest): $best_disk"
-        echo "    Model: $best_model"
+        best_size_gb=$(size_to_gb "$(disk_size "$best_disk")")
+
+        # If the fastest disk is too small, recommend the fastest large disk instead
+        if [[ "$best_size_gb" -lt "$MIN_ACCOUNTSDB_SIZE_GB" && -n "$best_large_disk" ]]; then
+            recommended_disk="$best_large_disk"
+            fastest_too_small="$best_disk"
+        fi
+    fi
+
+    if [[ -n "$recommended_disk" ]]; then
+        local rec_model="${disk_models[$recommended_disk]}"
+        local rec_size
+        rec_size=$(disk_size "$recommended_disk")
+
+        success "Recommended for AccountsDB: $recommended_disk"
+        echo "    Model: $rec_model"
+        echo "    Size:  $rec_size"
+
+        # Explain why we didn't pick the fastest if applicable
+        if [[ -n "$fastest_too_small" ]]; then
+            local small_size small_model
+            small_size=$(disk_size "$fastest_too_small")
+            small_model="${disk_models[$fastest_too_small]}"
+            echo ""
+            warn "$fastest_too_small is slightly faster but too small ($small_size)"
+            echo "    AccountsDB needs at least ${MIN_ACCOUNTSDB_SIZE_GB}GB (currently ~500GB, growing)."
+            echo "    The speed difference is negligible (<1%), but size matters."
+        fi
+
         echo ""
         if $use_fio; then
             echo "  Random 4K IOPS is the key metric for AccountsDB performance."
@@ -473,6 +535,19 @@ run_benchmarks() {
         fi
         echo ""
         echo "  Use your fastest drive for AccountsDB, slower drive(s) for snapshots/blocks."
+    elif [[ -n "$best_disk" ]]; then
+        # All drives are too small
+        local best_model="${disk_models[$best_disk]}"
+        local best_size
+        best_size=$(disk_size "$best_disk")
+
+        warn "No drives meet the minimum size requirement (${MIN_ACCOUNTSDB_SIZE_GB}GB)"
+        echo ""
+        echo "  Fastest drive: $best_disk ($best_size)"
+        echo "    Model: $best_model"
+        echo ""
+        echo "  AccountsDB currently needs ~500GB and is growing."
+        echo "  You may run out of space. Consider a larger drive."
     fi
 }
 
