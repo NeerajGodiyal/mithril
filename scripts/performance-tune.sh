@@ -1125,7 +1125,14 @@ set_readahead() {
         if yesno "  Configure devices separately?" y; then
             while read -r dev size; do
                 echo ""
-                echo "  /dev/$dev (${size}):"
+                # Get mount points for this device's partitions
+                local mounts
+                mounts=$(lsblk -n -o MOUNTPOINT "/dev/$dev" 2>/dev/null | grep -v "^$" | tr '\n' ', ' | sed 's/, $//')
+                if [[ -n "$mounts" ]]; then
+                    echo "  /dev/$dev (${size}) - mounted at: ${mounts}"
+                else
+                    echo "  /dev/$dev (${size}) - not mounted"
+                fi
                 echo "    1) 64 KB   - MINIMUM LATENCY (recommended for AccountsDB)"
                 echo "    2) 128 KB  - Low latency (single-drive compromise)"
                 echo "    3) 256 KB  - Balanced"
