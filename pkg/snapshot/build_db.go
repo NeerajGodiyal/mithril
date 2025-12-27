@@ -244,7 +244,7 @@ func BuildAccountsDb(
 	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", time.Since(start))
 
 	// Show indexing progress for shard flush
-	indexProgress := progress.NewIndexingProgress("Indexing")
+	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
 	err = sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
@@ -370,9 +370,9 @@ func readTarWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, s
 	return nil
 }
 
-// readTarWithProgress is like readTarWithSave but reports progress to a TripleProgress display.
-// If tp is nil, it falls back to the standard behavior without progress reporting.
-func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc, tp *progress.TripleProgress) error {
+// readTarWithProgress is like readTarWithSave but reports progress to a DualProgress display.
+// If dp is nil, it falls back to the standard behavior without progress reporting.
+func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc, dp *progress.DualProgress) error {
 	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(filename, savePath)
 	if err != nil {
 		return err
@@ -380,12 +380,12 @@ func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename strin
 	defer closer.Close()
 
 	// Set up download progress callback
-	if tp != nil && bmr != nil {
+	if dp != nil && bmr != nil {
 		// Use SetDownloadTotal which enables dynamic Extract total estimation
 		// based on observed compression ratio (recalculated in updateLoop)
-		tp.SetDownloadTotal(bmr.TotalSize())
+		dp.SetDownloadTotal(bmr.TotalSize())
 		bmr.SetProgressCallback(func(bytesRead, totalBytes int64) {
-			tp.Download.Add(bytesRead - tp.Download.Current())
+			dp.Download.Add(bytesRead - dp.Download.Current())
 		})
 	}
 
@@ -430,8 +430,8 @@ func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename strin
 		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
 
 		// Update extract progress
-		if tp != nil {
-			tp.Extract.Add(tarBytesRead)
+		if dp != nil {
+			dp.Extract.Add(tarBytesRead)
 		}
 
 		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}

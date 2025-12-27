@@ -17,11 +17,12 @@ import (
 // This is returned by GetSnapshotURLWithInfo for display purposes.
 type SnapshotInfo struct {
 	URL           string  // HTTP URL for streaming
-	Slot          int     // Snapshot slot
+	Slot          int     // Full snapshot slot
 	ReferenceSlot int     // Current network slot (for calculating age)
 	NodeIP        string  // IP:port of the selected node
 	NodeVersion   string  // Solana version of the node
 	SpeedMBs      float64 // Download speed in MB/s from Stage 2 testing
+	RTTMs         int     // Round-trip time in milliseconds
 }
 
 // Age returns how many slots behind the snapshot is from the current tip
@@ -230,15 +231,16 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
-	// Print statistics if verbose mode
-	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
-	}
-
 	// Step 4: Sort and select best nodes by download speed
+	// Note: This also populates filter pipeline stats in ProbeStats
 	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
+	}
+
+	// Print statistics if verbose mode (after filtering is complete)
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
@@ -321,15 +323,29 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	// Step 3: Evaluate nodes with version tracking and statistics
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 
-	// Always print the filtering histogram
-	if stats != nil {
-		formatProbeStats(stats, cfg)
-	}
-
 	// Step 4: Sort and select best nodes by download speed
+	// Note: This also populates filter pipeline stats in ProbeStats
 	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return nil, fmt.Errorf("no suitable nodes found with snapshots")
+	}
+
+	// Only print detailed stats in verbose mode (after filtering is complete)
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
+	}
+
+	// Print Stage 2 candidates (simpler output)
+	mlog.Log.Infof("Stage 2 candidates (%d nodes ranked by speed):", len(rankedNodes))
+	for i, rn := range rankedNodes {
+		if i >= 8 { // Only show top 8
+			break
+		}
+		speed := rn.S2.MinMBs
+		if speed == 0 {
+			speed = rn.S1.MedianMBs
+		}
+		mlog.Log.Infof("  %d. %s | %s | %.1f MB/s", i+1, rn.Result.RPC, rn.Result.Version, speed)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
@@ -338,6 +354,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	var selectedNodeRPC string
 	var selectedSpeed float64
 	var selectedVersion string
+	var selectedRTT int
 	var urlErr error
 
 	maxAttempts := snapCfg.MaxSnapshotURLAttempts
@@ -360,7 +377,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, nodeRPC, "full")
 
 		if err == nil && urlInfo != nil {
-			// Find the speed and version for this node from rankedNodes
+			// Find the speed, version, and RTT for this node from rankedNodes
 			for _, rn := range rankedNodes {
 				if rn.Result.RPC == nodeRPC {
 					// Use Stage 2 min speed if available, otherwise fall back to Stage 1 median
@@ -370,6 +387,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 						selectedSpeed = rn.S1.MedianMBs
 					}
 					selectedVersion = rn.Result.Version
+					selectedRTT = int(rn.Result.Latency * 1000) // Convert seconds to ms
 					break
 				}
 			}
@@ -408,6 +426,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 		NodeIP:        nodeIP,
 		NodeVersion:   selectedVersion,
 		SpeedMBs:      selectedSpeed,
+		RTTMs:         selectedRTT,
 	}, nil
 }
 
@@ -438,15 +457,16 @@ func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotCo
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
-	// Print statistics if verbose mode
-	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
-	}
-
 	// Step 4: Sort and select best nodes by download speed
+	// Note: This also populates filter pipeline stats in ProbeStats
 	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
+	}
+
+	// Print statistics if verbose mode (after filtering is complete)
+	if snapCfg.Verbose && stats != nil {
+		formatProbeStats(stats, cfg)
 	}
 
 	// Step 5: Download snapshot from best nodes (with configurable fallback)

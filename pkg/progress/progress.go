@@ -151,12 +151,12 @@ func (p *ProgressBar) Render(useColor bool) string {
 
 	// Build the line with size progress
 	if useColor {
-		return fmt.Sprintf("%s%-18s%s [%s%s%s] %5.1f%% %13s %8s  ETA %s",
+		return fmt.Sprintf("%s%-24s%s [%s%s%s] %5.1f%% %13s %8s  ETA %s",
 			colorTeal, p.label, colorReset,
 			colorTeal, bar, colorReset,
 			percent, sizeStr, throughputStr, eta)
 	}
-	return fmt.Sprintf("%-18s [%s] %5.1f%% %13s %8s  ETA %s",
+	return fmt.Sprintf("%-24s [%s] %5.1f%% %13s %8s  ETA %s",
 		p.label, bar, percent, sizeStr, throughputStr, eta)
 }
 
@@ -200,163 +200,12 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
-// TripleProgress manages three progress bars displayed simultaneously:
+// DualProgress manages two progress bars displayed simultaneously:
 // - Download: compressed snapshot bytes from network
 // - Extract: decompressed tar bytes (AppendVec files)
-// - Shard: bytes flushed from shard logs to cache
-type TripleProgress struct {
-	Download *ProgressBar
-	Extract  *ProgressBar
-	Shard    *ProgressBar
-
-	mu            sync.Mutex
-	started       bool
-	done          bool
-	stopCh        chan struct{}
-	doneCh        chan struct{}
-	output        io.Writer
-	useColor      bool
-	downloadTotal int64 // cached download total for ratio calculation
-}
-
-// NewTripleProgress creates a new triple progress display
-func NewTripleProgress() *TripleProgress {
-	// Check if stdout is a TTY
-	useColor := term.IsTerminal(int(os.Stdout.Fd()))
-
-	return &TripleProgress{
-		Download: NewProgressBar("Snapshot"),
-		Extract:  NewProgressBar("Extract"),
-		Shard:    NewProgressBar("Indexing"),
-		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
-		output:   os.Stdout,
-		useColor: useColor,
-	}
-}
-
-// SetDownloadTotal sets the known download total and enables dynamic estimation
-func (t *TripleProgress) SetDownloadTotal(total int64) {
-	t.mu.Lock()
-	t.downloadTotal = total
-	t.mu.Unlock()
-	t.Download.SetTotal(total)
-}
-
-// updateEstimates dynamically adjusts Extract total based on observed compression ratio
-func (t *TripleProgress) updateEstimates() {
-	downloadCurrent := t.Download.Current()
-	extractCurrent := t.Extract.Current()
-
-	// Need at least 1MB of data to calculate a meaningful ratio
-	const minBytes = 1 << 20 // 1 MB
-	if downloadCurrent < minBytes || extractCurrent == 0 {
-		return
-	}
-
-	t.mu.Lock()
-	downloadTotal := t.downloadTotal
-	t.mu.Unlock()
-
-	if downloadTotal <= 0 {
-		return
-	}
-
-	// Calculate observed compression ratio for Extract
-	ratio := float64(extractCurrent) / float64(downloadCurrent)
-	if ratio < 2.0 {
-		ratio = 2.0
-	} else if ratio > 10.0 {
-		ratio = 10.0
-	}
-	t.Extract.SetTotal(int64(float64(downloadTotal) * ratio))
-}
-
-// Start begins the progress display update loop
-func (t *TripleProgress) Start() {
-	t.mu.Lock()
-	if t.started {
-		t.mu.Unlock()
-		return
-	}
-	t.started = true
-	t.mu.Unlock()
-
-	// Print pipeline description
-	if t.useColor {
-		fmt.Fprintf(t.output, "%s", colorDim)
-	}
-	fmt.Fprintln(t.output, "  Pipeline: Snapshot (.tar.zst) → Decompress → Extract AppendVecs → Build Index → Cache")
-	fmt.Fprintln(t.output, "            Then: Incremental snapshot → Apply deltas → Fetch blocks (RPC) → Replay")
-	if t.useColor {
-		fmt.Fprintf(t.output, "%s", colorReset)
-	}
-	fmt.Fprintln(t.output)
-
-	// Print initial empty lines for progress bars (3 bars)
-	fmt.Fprintln(t.output)
-	fmt.Fprintln(t.output)
-	fmt.Fprintln(t.output)
-
-	go t.updateLoop()
-}
-
-// updateLoop periodically updates the display
-func (t *TripleProgress) updateLoop() {
-	ticker := time.NewTicker(updateInterval)
-	defer ticker.Stop()
-	defer close(t.doneCh)
-
-	for {
-		select {
-		case <-t.stopCh:
-			t.updateEstimates()
-			t.render()
-			return
-		case <-ticker.C:
-			t.updateEstimates()
-			t.render()
-		}
-	}
-}
-
-// render updates the display with all three bars
-func (t *TripleProgress) render() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// Move up three lines and clear
-	if t.useColor {
-		fmt.Fprint(t.output, moveUp+clearLine)
-		fmt.Fprint(t.output, moveUp+clearLine)
-		fmt.Fprint(t.output, moveUp+clearLine)
-	}
-
-	// Render all three bars
-	fmt.Fprintln(t.output, t.Download.Render(t.useColor))
-	fmt.Fprintln(t.output, t.Extract.Render(t.useColor))
-	fmt.Fprintln(t.output, t.Shard.Render(t.useColor))
-}
-
-// Stop stops the progress display
-func (t *TripleProgress) Stop() {
-	t.mu.Lock()
-	if t.done {
-		t.mu.Unlock()
-		return
-	}
-	t.done = true
-	t.mu.Unlock()
-
-	close(t.stopCh)
-	<-t.doneCh
-}
-
-// DualProgress manages two progress bars displayed simultaneously
-// Deprecated: Use TripleProgress for full pipeline visibility
 type DualProgress struct {
 	Download *ProgressBar
-	Build    *ProgressBar
+	Extract  *ProgressBar
 
 	mu            sync.Mutex
 	started       bool
@@ -369,14 +218,13 @@ type DualProgress struct {
 }
 
 // NewDualProgress creates a new dual progress display
-// Deprecated: Use NewTripleProgress for full pipeline visibility
 func NewDualProgress() *DualProgress {
 	// Check if stdout is a TTY
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	return &DualProgress{
-		Download: NewProgressBar("Snapshot"),
-		Build:    NewProgressBar("Extract"),
+		Download: NewProgressBar("Download (.tar.zst)"),
+		Extract:  NewProgressBar("Extract (AppendVecs)"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 		output:   os.Stdout,
@@ -384,7 +232,7 @@ func NewDualProgress() *DualProgress {
 	}
 }
 
-// SetDownloadTotal sets the known download total and enables dynamic Build estimation
+// SetDownloadTotal sets the known download total and enables dynamic estimation
 func (d *DualProgress) SetDownloadTotal(total int64) {
 	d.mu.Lock()
 	d.downloadTotal = total
@@ -392,15 +240,14 @@ func (d *DualProgress) SetDownloadTotal(total int64) {
 	d.Download.SetTotal(total)
 }
 
-// updateBuildEstimate dynamically adjusts Build total based on observed compression ratio
-// This is called in the update loop to refine the estimate as we get more data
-func (d *DualProgress) updateBuildEstimate() {
+// updateEstimates dynamically adjusts Extract total based on observed compression ratio
+func (d *DualProgress) updateEstimates() {
 	downloadCurrent := d.Download.Current()
-	buildCurrent := d.Build.Current()
+	extractCurrent := d.Extract.Current()
 
 	// Need at least 1MB of data to calculate a meaningful ratio
 	const minBytes = 1 << 20 // 1 MB
-	if downloadCurrent < minBytes || buildCurrent == 0 {
+	if downloadCurrent < minBytes || extractCurrent == 0 {
 		return
 	}
 
@@ -412,20 +259,14 @@ func (d *DualProgress) updateBuildEstimate() {
 		return
 	}
 
-	// Calculate observed compression ratio
-	// ratio = decompressed / compressed
-	ratio := float64(buildCurrent) / float64(downloadCurrent)
-
-	// Clamp ratio to reasonable bounds (2x to 10x compression is typical for zstd)
+	// Calculate observed compression ratio for Extract
+	ratio := float64(extractCurrent) / float64(downloadCurrent)
 	if ratio < 2.0 {
 		ratio = 2.0
 	} else if ratio > 10.0 {
 		ratio = 10.0
 	}
-
-	// Update build total estimate
-	estimatedBuildTotal := int64(float64(downloadTotal) * ratio)
-	d.Build.SetTotal(estimatedBuildTotal)
+	d.Extract.SetTotal(int64(float64(downloadTotal) * ratio))
 }
 
 // Start begins the progress display update loop
@@ -442,14 +283,14 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
-	fmt.Fprintln(d.output, "  Pipeline: Snapshot (.tar.zst) → decompress (~3x) → extract AppendVecs → AccountsDB")
-	fmt.Fprintln(d.output, "            Then: Incremental snapshot → Apply deltas → Fetch blocks (RPC) → Replay")
+	fmt.Fprintln(d.output, "  Pipeline: Download (.tar.zst) → Extract (AppendVecs) → Flush (shard logs)")
+	fmt.Fprintln(d.output, "            Then: Incremental snapshot → Fetch blocks (RPC) → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
 	fmt.Fprintln(d.output)
 
-	// Print initial empty lines for progress bars
+	// Print initial empty lines for progress bars (2 bars)
 	fmt.Fprintln(d.output)
 	fmt.Fprintln(d.output)
 
@@ -465,17 +306,17 @@ func (d *DualProgress) updateLoop() {
 	for {
 		select {
 		case <-d.stopCh:
-			d.updateBuildEstimate() // Final estimate update
-			d.render()              // Final render
+			d.updateEstimates()
+			d.render()
 			return
 		case <-ticker.C:
-			d.updateBuildEstimate() // Refine Build total based on observed ratio
+			d.updateEstimates()
 			d.render()
 		}
 	}
 }
 
-// render updates the display
+// render updates the display with both bars
 func (d *DualProgress) render() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -488,7 +329,7 @@ func (d *DualProgress) render() {
 
 	// Render both bars
 	fmt.Fprintln(d.output, d.Download.Render(d.useColor))
-	fmt.Fprintln(d.output, d.Build.Render(d.useColor))
+	fmt.Fprintln(d.output, d.Extract.Render(d.useColor))
 }
 
 // Stop stops the progress display
@@ -573,12 +414,12 @@ func (p *IndexingProgress) Update(completed, total int) {
 	}
 
 	if p.useColor {
-		fmt.Fprintf(p.output, "%s%-18s%s [%s%s%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
+		fmt.Fprintf(p.output, "%s%-24s%s [%s%s%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
 			colorTeal, p.label, colorReset,
 			colorTeal, bar, colorReset,
 			percent, completed, total, eta)
 	} else {
-		fmt.Fprintf(p.output, "%-18s [%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
+		fmt.Fprintf(p.output, "%-24s [%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
 			p.label, bar, percent, completed, total, eta)
 	}
 }
@@ -652,16 +493,22 @@ func PrintBanner() {
 }
 
 // PrintSnapshotSourceSummary prints a clean summary box for the selected snapshot source
-func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, nodeVersion string, speedMBs float64, searchDuration time.Duration) {
+func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, nodeVersion string, speedMBs float64, rttMs int, searchDuration time.Duration) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// Calculate age in slots
 	age := referenceSlot - slot
 
-	// Format version (truncate if too long)
+	// Format version
 	version := nodeVersion
 	if version == "" {
 		version = "unknown"
+	}
+
+	// Format RTT
+	rttStr := fmt.Sprintf("%d ms", rttMs)
+	if rttMs == 0 {
+		rttStr = "N/A"
 	}
 
 	fmt.Println()
@@ -669,14 +516,15 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 		fmt.Printf("%s", colorTeal)
 	}
 	fmt.Println("  ┌────────────────────────────────────────────────────────────┐")
-	fmt.Printf("  │  %-58s│\n", "✓ Full Snapshot Source Selected")
+	fmt.Printf("  │  %-58s│\n", "Full Snapshot Source Selected")
 	fmt.Println("  │                                                            │")
-	fmt.Printf("  │   %-12s %-44s│\n", "IP:", nodeIP)
-	fmt.Printf("  │   %-12s %-44d│\n", "Slot:", slot)
-	fmt.Printf("  │   %-12s %-44s│\n", "Age:", fmt.Sprintf("%d slots behind", age))
-	fmt.Printf("  │   %-12s %-44s│\n", "Version:", version)
-	fmt.Printf("  │   %-12s %-44s│\n", "Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
-	fmt.Printf("  │   %-12s %-44s│\n", "Found in:", searchDuration.Round(time.Second).String())
+	fmt.Printf("  │   %-18s %-38s│\n", "Source:", nodeIP)
+	fmt.Printf("  │   %-18s %-38s│\n", "Version:", version)
+	fmt.Printf("  │   %-18s %-38d│\n", "Snapshot Slot:", slot)
+	fmt.Printf("  │   %-18s %-38s│\n", "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age))
+	fmt.Printf("  │   %-18s %-38s│\n", "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
+	fmt.Printf("  │   %-18s %-38s│\n", "RTT:", rttStr)
+	fmt.Printf("  │   %-18s %-38s│\n", "Search Time:", searchDuration.Round(time.Second).String())
 	fmt.Println("  └────────────────────────────────────────────────────────────┘")
 	if useColor {
 		fmt.Printf("%s", colorReset)

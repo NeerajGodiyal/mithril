@@ -244,17 +244,26 @@ type Prometheusmetrics struct {
 }
 
 var metricsCollection *Prometheusmetrics
+var metricsServerStarted bool
 
 func init() {
+	initializeStatsdMetrics()
+}
+
+// StartMetricsServer starts the Prometheus metrics HTTP server.
+// Call this after printing the banner to avoid error messages appearing before it.
+func StartMetricsServer() {
+	if metricsServerStarted {
+		return
+	}
+	metricsServerStarted = true
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
 		addr := ":9090"
-		// Start silently - errors are still logged if binding fails
 		if err := http.ListenAndServe(addr, nil); err != nil {
 			mlog.Log.Errorf("Prometheus metrics server failed: %v", err)
 		}
 	}()
-	initializeStatsdMetrics()
 }
 
 func initializeStatsdMetrics() Prometheusmetrics {

@@ -26,6 +26,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -574,10 +575,15 @@ func runVerifyRange(c *cobra.Command, args []string) {
 func runVerifyLive(c *cobra.Command, args []string) {
 	ctx := c.Context()
 
-	// Print the Mithril banner
+	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
 
-	logVCSInfo()
+	// Print version/commit info right after the banner
+	printVersionInfo()
+
+	// Now start the metrics server (after banner so errors don't appear first)
+	statsd.StartMetricsServer()
+
 	snapshotDownloadPath := scratchDirectory
 
 	// Determine if using Overcast based on block source
@@ -622,6 +628,7 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		fullSnapshotInfo.ReferenceSlot,
 		fullSnapshotInfo.NodeVersion,
 		fullSnapshotInfo.SpeedMBs,
+		fullSnapshotInfo.RTTMs,
 		time.Since(fullSnapshotDlStart),
 	)
 
@@ -631,10 +638,10 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	// Create progress display for snapshot download, extract, and shard commit
-	tp := progress.NewTripleProgress()
+	// Create progress display for snapshot download and extract
+	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, tp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
 	if err != nil {
 		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 	}
@@ -685,20 +692,59 @@ func logVCSInfo() {
 		return
 	}
 
-	var revision, time, modified string
+	var revision, vcsTime, modified string
 
 	for _, setting := range info.Settings {
 		switch setting.Key {
 		case "vcs.revision":
 			revision = setting.Value
 		case "vcs.time":
-			time = setting.Value
+			vcsTime = setting.Value
 		case "vcs.modified":
 			modified = setting.Value
 		}
 	}
 
-	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, time, modified)
+	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
+}
+
+// printVersionInfo prints version/commit info in a nice format after the banner
+func printVersionInfo() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		fmt.Println("  Version: unknown")
+		fmt.Println()
+		return
+	}
+
+	var revision, vcsTime, modified string
+
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.time":
+			vcsTime = setting.Value
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+
+	// Shorten the commit hash to 8 chars
+	if len(revision) > 8 {
+		revision = revision[:8]
+	}
+
+	// Format the version line
+	versionStr := fmt.Sprintf("commit %s", revision)
+	if modified == "true" {
+		versionStr += " (modified)"
+	}
+	if vcsTime != "" {
+		versionStr += fmt.Sprintf(" built %s", vcsTime)
+	}
+
+	fmt.Printf("  %s\n\n", versionStr)
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {
