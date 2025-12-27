@@ -528,7 +528,7 @@ run_benchmarks() {
     # Count drives to test (excluding root)
     local drives_to_test=0
     for disk in "${nvme_disks[@]}"; do
-        [[ "$disk" != "$root_disk" ]] && ((drives_to_test++))
+        [[ "$disk" != "$root_disk" ]] && drives_to_test=$((drives_to_test + 1))
     done
 
     echo "  Running benchmarks on $drives_to_test drive(s)..."
