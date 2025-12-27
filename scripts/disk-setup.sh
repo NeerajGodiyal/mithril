@@ -1362,6 +1362,9 @@ interactive_setup() {
         fi
     fi
 
+    # Reload systemd to pick up fstab changes
+    systemctl daemon-reload
+
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
     echo "  │ SETUP COMPLETE                                                           │"
