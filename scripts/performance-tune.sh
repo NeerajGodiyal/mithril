@@ -1629,6 +1629,11 @@ main() {
             set_cpu_perf
         fi
 
+        echo ""
+        if yesno "Show Go build/runtime tuning recommendations?" y; then
+            show_go_tuning
+        fi
+
         if yesno "Configure noatime mount option?" y; then
             apply_noatime
         fi
@@ -1648,11 +1653,6 @@ main() {
         # if yesno "Configure Transparent Huge Pages?"; then
         #     configure_hugepages
         # fi
-
-        echo ""
-        if yesno "Show Go runtime tuning recommendations?" y; then
-            show_go_tuning
-        fi
 
         echo ""
         echo "=== EXPERIMENTAL OPTIMIZATIONS ==="
