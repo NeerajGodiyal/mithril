@@ -93,7 +93,7 @@
 #   --delete-all         Clear everything (complete reset)
 #
 # SAFETY:
-#   - NEVER touches the root (boot) disk
+#   - Preserves existing OS partitions (only uses free space in single-drive mode)
 #   - NEVER formats drives with mounted partitions
 #   - Requires typing a confirmation phrase before any destructive action
 #   - Creates backups of /etc/fstab before modification
@@ -965,7 +965,7 @@ interactive_setup() {
     if [[ "$root_disk" == "none" ]]; then
         echo "  Rescue/Live mode detected - no physical root disk to protect"
     else
-        echo "  Root disk: $root_disk (will NEVER be touched)"
+        echo "  Root disk: $root_disk (OS - existing partitions preserved)"
     fi
     echo ""
 
