@@ -17,14 +17,17 @@ const (
 	updateInterval = 500 * time.Millisecond
 	ewmaTau        = 5.0 // seconds for EWMA smoothing
 
-	// Gold/amber color like Claude
-	colorGold  = "\x1b[38;2;217;164;65m"
+	// Teal/cyan color
+	colorTeal  = "\x1b[38;2;0;188;212m"
 	colorReset = "\x1b[0m"
 	colorDim   = "\x1b[2m"
 
 	// Cursor control
 	clearLine = "\x1b[2K"
 	moveUp    = "\x1b[1A"
+
+	// Size constants
+	gib = 1 << 30
 )
 
 // ProgressBar tracks progress for a single operation
@@ -151,15 +154,18 @@ func (p *ProgressBar) Render(useColor bool) string {
 	// Format throughput
 	throughputStr := formatThroughput(throughput)
 
-	// Build the line
+	// Format size progress (current/total in GB)
+	sizeStr := formatSizeProgress(current, total)
+
+	// Build the line with size progress
 	if useColor {
-		return fmt.Sprintf("%s%-18s%s [%s%s%s] %5.1f%% %8s  ETA %s",
-			colorGold, p.label, colorReset,
-			colorGold, bar, colorReset,
-			percent, throughputStr, eta)
+		return fmt.Sprintf("%s%-18s%s [%s%s%s] %5.1f%% %13s %8s  ETA %s",
+			colorTeal, p.label, colorReset,
+			colorTeal, bar, colorReset,
+			percent, sizeStr, throughputStr, eta)
 	}
-	return fmt.Sprintf("%-18s [%s] %5.1f%% %8s  ETA %s",
-		p.label, bar, percent, throughputStr, eta)
+	return fmt.Sprintf("%-18s [%s] %5.1f%% %13s %8s  ETA %s",
+		p.label, bar, percent, sizeStr, throughputStr, eta)
 }
 
 func formatThroughput(bytesPerSec float64) string {
@@ -170,6 +176,15 @@ func formatThroughput(bytesPerSec float64) string {
 	} else {
 		return fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
 	}
+}
+
+func formatSizeProgress(current, total int64) string {
+	currentGB := float64(current) / float64(gib)
+	totalGB := float64(total) / float64(gib)
+	if total > 0 {
+		return fmt.Sprintf("%5.1f/%5.1f GB", currentGB, totalGB)
+	}
+	return fmt.Sprintf("%5.1f/  ??? GB", currentGB)
 }
 
 func formatDuration(d time.Duration) string {
@@ -303,7 +318,7 @@ func PrintBanner() {
 			continue
 		}
 		if useColor {
-			fmt.Printf("%s%s%s\n", colorGold, line, colorReset)
+			fmt.Printf("%s%s%s\n", colorTeal, line, colorReset)
 		} else {
 			fmt.Println(line)
 		}
@@ -326,7 +341,7 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 
 	fmt.Println()
 	if useColor {
-		fmt.Printf("%s", colorGold)
+		fmt.Printf("%s", colorTeal)
 	}
 	fmt.Println("  ┌────────────────────────────────────────────────────────────┐")
 	fmt.Printf("  │  %-58s│\n", "✓ Full Snapshot Source Selected")
