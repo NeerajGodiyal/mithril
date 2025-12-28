@@ -224,6 +224,12 @@ go build -o mithril ./cmd/mithril
 
 **Note:** With `bootstrap.mode = "snapshot"` (the default), each restart downloads a fresh snapshot and re-syncs from scratch. Set `bootstrap.mode = "auto"` to reuse an existing AccountsDB when available.
 
+### Operational Best Practices
+
+**Clean Shutdown**: Always use `Ctrl+C` to stop Mithril cleanly rather than killing the terminal or closing the SSH session. This allows Mithril to flush data and exit gracefully.
+
+For detailed troubleshooting tips, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ---
 
 ## Development Milestones

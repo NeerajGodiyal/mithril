@@ -2,15 +2,19 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	_ "net/http/pprof"
@@ -642,11 +646,13 @@ func runLive(c *cobra.Command, args []string) {
 	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
 
-	// Print version/commit info right after the banner
-	printVersionInfo()
+	// Kill any existing mithril processes to prevent zombie accumulation
+	if killed := killExistingMithrilProcesses(); killed > 0 {
+		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
+	}
 
-	// Print startup summary
-	printStartupSummary()
+	// Print consolidated startup info
+	printStartupInfo("run")
 
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
@@ -735,7 +741,7 @@ func runLive(c *cobra.Command, args []string) {
 	startSlot := int64(manifest.Bank.Slot + 1)
 	liveEndSlot := uint64(math.MaxUint64)
 
-	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, liveEndSlot)
+	mlog.Log.Infof("starting replay from slot %d", startSlot)
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
@@ -793,25 +799,27 @@ func logVCSInfo() {
 	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
 }
 
-// printVersionInfo prints version/commit info in a nice format after the banner
-func printVersionInfo() {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		fmt.Println("  Version: unknown")
-		fmt.Println()
-		return
-	}
+// printStartupInfo prints consolidated startup info including version, timestamp, and configuration
+func printStartupInfo(commandName string) {
+	// Gold/amber color like the banner
+	gold := "\x1b[38;2;217;164;65m"
+	reset := "\x1b[0m"
+	dim := "\x1b[2m"
+	green := "\x1b[32m"
+	cyan := "\x1b[36m"
 
-	var revision, vcsTime, modified string
+	fmt.Printf("%s━━━ Startup Info ━━━%s\n", gold, reset)
 
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.time":
-			vcsTime = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
+	// Get version info from build
+	var revision, modified string
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
 		}
 	}
 
@@ -820,38 +828,105 @@ func printVersionInfo() {
 		revision = revision[:8]
 	}
 
-	// Format the version line
-	versionStr := fmt.Sprintf("commit %s", revision)
-	if modified == "true" {
-		versionStr += " (modified)"
+	// Timestamp (current time)
+	fmt.Printf("  Timestamp:    %s%s%s\n", dim, time.Now().Format(time.RFC3339), reset)
+
+	// Commit info
+	if revision != "" {
+		commitStr := revision
+		if modified == "true" {
+			commitStr += " (modified)"
+		}
+		fmt.Printf("  Commit:       %s%s%s\n", dim, commitStr, reset)
 	}
-	if vcsTime != "" {
-		versionStr += fmt.Sprintf(" built %s", vcsTime)
+
+	// Go version
+	fmt.Printf("  Go:           %s%s%s\n", dim, runtime.Version(), reset)
+
+	// Command being run
+	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
+
+	// Detect what's on disk
+	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
+
+	// Check for existing snapshots - try configured paths in order of preference:
+	// 1. snapshotArchivePath (storage.snapshots)
+	// 2. snapshotDlPath (snapshot.download_path)
+	// 3. scratchDirectory (scratch_directory)
+	var existingSnapshots []snapshotInfo
+	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath, scratchDirectory} {
+		if searchPath != "" {
+			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
+				existingSnapshots = snaps
+				break
+			}
+		}
 	}
 
-	fmt.Printf("  %s\n\n", versionStr)
-}
+	// Determine actual action based on bootstrap mode and what exists
+	var actionStr string
+	var actionDetail string
 
-// printStartupSummary prints a summary of the current configuration
-func printStartupSummary() {
-	// Gold/amber color like the banner
-	gold := "\x1b[38;2;217;164;65m"
-	reset := "\x1b[0m"
-	dim := "\x1b[2m"
-
-	fmt.Printf("%s━━━ Startup Configuration ━━━%s\n", gold, reset)
-
-	// Bootstrap mode
-	fmt.Printf("  Bootstrap:    %s%s%s", gold, bootstrapMode, reset)
 	switch bootstrapMode {
 	case "auto":
-		fmt.Printf(" %s(use AccountsDB if exists, else download snapshot)%s\n", dim, reset)
+		if hasAccountsDB {
+			actionStr = "Resuming from AccountsDB"
+			if accountsDBSlot > 0 {
+				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+			}
+		} else if len(existingSnapshots) > 0 {
+			actionStr = "Building from existing snapshot"
+			actionDetail = existingSnapshots[0].filename
+		} else {
+			actionStr = "Downloading new snapshot"
+		}
 	case "snapshot":
-		fmt.Printf(" %s(always download fresh snapshot)%s\n", dim, reset)
+		actionStr = "Downloading new snapshot"
+		actionDetail = "fresh start"
 	case "accountsdb":
-		fmt.Printf(" %s(require existing AccountsDB)%s\n", dim, reset)
-	default:
-		fmt.Println()
+		if hasAccountsDB {
+			actionStr = "Resuming from AccountsDB"
+			if accountsDBSlot > 0 {
+				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+			}
+		} else {
+			actionStr = "ERROR: No AccountsDB found"
+			actionDetail = "mode=accountsdb requires existing data"
+		}
+	}
+
+	// Print bootstrap action (the main thing users care about)
+	fmt.Printf("  Bootstrap:    %s%s%s", green, actionStr, reset)
+	if actionDetail != "" {
+		fmt.Printf(" %s(%s)%s", dim, actionDetail, reset)
+	}
+	fmt.Printf(" %s[mode=%s]%s\n", dim, bootstrapMode, reset)
+
+	// Show existing AccountsDB info if present
+	if hasAccountsDB && bootstrapMode != "snapshot" {
+		fmt.Printf("  AccountsDB:   %s%s%s", cyan, accountsPath, reset)
+		if accountsDBSlot > 0 {
+			fmt.Printf(" %s(slot %d)%s\n", dim, accountsDBSlot, reset)
+		} else {
+			fmt.Println()
+		}
+	} else if accountsPath != "" {
+		fmt.Printf("  AccountsDB:   %s%s%s %s(will create)%s\n", gold, accountsPath, reset, dim, reset)
+	}
+
+	// Show existing snapshots if any
+	if len(existingSnapshots) > 0 && bootstrapMode != "snapshot" {
+		for i, snap := range existingSnapshots {
+			prefix := "  Snapshot:     "
+			if i > 0 {
+				prefix = "                "
+			}
+			fmt.Printf("%s%s%s%s", prefix, cyan, snap.filename, reset)
+			if snap.slot > 0 {
+				fmt.Printf(" %s(slot %d)%s", dim, snap.slot, reset)
+			}
+			fmt.Println()
+		}
 	}
 
 	// Block source
@@ -862,10 +937,7 @@ func printStartupSummary() {
 		fmt.Println()
 	}
 
-	// Paths
-	if accountsPath != "" {
-		fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
-	}
+	// Blockstore path
 	if ledgerPath != "" {
 		fmt.Printf("  Blockstore:   %s%s%s\n", gold, ledgerPath, reset)
 	}
@@ -879,6 +951,187 @@ func printStartupSummary() {
 	}
 
 	fmt.Println()
+}
+
+// snapshotInfo holds information about a detected snapshot file
+type snapshotInfo struct {
+	filename string
+	slot     uint64
+	isIncr   bool
+}
+
+// detectExistingAccountsDB checks if a valid AccountsDB exists at the given path
+// Returns (exists, slot) where slot is parsed from the manifest if available
+func detectExistingAccountsDB(path string) (bool, uint64) {
+	if path == "" {
+		return false, 0
+	}
+
+	// Check for the accounts directory
+	accountsDir := filepath.Join(path, "accounts")
+	if _, err := os.Stat(accountsDir); os.IsNotExist(err) {
+		return false, 0
+	}
+
+	// Check for manifest file
+	manifestPath := filepath.Join(path, "manifest")
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		return false, 0
+	}
+
+	// Try to load the manifest to get the slot
+	manifest, err := snapshot.LoadManifestFromFile(manifestPath)
+	if err != nil {
+		// AccountsDB exists but manifest is unreadable
+		return true, 0
+	}
+
+	return true, manifest.Bank.Slot
+}
+
+// detectExistingSnapshots finds snapshot files in the given directory
+func detectExistingSnapshots(dir string) []snapshotInfo {
+	if dir == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var snapshots []snapshotInfo
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+
+		// Full snapshot: snapshot-{slot}-{hash}.tar.zst
+		if len(name) > 9 && name[:9] == "snapshot-" && filepath.Ext(name) == ".zst" {
+			slot := parseSlotFromSnapshotName(name)
+			snapshots = append(snapshots, snapshotInfo{
+				filename: name,
+				slot:     slot,
+				isIncr:   false,
+			})
+		}
+
+		// Incremental snapshot: incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst
+		if len(name) > 21 && name[:21] == "incremental-snapshot-" && filepath.Ext(name) == ".zst" {
+			slot := parseSlotFromIncrementalName(name)
+			snapshots = append(snapshots, snapshotInfo{
+				filename: name,
+				slot:     slot,
+				isIncr:   true,
+			})
+		}
+	}
+
+	return snapshots
+}
+
+// parseSlotFromSnapshotName extracts slot from "snapshot-{slot}-{hash}.tar.zst"
+func parseSlotFromSnapshotName(name string) uint64 {
+	// Remove "snapshot-" prefix and ".tar.zst" suffix
+	if len(name) <= 17 {
+		return 0
+	}
+	trimmed := name[9 : len(name)-8] // "slot-hash"
+	// Find the first dash after the slot number
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '-' {
+			slot, err := strconv.ParseUint(trimmed[:i], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return slot
+		}
+	}
+	return 0
+}
+
+// parseSlotFromIncrementalName extracts end slot from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
+func parseSlotFromIncrementalName(name string) uint64 {
+	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
+	if len(name) <= 29 {
+		return 0
+	}
+	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
+
+	// Find first dash (after baseSlot)
+	firstDash := -1
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '-' {
+			firstDash = i
+			break
+		}
+	}
+	if firstDash == -1 {
+		return 0
+	}
+
+	// Find second dash (after endSlot)
+	remaining := trimmed[firstDash+1:]
+	for i := 0; i < len(remaining); i++ {
+		if remaining[i] == '-' {
+			slot, err := strconv.ParseUint(remaining[:i], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return slot
+		}
+	}
+	return 0
+}
+
+// killExistingMithrilProcesses finds and kills any other running mithril processes.
+// This prevents zombie processes from accumulating and holding disk space.
+// Returns the number of processes killed.
+func killExistingMithrilProcesses() int {
+	myPID := os.Getpid()
+
+	// Use pgrep to find mithril processes
+	cmd := exec.Command("pgrep", "-f", "mithril")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		// No processes found or pgrep not available
+		return 0
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	killed := 0
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+
+		// Don't kill ourselves
+		if pid == myPID {
+			continue
+		}
+
+		// Try to kill the process
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+
+		// Send SIGKILL
+		if err := proc.Signal(syscall.SIGKILL); err == nil {
+			killed++
+		}
+	}
+
+	return killed
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {
