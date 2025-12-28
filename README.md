@@ -8,9 +8,9 @@ While Mithril is already functional and runs reliably for many use cases, it is 
 
 ---
 
-## Running Mithril (verify-live mode)
+## Running Mithril
 
-The `verify-live` command allows Mithril to bootstrap from a Solana snapshot and continuously verify new blocks as they are produced on mainnet-beta.
+The `run` command starts Mithril as a live verifier - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
 
 ### Hardware Requirements
 
@@ -103,49 +103,49 @@ go build -o mithril ./cmd/mithril
 
 ### Configuration
 
-Copy the example config to get started:
+Generate a starter config with sensible defaults:
 
 ```bash
-cp config.example.toml mithril.toml
+./mithril config init
 ```
 
-The example config comes with sensible defaults and is ready to use immediately. Key settings to review:
+This creates `config.toml` with all essential settings. Key options to review:
 
 ```toml
 name = "mithril"
 
-[ledger]
+[bootstrap]
+    # How Mithril initializes state:
+    #   "auto"       - Use existing AccountsDB if valid, else download snapshot
+    #   "snapshot"   - Always download fresh snapshot (default, good for early-stage)
+    #   "accountsdb" - Require existing AccountsDB, fail if missing
+    mode = "snapshot"
+
+[storage]
     # AccountsDB path - use your fastest NVMe
-    accounts_path = "/mnt/mithril-accounts"
-    path = "/mnt/mithril-ledger/blockstore"
+    accounts = "/mnt/mithril-accounts"
+    blockstore = "/mnt/mithril-ledger/blockstore"
 
-[rpc]
-    # RPC endpoint(s) for fetching blocks
+[network]
+    # Solana RPC endpoint(s) for discovering snapshots and fetching blocks
     rpc = ["https://api.mainnet-beta.solana.com"]
-
-    # Enable Mithril's RPC server (optional)
-    # port = 8899
 
 [replay]
     # Transaction parallelism - recommended: 2x your CPU core count
     # e.g., 192 for a 96-core machine, 24 for a 12-core machine
     txpar = 24
 
-[snapshot]
-    # Keep snapshots on disk (0 = stream-only, 1+ = save and retain N)
-    # max_full_snapshots = 2
-    download_path = "/mnt/mithril-ledger/snapshots"
-
-    # Verbose output shows detailed node discovery statistics
-    # verbose = true
+[rpc]
+    # Mithril's RPC server (localhost only, enabled by default)
+    port = 8899
 ```
 
 See `config.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
 
-### Running verify-live
+### Running Mithril
 
 ```bash
-./mithril verify-live --config mithril.toml
+./mithril run --config config.toml
 ```
 
 **What happens:**
@@ -219,10 +219,10 @@ git pull
 go build -o mithril ./cmd/mithril
 
 # Restart
-./mithril verify-live --config mithril.toml
+./mithril run --config config.toml
 ```
 
-**Note:** Currently, `verify-live` does not support resuming from existing AccountsDB state. Each restart downloads a fresh snapshot and re-syncs from scratch. Resume capability is planned for a future release.
+**Note:** With `bootstrap.mode = "snapshot"` (the default), each restart downloads a fresh snapshot and re-syncs from scratch. Set `bootstrap.mode = "auto"` to reuse an existing AccountsDB when available.
 
 ---
 

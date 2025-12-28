@@ -49,8 +49,8 @@ sudo ./scripts/performance-tune.sh          # Apply performance tuning
 
 **Resetting Mithril data** (when needed):
 ```bash
-sudo ./scripts/disk-setup.sh --delete-accountsdb  # After bankhash mismatch / bug fix
-sudo ./scripts/disk-setup.sh --delete-blockstore  # After restarting from new snapshot
+sudo ./scripts/disk-setup.sh --delete-accounts    # After bankhash mismatch / bug fix
+sudo ./scripts/disk-setup.sh --delete-ledger      # Delete snapshots + blockstore
 sudo ./scripts/disk-setup.sh --delete-all         # Complete reset
 ```
 
@@ -518,7 +518,7 @@ Sometimes you need to start fresh. These commands delete this data so you can re
 Forces Mithril to rebuild from a fresh snapshot on next run:
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-accountsdb
+sudo ./scripts/disk-setup.sh --delete-accounts
 ```
 
 **When to use:**
@@ -527,6 +527,19 @@ sudo ./scripts/disk-setup.sh --delete-accountsdb
 - AccountsDB got corrupted, or you want a clean slate without re-downloading snapshots
 
 After deleting, Mithril will fetch a fresh snapshot on next run and rebuild AccountsDB from scratch.
+
+### Delete Ledger Only (Snapshots + Blockstore)
+
+Removes both snapshots and blockstore while preserving AccountsDB:
+
+```bash
+sudo ./scripts/disk-setup.sh --delete-ledger
+```
+
+**When to use:**
+- Starting fresh with new snapshots while keeping AccountsDB intact
+- Reclaiming space from old snapshots and blocks together
+- When you want to clear all "ledger" data (everything except account state)
 
 ### Delete Snapshots Only
 
@@ -651,8 +664,9 @@ sudo ./scripts/performance-tune.sh --status      # Show current settings
 ./scripts/performance-tune.sh --goamd64          # Configure GOAMD64 for CPU
 
 # Reset Data
-sudo ./scripts/disk-setup.sh --delete-accountsdb # Delete AccountsDB
-sudo ./scripts/disk-setup.sh --delete-snapshots  # Delete snapshots
-sudo ./scripts/disk-setup.sh --delete-blockstore # Delete blockstore
+sudo ./scripts/disk-setup.sh --delete-accounts   # Delete AccountsDB
+sudo ./scripts/disk-setup.sh --delete-ledger     # Delete ledger (snapshots + blockstore)
+sudo ./scripts/disk-setup.sh --delete-snapshots  # Delete snapshots only
+sudo ./scripts/disk-setup.sh --delete-blockstore # Delete blockstore only
 sudo ./scripts/disk-setup.sh --delete-all        # Delete everything
 ```
