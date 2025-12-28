@@ -30,13 +30,13 @@ func prepareLeaderSchedule(epoch uint64, epochSchedule *sealevel.SysvarEpochSche
 			if waitTime > 30*time.Second {
 				waitTime = 30 * time.Second
 			}
-			mlog.Log.Infof("rate limited fetching leader schedule, retrying in %v (attempt %d/10)", waitTime, attempt+1)
+			mlog.Log.Infof("rate limited fetching leader schedule from %s, retrying in %v (attempt %d/10)", rpcClient.Endpoint(), waitTime, attempt+1)
 			time.Sleep(waitTime)
 		}
 	}
 
 	if err != nil {
-		panic(fmt.Sprintf("unable to fetch leader schedule after 10 attempts: %s", err))
+		panic(fmt.Sprintf("unable to fetch leader schedule from %s after 10 attempts: %s", rpcClient.Endpoint(), err))
 	}
 
 	leaderSchedule := leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch)
