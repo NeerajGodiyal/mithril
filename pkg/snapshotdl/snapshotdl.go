@@ -339,6 +339,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 			Rank:    i + 1,
 			RPC:     rn.Result.RPC,
 			Version: rn.Result.Version,
+			RTTMs:   int(rn.Result.Latency * 1000), // Convert seconds to milliseconds
 			SpeedS1: rn.S1.MedianMBs,
 			SpeedS2: rn.S2.MinMBs,
 		}
