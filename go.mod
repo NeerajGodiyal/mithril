@@ -108,7 +108,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251227231433-4cd06442b410
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251228070310-442ea9d87d2a
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
