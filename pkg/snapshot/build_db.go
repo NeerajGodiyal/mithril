@@ -29,9 +29,10 @@ const (
 	maxAppendVecCopying    = 500
 )
 
-// cleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
+// CleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
 // This prevents corruption from Ctrl+C or partial downloads.
-func cleanAccountsDbDir(accountsDbDir string) {
+// Exported so it can be called early in startup before any failures.
+func CleanAccountsDbDir(accountsDbDir string) {
 	// List of all files/directories that may be left from a previous incomplete run
 	artifacts := []string{
 		"accounts",
@@ -43,7 +44,92 @@ func cleanAccountsDbDir(accountsDbDir string) {
 		"manifest",
 	}
 	for _, artifact := range artifacts {
-		os.RemoveAll(filepath.Join(accountsDbDir, artifact))
+		path := filepath.Join(accountsDbDir, artifact)
+		if err := os.RemoveAll(path); err != nil {
+			mlog.Log.Errorf("failed to remove %s: %v", path, err)
+		}
+	}
+}
+
+// CleanSnapshotDownloadDir removes old snapshot files based on retention settings.
+// maxSnapshots: maximum full snapshots to keep (0 = unlimited)
+// deleteOldSnapshots: if true, always clean excess; if false, only clean when over limit
+func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int, deleteOldSnapshots bool) {
+	if downloadPath == "" || maxSnapshots < 0 {
+		return
+	}
+	entries, err := os.ReadDir(downloadPath)
+	if err != nil {
+		return // Directory may not exist yet
+	}
+
+	// Collect snapshot files with their info
+	type snapshotFile struct {
+		name    string
+		path    string
+		modTime time.Time
+	}
+	var fullSnapshots []snapshotFile
+	var incrSnapshots []snapshotFile
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "snapshot-") && strings.HasSuffix(name, ".tar.zst") {
+			path := filepath.Join(downloadPath, name)
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			fullSnapshots = append(fullSnapshots, snapshotFile{name, path, info.ModTime()})
+		}
+		if strings.HasPrefix(name, "incremental-snapshot-") && strings.HasSuffix(name, ".tar.zst") {
+			path := filepath.Join(downloadPath, name)
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			incrSnapshots = append(incrSnapshots, snapshotFile{name, path, info.ModTime()})
+		}
+	}
+
+	// If maxSnapshots is 0 (unlimited) and deleteOldSnapshots is false, don't clean anything
+	if maxSnapshots == 0 && !deleteOldSnapshots {
+		return
+	}
+
+	// Sort by modification time (newest first)
+	sortByTime := func(files []snapshotFile) {
+		for i := 0; i < len(files)-1; i++ {
+			for j := i + 1; j < len(files); j++ {
+				if files[j].modTime.After(files[i].modTime) {
+					files[i], files[j] = files[j], files[i]
+				}
+			}
+		}
+	}
+
+	// Clean full snapshots beyond the retention limit
+	if maxSnapshots > 0 && len(fullSnapshots) > maxSnapshots {
+		sortByTime(fullSnapshots)
+		for i := maxSnapshots; i < len(fullSnapshots); i++ {
+			if err := os.Remove(fullSnapshots[i].path); err != nil {
+				mlog.Log.Errorf("failed to remove old snapshot %s: %v", fullSnapshots[i].name, err)
+			} else {
+				mlog.Log.Infof("cleaned up old snapshot file (retention limit %d): %s", maxSnapshots, fullSnapshots[i].name)
+			}
+		}
+	}
+
+	// Clean incremental snapshots beyond the retention limit (same limit as full)
+	if maxSnapshots > 0 && len(incrSnapshots) > maxSnapshots {
+		sortByTime(incrSnapshots)
+		for i := maxSnapshots; i < len(incrSnapshots); i++ {
+			if err := os.Remove(incrSnapshots[i].path); err != nil {
+				mlog.Log.Errorf("failed to remove old incremental snapshot %s: %v", incrSnapshots[i].name, err)
+			} else {
+				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", maxSnapshots, incrSnapshots[i].name)
+			}
+		}
 	}
 }
 
@@ -60,7 +146,7 @@ func BuildAccountsDb(
 	accountsDbDir string,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
-	cleanAccountsDbDir(accountsDbDir)
+	CleanAccountsDbDir(accountsDbDir)
 
 	manifest, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
 	if err != nil {

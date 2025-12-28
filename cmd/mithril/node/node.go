@@ -584,7 +584,25 @@ func runVerifyLive(c *cobra.Command, args []string) {
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
 
+	// Clean up any leftover artifacts from previous runs early,
+	// before any operations that could fail (snapshot finding, downloading, etc.)
+	// This ensures disk space is reclaimed even if the program exits early.
+	if accountsPath != "" {
+		mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+		snapshot.CleanAccountsDbDir(accountsPath)
+	}
+
 	snapshotDownloadPath := scratchDirectory
+
+	// Clean up old snapshot files based on retention settings
+	if snapshotDownloadPath != "" {
+		maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+		if maxSnapshots == 0 {
+			maxSnapshots = 2 // default
+		}
+		deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+		snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+	}
 
 	// Determine if using Overcast based on block source
 	useOvercast := blockSource == "overcast"
