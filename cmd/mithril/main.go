@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/spf13/cobra"
@@ -30,10 +31,10 @@ func init() {
 	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
 
 	cmd.AddCommand(
-		&node.VerifyRange,
-	)
-	cmd.AddCommand(
-		&node.VerifyLive,
+		&node.Run,              // Primary command for running Mithril
+		&configcmd.ConfigCmd,   // Config management (init, etc.)
+		&node.VerifyRange,      // Developer/advanced command
+		&node.VerifyLive,       // Backwards compatibility alias for Run
 	)
 }
 

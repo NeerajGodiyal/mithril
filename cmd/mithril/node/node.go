@@ -43,19 +43,36 @@ var (
 		},
 	}
 
-	VerifyLive = cobra.Command{
-		Use:   "verify-live",
-		Short: "Catchup and verify live blocks",
+	// Run is the main command for running Mithril as a live verifier.
+	// This is the primary way most users will run Mithril.
+	Run = cobra.Command{
+		Use:   "run",
+		Short: "Run Mithril as a live verifier (downloads snapshot, builds AccountsDB, verifies blocks)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return initConfigAndBindFlags(cmd)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			runVerifyLive(cmd, args)
+			runLive(cmd, args)
+		},
+	}
+
+	// VerifyLive is an alias for Run (kept for backwards compatibility)
+	VerifyLive = cobra.Command{
+		Use:    "verify-live",
+		Short:  "Alias for 'run' (deprecated, use 'mithril run' instead)",
+		Hidden: true, // Hide from help but still works
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfigAndBindFlags(cmd)
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Note: 'verify-live' is deprecated. Use 'mithril run' instead.")
+			runLive(cmd, args)
 		},
 	}
 
 	loadFromSnapshot            bool
 	loadFromAccountsDb          bool
+	bootstrapMode               string // "auto", "snapshot", or "accountsdb"
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
 	accountsPath                string
@@ -107,11 +124,11 @@ func init() {
 	VerifyRange.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	VerifyRange.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
-	// [development.pprof] section flags
+	// [tuning.pprof] section flags
 	VerifyRange.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
 	VerifyRange.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
-	// [development.debug] section flags
+	// [debug] section flags
 	VerifyRange.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	VerifyRange.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 
@@ -121,41 +138,47 @@ func init() {
 	// [overcast] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
-	// flags for RPC catchup mode
+	// flags for 'mithril run' (live verifier mode)
+	// [bootstrap] section flags
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'snapshot' (always download), 'accountsdb' (require existing)")
+
 	// [ledger] section flags
-	VerifyLive.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	VerifyLive.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
+	Run.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
-	VerifyLive.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
-	VerifyLive.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
+	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
+	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
-	VerifyLive.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
+	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 
-	// [development] section flags
-	VerifyLive.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
-	VerifyLive.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
-	VerifyLive.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
-	VerifyLive.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
-	VerifyLive.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	// [tuning] section flags
+	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
+	Run.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
+	Run.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
+	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
+	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
-	// [development.pprof] section flags
-	VerifyLive.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
+	// [tuning.pprof] section flags
+	Run.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
-	// [development.debug] section flags
-	VerifyLive.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
-	VerifyLive.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
+	// [debug] section flags
+	Run.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
+	Run.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 
 	// [reporting] section flags
-	VerifyLive.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
+	Run.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
 
 	// Top-level flags
-	VerifyLive.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
+	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	VerifyLive.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
-	VerifyLive.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
+	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+
+	// Copy all Run flags to VerifyLive for backwards compatibility
+	VerifyLive.Flags().AddFlagSet(Run.Flags())
 }
 
 // initConfigAndBindFlags loads TOML config file (if specified) and binds flags to viper.
@@ -274,21 +297,44 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Update variables (CLI flags take precedence over TOML config when explicitly set)
 	// CLI flag names -> TOML nested keys (Firedancer-style)
 
-	// [replay] section
+	// [bootstrap] section (new unified mode replacing two booleans)
+	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
+	if bootstrapMode == "" {
+		bootstrapMode = "auto" // default
+	}
+
+	// [replay] section (legacy booleans for verify-range)
 	loadFromSnapshot = getBool("load-from-snapshot", "replay.load_from_snapshot")
 	loadFromAccountsDb = getBool("load-from-accounts-db", "replay.load_from_accounts_db")
 	numReplaySlots = getInt64("num-slots", "replay.num_slots")
 	endSlot = getInt64("end-slot", "replay.end_slot")
 	txParallelism = getInt64("txpar", "replay.txpar")
 
-	// [ledger] section
-	snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
-	incrementalSnapshotFilename = getString("incremental-snapshot", "ledger.incremental_snapshot")
-	accountsPath = getString("accounts-path", "ledger.accounts_path")
-	ledgerPath = getString("ledger-path", "ledger.path")
+	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
+	snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	if snapshotArchivePath == "" {
+		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
+	}
+	incrementalSnapshotFilename = getString("incremental-snapshot", "storage.incremental_snapshot")
+	if incrementalSnapshotFilename == "" {
+		incrementalSnapshotFilename = getString("incremental-snapshot", "ledger.incremental_snapshot")
+	}
+	accountsPath = getString("accounts-path", "storage.accounts")
+	if accountsPath == "" {
+		accountsPath = getString("accounts-path", "ledger.accounts_path")
+	}
+	ledgerPath = getString("ledger-path", "storage.blockstore")
+	if ledgerPath == "" {
+		ledgerPath = getString("ledger-path", "ledger.path")
+	}
 
-	// [rpc] section
-	rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	// [network] section (with fallback to legacy [rpc] keys)
+	rpcEndpoints = getStringSlice("rpc", "network.rpc")
+	if len(rpcEndpoints) == 0 {
+		rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	}
+
+	// [rpc] section - Mithril's RPC server
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -307,34 +353,58 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [snapshot] section
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 
-	// [development.pprof] section
-	pprofPort = getInt64("pprof-port", "development.pprof.port")
-	cpuprofPath = getString("cpu-profile-path", "development.pprof.cpu_profile_path")
+	// [tuning.pprof] section (with fallback to legacy [development.pprof])
+	pprofPort = getInt64("pprof-port", "tuning.pprof.port")
+	if pprofPort == 0 {
+		pprofPort = getInt64("pprof-port", "development.pprof.port")
+	}
+	cpuprofPath = getString("cpu-profile-path", "tuning.pprof.cpu_profile_path")
+	if cpuprofPath == "" {
+		cpuprofPath = getString("cpu-profile-path", "development.pprof.cpu_profile_path")
+	}
 
-	// [development.debug] section
-	debugTxs = getStringSlice("transaction-signatures", "development.debug.transaction_signatures")
-	debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
+	// [debug] section (with fallback to legacy [development.debug])
+	debugTxs = getStringSlice("transaction-signatures", "debug.transaction_signatures")
+	if len(debugTxs) == 0 {
+		debugTxs = getStringSlice("transaction-signatures", "development.debug.transaction_signatures")
+	}
+	debugAcctWrites = getStringSlice("account-writes", "debug.account_writes")
+	if len(debugAcctWrites) == 0 {
+		debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
+	}
 
-	// [development] section
-	paramArenaSizeMB = getUint64("param-arena-size-mb", "development.param_arena_size_mb")
-	borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
+	// [tuning] section (with fallback to legacy [development])
+	paramArenaSizeMB = getUint64("param-arena-size-mb", "tuning.param_arena_size_mb")
+	if paramArenaSizeMB == 0 {
+		paramArenaSizeMB = getUint64("param-arena-size-mb", "development.param_arena_size_mb")
+	}
+	borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "tuning.borrowed_account_arena_size")
+	if borrowedAccountArenaSize == 0 {
+		borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
+	}
 
 	// [reporting] section
 	metricsPath = getString("metrics-path", "reporting.metrics_path")
 
-	// Handle external package variables
+	// Handle external package variables (try tuning.* first, fallback to development.*)
 	if flagChanged("zstd-decoder-concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
+	} else if config.IsSet("tuning.zstd_decoder_concurrency") {
+		snapshot.ZstdDecoderConcurrency = config.GetInt("tuning.zstd_decoder_concurrency")
 	} else if config.IsSet("development.zstd_decoder_concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("development.zstd_decoder_concurrency")
 	}
 	if flagChanged("max-concurrent-flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
+	} else if config.IsSet("tuning.max_concurrent_flushers") {
+		snapshot.MaxConcurrentFlushers = config.GetInt("tuning.max_concurrent_flushers")
 	} else if config.IsSet("development.max_concurrent_flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("development.max_concurrent_flushers")
 	}
 	if flagChanged("use-pool") {
 		sbpf.UsePool = config.GetBool("use-pool")
+	} else if config.IsSet("tuning.use_pool") {
+		sbpf.UsePool = config.GetBool("tuning.use_pool")
 	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
 	}
@@ -566,7 +636,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	accountsDb.CloseDb()
 }
 
-func runVerifyLive(c *cobra.Command, args []string) {
+func runLive(c *cobra.Command, args []string) {
 	ctx := c.Context()
 
 	// Print the Mithril banner first, before any other output
@@ -574,6 +644,9 @@ func runVerifyLive(c *cobra.Command, args []string) {
 
 	// Print version/commit info right after the banner
 	printVersionInfo()
+
+	// Print startup summary
+	printStartupSummary()
 
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
@@ -757,6 +830,55 @@ func printVersionInfo() {
 	}
 
 	fmt.Printf("  %s\n\n", versionStr)
+}
+
+// printStartupSummary prints a summary of the current configuration
+func printStartupSummary() {
+	// Gold/amber color like the banner
+	gold := "\x1b[38;2;217;164;65m"
+	reset := "\x1b[0m"
+	dim := "\x1b[2m"
+
+	fmt.Printf("%s━━━ Startup Configuration ━━━%s\n", gold, reset)
+
+	// Bootstrap mode
+	fmt.Printf("  Bootstrap:    %s%s%s", gold, bootstrapMode, reset)
+	switch bootstrapMode {
+	case "auto":
+		fmt.Printf(" %s(use AccountsDB if exists, else download snapshot)%s\n", dim, reset)
+	case "snapshot":
+		fmt.Printf(" %s(always download fresh snapshot)%s\n", dim, reset)
+	case "accountsdb":
+		fmt.Printf(" %s(require existing AccountsDB)%s\n", dim, reset)
+	default:
+		fmt.Println()
+	}
+
+	// Block source
+	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
+	if blockSource == "overcast" && overcastEndpoint != "" {
+		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	} else {
+		fmt.Println()
+	}
+
+	// Paths
+	if accountsPath != "" {
+		fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
+	}
+	if ledgerPath != "" {
+		fmt.Printf("  Blockstore:   %s%s%s\n", gold, ledgerPath, reset)
+	}
+
+	// RPC endpoints
+	if len(rpcEndpoints) > 0 {
+		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
+		for _, ep := range rpcEndpoints[1:] {
+			fmt.Printf("                %s%s%s\n", gold, ep, reset)
+		}
+	}
+
+	fmt.Println()
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {
