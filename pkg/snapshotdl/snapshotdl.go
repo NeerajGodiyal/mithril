@@ -323,6 +323,11 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	mlog.Log.Infof("Probing %d nodes for snapshot availability...", len(nodes))
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 
+	// Print Node Discovery Report (before speed testing)
+	if stats != nil {
+		stats.PrintNodeDiscoveryReport()
+	}
+
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
 	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
@@ -331,22 +336,34 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 		return nil, fmt.Errorf("no suitable nodes found with snapshots")
 	}
 
-	// Print histogram stats (after filtering is complete)
-	if stats != nil {
-		formatProbeStats(stats, cfg)
+	// Print Stage 2 candidates as a table (no timestamps)
+	maxCandidates := 8
+	if len(rankedNodes) < maxCandidates {
+		maxCandidates = len(rankedNodes)
 	}
+	candidates := make([]rpc.RankedNodeInfo, maxCandidates)
+	for i := 0; i < maxCandidates; i++ {
+		rn := rankedNodes[i]
+		candidates[i] = rpc.RankedNodeInfo{
+			Rank:    i + 1,
+			RPC:     rn.Result.RPC,
+			Version: rn.Result.Version,
+			SpeedS1: rn.S1.MedianMBs,
+			SpeedS2: rn.S2.MinMBs,
+		}
+	}
+	rpc.PrintStage2CandidatesTable(candidates)
 
-	// Print Stage 2 candidates (simpler output)
-	mlog.Log.Infof("Stage 2 candidates (%d nodes ranked by speed):", len(rankedNodes))
-	for i, rn := range rankedNodes {
-		if i >= 8 { // Only show top 8
-			break
+	// Print Filter Pipeline (after speed testing, before source selection)
+	if stats != nil {
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
 		}
-		speed := rn.S2.MinMBs
-		if speed == 0 {
-			speed = rn.S1.MedianMBs
-		}
-		mlog.Log.Infof("  %d. %s | %s | %.1f MB/s", i+1, rn.Result.RPC, rn.Result.Version, speed)
+		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
