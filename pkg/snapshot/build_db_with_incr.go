@@ -39,7 +39,7 @@ func BuildAccountsDbWithIncr(
 	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
-	cleanAccountsDbDir(accountsDbDir)
+	CleanAccountsDbDir(accountsDbDir)
 
 	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
 	if err != nil {
