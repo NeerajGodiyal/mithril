@@ -67,8 +67,11 @@ type BlockConfig struct {
 
 // SnapshotConfig holds snapshot download configuration
 type SnapshotConfig struct {
-	DownloadPath string `toml:"download_path" mapstructure:"download_path"` // Path to download snapshot to
-	SaveToDisk   bool   `toml:"save_to_disk" mapstructure:"save_to_disk"`   // Save snapshots while streaming (requires download_path)
+	// MaxFullSnapshots controls both saving and retention:
+	//   0 = Stream-only mode (don't save snapshots to disk)
+	//   1+ = Save snapshots and keep up to N on disk
+	MaxFullSnapshots int    `toml:"max_full_snapshots" mapstructure:"max_full_snapshots"`
+	DownloadPath     string `toml:"download_path" mapstructure:"download_path"` // Path to download snapshot to
 
 	// Output verbosity
 	Verbose bool `toml:"verbose" mapstructure:"verbose"` // Enable detailed statistics output
@@ -97,10 +100,6 @@ type SnapshotConfig struct {
 	FullThreshold        int `toml:"full_threshold" mapstructure:"full_threshold"`
 	IncrementalThreshold int `toml:"incremental_threshold" mapstructure:"incremental_threshold"`
 	SafetyMarginSlots    int `toml:"safety_margin_slots" mapstructure:"safety_margin_slots"`
-
-	// Retention
-	MaxFullSnapshots   int  `toml:"max_full_snapshots" mapstructure:"max_full_snapshots"`
-	DeleteOldSnapshots bool `toml:"delete_old_snapshots" mapstructure:"delete_old_snapshots"`
 
 	// Performance
 	WorkerCount int `toml:"worker_count" mapstructure:"worker_count"`

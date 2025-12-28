@@ -199,7 +199,7 @@ func BuildAccountsDbWithIncr(
 
 	// Determine save path for full snapshot if streaming from HTTP
 	var fullSavePath string
-	if snapCfg.SaveToDisk && (strings.HasPrefix(fullSnapshotFile, "http://") || strings.HasPrefix(fullSnapshotFile, "https://")) {
+	if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(fullSnapshotFile, "http://") || strings.HasPrefix(fullSnapshotFile, "https://")) {
 		if snapshotDownloadPath != "" {
 			// Extract filename from URL and create save path
 			urlParts := strings.Split(fullSnapshotFile, "/")
@@ -306,7 +306,7 @@ func BuildAccountsDbWithIncr(
 
 		// Determine save path for incremental snapshot if streaming from HTTP
 		var incrSavePath string
-		if snapCfg.SaveToDisk && (strings.HasPrefix(incrementalSnapshotPath, "http://") || strings.HasPrefix(incrementalSnapshotPath, "https://")) {
+		if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(incrementalSnapshotPath, "http://") || strings.HasPrefix(incrementalSnapshotPath, "https://")) {
 			if snapshotDownloadPath != "" {
 				// Extract filename from URL and create save path
 				urlParts := strings.Split(incrementalSnapshotPath, "/")

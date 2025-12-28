@@ -118,7 +118,7 @@ Incremental snapshots must match the base slot of the full snapshot. The selecti
 
 ### Streaming Mode (Default)
 
-When `save_to_disk = false` (default):
+When `max_full_snapshots = 0` (default):
 - Snapshot data streams directly from HTTP to processing pipeline
 - No disk space required for snapshot files
 - Cannot resume if interrupted
@@ -126,10 +126,11 @@ When `save_to_disk = false` (default):
 
 ### Streaming + Save Mode
 
-When `save_to_disk = true` and `download_path` is set:
+When `max_full_snapshots > 0` and `download_path` is set:
 - Uses `io.TeeReader` to write to disk while streaming
 - Processing happens in parallel with disk write
 - Snapshot files are saved for potential reuse
+- Old snapshots automatically deleted when limit exceeded
 - Slightly higher memory usage
 
 ### Disk Download Mode
@@ -164,13 +165,18 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
 
 ```toml
 [snapshot]
-    # Path to download snapshot to (only used if save_to_disk = true)
-    # download_path = ""
+    # Maximum snapshots to keep on disk (controls both saving and retention)
+    #   0 = Stream-only mode (don't save snapshots, saves disk space)
+    #   1 = Save one snapshot, delete previous before downloading new
+    #   2+ = Keep N snapshots, delete oldest when limit exceeded
+    #
+    # When set to 0, snapshots are streamed directly from the network and
+    # processed without saving to disk. This saves significant disk space
+    # but means you'll need to re-download if the process is interrupted.
+    # max_full_snapshots = 1
 
-    # Save snapshots to disk while streaming (requires download_path)
-    # When true: streams from network while saving to disk and processing (parallel)
-    # When false: streams from network and processes without saving (saves disk space)
-    # save_to_disk = false
+    # Path to save snapshots (only used when max_full_snapshots > 0)
+    # download_path = ""
 
     # Enable verbose output showing detailed node discovery statistics
     # verbose = false
@@ -243,16 +249,6 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
     # safety_margin_slots = 5000
 
     # -------------------------------------------------------------------------
-    # Snapshot Retention
-    # -------------------------------------------------------------------------
-
-    # Maximum number of full snapshots to keep (0 = unlimited)
-    # max_full_snapshots = 2
-
-    # Automatically delete old snapshots based on age thresholds
-    # delete_old_snapshots = false
-
-    # -------------------------------------------------------------------------
     # Performance
     # -------------------------------------------------------------------------
 
@@ -284,7 +280,7 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `save_to_disk` | `false` | Stream-only by default |
+| `max_full_snapshots` | `1` | Save one snapshot (0=stream, 1+=save and retain N) |
 | `verbose` | `false` | Quiet logging |
 | `stage1_warm_kib` | `512` | 512 KiB warmup |
 | `stage1_window_kib` | `512` | 512 KiB windows |
@@ -302,7 +298,6 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
 | `full_threshold` | `100000` | ~11 hours old |
 | `incremental_threshold` | `200` | ~80 seconds old |
 | `safety_margin_slots` | `5000` | Warn if close to expiration |
-| `max_full_snapshots` | `2` | Keep last 2 |
 | `worker_count` | `100` | 100 concurrent workers |
 | `max_snapshot_url_attempts` | `3` | Try top 3 nodes |
 | `min_incremental_speed_mbs` | `2.0` | Minimum 2 MB/s |
@@ -356,7 +351,8 @@ mithril verify-live --config my-config.toml
 
 ```toml
 [snapshot]
-    save_to_disk = true
+    # Keep 2 snapshots on disk
+    max_full_snapshots = 2
     download_path = "/data/snapshots"
 ```
 
