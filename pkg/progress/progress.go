@@ -20,9 +20,10 @@ const (
 
 	// Teal/cyan color (using 256-color mode for wider terminal compatibility)
 	// Index 85 is a teal/cyan in the 256-color palette
-	colorTeal  = "\x1b[38;5;85m"
-	colorReset = "\x1b[0m"
-	colorDim   = "\x1b[2m"
+	colorTeal   = "\x1b[38;5;85m"
+	colorYellow = "\x1b[38;5;220m"
+	colorReset  = "\x1b[0m"
+	colorDim    = "\x1b[2m"
 
 	// Cursor control
 	clearLine = "\x1b[2K"
@@ -210,6 +211,7 @@ type DualProgress struct {
 	mu            sync.Mutex
 	started       bool
 	done          bool
+	interrupted   bool
 	stopCh        chan struct{}
 	doneCh        chan struct{}
 	output        io.Writer
@@ -346,6 +348,30 @@ func (d *DualProgress) Stop() {
 	<-d.doneCh
 }
 
+// Interrupt stops the progress display and shows interrupted status
+func (d *DualProgress) Interrupt() {
+	d.mu.Lock()
+	d.interrupted = true
+	d.mu.Unlock()
+
+	d.Stop()
+
+	// Print final interrupted status
+	fmt.Fprintf(d.output, "\033[2K") // Clear line
+	if d.useColor {
+		fmt.Fprintf(d.output, "%s⚠ Interrupted by user%s\n", colorYellow, colorReset)
+	} else {
+		fmt.Fprintln(d.output, "⚠ Interrupted by user")
+	}
+}
+
+// IsInterrupted returns true if the progress was interrupted
+func (d *DualProgress) IsInterrupted() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.interrupted
+}
+
 // IndexingProgress tracks shard flush progress
 type IndexingProgress struct {
 	label     string
@@ -427,6 +453,26 @@ func (p *IndexingProgress) Update(completed, total int) {
 // Finish marks completion
 func (p *IndexingProgress) Finish() {
 	p.Update(p.total, p.total)
+}
+
+// Interrupt shows interrupted status
+func (p *IndexingProgress) Interrupt() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.started {
+		return
+	}
+
+	// Move up and clear line
+	if p.useColor {
+		fmt.Fprint(p.output, moveUp+clearLine)
+		fmt.Fprintf(p.output, "%s%-24s%s %s⚠ Interrupted%s\n",
+			colorTeal, p.label, colorReset,
+			colorYellow, colorReset)
+	} else {
+		fmt.Fprintf(p.output, "%-24s ⚠ Interrupted\n", p.label)
+	}
 }
 
 // PrintBanner prints the Mithril ASCII art banner centered in the terminal

@@ -221,6 +221,14 @@ func BuildAccountsDbWithIncr(
 	}()
 	wg.Wait()
 
+	// Check if processing was interrupted (context cancelled or error)
+	if err != nil {
+		if dp != nil {
+			dp.Interrupt()
+		}
+		return nil, nil, fmt.Errorf("processing full snapshot: %w", err)
+	}
+
 	// Stop progress display after full snapshot is processed
 	if dp != nil {
 		dp.Stop()
@@ -235,6 +243,7 @@ func BuildAccountsDbWithIncr(
 		indexProgress.Update(completed, total)
 	})
 	if err != nil {
+		indexProgress.Interrupt()
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
 
