@@ -164,23 +164,6 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 	}
 }
 
-// formatProbeStats formats ProbeStats using the full report format like solana-snapshot-finder-go
-func formatProbeStats(stats *rpc.ProbeStats, cfg config.Config) {
-	if stats == nil {
-		return
-	}
-
-	// Use the library's built-in report printer for full histogram
-	filterCfg := rpc.FilterConfig{
-		MaxRTTMs:        cfg.MaxRTTMs,
-		FullThreshold:   cfg.FullThreshold,
-		IncThreshold:    cfg.IncrementalThreshold,
-		MinVersion:      cfg.MinNodeVersion,
-		AllowedVersions: cfg.AllowedNodeVersions,
-	}
-	stats.PrintReport(filterCfg)
-}
-
 // DownloadSnapshot downloads a full snapshot from the best available RPC node.
 // It returns: (downloadPath, referenceSlot, snapshotSlot, error)
 //
@@ -232,14 +215,22 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
 
 	// Print statistics if verbose mode (after filtering is complete)
 	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
+		}
+		stats.PrintNodeDiscoveryReport()
+		stats.PrintFilterPipeline(filterCfg, speedStats)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
@@ -331,7 +322,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
 	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
-	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, rankedNodes, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return nil, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -354,16 +345,24 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	}
 	rpc.PrintStage2CandidatesTable(candidates)
 
-	// Print Filter Pipeline (after speed testing, before source selection)
+	// Print Filter Pipeline with speed test stats (after speed testing, before source selection)
+	filterCfg := rpc.FilterConfig{
+		MaxRTTMs:        cfg.MaxRTTMs,
+		FullThreshold:   cfg.FullThreshold,
+		IncThreshold:    cfg.IncrementalThreshold,
+		MinVersion:      cfg.MinNodeVersion,
+		AllowedVersions: cfg.AllowedNodeVersions,
+	}
 	if stats != nil {
-		filterCfg := rpc.FilterConfig{
-			MaxRTTMs:        cfg.MaxRTTMs,
-			FullThreshold:   cfg.FullThreshold,
-			IncThreshold:    cfg.IncrementalThreshold,
-			MinVersion:      cfg.MinNodeVersion,
-			AllowedVersions: cfg.AllowedNodeVersions,
+		stats.PrintFilterPipeline(filterCfg, speedStats)
+	}
+
+	// Write detailed speed test log to file
+	if speedStats != nil {
+		logDir := "/tmp/mithril-logs"
+		if err := speedStats.WriteSpeedTestLog(logDir, filterCfg); err != nil {
+			mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
 		}
-		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
@@ -477,14 +476,22 @@ func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotCo
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
 
 	// Print statistics if verbose mode (after filtering is complete)
 	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
+		}
+		stats.PrintNodeDiscoveryReport()
+		stats.PrintFilterPipeline(filterCfg, speedStats)
 	}
 
 	// Step 5: Download snapshot from best nodes (with configurable fallback)
@@ -567,12 +574,20 @@ func DownloadIncrementalSnapshotWithConfig(endpoint string, path string, referen
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
+		}
+		stats.PrintNodeDiscoveryReport()
+		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
 	// Step 3: Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
 	// This ensures we don't get nodes that haven't seen our full snapshot yet
-	bestNodes, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
+	bestNodes, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
 		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 
 	if len(bestNodes) == 0 {
@@ -730,11 +745,19 @@ func GetIncrementalSnapshotURL(endpoint string, fullSnapshotURL string, referenc
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
-		formatProbeStats(stats, cfg)
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
+		}
+		stats.PrintNodeDiscoveryReport()
+		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
 	// Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
-	_, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
+	_, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
 		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 
 	if len(rankedNodes) == 0 {
