@@ -76,6 +76,11 @@ type SnapshotConfig struct {
 	// Output verbosity
 	Verbose bool `toml:"verbose" mapstructure:"verbose"` // Enable detailed statistics output
 
+	// AlwaysDownloadFull controls whether to always download a new full snapshot
+	// even if a valid one exists on disk within the age threshold.
+	// When false (default), uses existing full snapshot if fresh enough.
+	AlwaysDownloadFull bool `toml:"always_download_full" mapstructure:"always_download_full"`
+
 	// Stage 1: Fast parallel triage
 	Stage1WarmKiB     int64 `toml:"stage1_warm_kib" mapstructure:"stage1_warm_kib"`
 	Stage1WindowKiB   int64 `toml:"stage1_window_kib" mapstructure:"stage1_window_kib"`

@@ -305,7 +305,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [bootstrap] section (new unified mode replacing two booleans)
 	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
 	if bootstrapMode == "" {
-		bootstrapMode = "auto" // default
+		bootstrapMode = "snapshot" // default: always download fresh snapshot
 	}
 
 	// [replay] section (legacy booleans for verify-range)
@@ -950,18 +950,21 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  AccountsDB:   %s%s%s %s(will create)%s\n", gold, accountsPath, reset, dim, reset)
 	}
 
-	// Show existing snapshots if any
-	if len(existingSnapshots) > 0 && bootstrapMode != "snapshot" {
-		for i, snap := range existingSnapshots {
-			prefix := "  Snapshot:     "
-			if i > 0 {
-				prefix = "                "
+	// Show existing full snapshot only when actually using it
+	// (mode=auto without AccountsDB and an existing snapshot will be used)
+	usingExistingSnapshot := bootstrapMode == "auto" && !hasAccountsDB && len(existingSnapshots) > 0
+	if usingExistingSnapshot {
+		// Only show full snapshots, not incrementals
+		for _, snap := range existingSnapshots {
+			if snap.isIncr {
+				continue // skip incremental snapshots
 			}
-			fmt.Printf("%s%s%s%s", prefix, cyan, snap.filename, reset)
+			fmt.Printf("  Snapshot:     %s%s%s", cyan, snap.filename, reset)
 			if snap.slot > 0 {
 				fmt.Printf(" %s(slot %d)%s", dim, snap.slot, reset)
 			}
 			fmt.Println()
+			break // only show first full snapshot
 		}
 	}
 

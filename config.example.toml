@@ -225,6 +225,28 @@ name = "mithril"
     verbose = false
 
     # -------------------------------------------------------------------------
+    # Snapshot Age Thresholds (for reusing existing snapshots)
+    # -------------------------------------------------------------------------
+    # These settings control when existing snapshots on disk are considered
+    # "fresh enough" to reuse vs downloading new ones.
+
+    # Always download a new full snapshot, even if a fresh one exists on disk.
+    # Set to false to reuse existing full snapshots within the age threshold.
+    always_download_full = true
+
+    # Maximum age for full snapshots (slots) - only used when always_download_full = false
+    # Snapshots older than this are considered stale and will be re-downloaded.
+    # ~100,000 slots ≈ 12 hours at 400ms/slot
+    full_threshold = 100000
+
+    # Maximum age for incremental snapshots (slots)
+    # Incrementals are always downloaded (they're small and provide latest state)
+    incremental_threshold = 200
+
+    # Safety margin - warn if snapshot is this close to expiration (slots)
+    safety_margin_slots = 5000
+
+    # -------------------------------------------------------------------------
     # Stage 1: Fast Parallel Triage
     # Quickly tests many nodes in parallel to eliminate slow ones
     # -------------------------------------------------------------------------
@@ -282,19 +304,6 @@ name = "mithril"
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]
     # allowed_node_versions = []
-
-    # -------------------------------------------------------------------------
-    # Snapshot Age Thresholds
-    # -------------------------------------------------------------------------
-
-    # Maximum age for full snapshots (slots)
-    full_threshold = 100000
-
-    # Maximum age for incremental snapshots (slots)
-    incremental_threshold = 200
-
-    # Safety margin - warn if snapshot is this close to expiration (slots)
-    safety_margin_slots = 5000
 
     # -------------------------------------------------------------------------
     # Performance
