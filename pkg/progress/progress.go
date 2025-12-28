@@ -488,14 +488,14 @@ func (p *IndexingProgress) Interrupt() {
 func PrintBanner() {
 	// Banner with content starting at left edge
 	const logo = `
-            _______ __________________          _______ _________ _
-           (       )\__   __/\__   __/|\     /|(  ____ )\__   __/( \
- .         | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (            .
-/|\.       | || || |   | |      | |   | (___) || (____)|   | |   | |          ./|\.
--:-->      | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |         <--:-->
-\|/'       | |   | |   | |      | |   | (   ) || (\ (      | |   | |          '\|/'
- '         | )   ( |___) (___   | |   | )   ( || ) \ \_____) (___| (____/\      '
-           |/     \|\_______/   )_(   |/     \||/   \__/\_______/(_______/
+              _______ __________________          _______ _________ _
+             (       )\__   __/\__   __/|\     /|(  ____ )\__   __/( \
+   .         | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (            .
+ ./|\.       | || || |   | |      | |   | (___) || (____)|   | |   | |          ./|\.
+<--:-->      | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |         <--:-->
+ '\|/'       | |   | |   | |      | |   | (   ) || (\ (      | |   | |          '\|/'
+   '         | )   ( |___) (___   | |   | )   ( || ) \ \_____) (___| (____/\      '
+             |/     \|\_______/   )_(   |/     \||/   \__/\_______/(_______/
 `
 
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
@@ -516,8 +516,15 @@ func PrintBanner() {
 }
 
 // PrintSnapshotSourceSummary prints a clean summary box for the selected snapshot source
+// Box width = 73 chars to match Mithril banner
 func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, nodeVersion string, speedMBs float64, rttMs int, searchDuration time.Duration) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := ""  // color start (teal for borders)
+	r := ""  // color reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
 
 	// Calculate age in slots
 	age := referenceSlot - slot
@@ -534,26 +541,17 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 		rttStr = "N/A"
 	}
 
-	// Use 10-space indent to align with text after relative timestamps "(+    0s) "
-	indent := "          "
-
 	fmt.Println()
-	if useColor {
-		fmt.Printf("%s", colorTeal)
-	}
-	fmt.Printf("%s┌───────────────────────────────────────────────────────────────┐\n", indent)
-	fmt.Printf("%s│  %-61s│\n", indent, "FULL SNAPSHOT SOURCE SELECTED")
-	fmt.Printf("%s├───────────────────────────────────────────────────────────────┤\n", indent)
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "Source:", nodeIP)
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "Version:", version)
-	fmt.Printf("%s│   %-18s %-41d│\n", indent, "Snapshot Slot:", slot)
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age))
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "RTT:", rttStr)
-	fmt.Printf("%s│   %-18s %-41s│\n", indent, "Search Time:", searchDuration.Round(time.Second).String())
-	fmt.Printf("%s└───────────────────────────────────────────────────────────────┘\n", indent)
-	if useColor {
-		fmt.Printf("%s", colorReset)
-	}
+	fmt.Printf("%s┌───────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s FULL SNAPSHOT SOURCE SELECTED                                         %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├───────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Source:", nodeIP, c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Version:", version, c, r)
+	fmt.Printf("%s│%s   %-18s %-49d%s│%s\n", c, r, "Snapshot Slot:", slot, c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age), c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "RTT:", rttStr, c, r)
+	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
+	fmt.Printf("%s└───────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }
