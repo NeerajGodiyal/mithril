@@ -132,8 +132,8 @@ name = "mithril"
     txpar = 24
 
 [snapshot]
-    # Save snapshots to disk while streaming (optional)
-    # save_to_disk = true
+    # Keep snapshots on disk (0 = stream-only, 1+ = save and retain N)
+    # max_full_snapshots = 2
     download_path = "/mnt/mithril-ledger/snapshots"
 
     # Verbose output shows detailed node discovery statistics

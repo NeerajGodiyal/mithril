@@ -351,9 +351,6 @@ func buildSnapshotConfig() snapshotdl.SnapshotConfig {
 	if config.IsSet("snapshot.verbose") {
 		cfg.Verbose = config.GetBool("snapshot.verbose")
 	}
-	if config.IsSet("snapshot.save_to_disk") {
-		cfg.SaveToDisk = config.GetBool("snapshot.save_to_disk")
-	}
 	if config.IsSet("snapshot.download_path") {
 		cfg.DownloadPath = config.GetString("snapshot.download_path")
 	}
@@ -410,9 +407,6 @@ func buildSnapshotConfig() snapshotdl.SnapshotConfig {
 	}
 	if config.IsSet("snapshot.max_full_snapshots") {
 		cfg.MaxFullSnapshots = config.GetInt("snapshot.max_full_snapshots")
-	}
-	if config.IsSet("snapshot.delete_old_snapshots") {
-		cfg.DeleteOldSnapshots = config.GetBool("snapshot.delete_old_snapshots")
 	}
 	if config.IsSet("snapshot.worker_count") {
 		cfg.WorkerCount = config.GetInt("snapshot.worker_count")

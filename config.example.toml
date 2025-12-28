@@ -129,13 +129,23 @@ scratch_directory = "/mnt/mithril-ledger"
 # ============================================================================
 
 [snapshot]
-    # Path to download snapshot to (only used if save_to_disk = true)
-    download_path = "/mnt/mithril-ledger/snapshots"
+    # -------------------------------------------------------------------------
+    # Snapshot Storage
+    # -------------------------------------------------------------------------
 
-    # Save snapshots to disk while streaming (requires download_path)
-    # When true: streams from network while saving to disk and processing (parallel)
-    # When false: streams from network and processes without saving (saves disk space)
-    save_to_disk = false
+    # Maximum snapshots to keep on disk (controls both saving and retention)
+    #   0 = Stream-only mode (don't save snapshots, saves disk space)
+    #   1 = Save one snapshot, delete previous before downloading new
+    #   2+ = Keep N snapshots, delete oldest when limit exceeded
+    #
+    # Saved snapshots are valuable for debugging and reproducing issues -
+    # the dev team can start from a snapshot to investigate problems.
+    # Set to 0 for stream-only mode (saves disk space but requires re-download
+    # if interrupted).
+    max_full_snapshots = 1
+
+    # Path to save snapshots (only used when max_full_snapshots > 0)
+    download_path = "/mnt/mithril-ledger/snapshots"
 
     # Enable verbose output showing detailed node discovery statistics
     verbose = false
@@ -211,16 +221,6 @@ scratch_directory = "/mnt/mithril-ledger"
 
     # Safety margin - warn if snapshot is this close to expiration (slots)
     safety_margin_slots = 5000
-
-    # -------------------------------------------------------------------------
-    # Snapshot Retention
-    # -------------------------------------------------------------------------
-
-    # Maximum number of full snapshots to keep (0 = unlimited)
-    max_full_snapshots = 2
-
-    # Automatically delete old snapshots based on age thresholds
-    delete_old_snapshots = false
 
     # -------------------------------------------------------------------------
     # Performance

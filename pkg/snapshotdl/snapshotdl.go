@@ -57,9 +57,10 @@ type SnapshotConfig struct {
 	FullThreshold        int
 	IncrementalThreshold int
 
-	// Retention
-	MaxFullSnapshots   int
-	DeleteOldSnapshots bool
+	// Snapshot storage (controls both saving and retention)
+	// 0 = Stream-only mode (don't save snapshots to disk)
+	// 1+ = Save snapshots and keep up to N on disk
+	MaxFullSnapshots int
 
 	// Safety
 	SafetyMarginSlots int
@@ -70,9 +71,8 @@ type SnapshotConfig struct {
 	// Output verbosity
 	Verbose bool
 
-	// Disk saving
-	SaveToDisk   bool   // Save snapshots to disk while streaming
-	DownloadPath string // Path to save snapshots to (only used if SaveToDisk=true)
+	// Download path (only used when MaxFullSnapshots > 0)
+	DownloadPath string
 
 	// Fallback resilience
 	MaxSnapshotURLAttempts int // Number of ranked nodes to try when getting snapshot URLs (0 = try all)
@@ -108,9 +108,9 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		FullThreshold:        100000, // Full snapshots up to 100k slots old (Agave 3.0+)
 		IncrementalThreshold: 200,    // Allow slightly ahead incrementals
 
-		// Retention
-		MaxFullSnapshots:   2,     // Keep last 2 full snapshots
-		DeleteOldSnapshots: false, // Let mithril manage deletion
+		// Snapshot storage (0 = stream-only, 1+ = save and retain N)
+		// Saved snapshots are valuable for debugging and reproducing issues
+		MaxFullSnapshots: 1, // Save one snapshot by default
 
 		// Safety
 		SafetyMarginSlots: 5000, // Warn if <5000 slots until expiration
@@ -121,9 +121,8 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		// Output
 		Verbose: false, // Quiet by default
 
-		// Disk saving
-		SaveToDisk:   false, // Stream only by default (save disk space)
-		DownloadPath: "",    // No download path by default
+		// Download path (set via config when MaxFullSnapshots > 0)
+		DownloadPath: "",
 
 		// Fallback resilience
 		MaxSnapshotURLAttempts: 3, // Try top 3 ranked nodes before giving up
@@ -159,9 +158,8 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 		TCPTimeoutMs:         sc.TCPTimeoutMs,
 		MinNodeVersion:       sc.MinNodeVersion,
 		AllowedNodeVersions:  sc.AllowedNodeVersions,
-		MaxFullSnapshots:     sc.MaxFullSnapshots,
-		DeleteOldSnapshots:   sc.DeleteOldSnapshots,
-		SafetyMarginSlots:    sc.SafetyMarginSlots,
+		MaxFullSnapshots:  sc.MaxFullSnapshots,
+		SafetyMarginSlots: sc.SafetyMarginSlots,
 		Quiet:                true, // Mithril prints its own summary
 	}
 }
