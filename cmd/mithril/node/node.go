@@ -1091,9 +1091,11 @@ func parseSlotFromIncrementalName(name string) uint64 {
 // Returns the number of processes killed.
 func killExistingMithrilProcesses() int {
 	myPID := os.Getpid()
+	myPPID := os.Getppid()
 
-	// Use pgrep to find mithril processes
-	cmd := exec.Command("pgrep", "-f", "mithril")
+	// Use pgrep to find mithril processes by executable name (not full command line)
+	// This avoids matching sudo or shell processes that have "mithril" in args
+	cmd := exec.Command("pgrep", "-x", "mithril")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
@@ -1114,8 +1116,8 @@ func killExistingMithrilProcesses() int {
 			continue
 		}
 
-		// Don't kill ourselves
-		if pid == myPID {
+		// Don't kill ourselves or our parent (sudo)
+		if pid == myPID || pid == myPPID {
 			continue
 		}
 
