@@ -521,6 +521,7 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 	c := ""  // color start (teal for borders)
 	r := ""  // color reset
+	p := " " // left padding to match other boxes
 	if useColor {
 		c = colorTeal
 		r = colorReset
@@ -542,16 +543,16 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	}
 
 	fmt.Println()
-	fmt.Printf("%s┌───────────────────────────────────────────────────────────────────────┐%s\n", c, r)
-	fmt.Printf("%s│%s FULL SNAPSHOT SOURCE SELECTED                                         %s│%s\n", c, r, c, r)
-	fmt.Printf("%s├───────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Source:", nodeIP, c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Version:", version, c, r)
-	fmt.Printf("%s│%s   %-18s %-49d%s│%s\n", c, r, "Snapshot Slot:", slot, c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age), c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "RTT:", rttStr, c, r)
-	fmt.Printf("%s│%s   %-18s %-49s%s│%s\n", c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
-	fmt.Printf("%s└───────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Printf("%s%s┌───────────────────────────────────────────────────────────────────────┐%s\n", p, c, r)
+	fmt.Printf("%s%s│%s FULL SNAPSHOT SOURCE SELECTED                                         %s│%s\n", p, c, r, c, r)
+	fmt.Printf("%s%s├───────────────────────────────────────────────────────────────────────┤%s\n", p, c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "Source:", nodeIP, c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "Version:", version, c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49d%s│%s\n", p, c, r, "Snapshot Slot:", slot, c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age), c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "RTT:", rttStr, c, r)
+	fmt.Printf("%s%s│%s   %-18s %-49s%s│%s\n", p, c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
+	fmt.Printf("%s%s└───────────────────────────────────────────────────────────────────────┘%s\n", p, c, r)
 	fmt.Println()
 }
