@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -116,10 +117,10 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 	var result *rpc.GetBlockResult
 	var err error
 
-	for count := uint64(0); count < 20; count++ {
+	for attempt := uint64(0); attempt < 20; attempt++ {
 		result, err = fetcher.client.GetBlockWithOpts(
 			context.TODO(),
-			slot+count,
+			slot+attempt,
 			&rpc.GetBlockOpts{
 				MaxSupportedTransactionVersion: &maxSupportedTxVer,
 				Commitment:                     rpc.CommitmentFinalized,
@@ -130,11 +131,22 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 
 		if err == nil {
 			break
-		} else if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot+count)) {
+		} else if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot+attempt)) {
 			continue
 		} else {
-			panic(err)
+			if attempt < 19 {
+				waitTime := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s...
+				if waitTime > 30*time.Second {
+					waitTime = 30 * time.Second
+				}
+				mlog.Log.Infof("might be too early for slot %d, retrying in %v (attempt %d/10)", slot, waitTime, attempt+1)
+				time.Sleep(waitTime)
+			}
 		}
+	}
+
+	if result == nil {
+		return 0, fmt.Errorf("unable to fetch numRewardPartitions")
 	}
 
 	if result.NumRewardPartitions == nil {
