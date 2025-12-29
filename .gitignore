@@ -43,6 +43,9 @@ conformance/.DS_Store
 fixtures/.DS_Store
 pkg/.DS_Store
 .DS_Store
+
+# User config files (use config.example.toml as template)
+config.toml
 mithril.toml
 
 # Local development files

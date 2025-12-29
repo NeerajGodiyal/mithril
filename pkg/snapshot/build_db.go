@@ -318,7 +318,7 @@ func BuildAccountsDb(
 			defer wg.Done()
 			start := time.Now()
 			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool)
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, time.Since(start))
+			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
 		}()
 	}
 
@@ -327,7 +327,7 @@ func BuildAccountsDb(
 		mlog.Log.Errorf("failed while processing snapshots: %v", err)
 		return nil, nil, err
 	}
-	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", time.Since(start))
+	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", fmtDuration(time.Since(start)))
 
 	// Show indexing progress for shard flush
 	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
@@ -339,12 +339,12 @@ func BuildAccountsDb(
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
 
-	mlog.Log.Infof("Snapshot indexing complete in %s", time.Since(start))
+	mlog.Log.Infof("Snapshot indexing complete in %s", fmtDuration(time.Since(start)))
 
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 
-	mlog.Log.Infof("snapshot processed in %s.\n", time.Since(start))
+	mlog.Log.Infof("snapshot processed in %s.\n", fmtDuration(time.Since(start)))
 
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())

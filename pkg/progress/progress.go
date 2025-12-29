@@ -323,15 +323,24 @@ func (d *DualProgress) render() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Move up two lines and clear
-	if d.useColor {
-		fmt.Fprint(d.output, moveUp+clearLine)
-		fmt.Fprint(d.output, moveUp+clearLine)
-	}
+	downloadLine := d.Download.Render(d.useColor)
+	extractLine := d.Extract.Render(d.useColor)
 
-	// Render both bars
-	fmt.Fprintln(d.output, d.Download.Render(d.useColor))
-	fmt.Fprintln(d.output, d.Extract.Render(d.useColor))
+	if d.useColor {
+		// Single atomic write to avoid terminal buffering issues:
+		// \r - carriage return to start of line (ensures clean positioning)
+		// \x1b[2A - move cursor up 2 lines
+		// \x1b[2K - clear the current line (download bar line)
+		// print download bar + newline
+		// \x1b[2K - clear the current line (extract bar line)
+		// print extract bar + newline
+		fmt.Fprintf(d.output, "\r\x1b[2A\x1b[2K%s\n\x1b[2K%s\n",
+			downloadLine,
+			extractLine)
+	} else {
+		// Non-TTY: skip in-place updates, bars will scroll
+		fmt.Fprintf(d.output, "%s\n%s\n", downloadLine, extractLine)
+	}
 }
 
 // Stop stops the progress display
@@ -475,61 +484,29 @@ func (p *IndexingProgress) Interrupt() {
 	}
 }
 
-// PrintBanner prints the Mithril ASCII art banner centered in the terminal
+// PrintBanner prints the Mithril ASCII art banner (left-aligned to match log output)
 func PrintBanner() {
+	// Banner with content starting at left edge
 	const logo = `
-               _______ __________________          _______ _________ _
-              (       )\__   __/\__   __/|\     /|(  ____ )\__   __/( \
-    .         | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (            .
-  ./|\.       | || || |   | |      | |   | (___) || (____)|   | |   | |          ./|\.
- <--:-->      | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |         <--:-->
-  '\|/'       | |   | |   | |      | |   | (   ) || (\ (      | |   | |          '\|/'
-    '         | )   ( |___) (___   | |   | )   ( || ) \ \_____) (___| (____/\      '
-              |/     \|\_______/   )_(   |/     \||/   \__/\_______/(_______/
+           _______ __________________          _______ _________ _
+          (       )\__   __/\__   __/|\     /|(  ____ )\__   __/( \
+   .      | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (         .
+ ./|\.    | || || |   | |      | |   | (___) || (____)|   | |   | |       ./|\.
+<--:-->   | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |      <--:-->
+ '\|/'    | |   | |   | |      | |   | (   ) || (\ (      | |   | |       '\|/'
+   '      | )   ( |___) (___   | |   | )   ( || ) \ \_____) (___| (____/\   '
+          |/     \|\_______/   )_(   |/     \||/   \__/\_______/(_______/
 `
 
-	// Split and strip common indent
-	lines := strings.Split(strings.Trim(logo, "\n"), "\n")
-	minIndent := len(lines[0])
-	for _, ln := range lines {
-		indent := len(ln) - len(strings.TrimLeft(ln, " \t"))
-		if indent < minIndent {
-			minIndent = indent
-		}
-	}
-	for i := range lines {
-		if len(lines[i]) > minIndent {
-			lines[i] = lines[i][minIndent:]
-		}
-	}
-
-	// Get terminal width for centering (fallback to banner width)
-	termWidth, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || termWidth == 0 {
-		termWidth = 80 // reasonable default
-	}
-
-	// Find max line width for centering
-	maxWidth := 0
-	for _, ln := range lines {
-		if len(ln) > maxWidth {
-			maxWidth = len(ln)
-		}
-	}
-
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	lines := strings.Split(strings.Trim(logo, "\n"), "\n")
 
 	fmt.Println() // blank line above
 	for _, ln := range lines {
-		leftPad := (termWidth - maxWidth) / 2
-		if leftPad < 0 {
-			leftPad = 0
-		}
-		padding := strings.Repeat(" ", leftPad)
 		if useColor {
-			fmt.Printf("%s%s%s%s\n", padding, colorTeal, ln, colorReset)
+			fmt.Printf("%s%s%s\n", colorTeal, ln, colorReset)
 		} else {
-			fmt.Printf("%s%s\n", padding, ln)
+			fmt.Println(ln)
 		}
 	}
 	// Add empty lines below the banner for visual separation
@@ -539,8 +516,15 @@ func PrintBanner() {
 }
 
 // PrintSnapshotSourceSummary prints a clean summary box for the selected snapshot source
+// Box width = 80 chars to match Mithril banner (from left star edge to right star edge)
 func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, nodeVersion string, speedMBs float64, rttMs int, searchDuration time.Duration) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // color start (teal for borders)
+	r := "" // color reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
 
 	// Calculate age in slots
 	age := referenceSlot - slot
@@ -558,22 +542,16 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	}
 
 	fmt.Println()
-	if useColor {
-		fmt.Printf("%s", colorTeal)
-	}
-	fmt.Println("  ┌────────────────────────────────────────────────────────────┐")
-	fmt.Printf("  │  %-58s│\n", "Full Snapshot Source Selected")
-	fmt.Println("  │                                                            │")
-	fmt.Printf("  │   %-18s %-38s│\n", "Source:", nodeIP)
-	fmt.Printf("  │   %-18s %-38s│\n", "Version:", version)
-	fmt.Printf("  │   %-18s %-38d│\n", "Snapshot Slot:", slot)
-	fmt.Printf("  │   %-18s %-38s│\n", "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age))
-	fmt.Printf("  │   %-18s %-38s│\n", "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs))
-	fmt.Printf("  │   %-18s %-38s│\n", "RTT:", rttStr)
-	fmt.Printf("  │   %-18s %-38s│\n", "Search Time:", searchDuration.Round(time.Second).String())
-	fmt.Println("  └────────────────────────────────────────────────────────────┘")
-	if useColor {
-		fmt.Printf("%s", colorReset)
-	}
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s FULL SNAPSHOT SOURCE SELECTED                                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Source:", nodeIP, c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Version:", version, c, r)
+	fmt.Printf("%s│%s %-18s%-59d%s│%s\n", c, r, "Snapshot Slot:", slot, c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Snapshot Age:", fmt.Sprintf("%d slots behind tip", age), c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "RTT:", rttStr, c, r)
+	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }

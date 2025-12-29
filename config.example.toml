@@ -1,53 +1,113 @@
 # Mithril Configuration File
-# Copy this file to mithril.toml and customize for your deployment.
+# Generate a starter config with: mithril config init
 # CLI flags override these values when both are specified.
 #
-# Configuration structure follows Firedancer conventions for familiarity.
+# Quick start:
+#   1. Run: mithril config init
+#   2. Edit [storage] paths for your setup
+#   3. Run: mithril run --config config.toml
+#
+# Everything else has sensible defaults.
 
 # ============================================================================
-# TOP-LEVEL
+# GENERAL SETTINGS
 # ============================================================================
 
-# Name of this Mithril instance
+# Name of this Mithril instance (used in logs and metrics)
 name = "mithril"
 
-# Path for downloads (e.g. snapshots) and other temp state
-scratch_directory = "/mnt/mithril-ledger"
+# ============================================================================
+# [bootstrap] - Startup Mode
+# ============================================================================
+#
+# Controls how Mithril initializes its state on startup.
+#
+# Modes:
+#   "auto"       - Use existing AccountsDB if valid, otherwise download snapshot
+#   "snapshot"   - Always download a fresh snapshot (good for debugging/early-stage)
+#   "accountsdb" - Require existing AccountsDB, fail fast if missing
+#
+# The default is "snapshot" which is recommended while Mithril is in early
+# development. Once stable, "auto" is a good choice for production.
+
+[bootstrap]
+    mode = "snapshot"
 
 # ============================================================================
-# [ledger] - Ledger and storage paths
+# [storage] - Storage Paths
 # ============================================================================
+#
+# Mithril stores data in these locations:
+#
+#   AccountsDB (~500GB)
+#     In Solana, "accounts" are the fundamental unit of state - every wallet,
+#     token balance, program, and piece of on-chain data is an account.
+#     AccountsDB is Mithril's index of all ~500M accounts on the network.
+#     Heavy random I/O - put this on your FASTEST NVMe.
+#
+#   Snapshots (~100GB)
+#     Periodic dumps of account state from the network. Mithril downloads
+#     one on first run to bootstrap AccountsDB.
+#
+#   Blockstore (varies)
+#     Incoming blocks from RPC/Overcast. Size depends on how much history
+#     you want to keep (0 to hundreds of GB).
+#
+# Recommended setup (two NVMe drives):
+#   /mnt/mithril-accounts/     <- Fast NVMe (~500GB for AccountsDB)
+#   /mnt/mithril-ledger/       <- Larger NVMe for everything else
+#       ├── blockstore/
+#       └── snapshots/
+#
+# See scripts/disk-setup.sh for automated setup.
 
-[ledger]
-    # Path containing slot.json files (block data)
-    path = "/mnt/mithril-ledger/blockstore"
+[storage]
+    # AccountsDB - the main account state database (~500GB)
+    # Put this on your fastest NVMe due to heavy random I/O.
+    accounts = "/mnt/mithril-accounts"
 
-    # Output path for writing AccountsDB data to
-    accounts_path = "/mnt/mithril-accounts"
+    # Blockstore - incoming blocks from RPC/Overcast
+    # Size depends on how much block history you keep.
+    blockstore = "/mnt/mithril-ledger/blockstore"
 
-    # Path of full snapshot or AccountsDB to load from (verifier mode)
-    snapshot_archive_path = "/mnt/mithril-ledger/snapshots"
-
-    # Filename containing incremental snapshot
-    # incremental_snapshot = ""
+    # Snapshots - downloaded on first run (~100GB for full + incremental)
+    snapshots = "/mnt/mithril-ledger/snapshots"
 
 # ============================================================================
-# [rpc] - RPC configuration
+# [network] + [block] - Data Sources
 # ============================================================================
+#
+# These settings control where Mithril gets the data it needs:
+#   1. RPC endpoints - Used to discover snapshot sources AND fetch blocks
+#   2. Block source  - Whether to stream blocks from RPC or Overcast
+#
+# On startup, Mithril uses the RPC endpoint(s) to:
+#   - Query the cluster for nodes hosting snapshots
+#   - Speed-test nodes to find the fastest snapshot download
+#   - Fetch new blocks in real-time (if using RPC as block source)
 
-[rpc]
-    # RPC endpoint(s) for fetching blocks and block downloads
-    # Can be a single URL or a list of URLs for load balancing
+[network]
+    # Solana RPC endpoint(s) for cluster access
+    # Used for: discovering snapshot sources, fetching blocks (if source=rpc)
+    # Can be a single URL or multiple URLs for redundancy
     rpc = ["https://api.mainnet-beta.solana.com"]
     # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
 
-    # RPC server port. Set to 0 to disable (default).
-    # When enabled, exposes a Solana-compatible JSON-RPC interface.
-    # port = 8899
+[block]
+    # Where to stream new blocks from:
+    #   "rpc"      - Fetch blocks via RPC (uses network.rpc endpoints above)
+    #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
+    source = "rpc"
+
+    # Overcast endpoint address (only used when source = "overcast")
+    # If source = "overcast" but no endpoint is provided, falls back to RPC
+    # overcast_endpoint = "localhost:9000"
 
 # ============================================================================
-# [replay] - Block replay settings
+# [replay] - Block Replay
 # ============================================================================
+#
+# Controls how Mithril processes and verifies blocks.
 
 [replay]
     # Transaction parallelism. Set to 0 for sequential execution,
@@ -55,24 +115,44 @@ scratch_directory = "/mnt/mithril-ledger"
     # Recommended: 2x your CPU core count (e.g., 192 for a 96-core machine)
     txpar = 24
 
-    # Number of slots to replay (verifier mode)
+    # -------------------------------------------------------------------------
+    # Advanced: verify-range settings (for developers)
+    # -------------------------------------------------------------------------
+    # These settings are only used with 'mithril verify-range', not 'mithril run'.
+    # For normal operation, use [bootstrap].mode above instead.
+
+    # Number of slots to replay
     # num_slots = 0
 
-    # Block at which to stop replaying, inclusive (verifier mode)
-    # -1 means no limit
+    # Block at which to stop replaying, inclusive (-1 = no limit)
     # end_slot = -1
 
-    # Load from a full snapshot (verifier mode)
+    # Legacy bootstrap flags (use [bootstrap].mode instead for 'mithril run')
     # load_from_snapshot = false
-
-    # Load from AccountsDB (verifier mode)
     # load_from_accounts_db = false
 
 # ============================================================================
-# [development] - Development and tuning options
+# [rpc] - Mithril RPC Server
 # ============================================================================
+#
+# Mithril exposes a Solana-compatible JSON-RPC interface on localhost,
+# allowing other tools to query Mithril's account state directly.
+#
+# Query with: curl http://localhost:8899 -X POST -H "Content-Type: application/json" \
+#   -d '{"jsonrpc":"2.0","id":1,"method":"getBlockHeight"}'
 
-[development]
+[rpc]
+    # Port for Mithril's RPC interface (0 = disabled)
+    port = 8899
+
+# ============================================================================
+# [tuning] - Performance Tuning & Profiling
+# ============================================================================
+#
+# Advanced settings for optimizing Mithril's performance.
+# The defaults work well for most deployments.
+
+[tuning]
     # Zstd decoder concurrency (defaults to NumCPU)
     # zstd_decoder_concurrency = 16
 
@@ -88,24 +168,30 @@ scratch_directory = "/mnt/mithril-ledger"
     # Enable/disable pool allocator for slices
     use_pool = true
 
-    # [development.pprof] - Profiling options
-    [development.pprof]
+    # [tuning.pprof] - CPU/Memory Profiling
+    [tuning.pprof]
         # Port to serve HTTP pprof endpoint (-1 to disable)
+        # Access at http://localhost:PORT/debug/pprof/
         # port = 6060
 
-        # Filename to write CPU profile
+        # Filename to write CPU profile (for offline analysis)
         # cpu_profile_path = "/tmp/cpuprof.pprof"
 
-    # [development.debug] - Debug logging options
-    [development.debug]
-        # Transaction signatures to enable debug logging for
-        # transaction_signatures = ["sig1", "sig2"]
+# ============================================================================
+# [debug] - Debug Logging
+# ============================================================================
+#
+# Options for debugging specific transactions or accounts.
 
-        # Account pubkeys to enable debug logging of transactions that modify them
-        # account_writes = ["pubkey1", "pubkey2"]
+[debug]
+    # Transaction signatures to enable debug logging for
+    # transaction_signatures = ["sig1", "sig2"]
+
+    # Account pubkeys to enable debug logging of transactions that modify them
+    # account_writes = ["pubkey1", "pubkey2"]
 
 # ============================================================================
-# [reporting] - Metrics and reporting
+# [reporting] - Metrics & Reporting
 # ============================================================================
 
 [reporting]
@@ -113,19 +199,7 @@ scratch_directory = "/mnt/mithril-ledger"
     # metrics_path = "/tmp/metrics.jsonl"
 
 # ============================================================================
-# [block] - Block source configuration
-# ============================================================================
-
-[block]
-    # Block source for verify-live mode: "rpc" or "overcast"
-    source = "rpc"
-
-    # Overcast endpoint address (only used when source = "overcast")
-    # If source = "overcast" but no endpoint is provided, falls back to RPC
-    # overcast_endpoint = "localhost:9000"
-
-# ============================================================================
-# [snapshot] - Snapshot download configuration
+# [snapshot] - Snapshot Download Settings
 # ============================================================================
 
 [snapshot]
@@ -149,6 +223,28 @@ scratch_directory = "/mnt/mithril-ledger"
 
     # Enable verbose output showing detailed node discovery statistics
     verbose = false
+
+    # -------------------------------------------------------------------------
+    # Snapshot Age Thresholds (for reusing existing snapshots)
+    # -------------------------------------------------------------------------
+    # These settings control when existing snapshots on disk are considered
+    # "fresh enough" to reuse vs downloading new ones.
+
+    # Always download a new full snapshot, even if a fresh one exists on disk.
+    # Set to false to reuse existing full snapshots within the age threshold.
+    always_download_full = true
+
+    # Maximum age for full snapshots (slots) - only used when always_download_full = false
+    # Snapshots older than this are considered stale and will be re-downloaded.
+    # ~100,000 slots ≈ 12 hours at 400ms/slot
+    full_threshold = 100000
+
+    # Maximum age for incremental snapshots (slots)
+    # Incrementals are always downloaded (they're small and provide latest state)
+    incremental_threshold = 200
+
+    # Safety margin - warn if snapshot is this close to expiration (slots)
+    safety_margin_slots = 5000
 
     # -------------------------------------------------------------------------
     # Stage 1: Fast Parallel Triage
@@ -208,19 +304,6 @@ scratch_directory = "/mnt/mithril-ledger"
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]
     # allowed_node_versions = []
-
-    # -------------------------------------------------------------------------
-    # Snapshot Age Thresholds
-    # -------------------------------------------------------------------------
-
-    # Maximum age for full snapshots (slots)
-    full_threshold = 100000
-
-    # Maximum age for incremental snapshots (slots)
-    incremental_threshold = 200
-
-    # Safety margin - warn if snapshot is this close to expiration (slots)
-    safety_margin_slots = 5000
 
     # -------------------------------------------------------------------------
     # Performance

@@ -25,6 +25,14 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// fmtDuration formats a duration to 3 decimal places in the most appropriate unit
+func fmtDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%.3fms", float64(d.Microseconds())/1000)
+	}
+	return fmt.Sprintf("%.3fs", d.Seconds())
+}
+
 func BuildAccountsDbWithIncr(
 	ctx context.Context,
 	fullSnapshotFile string,
@@ -234,7 +242,7 @@ func BuildAccountsDbWithIncr(
 		dp.Stop()
 	}
 
-	mlog.Log.Infof("done processing full snapshot in %s.", time.Since(start))
+	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
 
 	// Show indexing progress for shard flush
 	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
@@ -256,7 +264,7 @@ func BuildAccountsDbWithIncr(
 	if err != nil {
 		klog.Fatalf("error getting incremental snapshot URL: %s", err)
 	}
-	mlog.Log.Infof("found incremental snapshot URL in %s: %s", time.Since(incrSnapshotDlStart), incrementalSnapshotPath)
+	mlog.Log.Infof("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
 
 	var downloaderOpts blockstream.BackgroundBlockDownloaderOpts
 	if overcastEndpoint != "" {
@@ -321,10 +329,10 @@ func BuildAccountsDbWithIncr(
 			defer wg.Done()
 			start := time.Now()
 			incrementalErr = readTarIncrWithSave(ctx, wg, incrementalSnapshotPath, incrSavePath, appendVecCopyingPool)
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, time.Since(start))
+			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, fmtDuration(time.Since(start)))
 		}()
 		wg.Wait()
-		mlog.Log.Infof("done processing incremental snapshot in %s.", time.Since(incrSnapshotStart))
+		mlog.Log.Infof("done processing incremental snapshot in %s.", fmtDuration(time.Since(incrSnapshotStart)))
 
 		// Check if we should retry
 		if incrementalErr == nil {
@@ -354,7 +362,7 @@ func BuildAccountsDbWithIncr(
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 
-	mlog.Log.Infof("snapshots processed in %s.\n", time.Since(start))
+	mlog.Log.Infof("snapshots processed in %s.\n", fmtDuration(time.Since(start)))
 
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())

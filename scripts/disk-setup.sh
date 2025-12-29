@@ -85,11 +85,13 @@
 #   sudo ./scripts/disk-setup.sh --setup              # Format & configure
 #   ./scripts/disk-setup.sh --status                  # Show current config
 #   ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info
+#   ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage & diagnostics
 #
 # DELETE OPTIONS (for resetting Mithril - start fresh):
 #   --delete-accounts    Clear accounts data (forces new snapshot sync)
-#   --delete-snapshots   Clear downloaded snapshots
-#   --delete-blockstore  Clear verified blocks
+#   --delete-ledger      Clear ledger data (snapshots + blockstore)
+#   --delete-snapshots   Clear downloaded snapshots only
+#   --delete-blockstore  Clear verified blocks only
 #   --delete-all         Clear everything (complete reset)
 #
 # SAFETY:
@@ -1424,6 +1426,77 @@ dir_size() {
     fi
 }
 
+# Get disk space info for a directory's mount point
+# Returns: "used_bytes total_bytes free_bytes mount_point fstype"
+get_mount_disk_space() {
+    local dir="$1"
+    # Find the mount point for this directory
+    local mount_point
+    mount_point=$(df "$dir" 2>/dev/null | tail -1 | awk '{print $NF}')
+
+    if [[ -z "$mount_point" ]]; then
+        echo "0 0 0 unknown unknown"
+        return
+    fi
+
+    # Get disk space in 1K blocks and convert to bytes
+    local used_kb total_kb free_kb
+    read -r total_kb used_kb free_kb < <(df -k "$dir" 2>/dev/null | tail -1 | awk '{print $2, $3, $4}')
+
+    local used_bytes=$((used_kb * 1024))
+    local total_bytes=$((total_kb * 1024))
+    local free_bytes=$((free_kb * 1024))
+
+    # Get filesystem type
+    local fstype
+    fstype=$(df -T "$dir" 2>/dev/null | tail -1 | awk '{print $2}')
+    [[ -z "$fstype" ]] && fstype="unknown"
+
+    echo "$used_bytes $total_bytes $free_bytes $mount_point $fstype"
+}
+
+# Format bytes to human-readable (e.g., "1.5 TB")
+format_bytes() {
+    local bytes="$1"
+
+    if [[ $bytes -ge $((1024*1024*1024*1024)) ]]; then
+        awk "BEGIN {printf \"%.2f TB\", $bytes / (1024*1024*1024*1024)}"
+    elif [[ $bytes -ge $((1024*1024*1024)) ]]; then
+        awk "BEGIN {printf \"%.2f GB\", $bytes / (1024*1024*1024)}"
+    elif [[ $bytes -ge $((1024*1024)) ]]; then
+        awk "BEGIN {printf \"%.2f MB\", $bytes / (1024*1024)}"
+    elif [[ $bytes -ge 1024 ]]; then
+        awk "BEGIN {printf \"%.2f KB\", $bytes / 1024}"
+    else
+        echo "${bytes} B"
+    fi
+}
+
+# Show disk space before/after deletion
+show_disk_space_summary() {
+    local mount_point="$1"
+    local before_used="$2"
+    local before_free="$3"
+    local after_used="$4"
+    local after_free="$5"
+    local total="$6"
+    local fstype="${7:-unknown}"
+
+    local freed=$((before_used - after_used))
+
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+    echo "  │ DISK SPACE SUMMARY                                                       │"
+    echo "  ├─────────────────────────────────────────────────────────────────────────┤"
+    printf "  │ Mount point: %-50s (%s) │\n" "$mount_point" "$fstype"
+    echo "  │                                                                          │"
+    printf "  │   Before:  %12s used  /  %12s free                      │\n" "$(format_bytes $before_used)" "$(format_bytes $before_free)"
+    printf "  │   After:   %12s used  /  %12s free                      │\n" "$(format_bytes $after_used)" "$(format_bytes $after_free)"
+    echo "  │                                                                          │"
+    printf "  │   ${GREEN}Freed:     %12s${NC}                                              │\n" "$(format_bytes $freed)"
+    echo "  └─────────────────────────────────────────────────────────────────────────┘"
+}
+
 # Generic clean function for a specific subdirectory type
 clean_subdir() {
     local subdir_name="$1"  # e.g., "accountsdb", "snapshots", "blockstore"
@@ -1444,6 +1517,7 @@ clean_subdir() {
 
     # Find all matching subdirectories
     local paths_to_clean=()
+    local primary_dir=""
 
     echo "  Found $description directories:"
     echo ""
@@ -1458,6 +1532,7 @@ clean_subdir() {
             local size
             size=$(dir_size "$mithril_dir/$subdir_name")
             paths_to_clean+=("$mithril_dir/$subdir_name")
+            [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
             echo "    $mithril_dir/$subdir_name  ($size)"
         fi
     done
@@ -1476,6 +1551,10 @@ clean_subdir() {
 
     confirm_destructive "DELETE $description"
 
+    # Capture disk space BEFORE deletion
+    local before_used before_total before_free mount_point fstype
+    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+
     # Execute deletion
     info "Deleting $description..."
 
@@ -1487,8 +1566,18 @@ clean_subdir() {
         success "Deleted: $path"
     done
 
+    # Sync to ensure filesystem updates are reflected
+    sync
+
+    # Capture disk space AFTER deletion
+    local after_used after_total after_free
+    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
+
     echo ""
     success "$description has been deleted"
+
+    # Show before/after disk space summary
+    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
 }
 
 clean_accounts() {
@@ -1510,6 +1599,7 @@ clean_accounts() {
 
     # Find all matching artifacts
     local paths_to_clean=()
+    local primary_dir=""
 
     echo "  Found accounts artifacts:"
     echo ""
@@ -1525,6 +1615,7 @@ clean_accounts() {
                 local size
                 size=$(dir_size "$mithril_dir/$artifact")
                 paths_to_clean+=("$mithril_dir/$artifact")
+                [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
                 echo "    $mithril_dir/$artifact  ($size)"
             fi
         done
@@ -1541,6 +1632,10 @@ clean_accounts() {
         die "Aborted"
     fi
 
+    # Capture disk space BEFORE deletion
+    local before_used before_total before_free mount_point fstype
+    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+
     echo ""
 
     for path in "${paths_to_clean[@]}"; do
@@ -1548,14 +1643,116 @@ clean_accounts() {
         rm -rf "$path"
     done
 
+    # Sync to ensure filesystem updates are reflected
+    sync
+
+    # Capture disk space AFTER deletion
+    local after_used after_total after_free
+    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
+
     echo ""
     success "Accounts data has been deleted"
+
+    # Show before/after disk space summary
+    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+
     echo ""
     echo "  On next run, Mithril will rebuild accounts from a fresh snapshot."
 }
 
 clean_snapshots() {
-    clean_subdir "snapshots" "Snapshots"
+    info "DELETING Snapshots"
+    echo ""
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        warn "No Mithril data directories found"
+        echo ""
+        echo "  Checked: /mnt/mithril-accounts, /mnt/mithril-ledger"
+        return 1
+    fi
+
+    # Find all snapshot files and directories
+    local paths_to_clean=()
+    local primary_dir=""
+
+    echo "  Found snapshot files/directories:"
+    echo ""
+
+    for mithril_dir in "${mithril_dirs[@]}"; do
+        # SAFETY: Never delete anything on the OS disk
+        if path_on_root_disk "$mithril_dir"; then
+            warn "SKIPPING $mithril_dir - on OS disk (safety protection)"
+            continue
+        fi
+
+        # Check for snapshots subdirectory
+        if [[ -d "$mithril_dir/snapshots" ]]; then
+            local size
+            size=$(dir_size "$mithril_dir/snapshots")
+            paths_to_clean+=("$mithril_dir/snapshots")
+            [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
+            echo "    $mithril_dir/snapshots/  ($size)"
+        fi
+
+        # Also check for snapshot files at root level (snapshot-*.tar.*, incremental-snapshot-*.tar.*)
+        for pattern in "snapshot-*.tar.*" "incremental-snapshot-*.tar.*"; do
+            while IFS= read -r -d '' snapshot_file; do
+                local size
+                size=$(du -sh "$snapshot_file" 2>/dev/null | awk '{print $1}')
+                paths_to_clean+=("$snapshot_file")
+                [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
+                echo "    $snapshot_file  ($size)"
+            done < <(find "$mithril_dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null)
+        done
+    done
+
+    if [[ ${#paths_to_clean[@]} -eq 0 ]]; then
+        warn "No snapshot files or directories found"
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    for path in "${paths_to_clean[@]}"; do
+        echo "    $path"
+    done
+    echo ""
+
+    confirm_destructive "DELETE SNAPSHOTS"
+
+    # Capture disk space BEFORE deletion
+    local before_used before_total before_free mount_point fstype
+    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+
+    # Execute deletion
+    info "Deleting snapshots..."
+
+    for path in "${paths_to_clean[@]}"; do
+        echo "  Removing $path..."
+        rm -rf "$path"
+        # Recreate directory if it was a directory (not a file)
+        if [[ "$path" == */snapshots ]]; then
+            mkdir -p "$path"
+        fi
+        success "Deleted: $path"
+    done
+
+    # Sync to ensure filesystem updates are reflected
+    sync
+
+    # Capture disk space AFTER deletion
+    local after_used after_total after_free
+    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
+
+    echo ""
+    success "Snapshots have been deleted"
+
+    # Show before/after disk space summary
+    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+
     echo ""
     echo "  On next run, Mithril will download fresh snapshots from the network."
 }
@@ -1564,6 +1761,108 @@ clean_blockstore() {
     clean_subdir "blockstore" "Blockstore"
     echo ""
     echo "  On next run, Mithril will rebuild blockstore from verified blocks."
+}
+
+clean_ledger() {
+    info "DELETING Ledger data (Snapshots + Blockstore)"
+    echo ""
+    echo "  This will delete snapshots, blockstore, and any snapshot files."
+    echo "  (AccountsDB will be preserved)"
+    echo ""
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        warn "No Mithril data directories found"
+        echo ""
+        echo "  Checked: /mnt/mithril-accounts, /mnt/mithril-ledger"
+        return 1
+    fi
+
+    # Find all ledger subdirectories and snapshot files
+    local paths_to_clean=()
+    local primary_dir=""
+
+    echo "  Found ledger files/directories:"
+    echo ""
+
+    for mithril_dir in "${mithril_dirs[@]}"; do
+        # SAFETY: Never delete anything on the OS disk
+        if path_on_root_disk "$mithril_dir"; then
+            warn "SKIPPING $mithril_dir - on OS disk (safety protection)"
+            continue
+        fi
+
+        # Check for snapshots and blockstore subdirectories
+        for subdir in snapshots blockstore; do
+            if [[ -d "$mithril_dir/$subdir" ]]; then
+                local size
+                size=$(dir_size "$mithril_dir/$subdir")
+                paths_to_clean+=("$mithril_dir/$subdir")
+                [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
+                echo "    $mithril_dir/$subdir/  ($size)"
+            fi
+        done
+
+        # Also check for snapshot files at root level (snapshot-*.tar.*, incremental-snapshot-*.tar.*)
+        for pattern in "snapshot-*.tar.*" "incremental-snapshot-*.tar.*"; do
+            while IFS= read -r -d '' snapshot_file; do
+                local size
+                size=$(du -sh "$snapshot_file" 2>/dev/null | awk '{print $1}')
+                paths_to_clean+=("$snapshot_file")
+                [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
+                echo "    $snapshot_file  ($size)"
+            done < <(find "$mithril_dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null)
+        done
+    done
+
+    if [[ ${#paths_to_clean[@]} -eq 0 ]]; then
+        warn "No ledger files/directories (snapshots/blockstore) found"
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    for path in "${paths_to_clean[@]}"; do
+        echo "    $path"
+    done
+    echo ""
+
+    confirm_destructive "DELETE LEDGER"
+
+    # Capture disk space BEFORE deletion
+    local before_used before_total before_free mount_point fstype
+    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+
+    # Execute deletion
+    info "Deleting ledger data..."
+
+    for path in "${paths_to_clean[@]}"; do
+        echo "  Removing $path..."
+        rm -rf "$path"
+        # Recreate directory if it was a directory (not a file)
+        if [[ "$path" == */snapshots || "$path" == */blockstore ]]; then
+            mkdir -p "$path"
+        fi
+        success "Deleted: $path"
+    done
+
+    # Sync to ensure filesystem updates are reflected
+    sync
+
+    # Capture disk space AFTER deletion
+    local after_used after_total after_free
+    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
+
+    echo ""
+    success "Ledger data has been deleted"
+
+    # Show before/after disk space summary
+    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+
+    echo ""
+    echo "  On next run, Mithril will download fresh snapshots and rebuild blockstore."
 }
 
 clean_all() {
@@ -1585,6 +1884,7 @@ clean_all() {
 
     # Find all data to clean
     local paths_to_clean=()
+    local primary_dir=""
 
     echo "  Found Mithril directories:"
     echo ""
@@ -1596,6 +1896,7 @@ clean_all() {
             continue
         fi
         echo "    $mithril_dir"
+        [[ -z "$primary_dir" ]] && primary_dir="$mithril_dir"
 
         # Check for accounts artifacts at root level
         for artifact in "${accounts_artifacts[@]}"; do
@@ -1616,6 +1917,16 @@ clean_all() {
                 echo "      $subdir/  ($size)"
             fi
         done
+
+        # Also check for snapshot files at root level (snapshot-*.tar.*, incremental-snapshot-*.tar.*)
+        for pattern in "snapshot-*.tar.*" "incremental-snapshot-*.tar.*"; do
+            while IFS= read -r -d '' snapshot_file; do
+                local size
+                size=$(du -sh "$snapshot_file" 2>/dev/null | awk '{print $1}')
+                paths_to_clean+=("$snapshot_file")
+                echo "      $(basename "$snapshot_file")  ($size)"
+            done < <(find "$mithril_dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null)
+        done
     done
 
     if [[ ${#paths_to_clean[@]} -eq 0 ]]; then
@@ -1629,6 +1940,10 @@ clean_all() {
 
     confirm_destructive "DELETE ALL MITHRIL DATA"
 
+    # Capture disk space BEFORE deletion
+    local before_used before_total before_free mount_point fstype
+    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+
     # Execute deletion
     info "Deleting all Mithril data..."
 
@@ -1639,10 +1954,305 @@ clean_all() {
         success "Deleted: $path"
     done
 
+    # Sync to ensure filesystem updates are reflected
+    sync
+
+    # Capture disk space AFTER deletion
+    local after_used after_total after_free
+    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
+
     echo ""
     success "All Mithril data has been deleted"
+
+    # Show before/after disk space summary
+    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+
     echo ""
     echo "  On next run, Mithril will start completely fresh."
+}
+
+# ------------------------------------------------------------------------------
+# Disk Summary
+# ------------------------------------------------------------------------------
+
+show_disk_summary() {
+    echo ""
+    echo "================================================================================"
+    echo "                    DISK SUMMARY"
+    echo "================================================================================"
+
+    # ============================================================================
+    # PART 1: PER-DRIVE DETAILS
+    # ============================================================================
+
+    # Iterate through each physical disk
+    lsblk -dn -o NAME,SIZE,TYPE,MODEL 2>/dev/null | while read -r name size dtype model; do
+        # Only show disk types (not partitions, loops, etc.)
+        if [[ "$dtype" == "disk" ]]; then
+            local device="/dev/$name"
+            local drive_type="HDD"
+
+            # Detect drive type
+            if [[ "$name" == nvme* ]]; then
+                drive_type="NVMe"
+            elif [[ -f "/sys/block/$name/queue/rotational" ]]; then
+                local rotational
+                rotational=$(cat "/sys/block/$name/queue/rotational" 2>/dev/null || echo "1")
+                if [[ "$rotational" == "0" ]]; then
+                    drive_type="SSD"
+                fi
+            fi
+
+            # Clean up model (may be empty for some drives)
+            [[ -z "$model" ]] && model="(unknown)"
+
+            echo ""
+            echo "--------------------------------------------------------------------------------"
+            echo -e "  ${CYAN}$device${NC}  ($drive_type)"
+            echo "--------------------------------------------------------------------------------"
+            echo "  Model:      $model"
+            echo "  Size:       $size"
+
+            # Get UUID (from first partition or the device itself)
+            local uuid="-"
+            # Try the device itself first
+            uuid=$(blkid -s UUID -o value "$device" 2>/dev/null || true)
+            # If no UUID, try first partition
+            if [[ -z "$uuid" ]]; then
+                local first_part
+                first_part=$(lsblk -ln -o NAME "$device" 2>/dev/null | head -2 | tail -1)
+                if [[ -n "$first_part" && "$first_part" != "$name" ]]; then
+                    uuid=$(blkid -s UUID -o value "/dev/$first_part" 2>/dev/null || true)
+                fi
+            fi
+            [[ -z "$uuid" ]] && uuid="-"
+            echo "  UUID:       $uuid"
+
+            # I/O Scheduler and read-ahead
+            local scheduler_file="/sys/block/$name/queue/scheduler"
+            local readahead_file="/sys/block/$name/queue/read_ahead_kb"
+            if [[ -f "$scheduler_file" ]]; then
+                local scheduler
+                scheduler=$(cat "$scheduler_file" 2>/dev/null | grep -oP '\[\w+\]' | tr -d '[]')
+                local readahead="?"
+                [[ -f "$readahead_file" ]] && readahead=$(cat "$readahead_file" 2>/dev/null)
+                echo "  Scheduler:  $scheduler"
+                echo "  Read-ahead: ${readahead}KB"
+
+                # Recommendation for NVMe
+                if [[ "$name" == nvme* && "$scheduler" != "none" && "$scheduler" != "mq-deadline" ]]; then
+                    echo -e "              ${YELLOW}(Tip: 'none' or 'mq-deadline' recommended for NVMe)${NC}"
+                fi
+            fi
+
+            # Check TRIM support for SSDs/NVMe
+            if [[ "$drive_type" == "NVMe" || "$drive_type" == "SSD" ]]; then
+                local discard_gran="/sys/block/$name/queue/discard_granularity"
+                if [[ -f "$discard_gran" ]]; then
+                    local gran
+                    gran=$(cat "$discard_gran" 2>/dev/null || echo "0")
+                    if [[ "$gran" != "0" ]]; then
+                        echo -e "  TRIM:       ${GREEN}supported${NC}"
+                    else
+                        echo -e "  TRIM:       ${YELLOW}not supported${NC}"
+                    fi
+                fi
+            fi
+
+            # Show partitions/mount points on this disk
+            echo ""
+            echo "  Partitions:"
+            local has_partitions=false
+            lsblk -ln -o NAME,SIZE,FSTYPE,MOUNTPOINT "$device" 2>/dev/null | tail -n +2 | while read -r pname psize pfstype pmount; do
+                has_partitions=true
+                local pdevice="/dev/$pname"
+                [[ -z "$pfstype" ]] && pfstype="-"
+                [[ -z "$pmount" ]] && pmount="(not mounted)"
+
+                # Get mount options if mounted
+                local mount_opts=""
+                if [[ "$pmount" != "(not mounted)" ]]; then
+                    local opts
+                    opts=$(grep -E "^$pdevice " /proc/mounts 2>/dev/null | awk '{print $4}' || true)
+                    [[ "$opts" == *noatime* ]] && mount_opts+="noatime "
+                    [[ "$opts" == *discard* ]] && mount_opts+="discard "
+                    mount_opts="${mount_opts% }"
+                fi
+
+                printf "    %-15s  %8s  %-6s  %-20s" "$pdevice" "$psize" "$pfstype" "$pmount"
+                [[ -n "$mount_opts" ]] && printf "  [%s]" "$mount_opts"
+                echo ""
+
+                # Usage warning for mounted partitions
+                if [[ "$pmount" != "(not mounted)" ]]; then
+                    local pct
+                    pct=$(df "$pmount" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+                    if [[ -n "$pct" && "$pct" -ge 80 ]]; then
+                        echo -e "                  ${YELLOW}⚠ ${pct}% full - SSD performance degrades above 80%${NC}"
+                    fi
+                fi
+            done
+        fi
+    done
+
+    echo ""
+
+    # ============================================================================
+    # PART 2: SYSTEM-WIDE TRIM STATUS
+    # ============================================================================
+    echo "--------------------------------------------------------------------------------"
+    echo "  TRIM Timer Status"
+    echo "--------------------------------------------------------------------------------"
+    echo ""
+    if systemctl is-active --quiet fstrim.timer 2>/dev/null; then
+        success "  fstrim.timer is ACTIVE (weekly TRIM enabled)"
+        local next_run
+        next_run=$(systemctl show fstrim.timer --property=NextElapseUSecRealtime 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "$next_run" && "$next_run" != "n/a" ]]; then
+            echo "    Next scheduled run: $next_run"
+        fi
+    elif systemctl is-enabled --quiet fstrim.timer 2>/dev/null; then
+        warn "  fstrim.timer is ENABLED but not running"
+        echo "    Start with: sudo systemctl start fstrim.timer"
+    else
+        warn "  fstrim.timer is NOT enabled"
+        echo "    Enable with: sudo systemctl enable --now fstrim.timer"
+        echo "    (Weekly TRIM improves SSD performance and longevity)"
+    fi
+
+    echo ""
+    echo ""
+    echo "================================================================================"
+    echo "                    MITHRIL DATA DIRECTORIES"
+    echo "================================================================================"
+    echo ""
+
+    # ============================================================================
+    # PART 3: MITHRIL-SPECIFIC DIRECTORIES
+    # ============================================================================
+
+    echo "--- Mithril Data Usage ---"
+    echo ""
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        echo "  No Mithril directories found."
+        echo ""
+        echo "  Mithril typically stores data in:"
+        echo "    /mnt/mithril-accounts  - AccountsDB and index"
+        echo "    /mnt/mithril-ledger    - Snapshots and blockstore"
+        echo ""
+        echo "  Run 'sudo ./scripts/disk-setup.sh --setup' to configure storage."
+    else
+        # Accounts artifacts
+        local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+
+        for mithril_dir in "${mithril_dirs[@]}"; do
+            # Get mount point info for this directory
+            local used_bytes total_bytes free_bytes mount_point fstype
+            read -r used_bytes total_bytes free_bytes mount_point fstype < <(get_mount_disk_space "$mithril_dir")
+
+            # Calculate usage percentage
+            local usage_pct=0
+            [[ $total_bytes -gt 0 ]] && usage_pct=$((used_bytes * 100 / total_bytes))
+
+            echo "  ${CYAN}$mithril_dir${NC}"
+            printf "    Mount: %s (%s)  |  Total: %s  |  Free: %s  |  %d%% used\n" \
+                "$mount_point" "$fstype" "$(format_bytes $total_bytes)" "$(format_bytes $free_bytes)" "$usage_pct"
+
+            # Over-provisioning recommendation
+            if [[ $usage_pct -ge 80 ]]; then
+                echo -e "    ${YELLOW}⚠ Consider freeing space - SSD performance degrades above 80% capacity${NC}"
+            elif [[ $usage_pct -ge 70 ]]; then
+                echo -e "    ${GREEN}✓ Good: ~$((100 - usage_pct))% free for SSD over-provisioning${NC}"
+            fi
+            echo ""
+
+            # Check for accounts artifacts
+            local has_accounts=false
+            local accounts_total=0
+            for artifact in "${accounts_artifacts[@]}"; do
+                if [[ -e "$mithril_dir/$artifact" ]]; then
+                    has_accounts=true
+                    break
+                fi
+            done
+
+            if $has_accounts; then
+                echo "    AccountsDB artifacts:"
+                for artifact in "${accounts_artifacts[@]}"; do
+                    if [[ -e "$mithril_dir/$artifact" ]]; then
+                        local size
+                        size=$(dir_size "$mithril_dir/$artifact")
+                        printf "      %-30s  %10s\n" "$artifact" "$size"
+                    fi
+                done
+                echo ""
+            fi
+
+            # Check for snapshots
+            if [[ -d "$mithril_dir/snapshots" ]]; then
+                local size
+                size=$(dir_size "$mithril_dir/snapshots")
+                echo "    Snapshots:"
+                printf "      %-30s  %10s\n" "snapshots/" "$size"
+                echo ""
+            fi
+
+            # Check for snapshot files at root level
+            local found_root_snapshots=false
+            for pattern in "snapshot-*.tar.*" "incremental-snapshot-*.tar.*"; do
+                while IFS= read -r -d '' snapshot_file; do
+                    if ! $found_root_snapshots; then
+                        echo "    Snapshot files (root level):"
+                        found_root_snapshots=true
+                    fi
+                    local size
+                    size=$(du -sh "$snapshot_file" 2>/dev/null | awk '{print $1}')
+                    printf "      %-50s  %10s\n" "$(basename "$snapshot_file")" "$size"
+                done < <(find "$mithril_dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null)
+            done
+            $found_root_snapshots && echo ""
+
+            # Check for blockstore
+            if [[ -d "$mithril_dir/blockstore" ]]; then
+                local size
+                size=$(dir_size "$mithril_dir/blockstore")
+                echo "    Blockstore:"
+                printf "      %-30s  %10s\n" "blockstore/" "$size"
+                echo ""
+            fi
+        done
+    fi
+
+    # Recommendations (only show if mithril directories exist)
+    if [[ ${#mithril_dirs[@]} -gt 0 ]]; then
+        echo "--- Recommendations ---"
+        echo ""
+
+        # Check noatime on mithril mounts
+        local noatime_missing=false
+        for mithril_dir in "${mithril_dirs[@]}"; do
+            local device
+            device=$(df "$mithril_dir" 2>/dev/null | tail -1 | awk '{print $1}')
+            local opts
+            opts=$(grep -E "^$device " /proc/mounts 2>/dev/null | awk '{print $4}' || true)
+            if [[ "$opts" != *noatime* ]]; then
+                noatime_missing=true
+                warn "  $mithril_dir is missing 'noatime' mount option"
+                echo "    Add 'noatime' to fstab entry to reduce unnecessary disk writes"
+            fi
+        done
+        if ! $noatime_missing; then
+            success "  All Mithril mounts have 'noatime' enabled"
+        fi
+
+        echo ""
+    fi
+
+    echo "================================================================================"
 }
 
 # ------------------------------------------------------------------------------
@@ -1679,6 +2289,10 @@ main() {
             check_root
             clean_blockstore
             ;;
+        --delete-ledger)
+            check_root
+            clean_ledger
+            ;;
         --delete-all)
             check_root
             clean_all
@@ -1688,6 +2302,9 @@ main() {
             ;;
         --disk-info)
             show_disk_info
+            ;;
+        --disk-summary)
+            show_disk_summary
             ;;
         --help|-h)
             show_help
@@ -1701,9 +2318,11 @@ main() {
             echo "  sudo ./scripts/disk-setup.sh --setup              # Interactive setup (formats drives)"
             echo "  ./scripts/disk-setup.sh --status                  # Show current storage status"
             echo "  ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info"
+            echo "  ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage breakdown"
             echo ""
             echo "Delete commands (for resetting Mithril):"
-            echo "  sudo ./scripts/disk-setup.sh --delete-accounts    # Delete accounts only"
+            echo "  sudo ./scripts/disk-setup.sh --delete-accounts    # Delete accounts (AccountsDB, index)"
+            echo "  sudo ./scripts/disk-setup.sh --delete-ledger      # Delete ledger (snapshots + blockstore)"
             echo "  sudo ./scripts/disk-setup.sh --delete-snapshots   # Delete snapshots only"
             echo "  sudo ./scripts/disk-setup.sh --delete-blockstore  # Delete blockstore only"
             echo "  sudo ./scripts/disk-setup.sh --delete-all         # Delete everything"

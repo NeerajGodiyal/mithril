@@ -2,15 +2,20 @@ package node
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	_ "net/http/pprof"
@@ -43,19 +48,36 @@ var (
 		},
 	}
 
-	VerifyLive = cobra.Command{
-		Use:   "verify-live",
-		Short: "Catchup and verify live blocks",
+	// Run is the main command for running Mithril as a live verifier.
+	// This is the primary way most users will run Mithril.
+	Run = cobra.Command{
+		Use:   "run",
+		Short: "Run Mithril as a live verifier (downloads snapshot, builds AccountsDB, verifies blocks)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return initConfigAndBindFlags(cmd)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			runVerifyLive(cmd, args)
+			runLive(cmd, args)
+		},
+	}
+
+	// VerifyLive is an alias for Run (kept for backwards compatibility)
+	VerifyLive = cobra.Command{
+		Use:    "verify-live",
+		Short:  "Alias for 'run' (deprecated, use 'mithril run' instead)",
+		Hidden: true, // Hide from help but still works
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfigAndBindFlags(cmd)
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Note: 'verify-live' is deprecated. Use 'mithril run' instead.")
+			runLive(cmd, args)
 		},
 	}
 
 	loadFromSnapshot            bool
 	loadFromAccountsDb          bool
+	bootstrapMode               string // "auto", "snapshot", or "accountsdb"
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
 	accountsPath                string
@@ -107,11 +129,11 @@ func init() {
 	VerifyRange.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	VerifyRange.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
-	// [development.pprof] section flags
+	// [tuning.pprof] section flags
 	VerifyRange.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
 	VerifyRange.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
-	// [development.debug] section flags
+	// [debug] section flags
 	VerifyRange.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	VerifyRange.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 
@@ -121,41 +143,47 @@ func init() {
 	// [overcast] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
-	// flags for RPC catchup mode
+	// flags for 'mithril run' (live verifier mode)
+	// [bootstrap] section flags
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'snapshot' (always download), 'accountsdb' (require existing)")
+
 	// [ledger] section flags
-	VerifyLive.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	VerifyLive.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
+	Run.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
-	VerifyLive.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
-	VerifyLive.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
+	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
+	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
-	VerifyLive.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
+	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 
-	// [development] section flags
-	VerifyLive.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
-	VerifyLive.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
-	VerifyLive.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
-	VerifyLive.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
-	VerifyLive.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	// [tuning] section flags
+	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
+	Run.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
+	Run.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
+	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
+	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
-	// [development.pprof] section flags
-	VerifyLive.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
+	// [tuning.pprof] section flags
+	Run.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
-	// [development.debug] section flags
-	VerifyLive.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
-	VerifyLive.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
+	// [debug] section flags
+	Run.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
+	Run.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 
 	// [reporting] section flags
-	VerifyLive.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
+	Run.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
 
 	// Top-level flags
-	VerifyLive.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
+	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	VerifyLive.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
-	VerifyLive.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
+	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+
+	// Copy all Run flags to VerifyLive for backwards compatibility
+	VerifyLive.Flags().AddFlagSet(Run.Flags())
 }
 
 // initConfigAndBindFlags loads TOML config file (if specified) and binds flags to viper.
@@ -274,21 +302,44 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Update variables (CLI flags take precedence over TOML config when explicitly set)
 	// CLI flag names -> TOML nested keys (Firedancer-style)
 
-	// [replay] section
+	// [bootstrap] section (new unified mode replacing two booleans)
+	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
+	if bootstrapMode == "" {
+		bootstrapMode = "snapshot" // default: always download fresh snapshot
+	}
+
+	// [replay] section (legacy booleans for verify-range)
 	loadFromSnapshot = getBool("load-from-snapshot", "replay.load_from_snapshot")
 	loadFromAccountsDb = getBool("load-from-accounts-db", "replay.load_from_accounts_db")
 	numReplaySlots = getInt64("num-slots", "replay.num_slots")
 	endSlot = getInt64("end-slot", "replay.end_slot")
 	txParallelism = getInt64("txpar", "replay.txpar")
 
-	// [ledger] section
-	snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
-	incrementalSnapshotFilename = getString("incremental-snapshot", "ledger.incremental_snapshot")
-	accountsPath = getString("accounts-path", "ledger.accounts_path")
-	ledgerPath = getString("ledger-path", "ledger.path")
+	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
+	snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	if snapshotArchivePath == "" {
+		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
+	}
+	incrementalSnapshotFilename = getString("incremental-snapshot", "storage.incremental_snapshot")
+	if incrementalSnapshotFilename == "" {
+		incrementalSnapshotFilename = getString("incremental-snapshot", "ledger.incremental_snapshot")
+	}
+	accountsPath = getString("accounts-path", "storage.accounts")
+	if accountsPath == "" {
+		accountsPath = getString("accounts-path", "ledger.accounts_path")
+	}
+	ledgerPath = getString("ledger-path", "storage.blockstore")
+	if ledgerPath == "" {
+		ledgerPath = getString("ledger-path", "ledger.path")
+	}
 
-	// [rpc] section
-	rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	// [network] section (with fallback to legacy [rpc] keys)
+	rpcEndpoints = getStringSlice("rpc", "network.rpc")
+	if len(rpcEndpoints) == 0 {
+		rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	}
+
+	// [rpc] section - Mithril's RPC server
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -307,34 +358,58 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [snapshot] section
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 
-	// [development.pprof] section
-	pprofPort = getInt64("pprof-port", "development.pprof.port")
-	cpuprofPath = getString("cpu-profile-path", "development.pprof.cpu_profile_path")
+	// [tuning.pprof] section (with fallback to legacy [development.pprof])
+	pprofPort = getInt64("pprof-port", "tuning.pprof.port")
+	if pprofPort == 0 {
+		pprofPort = getInt64("pprof-port", "development.pprof.port")
+	}
+	cpuprofPath = getString("cpu-profile-path", "tuning.pprof.cpu_profile_path")
+	if cpuprofPath == "" {
+		cpuprofPath = getString("cpu-profile-path", "development.pprof.cpu_profile_path")
+	}
 
-	// [development.debug] section
-	debugTxs = getStringSlice("transaction-signatures", "development.debug.transaction_signatures")
-	debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
+	// [debug] section (with fallback to legacy [development.debug])
+	debugTxs = getStringSlice("transaction-signatures", "debug.transaction_signatures")
+	if len(debugTxs) == 0 {
+		debugTxs = getStringSlice("transaction-signatures", "development.debug.transaction_signatures")
+	}
+	debugAcctWrites = getStringSlice("account-writes", "debug.account_writes")
+	if len(debugAcctWrites) == 0 {
+		debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
+	}
 
-	// [development] section
-	paramArenaSizeMB = getUint64("param-arena-size-mb", "development.param_arena_size_mb")
-	borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
+	// [tuning] section (with fallback to legacy [development])
+	paramArenaSizeMB = getUint64("param-arena-size-mb", "tuning.param_arena_size_mb")
+	if paramArenaSizeMB == 0 {
+		paramArenaSizeMB = getUint64("param-arena-size-mb", "development.param_arena_size_mb")
+	}
+	borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "tuning.borrowed_account_arena_size")
+	if borrowedAccountArenaSize == 0 {
+		borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
+	}
 
 	// [reporting] section
 	metricsPath = getString("metrics-path", "reporting.metrics_path")
 
-	// Handle external package variables
+	// Handle external package variables (try tuning.* first, fallback to development.*)
 	if flagChanged("zstd-decoder-concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
+	} else if config.IsSet("tuning.zstd_decoder_concurrency") {
+		snapshot.ZstdDecoderConcurrency = config.GetInt("tuning.zstd_decoder_concurrency")
 	} else if config.IsSet("development.zstd_decoder_concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("development.zstd_decoder_concurrency")
 	}
 	if flagChanged("max-concurrent-flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
+	} else if config.IsSet("tuning.max_concurrent_flushers") {
+		snapshot.MaxConcurrentFlushers = config.GetInt("tuning.max_concurrent_flushers")
 	} else if config.IsSet("development.max_concurrent_flushers") {
 		snapshot.MaxConcurrentFlushers = config.GetInt("development.max_concurrent_flushers")
 	}
 	if flagChanged("use-pool") {
 		sbpf.UsePool = config.GetBool("use-pool")
+	} else if config.IsSet("tuning.use_pool") {
+		sbpf.UsePool = config.GetBool("tuning.use_pool")
 	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
 	}
@@ -566,37 +641,22 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	accountsDb.CloseDb()
 }
 
-func runVerifyLive(c *cobra.Command, args []string) {
+func runLive(c *cobra.Command, args []string) {
 	ctx := c.Context()
 
 	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
 
-	// Print version/commit info right after the banner
-	printVersionInfo()
+	// Kill any existing mithril processes to prevent zombie accumulation
+	if killed := killExistingMithrilProcesses(); killed > 0 {
+		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
+	}
+
+	// Print consolidated startup info
+	printStartupInfo("run")
 
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
-
-	// Clean up any leftover artifacts from previous runs early,
-	// before any operations that could fail (snapshot finding, downloading, etc.)
-	// This ensures disk space is reclaimed even if the program exits early.
-	if accountsPath != "" {
-		mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
-		snapshot.CleanAccountsDbDir(accountsPath)
-	}
-
-	snapshotDownloadPath := scratchDirectory
-
-	// Clean up old snapshot files based on retention settings
-	if snapshotDownloadPath != "" {
-		maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
-		if maxSnapshots == 0 {
-			maxSnapshots = 2 // default
-		}
-		deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-		snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
-	}
 
 	// Determine if using Overcast based on block source
 	useOvercast := blockSource == "overcast"
@@ -624,25 +684,13 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		rpcEndpoints = []string{"https://api.mainnet-beta.solana.com"}
 	}
 
-	snapCfg := buildSnapshotConfig()
-	fullSnapshotDlStart := time.Now()
-	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
-	if err != nil {
-		klog.Fatalf("error getting snapshot URL: %s", err)
-	}
-	fullSnapshotURL := fullSnapshotInfo.URL
-	fullSnapshotSlot := fullSnapshotInfo.Slot
+	// Bootstrap: determine how to initialize AccountsDB based on mode
+	var accountsDb *accountsdb.AccountsDb
+	var manifest *snapshot.SnapshotManifest
+	snapshotDownloadPath := scratchDirectory
 
-	// Print a clean summary of the selected snapshot source
-	progress.PrintSnapshotSourceSummary(
-		fullSnapshotInfo.NodeIP,
-		fullSnapshotInfo.Slot,
-		fullSnapshotInfo.ReferenceSlot,
-		fullSnapshotInfo.NodeVersion,
-		fullSnapshotInfo.SpeedMBs,
-		fullSnapshotInfo.RTTMs,
-		time.Since(fullSnapshotDlStart),
-	)
+	// Detect existing state
+	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
 	var overcastAddr string
@@ -650,19 +698,86 @@ func runVerifyLive(c *cobra.Command, args []string) {
 		overcastAddr = overcastEndpoint
 	}
 
-	// Create progress display for snapshot download and extract
-	dp := progress.NewDualProgress()
+	switch bootstrapMode {
+	case "accountsdb":
+		// Mode: Require existing AccountsDB, never download
+		if !hasAccountsDB {
+			klog.Fatalf("mode=accountsdb requires existing AccountsDB at %s", accountsPath)
+		}
+		mlog.Log.Infof("resuming from existing AccountsDB at slot %d", accountsDBSlot)
+		accountsDb, err = accountsdb.OpenDb(accountsPath)
+		if err != nil {
+			klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
+		}
+		manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsPath, "manifest"))
+		if err != nil {
+			klog.Fatalf("failed to load manifest: %v", err)
+		}
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
-	if err != nil {
-		klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
+	case "snapshot":
+		// Mode: Always download fresh snapshot, clean up existing data
+		mlog.Log.Infof("mode=snapshot: downloading fresh snapshot")
+		if accountsPath != "" {
+			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			snapshot.CleanAccountsDbDir(accountsPath)
+		}
+		// Clean up old snapshot files based on retention settings
+		if snapshotDownloadPath != "" {
+			maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+			if maxSnapshots == 0 {
+				maxSnapshots = 2 // default
+			}
+			deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+		}
+		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+
+	case "auto":
+		fallthrough
+	default:
+		// Mode: auto - prefer AccountsDB, then existing snapshot, then download
+		if hasAccountsDB {
+			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			accountsDb, err = accountsdb.OpenDb(accountsPath)
+			if err != nil {
+				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
+			}
+			manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsPath, "manifest"))
+			if err != nil {
+				klog.Fatalf("failed to load manifest: %v", err)
+			}
+		} else {
+			// No existing AccountsDB - need to build from snapshot
+			mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+			if accountsPath != "" {
+				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+				snapshot.CleanAccountsDbDir(accountsPath)
+			}
+			// Clean up old snapshot files based on retention settings
+			if snapshotDownloadPath != "" {
+				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+				if maxSnapshots == 0 {
+					maxSnapshots = 2 // default
+				}
+				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+			}
+			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+			if err != nil {
+				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+			}
+		}
 	}
-	mlog.Log.Infof("finished building accountsdb")
+
+	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
 
 	startSlot := int64(manifest.Bank.Slot + 1)
 	liveEndSlot := uint64(math.MaxUint64)
 
-	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, liveEndSlot)
+	mlog.Log.Infof("starting replay from slot %d", startSlot)
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
@@ -720,25 +835,27 @@ func logVCSInfo() {
 	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
 }
 
-// printVersionInfo prints version/commit info in a nice format after the banner
-func printVersionInfo() {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		fmt.Println("  Version: unknown")
-		fmt.Println()
-		return
-	}
+// printStartupInfo prints consolidated startup info including version, timestamp, and configuration
+func printStartupInfo(commandName string) {
+	// Gold/amber color like the banner
+	gold := "\x1b[38;2;217;164;65m"
+	reset := "\x1b[0m"
+	dim := "\x1b[2m"
+	green := "\x1b[32m"
+	cyan := "\x1b[36m"
 
-	var revision, vcsTime, modified string
+	fmt.Printf("%s━━━ Startup Info ━━━%s\n", gold, reset)
 
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.time":
-			vcsTime = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
+	// Get version info from build
+	var revision, modified string
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
 		}
 	}
 
@@ -747,16 +864,349 @@ func printVersionInfo() {
 		revision = revision[:8]
 	}
 
-	// Format the version line
-	versionStr := fmt.Sprintf("commit %s", revision)
-	if modified == "true" {
-		versionStr += " (modified)"
-	}
-	if vcsTime != "" {
-		versionStr += fmt.Sprintf(" built %s", vcsTime)
+	// Timestamp (current time)
+	fmt.Printf("  Timestamp:    %s%s%s\n", dim, time.Now().Format(time.RFC3339), reset)
+
+	// Commit info
+	if revision != "" {
+		commitStr := revision
+		if modified == "true" {
+			commitStr += " (modified)"
+		}
+		fmt.Printf("  Commit:       %s%s%s\n", dim, commitStr, reset)
 	}
 
-	fmt.Printf("  %s\n\n", versionStr)
+	// Go version
+	fmt.Printf("  Go:           %s%s%s\n", dim, runtime.Version(), reset)
+
+	// Command being run
+	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
+
+	// Detect what's on disk
+	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
+
+	// Check for existing snapshots - try configured paths in order of preference:
+	// 1. snapshotArchivePath (storage.snapshots)
+	// 2. snapshotDlPath (snapshot.download_path)
+	// 3. scratchDirectory (scratch_directory)
+	var existingSnapshots []snapshotInfo
+	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath, scratchDirectory} {
+		if searchPath != "" {
+			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
+				existingSnapshots = snaps
+				break
+			}
+		}
+	}
+
+	// Determine actual action based on bootstrap mode and what exists
+	var actionStr string
+	var actionDetail string
+
+	switch bootstrapMode {
+	case "auto":
+		if hasAccountsDB {
+			actionStr = "Resuming from AccountsDB"
+			if accountsDBSlot > 0 {
+				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+			}
+		} else if len(existingSnapshots) > 0 {
+			actionStr = "Building from existing snapshot"
+			actionDetail = existingSnapshots[0].filename
+		} else {
+			actionStr = "Downloading new snapshot"
+		}
+	case "snapshot":
+		actionStr = "Downloading new snapshot"
+		actionDetail = "fresh start"
+	case "accountsdb":
+		if hasAccountsDB {
+			actionStr = "Resuming from AccountsDB"
+			if accountsDBSlot > 0 {
+				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+			}
+		} else {
+			actionStr = "ERROR: No AccountsDB found"
+			actionDetail = "mode=accountsdb requires existing data"
+		}
+	}
+
+	// Print bootstrap action (the main thing users care about)
+	fmt.Printf("  Bootstrap:    %s%s%s", green, actionStr, reset)
+	if actionDetail != "" {
+		fmt.Printf(" %s(%s)%s", dim, actionDetail, reset)
+	}
+	fmt.Printf(" %s[mode=%s]%s\n", dim, bootstrapMode, reset)
+
+	// Show existing AccountsDB info if present
+	if hasAccountsDB && bootstrapMode != "snapshot" {
+		fmt.Printf("  AccountsDB:   %s%s%s", cyan, accountsPath, reset)
+		if accountsDBSlot > 0 {
+			fmt.Printf(" %s(slot %d)%s\n", dim, accountsDBSlot, reset)
+		} else {
+			fmt.Println()
+		}
+	} else if accountsPath != "" {
+		fmt.Printf("  AccountsDB:   %s%s%s %s(will create)%s\n", gold, accountsPath, reset, dim, reset)
+	}
+
+	// Show existing full snapshot only when actually using it
+	// (mode=auto without AccountsDB and an existing snapshot will be used)
+	usingExistingSnapshot := bootstrapMode == "auto" && !hasAccountsDB && len(existingSnapshots) > 0
+	if usingExistingSnapshot {
+		// Only show full snapshots, not incrementals
+		for _, snap := range existingSnapshots {
+			if snap.isIncr {
+				continue // skip incremental snapshots
+			}
+			fmt.Printf("  Snapshot:     %s%s%s", cyan, snap.filename, reset)
+			if snap.slot > 0 {
+				fmt.Printf(" %s(slot %d)%s", dim, snap.slot, reset)
+			}
+			fmt.Println()
+			break // only show first full snapshot
+		}
+	}
+
+	// Block source
+	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
+	if blockSource == "overcast" && overcastEndpoint != "" {
+		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	} else {
+		fmt.Println()
+	}
+
+	// Blockstore path
+	if ledgerPath != "" {
+		fmt.Printf("  Blockstore:   %s%s%s\n", gold, ledgerPath, reset)
+	}
+
+	// RPC endpoints
+	if len(rpcEndpoints) > 0 {
+		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
+		for _, ep := range rpcEndpoints[1:] {
+			fmt.Printf("                %s%s%s\n", gold, ep, reset)
+		}
+	}
+
+	fmt.Println()
+}
+
+// snapshotInfo holds information about a detected snapshot file
+type snapshotInfo struct {
+	filename string
+	slot     uint64
+	isIncr   bool
+}
+
+// detectExistingAccountsDB checks if a valid AccountsDB exists at the given path
+// Returns (exists, slot) where slot is parsed from the manifest if available
+func detectExistingAccountsDB(path string) (bool, uint64) {
+	if path == "" {
+		return false, 0
+	}
+
+	// Check for the accounts directory
+	accountsDir := filepath.Join(path, "accounts")
+	if _, err := os.Stat(accountsDir); os.IsNotExist(err) {
+		return false, 0
+	}
+
+	// Check for manifest file
+	manifestPath := filepath.Join(path, "manifest")
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		return false, 0
+	}
+
+	// Try to load the manifest to get the slot
+	manifest, err := snapshot.LoadManifestFromFile(manifestPath)
+	if err != nil {
+		// AccountsDB exists but manifest is unreadable
+		return true, 0
+	}
+
+	return true, manifest.Bank.Slot
+}
+
+// detectExistingSnapshots finds snapshot files in the given directory
+func detectExistingSnapshots(dir string) []snapshotInfo {
+	if dir == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var snapshots []snapshotInfo
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+
+		// Full snapshot: snapshot-{slot}-{hash}.tar.zst
+		if len(name) > 9 && name[:9] == "snapshot-" && filepath.Ext(name) == ".zst" {
+			slot := parseSlotFromSnapshotName(name)
+			snapshots = append(snapshots, snapshotInfo{
+				filename: name,
+				slot:     slot,
+				isIncr:   false,
+			})
+		}
+
+		// Incremental snapshot: incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst
+		if len(name) > 21 && name[:21] == "incremental-snapshot-" && filepath.Ext(name) == ".zst" {
+			slot := parseSlotFromIncrementalName(name)
+			snapshots = append(snapshots, snapshotInfo{
+				filename: name,
+				slot:     slot,
+				isIncr:   true,
+			})
+		}
+	}
+
+	return snapshots
+}
+
+// parseSlotFromSnapshotName extracts slot from "snapshot-{slot}-{hash}.tar.zst"
+func parseSlotFromSnapshotName(name string) uint64 {
+	// Remove "snapshot-" prefix and ".tar.zst" suffix
+	if len(name) <= 17 {
+		return 0
+	}
+	trimmed := name[9 : len(name)-8] // "slot-hash"
+	// Find the first dash after the slot number
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '-' {
+			slot, err := strconv.ParseUint(trimmed[:i], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return slot
+		}
+	}
+	return 0
+}
+
+// parseSlotFromIncrementalName extracts end slot from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
+func parseSlotFromIncrementalName(name string) uint64 {
+	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
+	if len(name) <= 29 {
+		return 0
+	}
+	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
+
+	// Find first dash (after baseSlot)
+	firstDash := -1
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '-' {
+			firstDash = i
+			break
+		}
+	}
+	if firstDash == -1 {
+		return 0
+	}
+
+	// Find second dash (after endSlot)
+	remaining := trimmed[firstDash+1:]
+	for i := 0; i < len(remaining); i++ {
+		if remaining[i] == '-' {
+			slot, err := strconv.ParseUint(remaining[:i], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return slot
+		}
+	}
+	return 0
+}
+
+// downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
+func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+	snapCfg := buildSnapshotConfig()
+	fullSnapshotDlStart := time.Now()
+	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting snapshot URL: %w", err)
+	}
+	fullSnapshotURL := fullSnapshotInfo.URL
+	fullSnapshotSlot := fullSnapshotInfo.Slot
+
+	// Print a clean summary of the selected snapshot source
+	progress.PrintSnapshotSourceSummary(
+		fullSnapshotInfo.NodeIP,
+		fullSnapshotInfo.Slot,
+		fullSnapshotInfo.ReferenceSlot,
+		fullSnapshotInfo.NodeVersion,
+		fullSnapshotInfo.SpeedMBs,
+		fullSnapshotInfo.RTTMs,
+		time.Since(fullSnapshotDlStart),
+	)
+
+	// Create progress display for snapshot download and extract
+	dp := progress.NewDualProgress()
+
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
+	}
+	mlog.Log.Infof("finished building AccountsDB")
+
+	return accountsDb, manifest, nil
+}
+
+// killExistingMithrilProcesses finds and kills any other running mithril processes.
+// This prevents zombie processes from accumulating and holding disk space.
+// Returns the number of processes killed.
+func killExistingMithrilProcesses() int {
+	myPID := os.Getpid()
+	myPPID := os.Getppid()
+
+	// Use pgrep to find mithril processes by executable name (not full command line)
+	// This avoids matching sudo or shell processes that have "mithril" in args
+	cmd := exec.Command("pgrep", "-x", "mithril")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		// No processes found or pgrep not available
+		return 0
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	killed := 0
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+
+		// Don't kill ourselves or our parent (sudo)
+		if pid == myPID || pid == myPPID {
+			continue
+		}
+
+		// Try to kill the process
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+
+		// Send SIGKILL
+		if err := proc.Signal(syscall.SIGKILL); err == nil {
+			killed++
+		}
+	}
+
+	return killed
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {
