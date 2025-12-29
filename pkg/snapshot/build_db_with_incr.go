@@ -30,7 +30,12 @@ func fmtDuration(d time.Duration) string {
 	if d < time.Second {
 		return fmt.Sprintf("%.3fms", float64(d.Microseconds())/1000)
 	}
-	return fmt.Sprintf("%.3fs", d.Seconds())
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
 func BuildAccountsDbWithIncr(
