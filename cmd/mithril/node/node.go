@@ -859,17 +859,18 @@ func runLive(c *cobra.Command, args []string) {
 
 		if hasValidState {
 			// Check if AccountsDB is stale (significantly behind chain tip)
-			latestSnapshotSlot, err := queryLatestSnapshotSlot(ctx, rpcEndpoints)
+			// Use queryCurrentSlot instead of queryLatestSnapshotSlot to avoid expensive node discovery
+			currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
 			if err != nil {
-				mlog.Log.Infof("could not query latest snapshot slot: %v (continuing with existing AccountsDB)", err)
-			} else if mithrilState.IsStale(latestSnapshotSlot, uint64(fullThreshold)) {
-				slotsBehind := latestSnapshotSlot - mithrilState.GetCurrentSlot()
-				mlog.Log.Infof("AccountsDB is %d slots behind latest snapshot", slotsBehind)
+				mlog.Log.Infof("could not query current slot: %v (continuing with existing AccountsDB)", err)
+			} else if mithrilState.IsStale(currentSlot, uint64(fullThreshold)) {
+				slotsBehind := currentSlot - mithrilState.GetCurrentSlot()
+				mlog.Log.Infof("AccountsDB is %d slots behind chain tip", slotsBehind)
 
 				// Interactive prompt
 				choice := progress.PromptStaleAccountsDB(progress.StaleInfo{
 					AccountsDBSlot:     mithrilState.GetCurrentSlot(),
-					LatestSnapshotSlot: latestSnapshotSlot,
+					LatestSnapshotSlot: currentSlot, // Using current chain tip slot
 					SlotsBehind:        slotsBehind,
 				})
 
@@ -923,8 +924,19 @@ func runLive(c *cobra.Command, args []string) {
 				mlog.Log.Errorf("INTEGRITY CHECK FAILED: %v", err)
 				mlog.Log.Infof("AccountsDB appears to have been modified beyond what state file records")
 				mlog.Log.Infof("This usually happens when the process was killed with Ctrl+Z or kill -9")
-				mlog.Log.Infof("To recover: use --bootstrap-mode=snapshot to rebuild from fresh snapshot")
-				klog.Fatalf("Cannot safely resume - AccountsDB is in inconsistent state")
+
+				// Mark state as corrupted so next startup knows to rebuild
+				if markErr := mithrilState.MarkCorrupted(accountsPath, err.Error()); markErr != nil {
+					mlog.Log.Errorf("failed to mark state as corrupted: %v", markErr)
+				} else {
+					mlog.Log.Infof("state file updated to indicate corruption")
+				}
+
+				// Close AccountsDB before exiting
+				accountsDb.CloseDb()
+
+				mlog.Log.Infof("restart mithril to automatically rebuild from snapshot")
+				klog.Fatalf("AccountsDB corrupted - restart to rebuild")
 			}
 		} else {
 			// No valid state - need to clean and rebuild from snapshot

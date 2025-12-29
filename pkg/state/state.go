@@ -17,13 +17,17 @@ const StateFileName = "mithril_state.json"
 // The state file serves as an atomic marker of validity - AccountsDB is valid
 // if and only if this file exists with Stage == "ready".
 type MithrilState struct {
-	Stage          string        `json:"stage"` // "ready", "downloading", "building"
+	Stage          string        `json:"stage"` // "ready", "downloading", "building", "corrupted"
 	SnapshotSlot   uint64        `json:"snapshot_slot"`
 	LastSlot       uint64        `json:"last_slot,omitempty"`
 	LastBankhash   string        `json:"last_bankhash,omitempty"`
 	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`
 	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`
 	BuildCompleted time.Time     `json:"build_completed_at,omitempty"`
+
+	// Corruption tracking - set when integrity check fails
+	CorruptionReason     string    `json:"corruption_reason,omitempty"`
+	CorruptionDetectedAt time.Time `json:"corruption_detected_at,omitempty"`
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -80,6 +84,20 @@ func (s *MithrilState) Save(accountsDbDir string) error {
 // IsReady returns true if the state indicates AccountsDB is valid and ready.
 func (s *MithrilState) IsReady() bool {
 	return s != nil && s.Stage == "ready"
+}
+
+// IsCorrupted returns true if the state indicates AccountsDB is corrupted.
+func (s *MithrilState) IsCorrupted() bool {
+	return s != nil && s.Stage == "corrupted"
+}
+
+// MarkCorrupted updates the state file to indicate AccountsDB is corrupted.
+// This persists the corruption status so the next startup knows to rebuild.
+func (s *MithrilState) MarkCorrupted(accountsDbDir string, reason string) error {
+	s.Stage = "corrupted"
+	s.CorruptionReason = reason
+	s.CorruptionDetectedAt = time.Now()
+	return s.Save(accountsDbDir)
 }
 
 // UpdateLastSlot updates the last slot and bankhash in the state file.
@@ -225,6 +243,14 @@ func CheckAndLoadValidState(accountsDbDir string) (*MithrilState, error) {
 
 	if state == nil {
 		mlog.Log.Infof("no state file found in %s", accountsDbDir)
+		return nil, nil
+	}
+
+	// Handle corrupted state with specific logging
+	if state.IsCorrupted() {
+		mlog.Log.Infof("state file indicates corruption (detected at %s): %s",
+			state.CorruptionDetectedAt.Format(time.RFC3339), state.CorruptionReason)
+		mlog.Log.Infof("will rebuild from snapshot")
 		return nil, nil
 	}
 
