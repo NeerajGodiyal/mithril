@@ -1585,7 +1585,7 @@ clean_accounts() {
     echo ""
 
     # Accounts artifacts (stored directly in mount point, not a subdirectory)
-    local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+    local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest" "mithril_state.json")
 
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
@@ -1872,7 +1872,7 @@ clean_all() {
     echo ""
 
     # Accounts artifacts (stored directly in mount point)
-    local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+    local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest" "mithril_state.json")
 
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
@@ -1949,8 +1949,14 @@ clean_all() {
 
     for path in "${paths_to_clean[@]}"; do
         echo "  Removing $path..."
+        # Check if it was a directory (before deletion) to know whether to recreate
+        local was_dir=false
+        [[ -d "$path" ]] && was_dir=true
         rm -rf "$path"
-        mkdir -p "$path"
+        # Only recreate if it was a directory (not a file like snapshot-*.tar.zst)
+        if $was_dir; then
+            mkdir -p "$path"
+        fi
         success "Deleted: $path"
     done
 
