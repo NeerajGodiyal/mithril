@@ -87,12 +87,12 @@
 #   ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info
 #   ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage & diagnostics
 #
-# DELETE OPTIONS (for resetting Mithril - start fresh):
-#   --delete-accounts    Clear accounts data (forces new snapshot sync)
-#   --delete-ledger      Clear ledger data (snapshots + blockstore)
-#   --delete-snapshots   Clear downloaded snapshots only
-#   --delete-blockstore  Clear verified blocks only
-#   --delete-all         Clear everything (complete reset)
+# CLEAN OPTIONS (for resetting Mithril - start fresh):
+#   --clean-accounts     Clear accounts data (forces new snapshot sync)
+#   --clean-ledger       Clear ledger data (snapshots + blockstore)
+#   --clean-snapshots    Clear downloaded snapshots only
+#   --clean-blockstore   Clear verified blocks only
+#   --clean-all          Clear everything (complete reset)
 #
 # MAINTENANCE:
 #   --fix-noatime        Add noatime mount option to existing Mithril partitions
@@ -1546,13 +1546,13 @@ clean_subdir() {
     fi
 
     echo ""
-    echo -e "  ${RED}These directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE $description"
+    confirm_destructive "CLEAN $description"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1566,7 +1566,7 @@ clean_subdir() {
         rm -rf "$path"
         # Recreate empty directory
         mkdir -p "$path"
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1584,7 +1584,7 @@ clean_subdir() {
 }
 
 clean_accounts() {
-    info "DELETING Accounts data"
+    info "CLEANING Accounts data"
     echo ""
 
     # Accounts artifacts (stored directly in mount point, not a subdirectory)
@@ -1654,7 +1654,7 @@ clean_accounts() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Accounts data has been deleted"
+    success "Accounts data has been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1664,7 +1664,7 @@ clean_accounts() {
 }
 
 clean_snapshots() {
-    info "DELETING Snapshots"
+    info "CLEANING Snapshots"
     echo ""
 
     # Find Mithril directories
@@ -1718,13 +1718,13 @@ clean_snapshots() {
     fi
 
     echo ""
-    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These files/directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE SNAPSHOTS"
+    confirm_destructive "CLEAN SNAPSHOTS"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1740,7 +1740,7 @@ clean_snapshots() {
         if [[ "$path" == */snapshots ]]; then
             mkdir -p "$path"
         fi
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1751,7 +1751,7 @@ clean_snapshots() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Snapshots have been deleted"
+    success "Snapshots have been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1767,7 +1767,7 @@ clean_blockstore() {
 }
 
 clean_ledger() {
-    info "DELETING Ledger data (Snapshots + Blockstore)"
+    info "CLEANING Ledger data (Snapshots + Blockstore)"
     echo ""
     echo "  This will delete snapshots, blockstore, and any snapshot files."
     echo "  (AccountsDB will be preserved)"
@@ -1826,13 +1826,13 @@ clean_ledger() {
     fi
 
     echo ""
-    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These files/directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE LEDGER"
+    confirm_destructive "CLEAN LEDGER"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1848,7 +1848,7 @@ clean_ledger() {
         if [[ "$path" == */snapshots || "$path" == */blockstore ]]; then
             mkdir -p "$path"
         fi
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1859,7 +1859,7 @@ clean_ledger() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Ledger data has been deleted"
+    success "Ledger data has been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1869,7 +1869,7 @@ clean_ledger() {
 }
 
 clean_all() {
-    info "DELETING ALL MITHRIL DATA"
+    info "CLEANING ALL MITHRIL DATA"
     echo ""
     echo "  This will delete Accounts, Snapshots, AND Blockstore."
     echo ""
@@ -1938,10 +1938,10 @@ clean_all() {
     fi
 
     echo ""
-    echo -e "  ${RED}ALL of the above directories will be PERMANENTLY DELETED${NC}"
+    echo -e "  ${RED}ALL of the above directories will be CLEANED (contents erased)${NC}"
     echo ""
 
-    confirm_destructive "DELETE ALL MITHRIL DATA"
+    confirm_destructive "CLEAN ALL MITHRIL DATA"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1960,7 +1960,7 @@ clean_all() {
         if $was_dir; then
             mkdir -p "$path"
         fi
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1971,7 +1971,7 @@ clean_all() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "All Mithril data has been deleted"
+    success "All Mithril data has been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -2579,23 +2579,23 @@ main() {
             check_disk_deps
             interactive_setup
             ;;
-        --delete-accounts)
+        --clean-accounts)
             check_root
             clean_accounts
             ;;
-        --delete-snapshots)
+        --clean-snapshots)
             check_root
             clean_snapshots
             ;;
-        --delete-blockstore)
+        --clean-blockstore)
             check_root
             clean_blockstore
             ;;
-        --delete-ledger)
+        --clean-ledger)
             check_root
             clean_ledger
             ;;
-        --delete-all)
+        --clean-all)
             check_root
             clean_all
             ;;
@@ -2630,12 +2630,12 @@ main() {
             echo "  ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info"
             echo "  ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage breakdown"
             echo ""
-            echo "Delete commands (for resetting Mithril):"
-            echo "  sudo ./scripts/disk-setup.sh --delete-accounts    # Delete accounts (AccountsDB, index)"
-            echo "  sudo ./scripts/disk-setup.sh --delete-ledger      # Delete ledger (snapshots + blockstore)"
-            echo "  sudo ./scripts/disk-setup.sh --delete-snapshots   # Delete snapshots only"
-            echo "  sudo ./scripts/disk-setup.sh --delete-blockstore  # Delete blockstore only"
-            echo "  sudo ./scripts/disk-setup.sh --delete-all         # Delete everything"
+            echo "Clean commands (for resetting Mithril):"
+            echo "  sudo ./scripts/disk-setup.sh --clean-accounts     # Clear accounts (AccountsDB, index)"
+            echo "  sudo ./scripts/disk-setup.sh --clean-ledger       # Clear ledger (snapshots + blockstore)"
+            echo "  sudo ./scripts/disk-setup.sh --clean-snapshots    # Clear snapshots only"
+            echo "  sudo ./scripts/disk-setup.sh --clean-blockstore   # Clear blockstore only"
+            echo "  sudo ./scripts/disk-setup.sh --clean-all          # Clear everything"
             echo ""
             echo "Maintenance:"
             echo "  sudo ./scripts/disk-setup.sh --fix-noatime        # Add noatime to existing mounts"
