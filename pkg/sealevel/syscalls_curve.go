@@ -645,7 +645,7 @@ func g1Decompress(input []byte) ([]byte, error) {
 		return nil, fmt.Errorf("wrong input length")
 	}
 
-	if bytes.Compare(input, empty32Bytes[:]) == 0 {
+	if bytes.Equal(input, empty32Bytes[:]) {
 		return empty64Bytes[:], nil
 	}
 
@@ -679,7 +679,7 @@ func g2Decompress(input []byte) ([]byte, error) {
 		return nil, fmt.Errorf("wrong input length")
 	}
 
-	if bytes.Compare(input, empty64Bytes[:]) == 0 {
+	if bytes.Equal(input, empty64Bytes[:]) {
 		return empty128Bytes[:], nil
 	}
 

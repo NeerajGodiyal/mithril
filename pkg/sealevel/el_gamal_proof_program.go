@@ -1411,11 +1411,11 @@ func verifyGroupedCiphertext2HandlesValidity(context, proof []byte) error {
 	var points [16]*ristretto255.Element
 	pubkey2NotZero := true
 	var ristrettoCompressedZero [32]byte
-	if bytes.Compare(pubkey2, ristrettoCompressedZero[:]) == 0 {
+	if bytes.Equal(pubkey2, ristrettoCompressedZero[:]) {
 		pubkey2NotZero = false
 
-		if bytes.Compare(handle2, ristrettoCompressedZero[:]) != 0 ||
-			bytes.Compare(proofY2, ristrettoCompressedZero[:]) != 0 {
+		if !bytes.Equal(handle2, ristrettoCompressedZero[:]) ||
+			!bytes.Equal(proofY2, ristrettoCompressedZero[:]) {
 			return ErrInvalidProof
 		}
 	}
@@ -1754,12 +1754,12 @@ func verifyBatchedGroupedCiphertext2HandlesValidity(context, proof []byte) error
 	var points [16]*ristretto255.Element
 	pubkey2NotZero := true
 	var ristrettoCompressedZero [32]byte
-	if bytes.Compare(pubkey2, ristrettoCompressedZero[:]) == 0 {
+	if bytes.Equal(pubkey2, ristrettoCompressedZero[:]) {
 		pubkey2NotZero = false
 
-		if bytes.Compare(handle2, ristrettoCompressedZero[:]) != 0 ||
-			bytes.Compare(proofY2, ristrettoCompressedZero[:]) != 0 ||
-			bytes.Compare(handle2Hi, ristrettoCompressedZero[:]) != 0 {
+		if !bytes.Equal(handle2, ristrettoCompressedZero[:]) ||
+			!bytes.Equal(proofY2, ristrettoCompressedZero[:]) ||
+			!bytes.Equal(handle2Hi, ristrettoCompressedZero[:]) {
 			return ErrInvalidProof
 		}
 	}
