@@ -53,8 +53,13 @@ func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
 	return []uint64{idx}
 }
 
+const (
+	maxStackCapacity      = 5
+	maxInstrTraceCapacity = 64
+)
+
 func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, log *sealevel.LogRecorder) *sealevel.ExecutionCtx {
-	txCtx := sealevel.NewTransactionCtx(*transactionAccts, 64, 64)
+	txCtx := sealevel.NewTransactionCtx(*transactionAccts, maxStackCapacity, maxInstrTraceCapacity)
 	execCtx := &sealevel.ExecutionCtx{Log: log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(uint64(computeBudgetLimits.ComputeUnitLimit)), PrevLamportsPerSignature: slotCtx.FeeRateGovernor.PrevLamportsPerSignature}
 
 	execCtx.Features = *slotCtx.Features
