@@ -1,0 +1,191 @@
+package state
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/mr-tron/base58"
+)
+
+const StateFileName = "mithril_state.json"
+
+// MithrilState tracks the current state of the mithril node.
+// The state file serves as an atomic marker of validity - AccountsDB is valid
+// if and only if this file exists with Stage == "ready".
+type MithrilState struct {
+	Stage          string        `json:"stage"` // "ready", "downloading", "building"
+	SnapshotSlot   uint64        `json:"snapshot_slot"`
+	LastSlot       uint64        `json:"last_slot,omitempty"`
+	LastBankhash   string        `json:"last_bankhash,omitempty"`
+	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`
+	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`
+	BuildCompleted time.Time     `json:"build_completed_at,omitempty"`
+}
+
+// SnapshotInfo contains metadata about a downloaded snapshot file.
+type SnapshotInfo struct {
+	Path     string `json:"path"`
+	Slot     uint64 `json:"slot"`
+	BaseSlot uint64 `json:"base_slot,omitempty"` // only for incrementals
+}
+
+// LoadState loads the state file from the accountsdb directory.
+// Returns nil and no error if the file doesn't exist.
+func LoadState(accountsDbDir string) (*MithrilState, error) {
+	stateFile := filepath.Join(accountsDbDir, StateFileName)
+
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read state file: %w", err)
+	}
+
+	var state MithrilState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to parse state file: %w", err)
+	}
+
+	return &state, nil
+}
+
+// Save writes the state to the accountsdb directory.
+func (s *MithrilState) Save(accountsDbDir string) error {
+	stateFile := filepath.Join(accountsDbDir, StateFileName)
+
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	// Write to temp file first, then rename for atomicity
+	tmpFile := stateFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write state file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, stateFile); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename state file: %w", err)
+	}
+
+	return nil
+}
+
+// IsReady returns true if the state indicates AccountsDB is valid and ready.
+func (s *MithrilState) IsReady() bool {
+	return s != nil && s.Stage == "ready"
+}
+
+// UpdateLastSlot updates the last slot and bankhash in the state file.
+// This should be called after successfully committing a slot during replay.
+func (s *MithrilState) UpdateLastSlot(accountsDbDir string, slot uint64, bankhash []byte) error {
+	s.LastSlot = slot
+	s.LastBankhash = base58.Encode(bankhash)
+	return s.Save(accountsDbDir)
+}
+
+// GetResumeSlot returns the slot to resume from.
+// Returns LastSlot + 1 if replay has happened, otherwise SnapshotSlot + 1.
+func (s *MithrilState) GetResumeSlot() uint64 {
+	if s.LastSlot > 0 {
+		return s.LastSlot + 1
+	}
+	return s.SnapshotSlot + 1
+}
+
+// NewReadyState creates a new state marking the AccountsDB as ready.
+func NewReadyState(snapshotSlot uint64, fullSnapshotPath string, incrSnapshotPath string, incrBaseSlot uint64, incrSlot uint64) *MithrilState {
+	state := &MithrilState{
+		Stage:          "ready",
+		SnapshotSlot:   snapshotSlot,
+		BuildCompleted: time.Now(),
+	}
+
+	if fullSnapshotPath != "" {
+		state.FullSnapshot = &SnapshotInfo{
+			Path: fullSnapshotPath,
+			Slot: snapshotSlot,
+		}
+	}
+
+	if incrSnapshotPath != "" {
+		state.IncrSnapshot = &SnapshotInfo{
+			Path:     incrSnapshotPath,
+			BaseSlot: incrBaseSlot,
+			Slot:     incrSlot,
+		}
+	}
+
+	return state
+}
+
+// DeleteState removes the state file from the accountsdb directory.
+func DeleteState(accountsDbDir string) error {
+	stateFile := filepath.Join(accountsDbDir, StateFileName)
+	err := os.Remove(stateFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete state file: %w", err)
+	}
+	return nil
+}
+
+// ValidateAccountsDbArtifacts checks if expected AccountsDB artifacts exist.
+// This provides an extra layer of validation beyond just checking the state file.
+func ValidateAccountsDbArtifacts(accountsDbDir string) error {
+	requiredFiles := []string{
+		"mithril_db",
+		"bankhash_db",
+		"accounts",
+		"largest_file_id",
+		"bank_hash",
+		"manifest",
+	}
+
+	for _, file := range requiredFiles {
+		path := filepath.Join(accountsDbDir, file)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("missing required artifact: %s", file)
+			}
+			return fmt.Errorf("error checking artifact %s: %w", file, err)
+		}
+	}
+
+	return nil
+}
+
+// CheckAndLoadValidState loads state and validates that AccountsDB is ready.
+// Returns (state, nil) if valid, or (nil, nil) if state is invalid/missing.
+// Returns (nil, error) only for unexpected errors.
+func CheckAndLoadValidState(accountsDbDir string) (*MithrilState, error) {
+	state, err := LoadState(accountsDbDir)
+	if err != nil {
+		mlog.Log.Infof("error loading state file: %v", err)
+		return nil, nil
+	}
+
+	if state == nil {
+		mlog.Log.Infof("no state file found in %s", accountsDbDir)
+		return nil, nil
+	}
+
+	if !state.IsReady() {
+		mlog.Log.Infof("state file exists but stage is %q (not ready)", state.Stage)
+		return nil, nil
+	}
+
+	// Extra validation: check that artifacts actually exist
+	if err := ValidateAccountsDbArtifacts(accountsDbDir); err != nil {
+		mlog.Log.Infof("state file says ready but artifacts invalid: %v", err)
+		return nil, nil
+	}
+
+	mlog.Log.Infof("valid state found: snapshot_slot=%d, last_slot=%d", state.SnapshotSlot, state.LastSlot)
+	return state, nil
+}

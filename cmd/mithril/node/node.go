@@ -31,6 +31,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
+	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -591,14 +592,33 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Check for checkpoint file to resume from correct slot
+	// Check for state file to resume from correct slot
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
-	checkpointFile := filepath.Join(accountsDbDir, "last_slot")
-	if data, err := os.ReadFile(checkpointFile); err == nil {
-		if slot, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64); err == nil {
-			startSlot = int64(slot + 1)
-			mlog.Log.Infof("resuming from checkpoint: last_slot=%d, starting at %d", slot, startSlot)
+	mithrilState, _ := state.CheckAndLoadValidState(accountsDbDir)
+	if mithrilState != nil {
+		// Validate state file matches current manifest
+		if mithrilState.SnapshotSlot != manifest.Bank.Slot {
+			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
+				mithrilState.SnapshotSlot, manifest.Bank.Slot)
+			mithrilState = nil
+		} else if mithrilState.LastSlot > 0 {
+			// Validate last_slot is reasonable (not in the future relative to what we could have replayed)
+			if mithrilState.LastSlot < manifest.Bank.Slot {
+				mlog.Log.Infof("state file last_slot (%d) is before snapshot slot (%d), ignoring",
+					mithrilState.LastSlot, manifest.Bank.Slot)
+				mithrilState = nil
+			} else {
+				startSlot = int64(mithrilState.LastSlot + 1)
+				mlog.Log.Infof("resuming from state file: last_slot=%d, starting at %d", mithrilState.LastSlot, startSlot)
+			}
+		}
+	}
+	if mithrilState == nil {
+		// Create a new state file for this session
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		if err := mithrilState.Save(accountsDbDir); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 	}
 
@@ -649,11 +669,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	replayStartTime := time.Now()
 	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
 
-	// Write checkpoint file with last persisted slot
-	if result.LastPersistedSlot > 0 {
-		checkpointData := fmt.Sprintf("%d", result.LastPersistedSlot)
-		if err := os.WriteFile(checkpointFile, []byte(checkpointData), 0644); err != nil {
-			mlog.Log.Errorf("failed to write checkpoint file: %v", err)
+	// Update state file with last persisted slot
+	if result.LastPersistedSlot > 0 && mithrilState != nil {
+		if err := mithrilState.UpdateLastSlot(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash); err != nil {
+			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 	}
 
@@ -719,10 +738,19 @@ func runLive(c *cobra.Command, args []string) {
 	// Bootstrap: determine how to initialize AccountsDB based on mode
 	var accountsDb *accountsdb.AccountsDb
 	var manifest *snapshot.SnapshotManifest
+	var mithrilState *state.MithrilState
 	snapshotDownloadPath := scratchDirectory
 
-	// Detect existing state
+	// Check for valid state file first (this is the authoritative source of truth)
+	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
+	hasValidState := mithrilState != nil
+
+	// Fall back to legacy detection if no state file
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
+	if hasValidState {
+		hasAccountsDB = true
+		accountsDBSlot = mithrilState.SnapshotSlot
+	}
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
 	var overcastAddr string
@@ -733,8 +761,11 @@ func runLive(c *cobra.Command, args []string) {
 	switch bootstrapMode {
 	case "accountsdb":
 		// Mode: Require existing AccountsDB, never download
-		if !hasAccountsDB {
+		if !hasValidState && !hasAccountsDB {
 			klog.Fatalf("mode=accountsdb requires existing AccountsDB at %s", accountsPath)
+		}
+		if !hasValidState {
+			mlog.Log.Infof("WARNING: no state file found, AccountsDB may be from incomplete build")
 		}
 		mlog.Log.Infof("resuming from existing AccountsDB at slot %d", accountsDBSlot)
 		accountsDb, err = accountsdb.OpenDb(accountsPath)
@@ -766,12 +797,17 @@ func runLive(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
+		// Write state file to mark build as complete
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
 
 	case "auto":
 		fallthrough
 	default:
-		// Mode: auto - prefer AccountsDB, then existing snapshot, then download
-		if hasAccountsDB {
+		// Mode: auto - prefer valid AccountsDB (with state file), then download fresh
+		if hasValidState {
 			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
 			if err != nil {
@@ -782,8 +818,12 @@ func runLive(c *cobra.Command, args []string) {
 				klog.Fatalf("failed to load manifest: %v", err)
 			}
 		} else {
-			// No existing AccountsDB - need to build from snapshot
-			mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+			// No valid state - need to clean and rebuild from snapshot
+			if hasAccountsDB {
+				mlog.Log.Infof("mode=auto: found AccountsDB but no valid state file (may be corrupted), rebuilding")
+			} else {
+				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+			}
 			if accountsPath != "" {
 				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
@@ -801,19 +841,42 @@ func runLive(c *cobra.Command, args []string) {
 			if err != nil {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 			}
+			// Write state file to mark build as complete
+			mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+			if err := mithrilState.Save(accountsPath); err != nil {
+				mlog.Log.Errorf("failed to save state file: %v", err)
+			}
 		}
 	}
 
 	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
 
-	// Check for checkpoint file to resume from correct slot
+	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
-	checkpointFile := filepath.Join(accountsPath, "last_slot")
-	if data, err := os.ReadFile(checkpointFile); err == nil {
-		if slot, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64); err == nil {
-			startSlot = int64(slot + 1)
-			mlog.Log.Infof("resuming from checkpoint: last_slot=%d, starting at %d", slot, startSlot)
+	if mithrilState != nil {
+		// Validate state file matches current manifest
+		if mithrilState.SnapshotSlot != manifest.Bank.Slot {
+			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
+				mithrilState.SnapshotSlot, manifest.Bank.Slot)
+			mithrilState = nil
+		} else if mithrilState.LastSlot > 0 {
+			// Validate last_slot is reasonable
+			if mithrilState.LastSlot < manifest.Bank.Slot {
+				mlog.Log.Infof("state file last_slot (%d) is before snapshot slot (%d), ignoring",
+					mithrilState.LastSlot, manifest.Bank.Slot)
+				mithrilState = nil
+			} else {
+				startSlot = int64(mithrilState.LastSlot + 1)
+				mlog.Log.Infof("resuming from state file: last_slot=%d, starting at %d", mithrilState.LastSlot, startSlot)
+			}
+		}
+	}
+	if mithrilState == nil {
+		// Initialize state for this session
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 	}
 
@@ -852,11 +915,10 @@ func runLive(c *cobra.Command, args []string) {
 	replayStartTime := time.Now()
 	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
 
-	// Write checkpoint file with last persisted slot
-	if result.LastPersistedSlot > 0 {
-		checkpointData := fmt.Sprintf("%d", result.LastPersistedSlot)
-		if err := os.WriteFile(checkpointFile, []byte(checkpointData), 0644); err != nil {
-			mlog.Log.Errorf("failed to write checkpoint file: %v", err)
+	// Update state file with last persisted slot
+	if result.LastPersistedSlot > 0 && mithrilState != nil {
+		if err := mithrilState.UpdateLastSlot(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash); err != nil {
+			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 	}
 

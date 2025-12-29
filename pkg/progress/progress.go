@@ -602,14 +602,58 @@ func PrintShutdownSummary(info ShutdownInfo) {
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%d (from snapshot slot %d)", slotsReplayed, info.SnapshotBaseSlot), c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Total replay time:", durationStr, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s TO RESUME FROM THIS ACCOUNTSDB:                                              %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   mithril run --bootstrap-mode=auto                                          %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   mithril run --bootstrap-mode=accountsdb                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s TO RESUME:                                                                   %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   mithril run --config config.toml                                           %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s NOTE: Default mode is 'snapshot' which downloads fresh.                      %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s Use 'auto' or 'accountsdb' to resume from existing AccountsDB.               %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s Mithril will automatically resume from slot %-32d%s│%s\n", c, r, nextSlot, c, r)
+	fmt.Printf("%s│%s State saved to: mithril_state.json                                           %s│%s\n", c, r, c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// BuildInterruptInfo contains information when build is interrupted
+type BuildInterruptInfo struct {
+	Stage            string // "downloading", "building", etc.
+	SnapshotSlot     uint64
+	SnapshotPath     string // path to downloaded snapshot if available
+	AccountsDBPath   string
+}
+
+// PrintBuildInterrupted prints a summary box when build is stopped via Ctrl+C
+func PrintBuildInterrupted(info BuildInterruptInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // color start (teal for borders)
+	r := "" // color reset
+	y := "" // yellow for warning
+	if useColor {
+		c = colorTeal
+		r = colorReset
+		y = colorYellow
+	}
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s BUILD INTERRUPTED                                                            %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Stage:", info.Stage, c, r)
+	if info.SnapshotSlot > 0 {
+		fmt.Printf("%s│%s %-20s%-57d%s│%s\n", c, r, "Snapshot slot:", info.SnapshotSlot, c, r)
+	}
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s TO RESUME:                                                                   %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   mithril run --config config.toml                                           %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s Next slot: %-65d%s│%s\n", c, r, nextSlot, c, r)
+	if info.SnapshotPath != "" {
+		fmt.Printf("%s│%s Mithril will rebuild AccountsDB from the downloaded snapshot.               %s│%s\n", c, r, c, r)
+		// Truncate path if too long
+		pathDisplay := info.SnapshotPath
+		if len(pathDisplay) > 55 {
+			pathDisplay = "..." + pathDisplay[len(pathDisplay)-52:]
+		}
+		fmt.Printf("%s│%s (Snapshot: %-65s)%s│%s\n", c, r, pathDisplay, c, r)
+	} else {
+		fmt.Printf("%s│%s %sMithril will start fresh (no completed snapshot found).%s                    %s│%s\n", c, r, y, r, c, r)
+	}
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }
