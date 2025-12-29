@@ -39,6 +39,18 @@ import (
 
 var SerializedParameterArena *arena.Arena[byte]
 
+// ReplayResult contains the result of a replay operation, including shutdown state
+type ReplayResult struct {
+	// LastPersistedSlot is the last slot whose state was successfully persisted to AccountsDB
+	LastPersistedSlot uint64
+	// LastPersistedBankhash is the bankhash of the last persisted slot
+	LastPersistedBankhash []byte
+	// WasCancelled indicates whether replay was interrupted by context cancellation
+	WasCancelled bool
+	// Error contains any error that occurred during replay
+	Error error
+}
+
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
@@ -669,7 +681,11 @@ func ReplayBlocks(
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
-) error {
+) *ReplayResult {
+	result := &ReplayResult{}
+	// Track last successfully persisted slot for checkpoint/resume
+	var lastPersistedSlot uint64
+	var lastPersistedBankhash []byte
 	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
@@ -739,6 +755,7 @@ func ReplayBlocks(
 
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
+			result.WasCancelled = true
 			break
 		}
 		start := time.Now()
@@ -805,10 +822,15 @@ func ReplayBlocks(
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, txParallelism, dbgOpts)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
+			result.Error = err
 			break
 		}
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
+
+		// Track last successfully persisted slot for checkpoint/resume
+		lastPersistedSlot = block.Slot
+		lastPersistedBankhash = lastSlotCtx.FinalBankhash
 
 		slotReplayDuration := time.Since(start)
 		mlog.Log.Infof("replayed slot %d - bankhash: %s  (slot replay time: %fs)", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash), slotReplayDuration.Seconds())
@@ -845,7 +867,9 @@ func ReplayBlocks(
 
 	}
 
-	return nil
+	result.LastPersistedSlot = lastPersistedSlot
+	result.LastPersistedBankhash = lastPersistedBankhash
+	return result
 }
 
 func runIncinerator(slotCtx *sealevel.SlotCtx) {

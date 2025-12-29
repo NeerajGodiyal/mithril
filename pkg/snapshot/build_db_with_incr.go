@@ -399,10 +399,16 @@ func BuildAccountsDbWithIncr(
 	}
 
 	rpcClient := rpcclient.NewRpcClient(rpcEndpoints[0])
-	latestSlot, _ := rpcClient.GetSlot()
+	latestSlot, err := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
-	mlog.Log.Infof("node currently at slot %d, whereas chain is at slot %d. currently %d slots behind.", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+	if err != nil || latestSlot == 0 {
+		mlog.Log.Infof("node currently at slot %d (unable to fetch chain tip)", incrSlot)
+	} else if latestSlot > uint64(incrSlot) {
+		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d (%d slots behind)", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+	} else {
+		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d", incrSlot, latestSlot)
+	}
 
 	return accountsDb, incrementalManifest, nil
 }

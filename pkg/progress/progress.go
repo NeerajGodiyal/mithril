@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"golang.org/x/term"
 )
 
@@ -552,6 +553,63 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "RTT:", rttStr, c, r)
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// ShutdownInfo contains information about the replay state when shutting down
+type ShutdownInfo struct {
+	LastSlot         uint64
+	LastBankhash     []byte
+	SnapshotBaseSlot uint64
+	AccountsDBPath   string
+	ReplayDuration   time.Duration
+	WasCancelled     bool
+}
+
+// PrintShutdownSummary prints a summary box when replay is stopped via Ctrl+C
+func PrintShutdownSummary(info ShutdownInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // color start (teal for borders)
+	r := "" // color reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	// Format bankhash as base58 (same as log output)
+	bankhashStr := base58.Encode(info.LastBankhash)
+
+	// Calculate slots replayed
+	slotsReplayed := int64(0)
+	if info.LastSlot > info.SnapshotBaseSlot {
+		slotsReplayed = int64(info.LastSlot - info.SnapshotBaseSlot)
+	}
+
+	// Format duration
+	durationStr := info.ReplayDuration.Round(time.Second).String()
+
+	// Next slot to resume from
+	nextSlot := info.LastSlot + 1
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s REPLAY STOPPED                                                               %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57d%s│%s\n", c, r, "Last replayed slot:", info.LastSlot, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Bankhash:", bankhashStr, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "AccountsDB:", info.AccountsDBPath, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%d (from snapshot slot %d)", slotsReplayed, info.SnapshotBaseSlot), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Total replay time:", durationStr, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s TO RESUME FROM THIS ACCOUNTSDB:                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   mithril run --bootstrap-mode=auto                                          %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   mithril run --bootstrap-mode=accountsdb                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s NOTE: Default mode is 'snapshot' which downloads fresh.                      %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s Use 'auto' or 'accountsdb' to resume from existing AccountsDB.               %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s Next slot: %-65d%s│%s\n", c, r, nextSlot, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }

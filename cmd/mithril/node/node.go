@@ -591,7 +591,17 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
+	// Check for checkpoint file to resume from correct slot
+	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
+	checkpointFile := filepath.Join(accountsDbDir, "last_slot")
+	if data, err := os.ReadFile(checkpointFile); err == nil {
+		if slot, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			startSlot = int64(slot + 1)
+			mlog.Log.Infof("resuming from checkpoint: last_slot=%d, starting at %d", slot, startSlot)
+		}
+	}
+
 	if endSlot != -1 {
 		numReplaySlots = endSlot - startSlot
 	} else if numReplaySlots != 0 {
@@ -636,7 +646,29 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	replayStartTime := time.Now()
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+
+	// Write checkpoint file with last persisted slot
+	if result.LastPersistedSlot > 0 {
+		checkpointData := fmt.Sprintf("%d", result.LastPersistedSlot)
+		if err := os.WriteFile(checkpointFile, []byte(checkpointData), 0644); err != nil {
+			mlog.Log.Errorf("failed to write checkpoint file: %v", err)
+		}
+	}
+
+	// Print shutdown summary if cancelled
+	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		progress.PrintShutdownSummary(progress.ShutdownInfo{
+			LastSlot:         result.LastPersistedSlot,
+			LastBankhash:     result.LastPersistedBankhash,
+			SnapshotBaseSlot: snapshotBaseSlot,
+			AccountsDBPath:   accountsDbDir,
+			ReplayDuration:   time.Since(replayStartTime),
+			WasCancelled:     true,
+		})
+	}
+
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -774,7 +806,17 @@ func runLive(c *cobra.Command, args []string) {
 
 	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
 
+	// Check for checkpoint file to resume from correct slot
+	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
+	checkpointFile := filepath.Join(accountsPath, "last_slot")
+	if data, err := os.ReadFile(checkpointFile); err == nil {
+		if slot, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			startSlot = int64(slot + 1)
+			mlog.Log.Infof("resuming from checkpoint: last_slot=%d, starting at %d", slot, startSlot)
+		}
+	}
+
 	liveEndSlot := uint64(math.MaxUint64)
 
 	mlog.Log.Infof("starting replay from slot %d", startSlot)
@@ -807,7 +849,29 @@ func runLive(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	replayStartTime := time.Now()
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+
+	// Write checkpoint file with last persisted slot
+	if result.LastPersistedSlot > 0 {
+		checkpointData := fmt.Sprintf("%d", result.LastPersistedSlot)
+		if err := os.WriteFile(checkpointFile, []byte(checkpointData), 0644); err != nil {
+			mlog.Log.Errorf("failed to write checkpoint file: %v", err)
+		}
+	}
+
+	// Print shutdown summary if cancelled
+	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		progress.PrintShutdownSummary(progress.ShutdownInfo{
+			LastSlot:         result.LastPersistedSlot,
+			LastBankhash:     result.LastPersistedBankhash,
+			SnapshotBaseSlot: snapshotBaseSlot,
+			AccountsDBPath:   accountsPath,
+			ReplayDuration:   time.Since(replayStartTime),
+			WasCancelled:     true,
+		})
+	}
+
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }

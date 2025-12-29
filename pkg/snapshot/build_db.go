@@ -42,6 +42,7 @@ func CleanAccountsDbDir(accountsDbDir string) {
 		"largest_file_id",
 		"bank_hash",
 		"manifest",
+		"last_slot", // Checkpoint file for resumption
 	}
 	for _, artifact := range artifacts {
 		path := filepath.Join(accountsDbDir, artifact)
