@@ -590,6 +590,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("unable to open manifest file")
 		}
+
+		// Show disk usage summary
+		progress.PrintDiskUsage(accountsDbDir, scratchDirectory, ledgerPath)
 	}
 
 	// Check for state file to resume from correct slot
@@ -850,6 +853,9 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
+
+	// Show disk usage summary
+	progress.PrintDiskUsage(accountsPath, snapshotDownloadPath, ledgerPath)
 
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot

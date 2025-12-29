@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
@@ -655,5 +656,126 @@ func PrintBuildInterrupted(info BuildInterruptInfo) {
 		fmt.Printf("%s│%s %sMithril will start fresh (no completed snapshot found).%s                    %s│%s\n", c, r, y, r, c, r)
 	}
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// DiskInfo holds information about disk usage for a specific path
+type DiskInfo struct {
+	Label      string // e.g., "AccountsDB", "Snapshots", "Ledger"
+	Path       string
+	UsedBytes  uint64
+	TotalBytes uint64
+	Error      error
+}
+
+// formatBytes formats bytes as human-readable string (e.g., "234 GB")
+func formatBytes(bytes uint64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+
+	switch {
+	case bytes >= TB:
+		return fmt.Sprintf("%.1f TB", float64(bytes)/float64(TB))
+	case bytes >= GB:
+		return fmt.Sprintf("%.0f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.0f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.0f KB", float64(bytes)/float64(KB))
+	}
+}
+
+// PrintDiskUsage prints a concise disk usage summary for configured paths
+func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	y := "" // yellow for warning
+	if useColor {
+		c = colorTeal
+		r = colorReset
+		y = colorYellow
+	}
+
+	// Collect disk info for each path, deduplicating by device
+	type deviceInfo struct {
+		usedBytes  uint64
+		totalBytes uint64
+		path       string
+		labels     []string
+	}
+	devices := make(map[uint64]*deviceInfo)
+
+	paths := []struct {
+		label string
+		path  string
+	}{
+		{"AccountsDB", accountsDbPath},
+		{"Snapshots", snapshotsPath},
+		{"Ledger", ledgerPath},
+	}
+
+	for _, p := range paths {
+		if p.path == "" {
+			continue
+		}
+
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(p.path, &stat); err != nil {
+			continue
+		}
+
+		// Use total size as device identifier (imperfect but works for most cases)
+		deviceKey := stat.Blocks * uint64(stat.Bsize)
+
+		if existing, ok := devices[deviceKey]; ok {
+			existing.labels = append(existing.labels, p.label)
+		} else {
+			totalBytes := stat.Blocks * uint64(stat.Bsize)
+			freeBytes := stat.Bavail * uint64(stat.Bsize)
+			usedBytes := totalBytes - freeBytes
+
+			devices[deviceKey] = &deviceInfo{
+				usedBytes:  usedBytes,
+				totalBytes: totalBytes,
+				path:       p.path,
+				labels:     []string{p.label},
+			}
+		}
+	}
+
+	if len(devices) == 0 {
+		return
+	}
+
+	fmt.Printf("%sDisk usage:%s\n", c, r)
+
+	for _, dev := range devices {
+		percentUsed := float64(dev.usedBytes) / float64(dev.totalBytes) * 100
+		usedStr := formatBytes(dev.usedBytes)
+		totalStr := formatBytes(dev.totalBytes)
+
+		// Combine labels if multiple paths on same device
+		labelStr := strings.Join(dev.labels, "+")
+
+		// Add warning if usage is high
+		warning := ""
+		if percentUsed >= 90 {
+			warning = fmt.Sprintf(" %sLOW SPACE!%s", y, r)
+		} else if percentUsed >= 80 {
+			warning = fmt.Sprintf(" %s(warning)%s", y, r)
+		}
+
+		fmt.Printf("  %-18s %s / %s (%3.0f%%)%s\n",
+			labelStr+":",
+			usedStr,
+			totalStr,
+			percentUsed,
+			warning)
+	}
 	fmt.Println()
 }
