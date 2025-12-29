@@ -565,7 +565,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		snapCfg := buildSnapshotConfig()
 		var dlPath string
-		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(rpcEndpoints[0], snapshotDlPath, snapCfg)
+		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(ctx, rpcEndpoints[0], snapshotDlPath, snapCfg)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -1261,7 +1261,7 @@ func parseSlotFromIncrementalName(name string) uint64 {
 func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig()
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
+	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, rpcEndpoints[0], snapCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting snapshot URL: %w", err)
 	}

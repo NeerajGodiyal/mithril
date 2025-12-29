@@ -172,8 +172,8 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 // 2. Discovers available RPC nodes from the cluster
 // 3. Evaluates nodes for snapshot availability and download speed
 // 4. Downloads from the fastest node with a recent snapshot
-func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
-	return DownloadSnapshotWithConfig(endpoint, path, DefaultSnapshotConfig())
+func DownloadSnapshot(ctx context.Context, endpoint string, path string) (string, int, int, error) {
+	return DownloadSnapshotWithConfig(ctx, endpoint, path, DefaultSnapshotConfig())
 }
 
 // GetSnapshotURL discovers the best RPC node and returns the HTTP URL for streaming.
@@ -187,9 +187,8 @@ func DownloadSnapshot(endpoint string, path string) (string, int, int, error) {
 //
 // The returned URL can be passed directly to snapshot processing functions
 // which will stream the data from HTTP (no disk download required).
-func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, error) {
+func GetSnapshotURL(ctx context.Context, endpoint string, snapCfg SnapshotConfig) (string, int, int, error) {
 	cfg := snapCfg.toInternalConfig(endpoint, "")
-	ctx := context.Background()
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -247,6 +246,11 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 	}
 
 	for i, nodeRPC := range bestNodes {
+		// Check for cancellation
+		if ctx.Err() != nil {
+			return "", 0, 0, ctx.Err()
+		}
+
 		if i >= maxAttempts {
 			break
 		}
@@ -291,9 +295,8 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 //
 // This is like GetSnapshotURL but returns a SnapshotInfo struct with additional
 // details useful for display (node IP, version, speed, age).
-func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
+func GetSnapshotURLWithInfo(ctx context.Context, endpoint string, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
 	cfg := snapCfg.toInternalConfig(endpoint, "")
-	ctx := context.Background()
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
@@ -381,6 +384,11 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	}
 
 	for i, nodeRPC := range bestNodes {
+		// Check for cancellation
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		if i >= maxAttempts {
 			break
 		}
@@ -449,9 +457,8 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 }
 
 // DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
-func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotConfig) (string, int, int, error) {
+func DownloadSnapshotWithConfig(ctx context.Context, endpoint string, path string, snapCfg SnapshotConfig) (string, int, int, error) {
 	cfg := snapCfg.toInternalConfig(endpoint, path)
-	ctx := context.Background()
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -505,6 +512,11 @@ func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotCo
 	}
 
 	for i, nodeRPC := range bestNodes {
+		// Check for cancellation
+		if ctx.Err() != nil {
+			return "", 0, 0, ctx.Err()
+		}
+
 		if i >= maxAttempts {
 			break
 		}
@@ -521,6 +533,11 @@ func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotCo
 		if downloadErr == nil && finalPath != "" {
 			mlog.Log.Infof("Successfully downloaded snapshot from %s in %s", nodeRPC, time.Since(downloadStart))
 			break
+		}
+
+		// Check if we were cancelled during download
+		if ctx.Err() != nil {
+			return "", 0, 0, ctx.Err()
 		}
 
 		if downloadErr != nil {
