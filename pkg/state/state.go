@@ -248,9 +248,7 @@ func CheckAndLoadValidState(accountsDbDir string) (*MithrilState, error) {
 
 	// Handle corrupted state with specific logging
 	if state.IsCorrupted() {
-		mlog.Log.Infof("state file indicates corruption (detected at %s): %s",
-			state.CorruptionDetectedAt.Format(time.RFC3339), state.CorruptionReason)
-		mlog.Log.Infof("will rebuild from snapshot")
+		mlog.Log.Infof("previous corruption detected: %s", state.CorruptionReason)
 		return nil, nil
 	}
 

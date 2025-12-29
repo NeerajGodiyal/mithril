@@ -941,7 +941,7 @@ func runLive(c *cobra.Command, args []string) {
 		} else {
 			// No valid state - need to clean and rebuild from snapshot
 			if hasAccountsDB {
-				mlog.Log.Infof("mode=auto: found AccountsDB but no valid state file (may be corrupted), rebuilding")
+				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
 			} else {
 				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
 			}
