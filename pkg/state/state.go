@@ -99,6 +99,59 @@ func (s *MithrilState) GetResumeSlot() uint64 {
 	return s.SnapshotSlot + 1
 }
 
+// GetCurrentSlot returns the most recent slot (LastSlot if replayed, else SnapshotSlot).
+func (s *MithrilState) GetCurrentSlot() uint64 {
+	if s.LastSlot > 0 {
+		return s.LastSlot
+	}
+	return s.SnapshotSlot
+}
+
+// IsStale returns true if the state is significantly behind the given slot.
+func (s *MithrilState) IsStale(latestSlot uint64, threshold uint64) bool {
+	currentSlot := s.GetCurrentSlot()
+	return latestSlot > currentSlot && (latestSlot-currentSlot) > threshold
+}
+
+// BankhashGetter is an interface for getting bankhashes by slot.
+// This is used for integrity validation without creating import cycles.
+type BankhashGetter interface {
+	GetBankHashForSlot(slot uint64) ([]byte, error)
+}
+
+// ValidateAgainstBankhashDB checks if AccountsDB has been modified beyond state file.
+// This detects cases where the process was killed (Ctrl+Z, kill -9) without
+// updating the state file, leaving AccountsDB in an inconsistent state.
+func (s *MithrilState) ValidateAgainstBankhashDB(bankhashDb BankhashGetter) error {
+	if s.LastSlot == 0 {
+		// No replay happened according to state file
+		// Check if bankhash exists for snapshot_slot + 1
+		checkSlot := s.SnapshotSlot + 1
+		bankhash, err := bankhashDb.GetBankHashForSlot(checkSlot)
+		if err == nil && len(bankhash) > 0 {
+			return fmt.Errorf("state file shows no replay (last_slot=0), but bankhash_db has entry for slot %d - AccountsDB may be corrupted", checkSlot)
+		}
+	} else {
+		// Replay happened, check for slots beyond last_slot
+		checkSlot := s.LastSlot + 1
+		bankhash, err := bankhashDb.GetBankHashForSlot(checkSlot)
+		if err == nil && len(bankhash) > 0 {
+			return fmt.Errorf("state file shows last_slot=%d, but bankhash_db has entry for slot %d - AccountsDB may be corrupted", s.LastSlot, checkSlot)
+		}
+
+		// Also verify last_slot's bankhash matches
+		expectedBankhash, err := bankhashDb.GetBankHashForSlot(s.LastSlot)
+		if err != nil || len(expectedBankhash) == 0 {
+			return fmt.Errorf("state file shows last_slot=%d, but no bankhash found in bankhash_db", s.LastSlot)
+		}
+		if s.LastBankhash != "" && base58.Encode(expectedBankhash) != s.LastBankhash {
+			return fmt.Errorf("bankhash mismatch for slot %d: state file has %s, bankhash_db has %s",
+				s.LastSlot, s.LastBankhash, base58.Encode(expectedBankhash))
+		}
+	}
+	return nil
+}
+
 // NewReadyState creates a new state marking the AccountsDB as ready.
 func NewReadyState(snapshotSlot uint64, fullSnapshotPath string, incrSnapshotPath string, incrBaseSlot uint64, incrSlot uint64) *MithrilState {
 	state := &MithrilState{

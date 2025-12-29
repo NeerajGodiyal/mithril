@@ -1,10 +1,12 @@
 package progress
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -597,16 +599,23 @@ func PrintShutdownSummary(info ShutdownInfo) {
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
 	fmt.Printf("%s│%s REPLAY STOPPED                                                               %s│%s\n", c, r, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s %-20s%-57d%s│%s\n", c, r, "Last replayed slot:", info.LastSlot, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Last replayed slot:", formatSlots(info.LastSlot), c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Bankhash:", bankhashStr, c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "AccountsDB:", info.AccountsDBPath, c, r)
-	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%d (from snapshot slot %d)", slotsReplayed, info.SnapshotBaseSlot), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%s (from snapshot slot %s)", formatSlots(uint64(slotsReplayed)), formatSlots(info.SnapshotBaseSlot)), c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Total replay time:", durationStr, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s TO RESUME:                                                                   %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   mithril run --config config.toml                                           %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s RESTART OPTIONS:                                                             %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s Mithril will automatically resume from slot %-32d%s│%s\n", c, r, nextSlot, c, r)
+	fmt.Printf("%s│%s   Resume from slot %s:%-43s%s│%s\n", c, r, formatSlots(nextSlot), "", c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=accountsdb                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   Rebuild from existing snapshot (slot %s):%-29s%s│%s\n", c, r, formatSlots(info.SnapshotBaseSlot), "", c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s State saved to: mithril_state.json                                           %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
@@ -625,11 +634,9 @@ func PrintBuildInterrupted(info BuildInterruptInfo) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 	c := "" // color start (teal for borders)
 	r := "" // color reset
-	y := "" // yellow for warning
 	if useColor {
 		c = colorTeal
 		r = colorReset
-		y = colorYellow
 	}
 
 	fmt.Println()
@@ -638,22 +645,26 @@ func PrintBuildInterrupted(info BuildInterruptInfo) {
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Stage:", info.Stage, c, r)
 	if info.SnapshotSlot > 0 {
-		fmt.Printf("%s│%s %-20s%-57d%s│%s\n", c, r, "Snapshot slot:", info.SnapshotSlot, c, r)
+		fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Snapshot slot:", formatSlots(info.SnapshotSlot), c, r)
 	}
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s TO RESUME:                                                                   %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   mithril run --config config.toml                                           %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s RESTART OPTIONS:                                                             %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	if info.SnapshotPath != "" {
-		fmt.Printf("%s│%s Mithril will rebuild AccountsDB from the downloaded snapshot.               %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s   Rebuild from existing snapshot (already downloaded):                       %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	}
+	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	if info.SnapshotPath != "" {
 		// Truncate path if too long
 		pathDisplay := info.SnapshotPath
 		if len(pathDisplay) > 55 {
 			pathDisplay = "..." + pathDisplay[len(pathDisplay)-52:]
 		}
-		fmt.Printf("%s│%s (Snapshot: %-65s)%s│%s\n", c, r, pathDisplay, c, r)
-	} else {
-		fmt.Printf("%s│%s %sMithril will start fresh (no completed snapshot found).%s                    %s│%s\n", c, r, y, r, c, r)
+		fmt.Printf("%s│%s Snapshot preserved: %-56s%s│%s\n", c, r, pathDisplay, c, r)
 	}
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
@@ -845,5 +856,129 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 			warning,
 			"")
 	}
+	fmt.Println()
+}
+
+// StaleInfo contains information for the stale AccountsDB prompt
+type StaleInfo struct {
+	AccountsDBSlot     uint64
+	LatestSnapshotSlot uint64
+	SlotsBehind        uint64
+}
+
+// formatSlots formats a slot number with commas for readability
+func formatSlots(slots uint64) string {
+	s := strconv.FormatUint(slots, 10)
+	if len(s) <= 3 {
+		return s
+	}
+
+	// Insert commas
+	var result strings.Builder
+	remainder := len(s) % 3
+	if remainder > 0 {
+		result.WriteString(s[:remainder])
+		if len(s) > remainder {
+			result.WriteString(",")
+		}
+	}
+	for i := remainder; i < len(s); i += 3 {
+		result.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			result.WriteString(",")
+		}
+	}
+	return result.String()
+}
+
+// PromptStaleAccountsDB displays an interactive prompt when AccountsDB is significantly behind
+// and returns the user's choice (1 = continue with AccountsDB, 2 = start fresh from snapshot)
+func PromptStaleAccountsDB(info StaleInfo) int {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	// Print the prompt box
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s ACCOUNTSDB BEHIND CHAIN TIP                                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "AccountsDB last slot:", formatSlots(info.AccountsDBSlot), c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Latest snapshot slot:", formatSlots(info.LatestSnapshotSlot), c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Slots behind:", formatSlots(info.SlotsBehind), c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s OPTIONS:                                                                     %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   [1] Continue from AccountsDB (replay %s slots)%-26s%s│%s\n", c, r, formatSlots(info.SlotsBehind), "", c, r)
+	fmt.Printf("%s│%s   [2] Start fresh from latest snapshot (faster to catch up)                 %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+
+	// Read user input
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Enter choice (1 or 2): ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			// On error (e.g., EOF), default to continuing with AccountsDB
+			return 1
+		}
+
+		input = strings.TrimSpace(input)
+		switch input {
+		case "1":
+			return 1
+		case "2":
+			return 2
+		default:
+			fmt.Println("Invalid choice. Please enter 1 or 2.")
+		}
+	}
+}
+
+// DownloadInterruptInfo contains information when download is interrupted
+type DownloadInterruptInfo struct {
+	Stage           string  // "downloading full snapshot", "downloading incremental", etc.
+	SourceHost      string
+	DownloadPercent float64
+	BytesDownloaded int64
+	TotalBytes      int64
+}
+
+// PrintDownloadInterrupted prints a summary box when download is stopped via Ctrl+C
+func PrintDownloadInterrupted(info DownloadInterruptInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	progressStr := fmt.Sprintf("%.0f%% (%s / %s)",
+		info.DownloadPercent,
+		formatBytes(uint64(info.BytesDownloaded)),
+		formatBytes(uint64(info.TotalBytes)))
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s DOWNLOAD INTERRUPTED                                                         %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Stage:", info.Stage, c, r)
+	if info.SourceHost != "" {
+		fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Source:", info.SourceHost, c, r)
+	}
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Progress:", progressStr, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s TO RESTART:                                                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   Download will resume from the beginning:                                   %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s Note: Partial download has been cleaned up.                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }

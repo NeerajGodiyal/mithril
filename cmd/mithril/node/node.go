@@ -33,6 +33,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	solrpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -146,7 +147,7 @@ func init() {
 
 	// flags for 'mithril run' (live verifier mode)
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'snapshot' (always download), 'accountsdb' (require existing)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -356,8 +357,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
 
-	// [snapshot] section
+	// Snapshot download path - defaults to storage.snapshots, can be overridden
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
+	if snapshotDlPath == "" {
+		snapshotDlPath = snapshotArchivePath // Use storage.snapshots as default
+	}
 
 	// [tuning.pprof] section (with fallback to legacy [development.pprof])
 	pprofPort = getInt64("pprof-port", "tuning.pprof.port")
@@ -780,23 +784,61 @@ func runLive(c *cobra.Command, args []string) {
 			klog.Fatalf("failed to load manifest: %v", err)
 		}
 
-	case "snapshot":
-		// Mode: Always download fresh snapshot, clean up existing data
-		mlog.Log.Infof("mode=snapshot: downloading fresh snapshot")
+	case "new-snapshot":
+		// Mode: Always download fresh snapshot, clean everything
+		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
 		if accountsPath != "" {
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
-		// Clean up old snapshot files based on retention settings
+		// Clean ALL existing snapshots (force fresh download)
 		if snapshotDownloadPath != "" {
-			maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
-			if maxSnapshots == 0 {
-				maxSnapshots = 2 // default
-			}
-			deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0, true) // 0 means delete all
 		}
 		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+		// Write state file to mark build as complete
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+
+	case "snapshot":
+		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
+		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
+		if accountsPath != "" {
+			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			snapshot.CleanAccountsDbDir(accountsPath)
+		}
+
+		// Check for existing fresh snapshot
+		fullThreshold := config.GetInt("snapshot.full_threshold")
+		if fullThreshold == 0 {
+			fullThreshold = 100000 // default
+		}
+		existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+
+		if existingSnap != nil {
+			// Reuse existing snapshot
+			mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+		} else {
+			// Download fresh
+			mlog.Log.Infof("no fresh snapshot file found, downloading new one")
+			// Clean up old snapshot files based on retention settings
+			if snapshotDownloadPath != "" {
+				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+				if maxSnapshots == 0 {
+					maxSnapshots = 2 // default
+				}
+				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+			}
+			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+		}
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
@@ -810,7 +852,62 @@ func runLive(c *cobra.Command, args []string) {
 		fallthrough
 	default:
 		// Mode: auto - prefer valid AccountsDB (with state file), then download fresh
+		fullThreshold := config.GetInt("snapshot.full_threshold")
+		if fullThreshold == 0 {
+			fullThreshold = 100000 // default
+		}
+
 		if hasValidState {
+			// Check if AccountsDB is stale (significantly behind chain tip)
+			latestSnapshotSlot, err := queryLatestSnapshotSlot(ctx, rpcEndpoints)
+			if err != nil {
+				mlog.Log.Infof("could not query latest snapshot slot: %v (continuing with existing AccountsDB)", err)
+			} else if mithrilState.IsStale(latestSnapshotSlot, uint64(fullThreshold)) {
+				slotsBehind := latestSnapshotSlot - mithrilState.GetCurrentSlot()
+				mlog.Log.Infof("AccountsDB is %d slots behind latest snapshot", slotsBehind)
+
+				// Interactive prompt
+				choice := progress.PromptStaleAccountsDB(progress.StaleInfo{
+					AccountsDBSlot:     mithrilState.GetCurrentSlot(),
+					LatestSnapshotSlot: latestSnapshotSlot,
+					SlotsBehind:        slotsBehind,
+				})
+
+				if choice == 2 {
+					// User chose to start fresh from snapshot
+					mlog.Log.Infof("user chose to rebuild from latest snapshot")
+					if accountsPath != "" {
+						snapshot.CleanAccountsDbDir(accountsPath)
+					}
+					// Check for existing fresh snapshot
+					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+					if existingSnap != nil {
+						mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+					} else {
+						// Clean up old snapshot files
+						if snapshotDownloadPath != "" {
+							maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+							if maxSnapshots == 0 {
+								maxSnapshots = 2
+							}
+							deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+						}
+						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+					}
+					if err != nil {
+						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+					}
+					mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+					if err := mithrilState.Save(accountsPath); err != nil {
+						mlog.Log.Errorf("failed to save state file: %v", err)
+					}
+					break // Exit the switch, continue with fresh AccountsDB
+				}
+				// choice == 1: continue with existing AccountsDB
+			}
+
 			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
 			if err != nil {
@@ -819,6 +916,15 @@ func runLive(c *cobra.Command, args []string) {
 			manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsPath, "manifest"))
 			if err != nil {
 				klog.Fatalf("failed to load manifest: %v", err)
+			}
+
+			// Validate state file matches AccountsDB (detect Ctrl+Z / kill -9 corruption)
+			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
+				mlog.Log.Errorf("INTEGRITY CHECK FAILED: %v", err)
+				mlog.Log.Infof("AccountsDB appears to have been modified beyond what state file records")
+				mlog.Log.Infof("This usually happens when the process was killed with Ctrl+Z or kill -9")
+				mlog.Log.Infof("To recover: use --bootstrap-mode=snapshot to rebuild from fresh snapshot")
+				klog.Fatalf("Cannot safely resume - AccountsDB is in inconsistent state")
 			}
 		} else {
 			// No valid state - need to clean and rebuild from snapshot
@@ -831,16 +937,24 @@ func runLive(c *cobra.Command, args []string) {
 				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
 			}
-			// Clean up old snapshot files based on retention settings
-			if snapshotDownloadPath != "" {
-				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
-				if maxSnapshots == 0 {
-					maxSnapshots = 2 // default
+
+			// Check for existing fresh snapshot
+			existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+			if existingSnap != nil {
+				mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+			} else {
+				// Clean up old snapshot files based on retention settings
+				if snapshotDownloadPath != "" {
+					maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+					if maxSnapshots == 0 {
+						maxSnapshots = 2 // default
+					}
+					deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+					snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 				}
-				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
 			}
-			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
 			if err != nil {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 			}
@@ -1049,8 +1163,16 @@ func printStartupInfo(commandName string) {
 			actionStr = "Downloading new snapshot"
 		}
 	case "snapshot":
-		actionStr = "Downloading new snapshot"
-		actionDetail = "fresh start"
+		if len(existingSnapshots) > 0 {
+			actionStr = "Rebuilding from snapshot"
+			actionDetail = "will reuse existing if fresh"
+		} else {
+			actionStr = "Downloading new snapshot"
+			actionDetail = "rebuild AccountsDB"
+		}
+	case "new-snapshot":
+		actionStr = "Downloading fresh snapshot"
+		actionDetail = "clean start, ignoring existing"
 	case "accountsdb":
 		if hasAccountsDB {
 			actionStr = "Resuming from AccountsDB"
@@ -1071,7 +1193,7 @@ func printStartupInfo(commandName string) {
 	fmt.Printf(" %s[mode=%s]%s\n", dim, bootstrapMode, reset)
 
 	// Show existing AccountsDB info if present
-	if hasAccountsDB && bootstrapMode != "snapshot" {
+	if hasAccountsDB && bootstrapMode != "snapshot" && bootstrapMode != "new-snapshot" {
 		fmt.Printf("  AccountsDB:   %s%s%s", cyan, accountsPath, reset)
 		if accountsDBSlot > 0 {
 			fmt.Printf(" %s(slot %d)%s\n", dim, accountsDBSlot, reset)
@@ -1255,6 +1377,91 @@ func parseSlotFromIncrementalName(name string) uint64 {
 		}
 	}
 	return 0
+}
+
+// detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
+// Returns the snapshotInfo if found, nil otherwise.
+func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []string, ctx context.Context) *snapshotInfo {
+	if snapshotDir == "" {
+		return nil
+	}
+
+	snapshots := detectExistingSnapshots(snapshotDir)
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	// Get current slot estimate from RPC
+	currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
+	if err != nil {
+		mlog.Log.Infof("could not query current slot: %v", err)
+		return nil
+	}
+
+	// Find the freshest full snapshot within threshold
+	var bestSnapshot *snapshotInfo
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.isIncr {
+			continue // Skip incrementals
+		}
+		if currentSlot > snap.slot && (currentSlot-snap.slot) <= uint64(fullThreshold) {
+			if bestSnapshot == nil || snap.slot > bestSnapshot.slot {
+				bestSnapshot = snap
+			}
+		}
+	}
+
+	return bestSnapshot
+}
+
+// queryCurrentSlot gets the current slot from RPC.
+func queryCurrentSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	if len(rpcEndpoints) == 0 {
+		return 0, fmt.Errorf("no RPC endpoints configured")
+	}
+
+	// Use the first RPC endpoint
+	client := solrpc.New(rpcEndpoints[0])
+	slot, err := client.GetSlot(ctx, solrpc.CommitmentFinalized)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get slot from RPC: %w", err)
+	}
+	return slot, nil
+}
+
+// queryLatestSnapshotSlot queries the latest available snapshot slot from the network.
+func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	if len(rpcEndpoints) == 0 {
+		return 0, fmt.Errorf("no RPC endpoints configured")
+	}
+
+	snapCfg := buildSnapshotConfig()
+	info, err := snapshotdl.GetSnapshotURLWithInfo(ctx, rpcEndpoints[0], snapCfg)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query snapshot info: %w", err)
+	}
+	return uint64(info.Slot), nil
+}
+
+// buildFromExistingSnapshot builds AccountsDB from an existing downloaded snapshot file.
+func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, ledgerPath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+	snapCfg := buildSnapshotConfig()
+
+	// Construct full path to snapshot file
+	fullSnapshotPath := filepath.Join(snapshotDir, snap.filename)
+	mlog.Log.Infof("building AccountsDB from existing snapshot: %s", fullSnapshotPath)
+
+	// Create progress display for extract
+	dp := progress.NewDualProgress()
+
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
+	}
+	mlog.Log.Infof("finished building AccountsDB from existing snapshot")
+
+	return accountsDb, manifest, nil
 }
 
 // downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot

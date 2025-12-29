@@ -2371,6 +2371,193 @@ fix_noatime() {
 }
 
 # ------------------------------------------------------------------------------
+# Move Mount Point
+# ------------------------------------------------------------------------------
+
+move_mount() {
+    info "MOVE MOUNT POINT"
+    echo ""
+    echo "  This command helps you relocate a Mithril mount to a different path."
+    echo "  It will update /etc/fstab and remount the filesystem."
+    echo ""
+
+    # Find Mithril-related entries in fstab
+    local fstab_entries=()
+    local mount_points=()
+    local uuids=()
+
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        # Check if line contains mithril-related paths
+        if [[ "$line" == *mithril* ]] || [[ "$line" == */mnt/accounts* ]] || [[ "$line" == */mnt/ledger* ]]; then
+            local mp uuid
+            # Extract mount point (2nd field)
+            mp=$(echo "$line" | awk '{print $2}')
+            # Extract UUID or device (1st field)
+            uuid=$(echo "$line" | awk '{print $1}')
+
+            if [[ -n "$mp" ]]; then
+                fstab_entries+=("$line")
+                mount_points+=("$mp")
+                uuids+=("$uuid")
+            fi
+        fi
+    done < /etc/fstab
+
+    if [[ ${#mount_points[@]} -eq 0 ]]; then
+        warn "No Mithril-related mount points found in /etc/fstab"
+        echo ""
+        echo "  Looking for entries containing 'mithril', '/mnt/accounts', or '/mnt/ledger'"
+        echo "  You may need to add fstab entries first with --setup"
+        return 1
+    fi
+
+    echo "  Found ${#mount_points[@]} Mithril-related mount(s) in /etc/fstab:"
+    echo ""
+
+    local i=1
+    for mp in "${mount_points[@]}"; do
+        local device="${uuids[$((i-1))]}"
+        # Check if currently mounted
+        local status="not mounted"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            status="mounted"
+        fi
+        printf "    %d) %-40s (%s)\n" "$i" "$mp" "$status"
+        i=$((i + 1))
+    done
+    echo ""
+
+    # Let user select which mount to move
+    local selection
+    while true; do
+        read -rp "  Select mount to move (1-${#mount_points[@]}, or 'q' to quit): " selection
+        if [[ "$selection" == "q" ]]; then
+            echo "  Cancelled."
+            return 0
+        fi
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#mount_points[@]} ]]; then
+            break
+        fi
+        echo "  Invalid selection. Please enter a number between 1 and ${#mount_points[@]}"
+    done
+
+    local old_mount="${mount_points[$((selection-1))]}"
+    local old_uuid="${uuids[$((selection-1))]}"
+    local old_entry="${fstab_entries[$((selection-1))]}"
+
+    echo ""
+    echo "  Selected: $old_mount"
+    echo ""
+
+    # Get new mount point path
+    local new_mount
+    read -rp "  Enter new mount path (e.g., /mnt/blockstore): " new_mount
+
+    if [[ -z "$new_mount" ]]; then
+        die "Mount path cannot be empty"
+    fi
+
+    # Normalize path (remove trailing slash)
+    new_mount="${new_mount%/}"
+
+    if [[ "$new_mount" == "$old_mount" ]]; then
+        die "New path is the same as the old path"
+    fi
+
+    # Check if new mount point already exists as a mount
+    if mountpoint -q "$new_mount" 2>/dev/null; then
+        die "Path $new_mount is already a mount point"
+    fi
+
+    echo ""
+    echo "  Summary:"
+    echo "    From: $old_mount"
+    echo "    To:   $new_mount"
+    echo ""
+
+    if ! yesno "  Proceed with moving this mount?" "n"; then
+        echo "  Cancelled."
+        return 0
+    fi
+
+    # Backup fstab
+    local backup="/etc/fstab.bak.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup"
+    success "Backed up fstab to $backup"
+
+    # Create new mount point directory
+    if [[ ! -d "$new_mount" ]]; then
+        mkdir -p "$new_mount"
+        success "Created directory $new_mount"
+    fi
+
+    # Check if old mount is currently mounted
+    local was_mounted=false
+    if mountpoint -q "$old_mount" 2>/dev/null; then
+        was_mounted=true
+        echo "  Unmounting $old_mount..."
+        if ! umount "$old_mount" 2>/dev/null; then
+            warn "Could not unmount $old_mount - it may be in use"
+            echo "  Try: lsof +D $old_mount"
+            echo "  Or reboot after fstab is updated"
+        else
+            success "Unmounted $old_mount"
+        fi
+    fi
+
+    # Update fstab - replace old mount point with new one
+    # Be careful to only replace the mount point field (2nd field)
+    local escaped_old escaped_new
+    escaped_old=$(printf '%s\n' "$old_mount" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    escaped_new=$(printf '%s\n' "$new_mount" | sed 's/[&/\]/\\&/g')
+
+    # Use awk to precisely replace only the 2nd field
+    awk -v old="$old_mount" -v new="$new_mount" '
+    {
+        if ($2 == old) {
+            $2 = new
+        }
+        print
+    }' /etc/fstab > /etc/fstab.tmp && mv /etc/fstab.tmp /etc/fstab
+
+    success "Updated /etc/fstab"
+
+    # Mount at new location
+    echo "  Mounting at $new_mount..."
+    if mount "$new_mount" 2>/dev/null; then
+        success "Mounted at $new_mount"
+    else
+        warn "Could not mount at $new_mount - may need reboot"
+        echo "  You can try: mount $new_mount"
+    fi
+
+    # Remind about config.toml
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────────────────────────────┐"
+    echo "  │ IMPORTANT: Update your config.toml                                       │"
+    echo "  ├──────────────────────────────────────────────────────────────────────────┤"
+    echo "  │                                                                          │"
+    echo "  │ The mount point has been moved, but you need to update config.toml:     │"
+    echo "  │                                                                          │"
+    printf "  │   Old path: %-55s │\n" "$old_mount"
+    printf "  │   New path: %-55s │\n" "$new_mount"
+    echo "  │                                                                          │"
+    echo "  │ Update the relevant [storage] section in your config.toml:              │"
+    echo "  │   accounts = \"...\"                                                       │"
+    echo "  │   blockstore = \"...\"                                                     │"
+    echo "  │   snapshots = \"...\"                                                      │"
+    echo "  │                                                                          │"
+    echo "  └──────────────────────────────────────────────────────────────────────────┘"
+    echo ""
+
+    success "Mount point moved successfully"
+}
+
+# ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
 
@@ -2416,6 +2603,10 @@ main() {
             check_root
             fix_noatime
             ;;
+        --move)
+            check_root
+            move_mount
+            ;;
         --status)
             show_status
             ;;
@@ -2448,6 +2639,7 @@ main() {
             echo ""
             echo "Maintenance:"
             echo "  sudo ./scripts/disk-setup.sh --fix-noatime        # Add noatime to existing mounts"
+            echo "  sudo ./scripts/disk-setup.sh --move               # Move a mount to a different path"
             echo ""
             echo "  ./scripts/disk-setup.sh --help                    # Show detailed help"
             echo ""

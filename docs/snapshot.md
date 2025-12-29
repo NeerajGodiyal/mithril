@@ -126,7 +126,7 @@ When `max_full_snapshots = 0` (default):
 
 ### Streaming + Save Mode
 
-When `max_full_snapshots > 0` and `download_path` is set:
+When `max_full_snapshots > 0` and `storage.snapshots` is set:
 - Uses `io.TeeReader` to write to disk while streaming
 - Processing happens in parallel with disk write
 - Snapshot files are saved for potential reuse
@@ -175,8 +175,7 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
     # but means you'll need to re-download if the process is interrupted.
     # max_full_snapshots = 1
 
-    # Path to save snapshots (only used when max_full_snapshots > 0)
-    # download_path = ""
+    # Snapshots are saved to the path in [storage].snapshots
 
     # Enable verbose output showing detailed node discovery statistics
     # verbose = false
@@ -350,10 +349,12 @@ mithril verify-live --config my-config.toml
 ### Save snapshots while streaming
 
 ```toml
+[storage]
+    snapshots = "/data/snapshots"
+
 [snapshot]
     # Keep 2 snapshots on disk
     max_full_snapshots = 2
-    download_path = "/data/snapshots"
 ```
 
 ### High-speed network tuning
