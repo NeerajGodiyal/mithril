@@ -21,6 +21,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -49,6 +50,29 @@ type ReplayResult struct {
 	WasCancelled bool
 	// Error contains any error that occurred during replay
 	Error error
+
+	// Resume context - populated on graceful shutdown (Ctrl+C) for proper resume
+	LastAcctsLtHash          *lthash.LtHash // LtHash at end of last persisted slot
+	LastLamportsPerSignature uint64         // FeeRateGovernor.LamportsPerSignature
+	LastPrevLamportsPerSig   uint64         // FeeRateGovernor.PrevLamportsPerSignature
+	LastNumSignatures        uint64         // SlotCtx.NumSignatures
+}
+
+// ResumeState contains the state needed to properly configure the first block when resuming.
+// This is passed to ReplayBlocks when resuming from a previous run.
+type ResumeState struct {
+	// ParentSlot is the slot of the last successfully replayed block (= state.LastSlot)
+	ParentSlot uint64
+	// ParentBankhash is the bankhash of the parent slot
+	ParentBankhash []byte
+	// AcctsLtHash is the cumulative LtHash at the end of the parent slot
+	AcctsLtHash *lthash.LtHash
+	// LamportsPerSignature for reconstructing FeeRateGovernor
+	LamportsPerSignature uint64
+	// PrevLamportsPerSignature for reconstructing FeeRateGovernor
+	PrevLamportsPerSignature uint64
+	// NumSignatures is the total signature count at end of parent slot
+	NumSignatures uint64
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
@@ -638,6 +662,112 @@ func configureBlock(block *b.Block,
 	}
 }
 
+// configureInitialBlockFromResume configures the first block when resuming from a previous run.
+// Unlike configureInitialBlock which uses snapshot manifest data, this uses the ResumeState
+// which contains the actual parent slot/bankhash from the last replayed slot.
+func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
+	block *b.Block,
+	resumeState *ResumeState,
+	snapshotManifest *snapshot.SnapshotManifest, // Still needed for static FeeRateGovernor fields
+	epochCtx *ReplayCtx,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	rpcClient *rpcclient.RpcClient) {
+
+	// Use resume state for parent info (the actual last replayed slot)
+	copy(block.ParentBankhash[:], resumeState.ParentBankhash)
+	block.ParentSlot = resumeState.ParentSlot
+	block.AcctsLtHash = resumeState.AcctsLtHash
+	block.EpochAcctsHash = epochCtx.EpochAcctsHash
+
+	// Reconstruct PrevFeeRateGovernor from manifest static fields + resume dynamic fields
+	prevFeeRateGovernor := snapshotManifest.Bank.FeeRateGovernor.Clone()
+	prevFeeRateGovernor.LamportsPerSignature = resumeState.LamportsPerSignature
+	prevFeeRateGovernor.PrevLamportsPerSignature = resumeState.PrevLamportsPerSignature
+	block.PrevFeeRateGovernor = prevFeeRateGovernor
+	block.PrevNumSignatures = resumeState.NumSignatures
+
+	// Load vote accounts from global epoch stakes (populated from manifest via buildInitialEpochStakesCache)
+	// NOT from VoteAcctCache (which is empty on resume - it's in-memory only)
+	setupVoteAcctsFromEpochStakes(block, epochSchedule)
+	configureGlobalCtx(block)
+
+	// Handle leader schedule
+	if global.ManageLeaderSchedule() {
+		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		var exists bool
+		block.Leader, exists = global.LeaderForSlot(block.Slot)
+		if !exists {
+			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+		}
+	}
+
+	if global.ManageBlockHeight() {
+		block.BlockHeight = global.BlockHeight()
+	}
+
+	// Get LatestEvictedBlockhash from RecentBlockhashes sysvar in AccountsDB
+	block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
+}
+
+// setupVoteAcctsFromEpochStakes loads vote accounts from the global epoch stakes cache.
+// This is used when resuming because VoteAcctCache is in-memory only and empty on restart.
+// The epoch stakes are populated from the manifest via buildInitialEpochStakesCache().
+func setupVoteAcctsFromEpochStakes(block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) {
+	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
+	block.VoteAccts = make(map[solana.PublicKey]uint64)
+
+	currentEpoch := epochSchedule.GetEpoch(block.Slot)
+
+	// VoteAccts (stake amounts) from global epoch stakes - populated from manifest
+	epochStakes := global.EpochStakes(currentEpoch)
+	for pk, stake := range epochStakes {
+		block.VoteAccts[pk] = stake
+		block.TotalEpochStake += stake
+	}
+
+	// VoteTimestamps from epoch stakes vote accounts - will be stale but gets
+	// updated during replay as vote transactions execute
+	epochVoteAccts := global.EpochStakesVoteAccts(currentEpoch)
+	for pk, voteAcct := range epochVoteAccts {
+		ts := sealevel.BlockTimestamp{
+			Slot:      voteAcct.LastTimestampSlot,
+			Timestamp: voteAcct.LastTimestampTs,
+		}
+		block.VoteTimestamps[pk] = ts
+	}
+}
+
+// getLatestEvictedBlockhashFromAccountsDB loads the latest evicted blockhash from the
+// RecentBlockhashes sysvar stored in AccountsDB. This is needed when resuming because
+// we can't rely on the snapshot manifest data which is stale.
+func getLatestEvictedBlockhashFromAccountsDB(acctsDb *accountsdb.AccountsDb, slot uint64) [32]byte {
+	recentBlockhashesAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarRecentBlockHashesAddr)
+	if err != nil {
+		mlog.Log.Infof("warning: failed to load RecentBlockhashes sysvar: %v", err)
+		return [32]byte{}
+	}
+
+	decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
+	var recentBlockhashes sealevel.SysvarRecentBlockhashes
+	err = recentBlockhashes.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		mlog.Log.Infof("warning: failed to unmarshal RecentBlockhashes sysvar: %v", err)
+		return [32]byte{}
+	}
+
+	// The sysvar contains up to 150 recent blockhashes. The latest evicted one
+	// is the one that would be at position 150 (0-indexed), i.e., the oldest one
+	// that's still in the sysvar but about to be evicted.
+	if len(recentBlockhashes) >= 150 {
+		return recentBlockhashes[149].Blockhash
+	} else if len(recentBlockhashes) > 0 {
+		// If we have fewer entries, return the oldest one
+		return recentBlockhashes[len(recentBlockhashes)-1].Blockhash
+	}
+
+	return [32]byte{}
+}
+
 func configureGlobalCtx(block *b.Block) {
 	global.SetSlot(block.Slot)
 	global.SetEpoch(block.Epoch)
@@ -672,6 +802,7 @@ func ReplayBlocks(
 	acctsDb *accountsdb.AccountsDb,
 	acctsDbPath string,
 	snapshotManifest *snapshot.SnapshotManifest,
+	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
 	rpcEndpoint string,
 	blockDir string,
@@ -762,7 +893,13 @@ func ReplayBlocks(
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		if currentSlot == startSlot {
-			configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
+			if resumeState != nil {
+				// RESUME: Use resume state + manifest (for static fields)
+				configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc)
+			} else {
+				// FRESH START: Use snapshot manifest
+				configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
+			}
 		} else {
 			configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc)
 		}
@@ -869,6 +1006,18 @@ func ReplayBlocks(
 
 	result.LastPersistedSlot = lastPersistedSlot
 	result.LastPersistedBankhash = lastPersistedBankhash
+
+	// Capture resume context from the last slot context (if available)
+	// This enables proper resume from Ctrl+C shutdown
+	if lastSlotCtx != nil {
+		result.LastAcctsLtHash = lastSlotCtx.AcctsLtHash
+		if lastSlotCtx.FeeRateGovernor != nil {
+			result.LastLamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
+			result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
+		}
+		result.LastNumSignatures = lastSlotCtx.NumSignatures
+	}
+
 	return result
 }
 

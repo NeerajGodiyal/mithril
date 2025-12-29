@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"math"
@@ -23,9 +24,11 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/mr-tron/base58"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -621,6 +624,36 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			}
 		}
 	}
+
+	// Create ResumeState if we have resume context from a previous graceful shutdown
+	var resumeState *replay.ResumeState
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		resumeCtx := mithrilState.GetResumeContext()
+		// Decode bankhash from base58
+		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
+		if err != nil {
+			mlog.Log.Infof("warning: failed to decode last_bankhash from state file: %v", err)
+		} else {
+			// Decode LtHash from base64
+			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			if err != nil {
+				mlog.Log.Infof("warning: failed to decode last_accts_lt_hash from state file: %v", err)
+			} else {
+				ltHash := &lthash.LtHash{}
+				ltHash.InitWithHash(ltHashBytes)
+				resumeState = &replay.ResumeState{
+					ParentSlot:               mithrilState.LastSlot,
+					ParentBankhash:           parentBankhash,
+					AcctsLtHash:              ltHash,
+					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
+					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
+					NumSignatures:            resumeCtx.NumSignatures,
+				}
+				mlog.Log.Infof("loaded resume context from state file")
+			}
+		}
+	}
+
 	if mithrilState == nil {
 		// Create a new state file for this session
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
@@ -674,11 +707,21 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
 
-	// Update state file with last persisted slot
+	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
-		if err := mithrilState.UpdateLastSlot(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash); err != nil {
+		// Build resume context for graceful shutdown
+		var resumeCtx *state.ResumeContext
+		if result.LastAcctsLtHash != nil {
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: result.LastLamportsPerSignature,
+				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
+				NumSignatures:        result.LastNumSignatures,
+			}
+		}
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 	}
@@ -756,7 +799,7 @@ func runLive(c *cobra.Command, args []string) {
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
 	if hasValidState {
 		hasAccountsDB = true
-		accountsDBSlot = mithrilState.SnapshotSlot
+		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
 	}
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
@@ -1004,6 +1047,43 @@ func runLive(c *cobra.Command, args []string) {
 			}
 		}
 	}
+
+	// Create ResumeState if we have resume context from state file
+	var resumeState *replay.ResumeState
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		resumeCtx := mithrilState.GetResumeContext()
+
+		// Decode parent bankhash
+		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
+		if err != nil {
+			mlog.Log.Errorf("failed to decode last_bankhash from state file: %v", err)
+			mlog.Log.Infof("will start fresh from snapshot")
+			mithrilState = nil
+		} else {
+			// Decode AcctsLtHash
+			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			if err != nil {
+				mlog.Log.Errorf("failed to decode accts_lt_hash from state file: %v", err)
+				mlog.Log.Infof("will start fresh from snapshot")
+				mithrilState = nil
+			} else {
+				ltHash := &lthash.LtHash{}
+				ltHash.InitWithHash(ltHashBytes)
+
+				resumeState = &replay.ResumeState{
+					ParentSlot:               mithrilState.LastSlot,
+					ParentBankhash:           parentBankhash,
+					AcctsLtHash:              ltHash,
+					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
+					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
+					NumSignatures:            resumeCtx.NumSignatures,
+				}
+				mlog.Log.Infof("resume context loaded: parent_slot=%d, lt_hash_len=%d",
+					resumeState.ParentSlot, len(ltHashBytes))
+			}
+		}
+	}
+
 	if mithrilState == nil {
 		// Initialize state for this session
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
@@ -1045,11 +1125,20 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
 
-	// Update state file with last persisted slot
+	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
-		if err := mithrilState.UpdateLastSlot(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash); err != nil {
+		var resumeCtx *state.ResumeContext
+		if result.LastAcctsLtHash != nil {
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: result.LastLamportsPerSignature,
+				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
+				NumSignatures:        result.LastNumSignatures,
+			}
+		}
+		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 	}

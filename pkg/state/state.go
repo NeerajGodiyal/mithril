@@ -28,6 +28,13 @@ type MithrilState struct {
 	// Corruption tracking - set when integrity check fails
 	CorruptionReason     string    `json:"corruption_reason,omitempty"`
 	CorruptionDetectedAt time.Time `json:"corruption_detected_at,omitempty"`
+
+	// Resume context - stored on shutdown to properly configure first block on resume
+	// These fields capture the state at the end of the last successfully replayed slot
+	LastAcctsLtHash          string `json:"last_accts_lt_hash,omitempty"`           // base64 encoded LtHash
+	LastLamportsPerSignature uint64 `json:"last_lamports_per_sig,omitempty"`        // FeeRateGovernor.LamportsPerSignature
+	LastPrevLamportsPerSig   uint64 `json:"last_prev_lamports_per_sig,omitempty"`   // FeeRateGovernor.PrevLamportsPerSignature
+	LastNumSignatures        uint64 `json:"last_num_signatures,omitempty"`          // SlotCtx.NumSignatures
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -100,12 +107,53 @@ func (s *MithrilState) MarkCorrupted(accountsDbDir string, reason string) error 
 	return s.Save(accountsDbDir)
 }
 
+// ResumeContext contains the context needed to properly resume replay from a saved state.
+type ResumeContext struct {
+	AcctsLtHash          string // base64 encoded
+	LamportsPerSignature uint64
+	PrevLamportsPerSig   uint64
+	NumSignatures        uint64
+}
+
 // UpdateLastSlot updates the last slot and bankhash in the state file.
 // This should be called after successfully committing a slot during replay.
 func (s *MithrilState) UpdateLastSlot(accountsDbDir string, slot uint64, bankhash []byte) error {
 	s.LastSlot = slot
 	s.LastBankhash = base58.Encode(bankhash)
 	return s.Save(accountsDbDir)
+}
+
+// UpdateLastSlotWithContext updates the last slot, bankhash, and resume context in the state file.
+// This should be called on graceful shutdown to preserve the full context needed for resume.
+func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint64, bankhash []byte, ctx *ResumeContext) error {
+	s.LastSlot = slot
+	s.LastBankhash = base58.Encode(bankhash)
+	if ctx != nil {
+		s.LastAcctsLtHash = ctx.AcctsLtHash
+		s.LastLamportsPerSignature = ctx.LamportsPerSignature
+		s.LastPrevLamportsPerSig = ctx.PrevLamportsPerSig
+		s.LastNumSignatures = ctx.NumSignatures
+	}
+	return s.Save(accountsDbDir)
+}
+
+// HasResumeContext returns true if the state has resume context stored.
+// This indicates the state was saved during a graceful shutdown with full context.
+func (s *MithrilState) HasResumeContext() bool {
+	return s != nil && s.LastSlot > 0 && s.LastAcctsLtHash != ""
+}
+
+// GetResumeContext returns the stored resume context, or nil if not present.
+func (s *MithrilState) GetResumeContext() *ResumeContext {
+	if !s.HasResumeContext() {
+		return nil
+	}
+	return &ResumeContext{
+		AcctsLtHash:          s.LastAcctsLtHash,
+		LamportsPerSignature: s.LastLamportsPerSignature,
+		PrevLamportsPerSig:   s.LastPrevLamportsPerSig,
+		NumSignatures:        s.LastNumSignatures,
+	}
 }
 
 // GetResumeSlot returns the slot to resume from.
