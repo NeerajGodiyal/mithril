@@ -94,6 +94,9 @@
 #   --delete-blockstore  Clear verified blocks only
 #   --delete-all         Clear everything (complete reset)
 #
+# MAINTENANCE:
+#   --fix-noatime        Add noatime mount option to existing Mithril partitions
+#
 # SAFETY:
 #   - Preserves existing OS partitions (only uses free space in single-drive mode)
 #   - NEVER formats drives with mounted partitions
@@ -2262,6 +2265,112 @@ show_disk_summary() {
 }
 
 # ------------------------------------------------------------------------------
+# Fix noatime mount option
+# ------------------------------------------------------------------------------
+
+fix_noatime() {
+    info "FIXING NOATIME MOUNT OPTIONS"
+    echo ""
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        warn "No Mithril data directories found"
+        return 1
+    fi
+
+    local needs_fix=()
+    local already_ok=()
+
+    for mithril_dir in "${mithril_dirs[@]}"; do
+        local device
+        device=$(df "$mithril_dir" 2>/dev/null | tail -1 | awk '{print $1}')
+        local opts
+        opts=$(grep -E "^$device " /proc/mounts 2>/dev/null | awk '{print $4}' || true)
+        if [[ "$opts" != *noatime* ]]; then
+            needs_fix+=("$mithril_dir")
+        else
+            already_ok+=("$mithril_dir")
+        fi
+    done
+
+    if [[ ${#already_ok[@]} -gt 0 ]]; then
+        echo "  Already have noatime:"
+        for dir in "${already_ok[@]}"; do
+            echo "    $dir"
+        done
+        echo ""
+    fi
+
+    if [[ ${#needs_fix[@]} -eq 0 ]]; then
+        success "All Mithril mounts already have noatime enabled"
+        return 0
+    fi
+
+    echo "  Need noatime added:"
+    for dir in "${needs_fix[@]}"; do
+        echo "    $dir"
+    done
+    echo ""
+
+    if ! yesno "  Add noatime to these mounts?" "y"; then
+        die "Aborted"
+    fi
+
+    # Backup fstab
+    local backup="/etc/fstab.bak.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup"
+    success "Backed up fstab to $backup"
+
+    for mithril_dir in "${needs_fix[@]}"; do
+        local device uuid
+        device=$(df "$mithril_dir" 2>/dev/null | tail -1 | awk '{print $1}')
+        uuid=$(blkid -s UUID -o value "$device" 2>/dev/null || true)
+
+        if [[ -z "$uuid" ]]; then
+            warn "Could not find UUID for $device, skipping"
+            continue
+        fi
+
+        # Check if there's an fstab entry for this UUID
+        if grep -q "$uuid" /etc/fstab 2>/dev/null; then
+            # Check if it already has noatime
+            if grep "$uuid" /etc/fstab | grep -q noatime; then
+                echo "  $mithril_dir: fstab already has noatime (but mount doesn't - remount needed)"
+            else
+                # Add noatime to existing entry
+                # Replace 'defaults' with 'defaults,noatime' or add noatime if other options exist
+                if grep "$uuid" /etc/fstab | grep -q "defaults"; then
+                    sed -i "/$uuid/s/defaults/defaults,noatime/" /etc/fstab
+                else
+                    # Add noatime to the options field (4th field)
+                    sed -i "/$uuid/s/\([^ \t]*[ \t]*[^ \t]*[ \t]*[^ \t]*[ \t]*[^ \t]*\)/\1,noatime/" /etc/fstab
+                fi
+                success "Updated fstab entry for $mithril_dir"
+            fi
+        else
+            warn "No fstab entry found for $mithril_dir (UUID: $uuid)"
+            echo "    You may need to add one manually"
+            continue
+        fi
+
+        # Remount with new options
+        echo "  Remounting $mithril_dir..."
+        if mount -o remount "$mithril_dir" 2>/dev/null; then
+            success "Remounted $mithril_dir with noatime"
+        else
+            warn "Could not remount $mithril_dir - may need reboot"
+        fi
+    done
+
+    echo ""
+    success "noatime fix complete"
+    echo ""
+    echo "  If any mounts failed to remount, they will take effect after reboot."
+}
+
+# ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
 
@@ -2303,6 +2412,10 @@ main() {
             check_root
             clean_all
             ;;
+        --fix-noatime)
+            check_root
+            fix_noatime
+            ;;
         --status)
             show_status
             ;;
@@ -2332,6 +2445,9 @@ main() {
             echo "  sudo ./scripts/disk-setup.sh --delete-snapshots   # Delete snapshots only"
             echo "  sudo ./scripts/disk-setup.sh --delete-blockstore  # Delete blockstore only"
             echo "  sudo ./scripts/disk-setup.sh --delete-all         # Delete everything"
+            echo ""
+            echo "Maintenance:"
+            echo "  sudo ./scripts/disk-setup.sh --fix-noatime        # Add noatime to existing mounts"
             echo ""
             echo "  ./scripts/disk-setup.sh --help                    # Show detailed help"
             echo ""
