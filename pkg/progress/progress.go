@@ -689,26 +689,78 @@ func formatBytes(bytes uint64) string {
 	}
 }
 
+// getMountPoint returns the mount point device for a given path by reading /proc/mounts
+func getMountPoint(path string) string {
+	// Get the device ID for the path
+	var pathStat syscall.Stat_t
+	if err := syscall.Stat(path, &pathStat); err != nil {
+		return ""
+	}
+	targetDev := pathStat.Dev
+
+	// Read /proc/mounts to find the device
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return ""
+	}
+
+	var bestMatch string
+	var bestMatchLen int
+
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		device := fields[0]
+		mountPoint := fields[1]
+
+		// Check if this mount point is a prefix of our path
+		if !strings.HasPrefix(path, mountPoint) {
+			continue
+		}
+
+		// Check if this mount has the same device
+		var mountStat syscall.Stat_t
+		if err := syscall.Stat(mountPoint, &mountStat); err != nil {
+			continue
+		}
+
+		if mountStat.Dev == targetDev && len(mountPoint) > bestMatchLen {
+			bestMatch = device
+			bestMatchLen = len(mountPoint)
+		}
+	}
+
+	// Extract just the device name (e.g., "nvme0n1p1" from "/dev/nvme0n1p1")
+	if strings.HasPrefix(bestMatch, "/dev/") {
+		return bestMatch[5:]
+	}
+	return bestMatch
+}
+
 // PrintDiskUsage prints a concise disk usage summary for configured paths
 func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 	c := "" // teal for borders
 	r := "" // reset
 	y := "" // yellow for warning
+	d := "" // dim for device name
 	if useColor {
 		c = colorTeal
 		r = colorReset
 		y = colorYellow
+		d = colorDim
 	}
 
 	// Collect disk info for each path, deduplicating by device
-	type deviceInfo struct {
+	type pathInfo struct {
+		label      string
+		path       string
+		device     string
 		usedBytes  uint64
 		totalBytes uint64
-		path       string
-		labels     []string
 	}
-	devices := make(map[uint64]*deviceInfo)
 
 	paths := []struct {
 		label string
@@ -718,6 +770,9 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 		{"Snapshots", snapshotsPath},
 		{"Ledger", ledgerPath},
 	}
+
+	var infos []pathInfo
+	seenDevices := make(map[string]int) // device -> index in infos
 
 	for _, p := range paths {
 		if p.path == "" {
@@ -729,38 +784,37 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 			continue
 		}
 
-		// Use total size as device identifier (imperfect but works for most cases)
-		deviceKey := stat.Blocks * uint64(stat.Bsize)
+		device := getMountPoint(p.path)
+		totalBytes := stat.Blocks * uint64(stat.Bsize)
+		freeBytes := stat.Bavail * uint64(stat.Bsize)
+		usedBytes := totalBytes - freeBytes
 
-		if existing, ok := devices[deviceKey]; ok {
-			existing.labels = append(existing.labels, p.label)
+		// Check if we've already seen this device
+		if idx, seen := seenDevices[device]; seen && device != "" {
+			// Append label to existing entry
+			infos[idx].label += "+" + p.label
 		} else {
-			totalBytes := stat.Blocks * uint64(stat.Bsize)
-			freeBytes := stat.Bavail * uint64(stat.Bsize)
-			usedBytes := totalBytes - freeBytes
-
-			devices[deviceKey] = &deviceInfo{
+			seenDevices[device] = len(infos)
+			infos = append(infos, pathInfo{
+				label:      p.label,
+				path:       p.path,
+				device:     device,
 				usedBytes:  usedBytes,
 				totalBytes: totalBytes,
-				path:       p.path,
-				labels:     []string{p.label},
-			}
+			})
 		}
 	}
 
-	if len(devices) == 0 {
+	if len(infos) == 0 {
 		return
 	}
 
 	fmt.Printf("%sDisk usage:%s\n", c, r)
 
-	for _, dev := range devices {
-		percentUsed := float64(dev.usedBytes) / float64(dev.totalBytes) * 100
-		usedStr := formatBytes(dev.usedBytes)
-		totalStr := formatBytes(dev.totalBytes)
-
-		// Combine labels if multiple paths on same device
-		labelStr := strings.Join(dev.labels, "+")
+	for _, info := range infos {
+		percentUsed := float64(info.usedBytes) / float64(info.totalBytes) * 100
+		usedStr := formatBytes(info.usedBytes)
+		totalStr := formatBytes(info.totalBytes)
 
 		// Add warning if usage is high
 		warning := ""
@@ -770,12 +824,26 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 			warning = fmt.Sprintf(" %s(warning)%s", y, r)
 		}
 
-		fmt.Printf("  %-18s %s / %s (%3.0f%%)%s\n",
-			labelStr+":",
+		// Format device info
+		deviceStr := ""
+		if info.device != "" {
+			deviceStr = fmt.Sprintf(" %s(%s)%s", d, info.device, r)
+		}
+
+		// Truncate path if needed
+		pathDisplay := info.path
+		if len(pathDisplay) > 30 {
+			pathDisplay = "..." + pathDisplay[len(pathDisplay)-27:]
+		}
+
+		fmt.Printf("  %-12s %-30s %7s / %-7s (%3.0f%%)%s%s\n",
+			info.label+":",
+			pathDisplay+deviceStr,
 			usedStr,
 			totalStr,
 			percentUsed,
-			warning)
+			warning,
+			"")
 	}
 	fmt.Println()
 }
