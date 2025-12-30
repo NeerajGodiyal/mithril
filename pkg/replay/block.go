@@ -1070,8 +1070,8 @@ func ReplayBlocks(
 			leaderStr = leader.String()
 		}
 
-		// Fixed-width format for consistent alignment
-		mlog.Log.Infof("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | execution: %.3fs",
+		// Fixed-width format for consistent alignment (use precise timing for block replay)
+		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | execution: %.3fs",
 			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
 
 		// Write bankhash to log file
