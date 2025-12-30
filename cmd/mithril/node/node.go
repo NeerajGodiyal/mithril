@@ -861,6 +861,9 @@ func runLive(c *cobra.Command, args []string) {
 
 	case "new-snapshot":
 		// Mode: Always download fresh snapshot, clean everything
+		if snapshotDownloadPath == "" {
+			klog.Fatalf("mode=new-snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
+		}
 		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
 		if accountsPath != "" {
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
@@ -883,6 +886,9 @@ func runLive(c *cobra.Command, args []string) {
 
 	case "snapshot":
 		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
+		if snapshotDownloadPath == "" {
+			klog.Fatalf("mode=snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
+		}
 		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
@@ -951,6 +957,9 @@ func runLive(c *cobra.Command, args []string) {
 
 				if choice == 2 {
 					// User chose to start fresh from snapshot
+					if snapshotDownloadPath == "" {
+						klog.Fatalf("cannot rebuild from snapshot: no snapshot directory configured (set storage.snapshots or snapshot.download_path in config)")
+					}
 					mlog.Log.Infof("user chose to rebuild from latest snapshot")
 					if accountsPath != "" {
 						snapshot.CleanAccountsDbDir(accountsPath)
@@ -1015,6 +1024,9 @@ func runLive(c *cobra.Command, args []string) {
 			}
 		} else {
 			// No valid state - need to clean and rebuild from snapshot
+			if snapshotDownloadPath == "" {
+				klog.Fatalf("mode=auto requires a snapshot directory to rebuild (set storage.snapshots or snapshot.download_path in config)")
+			}
 			if hasAccountsDB {
 				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
 			} else {
@@ -1032,14 +1044,12 @@ func runLive(c *cobra.Command, args []string) {
 				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
 			} else {
 				// Clean up old snapshot files based on retention settings
-				if snapshotDownloadPath != "" {
-					maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
-					if maxSnapshots == 0 {
-						maxSnapshots = 2 // default
-					}
-					deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-					snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+				if maxSnapshots == 0 {
+					maxSnapshots = 2 // default
 				}
+				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 			}
 			if err != nil {
