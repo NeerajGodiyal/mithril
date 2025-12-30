@@ -164,6 +164,68 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 	}
 }
 
+// incBaseMatchStats tracks statistics for incremental base matching filter
+type incBaseMatchStats struct {
+	totalWithFull       int // nodes with a full snapshot
+	totalWithInc        int // nodes with any incremental
+	afterIncBaseMatch   int // nodes remaining after incremental base match filter
+	uniqueFullSlots     int // number of unique full snapshot slots
+	uniqueIncBases      int // number of unique incremental base slots
+	matchingFullSlots   int // full slots that have at least one matching inc base
+}
+
+// filterByIncrementalBaseMatch filters results to only include nodes whose FullSlot
+// has at least one incremental with matching base slot somewhere in the network.
+// This ensures that when we select a full snapshot, there will be compatible incrementals.
+func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, incBaseMatchStats) {
+	var stats incBaseMatchStats
+
+	// Step 1: Build sets of all full snapshot slots and all incremental base slots
+	fullSlots := make(map[int64]bool)
+	incBases := make(map[int64]bool)
+
+	for _, r := range results {
+		if r.FullSlot > 0 {
+			stats.totalWithFull++
+			fullSlots[r.FullSlot] = true
+		}
+		if r.HasInc && r.IncBase > 0 {
+			stats.totalWithInc++
+			incBases[r.IncBase] = true
+		}
+	}
+
+	stats.uniqueFullSlots = len(fullSlots)
+	stats.uniqueIncBases = len(incBases)
+
+	// Step 2: Find full slots that have at least one matching inc base
+	matchingSlots := make(map[int64]bool)
+	for fullSlot := range fullSlots {
+		if incBases[fullSlot] {
+			matchingSlots[fullSlot] = true
+		}
+	}
+	stats.matchingFullSlots = len(matchingSlots)
+
+	// If no matching slots found, return all results (don't filter)
+	// This handles edge cases like all incrementals being stale
+	if len(matchingSlots) == 0 {
+		stats.afterIncBaseMatch = stats.totalWithFull
+		return results, stats
+	}
+
+	// Step 3: Filter to only nodes whose FullSlot is in matchingSlots
+	var filtered []rpc.NodeResult
+	for _, r := range results {
+		if r.FullSlot > 0 && matchingSlots[r.FullSlot] {
+			filtered = append(filtered, r)
+		}
+	}
+
+	stats.afterIncBaseMatch = len(filtered)
+	return filtered, stats
+}
+
 // DownloadSnapshot downloads a full snapshot from the best available RPC node.
 // It returns: (downloadPath, referenceSlot, snapshotSlot, error)
 //
@@ -212,6 +274,9 @@ func GetSnapshotURL(endpoint string, snapCfg SnapshotConfig) (string, int, int, 
 	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
+
+	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
+	results, _ = filterByIncrementalBaseMatch(results)
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
@@ -314,9 +379,23 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	mlog.Log.Infof("Probing %d nodes for snapshot availability...", len(nodes))
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 
+	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
+	// This prevents selecting a fast full snapshot that has no compatible incrementals
+	results, incBaseStats := filterByIncrementalBaseMatch(results)
+
 	// Print Node Discovery Report (before speed testing)
 	if stats != nil {
 		stats.PrintNodeDiscoveryReport()
+	}
+
+	// Print incremental base match stats
+	if incBaseStats.totalWithFull > 0 {
+		mlog.Log.Infof("Incremental base matching: %d/%d full snapshots have compatible incrementals (%d unique base slots)",
+			incBaseStats.afterIncBaseMatch, incBaseStats.totalWithFull, incBaseStats.matchingFullSlots)
+		if incBaseStats.afterIncBaseMatch < incBaseStats.totalWithFull {
+			mlog.Log.Infof("  (filtered %d sources with no matching incremental base)",
+				incBaseStats.totalWithFull-incBaseStats.afterIncBaseMatch)
+		}
 	}
 
 	// Step 4: Sort and select best nodes by download speed
@@ -324,7 +403,7 @@ func GetSnapshotURLWithInfo(endpoint string, snapCfg SnapshotConfig) (*SnapshotI
 	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
 	bestNodes, rankedNodes, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
-		return nil, fmt.Errorf("no suitable nodes found with snapshots")
+		return nil, fmt.Errorf("no suitable nodes found with snapshots (check incremental base matching)")
 	}
 
 	// Print Stage 2 candidates as a table (no timestamps)
@@ -475,6 +554,9 @@ func DownloadSnapshotWithConfig(endpoint string, path string, snapCfg SnapshotCo
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
 	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
+	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
+	results, _ = filterByIncrementalBaseMatch(results)
+
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
 	bestNodes, _, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
@@ -586,16 +668,42 @@ func DownloadIncrementalSnapshotWithConfig(endpoint string, path string, referen
 		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
-	// Step 3: Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
-	// This ensures we don't get nodes that haven't seen our full snapshot yet
-	bestNodes, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
-		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
-
-	if len(bestNodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no nodes found with snapshots >= slot %d", fullSnapshotSlot)
+	// Step 3: Filter to only nodes with matching incremental base slot FIRST
+	// This prevents threshold filtering from discarding nodes we need
+	var baseMatchingResults []rpc.NodeResult
+	for _, r := range results {
+		if r.HasInc && r.IncBase == int64(fullSnapshotSlot) {
+			baseMatchingResults = append(baseMatchingResults, r)
+		}
 	}
 
-	mlog.Log.Infof("Found %d nodes with matching full snapshot", len(bestNodes))
+	mlog.Log.Infof("Incremental base matching: %d nodes have base slot %d", len(baseMatchingResults), fullSnapshotSlot)
+
+	if len(baseMatchingResults) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d", fullSnapshotSlot)
+	}
+
+	// Step 3.5: Apply threshold filtering with two-pass approach
+	bestNodes, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
+		baseMatchingResults, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
+
+	// Pass 2: If no matches, relax incremental threshold
+	if len(bestNodes) == 0 && cfg.IncrementalThreshold > 0 {
+		relaxedThreshold := cfg.IncrementalThreshold * 2
+		mlog.Log.Infof("Pass 1 found no matches within threshold %d, trying relaxed threshold %d...",
+			cfg.IncrementalThreshold, relaxedThreshold)
+
+		relaxedCfg := cfg
+		relaxedCfg.IncrementalThreshold = relaxedThreshold
+		bestNodes, rankedNodes, _ = rpc.SortBestRPCsFilteredBySlot(
+			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
+	}
+
+	if len(bestNodes) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with snapshots >= slot %d within threshold", fullSnapshotSlot)
+	}
+
+	mlog.Log.Infof("Found %d nodes with matching incremental", len(bestNodes))
 
 	// Step 4: Use the new FindMatchingIncremental API
 	// This searches ranked nodes for an incremental that matches fullSnapshotSlot
@@ -757,24 +865,57 @@ func GetIncrementalSnapshotURL(endpoint string, fullSnapshotURL string, referenc
 		stats.PrintFilterPipeline(filterCfg, nil)
 	}
 
-	// Filter nodes by minimum slot (must have snapshot >= fullSnapshotSlot)
-	_, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
-		results, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
-
-	if len(rankedNodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no nodes found with snapshots >= slot %d", fullSnapshotSlot)
+	// Step 2.1: Filter to only nodes with matching base slot FIRST (before threshold filtering)
+	// This prevents threshold filtering from discarding nodes we need
+	var baseMatchingResults []rpc.NodeResult
+	totalWithMatchingBase := 0
+	for _, r := range results {
+		if r.HasInc && r.IncBase == int64(fullSnapshotSlot) {
+			baseMatchingResults = append(baseMatchingResults, r)
+			totalWithMatchingBase++
+		}
 	}
 
-	// Filter to only nodes with matching base slot
+	mlog.Log.Infof("Incremental base matching: %d nodes have base slot %d", totalWithMatchingBase, fullSnapshotSlot)
+
+	if len(baseMatchingResults) == 0 {
+		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d", fullSnapshotSlot)
+	}
+
+	// Step 2.2: Two-pass filtering - try strict threshold first, then relaxed
 	var matchingNodes []rpc.RankedNode
+
+	// Pass 1: Apply normal incremental threshold
+	_, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
+		baseMatchingResults, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 	for _, node := range rankedNodes {
-		if node.Result.HasInc && node.Result.IncBase == int64(fullSnapshotSlot) {
+		matchingNodes = append(matchingNodes, node)
+	}
+
+	// Pass 2: If no matches found, relax incremental threshold and retry
+	if len(matchingNodes) == 0 && cfg.IncrementalThreshold > 0 {
+		relaxedThreshold := cfg.IncrementalThreshold * 2
+		mlog.Log.Infof("Pass 1 found no matches within threshold %d, trying relaxed threshold %d...",
+			cfg.IncrementalThreshold, relaxedThreshold)
+
+		// Create a config with relaxed threshold
+		relaxedCfg := cfg
+		relaxedCfg.IncrementalThreshold = relaxedThreshold
+
+		_, rankedNodesRelaxed, _ := rpc.SortBestRPCsFilteredBySlot(
+			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
+		for _, node := range rankedNodesRelaxed {
 			matchingNodes = append(matchingNodes, node)
+		}
+
+		if len(matchingNodes) > 0 {
+			mlog.Log.Infof("Pass 2 (relaxed threshold) found %d matching nodes", len(matchingNodes))
 		}
 	}
 
 	if len(matchingNodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d", fullSnapshotSlot)
+		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d within threshold (strict: %d, relaxed: %d)",
+			fullSnapshotSlot, cfg.IncrementalThreshold, cfg.IncrementalThreshold*2)
 	}
 
 	// Filter out nodes that are too slow (incrementals are ~1GB, don't want 15min downloads)
