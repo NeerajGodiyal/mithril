@@ -35,6 +35,19 @@ type MithrilState struct {
 	LastLamportsPerSignature uint64 `json:"last_lamports_per_sig,omitempty"`        // FeeRateGovernor.LamportsPerSignature
 	LastPrevLamportsPerSig   uint64 `json:"last_prev_lamports_per_sig,omitempty"`   // FeeRateGovernor.PrevLamportsPerSignature
 	LastNumSignatures        uint64 `json:"last_num_signatures,omitempty"`          // SlotCtx.NumSignatures
+
+	// Blockhash context - required because appendvec file writes are not fsynced,
+	// so RecentBlockhashes sysvar data in AccountsDB may be stale after restart.
+	// These are all base58 encoded.
+	LastRecentBlockhashes []BlockhashEntry `json:"last_recent_blockhashes,omitempty"` // 150 entries, newest first
+	LastEvictedBlockhash  string           `json:"last_evicted_blockhash,omitempty"`  // 151st blockhash
+	LastBlockhash         string           `json:"last_blockhash,omitempty"`          // blockhash of last replayed slot (parent for next)
+}
+
+// BlockhashEntry represents a single entry in the RecentBlockhashes sysvar
+type BlockhashEntry struct {
+	Blockhash            string `json:"blockhash"`
+	LamportsPerSignature uint64 `json:"lamports_per_sig"`
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -113,6 +126,11 @@ type ResumeContext struct {
 	LamportsPerSignature uint64
 	PrevLamportsPerSig   uint64
 	NumSignatures        uint64
+
+	// Blockhash context
+	RecentBlockhashes []BlockhashEntry // 150 entries, newest first
+	EvictedBlockhash  string           // base58 encoded, 151st blockhash
+	LastBlockhash     string           // base58 encoded, blockhash of last slot (parent for next)
 }
 
 // UpdateLastSlot updates the last slot and bankhash in the state file.
@@ -133,6 +151,11 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastLamportsPerSignature = ctx.LamportsPerSignature
 		s.LastPrevLamportsPerSig = ctx.PrevLamportsPerSig
 		s.LastNumSignatures = ctx.NumSignatures
+
+		// Blockhash context - required because appendvec writes are not fsynced
+		s.LastRecentBlockhashes = ctx.RecentBlockhashes
+		s.LastEvictedBlockhash = ctx.EvictedBlockhash
+		s.LastBlockhash = ctx.LastBlockhash
 	}
 	return s.Save(accountsDbDir)
 }
@@ -153,6 +176,11 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		LamportsPerSignature: s.LastLamportsPerSignature,
 		PrevLamportsPerSig:   s.LastPrevLamportsPerSig,
 		NumSignatures:        s.LastNumSignatures,
+
+		// Blockhash context
+		RecentBlockhashes: s.LastRecentBlockhashes,
+		EvictedBlockhash:  s.LastEvictedBlockhash,
+		LastBlockhash:     s.LastBlockhash,
 	}
 }
 

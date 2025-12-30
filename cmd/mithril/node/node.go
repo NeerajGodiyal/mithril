@@ -649,7 +649,29 @@ func runVerifyRange(c *cobra.Command, args []string) {
 					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
 					NumSignatures:            resumeCtx.NumSignatures,
 				}
-				mlog.Log.Infof("loaded resume context from state file")
+
+				// Decode blockhash context
+				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+					resumeState.RecentBlockhashes = &recentBlockhashes
+
+					if resumeCtx.EvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+						if err == nil && len(evictedBytes) == 32 {
+							copy(resumeState.EvictedBlockhash[:], evictedBytes)
+						}
+					}
+
+					if resumeCtx.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+						if err == nil && len(lastBhBytes) == 32 {
+							copy(resumeState.LastBlockhash[:], lastBhBytes)
+						}
+					}
+					mlog.Log.Infof("loaded resume context with %d blockhashes from state file", len(*resumeState.RecentBlockhashes))
+				} else {
+					mlog.Log.Infof("loaded resume context from state file (no blockhashes)")
+				}
 			}
 		}
 	}
@@ -719,6 +741,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+
+				// Blockhash context - required because appendvec writes are not fsynced
+				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1078,8 +1105,31 @@ func runLive(c *cobra.Command, args []string) {
 					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
 					NumSignatures:            resumeCtx.NumSignatures,
 				}
-				mlog.Log.Infof("resume context loaded: parent_slot=%d, lt_hash_len=%d",
-					resumeState.ParentSlot, len(ltHashBytes))
+
+				// Decode blockhash context
+				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+					resumeState.RecentBlockhashes = &recentBlockhashes
+
+					if resumeCtx.EvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+						if err == nil && len(evictedBytes) == 32 {
+							copy(resumeState.EvictedBlockhash[:], evictedBytes)
+						}
+					}
+
+					if resumeCtx.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+						if err == nil && len(lastBhBytes) == 32 {
+							copy(resumeState.LastBlockhash[:], lastBhBytes)
+						}
+					}
+					mlog.Log.Infof("resume context loaded: parent_slot=%d, blockhashes=%d",
+						resumeState.ParentSlot, len(*resumeState.RecentBlockhashes))
+				} else {
+					mlog.Log.Infof("resume context loaded: parent_slot=%d (no blockhashes)",
+						resumeState.ParentSlot)
+				}
 			}
 		}
 	}
@@ -1136,6 +1186,11 @@ func runLive(c *cobra.Command, args []string) {
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+
+				// Blockhash context - required because appendvec writes are not fsynced
+				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1647,6 +1702,39 @@ func killExistingMithrilProcesses() int {
 	}
 
 	return killed
+}
+
+// decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes
+func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
+	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
+	for _, entry := range entries {
+		hashBytes, err := base58.Decode(entry.Blockhash)
+		if err != nil || len(hashBytes) != 32 {
+			continue
+		}
+		var blockhash [32]byte
+		copy(blockhash[:], hashBytes)
+		result = append(result, sealevel.RecentBlockHashesEntry{
+			Blockhash:     blockhash,
+			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: entry.LamportsPerSignature},
+		})
+	}
+	return result
+}
+
+// encodeRecentBlockhashes converts sealevel.SysvarRecentBlockhashes to state.BlockhashEntry list
+func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.BlockhashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.BlockhashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.BlockhashEntry{
+			Blockhash:            base58.Encode(entry.Blockhash[:]),
+			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
+		})
+	}
+	return result
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {

@@ -56,6 +56,11 @@ type ReplayResult struct {
 	LastLamportsPerSignature uint64         // FeeRateGovernor.LamportsPerSignature
 	LastPrevLamportsPerSig   uint64         // FeeRateGovernor.PrevLamportsPerSignature
 	LastNumSignatures        uint64         // SlotCtx.NumSignatures
+
+	// Blockhash context - required because appendvec writes are not fsynced
+	LastRecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
+	LastEvictedBlockhash  [32]byte                          // 151st blockhash
+	LastBlockhash         [32]byte                          // blockhash of last replayed slot
 }
 
 // ResumeState contains the state needed to properly configure the first block when resuming.
@@ -73,6 +78,11 @@ type ResumeState struct {
 	PrevLamportsPerSignature uint64
 	// NumSignatures is the total signature count at end of parent slot
 	NumSignatures uint64
+
+	// Blockhash context - required because appendvec writes are not fsynced
+	RecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
+	EvictedBlockhash  [32]byte                          // 151st blockhash
+	LastBlockhash     [32]byte                          // blockhash of last slot (parent for next)
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
@@ -712,8 +722,19 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		block.BlockHeight = global.BlockHeight()
 	}
 
-	// Get LatestEvictedBlockhash from RecentBlockhashes sysvar in AccountsDB
-	block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
+	// Restore blockhash context from ResumeState (required because appendvec writes are not fsynced)
+	if resumeState.RecentBlockhashes != nil && len(*resumeState.RecentBlockhashes) > 0 {
+		// Restore SysvarCache.RecentBlockHashes from state file
+		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
+		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
+		block.LastBlockhash = resumeState.LastBlockhash
+		mlog.Log.Infof("restored blockhash context from state file: %d blockhashes, evicted=%x, lastBh=%x",
+			len(*resumeState.RecentBlockhashes), resumeState.EvictedBlockhash[:8], resumeState.LastBlockhash[:8])
+	} else {
+		// Fallback: try to get from AccountsDB (may be stale, but better than nothing)
+		mlog.Log.Infof("warning: no blockhash context in state file, falling back to AccountsDB (may be stale)")
+		block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
+	}
 }
 
 // getLatestEvictedBlockhashFromAccountsDB loads the latest evicted blockhash from the
@@ -1006,6 +1027,11 @@ func ReplayBlocks(
 			result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 		}
 		result.LastNumSignatures = lastSlotCtx.NumSignatures
+
+		// Capture blockhash context from SysvarCache (required because appendvec writes are not fsynced)
+		result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
+		result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
+		result.LastBlockhash = lastSlotCtx.Blockhash
 	}
 
 	return result
