@@ -857,8 +857,10 @@ func ReplayBlocks(
 ) *ReplayResult {
 	result := &ReplayResult{}
 
-	// Generate unique run ID for log correlation
-	CurrentRunID = generateRunID()
+	// Generate unique run ID for log correlation (only if not already set by startup)
+	if CurrentRunID == "" {
+		CurrentRunID = generateRunID()
+	}
 	// Don't show end slot if it's max uint64 (means "forever")
 	if endSlot == ^uint64(0) {
 		mlog.Log.Infof("[run:%s] starting replay from slot %d", CurrentRunID, startSlot)
