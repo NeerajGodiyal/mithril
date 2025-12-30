@@ -361,8 +361,9 @@ func (d *DualProgress) Stop() {
 	<-d.doneCh
 }
 
-// Interrupt stops the progress display and shows interrupted status
-func (d *DualProgress) Interrupt() {
+// Interrupt stops the progress display and shows interrupted status.
+// If err is provided, shows the error message; otherwise shows "Interrupted by user".
+func (d *DualProgress) Interrupt(err ...error) {
 	d.mu.Lock()
 	d.interrupted = true
 	d.mu.Unlock()
@@ -371,10 +372,14 @@ func (d *DualProgress) Interrupt() {
 
 	// Print final interrupted status
 	fmt.Fprintf(d.output, "\033[2K") // Clear line
+	msg := "Interrupted by user"
+	if len(err) > 0 && err[0] != nil {
+		msg = err[0].Error()
+	}
 	if d.useColor {
-		fmt.Fprintf(d.output, "%s⚠ Interrupted by user%s\n", colorYellow, colorReset)
+		fmt.Fprintf(d.output, "%s⚠ %s%s\n", colorYellow, msg, colorReset)
 	} else {
-		fmt.Fprintln(d.output, "⚠ Interrupted by user")
+		fmt.Fprintf(d.output, "⚠ %s\n", msg)
 	}
 }
 
@@ -468,8 +473,9 @@ func (p *IndexingProgress) Finish() {
 	p.Update(p.total, p.total)
 }
 
-// Interrupt shows interrupted status
-func (p *IndexingProgress) Interrupt() {
+// Interrupt shows interrupted status.
+// If err is provided, shows the error message; otherwise shows "Interrupted".
+func (p *IndexingProgress) Interrupt(err ...error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -477,14 +483,19 @@ func (p *IndexingProgress) Interrupt() {
 		return
 	}
 
+	msg := "Interrupted"
+	if len(err) > 0 && err[0] != nil {
+		msg = err[0].Error()
+	}
+
 	// Move up and clear line
 	if p.useColor {
 		fmt.Fprint(p.output, moveUp+clearLine)
-		fmt.Fprintf(p.output, "%s%-24s%s %s⚠ Interrupted%s\n",
+		fmt.Fprintf(p.output, "%s%-24s%s %s⚠ %s%s\n",
 			colorTeal, p.label, colorReset,
-			colorYellow, colorReset)
+			colorYellow, msg, colorReset)
 	} else {
-		fmt.Fprintf(p.output, "%-24s ⚠ Interrupted\n", p.label)
+		fmt.Fprintf(p.output, "%-24s ⚠ %s\n", p.label, msg)
 	}
 }
 

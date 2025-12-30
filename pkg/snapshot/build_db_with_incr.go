@@ -214,6 +214,10 @@ func BuildAccountsDbWithIncr(
 	var fullSavePath string
 	if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(fullSnapshotFile, "http://") || strings.HasPrefix(fullSnapshotFile, "https://")) {
 		if snapshotDownloadPath != "" {
+			// Ensure snapshot download directory exists
+			if err := os.MkdirAll(snapshotDownloadPath, 0o755); err != nil {
+				return nil, nil, fmt.Errorf("failed to create snapshot download directory %s: %w", snapshotDownloadPath, err)
+			}
 			// Extract filename from URL and create save path
 			urlParts := strings.Split(fullSnapshotFile, "/")
 			filename := urlParts[len(urlParts)-1]
@@ -237,7 +241,7 @@ func BuildAccountsDbWithIncr(
 	// Check if processing was interrupted (context cancelled or error)
 	if err != nil {
 		if dp != nil {
-			dp.Interrupt()
+			dp.Interrupt(err)
 		}
 		return nil, nil, fmt.Errorf("processing full snapshot: %w", err)
 	}
@@ -256,7 +260,7 @@ func BuildAccountsDbWithIncr(
 		indexProgress.Update(completed, total)
 	})
 	if err != nil {
-		indexProgress.Interrupt()
+		indexProgress.Interrupt(err)
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
 
