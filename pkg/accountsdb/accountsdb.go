@@ -170,7 +170,7 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 }
 
 // SysvarRecentBlockHashesAddr is used for debug logging
-var SysvarRecentBlockHashesAddr = solana.MustPublicKeyFromBase58("SysvarRecentB1teleHashes11111111111111111111")
+var SysvarRecentBlockHashesAddr = solana.MustPublicKeyFromBase58("SysvarRecentB1ockHashes11111111111111111111")
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
