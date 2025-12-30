@@ -203,7 +203,7 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 - Consider using a higher-endurance drive (Samsung 990 Pro or better recommended)
 
 **Out of memory**
-- Mithril streams snapshots directly to processing without requiring disk space for the full snapshot file
+- By default, Mithril saves snapshots to disk (`max_full_snapshots = 1`). Set `max_full_snapshots = 0` for stream-only mode which doesn't require disk space for snapshot files.
 - Initial sync uses more RAM than steady-state replay
 
 ### Updating Mithril
@@ -222,7 +222,7 @@ go build -o mithril ./cmd/mithril
 ./mithril run --config config.toml
 ```
 
-**Note:** With `bootstrap.mode = "snapshot"` (the default), each restart downloads a fresh snapshot and re-syncs from scratch. Set `bootstrap.mode = "auto"` to reuse an existing AccountsDB when available.
+**Note:** With `bootstrap.mode = "snapshot"`, Mithril will use existing snapshot files if they are within the `full_threshold` (default: 100,000 slots), otherwise it downloads a fresh snapshot. Set `bootstrap.mode = "auto"` (the default) to reuse an existing AccountsDB when available, or `bootstrap.mode = "new-snapshot"` to always download fresh.
 
 ### Operational Best Practices
 

@@ -1314,10 +1314,10 @@ func printStartupInfo(commandName string) {
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
 
 	// Check for existing snapshots - try configured paths in order of preference:
-	// 1. snapshotArchivePath (storage.snapshots)
-	// 2. snapshotDlPath (snapshot.download_path) - defaults to snapshotArchivePath
+	// 1. snapshotDlPath (snapshot.download_path) - this is what runtime actually uses
+	// 2. snapshotArchivePath (storage.snapshots) - fallback if download_path not set
 	var existingSnapshots []snapshotInfo
-	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath} {
+	for _, searchPath := range []string{snapshotDlPath, snapshotArchivePath} {
 		if searchPath != "" {
 			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
 				existingSnapshots = snaps
