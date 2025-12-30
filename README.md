@@ -222,7 +222,7 @@ go build -o mithril ./cmd/mithril
 ./mithril run --config config.toml
 ```
 
-**Note:** With `bootstrap.mode = "snapshot"`, Mithril will use existing snapshot files if they are within the `full_threshold` (default: 100,000 slots), otherwise it downloads a fresh snapshot. Set `bootstrap.mode = "auto"` (the default) to reuse an existing AccountsDB when available, or `bootstrap.mode = "new-snapshot"` to always download fresh.
+**Note:** The default `bootstrap.mode = "snapshot"` will use existing snapshot files if they are within the `full_threshold` (default: 100,000 slots), otherwise it downloads a fresh snapshot. Set `bootstrap.mode = "auto"` to reuse an existing AccountsDB when available, or `bootstrap.mode = "new-snapshot"` to always download fresh.
 
 ### Operational Best Practices
 
