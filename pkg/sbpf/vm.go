@@ -70,7 +70,7 @@ func (e *Exception) Unwrap() error {
 
 // Exception codes.
 var (
-	ExcDivideByZero   = errors.New("division by zero")
+	ExcDivideByZero   = errors.New("divide by zero at BPF instruction")
 	ExcDivideOverflow = errors.New("divide overflow")
 	ExcOutOfCU        = errors.New("compute unit overrun")
 	ExcCallDepth      = errors.New("call depth exceeded")
