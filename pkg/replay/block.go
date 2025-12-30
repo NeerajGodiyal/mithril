@@ -347,6 +347,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				recentBlockhashes.MustUnmarshalWithDecoder(decoder)
 				sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+
+				// Debug: log the blockhash range on first load (helps debug resume issues)
+				if len(recentBlockhashes) > 0 {
+					mlog.Log.Infof("loaded RecentBlockhashes sysvar: %d entries, newest=%x, oldest=%x",
+						len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
+				}
 			}
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
@@ -720,12 +726,23 @@ func getLatestEvictedBlockhashFromAccountsDB(acctsDb *accountsdb.AccountsDb, slo
 		return [32]byte{}
 	}
 
+	// Debug: log the account slot (shows which version we're reading)
+	mlog.Log.Infof("DEBUG: RecentBlockhashes account loaded from slot %d, data_len=%d", recentBlockhashesAcct.Slot, len(recentBlockhashesAcct.Data))
+
 	decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 	var recentBlockhashes sealevel.SysvarRecentBlockhashes
 	err = recentBlockhashes.UnmarshalWithDecoder(decoder)
 	if err != nil {
 		mlog.Log.Infof("warning: failed to unmarshal RecentBlockhashes sysvar: %v", err)
 		return [32]byte{}
+	}
+
+	// Debug: log the blockhash range
+	if len(recentBlockhashes) > 0 {
+		mlog.Log.Infof("DEBUG: RecentBlockhashes has %d entries, newest=%x, oldest=%x",
+			len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
+	} else {
+		mlog.Log.Infof("DEBUG: RecentBlockhashes is EMPTY!")
 	}
 
 	// The sysvar contains up to 150 recent blockhashes. The latest evicted one
@@ -1170,7 +1187,22 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		close(done)
 	}
 
-	for _, txFeeInfo := range txFeeInfos {
+	for idx, txFeeInfo := range txFeeInfos {
+		if txFeeInfo == nil {
+			// This happens when IsTransactionAgeValid returns false (blockhash not found)
+			tx := block.Transactions[idx]
+			recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
+			mlog.Log.Errorf("txFeeInfo is nil for tx %s in slot %d", tx.Signatures[0], block.Slot)
+			mlog.Log.Errorf("  tx blockhash: %s", tx.Message.RecentBlockhash)
+			mlog.Log.Errorf("  LatestEvictedBlockhash: %x", slotCtx.LatestEvictedBlockhash[:8])
+			if recentBlockhashes != nil && len(*recentBlockhashes) > 0 {
+				mlog.Log.Errorf("  RecentBlockhashes: %d entries, newest=%x, oldest=%x",
+					len(*recentBlockhashes), (*recentBlockhashes)[0].Blockhash[:8], (*recentBlockhashes)[len(*recentBlockhashes)-1].Blockhash[:8])
+			} else {
+				mlog.Log.Errorf("  RecentBlockhashes: nil or empty!")
+			}
+			panic(fmt.Sprintf("txFeeInfo is nil - blockhash validation failed for tx %s", tx.Signatures[0]))
+		}
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 
