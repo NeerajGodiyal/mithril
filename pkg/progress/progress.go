@@ -45,9 +45,9 @@ type ProgressBar struct {
 	startTime time.Time
 
 	// For EWMA throughput calculation
-	mu           sync.Mutex
-	lastUpdate   time.Time
-	lastBytes    int64
+	mu             sync.Mutex
+	lastUpdate     time.Time
+	lastBytes      int64
 	ewmaThroughput float64
 }
 
@@ -625,10 +625,10 @@ func PrintShutdownSummary(info ShutdownInfo) {
 
 // BuildInterruptInfo contains information when build is interrupted
 type BuildInterruptInfo struct {
-	Stage            string // "downloading", "building", etc.
-	SnapshotSlot     uint64
-	SnapshotPath     string // path to downloaded snapshot if available
-	AccountsDBPath   string
+	Stage          string // "downloading", "building", etc.
+	SnapshotSlot   uint64
+	SnapshotPath   string // path to downloaded snapshot if available
+	AccountsDBPath string
 }
 
 // PrintBuildInterrupted prints a summary box when build is stopped via Ctrl+C
@@ -780,8 +780,8 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 		path  string
 	}{
 		{"AccountsDB", accountsDbPath},
+		{"Blockstore", ledgerPath},
 		{"Snapshots", snapshotsPath},
-		{"Ledger", ledgerPath},
 	}
 
 	var infos []pathInfo
@@ -943,7 +943,7 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 
 // DownloadInterruptInfo contains information when download is interrupted
 type DownloadInterruptInfo struct {
-	Stage           string  // "downloading full snapshot", "downloading incremental", etc.
+	Stage           string // "downloading full snapshot", "downloading incremental", etc.
 	SourceHost      string
 	DownloadPercent float64
 	BytesDownloaded int64

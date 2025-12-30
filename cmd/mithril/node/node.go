@@ -28,7 +28,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
-	"github.com/mr-tron/base58"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -37,6 +36,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
+	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -94,7 +94,7 @@ var (
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
-	ledgerPath                  string
+	blockstorePath              string
 	txParallelism               int64
 
 	debugTxs        []string
@@ -121,7 +121,7 @@ func init() {
 	VerifyRange.Flags().StringVarP(&snapshotArchivePath, "snapshot-archive-path", "p", "", "Path of full snapshot or AccountsDB to load from")
 	VerifyRange.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Filename containing incremental snapshot")
 	VerifyRange.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	VerifyRange.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	VerifyRange.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
 	VerifyRange.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
@@ -154,7 +154,7 @@ func init() {
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	Run.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	Run.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
@@ -333,9 +333,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if accountsPath == "" {
 		accountsPath = getString("accounts-path", "ledger.accounts_path")
 	}
-	ledgerPath = getString("ledger-path", "storage.blockstore")
-	if ledgerPath == "" {
-		ledgerPath = getString("ledger-path", "ledger.path")
+	blockstorePath = getString("ledger-path", "storage.blockstore")
+	if blockstorePath == "" {
+		blockstorePath = getString("ledger-path", "ledger.path")
 	}
 
 	// [network] section (with fallback to legacy [rpc] keys)
@@ -599,7 +599,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 
 		// Show disk usage summary
-		progress.PrintDiskUsage(accountsDbDir, scratchDirectory, ledgerPath)
+		progress.PrintDiskUsage(accountsDbDir, blockstorePath, snapshotArchivePath)
 	}
 
 	// Check for state file to resume from correct slot
@@ -707,7 +707,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -839,7 +839,7 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
 			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0, true) // 0 means delete all
 		}
-		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
@@ -867,7 +867,7 @@ func runLive(c *cobra.Command, args []string) {
 		if existingSnap != nil {
 			// Reuse existing snapshot
 			mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
 		} else {
 			// Download fresh
 			mlog.Log.Infof("no fresh snapshot file found, downloading new one")
@@ -880,7 +880,7 @@ func runLive(c *cobra.Command, args []string) {
 				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
 				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 			}
-			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 		}
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -927,7 +927,7 @@ func runLive(c *cobra.Command, args []string) {
 					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 					if existingSnap != nil {
 						mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
 					} else {
 						// Clean up old snapshot files
 						if snapshotDownloadPath != "" {
@@ -938,7 +938,7 @@ func runLive(c *cobra.Command, args []string) {
 							deleteOld := config.GetBool("snapshot.delete_old_snapshots")
 							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 						}
-						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 					}
 					if err != nil {
 						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -997,7 +997,7 @@ func runLive(c *cobra.Command, args []string) {
 			existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 			if existingSnap != nil {
 				mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr, rpcEndpoints)
+				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
 			} else {
 				// Clean up old snapshot files based on retention settings
 				if snapshotDownloadPath != "" {
@@ -1008,7 +1008,7 @@ func runLive(c *cobra.Command, args []string) {
 					deleteOld := config.GetBool("snapshot.delete_old_snapshots")
 					snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 				}
-				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 			}
 			if err != nil {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -1021,10 +1021,10 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
-	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
+	mlog.Log.Infof("AccountsDB ready (originally built from snapshot slot %d)", manifest.Bank.Slot)
 
 	// Show disk usage summary
-	progress.PrintDiskUsage(accountsPath, snapshotDownloadPath, ledgerPath)
+	progress.PrintDiskUsage(accountsPath, blockstorePath, snapshotArchivePath)
 
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
@@ -1125,7 +1125,7 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1332,8 +1332,8 @@ func printStartupInfo(commandName string) {
 	}
 
 	// Blockstore path
-	if ledgerPath != "" {
-		fmt.Printf("  Blockstore:   %s%s%s\n", gold, ledgerPath, reset)
+	if blockstorePath != "" {
+		fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
 	}
 
 	// RPC endpoints
@@ -1546,7 +1546,7 @@ func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64
 }
 
 // buildFromExistingSnapshot builds AccountsDB from an existing downloaded snapshot file.
-func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, ledgerPath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, blockstorePath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig()
 
 	// Construct full path to snapshot file
@@ -1556,7 +1556,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	// Create progress display for extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -1566,7 +1566,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 }
 
 // downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
-func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig()
 	fullSnapshotDlStart := time.Now()
 	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, rpcEndpoints[0], snapCfg)
@@ -1590,7 +1590,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
