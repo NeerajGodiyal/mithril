@@ -912,6 +912,8 @@ func ReplayBlocks(
 	var statsCounter uint64
 	var timeAccumulator float64
 	var cuAccumulator uint64
+	var voteTxAccumulator uint64
+	var nonVoteTxAccumulator uint64
 	var cachedChainTip atomic.Uint64 // Accessed from background goroutine, must be atomic
 	var justCrossedEpochBoundary bool
 
@@ -1064,7 +1066,8 @@ func ReplayBlocks(
 			leaderStr = leader.String()
 		}
 
-		mlog.Log.Infof("slot %d | leader: %s | cu: %d | txns: v:%d nv:%d | execution: %.3fs",
+		// Fixed-width format for consistent alignment
+		mlog.Log.Infof("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-4d nv:%-4d | execution: %.3fs",
 			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
 
 		// Write bankhash to log file
@@ -1082,8 +1085,16 @@ func ReplayBlocks(
 			statsCounter++
 			timeAccumulator += slotReplayDuration.Seconds()
 			cuAccumulator += totalCU
+			voteTxAccumulator += uint64(voteTxCount)
+			nonVoteTxAccumulator += uint64(nonVoteTxCount)
 
 			if statsCounter == 100 {
+				// Calculate averages (rounded to nearest whole number for CU and txns)
+				avgExec := timeAccumulator / float64(statsCounter)
+				avgCU := (cuAccumulator + statsCounter/2) / statsCounter // round to nearest
+				avgVoteTx := (voteTxAccumulator + statsCounter/2) / statsCounter
+				avgNonVoteTx := (nonVoteTxAccumulator + statsCounter/2) / statsCounter
+
 				// Query chain tip in background (non-blocking)
 				var chainTipStr string
 				tip := cachedChainTip.Load()
@@ -1091,10 +1102,18 @@ func ReplayBlocks(
 					slotsBehind := tip - block.Slot
 					chainTipStr = fmt.Sprintf(" | %d slots behind tip", slotsBehind)
 				}
-				mlog.Log.Infof("--- 100 slot avg: %.3fs | total CU: %d%s",
-					timeAccumulator/float64(statsCounter), cuAccumulator, chainTipStr)
+
+				// Print summary with newlines for visibility
+				mlog.Log.Infof("")
+				mlog.Log.Infof("--- 100 slot summary: execution avg: %.3fs | cu avg: %d | txns avg: v:%d nv:%d%s",
+					avgExec, avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
+				mlog.Log.Infof("")
+
+				// Reset accumulators
 				timeAccumulator = 0
 				cuAccumulator = 0
+				voteTxAccumulator = 0
+				nonVoteTxAccumulator = 0
 				statsCounter = 0
 
 				// Refresh chain tip in background for next summary
