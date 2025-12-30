@@ -753,7 +753,7 @@ func getMountPoint(path string) string {
 }
 
 // PrintDiskUsage prints a concise disk usage summary for configured paths
-func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
+func PrintDiskUsage(accountsDbPath, blockstorePath, snapshotsPath string) {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 	c := "" // teal for borders
 	r := "" // reset
@@ -780,7 +780,7 @@ func PrintDiskUsage(accountsDbPath, snapshotsPath, ledgerPath string) {
 		path  string
 	}{
 		{"AccountsDB", accountsDbPath},
-		{"Blockstore", ledgerPath},
+		{"Blockstore", blockstorePath},
 		{"Snapshots", snapshotsPath},
 	}
 
