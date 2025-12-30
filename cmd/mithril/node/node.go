@@ -1436,14 +1436,6 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
 	}
 
-	// Block source
-	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" && overcastEndpoint != "" {
-		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
-	} else {
-		fmt.Println()
-	}
-
 	// Blockstore path
 	if blockstorePath != "" {
 		fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
@@ -1464,6 +1456,14 @@ func printStartupInfo(commandName string) {
 		for _, ep := range rpcEndpoints[1:] {
 			fmt.Printf("                %s%s%s\n", gold, ep, reset)
 		}
+	}
+
+	// Block source
+	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
+	if blockSource == "overcast" && overcastEndpoint != "" {
+		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	} else {
+		fmt.Println()
 	}
 
 	fmt.Println()
