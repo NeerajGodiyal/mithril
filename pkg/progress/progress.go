@@ -568,6 +568,9 @@ type ShutdownInfo struct {
 	AccountsDBPath   string
 	ReplayDuration   time.Duration
 	WasCancelled     bool
+	RunID            string
+	Epoch            uint64
+	SnapshotEpoch    uint64
 }
 
 // PrintShutdownSummary prints a summary box when replay is stopped via Ctrl+C
@@ -599,10 +602,11 @@ func PrintShutdownSummary(info ShutdownInfo) {
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
 	fmt.Printf("%s│%s REPLAY STOPPED                                                               %s│%s\n", c, r, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Last replayed slot:", formatSlots(info.LastSlot), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Run ID:", info.RunID, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Last replayed slot:", fmt.Sprintf("%s (epoch %d)", formatSlots(info.LastSlot), info.Epoch), c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Bankhash:", bankhashStr, c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "AccountsDB:", info.AccountsDBPath, c, r)
-	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%s (from snapshot slot %s)", formatSlots(uint64(slotsReplayed)), formatSlots(info.SnapshotBaseSlot)), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%s (from snapshot slot %s, epoch %d)", formatSlots(uint64(slotsReplayed)), formatSlots(info.SnapshotBaseSlot), info.SnapshotEpoch), c, r)
 	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Total replay time:", durationStr, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
 	fmt.Printf("%s│%s RESTART OPTIONS:                                                             %s│%s\n", c, r, c, r)

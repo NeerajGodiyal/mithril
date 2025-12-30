@@ -19,7 +19,9 @@ const StateFileName = "mithril_state.json"
 type MithrilState struct {
 	Stage          string        `json:"stage"` // "ready", "downloading", "building", "corrupted"
 	SnapshotSlot   uint64        `json:"snapshot_slot"`
+	SnapshotEpoch  uint64        `json:"snapshot_epoch,omitempty"`
 	LastSlot       uint64        `json:"last_slot,omitempty"`
+	LastEpoch      uint64        `json:"last_epoch,omitempty"`
 	LastBankhash   string        `json:"last_bankhash,omitempty"`
 	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`
 	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`
@@ -130,6 +132,7 @@ type ResumeContext struct {
 	LamportsPerSignature uint64
 	PrevLamportsPerSig   uint64
 	NumSignatures        uint64
+	Epoch                uint64 // epoch of the last replayed slot
 
 	// Blockhash context
 	RecentBlockhashes []BlockhashEntry // 150 entries, newest first
@@ -159,6 +162,7 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastLamportsPerSignature = ctx.LamportsPerSignature
 		s.LastPrevLamportsPerSig = ctx.PrevLamportsPerSig
 		s.LastNumSignatures = ctx.NumSignatures
+		s.LastEpoch = ctx.Epoch
 
 		// Blockhash context - required because appendvec writes are not fsynced
 		s.LastRecentBlockhashes = ctx.RecentBlockhashes
@@ -188,6 +192,7 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		LamportsPerSignature: s.LastLamportsPerSignature,
 		PrevLamportsPerSig:   s.LastPrevLamportsPerSig,
 		NumSignatures:        s.LastNumSignatures,
+		Epoch:                s.LastEpoch,
 
 		// Blockhash context
 		RecentBlockhashes: s.LastRecentBlockhashes,
@@ -263,10 +268,11 @@ func (s *MithrilState) ValidateAgainstBankhashDB(bankhashDb BankhashGetter) erro
 }
 
 // NewReadyState creates a new state marking the AccountsDB as ready.
-func NewReadyState(snapshotSlot uint64, fullSnapshotPath string, incrSnapshotPath string, incrBaseSlot uint64, incrSlot uint64) *MithrilState {
+func NewReadyState(snapshotSlot uint64, snapshotEpoch uint64, fullSnapshotPath string, incrSnapshotPath string, incrBaseSlot uint64, incrSlot uint64) *MithrilState {
 	state := &MithrilState{
 		Stage:          "ready",
 		SnapshotSlot:   snapshotSlot,
+		SnapshotEpoch:  snapshotEpoch,
 		BuildCompleted: time.Now(),
 	}
 

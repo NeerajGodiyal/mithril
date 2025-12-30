@@ -678,7 +678,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	if mithrilState == nil {
 		// Create a new state file for this session
-		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		if err := mithrilState.Save(accountsDbDir); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
@@ -736,11 +740,17 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		// Build resume context for graceful shutdown
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
+			// Calculate epoch for the last persisted slot
+			var lastEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			}
 			resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+				Epoch:                lastEpoch,
 
 				// Blockhash context - required because appendvec writes are not fsynced
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
@@ -759,6 +769,12 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	// Print shutdown summary if cancelled
 	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		// Calculate epoch from slot using epoch schedule
+		var epoch, snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(snapshotBaseSlot)
+		}
 		progress.PrintShutdownSummary(progress.ShutdownInfo{
 			LastSlot:         result.LastPersistedSlot,
 			LastBankhash:     result.LastPersistedBankhash,
@@ -766,6 +782,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			AccountsDBPath:   accountsDbDir,
 			ReplayDuration:   time.Since(replayStartTime),
 			WasCancelled:     true,
+			RunID:            replay.CurrentRunID,
+			Epoch:            epoch,
+			SnapshotEpoch:    snapshotEpoch,
 		})
 	}
 
@@ -886,7 +905,11 @@ func runLive(c *cobra.Command, args []string) {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
 		// Write state file to mark build as complete
-		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
@@ -931,7 +954,11 @@ func runLive(c *cobra.Command, args []string) {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
 		// Write state file to mark build as complete
-		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
@@ -991,7 +1018,11 @@ func runLive(c *cobra.Command, args []string) {
 					if err != nil {
 						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 					}
-					mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+					var snapshotEpoch uint64
+					if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+						snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+					}
+					mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 					if err := mithrilState.Save(accountsPath); err != nil {
 						mlog.Log.Errorf("failed to save state file: %v", err)
 					}
@@ -1063,7 +1094,11 @@ func runLive(c *cobra.Command, args []string) {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 			}
 			// Write state file to mark build as complete
-			mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+			var snapshotEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+			}
+			mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 			if err := mithrilState.Save(accountsPath); err != nil {
 				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
@@ -1154,7 +1189,11 @@ func runLive(c *cobra.Command, args []string) {
 
 	if mithrilState == nil {
 		// Initialize state for this session
-		mithrilState = state.NewReadyState(manifest.Bank.Slot, "", "", 0, 0)
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
@@ -1199,11 +1238,17 @@ func runLive(c *cobra.Command, args []string) {
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
+			// Calculate epoch for the last persisted slot
+			var lastEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			}
 			resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+				Epoch:                lastEpoch,
 
 				// Blockhash context - required because appendvec writes are not fsynced
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
@@ -1222,6 +1267,12 @@ func runLive(c *cobra.Command, args []string) {
 
 	// Print shutdown summary if cancelled
 	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		// Calculate epoch from slot using epoch schedule
+		var epoch, snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(snapshotBaseSlot)
+		}
 		progress.PrintShutdownSummary(progress.ShutdownInfo{
 			LastSlot:         result.LastPersistedSlot,
 			LastBankhash:     result.LastPersistedBankhash,
@@ -1229,6 +1280,9 @@ func runLive(c *cobra.Command, args []string) {
 			AccountsDBPath:   accountsPath,
 			ReplayDuration:   time.Since(replayStartTime),
 			WasCancelled:     true,
+			RunID:            replay.CurrentRunID,
+			Epoch:            epoch,
+			SnapshotEpoch:    snapshotEpoch,
 		})
 	}
 
