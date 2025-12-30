@@ -599,7 +599,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 
 		// Show disk usage summary
-		progress.PrintDiskUsage(accountsDbDir, blockstorePath, snapshotArchivePath)
+		progress.PrintDiskUsage(accountsDbDir, blockstorePath, snapshotDlPath)
 	}
 
 	// Check for state file to resume from correct slot
@@ -1066,7 +1066,7 @@ func runLive(c *cobra.Command, args []string) {
 	mlog.Log.Infof("AccountsDB ready (originally built from snapshot slot %d)", manifest.Bank.Slot)
 
 	// Show disk usage summary
-	progress.PrintDiskUsage(accountsPath, blockstorePath, snapshotArchivePath)
+	progress.PrintDiskUsage(accountsPath, blockstorePath, snapshotDlPath)
 
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
