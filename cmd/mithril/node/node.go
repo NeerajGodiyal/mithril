@@ -760,6 +760,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
+				Commit:       getCommitHash(),
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1105,7 +1106,7 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
-	mlog.Log.Infof("AccountsDB ready (originally built from snapshot slot %d)", manifest.Bank.Slot)
+	mlog.Log.Infof("AccountsDB ready")
 
 	// Show disk usage summary
 	progress.PrintDiskUsage(accountsPath, blockstorePath, snapshotDlPath)
@@ -1258,6 +1259,7 @@ func runLive(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
+				Commit:       getCommitHash(),
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1313,6 +1315,21 @@ func logVCSInfo() {
 	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
 }
 
+// getCommitHash returns the short git commit hash from build info
+func getCommitHash() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				if len(setting.Value) > 8 {
+					return setting.Value[:8]
+				}
+				return setting.Value
+			}
+		}
+	}
+	return ""
+}
+
 // printStartupInfo prints consolidated startup info including version, timestamp, and configuration
 func printStartupInfo(commandName string) {
 	// Gold/amber color like the banner
@@ -1357,100 +1374,64 @@ func printStartupInfo(commandName string) {
 	// Go version
 	fmt.Printf("  Go:           %s%s%s\n", dim, runtime.Version(), reset)
 
+	// Run ID (generated fresh each run)
+	runID := replay.CurrentRunID
+	if runID == "" {
+		// Generate one early if not yet set
+		runID = fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+	}
+	fmt.Printf("  Run ID:       %s%s%s\n", dim, runID, reset)
+
 	// Command being run
 	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
 
-	// Detect what's on disk
-	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
+	// Bootstrap mode (simplified - details in state info section)
+	fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
 
-	// Check for existing snapshots - try configured paths in order of preference:
-	// 1. snapshotDlPath (snapshot.download_path) - this is what runtime actually uses
-	// 2. snapshotArchivePath (storage.snapshots) - fallback if download_path not set
-	var existingSnapshots []snapshotInfo
-	for _, searchPath := range []string{snapshotDlPath, snapshotArchivePath} {
-		if searchPath != "" {
-			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
-				existingSnapshots = snaps
-				break
+	// Load state file for detailed info
+	mithrilState, _ := state.LoadState(accountsPath)
+
+	// Show state info if available
+	if mithrilState != nil && mithrilState.IsReady() {
+		fmt.Printf("%s━━━ State Info ━━━%s\n", gold, reset)
+
+		// Original snapshot info
+		snapshotInfo := fmt.Sprintf("slot %d", mithrilState.SnapshotSlot)
+		if mithrilState.SnapshotEpoch > 0 {
+			snapshotInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.SnapshotSlot, mithrilState.SnapshotEpoch)
+		}
+		fmt.Printf("  Snapshot:     %s%s%s\n", dim, snapshotInfo, reset)
+
+		// Current/resume slot info
+		if mithrilState.LastSlot > 0 {
+			resumeInfo := fmt.Sprintf("slot %d", mithrilState.LastSlot)
+			if mithrilState.LastEpoch > 0 {
+				resumeInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.LastSlot, mithrilState.LastEpoch)
 			}
+			fmt.Printf("  Resume from:  %s%s%s\n", cyan, resumeInfo, reset)
+
+			// Slots replayed so far
+			slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
+			fmt.Printf("  Replayed:     %s%d slots%s\n", dim, slotsReplayed, reset)
+		} else {
+			fmt.Printf("  Resume from:  %ssnapshot (fresh start)%s\n", dim, reset)
 		}
-	}
 
-	// Determine actual action based on bootstrap mode and what exists
-	var actionStr string
-	var actionDetail string
-
-	switch bootstrapMode {
-	case "auto":
-		if hasAccountsDB {
-			actionStr = "Resuming from AccountsDB"
-			if accountsDBSlot > 0 {
-				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+		// Previous run info
+		if mithrilState.LastRunID != "" {
+			fmt.Printf("  Last run:     %s%s%s", dim, mithrilState.LastRunID, reset)
+			if mithrilState.LastCommit != "" && mithrilState.LastCommit != revision {
+				fmt.Printf(" %s(commit: %s)%s", dim, mithrilState.LastCommit, reset)
 			}
-		} else if len(existingSnapshots) > 0 {
-			actionStr = "Building from existing snapshot"
-			actionDetail = existingSnapshots[0].filename
-		} else {
-			actionStr = "Downloading new snapshot"
-		}
-	case "snapshot":
-		if len(existingSnapshots) > 0 {
-			actionStr = "Rebuilding from snapshot"
-			actionDetail = "will reuse existing if fresh"
-		} else {
-			actionStr = "Downloading new snapshot"
-			actionDetail = "rebuild AccountsDB"
-		}
-	case "new-snapshot":
-		actionStr = "Downloading fresh snapshot"
-		actionDetail = "clean start, ignoring existing"
-	case "accountsdb":
-		if hasAccountsDB {
-			actionStr = "Resuming from AccountsDB"
-			if accountsDBSlot > 0 {
-				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
-			}
-		} else {
-			actionStr = "ERROR: No AccountsDB found"
-			actionDetail = "mode=accountsdb requires existing data"
-		}
-	}
-
-	// Print bootstrap action (the main thing users care about)
-	fmt.Printf("  Bootstrap:    %s%s%s", green, actionStr, reset)
-	if actionDetail != "" {
-		fmt.Printf(" %s(%s)%s", dim, actionDetail, reset)
-	}
-	fmt.Printf(" %s[mode=%s]%s\n", dim, bootstrapMode, reset)
-
-	// Show existing AccountsDB info if present
-	if hasAccountsDB && bootstrapMode != "snapshot" && bootstrapMode != "new-snapshot" {
-		fmt.Printf("  AccountsDB:   %s%s%s", cyan, accountsPath, reset)
-		if accountsDBSlot > 0 {
-			fmt.Printf(" %s(slot %d)%s\n", dim, accountsDBSlot, reset)
-		} else {
 			fmt.Println()
 		}
-	} else if accountsPath != "" {
-		fmt.Printf("  AccountsDB:   %s%s%s %s(will create)%s\n", gold, accountsPath, reset, dim, reset)
 	}
 
-	// Show existing full snapshot only when actually using it
-	// (mode=auto without AccountsDB and an existing snapshot will be used)
-	usingExistingSnapshot := bootstrapMode == "auto" && !hasAccountsDB && len(existingSnapshots) > 0
-	if usingExistingSnapshot {
-		// Only show full snapshots, not incrementals
-		for _, snap := range existingSnapshots {
-			if snap.isIncr {
-				continue // skip incremental snapshots
-			}
-			fmt.Printf("  Snapshot:     %s%s%s", cyan, snap.filename, reset)
-			if snap.slot > 0 {
-				fmt.Printf(" %s(slot %d)%s", dim, snap.slot, reset)
-			}
-			fmt.Println()
-			break // only show first full snapshot
-		}
+	fmt.Printf("%s━━━ Paths ━━━%s\n", gold, reset)
+
+	// AccountsDB path
+	if accountsPath != "" {
+		fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
 	}
 
 	// Block source

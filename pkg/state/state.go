@@ -48,6 +48,9 @@ type MithrilState struct {
 	// Run tracking - for correlating logs with state
 	LastRunID string    `json:"last_run_id,omitempty"` // Run ID from last replay session
 	LastRunAt time.Time `json:"last_run_at,omitempty"` // When last replay session started
+
+	// Build info - for tracking which version created/modified the state
+	LastCommit string `json:"last_commit,omitempty"` // Git commit hash of last run
 }
 
 // BlockhashEntry represents a single entry in the RecentBlockhashes sysvar
@@ -142,6 +145,7 @@ type ResumeContext struct {
 	// Run tracking
 	RunID        string    // Run ID for log correlation
 	RunStartedAt time.Time // When this replay session started
+	Commit       string    // Git commit hash
 }
 
 // UpdateLastSlot updates the last slot and bankhash in the state file.
@@ -172,6 +176,7 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		// Run tracking - for correlating logs with state
 		s.LastRunID = ctx.RunID
 		s.LastRunAt = ctx.RunStartedAt
+		s.LastCommit = ctx.Commit
 	}
 	return s.Save(accountsDbDir)
 }
@@ -202,6 +207,7 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		// Run tracking (from previous session)
 		RunID:        s.LastRunID,
 		RunStartedAt: s.LastRunAt,
+		Commit:       s.LastCommit,
 	}
 }
 
