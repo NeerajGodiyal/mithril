@@ -427,8 +427,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 // buildSnapshotConfig creates a snapshotdl.SnapshotConfig from the mithril config.
 // It starts with defaults and overrides with any values set in the TOML file.
-func buildSnapshotConfig() snapshotdl.SnapshotConfig {
+func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 	cfg := snapshotdl.DefaultSnapshotConfig()
+	cfg.RPCAddresses = rpcEndpoints
 
 	// Override with TOML values if set
 	if config.IsSet("snapshot.verbose") {
@@ -570,9 +571,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("downloading snapshot...")
 
-		snapCfg := buildSnapshotConfig()
+		snapCfg := buildSnapshotConfig(rpcEndpoints)
 		var dlPath string
-		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(ctx, rpcEndpoints[0], snapshotDlPath, snapCfg)
+		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(ctx, snapshotDlPath, snapCfg)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -1658,8 +1659,8 @@ func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64
 		return 0, fmt.Errorf("no RPC endpoints configured")
 	}
 
-	snapCfg := buildSnapshotConfig()
-	info, err := snapshotdl.GetSnapshotURLWithInfo(ctx, rpcEndpoints[0], snapCfg)
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
+	info, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query snapshot info: %w", err)
 	}
@@ -1668,7 +1669,7 @@ func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64
 
 // buildFromExistingSnapshot builds AccountsDB from an existing downloaded snapshot file.
 func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, blockstorePath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
-	snapCfg := buildSnapshotConfig()
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
 
 	// Construct full path to snapshot file
 	fullSnapshotPath := filepath.Join(snapshotDir, snap.filename)
@@ -1688,9 +1689,9 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 
 // downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
 func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
-	snapCfg := buildSnapshotConfig()
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, rpcEndpoints[0], snapCfg)
+	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting snapshot URL: %w", err)
 	}

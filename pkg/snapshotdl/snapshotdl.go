@@ -33,6 +33,9 @@ func (s *SnapshotInfo) Age() int {
 // SnapshotConfig holds configuration for snapshot downloading.
 // This can be populated from CLI flags or TOML config.
 type SnapshotConfig struct {
+	// RPC endpoints for reference slot and cluster discovery
+	RPCAddresses []string
+
 	// Stage 1: Fast parallel triage
 	Stage1WarmKiB     int64
 	Stage1WindowKiB   int64
@@ -133,9 +136,9 @@ func DefaultSnapshotConfig() SnapshotConfig {
 }
 
 // toInternalConfig converts SnapshotConfig to snapshot-finder's config.Config
-func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.Config {
+func (sc SnapshotConfig) toInternalConfig(path string) config.Config {
 	return config.Config{
-		RPCAddresses:         []string{endpoint},
+		RPCAddresses:         sc.RPCAddresses,
 		SnapshotPath:         path,
 		NumOfRetries:         5,
 		SleepBeforeRetry:     2,
@@ -172,8 +175,10 @@ func (sc SnapshotConfig) toInternalConfig(endpoint string, path string) config.C
 // 2. Discovers available RPC nodes from the cluster
 // 3. Evaluates nodes for snapshot availability and download speed
 // 4. Downloads from the fastest node with a recent snapshot
-func DownloadSnapshot(ctx context.Context, endpoint string, path string) (string, int, int, error) {
-	return DownloadSnapshotWithConfig(ctx, endpoint, path, DefaultSnapshotConfig())
+func DownloadSnapshot(ctx context.Context, rpcEndpoints []string, path string) (string, int, int, error) {
+	cfg := DefaultSnapshotConfig()
+	cfg.RPCAddresses = rpcEndpoints
+	return DownloadSnapshotWithConfig(ctx, path, cfg)
 }
 
 // GetSnapshotURL discovers the best RPC node and returns the HTTP URL for streaming.
@@ -187,8 +192,8 @@ func DownloadSnapshot(ctx context.Context, endpoint string, path string) (string
 //
 // The returned URL can be passed directly to snapshot processing functions
 // which will stream the data from HTTP (no disk download required).
-func GetSnapshotURL(ctx context.Context, endpoint string, snapCfg SnapshotConfig) (string, int, int, error) {
-	cfg := snapCfg.toInternalConfig(endpoint, "")
+func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig("")
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -295,8 +300,8 @@ func GetSnapshotURL(ctx context.Context, endpoint string, snapCfg SnapshotConfig
 //
 // This is like GetSnapshotURL but returns a SnapshotInfo struct with additional
 // details useful for display (node IP, version, speed, age).
-func GetSnapshotURLWithInfo(ctx context.Context, endpoint string, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
-	cfg := snapCfg.toInternalConfig(endpoint, "")
+func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
+	cfg := snapCfg.toInternalConfig("")
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
@@ -457,8 +462,8 @@ func GetSnapshotURLWithInfo(ctx context.Context, endpoint string, snapCfg Snapsh
 }
 
 // DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
-func DownloadSnapshotWithConfig(ctx context.Context, endpoint string, path string, snapCfg SnapshotConfig) (string, int, int, error) {
-	cfg := snapCfg.toInternalConfig(endpoint, path)
+func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(path)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -569,19 +574,25 @@ func DownloadSnapshotWithConfig(ctx context.Context, endpoint string, path strin
 //
 // This function uses the new FindMatchingIncremental API to search across
 // ranked nodes for an incremental snapshot that matches the full snapshot.
-func DownloadIncrementalSnapshot(endpoint string, path string, referenceSlot int, fullSnapshotSlot int) (string, int, int, error) {
-	return DownloadIncrementalSnapshotWithConfig(endpoint, path, referenceSlot, fullSnapshotSlot, DefaultSnapshotConfig())
+func DownloadIncrementalSnapshot(rpcEndpoints []string, path string, referenceSlot int, fullSnapshotSlot int) (string, int, int, error) {
+	cfg := DefaultSnapshotConfig()
+	cfg.RPCAddresses = rpcEndpoints
+	return DownloadIncrementalSnapshotWithConfig(path, referenceSlot, fullSnapshotSlot, cfg)
 }
 
 // DownloadIncrementalSnapshotWithConfig is like DownloadIncrementalSnapshot but accepts custom config
-func DownloadIncrementalSnapshotWithConfig(endpoint string, path string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
-	cfg := snapCfg.toInternalConfig(endpoint, path)
+func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig(path)
 	ctx := context.Background()
 
 	mlog.Log.Infof("Searching for incremental snapshot matching full slot %d...", fullSnapshotSlot)
 
-	// Step 1: Get cluster nodes
-	nodes := rpc.FetchClusterNodes(cfg, endpoint)
+	// Step 1: Get cluster nodes (use first RPC as preferred)
+	preferredRPC := ""
+	if len(cfg.RPCAddresses) > 0 {
+		preferredRPC = cfg.RPCAddresses[0]
+	}
+	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
@@ -719,8 +730,8 @@ func extractFullSnapshotSlot(path string) int {
 //    a. Freshness (highest end slot = most recent incremental)
 //    b. Speed (faster downloads preferred when end slots are equal)
 // 4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
-func GetIncrementalSnapshotURL(endpoint string, fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
-	cfg := snapCfg.toInternalConfig(endpoint, "")
+func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	cfg := snapCfg.toInternalConfig("")
 	ctx := context.Background()
 
 	// Extract the source node RPC from the full snapshot URL
@@ -751,8 +762,12 @@ func GetIncrementalSnapshotURL(endpoint string, fullSnapshotURL string, referenc
 	// then prefer fresher incrementals (higher end slot) with reasonable speed
 	mlog.Log.Infof("Searching cluster for incremental snapshot matching full slot %d...", fullSnapshotSlot)
 
-	// Get cluster nodes
-	nodes := rpc.FetchClusterNodes(cfg, endpoint)
+	// Get cluster nodes (use first RPC as preferred)
+	preferredRPC := ""
+	if len(cfg.RPCAddresses) > 0 {
+		preferredRPC = cfg.RPCAddresses[0]
+	}
+	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}

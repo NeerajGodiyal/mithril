@@ -269,7 +269,7 @@ func BuildAccountsDbWithIncr(
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 	if err != nil {
 		klog.Fatalf("error getting incremental snapshot URL: %s", err)
 	}
@@ -304,7 +304,7 @@ func BuildAccountsDbWithIncr(
 		if incrAttempt > 0 {
 			// Re-discover incremental snapshot URL (sources may have changed)
 			mlog.Log.Infof("Incremental download failed, re-discovering sources (attempt %d/%d)...", incrAttempt+1, maxIncrRetries)
-			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 			if err != nil {
 				mlog.Log.Errorf("Failed to re-discover incremental snapshot: %v", err)
 				continue
