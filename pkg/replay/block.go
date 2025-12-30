@@ -686,9 +686,10 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	block.PrevFeeRateGovernor = prevFeeRateGovernor
 	block.PrevNumSignatures = resumeState.NumSignatures
 
-	// Load vote accounts from global epoch stakes (populated from manifest via buildInitialEpochStakesCache)
-	// NOT from VoteAcctCache (which is empty on resume - it's in-memory only)
-	setupVoteAcctsFromEpochStakes(block, epochSchedule)
+	// Load vote accounts from manifest's Bank.Stakes.VoteAccounts
+	// This is the same data source used by setupInitialVoteAcctsAndStakeAccts for fresh starts
+	// We can't use VoteAcctCache (in-memory only) or global.EpochStakes (may be keyed by different epoch)
+	setupVoteAcctsFromManifest(block, snapshotManifest)
 	configureGlobalCtx(block)
 
 	// Handle leader schedule
@@ -709,31 +710,19 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
 }
 
-// setupVoteAcctsFromEpochStakes loads vote accounts from the global epoch stakes cache.
-// This is used when resuming because VoteAcctCache is in-memory only and empty on restart.
-// The epoch stakes are populated from the manifest via buildInitialEpochStakesCache().
-func setupVoteAcctsFromEpochStakes(block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) {
+// setupVoteAcctsFromManifest loads vote accounts directly from the snapshot manifest.
+// This is used on resume to ensure we have valid stake data regardless of which epochs
+// are present in VersionedEpochStakes. The stake amounts are epoch-stable, and timestamps
+// will be updated during replay as vote transactions execute.
+func setupVoteAcctsFromManifest(block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.VoteAccts = make(map[solana.PublicKey]uint64)
 
-	currentEpoch := epochSchedule.GetEpoch(block.Slot)
-
-	// VoteAccts (stake amounts) from global epoch stakes - populated from manifest
-	epochStakes := global.EpochStakes(currentEpoch)
-	for pk, stake := range epochStakes {
-		block.VoteAccts[pk] = stake
-		block.TotalEpochStake += stake
-	}
-
-	// VoteTimestamps from epoch stakes vote accounts - will be stale but gets
-	// updated during replay as vote transactions execute
-	epochVoteAccts := global.EpochStakesVoteAccts(currentEpoch)
-	for pk, voteAcct := range epochVoteAccts {
-		ts := sealevel.BlockTimestamp{
-			Slot:      voteAcct.LastTimestampSlot,
-			Timestamp: voteAcct.LastTimestampTs,
-		}
-		block.VoteTimestamps[pk] = ts
+	for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
+		ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
+		block.VoteTimestamps[va.Key] = ts
+		block.VoteAccts[va.Key] = va.Stake
+		block.TotalEpochStake += va.Stake
 	}
 }
 
