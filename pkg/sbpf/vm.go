@@ -75,6 +75,8 @@ var (
 	ExcOutOfCU        = errors.New("compute unit overrun")
 	ExcCallDepth      = errors.New("call depth exceeded")
 	ExcInvalidInstr   = errors.New("invalid instruction - feature not enabled")
+
+	ExcUnsupportedInstruction = errors.New("unsupported BPF instruction")
 )
 
 type ExcBadAccess struct {
