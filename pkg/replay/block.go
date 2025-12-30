@@ -792,8 +792,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
 		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
 		block.LastBlockhash = resumeState.LastBlockhash
-		mlog.Log.Infof("restored blockhash context from state file: %d blockhashes, evicted=%x, lastBh=%x",
-			len(*resumeState.RecentBlockhashes), resumeState.EvictedBlockhash[:8], resumeState.LastBlockhash[:8])
+		mlog.Log.Infof("restored blockhash context from state file")
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
 		// but could happen with old state files created before blockhash tracking was added.
@@ -860,7 +859,12 @@ func ReplayBlocks(
 
 	// Generate unique run ID for log correlation
 	CurrentRunID = generateRunID()
-	mlog.Log.Infof("[run:%s] starting replay from slot %d to %d", CurrentRunID, startSlot, endSlot)
+	// Don't show end slot if it's max uint64 (means "forever")
+	if endSlot == ^uint64(0) {
+		mlog.Log.Infof("[run:%s] starting replay from slot %d", CurrentRunID, startSlot)
+	} else {
+		mlog.Log.Infof("[run:%s] starting replay from slot %d to %d", CurrentRunID, startSlot, endSlot)
+	}
 
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
@@ -1067,7 +1071,7 @@ func ReplayBlocks(
 		}
 
 		// Fixed-width format for consistent alignment
-		mlog.Log.Infof("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-4d nv:%-4d | execution: %.3fs",
+		mlog.Log.Infof("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | execution: %.3fs",
 			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
 
 		// Write bankhash to log file
@@ -1105,7 +1109,7 @@ func ReplayBlocks(
 
 				// Print summary with newlines for visibility
 				mlog.Log.Infof("")
-				mlog.Log.Infof("--- 100 slot summary: execution avg: %.3fs | cu avg: %d | txns avg: v:%d nv:%d%s",
+				mlog.Log.Infof("--- 100 slot summary: execution avg: %.3fs | cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
 					avgExec, avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
 				mlog.Log.Infof("")
 

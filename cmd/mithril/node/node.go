@@ -1146,12 +1146,8 @@ func runLive(c *cobra.Command, args []string) {
 							copy(resumeState.LastBlockhash[:], lastBhBytes)
 						}
 					}
-					mlog.Log.Infof("resume context loaded: parent_slot=%d, blockhashes=%d",
-						resumeState.ParentSlot, len(*resumeState.RecentBlockhashes))
-				} else {
-					mlog.Log.Infof("resume context loaded: parent_slot=%d (no blockhashes)",
-						resumeState.ParentSlot)
 				}
+				mlog.Log.Infof("resume context loaded: parent_slot=%d", resumeState.ParentSlot)
 			}
 		}
 	}
