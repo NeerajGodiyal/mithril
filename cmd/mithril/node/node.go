@@ -527,7 +527,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
 	}
 
-	logVCSInfo()
+	// Print consolidated startup info (same as run command)
+	printStartupInfo("verify-range")
+
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)
 	if err != nil {
 		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
