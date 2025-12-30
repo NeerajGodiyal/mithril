@@ -1412,6 +1412,15 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
 	}
 
+	// Snapshots path - show configured snapshot directory
+	snapshotDir := snapshotDlPath
+	if snapshotDir == "" {
+		snapshotDir = snapshotArchivePath
+	}
+	if snapshotDir != "" {
+		fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
+	}
+
 	// RPC endpoints
 	if len(rpcEndpoints) > 0 {
 		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
