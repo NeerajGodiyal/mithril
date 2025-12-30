@@ -42,6 +42,10 @@ type MithrilState struct {
 	LastRecentBlockhashes []BlockhashEntry `json:"last_recent_blockhashes,omitempty"` // 150 entries, newest first
 	LastEvictedBlockhash  string           `json:"last_evicted_blockhash,omitempty"`  // 151st blockhash
 	LastBlockhash         string           `json:"last_blockhash,omitempty"`          // blockhash of last replayed slot (parent for next)
+
+	// Run tracking - for correlating logs with state
+	LastRunID string    `json:"last_run_id,omitempty"` // Run ID from last replay session
+	LastRunAt time.Time `json:"last_run_at,omitempty"` // When last replay session started
 }
 
 // BlockhashEntry represents a single entry in the RecentBlockhashes sysvar
@@ -131,6 +135,10 @@ type ResumeContext struct {
 	RecentBlockhashes []BlockhashEntry // 150 entries, newest first
 	EvictedBlockhash  string           // base58 encoded, 151st blockhash
 	LastBlockhash     string           // base58 encoded, blockhash of last slot (parent for next)
+
+	// Run tracking
+	RunID        string    // Run ID for log correlation
+	RunStartedAt time.Time // When this replay session started
 }
 
 // UpdateLastSlot updates the last slot and bankhash in the state file.
@@ -156,6 +164,10 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastRecentBlockhashes = ctx.RecentBlockhashes
 		s.LastEvictedBlockhash = ctx.EvictedBlockhash
 		s.LastBlockhash = ctx.LastBlockhash
+
+		// Run tracking - for correlating logs with state
+		s.LastRunID = ctx.RunID
+		s.LastRunAt = ctx.RunStartedAt
 	}
 	return s.Save(accountsDbDir)
 }
@@ -181,6 +193,10 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		RecentBlockhashes: s.LastRecentBlockhashes,
 		EvictedBlockhash:  s.LastEvictedBlockhash,
 		LastBlockhash:     s.LastBlockhash,
+
+		// Run tracking (from previous session)
+		RunID:        s.LastRunID,
+		RunStartedAt: s.LastRunAt,
 	}
 }
 

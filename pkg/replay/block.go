@@ -2,12 +2,16 @@ package replay
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -39,6 +43,34 @@ import (
 )
 
 var SerializedParameterArena *arena.Arena[byte]
+
+// Commit state tracking for panic recovery
+// commitInProgress is set true during the critical window between StoreAccounts and StoreBankHashForSlot.
+// If a panic occurs while this is true, AccountsDB may be corrupted (partial writes).
+// If a panic occurs while this is false (e.g., divergence during tx loop), AccountsDB is safe.
+var commitInProgress atomic.Bool
+var commitSlot atomic.Uint64 // The slot currently being committed (for error messages)
+
+// CurrentRunID is a unique identifier for this replay session, used to correlate logs
+var CurrentRunID string
+
+// generateRunID creates a short random hex string for log correlation
+func generateRunID() string {
+	b := make([]byte, 4) // 8 hex chars
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// IsCommitInProgress returns true if we're in the critical commit window.
+// Used by panic recovery to determine if AccountsDB may be corrupted.
+func IsCommitInProgress() bool {
+	return commitInProgress.Load()
+}
+
+// GetCommitSlot returns the slot currently being committed (0 if not in commit)
+func GetCommitSlot() uint64 {
+	return commitSlot.Load()
+}
 
 // ReplayResult contains the result of a replay operation, including shutdown state
 type ReplayResult struct {
@@ -822,6 +854,23 @@ func ReplayBlocks(
 	rpcServer *rpcserver.RpcServer,
 ) *ReplayResult {
 	result := &ReplayResult{}
+
+	// Generate unique run ID for log correlation
+	CurrentRunID = generateRunID()
+	mlog.Log.Infof("[run:%s] starting replay from slot %d to %d", CurrentRunID, startSlot, endSlot)
+
+	// Create bankhash log file
+	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
+	bankhashLogFile, bankhashLogErr := os.OpenFile(bankhashLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if bankhashLogErr != nil {
+		mlog.Log.Errorf("failed to open bankhash log file: %v", bankhashLogErr)
+	} else {
+		defer bankhashLogFile.Close()
+		// Write run header for correlation
+		fmt.Fprintf(bankhashLogFile, "# run:%s started:%s slots:%d-%d\n",
+			CurrentRunID, time.Now().UTC().Format(time.RFC3339), startSlot, endSlot)
+	}
+
 	// Track last successfully persisted slot for checkpoint/resume
 	var lastPersistedSlot uint64
 	var lastPersistedBankhash []byte
@@ -859,6 +908,8 @@ func ReplayBlocks(
 
 	var statsCounter uint64
 	var timeAccumulator float64
+	var cuAccumulator uint64
+	var cachedChainTip uint64
 	var justCrossedEpochBoundary bool
 
 	var opts *blockstream.BlockSourceOpts
@@ -946,9 +997,19 @@ func ReplayBlocks(
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
 
-		// workaround for skipping the soon-to-be obsolete EAH.
-		// EAH is now obsolete as per the introduction of the accounts lattice hash.
-		// This remains in place for old slots.
+		// EAH (Epoch Accounts Hash) Workaround - DISABLED
+		// Background: Before the AccountsLtHash feature was activated, Solana required an Epoch
+		// Accounts Hash at specific slots during partitioned epoch rewards. This hash covers all
+		// accounts and is included in the bankhash calculation at the EahStopOffsetSlot.
+		// Problem: Mithril does not implement EAH computation (it's expensive and was being phased out).
+		// Workaround: For historical slots that require EAH, we fetch the expected bankhash from RPC
+		// instead of computing it locally. This allows replaying old slots without EAH implementation.
+		// Note: This workaround is only needed for slots before AccountsLtHash activation (~Nov 2024).
+		// If replaying historical slots and hitting EAH requirements, the bankhash is fetched from
+		// a trusted RPC endpoint rather than computed. The bankhash is NOT stored to bankhash_db
+		// in this case (see ProcessBlock's early return when HasEahWorkaround is true).
+		// Uncomment if you need to replay pre-AccountsLtHash historical slots.
+		/*
 		if !block.Features.IsActive(features.AccountsLtHash) {
 			if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
 				if replayCtx.HasEpochAcctsHash {
@@ -962,6 +1023,7 @@ func ReplayBlocks(
 				}
 			}
 		}
+		*/
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, txParallelism, dbgOpts)
@@ -978,7 +1040,35 @@ func ReplayBlocks(
 		lastPersistedBankhash = lastSlotCtx.FinalBankhash
 
 		slotReplayDuration := time.Since(start)
-		mlog.Log.Infof("replayed slot %d - bankhash: %s  (slot replay time: %fs)", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash), slotReplayDuration.Seconds())
+
+		// Calculate slot stats: vote/non-vote tx counts and total CU
+		var voteTxCount, nonVoteTxCount int
+		var totalCU uint64
+		for i, tx := range block.Transactions {
+			if tx.IsVote() {
+				voteTxCount++
+			} else {
+				nonVoteTxCount++
+			}
+			if i < len(block.TxMetas) && block.TxMetas[i] != nil && block.TxMetas[i].ComputeUnitsConsumed != nil {
+				totalCU += *block.TxMetas[i].ComputeUnitsConsumed
+			}
+		}
+
+		// Get leader from internal schedule (no RPC call)
+		leaderStr := "unknown"
+		if leader, ok := global.LeaderForSlot(block.Slot); ok {
+			leaderStr = leader.String()
+		}
+
+		mlog.Log.Infof("slot %d | leader: %s | cu: %d | txns: v:%d nv:%d | execution: %.3fs",
+			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
+
+		// Write bankhash to log file
+		if bankhashLogFile != nil {
+			fmt.Fprintf(bankhashLogFile, "%d %s\n", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash))
+		}
+
 		statsd.Count(statsd.SlotReplays, 1, nil)
 		statsd.Timing(statsd.SlotReplayDurationMs, uint64(slotReplayDuration.Nanoseconds())/1e6, nil)
 		statsd.Gauge(statsd.Epoch, float64(block.Epoch), nil)
@@ -988,11 +1078,29 @@ func ReplayBlocks(
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			timeAccumulator += slotReplayDuration.Seconds()
+			cuAccumulator += totalCU
 
 			if statsCounter == 100 {
-				mlog.Log.Infof("(average slot replay time over 100 slots: %f)\n", timeAccumulator/float64(statsCounter))
+				// Query chain tip in background (non-blocking)
+				var chainTipStr string
+				if cachedChainTip > 0 && block.Slot < cachedChainTip {
+					slotsBehind := cachedChainTip - block.Slot
+					chainTipStr = fmt.Sprintf(" | %d slots behind tip", slotsBehind)
+				}
+				mlog.Log.Infof("--- 100 slot avg: %.3fs | total CU: %d%s",
+					timeAccumulator/float64(statsCounter), cuAccumulator, chainTipStr)
 				timeAccumulator = 0
+				cuAccumulator = 0
 				statsCounter = 0
+
+				// Refresh chain tip in background for next summary
+				go func() {
+					if rpcc != nil {
+						if slot, err := rpcc.GetSlot(); err == nil {
+							cachedChainTip = slot
+						}
+					}
+				}()
 			}
 		} else {
 			justCrossedEpochBoundary = false
@@ -1141,14 +1249,20 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {
+				mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: vote tx %s failed locally but succeeded onchain => bankhash mismatch at parent slot %d",
+					CurrentRunID, block.Slot, tx.Signatures[0], block.ParentSlot)
 				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
 			}
 		}
 
 		// check for success-failure return value divergences
 		if txErr == nil && txMeta.Err != nil {
+			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
+				CurrentRunID, block.Slot, tx.Signatures[0], block.TxMetas[idx].Err)
 			panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
 		} else if txErr != nil && txMeta.Err == nil {
+			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
+				CurrentRunID, block.Slot, tx.Signatures[0], txErr)
 			panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 		}
 
@@ -1195,8 +1309,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 					txErr := errs[idx]
 					// check for success-failure return value divergences
 					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
+							CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
 					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
+							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 					}
 					txDurations[i] += time.Since(txStart)
@@ -1311,14 +1429,20 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 		// TODO: return signal that slot should be skipped
 	}*/
 
+	// Enter critical commit window - panics here may leave AccountsDB inconsistent
+	commitSlot.Store(slotCtx.Slot)
+	commitInProgress.Store(true)
+
 	if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
-	// EAH workaround
+	// EAH workaround - see comment at top of replay loop for details
 	if slotCtx.HasEahWorkaround {
 		slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
+		commitInProgress.Store(false)
+		commitSlot.Store(0)
 		return slotCtx, err
 	}
 
@@ -1326,6 +1450,10 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	if err != nil {
 		mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
 	}
+
+	// Exit critical commit window - AccountsDB is now consistent
+	commitInProgress.Store(false)
+	commitSlot.Store(0)
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	return slotCtx, err

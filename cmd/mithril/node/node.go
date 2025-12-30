@@ -729,7 +729,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -746,6 +746,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// Run tracking - for log correlation
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1175,7 +1179,7 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1191,6 +1195,10 @@ func runLive(c *cobra.Command, args []string) {
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// Run tracking - for log correlation
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1755,4 +1763,72 @@ func createBufWriter(filename string) (io.Writer, func(), error) {
 	}
 
 	return writer, cleanup, nil
+}
+
+// runReplayWithRecovery wraps replay.ReplayBlocks with panic recovery.
+// It distinguishes between:
+// - Panics during commit (commitInProgress=true): AccountsDB may be corrupted, marks state as corrupted
+// - Panics outside commit (divergence): AccountsDB is safe, logs helpful message
+// After handling, it re-panics to propagate the error.
+func runReplayWithRecovery(
+	ctx context.Context,
+	accountsDb *accountsdb.AccountsDb,
+	accountsDbPath string,
+	manifest *snapshot.SnapshotManifest,
+	resumeState *replay.ResumeState,
+	startSlot, endSlot uint64,
+	rpcEndpoint string,
+	blockDir string,
+	txParallelism int,
+	isLive bool,
+	useOvercast bool,
+	dbgOpts *replay.DebugOptions,
+	metricsWriter io.Writer,
+	rpcServer *rpcserver.RpcServer,
+	mithrilState *state.MithrilState,
+) *replay.ReplayResult {
+	var result *replay.ReplayResult
+
+	defer func() {
+		if r := recover(); r != nil {
+			runID := replay.CurrentRunID
+			if replay.IsCommitInProgress() {
+				commitSlot := replay.GetCommitSlot()
+				mlog.Log.Errorf("[run:%s] FATAL: Panic during commit at slot %d - AccountsDB may be corrupted", runID, commitSlot)
+				mlog.Log.Errorf("[run:%s] Panic occurred between StoreAccounts and StoreBankHashForSlot", runID)
+				// Mark state as corrupted so next startup knows to rebuild
+				if mithrilState != nil {
+					reason := fmt.Sprintf("panic during commit at slot %d: %v", commitSlot, r)
+					if err := mithrilState.MarkCorrupted(accountsDbPath, reason); err != nil {
+						mlog.Log.Errorf("[run:%s] Failed to mark state as corrupted: %v", runID, err)
+					}
+				}
+			} else {
+				mlog.Log.Errorf("[run:%s] Panic during replay (outside commit window) - AccountsDB is SAFE", runID)
+				mlog.Log.Errorf("[run:%s] This appears to be a divergence panic. You can resume from the last persisted slot.", runID)
+			}
+			// Print debug info and paths
+			mlog.Log.Errorf("[run:%s] Debug info:", runID)
+			if mithrilState != nil {
+				mlog.Log.Errorf("[run:%s]   Snapshot slot: %d", runID, mithrilState.SnapshotSlot)
+				if mithrilState.FullSnapshot != nil {
+					mlog.Log.Errorf("[run:%s]   Full snapshot:  %s (slot %d)", runID, mithrilState.FullSnapshot.Path, mithrilState.FullSnapshot.Slot)
+				}
+				if mithrilState.IncrSnapshot != nil {
+					mlog.Log.Errorf("[run:%s]   Incr snapshot:  %s (base %d -> slot %d)", runID, mithrilState.IncrSnapshot.Path, mithrilState.IncrSnapshot.BaseSlot, mithrilState.IncrSnapshot.Slot)
+				}
+				if mithrilState.LastSlot > 0 {
+					mlog.Log.Errorf("[run:%s]   Last persisted: slot %d, bankhash %s", runID, mithrilState.LastSlot, mithrilState.LastBankhash)
+				}
+			}
+			mlog.Log.Errorf("[run:%s] Debug files:", runID)
+			mlog.Log.Errorf("[run:%s]   Bankhash log: %s/bankhash.log", runID, accountsDbPath)
+			mlog.Log.Errorf("[run:%s]   State file:   %s/mithril_state.json", runID, accountsDbPath)
+			// Re-panic to propagate the error
+			panic(r)
+		}
+	}()
+
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoint, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	return result
 }

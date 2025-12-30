@@ -169,8 +169,6 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
-// SysvarRecentBlockHashesAddr is used for debug logging
-var SysvarRecentBlockHashesAddr = solana.MustPublicKeyFromBase58("SysvarRecentB1ockHashes11111111111111111111")
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
@@ -195,12 +193,6 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	}
 
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
-
-	// Debug: log index entry for RecentBlockhashes sysvar (helps debug resume issues)
-	if pubkey == SysvarRecentBlockHashesAddr {
-		mlog.Log.Infof("DEBUG GetAccount RecentBlockhashes: index_slot=%d, fileId=%d, offset=%d, file=%s",
-			acctIdxEntry.Slot, acctIdxEntry.FileId, acctIdxEntry.Offset, appendVecFileName)
-	}
 
 	appendVecFile, err := os.Open(appendVecFileName)
 	if err != nil {
@@ -330,21 +322,9 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 					panic(fmt.Sprintf("error marshaling appendvec for storage: %s", err))
 				}
 
-				// Debug: log in-place update for RecentBlockhashes
-				if acct.Key == SysvarRecentBlockHashesAddr {
-					mlog.Log.Infof("DEBUG storeAccounts RecentBlockhashes: IN-PLACE update at slot=%d, fileId=%d, offset=%d, file=%s",
-						acctIdxEntry.Slot, acctIdxEntry.FileId, acctIdxEntry.Offset, existingAppendVecFileName)
-				}
-
 				existingAppendVecFile.Close()
 				continue
 			}
-		}
-
-		// Debug: log new appendvec for RecentBlockhashes (index update)
-		if acct.Key == SysvarRecentBlockHashesAddr {
-			mlog.Log.Infof("DEBUG storeAccounts RecentBlockhashes: NEW appendvec at slot=%d, fileId=%d, offset=%d",
-				slot, fileId, appendVecAcctsBuf.Len())
 		}
 
 		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:])

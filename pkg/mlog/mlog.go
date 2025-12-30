@@ -16,20 +16,20 @@ var Log = logger{&atomic.Bool{}}
 
 // relativePrefix returns the elapsed time since program start as a prefix
 func relativePrefix() string {
-	d := time.Since(programStartTime).Round(time.Second)
+	d := time.Since(programStartTime)
 	h := d / time.Hour
 	d -= h * time.Hour
 	m := d / time.Minute
 	d -= m * time.Minute
-	s := d / time.Second
+	secs := d.Seconds() // includes fractional seconds
 
 	var timeStr string
 	if h > 0 {
 		timeStr = fmt.Sprintf("%2dh%02dm", h, m)
 	} else if m > 0 {
-		timeStr = fmt.Sprintf("%2dm%02ds", m, s)
+		timeStr = fmt.Sprintf("%2dm%06.3fs", m, secs)
 	} else {
-		timeStr = fmt.Sprintf("%5ds", s)
+		timeStr = fmt.Sprintf("%6.3fs", secs)
 	}
 	return fmt.Sprintf("(+%s) ", timeStr)
 }
