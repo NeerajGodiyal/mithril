@@ -1387,8 +1387,25 @@ func printStartupInfo(commandName string) {
 	// Command being run
 	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
 
-	// Bootstrap mode (simplified - details in state info section)
-	fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
+	// Bootstrap mode with description
+	var bootstrapDesc string
+	switch bootstrapMode {
+	case "auto":
+		bootstrapDesc = "use existing AccountsDB if valid, else download snapshot"
+	case "snapshot":
+		bootstrapDesc = "rebuild from local snapshot"
+	case "new-snapshot":
+		bootstrapDesc = "download fresh snapshot from network"
+	case "accountsdb":
+		bootstrapDesc = "require existing AccountsDB"
+	default:
+		bootstrapDesc = ""
+	}
+	if bootstrapDesc != "" {
+		fmt.Printf("  Bootstrap:    %s%s%s %s(%s)%s\n", green, bootstrapMode, reset, dim, bootstrapDesc, reset)
+	} else {
+		fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
+	}
 
 	// Load state file for detailed info
 	mithrilState, _ := state.LoadState(accountsPath)
