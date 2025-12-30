@@ -57,7 +57,10 @@ var CurrentRunID string
 // generateRunID creates a short random hex string for log correlation
 func generateRunID() string {
 	b := make([]byte, 4) // 8 hex chars
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -909,7 +912,7 @@ func ReplayBlocks(
 	var statsCounter uint64
 	var timeAccumulator float64
 	var cuAccumulator uint64
-	var cachedChainTip uint64
+	var cachedChainTip atomic.Uint64 // Accessed from background goroutine, must be atomic
 	var justCrossedEpochBoundary bool
 
 	var opts *blockstream.BlockSourceOpts
@@ -1083,8 +1086,9 @@ func ReplayBlocks(
 			if statsCounter == 100 {
 				// Query chain tip in background (non-blocking)
 				var chainTipStr string
-				if cachedChainTip > 0 && block.Slot < cachedChainTip {
-					slotsBehind := cachedChainTip - block.Slot
+				tip := cachedChainTip.Load()
+				if tip > 0 && block.Slot < tip {
+					slotsBehind := tip - block.Slot
 					chainTipStr = fmt.Sprintf(" | %d slots behind tip", slotsBehind)
 				}
 				mlog.Log.Infof("--- 100 slot avg: %.3fs | total CU: %d%s",
@@ -1097,7 +1101,7 @@ func ReplayBlocks(
 				go func() {
 					if rpcc != nil {
 						if slot, err := rpcc.GetSlot(); err == nil {
-							cachedChainTip = slot
+							cachedChainTip.Store(slot)
 						}
 					}
 				}()
