@@ -90,7 +90,7 @@ esac
 # Download and install
 wget "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz"
 sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.bashrc
 source ~/.bashrc
 go version
 ```
