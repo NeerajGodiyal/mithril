@@ -858,6 +858,13 @@ func runLive(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("failed to load manifest: %v", err)
 		}
+		// Run integrity check if we have a state file (warn only, don't fail - user chose force mode)
+		if hasValidState {
+			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
+				mlog.Log.Errorf("WARNING: integrity check failed: %v", err)
+				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap-mode=snapshot to rebuild.")
+			}
+		}
 
 	case "new-snapshot":
 		// Mode: Always download fresh snapshot, clean everything
