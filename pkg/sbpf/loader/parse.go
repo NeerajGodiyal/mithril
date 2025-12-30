@@ -89,9 +89,6 @@ func (l *Loader) newSymTableIter(sh *elf.Section64) (*symTableIter, error) {
 }
 
 func (l *Loader) readHeader() error {
-	if l.fileSize == 0 {
-		return ErrOutOfBounds
-	}
 	if l.fileSize < ehLen {
 		return ErrOutOfBounds
 	}
