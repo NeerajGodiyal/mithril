@@ -1,6 +1,7 @@
 package sbpf
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -18,6 +19,8 @@ import (
 	"github.com/gagliardetto/solana-go"
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
+
+var ExcUnsupportedInstruction = errors.New("unsupported BPF instruction")
 
 // Interpreter implements the SBF core in pure Go.
 type Interpreter struct {
@@ -946,7 +949,8 @@ mainLoop:
 				break mainLoop
 			}
 		default:
-			panic(fmt.Sprintf("unimplemented opcode %#02x", ins.Op()))
+			err = ExcUnsupportedInstruction
+			return
 		}
 
 		// Post execute
