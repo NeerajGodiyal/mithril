@@ -686,10 +686,10 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	block.PrevFeeRateGovernor = prevFeeRateGovernor
 	block.PrevNumSignatures = resumeState.NumSignatures
 
-	// Load vote accounts from manifest's Bank.Stakes.VoteAccounts
-	// This is the same data source used by setupInitialVoteAcctsAndStakeAccts for fresh starts
-	// We can't use VoteAcctCache (in-memory only) or global.EpochStakes (may be keyed by different epoch)
-	setupVoteAcctsFromManifest(block, snapshotManifest)
+	// Load vote accounts and populate global caches - same as fresh start
+	// This seeds both block.VoteAccts/VoteTimestamps AND global.VoteCache() from AccountsDB
+	// Required because getTimestampEstimate reads from global.VoteCache()
+	setupInitialVoteAcctsAndStakeAccts(acctsDb, block, snapshotManifest)
 	configureGlobalCtx(block)
 
 	// Handle leader schedule
@@ -708,22 +708,6 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Get LatestEvictedBlockhash from RecentBlockhashes sysvar in AccountsDB
 	block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
-}
-
-// setupVoteAcctsFromManifest loads vote accounts directly from the snapshot manifest.
-// This is used on resume to ensure we have valid stake data regardless of which epochs
-// are present in VersionedEpochStakes. The stake amounts are epoch-stable, and timestamps
-// will be updated during replay as vote transactions execute.
-func setupVoteAcctsFromManifest(block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
-	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
-	block.VoteAccts = make(map[solana.PublicKey]uint64)
-
-	for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
-		ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
-		block.VoteTimestamps[va.Key] = ts
-		block.VoteAccts[va.Key] = va.Stake
-		block.TotalEpochStake += va.Stake
-	}
 }
 
 // getLatestEvictedBlockhashFromAccountsDB loads the latest evicted blockhash from the
