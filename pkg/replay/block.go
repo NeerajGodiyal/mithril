@@ -352,6 +352,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 			}
 
 			if sealevel.SysvarCache.RecentBlockHashes.Sysvar == nil {
+				// Fresh start: unmarshal from AccountsDB
 				decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 				var recentBlockhashes sealevel.SysvarRecentBlockhashes
 				recentBlockhashes.MustUnmarshalWithDecoder(decoder)
@@ -363,6 +364,18 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 					mlog.Log.Infof("loaded RecentBlockhashes sysvar: %d entries, newest=%x, oldest=%x",
 						len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
 				}
+			} else {
+				// Resume case: SysvarCache was already set from state file in configureInitialBlockFromResume.
+				// The account data from AccountsDB may be stale (appendvec writes are not fsynced),
+				// so we need to overwrite it with the correct data from SysvarCache.
+				// This ensures BPF programs reading the account data directly see correct values.
+				recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
+				newData := recentBlockhashes.MustMarshal()
+				copy(recentBlockhashesAcct.Data, newData)
+				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+
+				mlog.Log.Infof("resume: overwrote RecentBlockhashes account data from SysvarCache (%d entries)",
+					len(*recentBlockhashes))
 			}
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
@@ -731,52 +744,20 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		mlog.Log.Infof("restored blockhash context from state file: %d blockhashes, evicted=%x, lastBh=%x",
 			len(*resumeState.RecentBlockhashes), resumeState.EvictedBlockhash[:8], resumeState.LastBlockhash[:8])
 	} else {
-		// Fallback: try to get from AccountsDB (may be stale, but better than nothing)
-		mlog.Log.Infof("warning: no blockhash context in state file, falling back to AccountsDB (may be stale)")
-		block.LatestEvictedBlockhash = getLatestEvictedBlockhashFromAccountsDB(acctsDb, block.Slot)
-	}
-}
-
-// getLatestEvictedBlockhashFromAccountsDB loads the latest evicted blockhash from the
-// RecentBlockhashes sysvar stored in AccountsDB. This is needed when resuming because
-// we can't rely on the snapshot manifest data which is stale.
-func getLatestEvictedBlockhashFromAccountsDB(acctsDb *accountsdb.AccountsDb, slot uint64) [32]byte {
-	recentBlockhashesAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarRecentBlockHashesAddr)
-	if err != nil {
-		mlog.Log.Infof("warning: failed to load RecentBlockhashes sysvar: %v", err)
-		return [32]byte{}
+		// No blockhash context in state file - this should not happen with new state files,
+		// but could happen with old state files created before blockhash tracking was added.
+		// We cannot safely resume without blockhash context because:
+		// 1. block.LastBlockhash is needed for durable nonce validation
+		// 2. LatestEvictedBlockhash is needed for transaction age validation edge cases
+		// 3. RecentBlockhashes sysvar data in AccountsDB may be stale
+		mlog.Log.Errorf("FATAL: no blockhash context in state file - cannot safely resume")
+		mlog.Log.Errorf("This state file was created before blockhash tracking was added.")
+		mlog.Log.Errorf("Please delete the AccountsDB directory and restart from snapshot.")
+		panic("cannot resume without blockhash context in state file")
 	}
 
-	// Debug: log the account slot (shows which version we're reading)
-	mlog.Log.Infof("DEBUG: RecentBlockhashes account loaded from slot %d, data_len=%d", recentBlockhashesAcct.Slot, len(recentBlockhashesAcct.Data))
-
-	decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
-	var recentBlockhashes sealevel.SysvarRecentBlockhashes
-	err = recentBlockhashes.UnmarshalWithDecoder(decoder)
-	if err != nil {
-		mlog.Log.Infof("warning: failed to unmarshal RecentBlockhashes sysvar: %v", err)
-		return [32]byte{}
-	}
-
-	// Debug: log the blockhash range
-	if len(recentBlockhashes) > 0 {
-		mlog.Log.Infof("DEBUG: RecentBlockhashes has %d entries, newest=%x, oldest=%x",
-			len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
-	} else {
-		mlog.Log.Infof("DEBUG: RecentBlockhashes is EMPTY!")
-	}
-
-	// The sysvar contains up to 150 recent blockhashes. The latest evicted one
-	// is the one that would be at position 150 (0-indexed), i.e., the oldest one
-	// that's still in the sysvar but about to be evicted.
-	if len(recentBlockhashes) >= 150 {
-		return recentBlockhashes[149].Blockhash
-	} else if len(recentBlockhashes) > 0 {
-		// If we have fewer entries, return the oldest one
-		return recentBlockhashes[len(recentBlockhashes)-1].Blockhash
-	}
-
-	return [32]byte{}
+	// Now that block.LastBlockhash is set, update global context
+	global.SetLatestBlockHash(block.LastBlockhash)
 }
 
 func configureGlobalCtx(block *b.Block) {
