@@ -1377,8 +1377,9 @@ func printStartupInfo(commandName string) {
 	// Run ID (generated fresh each run)
 	runID := replay.CurrentRunID
 	if runID == "" {
-		// Generate one early if not yet set
+		// Generate one early if not yet set, and assign to global for consistency
 		runID = fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+		replay.CurrentRunID = runID
 	}
 	fmt.Printf("  Run ID:       %s%s%s\n", dim, runID, reset)
 

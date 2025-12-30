@@ -325,6 +325,10 @@ func BuildAccountsDbWithIncr(
 		var incrSavePath string
 		if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(incrementalSnapshotPath, "http://") || strings.HasPrefix(incrementalSnapshotPath, "https://")) {
 			if snapshotDownloadPath != "" {
+				// Ensure snapshot download directory exists (may not exist if full was local)
+				if err := os.MkdirAll(snapshotDownloadPath, 0o755); err != nil {
+					return nil, nil, fmt.Errorf("failed to create snapshot download directory %s: %w", snapshotDownloadPath, err)
+				}
 				// Extract filename from URL and create save path
 				urlParts := strings.Split(incrementalSnapshotPath, "/")
 				filename := urlParts[len(urlParts)-1]
