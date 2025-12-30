@@ -1939,9 +1939,27 @@ clean_all() {
 
     confirm_destructive "CLEAN ALL MITHRIL DATA"
 
-    # Capture disk space BEFORE deletion
-    local before_used before_total before_free mount_point fstype
-    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+    # Collect all distinct mount points from paths being cleaned
+    declare -A mount_points_map
+    for path in "${paths_to_clean[@]}"; do
+        local mp
+        mp=$(df "$path" 2>/dev/null | tail -1 | awk '{print $NF}')
+        if [[ -n "$mp" ]]; then
+            mount_points_map["$mp"]=1
+        fi
+    done
+    local unique_mount_points=("${!mount_points_map[@]}")
+
+    # Capture disk space BEFORE deletion for each mount point
+    declare -A before_used_map before_total_map before_free_map fstype_map
+    for mp in "${unique_mount_points[@]}"; do
+        local used total free mount fstype
+        read -r used total free mount fstype < <(get_mount_disk_space "$mp")
+        before_used_map["$mp"]="$used"
+        before_total_map["$mp"]="$total"
+        before_free_map["$mp"]="$free"
+        fstype_map["$mp"]="$fstype"
+    done
 
     # Execute deletion
     info "Deleting all Mithril data..."
@@ -1962,15 +1980,15 @@ clean_all() {
     # Sync to ensure filesystem updates are reflected
     sync
 
-    # Capture disk space AFTER deletion
-    local after_used after_total after_free
-    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
-
     echo ""
     success "All Mithril data has been cleaned"
 
-    # Show before/after disk space summary
-    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+    # Show before/after disk space summary for each mount point
+    for mp in "${unique_mount_points[@]}"; do
+        local after_used after_total after_free
+        read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$mp")
+        show_disk_space_summary "$mp" "${before_used_map[$mp]}" "${before_free_map[$mp]}" "$after_used" "$after_free" "${before_total_map[$mp]}" "${fstype_map[$mp]}"
+    done
 
     echo ""
     echo "  On next run, Mithril will start completely fresh."
