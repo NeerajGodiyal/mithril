@@ -346,36 +346,38 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to get recentblockhashes")
 			}
 
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct.Clone())
-			if err != nil {
-				panic("unable to set recentblockhashes sysvar to accts")
-			}
-
 			if sealevel.SysvarCache.RecentBlockHashes.Sysvar == nil {
-				// Fresh start: unmarshal from AccountsDB
+				// Fresh start (first slot): unmarshal from AccountsDB
 				decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 				var recentBlockhashes sealevel.SysvarRecentBlockhashes
 				recentBlockhashes.MustUnmarshalWithDecoder(decoder)
 				sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
 
-				// Debug: log the blockhash range on first load (helps debug resume issues)
+				// Debug: log the blockhash range on first load
 				if len(recentBlockhashes) > 0 {
 					mlog.Log.Infof("loaded RecentBlockhashes sysvar: %d entries, newest=%x, oldest=%x",
 						len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
 				}
 			} else {
-				// Resume case: SysvarCache was already set from state file in configureInitialBlockFromResume.
+				// SysvarCache already populated (either from resume state file or from previous slot).
 				// The account data from AccountsDB may be stale (appendvec writes are not fsynced),
-				// so we need to overwrite it with the correct data from SysvarCache.
+				// so overwrite it with the authoritative data from SysvarCache.
 				// This ensures BPF programs reading the account data directly see correct values.
 				recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
 				newData := recentBlockhashes.MustMarshal()
+				if len(newData) != len(recentBlockhashesAcct.Data) {
+					panic(fmt.Sprintf("RecentBlockhashes data length mismatch: marshaled=%d, account=%d",
+						len(newData), len(recentBlockhashesAcct.Data)))
+				}
 				copy(recentBlockhashesAcct.Data, newData)
 				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
+			}
 
-				mlog.Log.Infof("resume: overwrote RecentBlockhashes account data from SysvarCache (%d entries)",
-					len(*recentBlockhashes))
+			// Set parentAccts AFTER potential data correction to ensure LtHash delta is computed correctly
+			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct.Clone())
+			if err != nil {
+				panic("unable to set recentblockhashes sysvar to accts")
 			}
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct)
@@ -737,6 +739,20 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Restore blockhash context from ResumeState (required because appendvec writes are not fsynced)
 	if resumeState.RecentBlockhashes != nil && len(*resumeState.RecentBlockhashes) > 0 {
+		// Validate that EvictedBlockhash and LastBlockhash are also present
+		// (they could be zero if decode failed in node.go)
+		var zeroHash [32]byte
+		if resumeState.EvictedBlockhash == zeroHash {
+			mlog.Log.Errorf("FATAL: blockhash context has RecentBlockhashes but EvictedBlockhash is zero")
+			mlog.Log.Errorf("State file may be corrupted. Delete AccountsDB directory and restart from snapshot.")
+			panic("cannot resume with zero EvictedBlockhash")
+		}
+		if resumeState.LastBlockhash == zeroHash {
+			mlog.Log.Errorf("FATAL: blockhash context has RecentBlockhashes but LastBlockhash is zero")
+			mlog.Log.Errorf("State file may be corrupted. Delete AccountsDB directory and restart from snapshot.")
+			panic("cannot resume with zero LastBlockhash")
+		}
+
 		// Restore SysvarCache.RecentBlockHashes from state file
 		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
 		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
