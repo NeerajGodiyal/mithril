@@ -820,7 +820,8 @@ func runLive(c *cobra.Command, args []string) {
 	var accountsDb *accountsdb.AccountsDb
 	var manifest *snapshot.SnapshotManifest
 	var mithrilState *state.MithrilState
-	snapshotDownloadPath := scratchDirectory
+	// Use configured snapshot directory (storage.snapshots / snapshot.download_path), not scratch
+	snapshotDownloadPath := snapshotDlPath
 
 	// Check for valid state file first (this is the authoritative source of truth)
 	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
@@ -1297,10 +1298,9 @@ func printStartupInfo(commandName string) {
 
 	// Check for existing snapshots - try configured paths in order of preference:
 	// 1. snapshotArchivePath (storage.snapshots)
-	// 2. snapshotDlPath (snapshot.download_path)
-	// 3. scratchDirectory (scratch_directory)
+	// 2. snapshotDlPath (snapshot.download_path) - defaults to snapshotArchivePath
 	var existingSnapshots []snapshotInfo
-	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath, scratchDirectory} {
+	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath} {
 		if searchPath != "" {
 			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
 				existingSnapshots = snaps
