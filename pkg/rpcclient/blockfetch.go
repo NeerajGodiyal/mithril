@@ -269,13 +269,24 @@ func (fetcher *RpcClient) GetSlot() (uint64, error) {
 	return slot, err
 }
 
-// GetSlotWithTimeout returns the current slot with a timeout.
+// GetSlotWithTimeout returns the current slot with a timeout (confirmed commitment).
 // Useful for health probes where we don't want to block indefinitely.
 func (fetcher *RpcClient) GetSlotWithTimeout(timeout time.Duration) (uint64, error) {
+	return fetcher.GetSlotWithTimeoutAndCommitment(timeout, rpc.CommitmentConfirmed)
+}
+
+// GetSlotProcessedWithTimeout returns the current slot with processed commitment.
+// Processed is the most recent slot - useful for measuring true distance to chain tip.
+func (fetcher *RpcClient) GetSlotProcessedWithTimeout(timeout time.Duration) (uint64, error) {
+	return fetcher.GetSlotWithTimeoutAndCommitment(timeout, rpc.CommitmentProcessed)
+}
+
+// GetSlotWithTimeoutAndCommitment returns the current slot with specified commitment and timeout.
+func (fetcher *RpcClient) GetSlotWithTimeoutAndCommitment(timeout time.Duration, commitment rpc.CommitmentType) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	slot, err := fetcher.client.GetSlot(ctx, rpc.CommitmentConfirmed)
+	slot, err := fetcher.client.GetSlot(ctx, commitment)
 	if err != nil {
 		return 0, err
 	}

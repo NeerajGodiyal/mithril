@@ -116,8 +116,8 @@ type BlockSource struct {
 
 	// Tip tracking
 	confirmedTip       atomic.Uint64
+	processedTip       atomic.Uint64 // Processed commitment tip (super tip)
 	tipAtSlot          atomic.Uint64 // What slot we were emitting when tip was measured
-	tipTime            atomic.Int64  // Unix nano timestamp when tip was measured
 	tipSafetyMargin    uint64
 	tipPollInterval    time.Duration
 	lastTipUpdate      atomic.Int64  // Unix timestamp of last successful tip poll
@@ -410,20 +410,76 @@ func (bs *BlockSource) pollTip() {
 	}
 }
 
-// updateTipSnapshot stores the tip along with what slot we were emitting at that moment.
+// updateTipSnapshot stores the confirmed tip along with what slot we were emitting at that moment.
 // This allows accurate distance calculation: tip - tipAtSlot is precise at measurement time.
-func (bs *BlockSource) updateTipSnapshot(tip uint64) {
+func (bs *BlockSource) updateTipSnapshot(confirmedTip uint64) {
 	bs.reorderMu.Lock()
 	slotAtTip := bs.nextSlotToSend
 	bs.reorderMu.Unlock()
 
-	bs.confirmedTip.Store(tip)
+	bs.confirmedTip.Store(confirmedTip)
 	bs.tipAtSlot.Store(slotAtTip)
-	bs.tipTime.Store(time.Now().UnixNano())
 	bs.lastTipUpdate.Store(time.Now().Unix())
 }
 
-// getMaxTipFromAllRpcs queries all configured RPCs for the current slot
+// RefreshTipsForSummary triggers an async refresh of both confirmed and processed tips.
+// Call this near summary time (e.g., at slot 95) so fresh tips are ready at slot 100.
+// This is non-blocking - it spawns a goroutine to do the work.
+func (bs *BlockSource) RefreshTipsForSummary() {
+	go func() {
+		const timeout = 5 * time.Second
+
+		// Capture current slot before RPC calls
+		bs.reorderMu.Lock()
+		slotAtTip := bs.nextSlotToSend
+		bs.reorderMu.Unlock()
+
+		// Query all RPCs for both confirmed and processed tips concurrently
+		type result struct {
+			confirmed uint64
+			processed uint64
+		}
+		results := make(chan result, len(bs.rpcClients))
+
+		for _, rpc := range bs.rpcClients {
+			go func(client *rpcclient.RpcClient) {
+				var r result
+				if tip, err := client.GetSlotWithTimeout(timeout); err == nil {
+					r.confirmed = tip
+				}
+				if tip, err := client.GetSlotProcessedWithTimeout(timeout); err == nil {
+					r.processed = tip
+				}
+				results <- r
+			}(rpc)
+		}
+
+		// Collect results and find max for each
+		var maxConfirmed, maxProcessed uint64
+		for i := 0; i < len(bs.rpcClients); i++ {
+			r := <-results
+			if r.confirmed > maxConfirmed {
+				maxConfirmed = r.confirmed
+			}
+			if r.processed > maxProcessed {
+				maxProcessed = r.processed
+			}
+		}
+
+		// Store results
+		if maxConfirmed > 0 {
+			bs.confirmedTip.Store(maxConfirmed)
+			bs.tipAtSlot.Store(slotAtTip)
+			bs.lastTipUpdate.Store(time.Now().Unix())
+			bs.tipPollFailures.Store(0)
+		}
+		if maxProcessed > 0 {
+			bs.processedTip.Store(maxProcessed)
+		}
+	}()
+}
+
+// getMaxTipFromAllRpcs queries all configured RPCs for the current slot (confirmed)
 // and returns the maximum value. This handles RPCs that fall behind.
 func (bs *BlockSource) getMaxTipFromAllRpcs(timeout time.Duration) uint64 {
 	if len(bs.rpcClients) == 0 {
@@ -993,8 +1049,8 @@ type FetchStatsSnapshot struct {
 	NextSlot           uint64
 	MaxBuffered        uint64
 	ConfirmedTip       uint64
+	ProcessedTip       uint64 // Processed commitment tip (super tip)
 	TipAtSlot          uint64 // What slot we were emitting when tip was measured
-	TipAgeMs           int64  // How old the tip measurement is (milliseconds)
 	WorkQueueLen       int
 	ReorderBufLen      int
 	// Tip poll health
@@ -1033,13 +1089,6 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		tipStaleSecs = time.Now().Unix() - lastTipUpdate
 	}
 
-	// Calculate tip age in milliseconds (how old the tip measurement is)
-	var tipAgeMs int64
-	tipTimeNano := bs.tipTime.Load()
-	if tipTimeNano > 0 {
-		tipAgeMs = (time.Now().UnixNano() - tipTimeNano) / int64(time.Millisecond)
-	}
-
 	return FetchStatsSnapshot{
 		Attempts:           attempts,
 		Successes:          successes,
@@ -1057,8 +1106,8 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		NextSlot:           nextSlot,
 		MaxBuffered:        maxBuffered,
 		ConfirmedTip:       bs.confirmedTip.Load(),
+		ProcessedTip:       bs.processedTip.Load(),
 		TipAtSlot:          bs.tipAtSlot.Load(),
-		TipAgeMs:           tipAgeMs,
 		WorkQueueLen:       len(bs.workQueue),
 		ReorderBufLen:      reorderLen,
 		TipStaleSecs:       tipStaleSecs,

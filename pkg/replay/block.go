@@ -1156,6 +1156,11 @@ func ReplayBlocks(
 			voteTxAccumulator += uint64(voteTxCount)
 			nonVoteTxAccumulator += uint64(nonVoteTxCount)
 
+			// Trigger async tip refresh 5 slots before summary so it's fresh when we print
+			if statsCounter == 95 {
+				blockStream.RefreshTipsForSummary()
+			}
+
 			if statsCounter == 100 {
 				// Calculate averages (rounded to nearest whole number for CU and txns)
 				avgExec := timeAccumulator / float64(statsCounter)
@@ -1171,18 +1176,22 @@ func ReplayBlocks(
 					blocksPerSec = 1.0 / avgTotal
 				}
 
-				// Get fetch stats (includes tip snapshot from tip poller - no blocking)
+				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
 				fetchStats := blockStream.GetFetchStats()
 
 				// Calculate distance from tip using precise snapshot data:
-				// ConfirmedTip - TipAtSlot gives the exact distance when tip was measured.
-				// TipAgeMs shows how stale the measurement is.
+				// ConfirmedTip/ProcessedTip - TipAtSlot gives exact distance when tip was measured.
 				var chainTipStr string
 				if fetchStats.ConfirmedTip > 0 && fetchStats.TipAtSlot > 0 && fetchStats.TipAtSlot < fetchStats.ConfirmedTip {
-					behindSlots := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
-					chainTipStr = fmt.Sprintf(" | %d slots behind tip (%.1fs ago)", behindSlots, float64(fetchStats.TipAgeMs)/1000)
+					behindConfirmed := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
+					if fetchStats.ProcessedTip > 0 && fetchStats.TipAtSlot < fetchStats.ProcessedTip {
+						behindProcessed := fetchStats.ProcessedTip - fetchStats.TipAtSlot
+						chainTipStr = fmt.Sprintf(" | %d behind confirmed, %d behind processed", behindConfirmed, behindProcessed)
+					} else {
+						chainTipStr = fmt.Sprintf(" | %d slots behind tip", behindConfirmed)
+					}
 				} else if fetchStats.ConfirmedTip > 0 {
-					chainTipStr = fmt.Sprintf(" | caught up to tip (%.1fs ago)", float64(fetchStats.TipAgeMs)/1000)
+					chainTipStr = " | caught up to tip"
 				} else {
 					chainTipStr = " | tip: unknown"
 				}
