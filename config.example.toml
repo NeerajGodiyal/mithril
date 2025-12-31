@@ -101,9 +101,9 @@ name = "mithril"
 [network]
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
     #
-    # Example with paid primary + free fallback:
+    # Example with primary + fallback:
     #   rpc = [
-    #       "https://your-paid-rpc.example.com",   # Primary
+    #       "https://your-rpc.example.com",        # Primary
     #       "https://api.mainnet-beta.solana.com"  # Fallback
     #   ]
     rpc = ["https://api.mainnet-beta.solana.com"]
