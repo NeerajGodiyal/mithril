@@ -103,8 +103,8 @@ name = "mithril"
     #
     # Example with paid primary + free fallback:
     #   rpc = [
-    #       "https://your-helius-endpoint.helius-rpc.com",   # Primary
-    #       "https://api.mainnet-beta.solana.com"            # Fallback
+    #       "https://your-paid-rpc.example.com",   # Primary
+    #       "https://api.mainnet-beta.solana.com"  # Fallback
     #   ]
     rpc = ["https://api.mainnet-beta.solana.com"]
 
@@ -132,7 +132,7 @@ name = "mithril"
     # Tune based on your RPC provider's rate limits.
 
     # Maximum RPC requests per second for block fetching.
-    # Common limits: Helius=10, QuickNode=25, private node=unlimited
+    # Check your RPC provider's rate limits. Private nodes can go higher.
     # Set slightly below provider limit to leave room for other RPC calls.
     max_rps = 10
 
