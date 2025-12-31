@@ -372,10 +372,11 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, erro
 	return block.FromBlockResult(blockResult, slot, rpc), nil
 }
 
-// pollTip periodically updates the confirmed tip using the auxiliary RPC client
+// pollTip periodically updates the confirmed tip using the active RPC client.
+// Uses getActiveRpc() so tip polling follows the same failover state as block fetching.
 func (bs *BlockSource) pollTip() {
 	// Get initial tip
-	if tip, err := bs.auxRpcClient.GetSlot(); err == nil {
+	if tip, err := bs.getActiveRpc().GetSlot(); err == nil {
 		bs.confirmedTip.Store(tip)
 		bs.lastTipUpdate.Store(time.Now().Unix())
 		bs.tipPollFailures.Store(0)
@@ -392,7 +393,7 @@ func (bs *BlockSource) pollTip() {
 		case <-bs.stopChan:
 			return
 		case <-ticker.C:
-			if tip, err := bs.auxRpcClient.GetSlot(); err == nil {
+			if tip, err := bs.getActiveRpc().GetSlot(); err == nil {
 				bs.confirmedTip.Store(tip)
 				bs.lastTipUpdate.Store(time.Now().Unix())
 				bs.tipPollFailures.Store(0)

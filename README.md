@@ -116,10 +116,10 @@ name = "mithril"
 
 [bootstrap]
     # How Mithril initializes state:
-    #   "auto"       - Use existing AccountsDB if valid, else download snapshot
-    #   "snapshot"   - Always download fresh snapshot (default, good for early-stage)
+    #   "auto"       - Use existing AccountsDB if valid, else download snapshot (default)
+    #   "snapshot"   - Always download fresh snapshot
     #   "accountsdb" - Require existing AccountsDB, fail if missing
-    mode = "snapshot"
+    mode = "auto"
 
 [storage]
     # AccountsDB path - use your fastest NVMe
@@ -222,7 +222,7 @@ go build -o mithril ./cmd/mithril
 ./mithril run --config config.toml
 ```
 
-**Note:** The default `bootstrap.mode = "snapshot"` will use existing snapshot files if they are within the `full_threshold` (default: 100,000 slots), otherwise it downloads a fresh snapshot. Set `bootstrap.mode = "auto"` to reuse an existing AccountsDB when available, or `bootstrap.mode = "new-snapshot"` to always download fresh.
+**Note:** The default `bootstrap.mode = "auto"` will reuse an existing valid AccountsDB when available, otherwise it downloads a snapshot. Set `bootstrap.mode = "snapshot"` to always start fresh from a snapshot, or `bootstrap.mode = "new-snapshot"` to always download a new one.
 
 ### Operational Best Practices
 
