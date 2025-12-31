@@ -1142,7 +1142,10 @@ func ReplayBlocks(
 
 				// Print summary with newlines for visibility
 				avgTotal := avgExec + avgWait
-				blocksPerSec := 1.0 / avgTotal
+				var blocksPerSec float64
+				if avgTotal > 0 {
+					blocksPerSec = 1.0 / avgTotal
+				}
 				mlog.Log.Infof("")
 				mlog.Log.Infof("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d",
 					avgExec, avgWait, avgTotal, blocksPerSec, blockStream.BufferDepth())
