@@ -57,6 +57,10 @@ name = "mithril"
 #   Blockstore (varies)
 #     Incoming blocks from RPC/Overcast. Size depends on how much history
 #     you want to keep (0 to hundreds of GB).
+#     NOTE: Block download to disk is TEMPORARILY DISABLED. Blocks are
+#     currently streamed directly from RPC and not persisted to disk.
+#     This path is reserved for future use when block persistence is
+#     re-implemented.
 #
 # Recommended setup (two NVMe drives):
 #   /mnt/mithril-accounts/     <- Fast NVMe (~500GB for AccountsDB)
@@ -73,6 +77,9 @@ name = "mithril"
 
     # Blockstore - incoming blocks from RPC/Overcast
     # Size depends on how much block history you keep.
+    # NOTE: Block persistence is temporarily disabled. Blocks are streamed
+    # directly from RPC without saving to disk. This setting is reserved
+    # for when block persistence is re-implemented.
     blockstore = "/mnt/mithril-ledger/blockstore"
 
     # Snapshots - downloaded on first run (~100GB for full + incremental)
