@@ -21,6 +21,7 @@ func isRateLimitedErr(err error) bool {
 
 // isTransientNetworkErr returns true for common transient network/RPC errors
 // that should be retried rather than treated as permanent failures.
+// These errors are retried on the SAME endpoint - they don't trigger failover.
 func isTransientNetworkErr(err error) bool {
 	if err == nil {
 		return false
@@ -28,7 +29,6 @@ func isTransientNetworkErr(err error) bool {
 	errStr := err.Error()
 	return strings.Contains(errStr, "EOF") ||
 		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "context deadline exceeded") ||
 		strings.Contains(errStr, "502") ||
@@ -38,6 +38,21 @@ func isTransientNetworkErr(err error) bool {
 		strings.Contains(errStr, "Service Unavailable") ||
 		strings.Contains(errStr, "Gateway Timeout") ||
 		strings.Contains(errStr, "i/o timeout") ||
-		strings.Contains(errStr, "temporary failure") ||
-		strings.Contains(errStr, "no such host")
+		strings.Contains(errStr, "temporary failure")
+}
+
+// isHardConnectivityErr returns true for hard connectivity failures that
+// indicate the endpoint is unreachable. These warrant RPC failover.
+// This is a subset of transient errors - only the "endpoint is down" cases.
+func isHardConnectivityErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "dial tcp") ||
+		strings.Contains(errStr, "TLS handshake") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "no route to host")
 }

@@ -61,7 +61,8 @@ type fetchResult struct {
 	slot    uint64
 	block   *b.Block
 	err     error
-	skipped bool // true if SlotSkipped error
+	skipped bool  // true if SlotSkipped error
+	rpcIdx  int32 // which RPC endpoint produced this result (for error attribution)
 }
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
@@ -106,7 +107,8 @@ type BlockSource struct {
 	activeRpcIdx         atomic.Int32  // Currently active RPC index (0 = primary)
 	slotsSinceFailover   atomic.Uint64 // Slots emitted since failover (for retry timing)
 	failoverCount        atomic.Uint64 // Total failovers (for stats)
-	transientErrCount    atomic.Uint64 // Consecutive transient errors (reset on success)
+	hardErrCount         atomic.Uint64 // Consecutive hard connectivity errors (reset on success)
+	lastHardErrTime      atomic.Int64  // Unix timestamp of last hard error (for time-windowing)
 
 	// Rate limiting
 	rateLimiter *rate.Limiter
@@ -162,8 +164,9 @@ const (
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
 	// RPC failover settings
-	primaryRetryInterval     = 100 // Retry primary RPC every N slots after failover
-	failoverErrThreshold     = 3   // Consecutive transient errors before failover
+	primaryRetryInterval   = 100 // Retry primary RPC every N slots after failover
+	failoverErrThreshold   = 10  // Consecutive hard errors before failover (conservative)
+	failoverErrWindowSecs  = 5   // Reset error count if no errors for this long
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -338,7 +341,7 @@ func (bs *BlockSource) restoreToPrimary() bool {
 	currentIdx := bs.activeRpcIdx.Load()
 	if bs.activeRpcIdx.CompareAndSwap(currentIdx, 0) {
 		bs.slotsSinceFailover.Store(0)
-		bs.transientErrCount.Store(0) // Reset error count when switching back
+		bs.hardErrCount.Store(0) // Reset error count when switching back
 		mlog.Log.Infof("RPC restored to primary endpoint %s (health probe succeeded)",
 			bs.rpcClients[0].Endpoint())
 		return true
@@ -422,9 +425,12 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		// Beyond tip - send back for retry
 		if maxSlot > 0 && slot > maxSlot {
 			bs.stats.ErrBeyondTip.Add(1)
-			bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip}
+			bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
 			continue
 		}
+
+		// Capture which RPC we're using BEFORE the fetch (for error attribution)
+		rpcIdx := bs.activeRpcIdx.Load()
 
 		// Fetch block with latency tracking
 		bs.stats.FetchAttempts.Add(1)
@@ -439,7 +445,7 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		}
 
 		skipped := err == rpcclient.SlotSkipped
-		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped}
+		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped, rpcIdx: rpcIdx}
 	}
 }
 
@@ -458,8 +464,8 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			continue
 		}
 
-		// Track error buckets and handle RPC failover on transient errors
-		isTransient := false
+		// Track error buckets
+		isHardErr := false
 		if result.err != nil {
 			if result.err == errBeyondTip {
 				// Already tracked in worker
@@ -469,19 +475,33 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.stats.ErrRateLimited.Add(1)
 			} else if isTransientNetworkErr(result.err) {
 				bs.stats.ErrTransient.Add(1)
-				isTransient = true
+				// Check if this is a hard connectivity error (failover-worthy)
+				if isHardConnectivityErr(result.err) {
+					isHardErr = true
+				}
 			} else if result.err != rpcclient.SlotSkipped {
 				bs.stats.ErrOther.Add(1)
 			}
 		}
 
-		// RPC failover: only after repeated transient errors (threshold-based)
-		// This prevents churn from single timeout spikes
-		if isTransient && len(bs.rpcClients) > 1 {
-			errCount := bs.transientErrCount.Add(1)
+		// RPC failover: only after repeated HARD connectivity errors
+		// - Only count errors from the currently active RPC (ignore late errors from old endpoint)
+		// - Time-windowed: reset count if no errors for 5 seconds
+		// - Threshold-based: require 10 consecutive errors before failover
+		if isHardErr && len(bs.rpcClients) > 1 && result.rpcIdx == bs.activeRpcIdx.Load() {
+			now := time.Now().Unix()
+			lastErr := bs.lastHardErrTime.Load()
+
+			// Time-window: reset if no errors for failoverErrWindowSecs
+			if lastErr > 0 && (now-lastErr) > failoverErrWindowSecs {
+				bs.hardErrCount.Store(0)
+			}
+			bs.lastHardErrTime.Store(now)
+
+			errCount := bs.hardErrCount.Add(1)
 			if errCount >= failoverErrThreshold {
 				bs.failoverToNext()
-				bs.transientErrCount.Store(0) // Reset after failover
+				bs.hardErrCount.Store(0) // Reset after failover
 			}
 		}
 
@@ -494,12 +514,12 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
-			bs.transientErrCount.Store(0) // Reset on progress
+			bs.hardErrCount.Store(0) // Reset on progress
 		} else if result.block != nil {
 			// Success! This takes priority over any pending error results.
 			bs.stats.FetchSuccesses.Add(1)
 			bs.reorderBuffer[result.slot] = result.block
-			bs.transientErrCount.Store(0) // Reset error count on success
+			bs.hardErrCount.Store(0) // Reset error count on success
 			// Track max buffered slot
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
 				bs.stats.MaxBufferedSlot.Store(result.slot)
