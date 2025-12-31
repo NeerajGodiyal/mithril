@@ -974,10 +974,11 @@ func ReplayBlocks(
 		}
 
 		// Stall detection: warn if waited too long for a block
-		if waitTime > 2*time.Second {
+		// Skip first block (startup has TLS/connection overhead)
+		if waitTime > 2*time.Second && statsCounter > 0 {
 			stats := blockStream.GetFetchStats()
-			mlog.Log.Errorf("STALL: waited %.1fs for block | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
-				waitTime.Seconds(), stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
+			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
+				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
 				stats.ErrNotAvail, stats.ErrRateLimit, stats.ErrBeyondTip, stats.ErrTransient,
 				stats.WorkQueueLen, stats.ReorderBufLen)
 		}
