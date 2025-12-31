@@ -68,6 +68,9 @@ type BlockSourceStats struct {
 	FetchRetries   atomic.Uint64
 	FetchSkipped   atomic.Uint64
 
+	// Speculative/backup requests
+	SpeculativeRetries atomic.Uint64 // Backup requests sent for slow slots
+
 	// Error buckets
 	ErrSlotNotAvail atomic.Uint64
 	ErrRateLimited  atomic.Uint64
@@ -109,8 +112,9 @@ type BlockSource struct {
 	maxPending     int
 
 	// Slot state tracking (prevents duplicates)
-	slotStateMu sync.Mutex
-	slotState   map[uint64]slotStatus
+	slotStateMu   sync.Mutex
+	slotState     map[uint64]slotStatus
+	inflightStart map[uint64]time.Time // When each slot started fetching
 
 	// Retry queue for slots that need rescheduling
 	retryMu    sync.Mutex
@@ -175,6 +179,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		nextSlotToSend:  opts.StartSlot,
 		maxPending:      defaultMaxPending,
 		slotState:       make(map[uint64]slotStatus),
+		inflightStart:   make(map[uint64]time.Time),
 		workQueue:       make(chan uint64, maxInflight*2),
 		resultQueue:     make(chan fetchResult, maxInflight*2),
 		stopChan:        make(chan struct{}),
@@ -298,6 +303,16 @@ func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
 		bs.reorderMu.Lock()
 
+		// Check if this is a duplicate result (from backup request)
+		// If slot is already done or we already have the block, discard this result
+		bs.slotStateMu.Lock()
+		isDuplicate := bs.slotState[result.slot] == slotDone
+		bs.slotStateMu.Unlock()
+		if isDuplicate || bs.reorderBuffer[result.slot] != nil || bs.skippedSlots[result.slot] {
+			bs.reorderMu.Unlock()
+			continue
+		}
+
 		// Track error buckets
 		if result.err != nil {
 			if result.err == errBeyondTip {
@@ -343,9 +358,11 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		bs.slotStateMu.Lock()
 		if !isRetriable {
 			bs.slotState[result.slot] = slotDone
+			delete(bs.inflightStart, result.slot) // Clean up timing data
 		} else {
 			// Will be retried, reset to pending
 			delete(bs.slotState, result.slot)
+			delete(bs.inflightStart, result.slot)
 		}
 		bs.slotStateMu.Unlock()
 
@@ -402,6 +419,7 @@ func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 		return false // Already scheduled
 	}
 	bs.slotState[slot] = slotInflight
+	bs.inflightStart[slot] = time.Now()
 	bs.slotStateMu.Unlock()
 
 	select {
@@ -412,12 +430,49 @@ func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 	}
 }
 
+// scheduleBackupRequest sends a backup request for a slow slot (bypasses slotState check)
+func (bs *BlockSource) scheduleBackupRequest(slot uint64) bool {
+	bs.stats.SpeculativeRetries.Add(1)
+
+	select {
+	case bs.workQueue <- slot:
+		return true
+	case <-bs.stopChan:
+		return false
+	default:
+		// Work queue full, skip backup request
+		return false
+	}
+}
+
+// getStaleSlots returns slots that have been inflight for longer than threshold
+func (bs *BlockSource) getStaleSlots(threshold time.Duration) []uint64 {
+	bs.slotStateMu.Lock()
+	defer bs.slotStateMu.Unlock()
+
+	now := time.Now()
+	var stale []uint64
+	for slot, status := range bs.slotState {
+		if status == slotInflight {
+			if start, ok := bs.inflightStart[slot]; ok {
+				if now.Sub(start) > threshold {
+					stale = append(stale, slot)
+				}
+			}
+		}
+	}
+	return stale
+}
+
 // scheduler feeds slots to the work queue
 func (bs *BlockSource) scheduler() {
 	nextToSchedule := bs.startSlot
 
 	retryTicker := time.NewTicker(200 * time.Millisecond)
 	defer retryTicker.Stop()
+
+	// Track which slots we've already sent backup requests for
+	backupSent := make(map[uint64]bool)
 
 	for {
 		// Check for shutdown
@@ -434,9 +489,10 @@ func (bs *BlockSource) scheduler() {
 			return
 		}
 
-		// Process retry slots first
+		// Process retry slots and backup requests on ticker
 		select {
 		case <-retryTicker.C:
+			// Handle normal retries
 			for _, slot := range bs.getRetrySlots() {
 				if bs.canScheduleMore() {
 					bs.scheduleSlot(slot)
@@ -444,6 +500,23 @@ func (bs *BlockSource) scheduler() {
 					bs.scheduleRetry(slot) // Put back
 				}
 			}
+
+			// Send backup requests for stale slots (>1 second old)
+			for _, slot := range bs.getStaleSlots(1 * time.Second) {
+				if !backupSent[slot] {
+					bs.scheduleBackupRequest(slot)
+					backupSent[slot] = true
+				}
+			}
+
+			// Clean up backupSent for completed slots
+			bs.slotStateMu.Lock()
+			for slot := range backupSent {
+				if bs.slotState[slot] == slotDone {
+					delete(backupSent, slot)
+				}
+			}
+			bs.slotStateMu.Unlock()
 		default:
 		}
 
@@ -572,23 +645,24 @@ func (bs *BlockSource) BufferDepth() int {
 
 // FetchStatsSnapshot returns a snapshot of fetch stats for logging
 type FetchStatsSnapshot struct {
-	Attempts      uint64
-	Successes     uint64
-	Retries       uint64
-	Skipped       uint64
-	AvgLatencyMs  float64
-	ErrNotAvail   uint64
-	ErrRateLimit  uint64
-	ErrBeyondTip  uint64
-	ErrTransient  uint64 // EOF, timeout, 502/503, connection reset, etc.
-	ErrOther      uint64
-	BufferDepth   int
-	LeadSlots     int64 // MaxBufferedSlot - NextSlotToSend
-	NextSlot      uint64
-	MaxBuffered   uint64
-	ConfirmedTip  uint64
-	WorkQueueLen  int
-	ReorderBufLen int
+	Attempts           uint64
+	Successes          uint64
+	Retries            uint64
+	Skipped            uint64
+	SpeculativeRetries uint64 // Backup requests sent for slow slots
+	AvgLatencyMs       float64
+	ErrNotAvail        uint64
+	ErrRateLimit       uint64
+	ErrBeyondTip       uint64
+	ErrTransient       uint64 // EOF, timeout, 502/503, connection reset, etc.
+	ErrOther           uint64
+	BufferDepth        int
+	LeadSlots          int64 // MaxBufferedSlot - NextSlotToSend
+	NextSlot           uint64
+	MaxBuffered        uint64
+	ConfirmedTip       uint64
+	WorkQueueLen       int
+	ReorderBufLen      int
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -615,22 +689,23 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 	}
 
 	return FetchStatsSnapshot{
-		Attempts:      attempts,
-		Successes:     successes,
-		Retries:       bs.stats.FetchRetries.Load(),
-		Skipped:       bs.stats.FetchSkipped.Load(),
-		AvgLatencyMs:  avgLatencyMs,
-		ErrNotAvail:   bs.stats.ErrSlotNotAvail.Load(),
-		ErrRateLimit:  bs.stats.ErrRateLimited.Load(),
-		ErrBeyondTip:  bs.stats.ErrBeyondTip.Load(),
-		ErrTransient:  bs.stats.ErrTransient.Load(),
-		ErrOther:      bs.stats.ErrOther.Load(),
-		BufferDepth:   len(bs.streamChan),
-		LeadSlots:     leadSlots,
-		NextSlot:      nextSlot,
-		MaxBuffered:   maxBuffered,
-		ConfirmedTip:  bs.confirmedTip.Load(),
-		WorkQueueLen:  len(bs.workQueue),
+		Attempts:           attempts,
+		Successes:          successes,
+		Retries:            bs.stats.FetchRetries.Load(),
+		Skipped:            bs.stats.FetchSkipped.Load(),
+		SpeculativeRetries: bs.stats.SpeculativeRetries.Load(),
+		AvgLatencyMs:       avgLatencyMs,
+		ErrNotAvail:        bs.stats.ErrSlotNotAvail.Load(),
+		ErrRateLimit:       bs.stats.ErrRateLimited.Load(),
+		ErrBeyondTip:       bs.stats.ErrBeyondTip.Load(),
+		ErrTransient:       bs.stats.ErrTransient.Load(),
+		ErrOther:           bs.stats.ErrOther.Load(),
+		BufferDepth:        len(bs.streamChan),
+		LeadSlots:          leadSlots,
+		NextSlot:           nextSlot,
+		MaxBuffered:        maxBuffered,
+		ConfirmedTip:       bs.confirmedTip.Load(),
+		WorkQueueLen:       len(bs.workQueue),
 		ReorderBufLen: reorderLen,
 	}
 }
@@ -641,6 +716,7 @@ func (bs *BlockSource) ResetStats() {
 	bs.stats.FetchSuccesses.Store(0)
 	bs.stats.FetchRetries.Store(0)
 	bs.stats.FetchSkipped.Store(0)
+	bs.stats.SpeculativeRetries.Store(0)
 	bs.stats.ErrSlotNotAvail.Store(0)
 	bs.stats.ErrRateLimited.Store(0)
 	bs.stats.ErrBeyondTip.Store(0)

@@ -974,8 +974,9 @@ func ReplayBlocks(
 		}
 
 		// Stall detection: warn if waited too long for a block
+		// Threshold is 10s because backup requests are sent at 1s for slow slots.
 		// Skip first block (startup has TLS/connection overhead)
-		if waitTime > 2*time.Second && statsCounter > 0 {
+		if waitTime > 10*time.Second && statsCounter > 0 {
 			stats := blockStream.GetFetchStats()
 			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
 				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
@@ -1147,10 +1148,10 @@ func ReplayBlocks(
 				if avgTotal > 0 {
 					blocksPerSec = 1.0 / avgTotal
 				}
-				mlog.Log.Infof("")
-				mlog.Log.Infof("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d",
+				mlog.Log.InfofPrecise("")
+				mlog.Log.InfofPrecise("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d",
 					avgExec, avgWait, avgTotal, blocksPerSec, blockStream.BufferDepth())
-				mlog.Log.Infof("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
+				mlog.Log.InfofPrecise("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
 					avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
 
 				// Print fetch stats for RPC source
@@ -1159,12 +1160,12 @@ func ReplayBlocks(
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					// prefetch = total blocks already fetched (stream buffer + reorder buffer)
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
-					mlog.Log.Infof("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | prefetch: %d (buf:%d ro:%d) | wq: %d | errs: na:%d rl:%d bt:%d tr:%d",
-						fetchStats.AvgLatencyMs, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
+					mlog.Log.InfofPrecise("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | backup: %d | prefetch: %d (buf:%d ro:%d) | wq: %d | errs: na:%d rl:%d bt:%d tr:%d",
+						fetchStats.AvgLatencyMs, retryRate, fetchStats.SpeculativeRetries, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
 						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
 					blockStream.ResetStats()
 				}
-				mlog.Log.Infof("")
+				mlog.Log.InfofPrecise("")
 
 				// Reset accumulators
 				timeAccumulator = 0
