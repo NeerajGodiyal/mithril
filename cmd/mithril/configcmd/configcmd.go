@@ -132,7 +132,7 @@ snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "overcast"
+source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
 # overcast_endpoint = "localhost:9000"
 
 [replay]

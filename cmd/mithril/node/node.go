@@ -839,6 +839,13 @@ func runLive(c *cobra.Command, args []string) {
 		mlog.Log.Infof("  The background block downloader was removed. Overcast streaming will be")
 		mlog.Log.Infof("  re-implemented in a future PR with the new parallel fetcher architecture.")
 		useOvercast = false
+
+		// Validate RPC endpoints since we're falling back to RPC mode
+		// (This check is normally done in loadConfig but only when blockSource == "rpc")
+		if len(rpcEndpoints) == 0 {
+			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
+				"Set network.rpc in config or use --rpc flag.")
+		}
 	}
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
@@ -1515,8 +1522,9 @@ func printStartupInfo(commandName string) {
 
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" && overcastEndpoint != "" {
-		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	if blockSource == "overcast" {
+		// Overcast is temporarily disabled - show this in startup info
+		fmt.Printf(" %s(disabled, using rpc)%s\n", dim, reset)
 	} else {
 		fmt.Println()
 	}
