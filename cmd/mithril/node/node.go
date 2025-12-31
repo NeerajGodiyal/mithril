@@ -620,7 +620,6 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				mithrilState = nil
 			} else {
 				startSlot = int64(mithrilState.LastSlot + 1)
-				mlog.Log.Infof("resuming from state file: last_slot=%d, starting at %d", mithrilState.LastSlot, startSlot)
 			}
 		}
 	}
@@ -1106,8 +1105,6 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
-	mlog.Log.Infof("AccountsDB ready")
-
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
@@ -1125,7 +1122,6 @@ func runLive(c *cobra.Command, args []string) {
 				mithrilState = nil
 			} else {
 				startSlot = int64(mithrilState.LastSlot + 1)
-				mlog.Log.Infof("resuming from state file: last_slot=%d, starting at %d", mithrilState.LastSlot, startSlot)
 			}
 		}
 	}
@@ -1180,7 +1176,6 @@ func runLive(c *cobra.Command, args []string) {
 						}
 					}
 				}
-				mlog.Log.Infof("resume context loaded: parent_slot=%d", resumeState.ParentSlot)
 			}
 		}
 	}
@@ -1198,8 +1193,6 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	liveEndSlot := uint64(math.MaxUint64)
-
-	mlog.Log.Infof("starting replay from slot %d", startSlot)
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()

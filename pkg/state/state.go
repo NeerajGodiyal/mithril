@@ -367,6 +367,5 @@ func CheckAndLoadValidState(accountsDbDir string) (*MithrilState, error) {
 		return nil, nil
 	}
 
-	mlog.Log.Infof("valid state found: snapshot_slot=%d, last_slot=%d", state.SnapshotSlot, state.LastSlot)
 	return state, nil
 }

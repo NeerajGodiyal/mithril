@@ -578,6 +578,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 }
 
 func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
+	mlog.Log.Infof("loading vote and stake accounts from AccountsDB...")
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.VoteAccts = make(map[solana.PublicKey]uint64)
 
@@ -792,7 +793,6 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
 		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
 		block.LastBlockhash = resumeState.LastBlockhash
-		mlog.Log.Infof("restored blockhash context from state file")
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
 		// but could happen with old state files created before blockhash tracking was added.
