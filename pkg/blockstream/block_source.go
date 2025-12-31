@@ -533,7 +533,8 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
 			for {
-				blockResult, err = bs.rpcClient.GetBlockConfirmed(uint64(slot))
+				// Use single-attempt fetch to avoid inner retry loop bypassing rate limits
+				blockResult, err = bs.rpcClient.GetBlockConfirmedOnce(uint64(slot))
 				if err == nil {
 					break
 				} else if err == rpcclient.SlotSkipped {
@@ -542,6 +543,8 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 					time.Sleep(500 * time.Millisecond)
 				} else if isRateLimitedErr(err) {
 					time.Sleep(2 * time.Second)
+				} else if isTransientNetworkErr(err) {
+					time.Sleep(1 * time.Second)
 				} else {
 					return nil, fmt.Errorf("error fetching block: %w", err)
 				}

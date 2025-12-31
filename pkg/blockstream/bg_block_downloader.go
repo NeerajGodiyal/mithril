@@ -305,7 +305,8 @@ func (downloader *BackgroundBlockDownloader) fetchAndParseBlockFromRpc(slot uint
 	defer downloader.rpcPool.Release(client)
 
 	for {
-		blockResult, err = client.GetBlockConfirmed(uint64(slot))
+		// Use single-attempt fetch to avoid inner retry loop bypassing rate limits
+		blockResult, err = client.GetBlockConfirmedOnce(uint64(slot))
 		if err == nil {
 			return blockResult
 		} else if err == rpcclient.SlotSkipped {
@@ -314,6 +315,8 @@ func (downloader *BackgroundBlockDownloader) fetchAndParseBlockFromRpc(slot uint
 			time.Sleep(500 * time.Millisecond)
 		} else if isRateLimitedErr(err) {
 			time.Sleep(2 * time.Second)
+		} else if isTransientNetworkErr(err) {
+			time.Sleep(1 * time.Second)
 		} else {
 			panic(fmt.Sprintf("error fetching block: %s\n", err))
 		}
