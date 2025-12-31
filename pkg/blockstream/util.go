@@ -48,11 +48,11 @@ func isHardConnectivityErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
+	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "no such host") ||
 		strings.Contains(errStr, "dial tcp") ||
-		strings.Contains(errStr, "TLS handshake") ||
+		strings.Contains(errStr, "tls") || // covers "tls: handshake failure" etc.
 		strings.Contains(errStr, "network is unreachable") ||
 		strings.Contains(errStr, "no route to host")
 }
