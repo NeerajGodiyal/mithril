@@ -866,8 +866,7 @@ func ReplayBlocks(
 	snapshotManifest *snapshot.SnapshotManifest,
 	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
-	blockRpcEndpoints []string, // Block RPC endpoints for getBlock (primary + backups for failover)
-	auxRpcEndpoints []string,   // Auxiliary RPC endpoints for leader schedule, tip polling
+	rpcEndpoints []string, // RPC endpoints in priority order (first = primary, rest = fallbacks)
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -906,25 +905,12 @@ func ReplayBlocks(
 	var lastPersistedSlot uint64
 	var lastPersistedBankhash []byte
 
-	// Block RPC client - for block fetching (getBlock calls)
+	// RPC client - for all cluster access (blocks, leader schedule, tip polling)
 	// First endpoint is primary, rest are backups for failover
-	blockRpcc := rpcclient.NewRpcClient(blockRpcEndpoints[0])
-	var blockRpcBackups []string
-	if len(blockRpcEndpoints) > 1 {
-		blockRpcBackups = blockRpcEndpoints[1:]
-	}
-
-	// Auxiliary RPC client - for leader schedule, tip polling, etc.
-	// Falls back to block RPC if no auxiliary endpoints configured
-	var auxRpcc *rpcclient.RpcClient
-	var auxBackupEndpoints []string
-	if len(auxRpcEndpoints) > 0 {
-		auxRpcc = rpcclient.NewRpcClient(auxRpcEndpoints[0])
-		if len(auxRpcEndpoints) > 1 {
-			auxBackupEndpoints = auxRpcEndpoints[1:]
-		}
-	} else {
-		auxRpcc = blockRpcc // Fallback to block RPC
+	rpcc := rpcclient.NewRpcClient(rpcEndpoints[0])
+	var rpcBackups []string
+	if len(rpcEndpoints) > 1 {
+		rpcBackups = rpcEndpoints[1:]
 	}
 
 	cacheConstantSysvars(acctsDb)
@@ -971,9 +957,9 @@ func ReplayBlocks(
 	if useOvercast {
 		opts = &blockstream.BlockSourceOpts{
 			SourceType:         blockstream.BlockSourceOvercast,
-			RpcClient:          blockRpcc,
-			AuxRpcClient:       auxRpcc, // For tip polling
-			BackupRpcEndpoints: blockRpcBackups,
+			RpcClient:          rpcc,
+			AuxRpcClient:       rpcc, // Same client for tip polling (unified RPC list)
+			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
 			EndSlot:            endSlot,
 			BlockDir:           blockDir,
@@ -981,9 +967,9 @@ func ReplayBlocks(
 	} else {
 		opts = &blockstream.BlockSourceOpts{
 			SourceType:         blockstream.BlockSourceRpc,
-			RpcClient:          blockRpcc,
-			AuxRpcClient:       auxRpcc, // For tip polling
-			BackupRpcEndpoints: blockRpcBackups,
+			RpcClient:          rpcc,
+			AuxRpcClient:       rpcc, // Same client for tip polling (unified RPC list)
+			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
 			EndSlot:            endSlot,
 			BlockDir:           blockDir,
@@ -1034,13 +1020,13 @@ func ReplayBlocks(
 		if currentSlot == startSlot {
 			if resumeState != nil {
 				// RESUME: Use resume state + manifest (for static fields)
-				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, auxRpcc, auxBackupEndpoints)
+				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
 			} else {
 				// FRESH START: Use snapshot manifest
-				configErr = configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, auxRpcc, auxBackupEndpoints)
+				configErr = configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
 			}
 		} else {
-			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, auxRpcc, auxBackupEndpoints)
+			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc, rpcBackups)
 		}
 		if configErr != nil {
 			mlog.Log.Errorf("FATAL: block configuration failed: %v", configErr)
@@ -1056,7 +1042,7 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, auxRpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
@@ -1227,12 +1213,10 @@ func ReplayBlocks(
 				nonVoteTxAccumulator = 0
 				statsCounter = 0
 
-				// Refresh chain tip in background for next summary (uses aux RPC)
+				// Refresh chain tip in background for next summary
 				go func() {
-					if auxRpcc != nil {
-						if slot, err := auxRpcc.GetSlot(); err == nil {
-							cachedChainTip.Store(slot)
-						}
+					if slot, err := rpcc.GetSlot(); err == nil {
+						cachedChainTip.Store(slot)
 					}
 				}()
 			}

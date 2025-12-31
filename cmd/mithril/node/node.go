@@ -90,7 +90,6 @@ var (
 	rpcEndpoints                []string
 	blockSource                 string   // "rpc" or "overcast"
 	overcastEndpoint            string
-	blockRpcEndpoints           []string // Optional: dedicated RPC endpoints for block fetching (falls back to rpcEndpoints)
 	blockMaxRPS                 int      // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
@@ -191,7 +190,6 @@ func init() {
 	// [block] section flags
 	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
 	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
-	Run.Flags().StringSliceVar(&blockRpcEndpoints, "block-rpc", []string{}, "Dedicated RPC endpoint(s) for block fetching (falls back to --rpc if not set)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -367,15 +365,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
 
-	// block.rpc - dedicated RPC endpoints for block fetching (falls back to network.rpc)
-	blockRpcEndpoints = getStringSlice("block-rpc", "block.rpc")
-	if len(blockRpcEndpoints) == 0 {
-		blockRpcEndpoints = rpcEndpoints // Use network.rpc as fallback
-	}
-
-	// Validate: blockSource=rpc requires either block.rpc or network.rpc
-	if blockSource == "rpc" && len(blockRpcEndpoints) == 0 {
-		return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set block.rpc or network.rpc)")
+	// Validate: blockSource=rpc requires RPC endpoints
+	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
+		return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set network.rpc)")
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -761,7 +753,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), blockRpcEndpoints, rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -871,9 +863,9 @@ func runLive(c *cobra.Command, args []string) {
 
 		// Validate RPC endpoints since we're falling back to RPC mode
 		// (This check is normally done in loadConfig but only when blockSource == "rpc")
-		if len(blockRpcEndpoints) == 0 {
+		if len(rpcEndpoints) == 0 {
 			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
-				"Set block.rpc or network.rpc in config, or use --rpc flag.")
+				"Set network.rpc in config, or use --rpc flag.")
 		}
 	}
 
@@ -1281,7 +1273,7 @@ func runLive(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, blockRpcEndpoints, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1602,17 +1594,9 @@ func printStartupInfo(commandName string) {
 
 	// RPC endpoints - show auxiliary (network.rpc) endpoints
 	if len(rpcEndpoints) > 0 {
-		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
+		fmt.Printf("  RPC:          %s%s%s (primary)\n", gold, rpcEndpoints[0], reset)
 		for _, ep := range rpcEndpoints[1:] {
-			fmt.Printf("                %s%s%s\n", gold, ep, reset)
-		}
-	}
-
-	// Block RPC endpoints - show if different from network.rpc
-	if len(blockRpcEndpoints) > 0 && (len(rpcEndpoints) == 0 || blockRpcEndpoints[0] != rpcEndpoints[0]) {
-		fmt.Printf("  Block RPC:    %s%s%s\n", gold, blockRpcEndpoints[0], reset)
-		for _, ep := range blockRpcEndpoints[1:] {
-			fmt.Printf("                %s%s%s\n", gold, ep, reset)
+			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
 	}
 
@@ -1986,8 +1970,7 @@ func runReplayWithRecovery(
 	manifest *snapshot.SnapshotManifest,
 	resumeState *replay.ResumeState,
 	startSlot, endSlot uint64,
-	blockRpcEndpoints []string, // Primary + backup block RPC endpoints
-	auxRpcEndpoints []string,
+	rpcEndpoints []string, // RPC endpoints in priority order (first = primary)
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -2040,6 +2023,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, blockRpcEndpoints, auxRpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
 	return result
 }

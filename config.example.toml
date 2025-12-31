@@ -86,45 +86,40 @@ name = "mithril"
     snapshots = "/mnt/mithril-ledger/snapshots"
 
 # ============================================================================
-# [network] + [block] - Data Sources
+# [network] - RPC Endpoints
 # ============================================================================
 #
-# These settings control where Mithril gets the data it needs:
-#   - network.rpc: Auxiliary RPC calls (leader schedule, getSlot, snapshot discovery)
-#   - block.rpc:   Block fetching (getBlock calls) - falls back to network.rpc if not set
-#   - block.source: Whether to use RPC or Overcast for blocks
+# Solana RPC endpoints for all cluster access (blocks, leader schedule, etc.)
+# Endpoints are listed in PRIORITY ORDER:
+#   - First endpoint is PRIMARY (used for all calls when healthy)
+#   - Remaining endpoints are FALLBACKS (used when primary fails)
 #
-# Why two RPC settings? Some RPC endpoints don't serve getBlock but work fine for
-# auxiliary calls. This lets you use a lightweight endpoint for metadata and a
-# block-capable endpoint for actual block data.
+# On hard connectivity errors (connection refused, DNS failure, etc.), Mithril
+# automatically fails over to the next endpoint in the list. It periodically
+# probes the primary and restores to it when healthy.
 
 [network]
-    # Solana RPC endpoint(s) for auxiliary cluster access
-    # Used for: leader schedule, tip polling (getSlot), snapshot discovery
-    # Can be a single URL or multiple URLs for redundancy
+    # RPC endpoints in priority order (first = primary, rest = fallbacks)
+    #
+    # Example with paid primary + free fallback:
+    #   rpc = [
+    #       "https://your-helius-endpoint.helius-rpc.com",   # Primary
+    #       "https://api.mainnet-beta.solana.com"            # Fallback
+    #   ]
     rpc = ["https://api.mainnet-beta.solana.com"]
-    # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
+
+# ============================================================================
+# [block] - Block Streaming
+# ============================================================================
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"      - Fetch blocks via RPC
+    #   "rpc"      - Fetch blocks via RPC (uses endpoints from [network].rpc)
     #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
     #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
     #                The background downloader was removed; Overcast streaming will be
     #                re-implemented in a future release.
     source = "rpc"
-
-    # -------------------------------------------------------------------------
-    # Block Fetching RPC (optional override)
-    # -------------------------------------------------------------------------
-    # Dedicated RPC endpoint(s) for block fetching (getBlock calls).
-    # If not set, falls back to network.rpc above.
-    #
-    # Why separate? Some RPC endpoints don't serve getBlock but work fine for
-    # auxiliary calls (getSlot, leader schedule). Use this to configure a
-    # block-capable RPC separately from your auxiliary endpoint.
-    #
-    # rpc = ["https://block-capable-rpc.example.com"]
 
     # Overcast endpoint address (only used when source = "overcast")
     # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
