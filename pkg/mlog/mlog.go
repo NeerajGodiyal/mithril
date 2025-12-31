@@ -35,6 +35,7 @@ func relativePrefix() string {
 }
 
 // relativePrefixPrecise returns the elapsed time with millisecond precision (for block replay)
+// Uses fixed 12-char width for times under 10 hours to keep log columns aligned.
 func relativePrefixPrecise() string {
 	d := time.Since(programStartTime)
 	h := d / time.Hour
@@ -44,12 +45,18 @@ func relativePrefixPrecise() string {
 	secs := d.Seconds() // includes fractional seconds
 
 	var timeStr string
-	if h > 0 {
-		timeStr = fmt.Sprintf("%2dh%02dm", h, m)
+	if h >= 10 {
+		// Double digit hours: allow expansion beyond 12 chars
+		timeStr = fmt.Sprintf("%dh%02dm%06.3fs", h, m, secs)
+	} else if h > 0 {
+		// Single digit hours: 12 chars (e.g., "1h30m45.123s")
+		timeStr = fmt.Sprintf("%dh%02dm%06.3fs", h, m, secs)
 	} else if m > 0 {
-		timeStr = fmt.Sprintf("%2dm%06.3fs", m, secs)
+		// Minutes only: pad to 12 chars (e.g., "  30m45.123s")
+		timeStr = fmt.Sprintf("  %2dm%06.3fs", m, secs)
 	} else {
-		timeStr = fmt.Sprintf("%6.3fs", secs)
+		// Seconds only: pad to 12 chars (e.g., "     45.123s")
+		timeStr = fmt.Sprintf("     %06.3fs", secs)
 	}
 	return fmt.Sprintf("(+%s) ", timeStr)
 }
