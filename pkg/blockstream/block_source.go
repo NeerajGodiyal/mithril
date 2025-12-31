@@ -103,10 +103,10 @@ type BlockSource struct {
 	sourceType   BlockSourceType
 
 	// RPC failover tracking
-	activeRpcIdx        atomic.Int32  // Currently active RPC index (0 = primary)
-	slotsSinceFailover  atomic.Uint64 // Slots emitted since failover (for retry timing)
-	failoverCount       atomic.Uint64 // Total failovers (for stats)
-	primaryRetryPending atomic.Bool   // True when we're testing the primary
+	activeRpcIdx         atomic.Int32  // Currently active RPC index (0 = primary)
+	slotsSinceFailover   atomic.Uint64 // Slots emitted since failover (for retry timing)
+	failoverCount        atomic.Uint64 // Total failovers (for stats)
+	transientErrCount    atomic.Uint64 // Consecutive transient errors (reset on success)
 
 	// Rate limiting
 	rateLimiter *rate.Limiter
@@ -162,7 +162,8 @@ const (
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
 	// RPC failover settings
-	primaryRetryInterval = 100 // Retry primary RPC every N slots after failover
+	primaryRetryInterval     = 100 // Retry primary RPC every N slots after failover
+	failoverErrThreshold     = 3   // Consecutive transient errors before failover
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -314,6 +315,8 @@ func (bs *BlockSource) failoverToNext() bool {
 
 // restoreToPrimary attempts to switch back to the primary RPC.
 // Returns true if we were on a backup and switched back.
+// Note: This doesn't probe the primary first - if it's still down, failover will
+// trigger again on the next transient error. This keeps the logic simple.
 func (bs *BlockSource) restoreToPrimary() bool {
 	if bs.isOnPrimary() {
 		return false // Already on primary
@@ -322,20 +325,12 @@ func (bs *BlockSource) restoreToPrimary() bool {
 	currentIdx := bs.activeRpcIdx.Load()
 	if bs.activeRpcIdx.CompareAndSwap(currentIdx, 0) {
 		bs.slotsSinceFailover.Store(0)
-		mlog.Log.Infof("RPC restored to primary endpoint %s after successful test",
+		bs.transientErrCount.Store(0) // Reset error count when switching back
+		mlog.Log.Infof("RPC rotating back to primary endpoint %s (will failover again if errors persist)",
 			bs.rpcClients[0].Endpoint())
 		return true
 	}
 	return false
-}
-
-// shouldRetryPrimary returns true if we should test the primary RPC again
-func (bs *BlockSource) shouldRetryPrimary() bool {
-	if bs.isOnPrimary() {
-		return false // Already on primary
-	}
-	slots := bs.slotsSinceFailover.Load()
-	return slots > 0 && slots%primaryRetryInterval == 0
 }
 
 // fetchBlockOnce fetches a single block without internal retry loop
@@ -467,11 +462,14 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 		}
 
-		// RPC failover: on transient/timeout errors, try the next endpoint
-		// Only failover if we have backups and see repeated transient errors
+		// RPC failover: only after repeated transient errors (threshold-based)
+		// This prevents churn from single timeout spikes
 		if isTransient && len(bs.rpcClients) > 1 {
-			// Failover to the next endpoint
-			bs.failoverToNext()
+			errCount := bs.transientErrCount.Add(1)
+			if errCount >= failoverErrThreshold {
+				bs.failoverToNext()
+				bs.transientErrCount.Store(0) // Reset after failover
+			}
 		}
 
 		// Handle result
@@ -483,10 +481,12 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
+			bs.transientErrCount.Store(0) // Reset on progress
 		} else if result.block != nil {
 			// Success! This takes priority over any pending error results.
 			bs.stats.FetchSuccesses.Add(1)
 			bs.reorderBuffer[result.slot] = result.block
+			bs.transientErrCount.Store(0) // Reset error count on success
 			// Track max buffered slot
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
 				bs.stats.MaxBufferedSlot.Store(result.slot)
