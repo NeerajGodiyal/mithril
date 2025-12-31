@@ -866,8 +866,8 @@ func ReplayBlocks(
 	snapshotManifest *snapshot.SnapshotManifest,
 	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
-	blockRpcEndpoint string,
-	auxRpcEndpoints []string, // Auxiliary RPC endpoints for leader schedule, tip polling (uses first as primary, rest as backups)
+	blockRpcEndpoints []string, // Block RPC endpoints for getBlock (primary + backups for failover)
+	auxRpcEndpoints []string,   // Auxiliary RPC endpoints for leader schedule, tip polling
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -907,7 +907,12 @@ func ReplayBlocks(
 	var lastPersistedBankhash []byte
 
 	// Block RPC client - for block fetching (getBlock calls)
-	blockRpcc := rpcclient.NewRpcClient(blockRpcEndpoint)
+	// First endpoint is primary, rest are backups for failover
+	blockRpcc := rpcclient.NewRpcClient(blockRpcEndpoints[0])
+	var blockRpcBackups []string
+	if len(blockRpcEndpoints) > 1 {
+		blockRpcBackups = blockRpcEndpoints[1:]
+	}
 
 	// Auxiliary RPC client - for leader schedule, tip polling, etc.
 	// Falls back to block RPC if no auxiliary endpoints configured
@@ -965,21 +970,23 @@ func ReplayBlocks(
 	var opts *blockstream.BlockSourceOpts
 	if useOvercast {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:   blockstream.BlockSourceOvercast,
-			RpcClient:    blockRpcc,
-			AuxRpcClient: auxRpcc, // For tip polling
-			StartSlot:    startSlot,
-			EndSlot:      endSlot,
-			BlockDir:     blockDir,
+			SourceType:         blockstream.BlockSourceOvercast,
+			RpcClient:          blockRpcc,
+			AuxRpcClient:       auxRpcc, // For tip polling
+			BackupRpcEndpoints: blockRpcBackups,
+			StartSlot:          startSlot,
+			EndSlot:            endSlot,
+			BlockDir:           blockDir,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:   blockstream.BlockSourceRpc,
-			RpcClient:    blockRpcc,
-			AuxRpcClient: auxRpcc, // For tip polling
-			StartSlot:    startSlot,
-			EndSlot:      endSlot,
-			BlockDir:     blockDir,
+			SourceType:         blockstream.BlockSourceRpc,
+			RpcClient:          blockRpcc,
+			AuxRpcClient:       auxRpcc, // For tip polling
+			BackupRpcEndpoints: blockRpcBackups,
+			StartSlot:          startSlot,
+			EndSlot:            endSlot,
+			BlockDir:           blockDir,
 		}
 		// Apply block fetching options if provided
 		if blockFetchOpts != nil {

@@ -761,7 +761,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), blockRpcEndpoints[0], rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), blockRpcEndpoints, rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1281,7 +1281,7 @@ func runLive(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, blockRpcEndpoints[0], rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, blockRpcEndpoints, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1986,7 +1986,7 @@ func runReplayWithRecovery(
 	manifest *snapshot.SnapshotManifest,
 	resumeState *replay.ResumeState,
 	startSlot, endSlot uint64,
-	blockRpcEndpoint string,
+	blockRpcEndpoints []string, // Primary + backup block RPC endpoints
 	auxRpcEndpoints []string,
 	blockDir string,
 	txParallelism int,
@@ -2040,6 +2040,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, blockRpcEndpoint, auxRpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, blockRpcEndpoints, auxRpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
 	return result
 }

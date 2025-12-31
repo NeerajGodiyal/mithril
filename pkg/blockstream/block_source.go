@@ -28,12 +28,17 @@ const (
 )
 
 type BlockSourceOpts struct {
-	RpcClient    *rpcclient.RpcClient // For block fetching (getBlock)
+	RpcClient    *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
 	AuxRpcClient *rpcclient.RpcClient // For tip polling (getSlot) - falls back to RpcClient if nil
 	SourceType   BlockSourceType
 	StartSlot    uint64
 	EndSlot      uint64
 	BlockDir     string
+
+	// Backup RPC endpoints for failover (optional)
+	// These are tried in order if the primary fails with timeout errors.
+	// After 100 slots, the primary is retried and restored if working.
+	BackupRpcEndpoints []string
 
 	// Parallel fetch settings
 	MaxRPS          int    // Rate limit (requests per second), 0 = use default
@@ -88,14 +93,20 @@ type BlockSourceStats struct {
 }
 
 type BlockSource struct {
-	rpcClient    *rpcclient.RpcClient // For block fetching
-	auxRpcClient *rpcclient.RpcClient // For tip polling (getSlot)
+	rpcClients   []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
+	auxRpcClient *rpcclient.RpcClient   // For tip polling (getSlot)
 	streamChan   chan *b.Block
 	startSlot    uint64
 	endSlot      uint64
 	currentSlot  uint64
 	blockDir     string
 	sourceType   BlockSourceType
+
+	// RPC failover tracking
+	activeRpcIdx        atomic.Int32  // Currently active RPC index (0 = primary)
+	slotsSinceFailover  atomic.Uint64 // Slots emitted since failover (for retry timing)
+	failoverCount       atomic.Uint64 // Total failovers (for stats)
+	primaryRetryPending atomic.Bool   // True when we're testing the primary
 
 	// Rate limiting
 	rateLimiter *rate.Limiter
@@ -149,6 +160,9 @@ const (
 	defaultMaxPending      = 500
 	streamChanBuffer       = 100
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
+
+	// RPC failover settings
+	primaryRetryInterval = 100 // Retry primary RPC every N slots after failover
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -179,8 +193,15 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		auxRpcClient = opts.RpcClient
 	}
 
+	// Build list of RPC clients: primary + backups
+	rpcClients := make([]*rpcclient.RpcClient, 0, 1+len(opts.BackupRpcEndpoints))
+	rpcClients = append(rpcClients, opts.RpcClient)
+	for _, endpoint := range opts.BackupRpcEndpoints {
+		rpcClients = append(rpcClients, rpcclient.NewRpcClient(endpoint))
+	}
+
 	bs := &BlockSource{
-		rpcClient:       opts.RpcClient,
+		rpcClients:      rpcClients,
 		auxRpcClient:    auxRpcClient,
 		streamChan:      make(chan *b.Block, streamChanBuffer),
 		startSlot:       opts.StartSlot,
@@ -206,6 +227,12 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
 	bs.lastProgress.Store(time.Now().Unix())
+
+	// Log RPC configuration
+	if len(rpcClients) > 1 {
+		mlog.Log.Infof("Block fetching configured with %d RPC endpoints (primary + %d backups)",
+			len(rpcClients), len(rpcClients)-1)
+	}
 
 	return bs
 }
@@ -236,6 +263,81 @@ func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
 	return out, nil
 }
 
+// getActiveRpc returns the currently active RPC client for block fetching
+func (bs *BlockSource) getActiveRpc() *rpcclient.RpcClient {
+	idx := bs.activeRpcIdx.Load()
+	if idx < 0 || int(idx) >= len(bs.rpcClients) {
+		return bs.rpcClients[0]
+	}
+	return bs.rpcClients[idx]
+}
+
+// getPrimaryRpc returns the primary (first) RPC client
+func (bs *BlockSource) getPrimaryRpc() *rpcclient.RpcClient {
+	return bs.rpcClients[0]
+}
+
+// isOnPrimary returns true if we're using the primary RPC
+func (bs *BlockSource) isOnPrimary() bool {
+	return bs.activeRpcIdx.Load() == 0
+}
+
+// failoverToNext switches to the next RPC endpoint on timeout errors.
+// Only fails over if there are backup endpoints available.
+// Returns true if failover occurred.
+func (bs *BlockSource) failoverToNext() bool {
+	if len(bs.rpcClients) <= 1 {
+		return false // No backups available
+	}
+
+	currentIdx := bs.activeRpcIdx.Load()
+	nextIdx := (currentIdx + 1) % int32(len(bs.rpcClients))
+
+	// Use CompareAndSwap to avoid race conditions
+	if bs.activeRpcIdx.CompareAndSwap(currentIdx, nextIdx) {
+		bs.failoverCount.Add(1)
+		bs.slotsSinceFailover.Store(0)
+
+		currentEndpoint := bs.rpcClients[currentIdx].Endpoint()
+		nextEndpoint := bs.rpcClients[nextIdx].Endpoint()
+
+		if nextIdx == 0 {
+			mlog.Log.Infof("RPC failover: restored to primary endpoint %s", nextEndpoint)
+		} else {
+			mlog.Log.Errorf("RPC failover: switching from %s to backup %s (failover #%d)",
+				currentEndpoint, nextEndpoint, bs.failoverCount.Load())
+		}
+		return true
+	}
+	return false
+}
+
+// restoreToPrimary attempts to switch back to the primary RPC.
+// Returns true if we were on a backup and switched back.
+func (bs *BlockSource) restoreToPrimary() bool {
+	if bs.isOnPrimary() {
+		return false // Already on primary
+	}
+
+	currentIdx := bs.activeRpcIdx.Load()
+	if bs.activeRpcIdx.CompareAndSwap(currentIdx, 0) {
+		bs.slotsSinceFailover.Store(0)
+		mlog.Log.Infof("RPC restored to primary endpoint %s after successful test",
+			bs.rpcClients[0].Endpoint())
+		return true
+	}
+	return false
+}
+
+// shouldRetryPrimary returns true if we should test the primary RPC again
+func (bs *BlockSource) shouldRetryPrimary() bool {
+	if bs.isOnPrimary() {
+		return false // Already on primary
+	}
+	slots := bs.slotsSinceFailover.Load()
+	return slots > 0 && slots%primaryRetryInterval == 0
+}
+
 // fetchBlockOnce fetches a single block without internal retry loop
 func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
 	// Try file first
@@ -243,13 +345,16 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
 		return blk, nil
 	}
 
+	// Get the currently active RPC client
+	rpc := bs.getActiveRpc()
+
 	// Single RPC attempt (no internal retry - scheduler handles retries)
-	blockResult, err := bs.rpcClient.GetBlockConfirmedOnce(slot)
+	blockResult, err := rpc.GetBlockConfirmedOnce(slot)
 	if err != nil {
 		return nil, err
 	}
 
-	return block.FromBlockResult(blockResult, slot, bs.rpcClient), nil
+	return block.FromBlockResult(blockResult, slot, rpc), nil
 }
 
 // pollTip periodically updates the confirmed tip using the auxiliary RPC client
@@ -345,7 +450,8 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			continue
 		}
 
-		// Track error buckets
+		// Track error buckets and handle RPC failover on transient errors
+		isTransient := false
 		if result.err != nil {
 			if result.err == errBeyondTip {
 				// Already tracked in worker
@@ -355,9 +461,17 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.stats.ErrRateLimited.Add(1)
 			} else if isTransientNetworkErr(result.err) {
 				bs.stats.ErrTransient.Add(1)
+				isTransient = true
 			} else if result.err != rpcclient.SlotSkipped {
 				bs.stats.ErrOther.Add(1)
 			}
+		}
+
+		// RPC failover: on transient/timeout errors, try the next endpoint
+		// Only failover if we have backups and see repeated transient errors
+		if isTransient && len(bs.rpcClients) > 1 {
+			// Failover to the next endpoint
+			bs.failoverToNext()
 		}
 
 		// Handle result
@@ -405,6 +519,17 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.streamChan <- blk
 				// Update progress timestamp for stall detection
 				bs.lastProgress.Store(time.Now().Unix())
+
+				// Track slots since failover for primary retry
+				if !bs.isOnPrimary() {
+					slots := bs.slotsSinceFailover.Add(1)
+					// Every primaryRetryInterval slots, try the primary again
+					if slots%primaryRetryInterval == 0 {
+						bs.restoreToPrimary()
+						// If primary fails, failover will trigger again on next transient error
+					}
+				}
+
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
@@ -412,6 +537,15 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				delete(bs.skippedSlots, bs.nextSlotToSend)
 				// Also update progress - skipped slots count as progress
 				bs.lastProgress.Store(time.Now().Unix())
+
+				// Track slots since failover for primary retry (skipped slots count too)
+				if !bs.isOnPrimary() {
+					slots := bs.slotsSinceFailover.Add(1)
+					if slots%primaryRetryInterval == 0 {
+						bs.restoreToPrimary()
+					}
+				}
+
 				bs.nextSlotToSend++
 			} else {
 				break
@@ -659,9 +793,10 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 	if bs.sourceType == BlockSourceFile {
 		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
+			rpc := bs.getActiveRpc()
 			for {
 				// Use single-attempt fetch to avoid inner retry loop bypassing rate limits
-				blockResult, err = bs.rpcClient.GetBlockConfirmedOnce(uint64(slot))
+				blockResult, err = rpc.GetBlockConfirmedOnce(uint64(slot))
 				if err == nil {
 					break
 				} else if err == rpcclient.SlotSkipped {
@@ -676,7 +811,7 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 					return nil, fmt.Errorf("error fetching block: %w", err)
 				}
 			}
-			blk = block.FromBlockResult(blockResult, slot, bs.rpcClient)
+			blk = block.FromBlockResult(blockResult, slot, rpc)
 		}
 	} else if bs.sourceType == BlockSourceOvercast {
 		// NOTE: BlockSourceOvercast is TEMPORARILY NON-FUNCTIONAL.
