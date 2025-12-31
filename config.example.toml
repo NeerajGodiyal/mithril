@@ -90,13 +90,13 @@ name = "mithril"
 # ============================================================================
 #
 # These settings control where Mithril gets the data it needs:
-#   1. RPC endpoints - Used to discover snapshot sources AND fetch blocks
-#   2. Block source  - Whether to stream blocks from RPC or Overcast
+#   - network.rpc: Auxiliary RPC calls (leader schedule, getSlot, snapshot discovery)
+#   - block.rpc:   Block fetching (getBlock calls) - falls back to network.rpc if not set
+#   - block.source: Whether to use RPC or Overcast for blocks
 #
-# On startup, Mithril uses the RPC endpoint(s) to:
-#   - Query the cluster for nodes hosting snapshots
-#   - Speed-test nodes to find the fastest snapshot download
-#   - Fetch new blocks in real-time (if using RPC as block source)
+# Why two RPC settings? Some RPC endpoints don't serve getBlock but work fine for
+# auxiliary calls. This lets you use a lightweight endpoint for metadata and a
+# block-capable endpoint for actual block data.
 
 [network]
     # Solana RPC endpoint(s) for auxiliary cluster access
