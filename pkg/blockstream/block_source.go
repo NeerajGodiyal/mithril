@@ -349,15 +349,19 @@ func (bs *BlockSource) restoreToPrimary() bool {
 	return false
 }
 
-// fetchBlockOnce fetches a single block without internal retry loop
-func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
+// fetchBlockOnce fetches a single block without internal retry loop.
+// rpcIdx specifies which RPC client to use (for consistent error attribution).
+func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, error) {
 	// Try file first
 	if blk, err := bs.tryGetBlockFromFile(slot); err == nil {
 		return blk, nil
 	}
 
-	// Get the currently active RPC client
-	rpc := bs.getActiveRpc()
+	// Use the specified RPC client (not getActiveRpc - that could race with failover)
+	if rpcIdx < 0 || int(rpcIdx) >= len(bs.rpcClients) {
+		rpcIdx = 0
+	}
+	rpc := bs.rpcClients[rpcIdx]
 
 	// Single RPC attempt (no internal retry - scheduler handles retries)
 	blockResult, err := rpc.GetBlockConfirmedOnce(slot)
@@ -430,12 +434,13 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		}
 
 		// Capture which RPC we're using BEFORE the fetch (for error attribution)
+		// Pass this to fetchBlockOnce so it uses the same client we're attributing to
 		rpcIdx := bs.activeRpcIdx.Load()
 
 		// Fetch block with latency tracking
 		bs.stats.FetchAttempts.Add(1)
 		fetchStart := time.Now()
-		blk, err := bs.fetchBlockOnce(slot)
+		blk, err := bs.fetchBlockOnce(slot, rpcIdx)
 		fetchLatency := time.Since(fetchStart)
 
 		// Track latency for successful fetches
@@ -465,6 +470,8 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		}
 
 		// Track error buckets
+		// Note: isHardConnectivityErr is checked independently because hard errors
+		// (connection refused, no such host) are NOT in isTransientNetworkErr anymore
 		isHardErr := false
 		if result.err != nil {
 			if result.err == errBeyondTip {
@@ -473,12 +480,14 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.stats.ErrSlotNotAvail.Add(1)
 			} else if isRateLimitedErr(result.err) {
 				bs.stats.ErrRateLimited.Add(1)
-			} else if isTransientNetworkErr(result.err) {
+			} else if isHardConnectivityErr(result.err) {
+				// Hard connectivity errors: endpoint is down (connection refused, no such host, etc.)
+				// These count as transient for stats but also trigger failover logic
 				bs.stats.ErrTransient.Add(1)
-				// Check if this is a hard connectivity error (failover-worthy)
-				if isHardConnectivityErr(result.err) {
-					isHardErr = true
-				}
+				isHardErr = true
+			} else if isTransientNetworkErr(result.err) {
+				// Soft transient errors: retry same endpoint (502/503, timeouts, EOF)
+				bs.stats.ErrTransient.Add(1)
 			} else if result.err != rpcclient.SlotSkipped {
 				bs.stats.ErrOther.Add(1)
 			}
@@ -838,7 +847,7 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 					time.Sleep(500 * time.Millisecond)
 				} else if isRateLimitedErr(err) {
 					time.Sleep(2 * time.Second)
-				} else if isTransientNetworkErr(err) {
+				} else if isHardConnectivityErr(err) || isTransientNetworkErr(err) {
 					time.Sleep(1 * time.Second)
 				} else {
 					return nil, fmt.Errorf("error fetching block: %w", err)
