@@ -88,9 +88,10 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	blockSource                 string // "rpc" or "overcast"
+	blockSource                 string   // "rpc" or "overcast"
 	overcastEndpoint            string
-	blockMaxRPS                 int    // Rate limit for block fetching
+	blockRpcEndpoints           []string // Optional: dedicated RPC endpoints for block fetching (falls back to rpcEndpoints)
+	blockMaxRPS                 int      // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
 	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
@@ -367,6 +368,13 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		return fmt.Errorf("blockSource=rpc but no endpoints were provided")
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
+
+	// block.rpc - dedicated RPC endpoints for block fetching (falls back to network.rpc)
+	blockRpcEndpoints = getStringSlice("block-rpc", "block.rpc")
+	if len(blockRpcEndpoints) == 0 {
+		blockRpcEndpoints = rpcEndpoints // Use network.rpc as fallback
+	}
+
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
 	blockMaxInflight = getInt("block-max-inflight", "block.max_inflight")
 	blockTipPollIntervalMs = getInt("block-tip-poll-ms", "block.tip_poll_interval_ms")
@@ -750,7 +758,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), blockRpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -860,9 +868,9 @@ func runLive(c *cobra.Command, args []string) {
 
 		// Validate RPC endpoints since we're falling back to RPC mode
 		// (This check is normally done in loadConfig but only when blockSource == "rpc")
-		if len(rpcEndpoints) == 0 {
+		if len(blockRpcEndpoints) == 0 {
 			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
-				"Set network.rpc in config or use --rpc flag.")
+				"Set block.rpc or network.rpc in config, or use --rpc flag.")
 		}
 	}
 
@@ -1270,7 +1278,7 @@ func runLive(c *cobra.Command, args []string) {
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, blockRpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1589,10 +1597,18 @@ func printStartupInfo(commandName string) {
 		fmt.Println()
 	}
 
-	// RPC endpoints
+	// RPC endpoints - show auxiliary (network.rpc) endpoints
 	if len(rpcEndpoints) > 0 {
 		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
 		for _, ep := range rpcEndpoints[1:] {
+			fmt.Printf("                %s%s%s\n", gold, ep, reset)
+		}
+	}
+
+	// Block RPC endpoints - show if different from network.rpc
+	if len(blockRpcEndpoints) > 0 && (len(rpcEndpoints) == 0 || blockRpcEndpoints[0] != rpcEndpoints[0]) {
+		fmt.Printf("  Block RPC:    %s%s%s\n", gold, blockRpcEndpoints[0], reset)
+		for _, ep := range blockRpcEndpoints[1:] {
 			fmt.Printf("                %s%s%s\n", gold, ep, reset)
 		}
 	}

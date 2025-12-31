@@ -125,14 +125,15 @@ mode = "snapshot"   # "auto" | "snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
-blockstore = "/mnt/mithril-ledger/blockstore"
+blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporarily disabled
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 
 [network]
-rpc = ["https://api.mainnet-beta.solana.com"]
+rpc = ["https://api.mainnet-beta.solana.com"] # Auxiliary calls (leader schedule, tip poll)
 
 [block]
 source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
+# rpc = ["https://block-capable-rpc.example.com"]  # Optional: dedicated block fetching RPC
 # overcast_endpoint = "localhost:9000"
 
 [replay]

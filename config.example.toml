@@ -99,20 +99,35 @@ name = "mithril"
 #   - Fetch new blocks in real-time (if using RPC as block source)
 
 [network]
-    # Solana RPC endpoint(s) for cluster access
-    # Used for: discovering snapshot sources, fetching blocks (if source=rpc)
+    # Solana RPC endpoint(s) for auxiliary cluster access
+    # Used for: leader schedule, tip polling (getSlot), snapshot discovery
+    # Public mainnet RPC works here - these calls are lightweight and don't need
+    # paid endpoints.
     # Can be a single URL or multiple URLs for redundancy
     rpc = ["https://api.mainnet-beta.solana.com"]
     # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"      - Fetch blocks via RPC (uses network.rpc endpoints above)
+    #   "rpc"      - Fetch blocks via RPC
     #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
     #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
     #                The background downloader was removed; Overcast streaming will be
     #                re-implemented in a future release.
     source = "rpc"
+
+    # -------------------------------------------------------------------------
+    # Block Fetching RPC (optional override)
+    # -------------------------------------------------------------------------
+    # Dedicated RPC endpoint(s) for block fetching (getBlock calls).
+    # If not set, falls back to network.rpc above.
+    #
+    # Why separate? Public RPC endpoints often don't serve getBlock, but work
+    # fine for auxiliary calls (getSlot, leader schedule). Use this to configure
+    # a paid/fast RPC specifically for block fetching while keeping a free
+    # public endpoint for auxiliary calls.
+    #
+    # rpc = ["https://block-capable-rpc.example.com"]
 
     # Overcast endpoint address (only used when source = "overcast")
     # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
