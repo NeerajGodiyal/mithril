@@ -116,6 +116,8 @@ type BlockSource struct {
 
 	// Tip tracking
 	confirmedTip       atomic.Uint64
+	tipAtSlot          atomic.Uint64 // What slot we were emitting when tip was measured
+	tipTime            atomic.Int64  // Unix nano timestamp when tip was measured
 	tipSafetyMargin    uint64
 	tipPollInterval    time.Duration
 	lastTipUpdate      atomic.Int64  // Unix timestamp of last successful tip poll
@@ -382,8 +384,7 @@ func (bs *BlockSource) pollTip() {
 
 	// Get initial tip
 	if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
-		bs.confirmedTip.Store(tip)
-		bs.lastTipUpdate.Store(time.Now().Unix())
+		bs.updateTipSnapshot(tip)
 		bs.tipPollFailures.Store(0)
 	} else {
 		bs.tipPollFailures.Add(1)
@@ -399,8 +400,7 @@ func (bs *BlockSource) pollTip() {
 			return
 		case <-ticker.C:
 			if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
-				bs.confirmedTip.Store(tip)
-				bs.lastTipUpdate.Store(time.Now().Unix())
+				bs.updateTipSnapshot(tip)
 				bs.tipPollFailures.Store(0)
 			} else {
 				bs.tipPollFailures.Add(1)
@@ -408,6 +408,19 @@ func (bs *BlockSource) pollTip() {
 			}
 		}
 	}
+}
+
+// updateTipSnapshot stores the tip along with what slot we were emitting at that moment.
+// This allows accurate distance calculation: tip - tipAtSlot is precise at measurement time.
+func (bs *BlockSource) updateTipSnapshot(tip uint64) {
+	bs.reorderMu.Lock()
+	slotAtTip := bs.nextSlotToSend
+	bs.reorderMu.Unlock()
+
+	bs.confirmedTip.Store(tip)
+	bs.tipAtSlot.Store(slotAtTip)
+	bs.tipTime.Store(time.Now().UnixNano())
+	bs.lastTipUpdate.Store(time.Now().Unix())
 }
 
 // getMaxTipFromAllRpcs queries all configured RPCs for the current slot
@@ -980,6 +993,8 @@ type FetchStatsSnapshot struct {
 	NextSlot           uint64
 	MaxBuffered        uint64
 	ConfirmedTip       uint64
+	TipAtSlot          uint64 // What slot we were emitting when tip was measured
+	TipAgeMs           int64  // How old the tip measurement is (milliseconds)
 	WorkQueueLen       int
 	ReorderBufLen      int
 	// Tip poll health
@@ -1018,6 +1033,13 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		tipStaleSecs = time.Now().Unix() - lastTipUpdate
 	}
 
+	// Calculate tip age in milliseconds (how old the tip measurement is)
+	var tipAgeMs int64
+	tipTimeNano := bs.tipTime.Load()
+	if tipTimeNano > 0 {
+		tipAgeMs = (time.Now().UnixNano() - tipTimeNano) / int64(time.Millisecond)
+	}
+
 	return FetchStatsSnapshot{
 		Attempts:           attempts,
 		Successes:          successes,
@@ -1035,6 +1057,8 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		NextSlot:           nextSlot,
 		MaxBuffered:        maxBuffered,
 		ConfirmedTip:       bs.confirmedTip.Load(),
+		TipAtSlot:          bs.tipAtSlot.Load(),
+		TipAgeMs:           tipAgeMs,
 		WorkQueueLen:       len(bs.workQueue),
 		ReorderBufLen:      reorderLen,
 		TipStaleSecs:       tipStaleSecs,
