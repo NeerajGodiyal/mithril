@@ -488,7 +488,11 @@ mainLoop:
 				err = ExcInvalidInstr
 				break
 			}
-			r[ins.Dst()] = uint64(uint32(r[ins.Dst()]) % uint32(r[ins.Src()]))
+			if src := r[ins.Src()]; src != 0 {
+				r[ins.Dst()] = uint64(r[ins.Dst()] % src)
+			} else {
+				err = ExcDivideByZero
+			}
 			pc++
 		case OpUrem64Imm:
 			if !ip.sbpfVersion.EnablePqr() {
