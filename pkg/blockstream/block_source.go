@@ -319,9 +319,10 @@ func (bs *BlockSource) failoverToNext() bool {
 
 // probePrimary does a quick health check on the primary RPC endpoint.
 // Returns true if the primary responds successfully to a getSlot call.
+// Uses a 5-second timeout to prevent blocking the scheduler on hanging RPCs.
 func (bs *BlockSource) probePrimary() bool {
 	primary := bs.getPrimaryRpc()
-	_, err := primary.GetSlot()
+	_, err := primary.GetSlotWithTimeout(5 * time.Second)
 	return err == nil
 }
 

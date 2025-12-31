@@ -269,6 +269,19 @@ func (fetcher *RpcClient) GetSlot() (uint64, error) {
 	return slot, err
 }
 
+// GetSlotWithTimeout returns the current slot with a timeout.
+// Useful for health probes where we don't want to block indefinitely.
+func (fetcher *RpcClient) GetSlotWithTimeout(timeout time.Duration) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	slot, err := fetcher.client.GetSlot(ctx, rpc.CommitmentConfirmed)
+	if err != nil {
+		return 0, err
+	}
+	return slot, nil
+}
+
 func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num int64) {
 	var fetchForever bool
 	if num < 0 {
