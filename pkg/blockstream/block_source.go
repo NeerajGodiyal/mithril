@@ -431,11 +431,11 @@ func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 }
 
 // scheduleBackupRequest sends a backup request for a slow slot (bypasses slotState check)
+// Returns true only if the request was actually queued.
 func (bs *BlockSource) scheduleBackupRequest(slot uint64) bool {
-	bs.stats.SpeculativeRetries.Add(1)
-
 	select {
 	case bs.workQueue <- slot:
+		bs.stats.SpeculativeRetries.Add(1) // Only count if actually queued
 		return true
 	case <-bs.stopChan:
 		return false
@@ -504,15 +504,18 @@ func (bs *BlockSource) scheduler() {
 			// Send backup requests for stale slots (>1 second old)
 			for _, slot := range bs.getStaleSlots(1 * time.Second) {
 				if !backupSent[slot] {
-					bs.scheduleBackupRequest(slot)
-					backupSent[slot] = true
+					if bs.scheduleBackupRequest(slot) {
+						backupSent[slot] = true // Only mark if actually queued
+					}
 				}
 			}
 
-			// Clean up backupSent for completed slots
+			// Clean up backupSent for completed or retried slots
+			// Clear when slot is done OR no longer inflight (was retried/reset)
 			bs.slotStateMu.Lock()
 			for slot := range backupSent {
-				if bs.slotState[slot] == slotDone {
+				state, exists := bs.slotState[slot]
+				if state == slotDone || !exists || state != slotInflight {
 					delete(backupSent, slot)
 				}
 			}
