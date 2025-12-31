@@ -1481,10 +1481,10 @@ func printStartupInfo(commandName string) {
 	if accountsPath != "" {
 		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(accountsPath))
 		if diskInfo != "" {
-			fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
+			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
 			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
 		} else {
-			fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
+			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
 		}
 	}
 
