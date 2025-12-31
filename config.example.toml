@@ -142,7 +142,7 @@ name = "mithril"
 
     # How often to poll for chain tip (milliseconds).
     # Used to avoid fetching slots that don't exist yet.
-    tip_poll_interval_ms = 1000
+    tip_poll_interval_ms = 5000
 
     # Don't fetch within this many slots of the confirmed tip.
     # Prevents "slot not available" errors. 64 slots ≈ 25 seconds.

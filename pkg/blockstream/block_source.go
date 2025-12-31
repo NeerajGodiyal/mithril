@@ -157,7 +157,7 @@ type BlockSource struct {
 const (
 	defaultMaxRPS          = 10
 	defaultMaxInflight     = 10
-	defaultTipPollMs       = 1000
+	defaultTipPollMs       = 5000
 	defaultTipSafetyMargin = 64
 	defaultMaxPending      = 500
 	streamChanBuffer       = 100
