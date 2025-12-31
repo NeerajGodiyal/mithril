@@ -973,6 +973,14 @@ func ReplayBlocks(
 			break
 		}
 
+		// Stall detection: warn if waited too long for a block
+		if waitTime > 2*time.Second {
+			stats := blockStream.GetFetchStats()
+			mlog.Log.Errorf("STALL: waited %.1fs for block | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d",
+				waitTime.Seconds(), stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
+				stats.ErrNotAvail, stats.ErrRateLimit, stats.ErrBeyondTip)
+		}
+
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			result.WasCancelled = true
@@ -1136,6 +1144,16 @@ func ReplayBlocks(
 					avgExec, avgWait, blockStream.BufferDepth())
 				mlog.Log.Infof("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
 					avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
+
+				// Print fetch stats for RPC source
+				fetchStats := blockStream.GetFetchStats()
+				if fetchStats.Attempts > 0 {
+					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
+					mlog.Log.Infof("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | lead: %d | errs: na:%d rl:%d bt:%d",
+						fetchStats.AvgLatencyMs, retryRate, fetchStats.LeadSlots,
+						fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip)
+					blockStream.ResetStats()
+				}
 				mlog.Log.Infof("")
 
 				// Reset accumulators

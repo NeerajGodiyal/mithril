@@ -60,6 +60,28 @@ type fetchResult struct {
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
 
+// BlockSourceStats contains metrics for parallel block fetching
+type BlockSourceStats struct {
+	// Fetch counts
+	FetchAttempts  atomic.Uint64
+	FetchSuccesses atomic.Uint64
+	FetchRetries   atomic.Uint64
+	FetchSkipped   atomic.Uint64
+
+	// Error buckets
+	ErrSlotNotAvail atomic.Uint64
+	ErrRateLimited  atomic.Uint64
+	ErrBeyondTip    atomic.Uint64
+	ErrOther        atomic.Uint64
+
+	// Latency tracking (nanoseconds)
+	TotalFetchLatencyNs atomic.Uint64
+	FetchLatencyCount   atomic.Uint64
+
+	// Buffer stats
+	MaxBufferedSlot atomic.Uint64
+}
+
 type BlockSource struct {
 	rpcClient   *rpcclient.RpcClient
 	streamChan  chan *b.Block
@@ -79,11 +101,11 @@ type BlockSource struct {
 	tipPollInterval time.Duration
 
 	// Reorder buffer
-	reorderMu     sync.Mutex
-	reorderBuffer map[uint64]*b.Block
-	skippedSlots  map[uint64]bool
+	reorderMu      sync.Mutex
+	reorderBuffer  map[uint64]*b.Block
+	skippedSlots   map[uint64]bool
 	nextSlotToSend uint64
-	maxPending    int
+	maxPending     int
 
 	// Slot state tracking (prevents duplicates)
 	slotStateMu sync.Mutex
@@ -98,6 +120,9 @@ type BlockSource struct {
 	resultQueue chan fetchResult
 	stopChan    chan struct{}
 	stopped     atomic.Bool
+
+	// Stats tracking
+	stats BlockSourceStats
 }
 
 // Default values
@@ -245,12 +270,22 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 
 		// Beyond tip - send back for retry
 		if maxSlot > 0 && slot > maxSlot {
+			bs.stats.ErrBeyondTip.Add(1)
 			bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip}
 			continue
 		}
 
-		// Fetch block
+		// Fetch block with latency tracking
+		bs.stats.FetchAttempts.Add(1)
+		fetchStart := time.Now()
 		blk, err := bs.fetchBlockOnce(slot)
+		fetchLatency := time.Since(fetchStart)
+
+		// Track latency for successful fetches
+		if err == nil {
+			bs.stats.TotalFetchLatencyNs.Add(uint64(fetchLatency.Nanoseconds()))
+			bs.stats.FetchLatencyCount.Add(1)
+		}
 
 		skipped := err == rpcclient.SlotSkipped
 		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped}
@@ -262,20 +297,40 @@ func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
 		bs.reorderMu.Lock()
 
+		// Track error buckets
+		if result.err != nil {
+			if result.err == errBeyondTip {
+				// Already tracked in worker
+			} else if isSlotNotAvailableErr(result.err) {
+				bs.stats.ErrSlotNotAvail.Add(1)
+			} else if isRateLimitedErr(result.err) {
+				bs.stats.ErrRateLimited.Add(1)
+			} else if result.err != rpcclient.SlotSkipped {
+				bs.stats.ErrOther.Add(1)
+			}
+		}
+
 		// Handle result
 		isRetriable := result.err == errBeyondTip || isSlotNotAvailableErr(result.err) || isRateLimitedErr(result.err)
 
 		if result.skipped {
+			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
 		} else if isRetriable {
 			// Schedule retry for transient errors
+			bs.stats.FetchRetries.Add(1)
 			bs.scheduleRetry(result.slot)
 		} else if result.err != nil {
 			// Other error - log and mark as skipped
 			mlog.Log.Errorf("block fetch error slot=%d: %v", result.slot, result.err)
 			bs.skippedSlots[result.slot] = true
 		} else if result.block != nil {
+			bs.stats.FetchSuccesses.Add(1)
 			bs.reorderBuffer[result.slot] = result.block
+			// Track max buffered slot
+			if result.slot > bs.stats.MaxBufferedSlot.Load() {
+				bs.stats.MaxBufferedSlot.Store(result.slot)
+			}
 		}
 
 		// Mark slot done (even on error), unless retriable
@@ -504,4 +559,81 @@ func (bs *BlockSource) NextBlock() *b.Block {
 
 func (bs *BlockSource) BufferDepth() int {
 	return len(bs.streamChan)
+}
+
+// FetchStatsSnapshot returns a snapshot of fetch stats for logging
+type FetchStatsSnapshot struct {
+	Attempts      uint64
+	Successes     uint64
+	Retries       uint64
+	Skipped       uint64
+	AvgLatencyMs  float64
+	ErrNotAvail   uint64
+	ErrRateLimit  uint64
+	ErrBeyondTip  uint64
+	ErrOther      uint64
+	BufferDepth   int
+	LeadSlots     int64 // MaxBufferedSlot - NextSlotToSend
+	NextSlot      uint64
+	MaxBuffered   uint64
+	ConfirmedTip  uint64
+	WorkQueueLen  int
+	ReorderBufLen int
+}
+
+// GetFetchStats returns a snapshot of current fetch statistics
+func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
+	attempts := bs.stats.FetchAttempts.Load()
+	successes := bs.stats.FetchSuccesses.Load()
+	latencyCount := bs.stats.FetchLatencyCount.Load()
+	totalLatencyNs := bs.stats.TotalFetchLatencyNs.Load()
+
+	var avgLatencyMs float64
+	if latencyCount > 0 {
+		avgLatencyMs = float64(totalLatencyNs) / float64(latencyCount) / 1e6
+	}
+
+	bs.reorderMu.Lock()
+	nextSlot := bs.nextSlotToSend
+	reorderLen := len(bs.reorderBuffer)
+	bs.reorderMu.Unlock()
+
+	maxBuffered := bs.stats.MaxBufferedSlot.Load()
+	var leadSlots int64
+	if maxBuffered >= nextSlot {
+		leadSlots = int64(maxBuffered - nextSlot)
+	}
+
+	return FetchStatsSnapshot{
+		Attempts:      attempts,
+		Successes:     successes,
+		Retries:       bs.stats.FetchRetries.Load(),
+		Skipped:       bs.stats.FetchSkipped.Load(),
+		AvgLatencyMs:  avgLatencyMs,
+		ErrNotAvail:   bs.stats.ErrSlotNotAvail.Load(),
+		ErrRateLimit:  bs.stats.ErrRateLimited.Load(),
+		ErrBeyondTip:  bs.stats.ErrBeyondTip.Load(),
+		ErrOther:      bs.stats.ErrOther.Load(),
+		BufferDepth:   len(bs.streamChan),
+		LeadSlots:     leadSlots,
+		NextSlot:      nextSlot,
+		MaxBuffered:   maxBuffered,
+		ConfirmedTip:  bs.confirmedTip.Load(),
+		WorkQueueLen:  len(bs.workQueue),
+		ReorderBufLen: reorderLen,
+	}
+}
+
+// ResetStats resets the fetch statistics (useful between 100-slot windows)
+func (bs *BlockSource) ResetStats() {
+	bs.stats.FetchAttempts.Store(0)
+	bs.stats.FetchSuccesses.Store(0)
+	bs.stats.FetchRetries.Store(0)
+	bs.stats.FetchSkipped.Store(0)
+	bs.stats.ErrSlotNotAvail.Store(0)
+	bs.stats.ErrRateLimited.Store(0)
+	bs.stats.ErrBeyondTip.Store(0)
+	bs.stats.ErrOther.Store(0)
+	bs.stats.TotalFetchLatencyNs.Store(0)
+	bs.stats.FetchLatencyCount.Store(0)
 }
