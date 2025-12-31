@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 )
+
+var ErrOutOfBounds = errors.New("value out of bounds")
 
 // TODO Fuzz
 // TODO Differential fuzz against rbpf

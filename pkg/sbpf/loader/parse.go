@@ -89,6 +89,10 @@ func (l *Loader) newSymTableIter(sh *elf.Section64) (*symTableIter, error) {
 }
 
 func (l *Loader) readHeader() error {
+	if l.fileSize < ehLen {
+		return ErrOutOfBounds
+	}
+
 	var hdrBuf [ehLen]byte
 	if _, err := io.ReadFull(io.NewSectionReader(l.rd, 0, ehLen), hdrBuf[:]); err != nil {
 		return err
