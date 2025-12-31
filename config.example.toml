@@ -101,8 +101,6 @@ name = "mithril"
 [network]
     # Solana RPC endpoint(s) for auxiliary cluster access
     # Used for: leader schedule, tip polling (getSlot), snapshot discovery
-    # Public mainnet RPC works here - these calls are lightweight and don't need
-    # paid endpoints.
     # Can be a single URL or multiple URLs for redundancy
     rpc = ["https://api.mainnet-beta.solana.com"]
     # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
@@ -122,10 +120,9 @@ name = "mithril"
     # Dedicated RPC endpoint(s) for block fetching (getBlock calls).
     # If not set, falls back to network.rpc above.
     #
-    # Why separate? Public RPC endpoints often don't serve getBlock, but work
-    # fine for auxiliary calls (getSlot, leader schedule). Use this to configure
-    # a paid/fast RPC specifically for block fetching while keeping a free
-    # public endpoint for auxiliary calls.
+    # Why separate? Some RPC endpoints don't serve getBlock but work fine for
+    # auxiliary calls (getSlot, leader schedule). Use this to configure a
+    # block-capable RPC separately from your auxiliary endpoint.
     #
     # rpc = ["https://block-capable-rpc.example.com"]
 

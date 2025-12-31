@@ -129,7 +129,7 @@ blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporar
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 
 [network]
-rpc = ["https://api.mainnet-beta.solana.com"] # Auxiliary calls (leader schedule, tip poll)
+rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
 source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
