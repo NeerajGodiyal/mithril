@@ -72,6 +72,7 @@ type BlockSourceStats struct {
 	ErrSlotNotAvail atomic.Uint64
 	ErrRateLimited  atomic.Uint64
 	ErrBeyondTip    atomic.Uint64
+	ErrTransient    atomic.Uint64 // EOF, timeout, 502/503, connection reset, etc.
 	ErrOther        atomic.Uint64
 
 	// Latency tracking (nanoseconds)
@@ -305,13 +306,18 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.stats.ErrSlotNotAvail.Add(1)
 			} else if isRateLimitedErr(result.err) {
 				bs.stats.ErrRateLimited.Add(1)
+			} else if isTransientNetworkErr(result.err) {
+				bs.stats.ErrTransient.Add(1)
 			} else if result.err != rpcclient.SlotSkipped {
 				bs.stats.ErrOther.Add(1)
 			}
 		}
 
-		// Handle result
-		isRetriable := result.err == errBeyondTip || isSlotNotAvailableErr(result.err) || isRateLimitedErr(result.err)
+		// Handle result - transient network errors are also retriable
+		isRetriable := result.err == errBeyondTip ||
+			isSlotNotAvailableErr(result.err) ||
+			isRateLimitedErr(result.err) ||
+			isTransientNetworkErr(result.err)
 
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
@@ -571,6 +577,7 @@ type FetchStatsSnapshot struct {
 	ErrNotAvail   uint64
 	ErrRateLimit  uint64
 	ErrBeyondTip  uint64
+	ErrTransient  uint64 // EOF, timeout, 502/503, connection reset, etc.
 	ErrOther      uint64
 	BufferDepth   int
 	LeadSlots     int64 // MaxBufferedSlot - NextSlotToSend
@@ -613,6 +620,7 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		ErrNotAvail:   bs.stats.ErrSlotNotAvail.Load(),
 		ErrRateLimit:  bs.stats.ErrRateLimited.Load(),
 		ErrBeyondTip:  bs.stats.ErrBeyondTip.Load(),
+		ErrTransient:  bs.stats.ErrTransient.Load(),
 		ErrOther:      bs.stats.ErrOther.Load(),
 		BufferDepth:   len(bs.streamChan),
 		LeadSlots:     leadSlots,
@@ -633,6 +641,7 @@ func (bs *BlockSource) ResetStats() {
 	bs.stats.ErrSlotNotAvail.Store(0)
 	bs.stats.ErrRateLimited.Store(0)
 	bs.stats.ErrBeyondTip.Store(0)
+	bs.stats.ErrTransient.Store(0)
 	bs.stats.ErrOther.Store(0)
 	bs.stats.TotalFetchLatencyNs.Store(0)
 	bs.stats.FetchLatencyCount.Store(0)

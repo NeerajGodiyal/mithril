@@ -58,12 +58,17 @@ var SlotSkipped = errors.New("slot skipped")
 
 // GetBlockConfirmedOnce fetches a block with a single RPC attempt (no internal retry).
 // Use this with rate-limited parallel fetching where the scheduler handles retries.
+// Uses a 30-second timeout to prevent worker stalls on hung RPC connections.
 func (fetcher *RpcClient) GetBlockConfirmedOnce(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
+	// Use a timeout to prevent indefinite hangs on slow/stuck RPC connections
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	result, err := fetcher.client.GetBlockWithOpts(
-		context.TODO(),
+		ctx,
 		slot,
 		&rpc.GetBlockOpts{
 			MaxSupportedTransactionVersion: &maxSupportedTxVer,

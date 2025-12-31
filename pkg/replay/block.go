@@ -1149,9 +1149,9 @@ func ReplayBlocks(
 				fetchStats := blockStream.GetFetchStats()
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
-					mlog.Log.Infof("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | lead: %d | errs: na:%d rl:%d bt:%d",
+					mlog.Log.Infof("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | lead: %d | errs: na:%d rl:%d bt:%d tr:%d",
 						fetchStats.AvgLatencyMs, retryRate, fetchStats.LeadSlots,
-						fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip)
+						fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
 					blockStream.ResetStats()
 				}
 				mlog.Log.Infof("")
