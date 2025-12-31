@@ -950,7 +950,8 @@ mainLoop:
 				break mainLoop
 			}
 		default:
-			panic(fmt.Sprintf("unimplemented opcode %#02x", ins.Op()))
+			err = ExcUnsupportedInstruction
+			return
 		}
 
 		// Post execute
