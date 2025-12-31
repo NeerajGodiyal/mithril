@@ -1,20 +1,22 @@
 package blockstream
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
-
-	//"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
-	"github.com/panjf2000/ants/v2"
+	"golang.org/x/time/rate"
 )
 
 type BlockSourceType int
@@ -31,177 +33,473 @@ type BlockSourceOpts struct {
 	StartSlot  uint64
 	EndSlot    uint64
 	BlockDir   string
+
+	// Parallel fetch settings
+	MaxRPS          int    // Rate limit (requests per second), 0 = use default
+	MaxInflight     int    // Max concurrent workers, 0 = use default
+	TipPollMs       int    // Tip poll interval ms, 0 = use default
+	TipSafetyMargin uint64 // Don't fetch within N slots of tip, 0 = use default
 }
+
+// slotStatus tracks the state of each slot being fetched
+type slotStatus int
+
+const (
+	slotPending slotStatus = iota
+	slotInflight
+	slotDone
+)
+
+// fetchResult is sent from workers to the emitter
+type fetchResult struct {
+	slot    uint64
+	block   *b.Block
+	err     error
+	skipped bool // true if SlotSkipped error
+}
+
+var errBeyondTip = errors.New("slot beyond confirmed tip")
 
 type BlockSource struct {
-	rpcClient         *rpcclient.RpcClient
-	streamChan        chan *b.Block
-	startSlot         uint64
-	endSlot           uint64
-	currentSlot       uint64
-	totalSlotsToFetch uint64
-	numInitialSlots   uint64
-	blockDir          string
-	sourceType        BlockSourceType
+	rpcClient   *rpcclient.RpcClient
+	streamChan  chan *b.Block
+	startSlot   uint64
+	endSlot     uint64
+	currentSlot uint64
+	blockDir    string
+	sourceType  BlockSourceType
+
+	// Rate limiting
+	rateLimiter *rate.Limiter
+	maxInflight int
+
+	// Tip tracking
+	confirmedTip    atomic.Uint64
+	tipSafetyMargin uint64
+	tipPollInterval time.Duration
+
+	// Reorder buffer
+	reorderMu     sync.Mutex
+	reorderBuffer map[uint64]*b.Block
+	skippedSlots  map[uint64]bool
+	nextSlotToSend uint64
+	maxPending    int
+
+	// Slot state tracking (prevents duplicates)
+	slotStateMu sync.Mutex
+	slotState   map[uint64]slotStatus
+
+	// Retry queue for slots that need rescheduling
+	retryMu    sync.Mutex
+	retrySlots []uint64
+
+	// Worker coordination
+	workQueue   chan uint64
+	resultQueue chan fetchResult
+	stopChan    chan struct{}
+	stopped     atomic.Bool
 }
 
-type blockSourceTaskInfo struct {
-	slot uint64
-	idx  uint64
-}
-
-var blockBufferSize = 35
+// Default values
+const (
+	defaultMaxRPS          = 10
+	defaultMaxInflight     = 10
+	defaultTipPollMs       = 1000
+	defaultTipSafetyMargin = 64
+	defaultMaxPending      = 500
+	streamChanBuffer       = 100
+)
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
-	streamChan := make(chan *b.Block, blockBufferSize)
-	return &BlockSource{
-		rpcClient:         opts.RpcClient,
-		streamChan:        streamChan,
-		totalSlotsToFetch: opts.EndSlot - opts.StartSlot,
-		currentSlot:       opts.StartSlot,
-		startSlot:         opts.StartSlot,
-		endSlot:           opts.EndSlot,
-		numInitialSlots:   min(uint64(blockBufferSize), opts.EndSlot-opts.StartSlot),
-		blockDir:          opts.BlockDir,
-		sourceType:        opts.SourceType,
+	// Apply defaults
+	maxRPS := opts.MaxRPS
+	if maxRPS <= 0 {
+		maxRPS = defaultMaxRPS
 	}
+
+	maxInflight := opts.MaxInflight
+	if maxInflight <= 0 {
+		maxInflight = defaultMaxInflight
+	}
+
+	tipPollMs := opts.TipPollMs
+	if tipPollMs <= 0 {
+		tipPollMs = defaultTipPollMs
+	}
+
+	tipSafetyMargin := opts.TipSafetyMargin
+	if tipSafetyMargin == 0 {
+		tipSafetyMargin = defaultTipSafetyMargin
+	}
+
+	bs := &BlockSource{
+		rpcClient:       opts.RpcClient,
+		streamChan:      make(chan *b.Block, streamChanBuffer),
+		startSlot:       opts.StartSlot,
+		endSlot:         opts.EndSlot,
+		currentSlot:     opts.StartSlot,
+		blockDir:        opts.BlockDir,
+		sourceType:      opts.SourceType,
+		rateLimiter:     rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
+		maxInflight:     maxInflight,
+		tipSafetyMargin: tipSafetyMargin,
+		tipPollInterval: time.Duration(tipPollMs) * time.Millisecond,
+		reorderBuffer:   make(map[uint64]*b.Block),
+		skippedSlots:    make(map[uint64]bool),
+		nextSlotToSend:  opts.StartSlot,
+		maxPending:      defaultMaxPending,
+		slotState:       make(map[uint64]slotStatus),
+		workQueue:       make(chan uint64, maxInflight*2),
+		resultQueue:     make(chan fetchResult, maxInflight*2),
+		stopChan:        make(chan struct{}),
+	}
+
+	return bs
 }
 
-func (blockSource *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
-	if blockSource.blockDir == "" {
+func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
+	if bs.blockDir == "" {
 		return nil, fmt.Errorf("no block directory specified")
 	}
-	blockFilename := filepath.Join(filepath.Clean(blockSource.blockDir), fmt.Sprintf("%d.json", slot))
+	blockFilename := filepath.Join(filepath.Clean(bs.blockDir), fmt.Sprintf("%d.json", slot))
 	file, err := os.Open(blockFilename)
 	if err != nil {
 		return nil, fmt.Errorf("error opening blockFilename=%s: %w", blockFilename, err)
 	}
 
-	// Create a decoder
 	decoder := json.NewDecoder(file)
-
 	out := &block.Block{}
 
-	// Decode JSON into target
 	err = decoder.Decode(out)
 	if err != nil {
+		file.Close()
 		return nil, fmt.Errorf("block decode error: %w", err)
 	}
 	out.FixupTxVersions()
 
-	// we no longer need the file anymore after use, so close and delete from file system
 	file.Close()
 	os.Remove(blockFilename)
 
 	return out, nil
 }
 
-func (blockSource *BlockSource) fetchAndParseBlock(slot uint64) (*b.Block, error) {
+// fetchBlockOnce fetches a single block without internal retry loop
+func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
+	// Try file first
+	if blk, err := bs.tryGetBlockFromFile(slot); err == nil {
+		return blk, nil
+	}
+
+	// Single RPC attempt
+	blockResult, err := bs.rpcClient.GetBlockConfirmed(slot)
+	if err != nil {
+		return nil, err
+	}
+
+	return block.FromBlockResult(blockResult, slot, bs.rpcClient), nil
+}
+
+// pollTip periodically updates the confirmed tip
+func (bs *BlockSource) pollTip() {
+	// Get initial tip
+	if tip, err := bs.rpcClient.GetSlot(); err == nil {
+		bs.confirmedTip.Store(tip)
+	}
+
+	ticker := time.NewTicker(bs.tipPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bs.stopChan:
+			return
+		case <-ticker.C:
+			if tip, err := bs.rpcClient.GetSlot(); err == nil {
+				bs.confirmedTip.Store(tip)
+			}
+		}
+	}
+}
+
+// worker fetches blocks from the work queue
+func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
+	defer wg.Done()
+
+	for slot := range bs.workQueue {
+		// Check for shutdown
+		if bs.stopped.Load() {
+			return
+		}
+
+		// Wait for rate limiter
+		bs.rateLimiter.Wait(context.Background())
+
+		// Tip underflow guard
+		tip := bs.confirmedTip.Load()
+		var maxSlot uint64
+		if tip <= bs.tipSafetyMargin {
+			maxSlot = 0
+		} else {
+			maxSlot = tip - bs.tipSafetyMargin
+		}
+
+		// Beyond tip - send back for retry
+		if maxSlot > 0 && slot > maxSlot {
+			bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip}
+			continue
+		}
+
+		// Fetch block
+		blk, err := bs.fetchBlockOnce(slot)
+
+		skipped := err == rpcclient.SlotSkipped
+		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped}
+	}
+}
+
+// emitOrderedBlocks receives results and emits blocks in order
+func (bs *BlockSource) emitOrderedBlocks() {
+	for result := range bs.resultQueue {
+		bs.reorderMu.Lock()
+
+		// Handle result
+		if result.skipped {
+			bs.skippedSlots[result.slot] = true
+		} else if result.err == errBeyondTip || isSlotNotAvailableErr(result.err) {
+			// Schedule retry
+			bs.scheduleRetry(result.slot)
+		} else if result.err != nil {
+			// Other error - log and mark as skipped for now
+			mlog.Log.Errorf("block fetch error slot=%d: %v", result.slot, result.err)
+			bs.skippedSlots[result.slot] = true
+		} else if result.block != nil {
+			bs.reorderBuffer[result.slot] = result.block
+		}
+
+		// Mark slot done (even on error)
+		bs.slotStateMu.Lock()
+		if result.err != errBeyondTip && !isSlotNotAvailableErr(result.err) {
+			bs.slotState[result.slot] = slotDone
+		} else {
+			// Will be retried, reset to pending
+			delete(bs.slotState, result.slot)
+		}
+		bs.slotStateMu.Unlock()
+
+		// Emit consecutive blocks
+		for {
+			if blk, ok := bs.reorderBuffer[bs.nextSlotToSend]; ok {
+				delete(bs.reorderBuffer, bs.nextSlotToSend)
+				bs.reorderMu.Unlock()
+				bs.streamChan <- blk
+				bs.reorderMu.Lock()
+				bs.nextSlotToSend++
+			} else if bs.skippedSlots[bs.nextSlotToSend] {
+				// Slot was skipped, advance without emitting
+				delete(bs.skippedSlots, bs.nextSlotToSend)
+				bs.nextSlotToSend++
+			} else {
+				break
+			}
+		}
+
+		bs.reorderMu.Unlock()
+	}
+}
+
+// scheduleRetry adds a slot to the retry queue
+func (bs *BlockSource) scheduleRetry(slot uint64) {
+	bs.retryMu.Lock()
+	bs.retrySlots = append(bs.retrySlots, slot)
+	bs.retryMu.Unlock()
+}
+
+// getRetrySlots returns and clears the retry queue
+func (bs *BlockSource) getRetrySlots() []uint64 {
+	bs.retryMu.Lock()
+	slots := bs.retrySlots
+	bs.retrySlots = nil
+	bs.retryMu.Unlock()
+	return slots
+}
+
+// canScheduleMore returns true if we can schedule more slots
+func (bs *BlockSource) canScheduleMore() bool {
+	bs.reorderMu.Lock()
+	pending := len(bs.reorderBuffer)
+	bs.reorderMu.Unlock()
+	return pending < bs.maxPending
+}
+
+// scheduleSlot schedules a slot if not already scheduled
+func (bs *BlockSource) scheduleSlot(slot uint64) bool {
+	bs.slotStateMu.Lock()
+	if _, exists := bs.slotState[slot]; exists {
+		bs.slotStateMu.Unlock()
+		return false // Already scheduled
+	}
+	bs.slotState[slot] = slotInflight
+	bs.slotStateMu.Unlock()
+
+	select {
+	case bs.workQueue <- slot:
+		return true
+	case <-bs.stopChan:
+		return false
+	}
+}
+
+// scheduler feeds slots to the work queue
+func (bs *BlockSource) scheduler() {
+	nextToSchedule := bs.startSlot
+
+	retryTicker := time.NewTicker(200 * time.Millisecond)
+	defer retryTicker.Stop()
+
+	for {
+		// Check for shutdown
+		if bs.stopped.Load() {
+			return
+		}
+
+		// Check if all slots are done
+		bs.reorderMu.Lock()
+		allDone := bs.nextSlotToSend >= bs.endSlot
+		bs.reorderMu.Unlock()
+
+		if allDone {
+			return
+		}
+
+		// Process retry slots first
+		select {
+		case <-retryTicker.C:
+			for _, slot := range bs.getRetrySlots() {
+				if bs.canScheduleMore() {
+					bs.scheduleSlot(slot)
+				} else {
+					bs.scheduleRetry(slot) // Put back
+				}
+			}
+		default:
+		}
+
+		// Schedule new slots if we have capacity
+		if bs.canScheduleMore() && nextToSchedule < bs.endSlot {
+			if bs.scheduleSlot(nextToSchedule) {
+				nextToSchedule++
+			} else {
+				// Channel full or stopped, wait a bit
+				time.Sleep(10 * time.Millisecond)
+			}
+		} else {
+			// At capacity, wait a bit
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// DownloadInitialBlocks is kept for backward compatibility but is a no-op
+// The parallel scheduler handles initial prefetch naturally
+func (bs *BlockSource) DownloadInitialBlocks() {
+	// No-op - parallel scheduler handles this
+}
+
+// Start begins parallel block fetching
+func (bs *BlockSource) Start() {
+	// For non-RPC sources, use the old sequential approach
+	if bs.sourceType != BlockSourceRpc {
+		bs.startSequential()
+		return
+	}
+
+	mlog.Log.Infof("starting parallel block fetch: rps=%d workers=%d safety_margin=%d",
+		int(bs.rateLimiter.Limit()), bs.maxInflight, bs.tipSafetyMargin)
+
+	// Start tip poller
+	go bs.pollTip()
+
+	// Wait for initial tip
+	time.Sleep(100 * time.Millisecond)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < bs.maxInflight; i++ {
+		wg.Add(1)
+		go bs.worker(&wg, i)
+	}
+
+	// Start emitter
+	emitterDone := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(emitterDone)
+	}()
+
+	// Start scheduler (runs until all slots done)
+	bs.scheduler()
+
+	// Shutdown
+	bs.stopped.Store(true)
+	close(bs.stopChan)
+	close(bs.workQueue)
+	wg.Wait()
+	close(bs.resultQueue)
+	<-emitterDone
+	close(bs.streamChan)
+}
+
+// startSequential is the old sequential approach for non-RPC sources
+func (bs *BlockSource) startSequential() {
+	for ; bs.currentSlot < bs.endSlot; bs.currentSlot++ {
+		newBlock, _ := bs.fetchAndParseBlockSequential(bs.currentSlot)
+		if newBlock != nil {
+			bs.streamChan <- newBlock
+		}
+	}
+	close(bs.streamChan)
+}
+
+// fetchAndParseBlockSequential is the old sequential fetch with retry
+func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, error) {
 	var err error
 	var blockResult *rpc.GetBlockResult
-	var b *b.Block
+	var blk *b.Block
 
-	if blockSource.sourceType == BlockSourceRpc {
-		b, err = blockSource.tryGetBlockFromFile(slot)
+	if bs.sourceType == BlockSourceFile {
+		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
 			for {
-				blockResult, err = blockSource.rpcClient.GetBlockConfirmed(uint64(slot))
+				blockResult, err = bs.rpcClient.GetBlockConfirmed(uint64(slot))
 				if err == nil {
 					break
 				} else if err == rpcclient.SlotSkipped {
 					return nil, err
-				} else if isSlotNotAvailableErr(err) { // we're too early. wait for a bit.
+				} else if isSlotNotAvailableErr(err) {
 					time.Sleep(500 * time.Millisecond)
 				} else if isRateLimitedErr(err) {
 					time.Sleep(2 * time.Second)
 				} else {
-					panic(fmt.Sprintf("error fetching block: %s\n", err))
+					return nil, fmt.Errorf("error fetching block: %w", err)
 				}
 			}
-			b = block.FromBlockResult(blockResult, slot, blockSource.rpcClient)
+			blk = block.FromBlockResult(blockResult, slot, bs.rpcClient)
 		}
-	} else {
-		if blockSource.sourceType == BlockSourceFile {
-			b, err = blockSource.tryGetBlockFromFile(slot)
-			if err != nil {
-				for {
-					blockResult, err = blockSource.rpcClient.GetBlockConfirmed(uint64(slot))
-					if err == nil {
-						break
-					} else if err == rpcclient.SlotSkipped {
-						return nil, err
-					} else if isSlotNotAvailableErr(err) { // we're too early. wait for a bit.
-						time.Sleep(500 * time.Millisecond)
-					} else if isRateLimitedErr(err) {
-						time.Sleep(2 * time.Second)
-					} else {
-						panic(fmt.Sprintf("error fetching block: %s\n", err))
-					}
-				}
-				b = block.FromBlockResult(blockResult, slot, blockSource.rpcClient)
-			}
-		} else if blockSource.sourceType == BlockSourceOvercast {
-			b, err = blockSource.tryGetBlockFromFile(slot)
-			if err != nil {
-				return nil, rpcclient.SlotSkipped
-			}
-		} else {
-			panic("invalid source type - programming error")
+	} else if bs.sourceType == BlockSourceOvercast {
+		blk, err = bs.tryGetBlockFromFile(slot)
+		if err != nil {
+			return nil, rpcclient.SlotSkipped
 		}
 	}
 
-	return b, nil
+	return blk, nil
 }
 
-func (blockSource *BlockSource) DownloadInitialBlocks() {
-	blocks := make([]*b.Block, blockSource.numInitialSlots)
-	var wg sync.WaitGroup
-
-	workerPool, _ := ants.NewPoolWithFunc(10, func(i interface{}) {
-		defer wg.Done()
-		taskInfo := i.(blockSourceTaskInfo)
-		slot := taskInfo.slot
-		idx := taskInfo.idx
-
-		block, _ := blockSource.fetchAndParseBlock(slot)
-		if block != nil {
-			//global.SubmitBlockToForkChoiceService(block.Slot, block.Transactions)
-		}
-		blocks[idx] = block
-	})
-
-	var idx uint64
-	for ; blockSource.currentSlot < blockSource.startSlot+blockSource.numInitialSlots; blockSource.currentSlot++ {
-		ti := blockSourceTaskInfo{slot: blockSource.currentSlot, idx: idx}
-		wg.Add(1)
-		workerPool.Invoke(ti)
-		idx++
-	}
-	wg.Wait()
-
-	for i := uint64(0); i < blockSource.numInitialSlots; i++ {
-		if blocks[i] != nil {
-			blockSource.streamChan <- blocks[i]
-		}
-	}
-}
-
-func (blockSource *BlockSource) Start() {
-	for ; blockSource.currentSlot < blockSource.endSlot; blockSource.currentSlot++ {
-		newBlock, _ := blockSource.fetchAndParseBlock(blockSource.currentSlot)
-		if newBlock != nil {
-			//global.SubmitBlockToForkChoiceService(newBlock.Slot, newBlock.Transactions)
-			blockSource.streamChan <- newBlock
-		}
-	}
-	close(blockSource.streamChan)
-}
-
-func (blockSource *BlockSource) NextBlock() *b.Block {
-	block := <-blockSource.streamChan
+func (bs *BlockSource) NextBlock() *b.Block {
+	block := <-bs.streamChan
 	return block
 }
 
-func (blockSource *BlockSource) BufferDepth() int {
-	return len(blockSource.streamChan)
+func (bs *BlockSource) BufferDepth() int {
+	return len(bs.streamChan)
 }

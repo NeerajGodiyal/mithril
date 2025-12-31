@@ -42,6 +42,14 @@ import (
 	"github.com/panjf2000/ants/v2"
 )
 
+// BlockFetchOpts contains options for parallel block fetching
+type BlockFetchOpts struct {
+	MaxRPS          int    // Rate limit (requests per second), 0 = use default
+	MaxInflight     int    // Max concurrent workers, 0 = use default
+	TipPollMs       int    // Tip poll interval ms, 0 = use default
+	TipSafetyMargin uint64 // Don't fetch within N slots of tip, 0 = use default
+}
+
 var SerializedParameterArena *arena.Arena[byte]
 
 // Commit state tracking for panic recovery
@@ -854,6 +862,7 @@ func ReplayBlocks(
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
+	blockFetchOpts *BlockFetchOpts,
 ) *ReplayResult {
 	result := &ReplayResult{}
 
@@ -940,6 +949,13 @@ func ReplayBlocks(
 			StartSlot:  startSlot,
 			EndSlot:    endSlot,
 			BlockDir:   blockDir,
+		}
+		// Apply block fetching options if provided
+		if blockFetchOpts != nil {
+			opts.MaxRPS = blockFetchOpts.MaxRPS
+			opts.MaxInflight = blockFetchOpts.MaxInflight
+			opts.TipPollMs = blockFetchOpts.TipPollMs
+			opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)

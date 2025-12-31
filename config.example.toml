@@ -108,6 +108,29 @@ name = "mithril"
     # If source = "overcast" but no endpoint is provided, falls back to RPC
     # overcast_endpoint = "localhost:9000"
 
+    # -------------------------------------------------------------------------
+    # Block Fetching Performance (RPC source only)
+    # -------------------------------------------------------------------------
+    # These settings control parallel block fetching during catchup.
+    # Tune based on your RPC provider's rate limits.
+
+    # Maximum RPC requests per second for block fetching.
+    # Common limits: Helius=10, QuickNode=25, private node=unlimited
+    # Set slightly below provider limit to leave room for other RPC calls.
+    max_rps = 10
+
+    # Maximum concurrent block fetch requests (workers).
+    # Should generally match max_rps.
+    max_inflight = 10
+
+    # How often to poll for chain tip (milliseconds).
+    # Used to avoid fetching slots that don't exist yet.
+    tip_poll_interval_ms = 1000
+
+    # Don't fetch within this many slots of the confirmed tip.
+    # Prevents "slot not available" errors. 64 slots ≈ 25 seconds.
+    tip_safety_margin = 64
+
 # ============================================================================
 # [replay] - Block Replay
 # ============================================================================

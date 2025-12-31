@@ -90,6 +90,10 @@ var (
 	rpcEndpoints                []string
 	blockSource                 string // "rpc" or "overcast"
 	overcastEndpoint            string
+	blockMaxRPS                 int    // Rate limit for block fetching
+	blockMaxInflight            int    // Max concurrent block fetch workers
+	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
+	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
 	snapshotDlPath              string
 	numReplaySlots              int64
 	endSlot                     int64
@@ -186,6 +190,10 @@ func init() {
 	// [block] section flags
 	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
 	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
+	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
+	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
+	Run.Flags().IntVar(&blockTipSafetyMargin, "block-tip-safety-margin", 0, "Don't fetch within N slots of tip (0 = use default)")
 
 	// Copy all Run flags to VerifyLive for backwards compatibility
 	VerifyLive.Flags().AddFlagSet(Run.Flags())
@@ -359,6 +367,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		return fmt.Errorf("blockSource=rpc but no endpoints were provided")
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
+	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
+	blockMaxInflight = getInt("block-max-inflight", "block.max_inflight")
+	blockTipPollIntervalMs = getInt("block-tip-poll-ms", "block.tip_poll_interval_ms")
+	blockTipSafetyMargin = getInt("block-tip-safety-margin", "block.tip_safety_margin")
 
 	// Snapshot download path - defaults to storage.snapshots, can be overridden
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
@@ -732,7 +744,13 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState)
+	blockFetchOpts := &replay.BlockFetchOpts{
+		MaxRPS:          blockMaxRPS,
+		MaxInflight:     blockMaxInflight,
+		TipPollMs:       blockTipPollIntervalMs,
+		TipSafetyMargin: uint64(blockTipSafetyMargin),
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1220,7 +1238,13 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState)
+	blockFetchOpts := &replay.BlockFetchOpts{
+		MaxRPS:          blockMaxRPS,
+		MaxInflight:     blockMaxInflight,
+		TipPollMs:       blockTipPollIntervalMs,
+		TipSafetyMargin: uint64(blockTipSafetyMargin),
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1883,6 +1907,7 @@ func runReplayWithRecovery(
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
 	mithrilState *state.MithrilState,
+	blockFetchOpts *replay.BlockFetchOpts,
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
 
@@ -1926,6 +1951,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoint, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoint, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
 	return result
 }
