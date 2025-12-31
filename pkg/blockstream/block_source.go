@@ -374,14 +374,14 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, erro
 	return block.FromBlockResult(blockResult, slot, rpc), nil
 }
 
-// pollTip periodically updates the confirmed tip using the active RPC client.
-// Uses getActiveRpc() so tip polling follows the same failover state as block fetching.
+// pollTip periodically updates the confirmed tip by querying all configured RPCs
+// and using the maximum slot value. This handles RPCs that fall behind.
 // Uses GetSlotWithTimeout to prevent hung RPCs from blocking the poll loop.
 func (bs *BlockSource) pollTip() {
 	const tipPollTimeout = 5 * time.Second
 
 	// Get initial tip
-	if tip, err := bs.getActiveRpc().GetSlotWithTimeout(tipPollTimeout); err == nil {
+	if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
 		bs.confirmedTip.Store(tip)
 		bs.lastTipUpdate.Store(time.Now().Unix())
 		bs.tipPollFailures.Store(0)
@@ -398,7 +398,7 @@ func (bs *BlockSource) pollTip() {
 		case <-bs.stopChan:
 			return
 		case <-ticker.C:
-			if tip, err := bs.getActiveRpc().GetSlotWithTimeout(tipPollTimeout); err == nil {
+			if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
 				bs.confirmedTip.Store(tip)
 				bs.lastTipUpdate.Store(time.Now().Unix())
 				bs.tipPollFailures.Store(0)
@@ -408,6 +408,47 @@ func (bs *BlockSource) pollTip() {
 			}
 		}
 	}
+}
+
+// getMaxTipFromAllRpcs queries all configured RPCs for the current slot
+// and returns the maximum value. This handles RPCs that fall behind.
+func (bs *BlockSource) getMaxTipFromAllRpcs(timeout time.Duration) uint64 {
+	if len(bs.rpcClients) == 0 {
+		return 0
+	}
+
+	// For single RPC, no need for goroutines
+	if len(bs.rpcClients) == 1 {
+		if tip, err := bs.rpcClients[0].GetSlotWithTimeout(timeout); err == nil {
+			return tip
+		}
+		return 0
+	}
+
+	// Query all RPCs concurrently
+	type result struct {
+		tip uint64
+		err error
+	}
+	results := make(chan result, len(bs.rpcClients))
+
+	for _, rpc := range bs.rpcClients {
+		go func(client *rpcclient.RpcClient) {
+			tip, err := client.GetSlotWithTimeout(timeout)
+			results <- result{tip: tip, err: err}
+		}(rpc)
+	}
+
+	// Collect results and find max
+	var maxTip uint64
+	for i := 0; i < len(bs.rpcClients); i++ {
+		r := <-results
+		if r.err == nil && r.tip > maxTip {
+			maxTip = r.tip
+		}
+	}
+
+	return maxTip
 }
 
 // worker fetches blocks from the work queue
