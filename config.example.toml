@@ -36,7 +36,7 @@ name = "mithril"
 # development. Once stable, "auto" is a good choice for production.
 
 [bootstrap]
-    mode = "snapshot"
+    mode = "auto"
 
 # ============================================================================
 # [storage] - Storage Paths
