@@ -190,8 +190,8 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
 		return blk, nil
 	}
 
-	// Single RPC attempt
-	blockResult, err := bs.rpcClient.GetBlockConfirmed(slot)
+	// Single RPC attempt (no internal retry - scheduler handles retries)
+	blockResult, err := bs.rpcClient.GetBlockConfirmedOnce(slot)
 	if err != nil {
 		return nil, err
 	}
@@ -263,22 +263,24 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		bs.reorderMu.Lock()
 
 		// Handle result
+		isRetriable := result.err == errBeyondTip || isSlotNotAvailableErr(result.err) || isRateLimitedErr(result.err)
+
 		if result.skipped {
 			bs.skippedSlots[result.slot] = true
-		} else if result.err == errBeyondTip || isSlotNotAvailableErr(result.err) {
-			// Schedule retry
+		} else if isRetriable {
+			// Schedule retry for transient errors
 			bs.scheduleRetry(result.slot)
 		} else if result.err != nil {
-			// Other error - log and mark as skipped for now
+			// Other error - log and mark as skipped
 			mlog.Log.Errorf("block fetch error slot=%d: %v", result.slot, result.err)
 			bs.skippedSlots[result.slot] = true
 		} else if result.block != nil {
 			bs.reorderBuffer[result.slot] = result.block
 		}
 
-		// Mark slot done (even on error)
+		// Mark slot done (even on error), unless retriable
 		bs.slotStateMu.Lock()
-		if result.err != errBeyondTip && !isSlotNotAvailableErr(result.err) {
+		if !isRetriable {
 			bs.slotState[result.slot] = slotDone
 		} else {
 			// Will be retried, reset to pending

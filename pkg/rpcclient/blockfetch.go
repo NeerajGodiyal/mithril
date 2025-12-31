@@ -56,6 +56,33 @@ func (fetcher *RpcClient) GetBlockConfirmed(slot uint64) (*rpc.GetBlockResult, e
 
 var SlotSkipped = errors.New("slot skipped")
 
+// GetBlockConfirmedOnce fetches a block with a single RPC attempt (no internal retry).
+// Use this with rate-limited parallel fetching where the scheduler handles retries.
+func (fetcher *RpcClient) GetBlockConfirmedOnce(slot uint64) (*rpc.GetBlockResult, error) {
+	includeRewards := true
+	maxSupportedTxVer := uint64(0)
+
+	result, err := fetcher.client.GetBlockWithOpts(
+		context.TODO(),
+		slot,
+		&rpc.GetBlockOpts{
+			MaxSupportedTransactionVersion: &maxSupportedTxVer,
+			Commitment:                     rpc.CommitmentConfirmed,
+			TransactionDetails:             rpc.TransactionDetailsFull,
+			Rewards:                        &includeRewards,
+		},
+	)
+
+	if err != nil {
+		if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot)) {
+			return nil, SlotSkipped
+		}
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
