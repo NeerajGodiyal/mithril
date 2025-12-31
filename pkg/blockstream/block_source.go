@@ -657,6 +657,11 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			blk = block.FromBlockResult(blockResult, slot, bs.rpcClient)
 		}
 	} else if bs.sourceType == BlockSourceOvercast {
+		// NOTE: BlockSourceOvercast is TEMPORARILY NON-FUNCTIONAL.
+		// The background block downloader that populated files for this path was removed.
+		// This code path will return SlotSkipped for every slot until Overcast streaming
+		// is re-implemented as a push-based source feeding directly into the reorder buffer.
+		// TODO: Implement Overcast as a streaming source (gRPC stream -> reorder buffer)
 		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
 			return nil, rpcclient.SlotSkipped

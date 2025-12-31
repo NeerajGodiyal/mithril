@@ -102,10 +102,13 @@ name = "mithril"
     # Where to stream new blocks from:
     #   "rpc"      - Fetch blocks via RPC (uses network.rpc endpoints above)
     #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
+    #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
+    #                The background downloader was removed; Overcast streaming will be
+    #                re-implemented in a future release.
     source = "rpc"
 
     # Overcast endpoint address (only used when source = "overcast")
-    # If source = "overcast" but no endpoint is provided, falls back to RPC
+    # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
     # overcast_endpoint = "localhost:9000"
 
     # -------------------------------------------------------------------------

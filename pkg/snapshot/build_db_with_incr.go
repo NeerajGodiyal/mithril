@@ -37,6 +37,7 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
+// BuildAccountsDbWithIncr builds the accounts database from full + incremental snapshots.
 func BuildAccountsDbWithIncr(
 	ctx context.Context,
 	fullSnapshotFile string,
@@ -46,7 +47,6 @@ func BuildAccountsDbWithIncr(
 	accountsDbDir string,
 	rpcEndpoints []string,
 	blockDir string,
-	overcastEndpoint string,
 	snapCfg snapshotdl.SnapshotConfig,
 	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
