@@ -164,9 +164,10 @@ const (
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
 	// RPC failover settings
-	primaryRetryInterval   = 100 // Retry primary RPC every N slots after failover
-	failoverErrThreshold   = 10  // Consecutive hard errors before failover (conservative)
-	failoverErrWindowSecs  = 5   // Reset error count if no errors for this long
+	primaryRetryInterval      = 100              // Retry primary RPC every N slots after failover (progress-based)
+	primaryProbeInterval      = 1 * time.Minute  // Probe primary RPC every minute when on backup (time-based)
+	failoverErrThreshold      = 10               // Consecutive hard errors before failover (conservative)
+	failoverErrWindowSecs     = 5                // Reset error count if no errors for this long
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -683,6 +684,10 @@ func (bs *BlockSource) scheduler() {
 	retryTicker := time.NewTicker(200 * time.Millisecond)
 	defer retryTicker.Stop()
 
+	// Time-based primary probe ticker (independent of progress)
+	primaryProbeTicker := time.NewTicker(primaryProbeInterval)
+	defer primaryProbeTicker.Stop()
+
 	// Track which slots we've already sent backup requests for
 	backupSent := make(map[uint64]bool)
 
@@ -698,6 +703,18 @@ func (bs *BlockSource) scheduler() {
 			bs.reorderMu.Lock()
 			waitingSlot := bs.nextSlotToSend
 			bs.reorderMu.Unlock()
+
+			// Last-chance probe: if we're on a backup, try primary before giving up
+			// This handles the case where backup can't serve getBlock but primary recovered
+			if !bs.isOnPrimary() && len(bs.rpcClients) > 1 {
+				mlog.Log.Infof("Block fetch stalled on backup endpoint - probing primary before shutdown...")
+				if bs.restoreToPrimary() {
+					mlog.Log.Infof("Primary RPC restored, resetting stall timer and continuing")
+					bs.lastProgress.Store(time.Now().Unix())
+					continue // Give primary a chance
+				}
+				mlog.Log.Infof("Primary RPC still unavailable, proceeding with shutdown")
+			}
 
 			mlog.Log.Errorf("FATAL: Block fetch stalled for %v - no progress since slot %d",
 				bs.stallTimeout, waitingSlot)
@@ -717,8 +734,17 @@ func (bs *BlockSource) scheduler() {
 			return
 		}
 
-		// Process retry slots and backup requests on ticker
+		// Process retry slots, backup requests, and primary probes on tickers
 		select {
+		case <-primaryProbeTicker.C:
+			// Time-based primary probe - try to restore to primary every minute when on backup
+			// This runs independently of block progress, so we'll try primary even if stalled
+			if !bs.isOnPrimary() && len(bs.rpcClients) > 1 {
+				if bs.restoreToPrimary() {
+					// Primary restored! Reset stall timer since we have a fresh endpoint to try
+					bs.lastProgress.Store(time.Now().Unix())
+				}
+			}
 		case <-retryTicker.C:
 			// Handle normal retries
 			for _, slot := range bs.getRetrySlots() {
