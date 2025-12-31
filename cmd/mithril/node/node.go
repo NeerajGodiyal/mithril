@@ -1333,6 +1333,31 @@ func getCommitHash() string {
 	return ""
 }
 
+// formatDurationShort formats a duration in a compact human-readable format (e.g., "2h 30m", "45m", "3d 2h")
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return "< 1m"
+	}
+
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dd %dh", days, hours)
+		}
+		return fmt.Sprintf("%dd", days)
+	}
+	if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
 // printStartupInfo prints consolidated startup info including version, timestamp, and configuration
 func printStartupInfo(commandName string) {
 	// Gold/amber color like the banner
@@ -1386,9 +1411,6 @@ func printStartupInfo(commandName string) {
 	}
 	fmt.Printf("  Run ID:       %s%s%s\n", dim, runID, reset)
 
-	// Command being run
-	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
-
 	// Bootstrap mode with description
 	var bootstrapDesc string
 	switch bootstrapMode {
@@ -1409,45 +1431,63 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
 	}
 
-	// Load state file for detailed info
-	mithrilState, _ := state.LoadState(accountsPath)
+	// Load state file for detailed info (only show for modes that use existing AccountsDB)
+	// In snapshot/new-snapshot modes, we're rebuilding so state info is not relevant
+	willUseExistingAccountsDB := bootstrapMode == "auto" || bootstrapMode == "accountsdb"
+	if willUseExistingAccountsDB {
+		mithrilState, _ := state.LoadState(accountsPath)
 
-	// Show state info if available
-	if mithrilState != nil && mithrilState.IsReady() {
-		fmt.Printf("%s━━━ State Info ━━━%s\n", gold, reset)
-
-		// Original snapshot info
-		snapshotInfo := fmt.Sprintf("slot %d", mithrilState.SnapshotSlot)
-		if mithrilState.SnapshotEpoch > 0 {
-			snapshotInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.SnapshotSlot, mithrilState.SnapshotEpoch)
-		}
-		fmt.Printf("  Snapshot:     %s%s%s\n", dim, snapshotInfo, reset)
-
-		// Current/resume slot info
-		if mithrilState.LastSlot > 0 {
-			resumeInfo := fmt.Sprintf("slot %d", mithrilState.LastSlot)
-			if mithrilState.LastEpoch > 0 {
-				resumeInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.LastSlot, mithrilState.LastEpoch)
-			}
-			fmt.Printf("  Resume from:  %s%s%s\n", cyan, resumeInfo, reset)
-
-			// Slots replayed so far
-			slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
-			fmt.Printf("  Replayed:     %s%d slots%s\n", dim, slotsReplayed, reset)
-		} else {
-			fmt.Printf("  Resume from:  %ssnapshot (fresh start)%s\n", dim, reset)
-		}
-
-		// Previous run info
-		if mithrilState.LastRunID != "" {
-			fmt.Printf("  Last run:     %s%s%s", dim, mithrilState.LastRunID, reset)
-			if mithrilState.LastCommit != "" && mithrilState.LastCommit != revision {
-				fmt.Printf(" %s(commit: %s)%s", dim, mithrilState.LastCommit, reset)
-			}
+		// Show state info if available
+		if mithrilState != nil && mithrilState.IsReady() {
 			fmt.Println()
+			fmt.Printf("%s━━━ State Info ━━━%s\n", gold, reset)
+
+			// Full snapshot info
+			snapshotInfo := fmt.Sprintf("slot %d", mithrilState.SnapshotSlot)
+			if mithrilState.SnapshotEpoch > 0 {
+				snapshotInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.SnapshotSlot, mithrilState.SnapshotEpoch)
+			}
+			fmt.Printf("  Full snapshot:  %s%s%s\n", dim, snapshotInfo, reset)
+
+			// Incremental snapshot info (if available)
+			if mithrilState.IncrSnapshot != nil && mithrilState.IncrSnapshot.Slot > 0 {
+				incrInfo := fmt.Sprintf("slot %d (based on %d)", mithrilState.IncrSnapshot.Slot, mithrilState.IncrSnapshot.BaseSlot)
+				fmt.Printf("  Incr snapshot:  %s%s%s\n", dim, incrInfo, reset)
+			}
+
+			// Current AccountsDB state / resume info
+			if mithrilState.LastSlot > 0 {
+				resumeInfo := fmt.Sprintf("AccountsDB at slot %d", mithrilState.LastSlot)
+				if mithrilState.LastEpoch > 0 {
+					resumeInfo = fmt.Sprintf("AccountsDB at slot %d (epoch %d)", mithrilState.LastSlot, mithrilState.LastEpoch)
+				}
+				fmt.Printf("  Resume from:    %s%s%s\n", cyan, resumeInfo, reset)
+
+				// Slots replayed since snapshot
+				slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
+				fmt.Printf("  Replayed:       %s%d slots since snapshot%s\n", dim, slotsReplayed, reset)
+			} else {
+				fmt.Printf("  Resume from:    %ssnapshot (fresh start)%s\n", dim, reset)
+			}
+
+			// Previous run info with timestamp and time ago
+			if mithrilState.LastRunID != "" {
+				runInfo := mithrilState.LastRunID
+				if !mithrilState.LastRunAt.IsZero() {
+					runInfo += fmt.Sprintf(" at %s", mithrilState.LastRunAt.Format("2006-01-02 15:04:05"))
+					// Add time since last run
+					elapsed := time.Since(mithrilState.LastRunAt)
+					runInfo += fmt.Sprintf(" (%s ago)", formatDurationShort(elapsed))
+				}
+				if mithrilState.LastCommit != "" && mithrilState.LastCommit != revision {
+					runInfo += fmt.Sprintf(" (commit: %s)", mithrilState.LastCommit)
+				}
+				fmt.Printf("  Last run:       %s%s%s\n", dim, runInfo, reset)
+			}
 		}
 	}
 
+	fmt.Println()
 	fmt.Printf("%s━━━ Paths ━━━%s\n", gold, reset)
 
 	// AccountsDB path
@@ -1469,20 +1509,20 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
 	}
 
+	// Block source (above RPC since it's related to block fetching)
+	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
+	if blockSource == "overcast" && overcastEndpoint != "" {
+		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	} else {
+		fmt.Println()
+	}
+
 	// RPC endpoints
 	if len(rpcEndpoints) > 0 {
 		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
 		for _, ep := range rpcEndpoints[1:] {
 			fmt.Printf("                %s%s%s\n", gold, ep, reset)
 		}
-	}
-
-	// Block source
-	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" && overcastEndpoint != "" {
-		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
-	} else {
-		fmt.Println()
 	}
 
 	fmt.Println()

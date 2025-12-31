@@ -286,6 +286,7 @@ func (d *DualProgress) Start() {
 	d.mu.Unlock()
 
 	// Print pipeline description using stages (same stage = parallel)
+	fmt.Fprintln(d.output) // spacing before pipeline
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
