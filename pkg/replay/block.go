@@ -1101,8 +1101,9 @@ func ReplayBlocks(
 		}
 
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | execution: %.3fs",
-			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
+		totalSlotTime := waitTime + slotReplayDuration
+		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
+			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds(), totalSlotTime.Seconds())
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
@@ -1140,9 +1141,10 @@ func ReplayBlocks(
 				}
 
 				// Print summary with newlines for visibility
+				avgTotal := avgExec + avgWait
 				mlog.Log.Infof("")
-				mlog.Log.Infof("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | buffer: %d",
-					avgExec, avgWait, blockStream.BufferDepth())
+				mlog.Log.Infof("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs | buffer: %d",
+					avgExec, avgWait, avgTotal, blockStream.BufferDepth())
 				mlog.Log.Infof("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
 					avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
 
