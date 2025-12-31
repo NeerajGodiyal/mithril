@@ -191,6 +191,7 @@ func init() {
 	// [block] section flags
 	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
 	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().StringSliceVar(&blockRpcEndpoints, "block-rpc", []string{}, "Dedicated RPC endpoint(s) for block fetching (falls back to --rpc if not set)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -364,15 +365,17 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if blockSource == "" {
 		blockSource = "rpc" // default
 	}
-	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
-		return fmt.Errorf("blockSource=rpc but no endpoints were provided")
-	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
 
 	// block.rpc - dedicated RPC endpoints for block fetching (falls back to network.rpc)
 	blockRpcEndpoints = getStringSlice("block-rpc", "block.rpc")
 	if len(blockRpcEndpoints) == 0 {
 		blockRpcEndpoints = rpcEndpoints // Use network.rpc as fallback
+	}
+
+	// Validate: blockSource=rpc requires either block.rpc or network.rpc
+	if blockSource == "rpc" && len(blockRpcEndpoints) == 0 {
+		return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set block.rpc or network.rpc)")
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
