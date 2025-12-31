@@ -313,20 +313,33 @@ func (bs *BlockSource) failoverToNext() bool {
 	return false
 }
 
-// restoreToPrimary attempts to switch back to the primary RPC.
-// Returns true if we were on a backup and switched back.
-// Note: This doesn't probe the primary first - if it's still down, failover will
-// trigger again on the next transient error. This keeps the logic simple.
+// probePrimary does a quick health check on the primary RPC endpoint.
+// Returns true if the primary responds successfully to a getSlot call.
+func (bs *BlockSource) probePrimary() bool {
+	primary := bs.getPrimaryRpc()
+	_, err := primary.GetSlot()
+	return err == nil
+}
+
+// restoreToPrimary attempts to switch back to the primary RPC after probing it.
+// Returns true if we were on a backup and successfully switched back.
+// The probe prevents predictable error bursts from switching to a still-down primary.
 func (bs *BlockSource) restoreToPrimary() bool {
 	if bs.isOnPrimary() {
 		return false // Already on primary
+	}
+
+	// Probe primary before switching - avoids predictable error bursts
+	if !bs.probePrimary() {
+		// Primary still down, stay on backup
+		return false
 	}
 
 	currentIdx := bs.activeRpcIdx.Load()
 	if bs.activeRpcIdx.CompareAndSwap(currentIdx, 0) {
 		bs.slotsSinceFailover.Store(0)
 		bs.transientErrCount.Store(0) // Reset error count when switching back
-		mlog.Log.Infof("RPC rotating back to primary endpoint %s (will failover again if errors persist)",
+		mlog.Log.Infof("RPC restored to primary endpoint %s (health probe succeeded)",
 			bs.rpcClients[0].Endpoint())
 		return true
 	}
