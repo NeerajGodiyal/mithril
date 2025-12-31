@@ -126,6 +126,11 @@ type BlockSource struct {
 	stopChan    chan struct{}
 	stopped     atomic.Bool
 
+	// Stall detection
+	lastProgress     atomic.Int64 // Unix timestamp of last successful block emit
+	stallTimeout     time.Duration
+	stallError       atomic.Bool // Set when stall timeout triggers
+
 	// Stats tracking
 	stats BlockSourceStats
 }
@@ -138,6 +143,7 @@ const (
 	defaultTipSafetyMargin = 64
 	defaultMaxPending      = 500
 	streamChanBuffer       = 100
+	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -183,7 +189,11 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		workQueue:       make(chan uint64, maxInflight*2),
 		resultQueue:     make(chan fetchResult, maxInflight*2),
 		stopChan:        make(chan struct{}),
+		stallTimeout:    defaultStallTimeout,
 	}
+
+	// Initialize lastProgress to now (first block hasn't been fetched yet)
+	bs.lastProgress.Store(time.Now().Unix())
 
 	return bs
 }
@@ -328,31 +338,30 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 		}
 
-		// Handle result - transient network errors are also retriable
-		isRetriable := result.err == errBeyondTip ||
-			isSlotNotAvailableErr(result.err) ||
-			isRateLimitedErr(result.err) ||
-			isTransientNetworkErr(result.err)
+		// Handle result
+		// CRITICAL: All errors except SlotSkipped are retriable.
+		// Never skip a non-skipped slot - that causes silent state divergence.
+		// If we truly can't fetch a block, we'll stall and eventually timeout.
+		isRetriable := result.err != nil && !result.skipped
 
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
-		} else if isRetriable {
-			// Schedule retry for transient errors
-			bs.stats.FetchRetries.Add(1)
-			bs.scheduleRetry(result.slot)
-		} else if result.err != nil {
-			// Other error - log and mark as skipped
-			mlog.Log.Errorf("block fetch error slot=%d: %v", result.slot, result.err)
-			bs.skippedSlots[result.slot] = true
 		} else if result.block != nil {
+			// Success! This takes priority over any pending error results.
 			bs.stats.FetchSuccesses.Add(1)
 			bs.reorderBuffer[result.slot] = result.block
 			// Track max buffered slot
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
 				bs.stats.MaxBufferedSlot.Store(result.slot)
 			}
+		} else if isRetriable {
+			// All non-skip errors are retriable - schedule retry
+			bs.stats.FetchRetries.Add(1)
+			bs.scheduleRetry(result.slot)
 		}
+		// Note: if result.block == nil && result.err == nil && !result.skipped,
+		// that's a bug in the worker, but we don't skip - it will stall and be detected.
 
 		// Mark slot done (even on error), unless retriable
 		bs.slotStateMu.Lock()
@@ -372,11 +381,15 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				delete(bs.reorderBuffer, bs.nextSlotToSend)
 				bs.reorderMu.Unlock()
 				bs.streamChan <- blk
+				// Update progress timestamp for stall detection
+				bs.lastProgress.Store(time.Now().Unix())
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
-				// Slot was skipped, advance without emitting
+				// Slot was skipped (SlotSkipped from RPC), advance without emitting
 				delete(bs.skippedSlots, bs.nextSlotToSend)
+				// Also update progress - skipped slots count as progress
+				bs.lastProgress.Store(time.Now().Unix())
 				bs.nextSlotToSend++
 			} else {
 				break
@@ -478,6 +491,22 @@ func (bs *BlockSource) scheduler() {
 		// Check for shutdown
 		if bs.stopped.Load() {
 			return
+		}
+
+		// Check for stall timeout - if no progress for too long, trigger graceful shutdown
+		lastProgressTime := time.Unix(bs.lastProgress.Load(), 0)
+		if time.Since(lastProgressTime) > bs.stallTimeout {
+			bs.reorderMu.Lock()
+			waitingSlot := bs.nextSlotToSend
+			bs.reorderMu.Unlock()
+
+			mlog.Log.Errorf("FATAL: Block fetch stalled for %v - no progress since slot %d",
+				bs.stallTimeout, waitingSlot)
+			mlog.Log.Errorf("This indicates persistent network issues or RPC unavailability.")
+			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
+
+			bs.stallError.Store(true)
+			return // Exit scheduler, which triggers shutdown
 		}
 
 		// Check if all slots are done
@@ -644,6 +673,12 @@ func (bs *BlockSource) NextBlock() *b.Block {
 
 func (bs *BlockSource) BufferDepth() int {
 	return len(bs.streamChan)
+}
+
+// Stalled returns true if the block source stalled due to persistent fetch failures.
+// When true, the caller should trigger a graceful shutdown to preserve AccountsDB state.
+func (bs *BlockSource) Stalled() bool {
+	return bs.stallError.Load()
 }
 
 // FetchStatsSnapshot returns a snapshot of fetch stats for logging
