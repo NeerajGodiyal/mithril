@@ -1,15 +1,19 @@
 package progress
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"golang.org/x/term"
 )
 
@@ -41,9 +45,9 @@ type ProgressBar struct {
 	startTime time.Time
 
 	// For EWMA throughput calculation
-	mu           sync.Mutex
-	lastUpdate   time.Time
-	lastBytes    int64
+	mu             sync.Mutex
+	lastUpdate     time.Time
+	lastBytes      int64
 	ewmaThroughput float64
 }
 
@@ -282,6 +286,7 @@ func (d *DualProgress) Start() {
 	d.mu.Unlock()
 
 	// Print pipeline description using stages (same stage = parallel)
+	fmt.Fprintln(d.output) // spacing before pipeline
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorDim)
 	}
@@ -357,8 +362,9 @@ func (d *DualProgress) Stop() {
 	<-d.doneCh
 }
 
-// Interrupt stops the progress display and shows interrupted status
-func (d *DualProgress) Interrupt() {
+// Interrupt stops the progress display and shows interrupted status.
+// If err is provided, shows the error message; otherwise shows "Interrupted by user".
+func (d *DualProgress) Interrupt(err ...error) {
 	d.mu.Lock()
 	d.interrupted = true
 	d.mu.Unlock()
@@ -367,10 +373,14 @@ func (d *DualProgress) Interrupt() {
 
 	// Print final interrupted status
 	fmt.Fprintf(d.output, "\033[2K") // Clear line
+	msg := "Interrupted by user"
+	if len(err) > 0 && err[0] != nil {
+		msg = err[0].Error()
+	}
 	if d.useColor {
-		fmt.Fprintf(d.output, "%s⚠ Interrupted by user%s\n", colorYellow, colorReset)
+		fmt.Fprintf(d.output, "%s⚠ %s%s\n", colorYellow, msg, colorReset)
 	} else {
-		fmt.Fprintln(d.output, "⚠ Interrupted by user")
+		fmt.Fprintf(d.output, "⚠ %s\n", msg)
 	}
 }
 
@@ -464,8 +474,9 @@ func (p *IndexingProgress) Finish() {
 	p.Update(p.total, p.total)
 }
 
-// Interrupt shows interrupted status
-func (p *IndexingProgress) Interrupt() {
+// Interrupt shows interrupted status.
+// If err is provided, shows the error message; otherwise shows "Interrupted".
+func (p *IndexingProgress) Interrupt(err ...error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -473,14 +484,19 @@ func (p *IndexingProgress) Interrupt() {
 		return
 	}
 
+	msg := "Interrupted"
+	if len(err) > 0 && err[0] != nil {
+		msg = err[0].Error()
+	}
+
 	// Move up and clear line
 	if p.useColor {
 		fmt.Fprint(p.output, moveUp+clearLine)
-		fmt.Fprintf(p.output, "%s%-24s%s %s⚠ Interrupted%s\n",
+		fmt.Fprintf(p.output, "%s%-24s%s %s⚠ %s%s\n",
 			colorTeal, p.label, colorReset,
-			colorYellow, colorReset)
+			colorYellow, msg, colorReset)
 	} else {
-		fmt.Fprintf(p.output, "%-24s ⚠ Interrupted\n", p.label)
+		fmt.Fprintf(p.output, "%-24s ⚠ %s\n", p.label, msg)
 	}
 }
 
@@ -552,6 +568,486 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Download Speed:", fmt.Sprintf("%.1f MB/s", speedMBs), c, r)
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "RTT:", rttStr, c, r)
 	fmt.Printf("%s│%s %-18s%-59s%s│%s\n", c, r, "Search Time:", searchDuration.Round(time.Second).String(), c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// ShutdownInfo contains information about the replay state when shutting down
+type ShutdownInfo struct {
+	LastSlot         uint64
+	LastBankhash     []byte
+	SnapshotBaseSlot uint64
+	AccountsDBPath   string
+	ReplayDuration   time.Duration
+	WasCancelled     bool
+	RunID            string
+	Epoch            uint64
+	SnapshotEpoch    uint64
+}
+
+// PrintShutdownSummary prints a summary box when replay is stopped via Ctrl+C
+func PrintShutdownSummary(info ShutdownInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // color start (teal for borders)
+	r := "" // color reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	// Format bankhash as base58 (same as log output)
+	bankhashStr := base58.Encode(info.LastBankhash)
+
+	// Calculate slots replayed
+	slotsReplayed := int64(0)
+	if info.LastSlot > info.SnapshotBaseSlot {
+		slotsReplayed = int64(info.LastSlot - info.SnapshotBaseSlot)
+	}
+
+	// Format duration
+	durationStr := info.ReplayDuration.Round(time.Second).String()
+
+	// Next slot to resume from
+	nextSlot := info.LastSlot + 1
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s REPLAY STOPPED                                                               %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Run ID:", info.RunID, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Last replayed slot:", fmt.Sprintf("%s (epoch %d)", formatSlots(info.LastSlot), info.Epoch), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Bankhash:", bankhashStr, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "AccountsDB:", info.AccountsDBPath, c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Slots replayed:", fmt.Sprintf("%s (from snapshot slot %s, epoch %d)", formatSlots(uint64(slotsReplayed)), formatSlots(info.SnapshotBaseSlot), info.SnapshotEpoch), c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Total replay time:", durationStr, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s RESTART OPTIONS:                                                             %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	resumeStr := fmt.Sprintf("   Resume from slot %s:", formatSlots(nextSlot))
+	fmt.Printf("%s│%s%-78s%s│%s\n", c, r, resumeStr, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=accountsdb                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	snapshotStr := fmt.Sprintf("   Rebuild from existing snapshot (slot %s):", formatSlots(info.SnapshotBaseSlot))
+	fmt.Printf("%s│%s%-78s%s│%s\n", c, r, snapshotStr, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s State saved to: mithril_state.json                                           %s│%s\n", c, r, c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// BuildInterruptInfo contains information when build is interrupted
+type BuildInterruptInfo struct {
+	Stage          string // "downloading", "building", etc.
+	SnapshotSlot   uint64
+	SnapshotPath   string // path to downloaded snapshot if available
+	AccountsDBPath string
+}
+
+// PrintBuildInterrupted prints a summary box when build is stopped via Ctrl+C
+func PrintBuildInterrupted(info BuildInterruptInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // color start (teal for borders)
+	r := "" // color reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s BUILD INTERRUPTED                                                            %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Stage:", info.Stage, c, r)
+	if info.SnapshotSlot > 0 {
+		fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Snapshot slot:", formatSlots(info.SnapshotSlot), c, r)
+	}
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s RESTART OPTIONS:                                                             %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	if info.SnapshotPath != "" {
+		fmt.Printf("%s│%s   Rebuild from existing snapshot (already downloaded):                       %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	}
+	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	if info.SnapshotPath != "" {
+		// Truncate path if too long
+		pathDisplay := info.SnapshotPath
+		if len(pathDisplay) > 55 {
+			pathDisplay = "..." + pathDisplay[len(pathDisplay)-52:]
+		}
+		fmt.Printf("%s│%s Snapshot preserved: %-56s%s│%s\n", c, r, pathDisplay, c, r)
+	}
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+	fmt.Println()
+}
+
+// DiskInfo holds information about disk usage for a specific path
+type DiskInfo struct {
+	Label      string // e.g., "AccountsDB", "Snapshots", "Ledger"
+	Path       string
+	Device     string // e.g., "nvme1n1p1"
+	UsedBytes  uint64
+	TotalBytes uint64
+	Error      error
+}
+
+// GetDiskInfo returns disk usage information for a given path
+func GetDiskInfo(path string) *DiskInfo {
+	if path == "" {
+		return nil
+	}
+
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return &DiskInfo{Path: path, Error: err}
+	}
+
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	usedBytes := totalBytes - freeBytes
+	device := getMountPoint(path)
+
+	return &DiskInfo{
+		Path:       path,
+		Device:     device,
+		UsedBytes:  usedBytes,
+		TotalBytes: totalBytes,
+	}
+}
+
+// FormatDiskInfo formats disk info as a compact string like "(nvme1n1p1) 630 GB / 1.5 TB (41%)"
+func FormatDiskInfo(info *DiskInfo) string {
+	if info == nil || info.Error != nil || info.TotalBytes == 0 {
+		return ""
+	}
+
+	percentUsed := float64(info.UsedBytes) / float64(info.TotalBytes) * 100
+	usedStr := formatBytes(info.UsedBytes)
+	totalStr := formatBytes(info.TotalBytes)
+
+	deviceStr := ""
+	if info.Device != "" {
+		deviceStr = fmt.Sprintf("(%s) ", info.Device)
+	}
+
+	// Add warning if usage is high
+	warning := ""
+	if percentUsed >= 90 {
+		warning = " ⚠ LOW SPACE!"
+	} else if percentUsed >= 80 {
+		warning = " ⚠"
+	}
+
+	return fmt.Sprintf("%s%s / %s (%2.0f%%)%s", deviceStr, usedStr, totalStr, percentUsed, warning)
+}
+
+// formatBytes formats bytes as human-readable string (e.g., "234 GB")
+func formatBytes(bytes uint64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+
+	switch {
+	case bytes >= TB:
+		return fmt.Sprintf("%.1f TB", float64(bytes)/float64(TB))
+	case bytes >= GB:
+		return fmt.Sprintf("%.0f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.0f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.0f KB", float64(bytes)/float64(KB))
+	}
+}
+
+// getMountPoint returns the mount point device for a given path by reading /proc/mounts
+func getMountPoint(path string) string {
+	// Get the device ID for the path
+	var pathStat syscall.Stat_t
+	if err := syscall.Stat(path, &pathStat); err != nil {
+		return ""
+	}
+	targetDev := pathStat.Dev
+
+	// Read /proc/mounts to find the device
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return ""
+	}
+
+	var bestMatch string
+	var bestMatchLen int
+
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		device := fields[0]
+		mountPoint := fields[1]
+
+		// Check if this mount point is a prefix of our path
+		if !strings.HasPrefix(path, mountPoint) {
+			continue
+		}
+
+		// Check if this mount has the same device
+		var mountStat syscall.Stat_t
+		if err := syscall.Stat(mountPoint, &mountStat); err != nil {
+			continue
+		}
+
+		if mountStat.Dev == targetDev && len(mountPoint) > bestMatchLen {
+			bestMatch = device
+			bestMatchLen = len(mountPoint)
+		}
+	}
+
+	// Extract just the device name (e.g., "nvme0n1p1" from "/dev/nvme0n1p1")
+	if strings.HasPrefix(bestMatch, "/dev/") {
+		return bestMatch[5:]
+	}
+	return bestMatch
+}
+
+// PrintDiskUsage prints a concise disk usage summary for configured paths
+func PrintDiskUsage(accountsDbPath, blockstorePath, snapshotsPath string) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	y := "" // yellow for warning
+	d := "" // dim for device name
+	if useColor {
+		c = colorTeal
+		r = colorReset
+		y = colorYellow
+		d = colorDim
+	}
+
+	// Collect disk info for each path, deduplicating by device
+	type pathInfo struct {
+		label      string
+		path       string
+		device     string
+		usedBytes  uint64
+		totalBytes uint64
+	}
+
+	paths := []struct {
+		label string
+		path  string
+	}{
+		{"AccountsDB", accountsDbPath},
+		{"Blockstore", blockstorePath},
+		{"Snapshots", snapshotsPath},
+	}
+
+	var infos []pathInfo
+	seenDevices := make(map[string]int) // device -> index in infos
+
+	for _, p := range paths {
+		if p.path == "" {
+			continue
+		}
+
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(p.path, &stat); err != nil {
+			continue
+		}
+
+		device := getMountPoint(p.path)
+		totalBytes := stat.Blocks * uint64(stat.Bsize)
+		freeBytes := stat.Bavail * uint64(stat.Bsize)
+		usedBytes := totalBytes - freeBytes
+
+		// Check if we've already seen this device
+		if idx, seen := seenDevices[device]; seen && device != "" {
+			// Append label to existing entry
+			infos[idx].label += "+" + p.label
+		} else {
+			seenDevices[device] = len(infos)
+			infos = append(infos, pathInfo{
+				label:      p.label,
+				path:       p.path,
+				device:     device,
+				usedBytes:  usedBytes,
+				totalBytes: totalBytes,
+			})
+		}
+	}
+
+	if len(infos) == 0 {
+		return
+	}
+
+	fmt.Printf("%sDisk usage:%s\n", c, r)
+
+	for _, info := range infos {
+		percentUsed := float64(info.usedBytes) / float64(info.totalBytes) * 100
+		usedStr := formatBytes(info.usedBytes)
+		totalStr := formatBytes(info.totalBytes)
+
+		// Add warning if usage is high
+		warning := ""
+		if percentUsed >= 90 {
+			warning = fmt.Sprintf(" %sLOW SPACE!%s", y, r)
+		} else if percentUsed >= 80 {
+			warning = fmt.Sprintf(" %s(warning)%s", y, r)
+		}
+
+		// Format device info
+		deviceStr := ""
+		if info.device != "" {
+			deviceStr = fmt.Sprintf(" %s(%s)%s", d, info.device, r)
+		}
+
+		// Truncate path if needed
+		pathDisplay := info.path
+		if len(pathDisplay) > 30 {
+			pathDisplay = "..." + pathDisplay[len(pathDisplay)-27:]
+		}
+
+		fmt.Printf("  %-12s %-30s %7s / %-7s (%3.0f%%)%s%s\n",
+			info.label+":",
+			pathDisplay+deviceStr,
+			usedStr,
+			totalStr,
+			percentUsed,
+			warning,
+			"")
+	}
+	fmt.Println()
+}
+
+// StaleInfo contains information for the stale AccountsDB prompt
+type StaleInfo struct {
+	AccountsDBSlot     uint64
+	LatestSnapshotSlot uint64
+	SlotsBehind        uint64
+}
+
+// formatSlots formats a slot number with commas for readability
+func formatSlots(slots uint64) string {
+	s := strconv.FormatUint(slots, 10)
+	if len(s) <= 3 {
+		return s
+	}
+
+	// Insert commas
+	var result strings.Builder
+	remainder := len(s) % 3
+	if remainder > 0 {
+		result.WriteString(s[:remainder])
+		if len(s) > remainder {
+			result.WriteString(",")
+		}
+	}
+	for i := remainder; i < len(s); i += 3 {
+		result.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			result.WriteString(",")
+		}
+	}
+	return result.String()
+}
+
+// PromptStaleAccountsDB displays an interactive prompt when AccountsDB is significantly behind
+// and returns the user's choice (1 = continue with AccountsDB, 2 = start fresh from snapshot)
+func PromptStaleAccountsDB(info StaleInfo) int {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	// Print the prompt box
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s ACCOUNTSDB BEHIND CHAIN TIP                                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "AccountsDB last slot:", formatSlots(info.AccountsDBSlot), c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Latest snapshot slot:", formatSlots(info.LatestSnapshotSlot), c, r)
+	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Slots behind:", formatSlots(info.SlotsBehind), c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s OPTIONS:                                                                     %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   [1] Continue from AccountsDB (replay %s slots)%-26s%s│%s\n", c, r, formatSlots(info.SlotsBehind), "", c, r)
+	fmt.Printf("%s│%s   [2] Start fresh from latest snapshot (faster to catch up)                 %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
+
+	// Read user input
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Enter choice (1 or 2): ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			// On error (e.g., EOF), default to continuing with AccountsDB
+			return 1
+		}
+
+		input = strings.TrimSpace(input)
+		switch input {
+		case "1":
+			return 1
+		case "2":
+			return 2
+		default:
+			fmt.Println("Invalid choice. Please enter 1 or 2.")
+		}
+	}
+}
+
+// DownloadInterruptInfo contains information when download is interrupted
+type DownloadInterruptInfo struct {
+	Stage           string // "downloading full snapshot", "downloading incremental", etc.
+	SourceHost      string
+	DownloadPercent float64
+	BytesDownloaded int64
+	TotalBytes      int64
+}
+
+// PrintDownloadInterrupted prints a summary box when download is stopped via Ctrl+C
+func PrintDownloadInterrupted(info DownloadInterruptInfo) {
+	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	c := "" // teal for borders
+	r := "" // reset
+	if useColor {
+		c = colorTeal
+		r = colorReset
+	}
+
+	progressStr := fmt.Sprintf("%.0f%% (%s / %s)",
+		info.DownloadPercent,
+		formatBytes(uint64(info.BytesDownloaded)),
+		formatBytes(uint64(info.TotalBytes)))
+
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
+	fmt.Printf("%s│%s DOWNLOAD INTERRUPTED                                                         %s│%s\n", c, r, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Stage:", info.Stage, c, r)
+	if info.SourceHost != "" {
+		fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Source:", info.SourceHost, c, r)
+	}
+	fmt.Printf("%s│%s %-20s%-57s%s│%s\n", c, r, "Progress:", progressStr, c, r)
+	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
+	fmt.Printf("%s│%s TO RESTART:                                                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s   Download will resume from the beginning:                                   %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s Note: Partial download has been cleaned up.                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 	fmt.Println()
 }

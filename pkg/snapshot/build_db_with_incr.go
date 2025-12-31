@@ -30,7 +30,12 @@ func fmtDuration(d time.Duration) string {
 	if d < time.Second {
 		return fmt.Sprintf("%.3fms", float64(d.Microseconds())/1000)
 	}
-	return fmt.Sprintf("%.3fs", d.Seconds())
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
 func BuildAccountsDbWithIncr(
@@ -209,6 +214,10 @@ func BuildAccountsDbWithIncr(
 	var fullSavePath string
 	if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(fullSnapshotFile, "http://") || strings.HasPrefix(fullSnapshotFile, "https://")) {
 		if snapshotDownloadPath != "" {
+			// Ensure snapshot download directory exists
+			if err := os.MkdirAll(snapshotDownloadPath, 0o755); err != nil {
+				return nil, nil, fmt.Errorf("failed to create snapshot download directory %s: %w", snapshotDownloadPath, err)
+			}
 			// Extract filename from URL and create save path
 			urlParts := strings.Split(fullSnapshotFile, "/")
 			filename := urlParts[len(urlParts)-1]
@@ -232,7 +241,7 @@ func BuildAccountsDbWithIncr(
 	// Check if processing was interrupted (context cancelled or error)
 	if err != nil {
 		if dp != nil {
-			dp.Interrupt()
+			dp.Interrupt(err)
 		}
 		return nil, nil, fmt.Errorf("processing full snapshot: %w", err)
 	}
@@ -251,7 +260,7 @@ func BuildAccountsDbWithIncr(
 		indexProgress.Update(completed, total)
 	})
 	if err != nil {
-		indexProgress.Interrupt()
+		indexProgress.Interrupt(err)
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
 
@@ -260,7 +269,7 @@ func BuildAccountsDbWithIncr(
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 	if err != nil {
 		klog.Fatalf("error getting incremental snapshot URL: %s", err)
 	}
@@ -295,7 +304,7 @@ func BuildAccountsDbWithIncr(
 		if incrAttempt > 0 {
 			// Re-discover incremental snapshot URL (sources may have changed)
 			mlog.Log.Infof("Incremental download failed, re-discovering sources (attempt %d/%d)...", incrAttempt+1, maxIncrRetries)
-			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(rpcEndpoints[0], fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 			if err != nil {
 				mlog.Log.Errorf("Failed to re-discover incremental snapshot: %v", err)
 				continue
@@ -316,6 +325,10 @@ func BuildAccountsDbWithIncr(
 		var incrSavePath string
 		if snapCfg.MaxFullSnapshots > 0 && (strings.HasPrefix(incrementalSnapshotPath, "http://") || strings.HasPrefix(incrementalSnapshotPath, "https://")) {
 			if snapshotDownloadPath != "" {
+				// Ensure snapshot download directory exists (may not exist if full was local)
+				if err := os.MkdirAll(snapshotDownloadPath, 0o755); err != nil {
+					return nil, nil, fmt.Errorf("failed to create snapshot download directory %s: %w", snapshotDownloadPath, err)
+				}
 				// Extract filename from URL and create save path
 				urlParts := strings.Split(incrementalSnapshotPath, "/")
 				filename := urlParts[len(urlParts)-1]
@@ -399,10 +412,16 @@ func BuildAccountsDbWithIncr(
 	}
 
 	rpcClient := rpcclient.NewRpcClient(rpcEndpoints[0])
-	latestSlot, _ := rpcClient.GetSlot()
+	latestSlot, err := rpcClient.GetSlot()
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
-	mlog.Log.Infof("node currently at slot %d, whereas chain is at slot %d. currently %d slots behind.", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+	if err != nil || latestSlot == 0 {
+		mlog.Log.Infof("node currently at slot %d (unable to fetch chain tip)", incrSlot)
+	} else if latestSlot > uint64(incrSlot) {
+		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d (%d slots behind)", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+	} else {
+		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d", incrSlot, latestSlot)
+	}
 
 	return accountsDb, incrementalManifest, nil
 }

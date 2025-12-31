@@ -87,12 +87,15 @@
 #   ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info
 #   ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage & diagnostics
 #
-# DELETE OPTIONS (for resetting Mithril - start fresh):
-#   --delete-accounts    Clear accounts data (forces new snapshot sync)
-#   --delete-ledger      Clear ledger data (snapshots + blockstore)
-#   --delete-snapshots   Clear downloaded snapshots only
-#   --delete-blockstore  Clear verified blocks only
-#   --delete-all         Clear everything (complete reset)
+# CLEAN OPTIONS (for resetting Mithril - start fresh):
+#   --clean-accounts     Clear accounts data (forces new snapshot sync)
+#   --clean-ledger       Clear ledger data (snapshots + blockstore)
+#   --clean-snapshots    Clear downloaded snapshots only
+#   --clean-blockstore   Clear verified blocks only
+#   --clean-all          Clear everything (complete reset)
+#
+# MAINTENANCE:
+#   --fix-noatime        Add noatime mount option to existing Mithril partitions
 #
 # SAFETY:
 #   - Preserves existing OS partitions (only uses free space in single-drive mode)
@@ -1372,19 +1375,15 @@ interactive_setup() {
     echo "  │ SETUP COMPLETE                                                           │"
     echo "  ├─────────────────────────────────────────────────────────────────────────┤"
     echo "  │                                                                          │"
-    echo "  │ Update your mithril.toml:                                                │"
+    echo "  │ Update your config.toml:                                                 │"
     echo "  │                                                                          │"
     # Determine paths based on whether there's a separate data disk
     local ledger_base="$accountsdb_mount"
     [[ -n "$data_disk" ]] && ledger_base="$data_mount"
-    printf "  │   scratch_directory = \"%s\"%-*s│\n" "$ledger_base" $((38 - ${#ledger_base})) ""
-    echo "  │                                                                          │"
-    echo "  │   [ledger]                                                               │"
-    printf "  │       accounts_path = \"%s\"%-*s│\n" "$accountsdb_mount" $((34 - ${#accountsdb_mount})) ""
-    printf "  │       path = \"%s/blockstore\"%-*s│\n" "$ledger_base" $((30 - ${#ledger_base})) ""
-    echo "  │                                                                          │"
-    echo "  │   [snapshot]                                                             │"
-    printf "  │       download_path = \"%s/snapshots\"%-*s│\n" "$ledger_base" $((28 - ${#ledger_base})) ""
+    echo "  │   [storage]                                                              │"
+    printf "  │       accounts = \"%s\"%-*s│\n" "$accountsdb_mount" $((39 - ${#accountsdb_mount})) ""
+    printf "  │       blockstore = \"%s/blockstore\"%-*s│\n" "$ledger_base" $((29 - ${#ledger_base})) ""
+    printf "  │       snapshots = \"%s/snapshots\"%-*s│\n" "$ledger_base" $((30 - ${#ledger_base})) ""
     echo "  │                                                                          │"
     echo "  │ Next: Run performance-tune.sh to optimize I/O settings                   │"
     echo "  │                                                                          │"
@@ -1543,13 +1542,13 @@ clean_subdir() {
     fi
 
     echo ""
-    echo -e "  ${RED}These directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE $description"
+    confirm_destructive "CLEAN $description"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1563,7 +1562,7 @@ clean_subdir() {
         rm -rf "$path"
         # Recreate empty directory
         mkdir -p "$path"
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1581,11 +1580,11 @@ clean_subdir() {
 }
 
 clean_accounts() {
-    info "DELETING Accounts data"
+    info "CLEANING Accounts data"
     echo ""
 
     # Accounts artifacts (stored directly in mount point, not a subdirectory)
-    local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+    local artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest" "mithril_state.json")
 
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
@@ -1651,7 +1650,7 @@ clean_accounts() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Accounts data has been deleted"
+    success "Accounts data has been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1661,7 +1660,7 @@ clean_accounts() {
 }
 
 clean_snapshots() {
-    info "DELETING Snapshots"
+    info "CLEANING Snapshots"
     echo ""
 
     # Find Mithril directories
@@ -1715,13 +1714,13 @@ clean_snapshots() {
     fi
 
     echo ""
-    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These files/directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE SNAPSHOTS"
+    confirm_destructive "CLEAN SNAPSHOTS"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1737,7 +1736,7 @@ clean_snapshots() {
         if [[ "$path" == */snapshots ]]; then
             mkdir -p "$path"
         fi
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1748,7 +1747,7 @@ clean_snapshots() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Snapshots have been deleted"
+    success "Snapshots have been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1764,7 +1763,7 @@ clean_blockstore() {
 }
 
 clean_ledger() {
-    info "DELETING Ledger data (Snapshots + Blockstore)"
+    info "CLEANING Ledger data (Snapshots + Blockstore)"
     echo ""
     echo "  This will delete snapshots, blockstore, and any snapshot files."
     echo "  (AccountsDB will be preserved)"
@@ -1823,13 +1822,13 @@ clean_ledger() {
     fi
 
     echo ""
-    echo -e "  ${RED}These files/directories will be PERMANENTLY DELETED:${NC}"
+    echo -e "  ${RED}These files/directories will be CLEANED (contents erased):${NC}"
     for path in "${paths_to_clean[@]}"; do
         echo "    $path"
     done
     echo ""
 
-    confirm_destructive "DELETE LEDGER"
+    confirm_destructive "CLEAN LEDGER"
 
     # Capture disk space BEFORE deletion
     local before_used before_total before_free mount_point fstype
@@ -1845,7 +1844,7 @@ clean_ledger() {
         if [[ "$path" == */snapshots || "$path" == */blockstore ]]; then
             mkdir -p "$path"
         fi
-        success "Deleted: $path"
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
@@ -1856,7 +1855,7 @@ clean_ledger() {
     read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
 
     echo ""
-    success "Ledger data has been deleted"
+    success "Ledger data has been cleaned"
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1866,13 +1865,13 @@ clean_ledger() {
 }
 
 clean_all() {
-    info "DELETING ALL MITHRIL DATA"
+    info "CLEANING ALL MITHRIL DATA"
     echo ""
     echo "  This will delete Accounts, Snapshots, AND Blockstore."
     echo ""
 
     # Accounts artifacts (stored directly in mount point)
-    local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest")
+    local accounts_artifacts=("accounts" "mithril_db" "mithril_db_log_shards" "bankhash_db" "largest_file_id" "bank_hash" "manifest" "mithril_state.json")
 
     # Find Mithril directories
     mapfile -t mithril_dirs < <(find_mithril_dirs)
@@ -1935,37 +1934,61 @@ clean_all() {
     fi
 
     echo ""
-    echo -e "  ${RED}ALL of the above directories will be PERMANENTLY DELETED${NC}"
+    echo -e "  ${RED}ALL of the above directories will be CLEANED (contents erased)${NC}"
     echo ""
 
-    confirm_destructive "DELETE ALL MITHRIL DATA"
+    confirm_destructive "CLEAN ALL MITHRIL DATA"
 
-    # Capture disk space BEFORE deletion
-    local before_used before_total before_free mount_point fstype
-    read -r before_used before_total before_free mount_point fstype < <(get_mount_disk_space "$primary_dir")
+    # Collect all distinct mount points from paths being cleaned
+    declare -A mount_points_map
+    for path in "${paths_to_clean[@]}"; do
+        local mp
+        mp=$(df "$path" 2>/dev/null | tail -1 | awk '{print $NF}')
+        if [[ -n "$mp" ]]; then
+            mount_points_map["$mp"]=1
+        fi
+    done
+    local unique_mount_points=("${!mount_points_map[@]}")
+
+    # Capture disk space BEFORE deletion for each mount point
+    declare -A before_used_map before_total_map before_free_map fstype_map
+    for mp in "${unique_mount_points[@]}"; do
+        local used total free mount fstype
+        read -r used total free mount fstype < <(get_mount_disk_space "$mp")
+        before_used_map["$mp"]="$used"
+        before_total_map["$mp"]="$total"
+        before_free_map["$mp"]="$free"
+        fstype_map["$mp"]="$fstype"
+    done
 
     # Execute deletion
     info "Deleting all Mithril data..."
 
     for path in "${paths_to_clean[@]}"; do
         echo "  Removing $path..."
+        # Check if it was a directory (before deletion) to know whether to recreate
+        local was_dir=false
+        [[ -d "$path" ]] && was_dir=true
         rm -rf "$path"
-        mkdir -p "$path"
-        success "Deleted: $path"
+        # Only recreate if it was a directory (not a file like snapshot-*.tar.zst)
+        if $was_dir; then
+            mkdir -p "$path"
+        fi
+        success "Cleaned: $path"
     done
 
     # Sync to ensure filesystem updates are reflected
     sync
 
-    # Capture disk space AFTER deletion
-    local after_used after_total after_free
-    read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$primary_dir")
-
     echo ""
-    success "All Mithril data has been deleted"
+    success "All Mithril data has been cleaned"
 
-    # Show before/after disk space summary
-    show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
+    # Show before/after disk space summary for each mount point
+    for mp in "${unique_mount_points[@]}"; do
+        local after_used after_total after_free
+        read -r after_used after_total after_free _ _ < <(get_mount_disk_space "$mp")
+        show_disk_space_summary "$mp" "${before_used_map[$mp]}" "${before_free_map[$mp]}" "$after_used" "$after_free" "${before_total_map[$mp]}" "${fstype_map[$mp]}"
+    done
 
     echo ""
     echo "  On next run, Mithril will start completely fresh."
@@ -2256,11 +2279,304 @@ show_disk_summary() {
 }
 
 # ------------------------------------------------------------------------------
+# Fix noatime mount option
+# ------------------------------------------------------------------------------
+
+fix_noatime() {
+    info "FIXING NOATIME MOUNT OPTIONS"
+    echo ""
+
+    # Find Mithril directories
+    mapfile -t mithril_dirs < <(find_mithril_dirs)
+
+    if [[ ${#mithril_dirs[@]} -eq 0 ]]; then
+        warn "No Mithril data directories found"
+        return 1
+    fi
+
+    local needs_fix=()
+    local already_ok=()
+
+    for mithril_dir in "${mithril_dirs[@]}"; do
+        local device
+        device=$(df "$mithril_dir" 2>/dev/null | tail -1 | awk '{print $1}')
+        local opts
+        opts=$(grep -E "^$device " /proc/mounts 2>/dev/null | awk '{print $4}' || true)
+        if [[ "$opts" != *noatime* ]]; then
+            needs_fix+=("$mithril_dir")
+        else
+            already_ok+=("$mithril_dir")
+        fi
+    done
+
+    if [[ ${#already_ok[@]} -gt 0 ]]; then
+        echo "  Already have noatime:"
+        for dir in "${already_ok[@]}"; do
+            echo "    $dir"
+        done
+        echo ""
+    fi
+
+    if [[ ${#needs_fix[@]} -eq 0 ]]; then
+        success "All Mithril mounts already have noatime enabled"
+        return 0
+    fi
+
+    echo "  Need noatime added:"
+    for dir in "${needs_fix[@]}"; do
+        echo "    $dir"
+    done
+    echo ""
+
+    if ! yesno "  Add noatime to these mounts?" "y"; then
+        die "Aborted"
+    fi
+
+    # Backup fstab
+    local backup="/etc/fstab.bak.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup"
+    success "Backed up fstab to $backup"
+
+    for mithril_dir in "${needs_fix[@]}"; do
+        local device uuid
+        device=$(df "$mithril_dir" 2>/dev/null | tail -1 | awk '{print $1}')
+        uuid=$(blkid -s UUID -o value "$device" 2>/dev/null || true)
+
+        if [[ -z "$uuid" ]]; then
+            warn "Could not find UUID for $device, skipping"
+            continue
+        fi
+
+        # Check if there's an fstab entry for this UUID
+        if grep -q "$uuid" /etc/fstab 2>/dev/null; then
+            # Check if it already has noatime
+            if grep "$uuid" /etc/fstab | grep -q noatime; then
+                echo "  $mithril_dir: fstab already has noatime (but mount doesn't - remount needed)"
+            else
+                # Add noatime to existing entry
+                # Replace 'defaults' with 'defaults,noatime' or add noatime if other options exist
+                if grep "$uuid" /etc/fstab | grep -q "defaults"; then
+                    sed -i "/$uuid/s/defaults/defaults,noatime/" /etc/fstab
+                else
+                    # Add noatime to the options field (4th field)
+                    sed -i "/$uuid/s/\([^ \t]*[ \t]*[^ \t]*[ \t]*[^ \t]*[ \t]*[^ \t]*\)/\1,noatime/" /etc/fstab
+                fi
+                success "Updated fstab entry for $mithril_dir"
+            fi
+        else
+            warn "No fstab entry found for $mithril_dir (UUID: $uuid)"
+            echo "    You may need to add one manually"
+            continue
+        fi
+
+        # Remount with new options
+        echo "  Remounting $mithril_dir..."
+        if mount -o remount "$mithril_dir" 2>/dev/null; then
+            success "Remounted $mithril_dir with noatime"
+        else
+            warn "Could not remount $mithril_dir - may need reboot"
+        fi
+    done
+
+    echo ""
+    success "noatime fix complete"
+    echo ""
+    echo "  If any mounts failed to remount, they will take effect after reboot."
+}
+
+# ------------------------------------------------------------------------------
+# Move Mount Point
+# ------------------------------------------------------------------------------
+
+move_mount() {
+    info "MOVE MOUNT POINT"
+    echo ""
+    echo "  This command helps you relocate a Mithril mount to a different path."
+    echo "  It will update /etc/fstab and remount the filesystem."
+    echo ""
+
+    # Find Mithril-related entries in fstab
+    local fstab_entries=()
+    local mount_points=()
+    local uuids=()
+
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        # Check if line contains mithril-related paths
+        if [[ "$line" == *mithril* ]] || [[ "$line" == */mnt/accounts* ]] || [[ "$line" == */mnt/ledger* ]]; then
+            local mp uuid
+            # Extract mount point (2nd field)
+            mp=$(echo "$line" | awk '{print $2}')
+            # Extract UUID or device (1st field)
+            uuid=$(echo "$line" | awk '{print $1}')
+
+            if [[ -n "$mp" ]]; then
+                fstab_entries+=("$line")
+                mount_points+=("$mp")
+                uuids+=("$uuid")
+            fi
+        fi
+    done < /etc/fstab
+
+    if [[ ${#mount_points[@]} -eq 0 ]]; then
+        warn "No Mithril-related mount points found in /etc/fstab"
+        echo ""
+        echo "  Looking for entries containing 'mithril', '/mnt/accounts', or '/mnt/ledger'"
+        echo "  You may need to add fstab entries first with --setup"
+        return 1
+    fi
+
+    echo "  Found ${#mount_points[@]} Mithril-related mount(s) in /etc/fstab:"
+    echo ""
+
+    local i=1
+    for mp in "${mount_points[@]}"; do
+        local device="${uuids[$((i-1))]}"
+        # Check if currently mounted
+        local status="not mounted"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            status="mounted"
+        fi
+        printf "    %d) %-40s (%s)\n" "$i" "$mp" "$status"
+        i=$((i + 1))
+    done
+    echo ""
+
+    # Let user select which mount to move
+    local selection
+    while true; do
+        read -rp "  Select mount to move (1-${#mount_points[@]}, or 'q' to quit): " selection
+        if [[ "$selection" == "q" ]]; then
+            echo "  Cancelled."
+            return 0
+        fi
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#mount_points[@]} ]]; then
+            break
+        fi
+        echo "  Invalid selection. Please enter a number between 1 and ${#mount_points[@]}"
+    done
+
+    local old_mount="${mount_points[$((selection-1))]}"
+    local old_uuid="${uuids[$((selection-1))]}"
+    local old_entry="${fstab_entries[$((selection-1))]}"
+
+    echo ""
+    echo "  Selected: $old_mount"
+    echo ""
+
+    # Get new mount point path
+    local new_mount
+    read -rp "  Enter new mount path (e.g., /mnt/blockstore): " new_mount
+
+    if [[ -z "$new_mount" ]]; then
+        die "Mount path cannot be empty"
+    fi
+
+    # Normalize path (remove trailing slash)
+    new_mount="${new_mount%/}"
+
+    if [[ "$new_mount" == "$old_mount" ]]; then
+        die "New path is the same as the old path"
+    fi
+
+    # Check if new mount point already exists as a mount
+    if mountpoint -q "$new_mount" 2>/dev/null; then
+        die "Path $new_mount is already a mount point"
+    fi
+
+    echo ""
+    echo "  Summary:"
+    echo "    From: $old_mount"
+    echo "    To:   $new_mount"
+    echo ""
+
+    if ! yesno "  Proceed with moving this mount?" "n"; then
+        echo "  Cancelled."
+        return 0
+    fi
+
+    # Backup fstab
+    local backup="/etc/fstab.bak.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup"
+    success "Backed up fstab to $backup"
+
+    # Create new mount point directory
+    if [[ ! -d "$new_mount" ]]; then
+        mkdir -p "$new_mount"
+        success "Created directory $new_mount"
+    fi
+
+    # Check if old mount is currently mounted
+    local was_mounted=false
+    if mountpoint -q "$old_mount" 2>/dev/null; then
+        was_mounted=true
+        echo "  Unmounting $old_mount..."
+        if ! umount "$old_mount" 2>/dev/null; then
+            warn "Could not unmount $old_mount - it may be in use"
+            echo "  Try: lsof +D $old_mount"
+            echo "  Or reboot after fstab is updated"
+        else
+            success "Unmounted $old_mount"
+        fi
+    fi
+
+    # Update fstab - replace old mount point with new one
+    # Be careful to only replace the mount point field (2nd field)
+    local escaped_old escaped_new
+    escaped_old=$(printf '%s\n' "$old_mount" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    escaped_new=$(printf '%s\n' "$new_mount" | sed 's/[&/\]/\\&/g')
+
+    # Use awk to precisely replace only the 2nd field
+    awk -v old="$old_mount" -v new="$new_mount" '
+    {
+        if ($2 == old) {
+            $2 = new
+        }
+        print
+    }' /etc/fstab > /etc/fstab.tmp && mv /etc/fstab.tmp /etc/fstab
+
+    success "Updated /etc/fstab"
+
+    # Mount at new location
+    echo "  Mounting at $new_mount..."
+    if mount "$new_mount" 2>/dev/null; then
+        success "Mounted at $new_mount"
+    else
+        warn "Could not mount at $new_mount - may need reboot"
+        echo "  You can try: mount $new_mount"
+    fi
+
+    # Remind about config.toml
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────────────────────────────┐"
+    echo "  │ IMPORTANT: Update your config.toml                                       │"
+    echo "  ├──────────────────────────────────────────────────────────────────────────┤"
+    echo "  │                                                                          │"
+    echo "  │ The mount point has been moved, but you need to update config.toml:     │"
+    echo "  │                                                                          │"
+    printf "  │   Old path: %-55s │\n" "$old_mount"
+    printf "  │   New path: %-55s │\n" "$new_mount"
+    echo "  │                                                                          │"
+    echo "  │ Update the relevant [storage] section in your config.toml:              │"
+    echo "  │   accounts = \"...\"                                                       │"
+    echo "  │   blockstore = \"...\"                                                     │"
+    echo "  │   snapshots = \"...\"                                                      │"
+    echo "  │                                                                          │"
+    echo "  └──────────────────────────────────────────────────────────────────────────┘"
+    echo ""
+
+    success "Mount point moved successfully"
+}
+
+# ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
 
 show_help() {
-    head -90 "$0" | tail -n +2 | grep -E "^#" | sed 's/^# \?//'
+    head -106 "$0" | tail -n +2 | grep -E "^#" | sed 's/^# \?//'
     exit 0
 }
 
@@ -2277,25 +2593,33 @@ main() {
             check_disk_deps
             interactive_setup
             ;;
-        --delete-accounts)
+        --clean-accounts)
             check_root
             clean_accounts
             ;;
-        --delete-snapshots)
+        --clean-snapshots)
             check_root
             clean_snapshots
             ;;
-        --delete-blockstore)
+        --clean-blockstore)
             check_root
             clean_blockstore
             ;;
-        --delete-ledger)
+        --clean-ledger)
             check_root
             clean_ledger
             ;;
-        --delete-all)
+        --clean-all)
             check_root
             clean_all
+            ;;
+        --fix-noatime)
+            check_root
+            fix_noatime
+            ;;
+        --move)
+            check_root
+            move_mount
             ;;
         --status)
             show_status
@@ -2320,12 +2644,16 @@ main() {
             echo "  ./scripts/disk-setup.sh --disk-info               # Show UUIDs and device info"
             echo "  ./scripts/disk-setup.sh --disk-summary            # Show Mithril data usage breakdown"
             echo ""
-            echo "Delete commands (for resetting Mithril):"
-            echo "  sudo ./scripts/disk-setup.sh --delete-accounts    # Delete accounts (AccountsDB, index)"
-            echo "  sudo ./scripts/disk-setup.sh --delete-ledger      # Delete ledger (snapshots + blockstore)"
-            echo "  sudo ./scripts/disk-setup.sh --delete-snapshots   # Delete snapshots only"
-            echo "  sudo ./scripts/disk-setup.sh --delete-blockstore  # Delete blockstore only"
-            echo "  sudo ./scripts/disk-setup.sh --delete-all         # Delete everything"
+            echo "Clean commands (for resetting Mithril):"
+            echo "  sudo ./scripts/disk-setup.sh --clean-accounts     # Clear accounts (AccountsDB, index)"
+            echo "  sudo ./scripts/disk-setup.sh --clean-ledger       # Clear ledger (snapshots + blockstore)"
+            echo "  sudo ./scripts/disk-setup.sh --clean-snapshots    # Clear snapshots only"
+            echo "  sudo ./scripts/disk-setup.sh --clean-blockstore   # Clear blockstore only"
+            echo "  sudo ./scripts/disk-setup.sh --clean-all          # Clear everything"
+            echo ""
+            echo "Maintenance:"
+            echo "  sudo ./scripts/disk-setup.sh --fix-noatime        # Add noatime to existing mounts"
+            echo "  sudo ./scripts/disk-setup.sh --move               # Move a mount to a different path"
             echo ""
             echo "  ./scripts/disk-setup.sh --help                    # Show detailed help"
             echo ""

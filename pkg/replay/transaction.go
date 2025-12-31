@@ -360,6 +360,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
 				if txAcct.Lamports != txMeta.PreBalances[count] {
+					mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s pre-balance mismatch for %s: mithril=%d, onchain=%d",
+						CurrentRunID, slotCtx.Slot, tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count])
 					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
 				}
 			}
@@ -379,6 +381,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	// check for fee divergences
 	if txMeta != nil && txFeeInfo.TotalFee != txMeta.Fee {
+		mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s fee mismatch: mithril=%d, onchain=%d",
+			CurrentRunID, slotCtx.Slot, tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
 		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
@@ -482,6 +486,8 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 			execCtx.TransactionContext.Accounts.Unlock(count)
 		}
 		if errBuf.Len() > 0 {
+			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s post-balance mismatches detected",
+				CurrentRunID, slotCtx.Slot, tx.Signatures[0])
 			msg := fmt.Sprintf("tx %s post-balance divergences:", tx.Signatures[0]) + errBuf.String()
 			panic(msg)
 		}

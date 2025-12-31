@@ -14,14 +14,14 @@ type logger struct {
 
 var Log = logger{&atomic.Bool{}}
 
-// relativePrefix returns the elapsed time since program start as a prefix
+// relativePrefix returns the elapsed time since program start as a prefix (no milliseconds)
 func relativePrefix() string {
-	d := time.Since(programStartTime).Round(time.Second)
+	d := time.Since(programStartTime)
 	h := d / time.Hour
 	d -= h * time.Hour
 	m := d / time.Minute
 	d -= m * time.Minute
-	s := d / time.Second
+	s := int(d.Seconds())
 
 	var timeStr string
 	if h > 0 {
@@ -34,6 +34,26 @@ func relativePrefix() string {
 	return fmt.Sprintf("(+%s) ", timeStr)
 }
 
+// relativePrefixPrecise returns the elapsed time with millisecond precision (for block replay)
+func relativePrefixPrecise() string {
+	d := time.Since(programStartTime)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	secs := d.Seconds() // includes fractional seconds
+
+	var timeStr string
+	if h > 0 {
+		timeStr = fmt.Sprintf("%2dh%02dm", h, m)
+	} else if m > 0 {
+		timeStr = fmt.Sprintf("%2dm%06.3fs", m, secs)
+	} else {
+		timeStr = fmt.Sprintf("%6.3fs", secs)
+	}
+	return fmt.Sprintf("(+%s) ", timeStr)
+}
+
 func (log *logger) Debugf(format string, args ...interface{}) {
 	if log.enableVerbose.Load() {
 		fmt.Printf("%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
@@ -42,6 +62,11 @@ func (log *logger) Debugf(format string, args ...interface{}) {
 
 func (log *logger) Infof(format string, args ...interface{}) {
 	fmt.Printf("%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
+}
+
+// InfofPrecise logs with millisecond precision timing (for block replay)
+func (log *logger) InfofPrecise(format string, args ...interface{}) {
+	fmt.Printf("%s%s\n", relativePrefixPrecise(), fmt.Sprintf(format, args...))
 }
 
 func (log *logger) Errorf(format string, args ...interface{}) {

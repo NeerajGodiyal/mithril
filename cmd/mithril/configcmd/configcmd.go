@@ -1,9 +1,12 @@
 package configcmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -30,12 +33,58 @@ If config.toml already exists, this command will not overwrite it.`,
 		},
 	}
 
+	// SetCmd updates a config value
+	SetCmd = cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a configuration value in config.toml",
+		Long: `Updates a configuration value in config.toml.
+
+Examples:
+  mithril config set storage.accounts /mnt/accounts
+  mithril config set storage.blockstore /mnt/blockstore
+  mithril config set storage.snapshots /mnt/snapshots
+  mithril config set bootstrap.mode auto
+  mithril config set replay.txpar 48
+
+Common keys:
+  storage.accounts    - Path to AccountsDB directory
+  storage.blockstore  - Path to blockstore directory
+  storage.snapshots   - Path to snapshots directory
+  bootstrap.mode      - Startup mode: auto, snapshot, or accountsdb
+  replay.txpar        - Transaction parallelism (recommended: 2x CPU cores)
+  network.rpc         - RPC endpoint(s)`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			runConfigSet(args[0], args[1])
+		},
+	}
+
+	// GetCmd reads a config value
+	GetCmd = cobra.Command{
+		Use:   "get <key>",
+		Short: "Get a configuration value from config.toml",
+		Long: `Reads a configuration value from config.toml.
+
+Examples:
+  mithril config get storage.accounts
+  mithril config get bootstrap.mode`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			runConfigGet(args[0])
+		},
+	}
+
 	outputPath string
+	configFile string
 )
 
 func init() {
 	ConfigCmd.AddCommand(&InitCmd)
+	ConfigCmd.AddCommand(&SetCmd)
+	ConfigCmd.AddCommand(&GetCmd)
 	InitCmd.Flags().StringVarP(&outputPath, "output", "o", "config.toml", "Output path for config file")
+	SetCmd.Flags().StringVarP(&configFile, "config", "c", "config.toml", "Path to config file")
+	GetCmd.Flags().StringVarP(&configFile, "config", "c", "config.toml", "Path to config file")
 }
 
 func runConfigInit() {
@@ -95,4 +144,205 @@ port = 8899  # Mithril's RPC server (localhost only)
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]
 `
+}
+
+// runConfigSet updates a key in the config file
+func runConfigSet(key, value string) {
+	// Check if config file exists
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Printf("Error: %s does not exist. Run 'mithril config init' first.\n", configFile)
+		os.Exit(1)
+	}
+
+	// Parse key into section and field (e.g., "storage.accounts" -> "storage", "accounts")
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) != 2 {
+		fmt.Printf("Error: Invalid key format. Use 'section.field' (e.g., 'storage.accounts')\n")
+		os.Exit(1)
+	}
+	section := parts[0]
+	field := parts[1]
+
+	// Read the config file
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		fmt.Printf("Error reading config file: %v\n", err)
+		os.Exit(1)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var result []string
+	inSection := false
+	found := false
+	currentSection := ""
+
+	// Determine if value needs quotes (strings vs numbers/booleans)
+	quotedValue := formatTOMLValue(value)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Check for section headers
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			// If we were in the target section and didn't find the key, add it
+			if inSection && !found {
+				result = append(result, fmt.Sprintf("%s = %s", field, quotedValue))
+				found = true
+			}
+			currentSection = strings.Trim(trimmed, "[]")
+			inSection = (currentSection == section)
+		}
+
+		// Check if this line sets our field
+		if inSection && !found {
+			// Match field = value pattern
+			pattern := fmt.Sprintf(`^\s*%s\s*=`, regexp.QuoteMeta(field))
+			matched, _ := regexp.MatchString(pattern, line)
+			if matched {
+				// Replace this line
+				// Preserve indentation
+				indent := ""
+				for _, c := range line {
+					if c == ' ' || c == '\t' {
+						indent += string(c)
+					} else {
+						break
+					}
+				}
+				result = append(result, fmt.Sprintf("%s%s = %s", indent, field, quotedValue))
+				found = true
+				continue
+			}
+		}
+
+		result = append(result, line)
+	}
+
+	// If section doesn't exist, create it
+	if !found {
+		// Check if we need to add the section
+		sectionExists := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == fmt.Sprintf("[%s]", section) {
+				sectionExists = true
+				break
+			}
+		}
+
+		if !sectionExists {
+			// Add section and key at the end
+			result = append(result, "")
+			result = append(result, fmt.Sprintf("[%s]", section))
+			result = append(result, fmt.Sprintf("%s = %s", field, quotedValue))
+		} else {
+			// Section exists but key wasn't found - this shouldn't happen
+			// but handle it by adding after section header
+			var newResult []string
+			for _, line := range result {
+				newResult = append(newResult, line)
+				trimmed := strings.TrimSpace(line)
+				if trimmed == fmt.Sprintf("[%s]", section) {
+					newResult = append(newResult, fmt.Sprintf("%s = %s", field, quotedValue))
+				}
+			}
+			result = newResult
+		}
+	}
+
+	// Write back
+	err = os.WriteFile(configFile, []byte(strings.Join(result, "\n")), 0644)
+	if err != nil {
+		fmt.Printf("Error writing config file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Set %s = %s\n", key, quotedValue)
+}
+
+// formatTOMLValue formats a value appropriately for TOML
+func formatTOMLValue(value string) string {
+	// Check if it's a number
+	if _, err := fmt.Sscanf(value, "%d", new(int)); err == nil {
+		return value
+	}
+	if _, err := fmt.Sscanf(value, "%f", new(float64)); err == nil {
+		return value
+	}
+
+	// Check if it's a boolean
+	if value == "true" || value == "false" {
+		return value
+	}
+
+	// Check if it's already an array
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		return value
+	}
+
+	// Otherwise, quote it as a string
+	return fmt.Sprintf(`"%s"`, value)
+}
+
+// runConfigGet reads a key from the config file
+func runConfigGet(key string) {
+	// Check if config file exists
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Printf("Error: %s does not exist.\n", configFile)
+		os.Exit(1)
+	}
+
+	// Parse key into section and field
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) != 2 {
+		fmt.Printf("Error: Invalid key format. Use 'section.field' (e.g., 'storage.accounts')\n")
+		os.Exit(1)
+	}
+	section := parts[0]
+	field := parts[1]
+
+	// Read and scan the file
+	file, err := os.Open(configFile)
+	if err != nil {
+		fmt.Printf("Error opening config file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	inSection := false
+	currentSection := ""
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		// Check for section headers
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			currentSection = strings.Trim(trimmed, "[]")
+			inSection = (currentSection == section)
+			continue
+		}
+
+		// Check if this line sets our field
+		if inSection {
+			pattern := fmt.Sprintf(`^\s*%s\s*=\s*(.+)$`, regexp.QuoteMeta(field))
+			re := regexp.MustCompile(pattern)
+			if matches := re.FindStringSubmatch(line); len(matches) > 1 {
+				value := strings.TrimSpace(matches[1])
+				// Remove inline comments
+				if idx := strings.Index(value, "#"); idx > 0 {
+					// Check it's not inside a string
+					if !strings.Contains(value[:idx], `"`) || strings.Count(value[:idx], `"`)%2 == 0 {
+						value = strings.TrimSpace(value[:idx])
+					}
+				}
+				fmt.Println(value)
+				return
+			}
+		}
+	}
+
+	fmt.Printf("Key '%s' not found in %s\n", key, configFile)
+	os.Exit(1)
 }

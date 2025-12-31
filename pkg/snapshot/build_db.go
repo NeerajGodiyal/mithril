@@ -42,6 +42,7 @@ func CleanAccountsDbDir(accountsDbDir string) {
 		"largest_file_id",
 		"bank_hash",
 		"manifest",
+		"mithril_state.json", // State file for tracking valid builds and replay progress
 	}
 	for _, artifact := range artifacts {
 		path := filepath.Join(accountsDbDir, artifact)

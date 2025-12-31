@@ -111,7 +111,16 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 }
 
 func (accountsDb *AccountsDb) CloseDb() {
-	accountsDb.Index.Close()
+	mlog.Log.Infof("CloseDb: syncing and closing Index...")
+	if err := accountsDb.Index.Close(); err != nil {
+		mlog.Log.Errorf("CloseDb: Index.Close() error: %v", err)
+	}
+	mlog.Log.Infof("CloseDb: syncing and closing BankHashStore...")
+	if err := accountsDb.BankHashStore.Close(); err != nil {
+		mlog.Log.Errorf("CloseDb: BankHashStore.Close() error: %v", err)
+	}
+	mlog.Log.Infof("CloseDb: done")
+	fmt.Println() // spacing after close
 }
 
 func (accountsDb *AccountsDb) InitCaches() {
@@ -161,6 +170,7 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
+
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
@@ -184,6 +194,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	}
 
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
+
 	appendVecFile, err := os.Open(appendVecFileName)
 	if err != nil {
 		//mlog.Log.Debugf("failed to open appendvec file %s")

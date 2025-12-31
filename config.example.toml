@@ -23,9 +23,14 @@ name = "mithril"
 # Controls how Mithril initializes its state on startup.
 #
 # Modes:
-#   "auto"       - Use existing AccountsDB if valid, otherwise download snapshot
-#   "snapshot"   - Always download a fresh snapshot (good for debugging/early-stage)
-#   "accountsdb" - Require existing AccountsDB, fail fast if missing
+#   "auto"         - Use existing AccountsDB if valid, otherwise download snapshot.
+#                    If AccountsDB is significantly behind chain tip (>full_threshold
+#                    slots), prompts interactively to continue or rebuild.
+#   "snapshot"     - Rebuild AccountsDB from snapshot. Reuses existing downloaded
+#                    snapshot if within full_threshold slots, otherwise downloads new.
+#   "new-snapshot" - Always download a fresh snapshot, ignoring all existing data.
+#                    Cleans AccountsDB and snapshot directories before starting.
+#   "accountsdb"   - Require existing valid AccountsDB, fail fast if missing.
 #
 # The default is "snapshot" which is recommended while Mithril is in early
 # development. Once stable, "auto" is a good choice for production.
@@ -206,6 +211,7 @@ name = "mithril"
     # -------------------------------------------------------------------------
     # Snapshot Storage
     # -------------------------------------------------------------------------
+    # Snapshots are downloaded to the path specified in [storage].snapshots above.
 
     # Maximum snapshots to keep on disk (controls both saving and retention)
     #   0 = Stream-only mode (don't save snapshots, saves disk space)
@@ -218,26 +224,25 @@ name = "mithril"
     # if interrupted).
     max_full_snapshots = 1
 
-    # Path to save snapshots (only used when max_full_snapshots > 0)
-    download_path = "/mnt/mithril-ledger/snapshots"
-
     # Enable verbose output showing detailed node discovery statistics
     verbose = false
 
     # -------------------------------------------------------------------------
-    # Snapshot Age Thresholds (for reusing existing snapshots)
+    # Snapshot Age Threshold
     # -------------------------------------------------------------------------
-    # These settings control when existing snapshots on disk are considered
-    # "fresh enough" to reuse vs downloading new ones.
-
-    # Always download a new full snapshot, even if a fresh one exists on disk.
-    # Set to false to reuse existing full snapshots within the age threshold.
-    always_download_full = true
-
-    # Maximum age for full snapshots (slots) - only used when always_download_full = false
-    # Snapshots older than this are considered stale and will be re-downloaded.
-    # ~100,000 slots ≈ 12 hours at 400ms/slot
+    # Maximum age for full snapshots in slots (~100,000 slots ≈ 12 hours at 400ms/slot)
+    #
+    # This threshold is used for:
+    #   - Snapshot download: Skip nodes with snapshots older than this
+    #   - Snapshot reuse: In mode=snapshot, reuse existing downloaded snapshot
+    #     if within this age instead of downloading new
+    #   - Stale AccountsDB detection: In mode=auto, prompt user if AccountsDB
+    #     is this far behind the latest available snapshot
     full_threshold = 100000
+
+    # (Legacy) Always download a new full snapshot even if one exists on disk.
+    # With the new bootstrap modes, use mode=new-snapshot instead.
+    # always_download_full = false
 
     # Maximum age for incremental snapshots (slots)
     # Incrementals are always downloaded (they're small and provide latest state)

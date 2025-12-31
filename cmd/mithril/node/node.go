@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"math"
@@ -23,6 +24,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
@@ -31,7 +33,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
+	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	solrpc "github.com/gagliardetto/solana-go/rpc"
+	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -89,7 +94,7 @@ var (
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
-	ledgerPath                  string
+	blockstorePath              string
 	txParallelism               int64
 
 	debugTxs        []string
@@ -116,7 +121,7 @@ func init() {
 	VerifyRange.Flags().StringVarP(&snapshotArchivePath, "snapshot-archive-path", "p", "", "Path of full snapshot or AccountsDB to load from")
 	VerifyRange.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Filename containing incremental snapshot")
 	VerifyRange.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	VerifyRange.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	VerifyRange.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
 	VerifyRange.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
@@ -145,11 +150,11 @@ func init() {
 
 	// flags for 'mithril run' (live verifier mode)
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'snapshot' (always download), 'accountsdb' (require existing)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
-	Run.Flags().StringVar(&ledgerPath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
+	Run.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
 	// [rpc] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
@@ -328,9 +333,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if accountsPath == "" {
 		accountsPath = getString("accounts-path", "ledger.accounts_path")
 	}
-	ledgerPath = getString("ledger-path", "storage.blockstore")
-	if ledgerPath == "" {
-		ledgerPath = getString("ledger-path", "ledger.path")
+	blockstorePath = getString("ledger-path", "storage.blockstore")
+	if blockstorePath == "" {
+		blockstorePath = getString("ledger-path", "ledger.path")
 	}
 
 	// [network] section (with fallback to legacy [rpc] keys)
@@ -355,8 +360,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
 
-	// [snapshot] section
+	// Snapshot download path - defaults to storage.snapshots, can be overridden
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
+	if snapshotDlPath == "" {
+		snapshotDlPath = snapshotArchivePath // Use storage.snapshots as default
+	}
 
 	// [tuning.pprof] section (with fallback to legacy [development.pprof])
 	pprofPort = getInt64("pprof-port", "tuning.pprof.port")
@@ -419,8 +427,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 // buildSnapshotConfig creates a snapshotdl.SnapshotConfig from the mithril config.
 // It starts with defaults and overrides with any values set in the TOML file.
-func buildSnapshotConfig() snapshotdl.SnapshotConfig {
+func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 	cfg := snapshotdl.DefaultSnapshotConfig()
+	cfg.RPCAddresses = rpcEndpoints
 
 	// Override with TOML values if set
 	if config.IsSet("snapshot.verbose") {
@@ -518,7 +527,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
 	}
 
-	logVCSInfo()
+	// Print consolidated startup info (same as run command)
+	printStartupInfo("verify-range")
+
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)
 	if err != nil {
 		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
@@ -562,9 +573,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("downloading snapshot...")
 
-		snapCfg := buildSnapshotConfig()
+		snapCfg := buildSnapshotConfig(rpcEndpoints)
 		var dlPath string
-		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(rpcEndpoints[0], snapshotDlPath, snapCfg)
+		dlPath, _, _, err = snapshotdl.DownloadSnapshotWithConfig(ctx, snapshotDlPath, snapCfg)
 		if err != nil {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
@@ -591,7 +602,91 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
+	// Check for state file to resume from correct slot
+	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
+	mithrilState, _ := state.CheckAndLoadValidState(accountsDbDir)
+	if mithrilState != nil {
+		// Validate state file matches current manifest
+		if mithrilState.SnapshotSlot != manifest.Bank.Slot {
+			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
+				mithrilState.SnapshotSlot, manifest.Bank.Slot)
+			mithrilState = nil
+		} else if mithrilState.LastSlot > 0 {
+			// Validate last_slot is reasonable (not in the future relative to what we could have replayed)
+			if mithrilState.LastSlot < manifest.Bank.Slot {
+				mlog.Log.Infof("state file last_slot (%d) is before snapshot slot (%d), ignoring",
+					mithrilState.LastSlot, manifest.Bank.Slot)
+				mithrilState = nil
+			} else {
+				startSlot = int64(mithrilState.LastSlot + 1)
+			}
+		}
+	}
+
+	// Create ResumeState if we have resume context from a previous graceful shutdown
+	var resumeState *replay.ResumeState
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		resumeCtx := mithrilState.GetResumeContext()
+		// Decode bankhash from base58
+		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
+		if err != nil {
+			mlog.Log.Infof("warning: failed to decode last_bankhash from state file: %v", err)
+		} else {
+			// Decode LtHash from base64
+			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			if err != nil {
+				mlog.Log.Infof("warning: failed to decode last_accts_lt_hash from state file: %v", err)
+			} else {
+				ltHash := &lthash.LtHash{}
+				ltHash.InitWithHash(ltHashBytes)
+				resumeState = &replay.ResumeState{
+					ParentSlot:               mithrilState.LastSlot,
+					ParentBankhash:           parentBankhash,
+					AcctsLtHash:              ltHash,
+					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
+					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
+					NumSignatures:            resumeCtx.NumSignatures,
+				}
+
+				// Decode blockhash context
+				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+					resumeState.RecentBlockhashes = &recentBlockhashes
+
+					if resumeCtx.EvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+						if err == nil && len(evictedBytes) == 32 {
+							copy(resumeState.EvictedBlockhash[:], evictedBytes)
+						}
+					}
+
+					if resumeCtx.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+						if err == nil && len(lastBhBytes) == 32 {
+							copy(resumeState.LastBlockhash[:], lastBhBytes)
+						}
+					}
+					mlog.Log.Infof("loaded resume context with %d blockhashes from state file", len(*resumeState.RecentBlockhashes))
+				} else {
+					mlog.Log.Infof("loaded resume context from state file (no blockhashes)")
+				}
+			}
+		}
+	}
+
+	if mithrilState == nil {
+		// Create a new state file for this session
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsDbDir); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+	}
+
 	if endSlot != -1 {
 		numReplaySlots = endSlot - startSlot
 	} else if numReplaySlots != 0 {
@@ -636,7 +731,63 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(ctx, accountsDb, accountsDbDir, manifest, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], ledgerPath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer)
+	replayStartTime := time.Now()
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState)
+
+	// Update state file with last persisted slot and resume context
+	if result.LastPersistedSlot > 0 && mithrilState != nil {
+		// Build resume context for graceful shutdown
+		var resumeCtx *state.ResumeContext
+		if result.LastAcctsLtHash != nil {
+			// Calculate epoch for the last persisted slot
+			var lastEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			}
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: result.LastLamportsPerSignature,
+				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
+				NumSignatures:        result.LastNumSignatures,
+				Epoch:                lastEpoch,
+
+				// Blockhash context - required because appendvec writes are not fsynced
+				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// Run tracking - for log correlation
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
+				Commit:       getCommitHash(),
+			}
+		}
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+			mlog.Log.Errorf("failed to update state file: %v", err)
+		}
+	}
+
+	// Print shutdown summary if cancelled
+	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		// Calculate epoch from slot using epoch schedule
+		var epoch, snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(snapshotBaseSlot)
+		}
+		progress.PrintShutdownSummary(progress.ShutdownInfo{
+			LastSlot:         result.LastPersistedSlot,
+			LastBankhash:     result.LastPersistedBankhash,
+			SnapshotBaseSlot: snapshotBaseSlot,
+			AccountsDBPath:   accountsDbDir,
+			ReplayDuration:   time.Since(replayStartTime),
+			WasCancelled:     true,
+			RunID:            replay.CurrentRunID,
+			Epoch:            epoch,
+			SnapshotEpoch:    snapshotEpoch,
+		})
+	}
+
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -687,10 +838,20 @@ func runLive(c *cobra.Command, args []string) {
 	// Bootstrap: determine how to initialize AccountsDB based on mode
 	var accountsDb *accountsdb.AccountsDb
 	var manifest *snapshot.SnapshotManifest
-	snapshotDownloadPath := scratchDirectory
+	var mithrilState *state.MithrilState
+	// Use configured snapshot directory (storage.snapshots / snapshot.download_path), not scratch
+	snapshotDownloadPath := snapshotDlPath
 
-	// Detect existing state
+	// Check for valid state file first (this is the authoritative source of truth)
+	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
+	hasValidState := mithrilState != nil
+
+	// Fall back to legacy detection if no state file
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
+	if hasValidState {
+		hasAccountsDB = true
+		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
+	}
 
 	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
 	var overcastAddr string
@@ -701,8 +862,11 @@ func runLive(c *cobra.Command, args []string) {
 	switch bootstrapMode {
 	case "accountsdb":
 		// Mode: Require existing AccountsDB, never download
-		if !hasAccountsDB {
+		if !hasValidState && !hasAccountsDB {
 			klog.Fatalf("mode=accountsdb requires existing AccountsDB at %s", accountsPath)
+		}
+		if !hasValidState {
+			mlog.Log.Infof("WARNING: no state file found, AccountsDB may be from incomplete build")
 		}
 		mlog.Log.Infof("resuming from existing AccountsDB at slot %d", accountsDBSlot)
 		accountsDb, err = accountsdb.OpenDb(accountsPath)
@@ -713,49 +877,68 @@ func runLive(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("failed to load manifest: %v", err)
 		}
+		// Run integrity check if we have a state file (warn only, don't fail - user chose force mode)
+		if hasValidState {
+			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
+				mlog.Log.Errorf("WARNING: integrity check failed: %v", err)
+				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap-mode=snapshot to rebuild.")
+			}
+		}
 
-	case "snapshot":
-		// Mode: Always download fresh snapshot, clean up existing data
-		mlog.Log.Infof("mode=snapshot: downloading fresh snapshot")
+	case "new-snapshot":
+		// Mode: Always download fresh snapshot, clean everything
+		if snapshotDownloadPath == "" {
+			klog.Fatalf("mode=new-snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
+		}
+		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
 		if accountsPath != "" {
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
-		// Clean up old snapshot files based on retention settings
+		// Clean ALL existing snapshots (force fresh download)
 		if snapshotDownloadPath != "" {
-			maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
-			if maxSnapshots == 0 {
-				maxSnapshots = 2 // default
-			}
-			deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0, true) // 0 means delete all
 		}
-		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
+		// Write state file to mark build as complete
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
 
-	case "auto":
-		fallthrough
-	default:
-		// Mode: auto - prefer AccountsDB, then existing snapshot, then download
-		if hasAccountsDB {
-			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
-			accountsDb, err = accountsdb.OpenDb(accountsPath)
-			if err != nil {
-				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
-			}
-			manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsPath, "manifest"))
-			if err != nil {
-				klog.Fatalf("failed to load manifest: %v", err)
-			}
+	case "snapshot":
+		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
+		if snapshotDownloadPath == "" {
+			klog.Fatalf("mode=snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
+		}
+		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
+		if accountsPath != "" {
+			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			snapshot.CleanAccountsDbDir(accountsPath)
+		}
+
+		// Check for existing fresh snapshot
+		fullThreshold := config.GetInt("snapshot.full_threshold")
+		if fullThreshold == 0 {
+			fullThreshold = 100000 // default
+		}
+		existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+
+		if existingSnap != nil {
+			// Reuse existing snapshot
+			mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
 		} else {
-			// No existing AccountsDB - need to build from snapshot
-			mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
-			if accountsPath != "" {
-				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
-				snapshot.CleanAccountsDbDir(accountsPath)
-			}
+			// Download fresh
+			mlog.Log.Infof("no fresh snapshot file found, downloading new one")
 			// Clean up old snapshot files based on retention settings
 			if snapshotDownloadPath != "" {
 				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
@@ -765,19 +948,251 @@ func runLive(c *cobra.Command, args []string) {
 				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
 				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
 			}
-			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr)
+			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+		}
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+		// Write state file to mark build as complete
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+
+	case "auto":
+		fallthrough
+	default:
+		// Mode: auto - prefer valid AccountsDB (with state file), then download fresh
+		fullThreshold := config.GetInt("snapshot.full_threshold")
+		if fullThreshold == 0 {
+			fullThreshold = 100000 // default
+		}
+
+		if hasValidState {
+			// Check if AccountsDB is stale (significantly behind chain tip)
+			// Use queryCurrentSlot instead of queryLatestSnapshotSlot to avoid expensive node discovery
+			currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
+			if err != nil {
+				mlog.Log.Infof("could not query current slot: %v (continuing with existing AccountsDB)", err)
+			} else if mithrilState.IsStale(currentSlot, uint64(fullThreshold)) {
+				slotsBehind := currentSlot - mithrilState.GetCurrentSlot()
+				mlog.Log.Infof("AccountsDB is %d slots behind chain tip", slotsBehind)
+
+				// Interactive prompt
+				choice := progress.PromptStaleAccountsDB(progress.StaleInfo{
+					AccountsDBSlot:     mithrilState.GetCurrentSlot(),
+					LatestSnapshotSlot: currentSlot, // Using current chain tip slot
+					SlotsBehind:        slotsBehind,
+				})
+
+				if choice == 2 {
+					// User chose to start fresh from snapshot
+					if snapshotDownloadPath == "" {
+						klog.Fatalf("cannot rebuild from snapshot: no snapshot directory configured (set storage.snapshots or snapshot.download_path in config)")
+					}
+					mlog.Log.Infof("user chose to rebuild from latest snapshot")
+					if accountsPath != "" {
+						snapshot.CleanAccountsDbDir(accountsPath)
+					}
+					// Check for existing fresh snapshot
+					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+					if existingSnap != nil {
+						mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
+					} else {
+						// Clean up old snapshot files
+						if snapshotDownloadPath != "" {
+							maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+							if maxSnapshots == 0 {
+								maxSnapshots = 2
+							}
+							deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+						}
+						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+					}
+					if err != nil {
+						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+					}
+					var snapshotEpoch uint64
+					if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+						snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+					}
+					mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+					if err := mithrilState.Save(accountsPath); err != nil {
+						mlog.Log.Errorf("failed to save state file: %v", err)
+					}
+					break // Exit the switch, continue with fresh AccountsDB
+				}
+				// choice == 1: continue with existing AccountsDB
+			}
+
+			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			accountsDb, err = accountsdb.OpenDb(accountsPath)
+			if err != nil {
+				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
+			}
+			manifest, err = snapshot.LoadManifestFromFile(filepath.Join(accountsPath, "manifest"))
+			if err != nil {
+				klog.Fatalf("failed to load manifest: %v", err)
+			}
+
+			// Validate state file matches AccountsDB (detect Ctrl+Z / kill -9 corruption)
+			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
+				mlog.Log.Errorf("INTEGRITY CHECK FAILED: %v", err)
+				mlog.Log.Infof("AccountsDB appears to have been modified beyond what state file records")
+				mlog.Log.Infof("This usually happens when the process was killed with Ctrl+Z or kill -9")
+
+				// Mark state as corrupted so next startup knows to rebuild
+				if markErr := mithrilState.MarkCorrupted(accountsPath, err.Error()); markErr != nil {
+					mlog.Log.Errorf("failed to mark state as corrupted: %v", markErr)
+				} else {
+					mlog.Log.Infof("state file updated to indicate corruption")
+				}
+
+				// Close AccountsDB before exiting
+				accountsDb.CloseDb()
+
+				mlog.Log.Infof("restart mithril to automatically rebuild from snapshot")
+				klog.Fatalf("AccountsDB corrupted - restart to rebuild")
+			}
+		} else {
+			// No valid state - need to clean and rebuild from snapshot
+			if snapshotDownloadPath == "" {
+				klog.Fatalf("mode=auto requires a snapshot directory to rebuild (set storage.snapshots or snapshot.download_path in config)")
+			}
+			if hasAccountsDB {
+				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
+			} else {
+				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+			}
+			if accountsPath != "" {
+				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+				snapshot.CleanAccountsDbDir(accountsPath)
+			}
+
+			// Check for existing fresh snapshot
+			existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+			if existingSnap != nil {
+				mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
+			} else {
+				// Clean up old snapshot files based on retention settings
+				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+				if maxSnapshots == 0 {
+					maxSnapshots = 2 // default
+				}
+				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+			}
 			if err != nil {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+			}
+			// Write state file to mark build as complete
+			var snapshotEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+			}
+			mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+			if err := mithrilState.Save(accountsPath); err != nil {
+				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
 		}
 	}
 
-	mlog.Log.Infof("AccountsDB ready at slot %d", manifest.Bank.Slot)
-
+	// Determine start slot from state file or manifest
+	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
-	liveEndSlot := uint64(math.MaxUint64)
+	if mithrilState != nil {
+		// Validate state file matches current manifest
+		if mithrilState.SnapshotSlot != manifest.Bank.Slot {
+			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
+				mithrilState.SnapshotSlot, manifest.Bank.Slot)
+			mithrilState = nil
+		} else if mithrilState.LastSlot > 0 {
+			// Validate last_slot is reasonable
+			if mithrilState.LastSlot < manifest.Bank.Slot {
+				mlog.Log.Infof("state file last_slot (%d) is before snapshot slot (%d), ignoring",
+					mithrilState.LastSlot, manifest.Bank.Slot)
+				mithrilState = nil
+			} else {
+				startSlot = int64(mithrilState.LastSlot + 1)
+			}
+		}
+	}
 
-	mlog.Log.Infof("starting replay from slot %d", startSlot)
+	// Create ResumeState if we have resume context from state file
+	var resumeState *replay.ResumeState
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		resumeCtx := mithrilState.GetResumeContext()
+
+		// Decode parent bankhash
+		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
+		if err != nil {
+			mlog.Log.Errorf("failed to decode last_bankhash from state file: %v", err)
+			mlog.Log.Infof("will start fresh from snapshot")
+			mithrilState = nil
+		} else {
+			// Decode AcctsLtHash
+			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			if err != nil {
+				mlog.Log.Errorf("failed to decode accts_lt_hash from state file: %v", err)
+				mlog.Log.Infof("will start fresh from snapshot")
+				mithrilState = nil
+			} else {
+				ltHash := &lthash.LtHash{}
+				ltHash.InitWithHash(ltHashBytes)
+
+				resumeState = &replay.ResumeState{
+					ParentSlot:               mithrilState.LastSlot,
+					ParentBankhash:           parentBankhash,
+					AcctsLtHash:              ltHash,
+					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
+					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
+					NumSignatures:            resumeCtx.NumSignatures,
+				}
+
+				// Decode blockhash context
+				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+					resumeState.RecentBlockhashes = &recentBlockhashes
+
+					if resumeCtx.EvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+						if err == nil && len(evictedBytes) == 32 {
+							copy(resumeState.EvictedBlockhash[:], evictedBytes)
+						}
+					}
+
+					if resumeCtx.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+						if err == nil && len(lastBhBytes) == 32 {
+							copy(resumeState.LastBlockhash[:], lastBhBytes)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if mithrilState == nil {
+		// Initialize state for this session
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+	}
+
+	liveEndSlot := uint64(math.MaxUint64)
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
@@ -807,7 +1222,62 @@ func runLive(c *cobra.Command, args []string) {
 		mlog.Log.Infof("started RPC server on port %d", rpcPort)
 	}
 
-	replay.ReplayBlocks(ctx, accountsDb, accountsPath, manifest, uint64(startSlot), liveEndSlot, rpcEndpoints[0], ledgerPath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	replayStartTime := time.Now()
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState)
+
+	// Update state file with last persisted slot and resume context
+	if result.LastPersistedSlot > 0 && mithrilState != nil {
+		var resumeCtx *state.ResumeContext
+		if result.LastAcctsLtHash != nil {
+			// Calculate epoch for the last persisted slot
+			var lastEpoch uint64
+			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			}
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: result.LastLamportsPerSignature,
+				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
+				NumSignatures:        result.LastNumSignatures,
+				Epoch:                lastEpoch,
+
+				// Blockhash context - required because appendvec writes are not fsynced
+				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// Run tracking - for log correlation
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
+				Commit:       getCommitHash(),
+			}
+		}
+		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+			mlog.Log.Errorf("failed to update state file: %v", err)
+		}
+	}
+
+	// Print shutdown summary if cancelled
+	if result.WasCancelled && result.LastPersistedSlot > 0 {
+		// Calculate epoch from slot using epoch schedule
+		var epoch, snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(snapshotBaseSlot)
+		}
+		progress.PrintShutdownSummary(progress.ShutdownInfo{
+			LastSlot:         result.LastPersistedSlot,
+			LastBankhash:     result.LastPersistedBankhash,
+			SnapshotBaseSlot: snapshotBaseSlot,
+			AccountsDBPath:   accountsPath,
+			ReplayDuration:   time.Since(replayStartTime),
+			WasCancelled:     true,
+			RunID:            replay.CurrentRunID,
+			Epoch:            epoch,
+			SnapshotEpoch:    snapshotEpoch,
+		})
+	}
+
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
 }
@@ -833,6 +1303,46 @@ func logVCSInfo() {
 	}
 
 	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
+}
+
+// getCommitHash returns the short git commit hash from build info
+func getCommitHash() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				if len(setting.Value) > 8 {
+					return setting.Value[:8]
+				}
+				return setting.Value
+			}
+		}
+	}
+	return ""
+}
+
+// formatDurationShort formats a duration in a compact human-readable format (e.g., "2h 30m", "45m", "3d 2h")
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return "< 1m"
+	}
+
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dd %dh", days, hours)
+		}
+		return fmt.Sprintf("%dd", days)
+	}
+	if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dm", minutes)
 }
 
 // printStartupInfo prints consolidated startup info including version, timestamp, and configuration
@@ -879,92 +1389,128 @@ func printStartupInfo(commandName string) {
 	// Go version
 	fmt.Printf("  Go:           %s%s%s\n", dim, runtime.Version(), reset)
 
-	// Command being run
-	fmt.Printf("  Command:      %s%s%s\n", cyan, commandName, reset)
-
-	// Detect what's on disk
-	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
-
-	// Check for existing snapshots - try configured paths in order of preference:
-	// 1. snapshotArchivePath (storage.snapshots)
-	// 2. snapshotDlPath (snapshot.download_path)
-	// 3. scratchDirectory (scratch_directory)
-	var existingSnapshots []snapshotInfo
-	for _, searchPath := range []string{snapshotArchivePath, snapshotDlPath, scratchDirectory} {
-		if searchPath != "" {
-			if snaps := detectExistingSnapshots(searchPath); len(snaps) > 0 {
-				existingSnapshots = snaps
-				break
-			}
-		}
+	// Run ID (generated fresh each run)
+	runID := replay.CurrentRunID
+	if runID == "" {
+		// Generate one early if not yet set, and assign to global for consistency
+		runID = fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+		replay.CurrentRunID = runID
 	}
+	fmt.Printf("  Run ID:       %s%s%s\n", dim, runID, reset)
 
-	// Determine actual action based on bootstrap mode and what exists
-	var actionStr string
-	var actionDetail string
-
+	// Bootstrap mode with description
+	var bootstrapDesc string
 	switch bootstrapMode {
 	case "auto":
-		if hasAccountsDB {
-			actionStr = "Resuming from AccountsDB"
-			if accountsDBSlot > 0 {
-				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
-			}
-		} else if len(existingSnapshots) > 0 {
-			actionStr = "Building from existing snapshot"
-			actionDetail = existingSnapshots[0].filename
-		} else {
-			actionStr = "Downloading new snapshot"
-		}
+		bootstrapDesc = "use existing AccountsDB if valid, else download snapshot"
 	case "snapshot":
-		actionStr = "Downloading new snapshot"
-		actionDetail = "fresh start"
+		bootstrapDesc = "rebuild from local snapshot"
+	case "new-snapshot":
+		bootstrapDesc = "download fresh snapshot from network"
 	case "accountsdb":
-		if hasAccountsDB {
-			actionStr = "Resuming from AccountsDB"
-			if accountsDBSlot > 0 {
-				actionDetail = fmt.Sprintf("slot %d", accountsDBSlot)
+		bootstrapDesc = "require existing AccountsDB"
+	default:
+		bootstrapDesc = ""
+	}
+	if bootstrapDesc != "" {
+		fmt.Printf("  Bootstrap:    %s%s%s %s(%s)%s\n", green, bootstrapMode, reset, dim, bootstrapDesc, reset)
+	} else {
+		fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
+	}
+
+	// Load state file for detailed info (only show for modes that use existing AccountsDB)
+	// In snapshot/new-snapshot modes, we're rebuilding so state info is not relevant
+	willUseExistingAccountsDB := bootstrapMode == "auto" || bootstrapMode == "accountsdb"
+	if willUseExistingAccountsDB {
+		mithrilState, _ := state.LoadState(accountsPath)
+
+		// Show state info if available
+		if mithrilState != nil && mithrilState.IsReady() {
+			fmt.Println()
+			fmt.Printf("%s━━━ State Info ━━━%s\n", gold, reset)
+
+			// Full snapshot info
+			snapshotInfo := fmt.Sprintf("slot %d", mithrilState.SnapshotSlot)
+			if mithrilState.SnapshotEpoch > 0 {
+				snapshotInfo = fmt.Sprintf("slot %d (epoch %d)", mithrilState.SnapshotSlot, mithrilState.SnapshotEpoch)
 			}
-		} else {
-			actionStr = "ERROR: No AccountsDB found"
-			actionDetail = "mode=accountsdb requires existing data"
+			fmt.Printf("  Full snapshot:  %s%s%s\n", dim, snapshotInfo, reset)
+
+			// Incremental snapshot info (if available)
+			if mithrilState.IncrSnapshot != nil && mithrilState.IncrSnapshot.Slot > 0 {
+				incrInfo := fmt.Sprintf("slot %d (based on %d)", mithrilState.IncrSnapshot.Slot, mithrilState.IncrSnapshot.BaseSlot)
+				fmt.Printf("  Incr snapshot:  %s%s%s\n", dim, incrInfo, reset)
+			}
+
+			// Current AccountsDB state / resume info
+			if mithrilState.LastSlot > 0 {
+				resumeInfo := fmt.Sprintf("AccountsDB at slot %d", mithrilState.LastSlot)
+				if mithrilState.LastEpoch > 0 {
+					resumeInfo = fmt.Sprintf("AccountsDB at slot %d (epoch %d)", mithrilState.LastSlot, mithrilState.LastEpoch)
+				}
+				fmt.Printf("  Resume from:    %s%s%s\n", cyan, resumeInfo, reset)
+
+				// Slots replayed since snapshot
+				slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
+				fmt.Printf("  Replayed:       %s%d slots since snapshot%s\n", dim, slotsReplayed, reset)
+			} else {
+				fmt.Printf("  Resume from:    %ssnapshot (fresh start)%s\n", dim, reset)
+			}
+
+			// Previous run info with timestamp and time ago
+			if mithrilState.LastRunID != "" {
+				runInfo := mithrilState.LastRunID
+				if !mithrilState.LastRunAt.IsZero() {
+					runInfo += fmt.Sprintf(" at %s", mithrilState.LastRunAt.Format("2006-01-02 15:04:05"))
+					// Add time since last run
+					elapsed := time.Since(mithrilState.LastRunAt)
+					runInfo += fmt.Sprintf(" (%s ago)", formatDurationShort(elapsed))
+				}
+				if mithrilState.LastCommit != "" && mithrilState.LastCommit != revision {
+					runInfo += fmt.Sprintf(" (commit: %s)", mithrilState.LastCommit)
+				}
+				fmt.Printf("  Last run:       %s%s%s\n", dim, runInfo, reset)
+			}
 		}
 	}
 
-	// Print bootstrap action (the main thing users care about)
-	fmt.Printf("  Bootstrap:    %s%s%s", green, actionStr, reset)
-	if actionDetail != "" {
-		fmt.Printf(" %s(%s)%s", dim, actionDetail, reset)
-	}
-	fmt.Printf(" %s[mode=%s]%s\n", dim, bootstrapMode, reset)
+	fmt.Println()
+	fmt.Printf("%s━━━ Paths ━━━%s\n", gold, reset)
 
-	// Show existing AccountsDB info if present
-	if hasAccountsDB && bootstrapMode != "snapshot" {
-		fmt.Printf("  AccountsDB:   %s%s%s", cyan, accountsPath, reset)
-		if accountsDBSlot > 0 {
-			fmt.Printf(" %s(slot %d)%s\n", dim, accountsDBSlot, reset)
+	// AccountsDB path with disk info
+	if accountsPath != "" {
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(accountsPath))
+		if diskInfo != "" {
+			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
 		} else {
-			fmt.Println()
+			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
 		}
-	} else if accountsPath != "" {
-		fmt.Printf("  AccountsDB:   %s%s%s %s(will create)%s\n", gold, accountsPath, reset, dim, reset)
 	}
 
-	// Show existing full snapshot only when actually using it
-	// (mode=auto without AccountsDB and an existing snapshot will be used)
-	usingExistingSnapshot := bootstrapMode == "auto" && !hasAccountsDB && len(existingSnapshots) > 0
-	if usingExistingSnapshot {
-		// Only show full snapshots, not incrementals
-		for _, snap := range existingSnapshots {
-			if snap.isIncr {
-				continue // skip incremental snapshots
-			}
-			fmt.Printf("  Snapshot:     %s%s%s", cyan, snap.filename, reset)
-			if snap.slot > 0 {
-				fmt.Printf(" %s(slot %d)%s", dim, snap.slot, reset)
-			}
-			fmt.Println()
-			break // only show first full snapshot
+	// Blockstore path with disk info
+	if blockstorePath != "" {
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(blockstorePath))
+		if diskInfo != "" {
+			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
+		}
+	}
+
+	// Snapshots path with disk info
+	snapshotDir := snapshotDlPath
+	if snapshotDir == "" {
+		snapshotDir = snapshotArchivePath
+	}
+	if snapshotDir != "" {
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(snapshotDir))
+		if diskInfo != "" {
+			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
 		}
 	}
 
@@ -974,11 +1520,6 @@ func printStartupInfo(commandName string) {
 		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
 	} else {
 		fmt.Println()
-	}
-
-	// Blockstore path
-	if ledgerPath != "" {
-		fmt.Printf("  Blockstore:   %s%s%s\n", gold, ledgerPath, reset)
 	}
 
 	// RPC endpoints
@@ -1125,11 +1666,96 @@ func parseSlotFromIncrementalName(name string) uint64 {
 	return 0
 }
 
+// detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
+// Returns the snapshotInfo if found, nil otherwise.
+func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []string, ctx context.Context) *snapshotInfo {
+	if snapshotDir == "" {
+		return nil
+	}
+
+	snapshots := detectExistingSnapshots(snapshotDir)
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	// Get current slot estimate from RPC
+	currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
+	if err != nil {
+		mlog.Log.Infof("could not query current slot: %v", err)
+		return nil
+	}
+
+	// Find the freshest full snapshot within threshold
+	var bestSnapshot *snapshotInfo
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.isIncr {
+			continue // Skip incrementals
+		}
+		if currentSlot > snap.slot && (currentSlot-snap.slot) <= uint64(fullThreshold) {
+			if bestSnapshot == nil || snap.slot > bestSnapshot.slot {
+				bestSnapshot = snap
+			}
+		}
+	}
+
+	return bestSnapshot
+}
+
+// queryCurrentSlot gets the current slot from RPC.
+func queryCurrentSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	if len(rpcEndpoints) == 0 {
+		return 0, fmt.Errorf("no RPC endpoints configured")
+	}
+
+	// Use the first RPC endpoint
+	client := solrpc.New(rpcEndpoints[0])
+	slot, err := client.GetSlot(ctx, solrpc.CommitmentFinalized)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get slot from RPC: %w", err)
+	}
+	return slot, nil
+}
+
+// queryLatestSnapshotSlot queries the latest available snapshot slot from the network.
+func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	if len(rpcEndpoints) == 0 {
+		return 0, fmt.Errorf("no RPC endpoints configured")
+	}
+
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
+	info, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query snapshot info: %w", err)
+	}
+	return uint64(info.Slot), nil
+}
+
+// buildFromExistingSnapshot builds AccountsDB from an existing downloaded snapshot file.
+func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, blockstorePath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
+
+	// Construct full path to snapshot file
+	fullSnapshotPath := filepath.Join(snapshotDir, snap.filename)
+	mlog.Log.Infof("building AccountsDB from existing snapshot: %s", fullSnapshotPath)
+
+	// Create progress display for extract
+	dp := progress.NewDualProgress()
+
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
+	}
+	mlog.Log.Infof("finished building AccountsDB from existing snapshot")
+
+	return accountsDb, manifest, nil
+}
+
 // downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
-func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, ledgerPath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
-	snapCfg := buildSnapshotConfig()
+func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+	snapCfg := buildSnapshotConfig(rpcEndpoints)
 	fullSnapshotDlStart := time.Now()
-	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(rpcEndpoints[0], snapCfg)
+	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting snapshot URL: %w", err)
 	}
@@ -1150,7 +1776,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, ledgerPath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -1209,6 +1835,39 @@ func killExistingMithrilProcesses() int {
 	return killed
 }
 
+// decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes
+func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
+	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
+	for _, entry := range entries {
+		hashBytes, err := base58.Decode(entry.Blockhash)
+		if err != nil || len(hashBytes) != 32 {
+			continue
+		}
+		var blockhash [32]byte
+		copy(blockhash[:], hashBytes)
+		result = append(result, sealevel.RecentBlockHashesEntry{
+			Blockhash:     blockhash,
+			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: entry.LamportsPerSignature},
+		})
+	}
+	return result
+}
+
+// encodeRecentBlockhashes converts sealevel.SysvarRecentBlockhashes to state.BlockhashEntry list
+func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.BlockhashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.BlockhashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.BlockhashEntry{
+			Blockhash:            base58.Encode(entry.Blockhash[:]),
+			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
+		})
+	}
+	return result
+}
+
 func createBufWriter(filename string) (io.Writer, func(), error) {
 	if filename == "" {
 		return nil, func() {}, nil
@@ -1227,4 +1886,72 @@ func createBufWriter(filename string) (io.Writer, func(), error) {
 	}
 
 	return writer, cleanup, nil
+}
+
+// runReplayWithRecovery wraps replay.ReplayBlocks with panic recovery.
+// It distinguishes between:
+// - Panics during commit (commitInProgress=true): AccountsDB may be corrupted, marks state as corrupted
+// - Panics outside commit (divergence): AccountsDB is safe, logs helpful message
+// After handling, it re-panics to propagate the error.
+func runReplayWithRecovery(
+	ctx context.Context,
+	accountsDb *accountsdb.AccountsDb,
+	accountsDbPath string,
+	manifest *snapshot.SnapshotManifest,
+	resumeState *replay.ResumeState,
+	startSlot, endSlot uint64,
+	rpcEndpoint string,
+	blockDir string,
+	txParallelism int,
+	isLive bool,
+	useOvercast bool,
+	dbgOpts *replay.DebugOptions,
+	metricsWriter io.Writer,
+	rpcServer *rpcserver.RpcServer,
+	mithrilState *state.MithrilState,
+) *replay.ReplayResult {
+	var result *replay.ReplayResult
+
+	defer func() {
+		if r := recover(); r != nil {
+			runID := replay.CurrentRunID
+			if replay.IsCommitInProgress() {
+				commitSlot := replay.GetCommitSlot()
+				mlog.Log.Errorf("[run:%s] FATAL: Panic during commit at slot %d - AccountsDB may be corrupted", runID, commitSlot)
+				mlog.Log.Errorf("[run:%s] Panic occurred between StoreAccounts and StoreBankHashForSlot", runID)
+				// Mark state as corrupted so next startup knows to rebuild
+				if mithrilState != nil {
+					reason := fmt.Sprintf("panic during commit at slot %d: %v", commitSlot, r)
+					if err := mithrilState.MarkCorrupted(accountsDbPath, reason); err != nil {
+						mlog.Log.Errorf("[run:%s] Failed to mark state as corrupted: %v", runID, err)
+					}
+				}
+			} else {
+				mlog.Log.Errorf("[run:%s] Panic during replay (outside commit window) - AccountsDB is SAFE", runID)
+				mlog.Log.Errorf("[run:%s] This appears to be a divergence panic. You can resume from the last persisted slot.", runID)
+			}
+			// Print debug info and paths
+			mlog.Log.Errorf("[run:%s] Debug info:", runID)
+			if mithrilState != nil {
+				mlog.Log.Errorf("[run:%s]   Snapshot slot: %d", runID, mithrilState.SnapshotSlot)
+				if mithrilState.FullSnapshot != nil {
+					mlog.Log.Errorf("[run:%s]   Full snapshot:  %s (slot %d)", runID, mithrilState.FullSnapshot.Path, mithrilState.FullSnapshot.Slot)
+				}
+				if mithrilState.IncrSnapshot != nil {
+					mlog.Log.Errorf("[run:%s]   Incr snapshot:  %s (base %d -> slot %d)", runID, mithrilState.IncrSnapshot.Path, mithrilState.IncrSnapshot.BaseSlot, mithrilState.IncrSnapshot.Slot)
+				}
+				if mithrilState.LastSlot > 0 {
+					mlog.Log.Errorf("[run:%s]   Last persisted: slot %d, bankhash %s", runID, mithrilState.LastSlot, mithrilState.LastBankhash)
+				}
+			}
+			mlog.Log.Errorf("[run:%s] Debug files:", runID)
+			mlog.Log.Errorf("[run:%s]   Bankhash log: %s/bankhash.log", runID, accountsDbPath)
+			mlog.Log.Errorf("[run:%s]   State file:   %s/mithril_state.json", runID, accountsDbPath)
+			// Re-panic to propagate the error
+			panic(r)
+		}
+	}()
+
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoint, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	return result
 }
