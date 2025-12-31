@@ -600,9 +600,6 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("unable to open manifest file")
 		}
-
-		// Show disk usage summary
-		progress.PrintDiskUsage(accountsDbDir, blockstorePath, snapshotDlPath)
 	}
 
 	// Check for state file to resume from correct slot
@@ -1111,9 +1108,6 @@ func runLive(c *cobra.Command, args []string) {
 
 	mlog.Log.Infof("AccountsDB ready")
 
-	// Show disk usage summary
-	progress.PrintDiskUsage(accountsPath, blockstorePath, snapshotDlPath)
-
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
@@ -1490,26 +1484,44 @@ func printStartupInfo(commandName string) {
 	fmt.Println()
 	fmt.Printf("%s━━━ Paths ━━━%s\n", gold, reset)
 
-	// AccountsDB path
+	// AccountsDB path with disk info
 	if accountsPath != "" {
-		fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(accountsPath))
+		if diskInfo != "" {
+			fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  AccountsDB:   %s%s%s\n", cyan, accountsPath, reset)
+		}
 	}
 
-	// Blockstore path
+	// Blockstore path with disk info
 	if blockstorePath != "" {
-		fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(blockstorePath))
+		if diskInfo != "" {
+			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
+		}
 	}
 
-	// Snapshots path - show configured snapshot directory
+	// Snapshots path with disk info
 	snapshotDir := snapshotDlPath
 	if snapshotDir == "" {
 		snapshotDir = snapshotArchivePath
 	}
 	if snapshotDir != "" {
-		fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(snapshotDir))
+		if diskInfo != "" {
+			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
+		}
 	}
 
-	// Block source (above RPC since it's related to block fetching)
+	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
 	if blockSource == "overcast" && overcastEndpoint != "" {
 		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)

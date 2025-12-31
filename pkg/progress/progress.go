@@ -692,9 +692,60 @@ func PrintBuildInterrupted(info BuildInterruptInfo) {
 type DiskInfo struct {
 	Label      string // e.g., "AccountsDB", "Snapshots", "Ledger"
 	Path       string
+	Device     string // e.g., "nvme1n1p1"
 	UsedBytes  uint64
 	TotalBytes uint64
 	Error      error
+}
+
+// GetDiskInfo returns disk usage information for a given path
+func GetDiskInfo(path string) *DiskInfo {
+	if path == "" {
+		return nil
+	}
+
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return &DiskInfo{Path: path, Error: err}
+	}
+
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	usedBytes := totalBytes - freeBytes
+	device := getMountPoint(path)
+
+	return &DiskInfo{
+		Path:       path,
+		Device:     device,
+		UsedBytes:  usedBytes,
+		TotalBytes: totalBytes,
+	}
+}
+
+// FormatDiskInfo formats disk info as a compact string like "(nvme1n1p1) 630 GB / 1.5 TB (41%)"
+func FormatDiskInfo(info *DiskInfo) string {
+	if info == nil || info.Error != nil || info.TotalBytes == 0 {
+		return ""
+	}
+
+	percentUsed := float64(info.UsedBytes) / float64(info.TotalBytes) * 100
+	usedStr := formatBytes(info.UsedBytes)
+	totalStr := formatBytes(info.TotalBytes)
+
+	deviceStr := ""
+	if info.Device != "" {
+		deviceStr = fmt.Sprintf("(%s) ", info.Device)
+	}
+
+	// Add warning if usage is high
+	warning := ""
+	if percentUsed >= 90 {
+		warning = " ⚠ LOW SPACE!"
+	} else if percentUsed >= 80 {
+		warning = " ⚠"
+	}
+
+	return fmt.Sprintf("%s%s / %s (%2.0f%%)%s", deviceStr, usedStr, totalStr, percentUsed, warning)
 }
 
 // formatBytes formats bytes as human-readable string (e.g., "234 GB")
