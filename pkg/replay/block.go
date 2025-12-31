@@ -965,19 +965,21 @@ func ReplayBlocks(
 	var opts *blockstream.BlockSourceOpts
 	if useOvercast {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType: blockstream.BlockSourceOvercast,
-			RpcClient:  blockRpcc,
-			StartSlot:  startSlot,
-			EndSlot:    endSlot,
-			BlockDir:   blockDir,
+			SourceType:   blockstream.BlockSourceOvercast,
+			RpcClient:    blockRpcc,
+			AuxRpcClient: auxRpcc, // For tip polling
+			StartSlot:    startSlot,
+			EndSlot:      endSlot,
+			BlockDir:     blockDir,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType: blockstream.BlockSourceRpc,
-			RpcClient:  blockRpcc,
-			StartSlot:  startSlot,
-			EndSlot:    endSlot,
-			BlockDir:   blockDir,
+			SourceType:   blockstream.BlockSourceRpc,
+			RpcClient:    blockRpcc,
+			AuxRpcClient: auxRpcc, // For tip polling
+			StartSlot:    startSlot,
+			EndSlot:      endSlot,
+			BlockDir:     blockDir,
 		}
 		// Apply block fetching options if provided
 		if blockFetchOpts != nil {

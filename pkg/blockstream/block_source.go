@@ -28,11 +28,12 @@ const (
 )
 
 type BlockSourceOpts struct {
-	RpcClient  *rpcclient.RpcClient
-	SourceType BlockSourceType
-	StartSlot  uint64
-	EndSlot    uint64
-	BlockDir   string
+	RpcClient    *rpcclient.RpcClient // For block fetching (getBlock)
+	AuxRpcClient *rpcclient.RpcClient // For tip polling (getSlot) - falls back to RpcClient if nil
+	SourceType   BlockSourceType
+	StartSlot    uint64
+	EndSlot      uint64
+	BlockDir     string
 
 	// Parallel fetch settings
 	MaxRPS          int    // Rate limit (requests per second), 0 = use default
@@ -87,13 +88,14 @@ type BlockSourceStats struct {
 }
 
 type BlockSource struct {
-	rpcClient   *rpcclient.RpcClient
-	streamChan  chan *b.Block
-	startSlot   uint64
-	endSlot     uint64
-	currentSlot uint64
-	blockDir    string
-	sourceType  BlockSourceType
+	rpcClient    *rpcclient.RpcClient // For block fetching
+	auxRpcClient *rpcclient.RpcClient // For tip polling (getSlot)
+	streamChan   chan *b.Block
+	startSlot    uint64
+	endSlot      uint64
+	currentSlot  uint64
+	blockDir     string
+	sourceType   BlockSourceType
 
 	// Rate limiting
 	rateLimiter *rate.Limiter
@@ -171,8 +173,15 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		tipSafetyMargin = defaultTipSafetyMargin
 	}
 
+	// Aux RPC client for tip polling - falls back to block RPC if not set
+	auxRpcClient := opts.AuxRpcClient
+	if auxRpcClient == nil {
+		auxRpcClient = opts.RpcClient
+	}
+
 	bs := &BlockSource{
 		rpcClient:       opts.RpcClient,
+		auxRpcClient:    auxRpcClient,
 		streamChan:      make(chan *b.Block, streamChanBuffer),
 		startSlot:       opts.StartSlot,
 		endSlot:         opts.EndSlot,
@@ -243,10 +252,10 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64) (*b.Block, error) {
 	return block.FromBlockResult(blockResult, slot, bs.rpcClient), nil
 }
 
-// pollTip periodically updates the confirmed tip
+// pollTip periodically updates the confirmed tip using the auxiliary RPC client
 func (bs *BlockSource) pollTip() {
 	// Get initial tip
-	if tip, err := bs.rpcClient.GetSlot(); err == nil {
+	if tip, err := bs.auxRpcClient.GetSlot(); err == nil {
 		bs.confirmedTip.Store(tip)
 		bs.lastTipUpdate.Store(time.Now().Unix())
 		bs.tipPollFailures.Store(0)
@@ -263,7 +272,7 @@ func (bs *BlockSource) pollTip() {
 		case <-bs.stopChan:
 			return
 		case <-ticker.C:
-			if tip, err := bs.rpcClient.GetSlot(); err == nil {
+			if tip, err := bs.auxRpcClient.GetSlot(); err == nil {
 				bs.confirmedTip.Store(tip)
 				bs.lastTipUpdate.Store(time.Now().Unix())
 				bs.tipPollFailures.Store(0)
