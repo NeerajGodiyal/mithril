@@ -950,7 +950,6 @@ func ReplayBlocks(
 	var cuAccumulator uint64
 	var voteTxAccumulator uint64
 	var nonVoteTxAccumulator uint64
-	var cachedChainTip atomic.Uint64 // Accessed from background goroutine, must be atomic
 	var justCrossedEpochBoundary bool
 
 	var opts *blockstream.BlockSourceOpts
@@ -1165,28 +1164,31 @@ func ReplayBlocks(
 				avgVoteTx := (voteTxAccumulator + statsCounter/2) / statsCounter
 				avgNonVoteTx := (nonVoteTxAccumulator + statsCounter/2) / statsCounter
 
-				// Query chain tip in background (non-blocking)
-				var chainTipStr string
-				tip := cachedChainTip.Load()
-				if tip > 0 && block.Slot < tip {
-					slotsBehind := tip - block.Slot
-					chainTipStr = fmt.Sprintf(" | %d slots behind tip", slotsBehind)
-				}
-
 				// Print summary with newlines for visibility
 				avgTotal := avgExec + avgWait
 				var blocksPerSec float64
 				if avgTotal > 0 {
 					blocksPerSec = 1.0 / avgTotal
 				}
-				mlog.Log.InfofPrecise("")
-				mlog.Log.InfofPrecise("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d",
-					avgExec, avgWait, avgTotal, blocksPerSec, blockStream.BufferDepth())
-				mlog.Log.InfofPrecise("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
-					avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
 
-				// Print fetch stats for RPC source
+				// Get fetch stats (includes confirmedTip from tip poller - no blocking)
 				fetchStats := blockStream.GetFetchStats()
+
+				// Calculate distance from tip (uses BlockSource's tip poller data)
+				var chainTipStr string
+				if fetchStats.ConfirmedTip > 0 && block.Slot < fetchStats.ConfirmedTip {
+					chainTipStr = fmt.Sprintf(" | %d slots behind tip", fetchStats.ConfirmedTip-block.Slot)
+				} else if fetchStats.ConfirmedTip > 0 {
+					chainTipStr = " | caught up to tip"
+				} else {
+					chainTipStr = " | tip: unknown"
+				}
+
+				mlog.Log.InfofPrecise("")
+				mlog.Log.InfofPrecise("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d%s",
+					avgExec, avgWait, avgTotal, blocksPerSec, blockStream.BufferDepth(), chainTipStr)
+				mlog.Log.InfofPrecise("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d",
+					avgCU, avgVoteTx, avgNonVoteTx)
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					// prefetch = total blocks already fetched (stream buffer + reorder buffer)
@@ -1212,13 +1214,6 @@ func ReplayBlocks(
 				voteTxAccumulator = 0
 				nonVoteTxAccumulator = 0
 				statsCounter = 0
-
-				// Refresh chain tip in background for next summary
-				go func() {
-					if slot, err := rpcc.GetSlot(); err == nil {
-						cachedChainTip.Store(slot)
-					}
-				}()
 			}
 		} else {
 			justCrossedEpochBoundary = false
