@@ -201,3 +201,7 @@ func (blockSource *BlockSource) NextBlock() *b.Block {
 	block := <-blockSource.streamChan
 	return block
 }
+
+func (blockSource *BlockSource) BufferDepth() int {
+	return len(blockSource.streamChan)
+}

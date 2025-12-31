@@ -917,6 +917,7 @@ func ReplayBlocks(
 
 	var statsCounter uint64
 	var timeAccumulator float64
+	var waitTimeAccumulator float64
 	var cuAccumulator uint64
 	var voteTxAccumulator uint64
 	var nonVoteTxAccumulator uint64
@@ -949,7 +950,9 @@ func ReplayBlocks(
 	go blockStream.Start()
 
 	for {
+		waitStart := time.Now()
 		block := blockStream.NextBlock()
+		waitTime := time.Since(waitStart)
 		if block == nil {
 			break
 		}
@@ -1090,6 +1093,7 @@ func ReplayBlocks(
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			timeAccumulator += slotReplayDuration.Seconds()
+			waitTimeAccumulator += waitTime.Seconds()
 			cuAccumulator += totalCU
 			voteTxAccumulator += uint64(voteTxCount)
 			nonVoteTxAccumulator += uint64(nonVoteTxCount)
@@ -1097,6 +1101,7 @@ func ReplayBlocks(
 			if statsCounter == 100 {
 				// Calculate averages (rounded to nearest whole number for CU and txns)
 				avgExec := timeAccumulator / float64(statsCounter)
+				avgWait := waitTimeAccumulator / float64(statsCounter)
 				avgCU := (cuAccumulator + statsCounter/2) / statsCounter // round to nearest
 				avgVoteTx := (voteTxAccumulator + statsCounter/2) / statsCounter
 				avgNonVoteTx := (nonVoteTxAccumulator + statsCounter/2) / statsCounter
@@ -1111,12 +1116,15 @@ func ReplayBlocks(
 
 				// Print summary with newlines for visibility
 				mlog.Log.Infof("")
-				mlog.Log.Infof("--- 100 slot summary: execution avg: %.3fs | cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
-					avgExec, avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
+				mlog.Log.Infof("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | buffer: %d",
+					avgExec, avgWait, blockStream.BufferDepth())
+				mlog.Log.Infof("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
+					avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
 				mlog.Log.Infof("")
 
 				// Reset accumulators
 				timeAccumulator = 0
+				waitTimeAccumulator = 0
 				cuAccumulator = 0
 				voteTxAccumulator = 0
 				nonVoteTxAccumulator = 0

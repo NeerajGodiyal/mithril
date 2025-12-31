@@ -230,7 +230,7 @@ func (fetcher *RpcClient) GetBlockTime(slot uint64) (int64, error) {
 }
 
 func (fetcher *RpcClient) GetSlot() (uint64, error) {
-	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentFinalized)
+	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentConfirmed)
 	if err != nil {
 		return 0, rpc.ErrNotConfirmed
 	}
