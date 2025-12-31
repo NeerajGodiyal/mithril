@@ -51,7 +51,21 @@ type MithrilState struct {
 
 	// Build info - for tracking which version created/modified the state
 	LastCommit string `json:"last_commit,omitempty"` // Git commit hash of last run
+
+	// Shutdown tracking - records why the last session ended
+	LastShutdownReason string    `json:"last_shutdown_reason,omitempty"` // human-readable reason
+	LastShutdownAt     time.Time `json:"last_shutdown_at,omitempty"`     // when shutdown occurred
 }
+
+// Shutdown reason constants - these are stored in the state file and should be
+// human-readable without needing to look up what they mean.
+const (
+	ShutdownReasonNormal         = "graceful shutdown (Ctrl+C)"
+	ShutdownReasonStall          = "block fetch stalled - no RPC progress for 5+ minutes"
+	ShutdownReasonLeaderSchedule = "leader schedule fetch failed from all RPC endpoints"
+	ShutdownReasonError          = "replay error"       // Will be suffixed with actual error
+	ShutdownReasonCompleted      = "replay completed - reached end slot"
+)
 
 // BlockhashEntry represents a single entry in the RecentBlockhashes sysvar
 type BlockhashEntry struct {
@@ -146,6 +160,9 @@ type ResumeContext struct {
 	RunID        string    // Run ID for log correlation
 	RunStartedAt time.Time // When this replay session started
 	Commit       string    // Git commit hash
+
+	// Shutdown tracking
+	ShutdownReason string // Why the session ended (see ShutdownReason* constants)
 }
 
 // UpdateLastSlot updates the last slot and bankhash in the state file.
@@ -177,6 +194,12 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastRunID = ctx.RunID
 		s.LastRunAt = ctx.RunStartedAt
 		s.LastCommit = ctx.Commit
+
+		// Shutdown tracking
+		if ctx.ShutdownReason != "" {
+			s.LastShutdownReason = ctx.ShutdownReason
+			s.LastShutdownAt = time.Now()
+		}
 	}
 	return s.Save(accountsDbDir)
 }

@@ -660,7 +660,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	snapshotManifest *snapshot.SnapshotManifest,
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient) error {
 
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
@@ -674,11 +674,13 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		if err := prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient); err != nil {
+			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -695,13 +697,14 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	block.LatestEvictedBlockhash = ages[150].Key
 
 	snapshotManifest = nil
+	return nil
 }
 
 func configureBlock(block *b.Block,
 	epochCtx *ReplayCtx,
 	lastSlotCtx *sealevel.SlotCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient) error {
 
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
@@ -723,18 +726,21 @@ func configureBlock(block *b.Block,
 	if global.ManageLeaderSchedule() {
 		// if we've crossed an epoch boundary, fetch the new leader schedule
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+			if err := prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient); err != nil {
+				return fmt.Errorf("failed to fetch leader schedule: %w", err)
+			}
 		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
 	if global.ManageBlockHeight() {
 		block.BlockHeight = global.BlockHeight()
 	}
+	return nil
 }
 
 // configureInitialBlockFromResume configures the first block when resuming from a previous run.
@@ -746,7 +752,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	snapshotManifest *snapshot.SnapshotManifest, // Still needed for static FeeRateGovernor fields
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient) error {
 
 	// Use resume state for parent info (the actual last replayed slot)
 	copy(block.ParentBankhash[:], resumeState.ParentBankhash)
@@ -769,11 +775,13 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Handle leader schedule
 	if global.ManageLeaderSchedule() {
-		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		if err := prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient); err != nil {
+			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -816,6 +824,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Now that block.LastBlockhash is set, update global context
 	global.SetLatestBlockHash(block.LastBlockhash)
+	return nil
 }
 
 func configureGlobalCtx(block *b.Block) {
@@ -992,16 +1001,23 @@ func ReplayBlocks(
 		start := time.Now()
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
+		var configErr error
 		if currentSlot == startSlot {
 			if resumeState != nil {
 				// RESUME: Use resume state + manifest (for static fields)
-				configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc)
+				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc)
 			} else {
 				// FRESH START: Use snapshot manifest
-				configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
+				configErr = configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
 			}
 		} else {
-			configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc)
+			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc)
+		}
+		if configErr != nil {
+			mlog.Log.Errorf("FATAL: block configuration failed: %v", configErr)
+			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
+			result.Error = configErr
+			break
 		}
 
 		// epoch boundary
@@ -1163,6 +1179,13 @@ func ReplayBlocks(
 					mlog.Log.InfofPrecise("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | backup: %d | prefetch: %d (buf:%d ro:%d) | wq: %d | errs: na:%d rl:%d bt:%d tr:%d",
 						fetchStats.AvgLatencyMs, retryRate, fetchStats.SpeculativeRetries, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
 						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
+
+					// Surface tip poll issues (only show if there are problems)
+					if fetchStats.TipStaleSecs > 30 || fetchStats.TotalTipPollFails > 0 {
+						mlog.Log.InfofPrecise("--- 100 slot summary: WARNING tip stale %ds | tip poll fails: %d (consecutive: %d)",
+							fetchStats.TipStaleSecs, fetchStats.TotalTipPollFails, fetchStats.TipPollFailures)
+					}
+
 					blockStream.ResetStats()
 				}
 				mlog.Log.InfofPrecise("")
@@ -1200,6 +1223,11 @@ func ReplayBlocks(
 			metrics.GlobalBlockReplay = metrics.BlockReplay{}
 		}
 
+	}
+
+	// Check if block source stalled (this provides explicit error info)
+	if blockStream.Stalled() && result.Error == nil {
+		result.Error = fmt.Errorf("block fetch stalled - no progress for %v", blockStream.StallTimeout())
 	}
 
 	result.LastPersistedSlot = lastPersistedSlot

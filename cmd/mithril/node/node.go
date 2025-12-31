@@ -762,7 +762,22 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
-			resumeCtx = &state.ResumeContext{
+			// Determine shutdown reason
+				shutdownReason := state.ShutdownReasonCompleted
+				if result.WasCancelled {
+					shutdownReason = state.ShutdownReasonNormal
+				} else if result.Error != nil {
+					if strings.Contains(result.Error.Error(), "stall") {
+						shutdownReason = state.ShutdownReasonStall
+					} else if strings.Contains(result.Error.Error(), "leader schedule") {
+						shutdownReason = state.ShutdownReasonLeaderSchedule
+					} else {
+						// Include the actual error for easier debugging
+						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
+					}
+				}
+
+				resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
@@ -778,6 +793,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
 				Commit:       getCommitHash(),
+
+				// Shutdown tracking
+				ShutdownReason: shutdownReason,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -785,8 +803,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Print shutdown summary if cancelled
-	if result.WasCancelled && result.LastPersistedSlot > 0 {
+	// Print shutdown summary if cancelled or error
+	if (result.WasCancelled || result.Error != nil) && result.LastPersistedSlot > 0 {
 		// Calculate epoch from slot using epoch schedule
 		var epoch, snapshotEpoch uint64
 		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
@@ -1263,7 +1281,22 @@ func runLive(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
-			resumeCtx = &state.ResumeContext{
+			// Determine shutdown reason
+				shutdownReason := state.ShutdownReasonCompleted
+				if result.WasCancelled {
+					shutdownReason = state.ShutdownReasonNormal
+				} else if result.Error != nil {
+					if strings.Contains(result.Error.Error(), "stall") {
+						shutdownReason = state.ShutdownReasonStall
+					} else if strings.Contains(result.Error.Error(), "leader schedule") {
+						shutdownReason = state.ShutdownReasonLeaderSchedule
+					} else {
+						// Include the actual error for easier debugging
+						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
+					}
+				}
+
+				resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
@@ -1279,6 +1312,9 @@ func runLive(c *cobra.Command, args []string) {
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
 				Commit:       getCommitHash(),
+
+				// Shutdown tracking
+				ShutdownReason: shutdownReason,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1286,8 +1322,8 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Print shutdown summary if cancelled
-	if result.WasCancelled && result.LastPersistedSlot > 0 {
+	// Print shutdown summary if cancelled or error
+	if (result.WasCancelled || result.Error != nil) && result.LastPersistedSlot > 0 {
 		// Calculate epoch from slot using epoch schedule
 		var epoch, snapshotEpoch uint64
 		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
@@ -1300,7 +1336,7 @@ func runLive(c *cobra.Command, args []string) {
 			SnapshotBaseSlot: snapshotBaseSlot,
 			AccountsDBPath:   accountsPath,
 			ReplayDuration:   time.Since(replayStartTime),
-			WasCancelled:     true,
+			WasCancelled:     result.WasCancelled,
 			RunID:            replay.CurrentRunID,
 			Epoch:            epoch,
 			SnapshotEpoch:    snapshotEpoch,
@@ -1476,6 +1512,30 @@ func printStartupInfo(commandName string) {
 					runInfo += fmt.Sprintf(" (commit: %s)", mithrilState.LastCommit)
 				}
 				fmt.Printf("  Last run:       %s%s%s\n", dim, runInfo, reset)
+			}
+
+			// Last shutdown reason (if available)
+			if mithrilState.LastShutdownReason != "" {
+				reasonColor := dim
+				reason := mithrilState.LastShutdownReason
+				// Choose color based on reason type
+				switch {
+				case reason == state.ShutdownReasonNormal:
+					reasonColor = dim // normal is fine
+				case reason == state.ShutdownReasonCompleted:
+					reasonColor = dim // completed is fine
+				case strings.HasPrefix(reason, state.ShutdownReasonStall):
+					reasonColor = "\x1b[33m" // yellow - network issue
+				case strings.HasPrefix(reason, state.ShutdownReasonLeaderSchedule):
+					reasonColor = "\x1b[33m" // yellow - network issue
+				case strings.HasPrefix(reason, state.ShutdownReasonError):
+					reasonColor = "\x1b[31m" // red - actual error
+				}
+				shutdownInfo := reason
+				if !mithrilState.LastShutdownAt.IsZero() {
+					shutdownInfo += fmt.Sprintf(" at %s", mithrilState.LastShutdownAt.Format("2006-01-02 15:04:05"))
+				}
+				fmt.Printf("  Last shutdown:  %s%s%s\n", reasonColor, shutdownInfo, reset)
 			}
 		}
 	}

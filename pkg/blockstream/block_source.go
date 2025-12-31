@@ -100,9 +100,12 @@ type BlockSource struct {
 	maxInflight int
 
 	// Tip tracking
-	confirmedTip    atomic.Uint64
-	tipSafetyMargin uint64
-	tipPollInterval time.Duration
+	confirmedTip       atomic.Uint64
+	tipSafetyMargin    uint64
+	tipPollInterval    time.Duration
+	lastTipUpdate      atomic.Int64  // Unix timestamp of last successful tip poll
+	tipPollFailures    atomic.Uint64 // Consecutive tip poll failures
+	totalTipPollFails  atomic.Uint64 // Total tip poll failures (for stats)
 
 	// Reorder buffer
 	reorderMu      sync.Mutex
@@ -245,6 +248,11 @@ func (bs *BlockSource) pollTip() {
 	// Get initial tip
 	if tip, err := bs.rpcClient.GetSlot(); err == nil {
 		bs.confirmedTip.Store(tip)
+		bs.lastTipUpdate.Store(time.Now().Unix())
+		bs.tipPollFailures.Store(0)
+	} else {
+		bs.tipPollFailures.Add(1)
+		bs.totalTipPollFails.Add(1)
 	}
 
 	ticker := time.NewTicker(bs.tipPollInterval)
@@ -257,6 +265,11 @@ func (bs *BlockSource) pollTip() {
 		case <-ticker.C:
 			if tip, err := bs.rpcClient.GetSlot(); err == nil {
 				bs.confirmedTip.Store(tip)
+				bs.lastTipUpdate.Store(time.Now().Unix())
+				bs.tipPollFailures.Store(0)
+			} else {
+				bs.tipPollFailures.Add(1)
+				bs.totalTipPollFails.Add(1)
 			}
 		}
 	}
@@ -686,6 +699,11 @@ func (bs *BlockSource) Stalled() bool {
 	return bs.stallError.Load()
 }
 
+// StallTimeout returns the configured stall timeout duration.
+func (bs *BlockSource) StallTimeout() time.Duration {
+	return bs.stallTimeout
+}
+
 // FetchStatsSnapshot returns a snapshot of fetch stats for logging
 type FetchStatsSnapshot struct {
 	Attempts           uint64
@@ -706,6 +724,10 @@ type FetchStatsSnapshot struct {
 	ConfirmedTip       uint64
 	WorkQueueLen       int
 	ReorderBufLen      int
+	// Tip poll health
+	TipStaleSecs      int64  // Seconds since last successful tip update (0 = healthy)
+	TipPollFailures   uint64 // Consecutive tip poll failures
+	TotalTipPollFails uint64 // Total tip poll failures this window
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -731,6 +753,13 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		leadSlots = int64(maxBuffered - nextSlot)
 	}
 
+	// Calculate tip staleness
+	var tipStaleSecs int64
+	lastTipUpdate := bs.lastTipUpdate.Load()
+	if lastTipUpdate > 0 {
+		tipStaleSecs = time.Now().Unix() - lastTipUpdate
+	}
+
 	return FetchStatsSnapshot{
 		Attempts:           attempts,
 		Successes:          successes,
@@ -749,7 +778,10 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		MaxBuffered:        maxBuffered,
 		ConfirmedTip:       bs.confirmedTip.Load(),
 		WorkQueueLen:       len(bs.workQueue),
-		ReorderBufLen: reorderLen,
+		ReorderBufLen:      reorderLen,
+		TipStaleSecs:       tipStaleSecs,
+		TipPollFailures:    bs.tipPollFailures.Load(),
+		TotalTipPollFails:  bs.totalTipPollFails.Load(),
 	}
 }
 
@@ -767,4 +799,6 @@ func (bs *BlockSource) ResetStats() {
 	bs.stats.ErrOther.Store(0)
 	bs.stats.TotalFetchLatencyNs.Store(0)
 	bs.stats.FetchLatencyCount.Store(0)
+	// Reset tip poll failures for this window (but keep consecutive count for alerting)
+	bs.totalTipPollFails.Store(0)
 }
