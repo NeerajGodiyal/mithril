@@ -99,6 +99,11 @@ name = "mithril"
 # probes the primary and restores to it when healthy.
 
 [network]
+    # Solana cluster (required): "mainnet-beta", "testnet", or "devnet"
+    # This is validated against the RPC's genesis hash to prevent accidentally
+    # running mainnet state against testnet, or vice versa.
+    cluster = "mainnet-beta"
+
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
     #
     # Example with primary + fallback:

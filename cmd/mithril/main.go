@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/statecmd"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -45,6 +46,7 @@ func init() {
 	cmd.AddCommand(
 		&node.Run,              // Primary command for running Mithril
 		&configcmd.ConfigCmd,   // Config management (init, etc.)
+		&statecmd.StateCmd,     // State file inspection and management
 		&node.VerifyRange,      // Developer/advanced command
 		&node.VerifyLive,       // Backwards compatibility alias for Run
 	)

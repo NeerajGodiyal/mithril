@@ -88,6 +88,7 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
+	cluster                     string   // "mainnet-beta", "testnet", "devnet"
 	blockSource                 string   // "rpc" or "overcast"
 	overcastEndpoint            string
 	blockMaxRPS                 int      // Rate limit for block fetching
@@ -170,8 +171,11 @@ func init() {
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
 	Run.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
-	// [rpc] section flags
+	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
+	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'mainnet-beta', 'testnet', or 'devnet'")
+
+	// [rpc] section flags (Mithril's RPC server)
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -360,6 +364,19 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	rpcEndpoints = getStringSlice("rpc", "network.rpc")
 	if len(rpcEndpoints) == 0 {
 		rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	}
+
+	// Cluster is required for safety (prevents mainnet/testnet mixups)
+	cluster = getString("cluster", "network.cluster")
+	if cluster == "" {
+		return fmt.Errorf("network.cluster is required - set to 'mainnet-beta', 'testnet', or 'devnet'")
+	}
+	// Validate cluster value
+	switch cluster {
+	case "mainnet-beta", "testnet", "devnet":
+		// Valid
+	default:
+		return fmt.Errorf("invalid network.cluster %q - must be 'mainnet-beta', 'testnet', or 'devnet'", cluster)
 	}
 
 	// [rpc] section - Mithril's RPC server
@@ -862,7 +879,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
-				Commit:       getCommitHash(),
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommitHash(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
@@ -966,6 +986,24 @@ func runLive(c *cobra.Command, args []string) {
 	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
 	hasValidState := mithrilState != nil
 
+	// Validate genesis hash if we have a valid state (prevents mainnet/testnet mixups)
+	if hasValidState {
+		genesisHash := fetchGenesisHash(ctx)
+		if genesisHash != "" {
+			if err := mithrilState.ValidateGenesisHash(genesisHash); err != nil {
+				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap-mode=snapshot to rebuild.", err)
+			}
+			// If state has no genesis hash (older version), set it now
+			if mithrilState.GenesisHash == "" {
+				mlog.Log.Infof("updating state file with cluster=%s genesis=%s", cluster, genesisHash[:12]+"...")
+				mithrilState.SetClusterInfo(cluster, genesisHash)
+				if err := mithrilState.Save(accountsPath); err != nil {
+					mlog.Log.Infof("WARNING: failed to update state file with cluster info: %v", err)
+				}
+			}
+		}
+	}
+
 	// Fall back to legacy detection if no state file
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
 	if hasValidState {
@@ -1006,6 +1044,12 @@ func runLive(c *cobra.Command, args []string) {
 		}
 		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
 		if accountsPath != "" {
+			// Record rebuild in history before cleanup (history file is preserved)
+			if mithrilState != nil {
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "new-snapshot mode")
+			} else {
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "new-snapshot mode (no prior state)")
+			}
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
@@ -1035,6 +1079,12 @@ func runLive(c *cobra.Command, args []string) {
 		}
 		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
+			// Record rebuild in history before cleanup (history file is preserved)
+			if mithrilState != nil {
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "snapshot mode")
+			} else {
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "snapshot mode (no prior state)")
+			}
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
@@ -1109,6 +1159,9 @@ func runLive(c *cobra.Command, args []string) {
 					}
 					mlog.Log.Infof("user chose to rebuild from latest snapshot")
 					if accountsPath != "" {
+						// Record rebuild in history before cleanup (history file is preserved)
+						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
+						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "user chose rebuild (stale AccountsDB)")
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// Check for existing fresh snapshot
@@ -1183,6 +1236,19 @@ func runLive(c *cobra.Command, args []string) {
 				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
 			}
 			if accountsPath != "" {
+				// Record rebuild in history before cleanup (history file is preserved)
+				// Try to load any existing state (even invalid) to capture slot info
+				var reason string
+				if hasAccountsDB {
+					reason = "auto mode (AccountsDB exists but state invalid)"
+				} else {
+					reason = "auto mode (no existing AccountsDB)"
+				}
+				if existingState, _ := state.LoadState(accountsPath); existingState != nil {
+					state.RecordRebuild(accountsPath, existingState.LastSlot, existingState.LastBankhash, getVersion(), getCommit(), reason)
+				} else {
+					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), reason)
+				}
 				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
 			}
@@ -1209,7 +1275,15 @@ func runLive(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
 			}
-			mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+			mithrilState = state.NewReadyStateWithOpts(state.NewReadyStateOpts{
+				SnapshotSlot:  manifest.Bank.Slot,
+				SnapshotEpoch: snapshotEpoch,
+				BuildMode:     bootstrapMode,
+				Cluster:       cluster,
+				GenesisHash:   fetchGenesisHash(ctx),
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommitHash(),
+			})
 			if err := mithrilState.Save(accountsPath); err != nil {
 				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
@@ -1399,7 +1473,10 @@ func runLive(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
-				Commit:       getCommitHash(),
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommitHash(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
@@ -1448,6 +1525,33 @@ func getCommitHash() string {
 		}
 	}
 	return ""
+}
+
+// getVersion returns the build version (set via ldflags or defaults to "dev")
+// TODO: Wire this up to the Version variable in cmd/mithril/version.go via a shared package
+func getVersion() string {
+	return "dev" // Placeholder - will be set by ldflags at build time
+}
+
+// getCommit returns the git commit hash (set via ldflags or defaults to "unknown")
+// TODO: Wire this up to the GitCommit variable in cmd/mithril/version.go via a shared package
+func getCommit() string {
+	return "unknown" // Placeholder - will be set by ldflags at build time
+}
+
+// fetchGenesisHash fetches the genesis hash from the first RPC endpoint.
+// Returns empty string on error (caller should log and continue).
+func fetchGenesisHash(ctx context.Context) string {
+	if len(rpcEndpoints) == 0 {
+		return ""
+	}
+	client := solrpc.New(rpcEndpoints[0])
+	hash, err := client.GetGenesisHash(ctx)
+	if err != nil {
+		mlog.Log.Infof("WARNING: failed to fetch genesis hash from RPC: %v", err)
+		return ""
+	}
+	return hash.String()
 }
 
 // formatDurationShort formats a duration in a compact human-readable format (e.g., "2h 30m", "45m", "3d 2h")
