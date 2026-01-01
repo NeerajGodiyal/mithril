@@ -1055,7 +1055,10 @@ func ReplayBlocks(
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		var configErr error
-		if currentSlot == startSlot {
+		// Use lastSlotCtx == nil to detect first block, not currentSlot == startSlot.
+		// This handles the case where startSlot (or slots after it) are skipped -
+		// the first emitted block might have slot > startSlot.
+		if lastSlotCtx == nil {
 			if resumeState != nil {
 				// RESUME: Use resume state + manifest (for static fields)
 				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
@@ -1093,7 +1096,9 @@ func ReplayBlocks(
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
 			}
-		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
+		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
+			// First block being processed - check if we're in rewards period
+			// (uses lastSlotCtx == nil to detect first block, handles skipped startSlot)
 			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
 				panic("bootstrapping during epoch rewards period is currently unsupported.")
 			}
