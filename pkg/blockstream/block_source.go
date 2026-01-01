@@ -118,7 +118,7 @@ type BlockSource struct {
 	confirmedTip        atomic.Uint64
 	processedTip        atomic.Uint64 // Processed commitment tip (super tip)
 	tipAtSlot           atomic.Uint64 // What slot we had executed when tip was measured
-	lastProcessedSlot   atomic.Uint64 // Last slot fully executed by replay (set by SetLastProcessedSlot)
+	lastExecutedSlot    atomic.Uint64 // Last slot fully executed by replay (set by SetLastExecutedSlot)
 	tipSafetyMargin     uint64
 	tipPollInterval     time.Duration
 	lastTipUpdate       atomic.Int64  // Unix timestamp of last successful tip poll
@@ -178,11 +178,10 @@ const (
 
 	// Near-tip mode settings
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	nearTipThreshold    = 128                      // Switch to near-tip mode when gap <= this
-	catchupThreshold    = 256                      // Switch back to catchup mode when gap >= this (hysteresis)
-	nearTipTargetLead   = 4                        // In near-tip, schedule at most this many slots ahead of last executed
-	nearTipSafetyMargin = 0                        // No margin in near-tip - rely on retries for "not available"
-	nearTipPollInterval = 500 * time.Millisecond  // Faster tip polling in near-tip mode
+	nearTipThreshold    = 128                     // Switch to near-tip mode when gap <= this
+	catchupThreshold    = 256                     // Switch back to catchup mode when gap >= this (hysteresis)
+	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
+	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -262,7 +261,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 // Uses hysteresis to avoid flapping: enter near-tip at <=128 slots, exit at >=256 slots.
 func (bs *BlockSource) updateMode() {
 	tip := bs.confirmedTip.Load()
-	lastExecuted := bs.lastProcessedSlot.Load()
+	lastExecuted := bs.lastExecutedSlot.Load()
 
 	// Can't determine mode without tip
 	if tip == 0 || lastExecuted == 0 {
@@ -487,16 +486,18 @@ func (bs *BlockSource) pollTip() {
 	}
 }
 
-// SetLastProcessedSlot is called by the replay loop after each block is fully executed.
+// SetLastExecutedSlot is called by the replay loop after each block is fully executed.
 // This allows accurate tip distance calculation without blocking on replay progress.
-func (bs *BlockSource) SetLastProcessedSlot(slot uint64) {
-	bs.lastProcessedSlot.Store(slot)
+// Also triggers mode switching based on replay progress (not just tip polling).
+func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
+	bs.lastExecutedSlot.Store(slot)
+	bs.updateMode() // React to replay progress immediately
 }
 
 // updateTipSnapshot stores the confirmed tip along with what slot was last executed.
 // This allows accurate distance calculation: tip - tipAtSlot is precise at measurement time.
 func (bs *BlockSource) updateTipSnapshot(confirmedTip uint64) {
-	slotAtTip := bs.lastProcessedSlot.Load()
+	slotAtTip := bs.lastExecutedSlot.Load()
 
 	bs.confirmedTip.Store(confirmedTip)
 	bs.tipAtSlot.Store(slotAtTip)
@@ -511,7 +512,7 @@ func (bs *BlockSource) RefreshTipsForSummary() {
 		const timeout = 5 * time.Second
 
 		// Capture last executed slot before RPC calls (set by replay loop)
-		slotAtTip := bs.lastProcessedSlot.Load()
+		slotAtTip := bs.lastExecutedSlot.Load()
 
 		// Query all RPCs for both confirmed and processed tips concurrently
 		type result struct {
@@ -729,6 +730,13 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
 				bs.stats.MaxBufferedSlot.Store(result.slot)
 			}
+			// Local tip proxy: confirmed tip >= any successfully fetched slot (monotonic)
+			// This lets us advance without waiting for the next pollTip()
+			if result.slot > bs.confirmedTip.Load() {
+				bs.confirmedTip.Store(result.slot)
+				bs.tipAtSlot.Store(bs.lastExecutedSlot.Load())
+				bs.lastTipUpdate.Store(time.Now().Unix())
+			}
 		} else if isRetriable {
 			// All non-skip errors are retriable - schedule retry
 			bs.stats.FetchRetries.Add(1)
@@ -810,21 +818,59 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 	return slots
 }
 
-// canScheduleMore returns true if we can schedule the given slot.
-// In catchup mode: gate on buffer size (up to defaultMaxPending).
-// In near-tip mode: gate on target lead (only schedule a few slots ahead of last executed).
-func (bs *BlockSource) canScheduleMore(slot uint64) bool {
-	if bs.isNearTip.Load() {
-		// Just-in-time: only schedule if within targetLead of last executed
-		lastExecuted := bs.lastProcessedSlot.Load()
-		// Allow scheduling if slot is at most nearTipTargetLead ahead of last executed
-		// Also allow if we haven't started executing yet (lastExecuted == 0)
-		if lastExecuted > 0 && slot > lastExecuted+nearTipTargetLead {
-			return false
+// pendingCount returns total slots pending across all stages:
+// reorder buffer + stream channel + inflight + work queue
+func (bs *BlockSource) pendingCount() int {
+	bs.reorderMu.Lock()
+	reorderLen := len(bs.reorderBuffer)
+	bs.reorderMu.Unlock()
+
+	streamLen := len(bs.streamChan)
+	workLen := len(bs.workQueue)
+
+	// Count inflight slots
+	bs.slotStateMu.Lock()
+	inflightCount := 0
+	for _, status := range bs.slotState {
+		if status == slotInflight {
+			inflightCount++
 		}
 	}
+	bs.slotStateMu.Unlock()
 
-	// Also check buffer capacity
+	return reorderLen + streamLen + workLen + inflightCount
+}
+
+// canScheduleMore returns true if we can schedule the given slot.
+// In catchup mode: gate on buffer size (up to defaultMaxPending).
+// In near-tip mode: true JIT - only schedule the exact next slot replay needs.
+func (bs *BlockSource) canScheduleMore(slot uint64) bool {
+	if bs.isNearTip.Load() {
+		// True JIT: only schedule the exact next slot replay needs
+		lastExecuted := bs.lastExecutedSlot.Load()
+
+		// Only allow N+1, nothing more
+		if lastExecuted > 0 && slot > lastExecuted+1 {
+			return false
+		}
+
+		// Check slotState - don't schedule if already inflight/done
+		bs.slotStateMu.Lock()
+		state, exists := bs.slotState[slot]
+		bs.slotStateMu.Unlock()
+		if exists && (state == slotInflight || state == slotDone) {
+			return false
+		}
+
+		// Also check if we already have it
+		bs.reorderMu.Lock()
+		alreadyHave := bs.reorderBuffer[slot] != nil || bs.skippedSlots[slot]
+		bs.reorderMu.Unlock()
+
+		return !alreadyHave
+	}
+
+	// Catchup mode: gate on buffer capacity
 	bs.reorderMu.Lock()
 	pending := len(bs.reorderBuffer)
 	bs.reorderMu.Unlock()
