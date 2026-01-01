@@ -182,6 +182,11 @@ const (
 	catchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
 	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
 	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
+
+	// Tip gate threshold: only apply tip safety margin when gap > this
+	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
+	// because headroom becomes too small (e.g., gap=70, margin=64 → only 6 slots headroom)
+	tipGateThreshold = 128
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -626,25 +631,43 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		// Wait for rate limiter
 		bs.rateLimiter.Wait(context.Background())
 
-		// Tip safety gate - only applies in catchup mode.
-		// In near-tip mode, we bypass this entirely and rely on RPC "slot not available"
-		// errors + 200ms retries. This allows true JIT fetching right at the tip.
+		// Tip safety gate strategy:
+		// - Near-tip mode: No gate - rely on RPC "slot not available" + 200ms retries
+		// - Catchup mode with large gap: Apply tip safety margin to avoid "slot not available"
+		// - Catchup mode with small gap: No gate - avoid bt storms when headroom is tight
+		//
+		// The key insight is that when gap is ~70 with margin=64, headroom is only ~6 slots,
+		// which causes bt storms (scheduler tries to go past, workers reject, massive retries).
+		// Solution: only apply margin when gap > tipGateThreshold (plenty of headroom).
 		if !bs.isNearTip.Load() {
 			tip := bs.confirmedTip.Load()
-			margin := bs.effectiveTipSafetyMargin()
-			var maxSlot uint64
-			if tip <= margin {
-				maxSlot = 0
-			} else {
-				maxSlot = tip - margin
+			lastExec := bs.lastExecutedSlot.Load()
+
+			// Calculate gap
+			var gap uint64
+			if tip > lastExec {
+				gap = tip - lastExec
 			}
 
-			// Beyond tip - send back for retry
-			if maxSlot > 0 && slot > maxSlot {
-				bs.stats.ErrBeyondTip.Add(1)
-				bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
-				continue
+			// Only apply tip gate if gap > tipGateThreshold (true catchup with plenty of headroom)
+			// When gap <= threshold, we're close enough that the gate does more harm than good
+			if gap > tipGateThreshold {
+				margin := bs.effectiveTipSafetyMargin()
+				var maxSlot uint64
+				if tip <= margin {
+					maxSlot = 0
+				} else {
+					maxSlot = tip - margin
+				}
+
+				// Beyond tip - send back for retry
+				if maxSlot > 0 && slot > maxSlot {
+					bs.stats.ErrBeyondTip.Add(1)
+					bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
+					continue
+				}
 			}
+			// If gap <= 128: no tip gate, just try to fetch and handle RPC errors naturally
 		}
 
 		// Capture which RPC we're using BEFORE the fetch (for error attribution)
