@@ -944,13 +944,21 @@ func ReplayBlocks(
 	//forkChoice.Start()
 	//global.SetForkChoice(forkChoice)
 
-	var statsCounter uint64
-	var timeAccumulator float64
-	var waitTimeAccumulator float64
-	var cuAccumulator uint64
-	var voteTxAccumulator uint64
-	var nonVoteTxAccumulator uint64
+	var statsCounter int
+	var execTimes []float64      // seconds per block
+	var waitTimes []float64      // seconds per block
+	var cuValues []uint64        // CU per block
+	var voteTxCounts []uint64    // vote txns per block
+	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
+
+	// Preallocate slices for 100 blocks
+	const summaryInterval = 100
+	execTimes = make([]float64, 0, summaryInterval)
+	waitTimes = make([]float64, 0, summaryInterval)
+	cuValues = make([]uint64, 0, summaryInterval)
+	voteTxCounts = make([]uint64, 0, summaryInterval)
+	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
 
 	var opts *blockstream.BlockSourceOpts
 	if useOvercast {
@@ -999,7 +1007,7 @@ func ReplayBlocks(
 		// Stall detection: warn if waited too long for a block
 		// Threshold is 10s because backup requests are sent at 1s for slow slots.
 		// Skip first block (startup has TLS/connection overhead)
-		if waitTime > 10*time.Second && statsCounter > 0 {
+		if waitTime > 10*time.Second && len(execTimes) > 0 {
 			stats := blockStream.GetFetchStats()
 			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
 				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
@@ -1150,68 +1158,177 @@ func ReplayBlocks(
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
-			timeAccumulator += slotReplayDuration.Seconds()
-			waitTimeAccumulator += waitTime.Seconds()
-			cuAccumulator += totalCU
-			voteTxAccumulator += uint64(voteTxCount)
-			nonVoteTxAccumulator += uint64(nonVoteTxCount)
+			execTimes = append(execTimes, slotReplayDuration.Seconds())
+			waitTimes = append(waitTimes, waitTime.Seconds())
+			cuValues = append(cuValues, totalCU)
+			voteTxCounts = append(voteTxCounts, uint64(voteTxCount))
+			nonVoteTxCounts = append(nonVoteTxCounts, uint64(nonVoteTxCount))
 
 			// Trigger async tip refresh 5 slots before summary so it's fresh when we print
-			if statsCounter == 95 {
+			if statsCounter == summaryInterval-5 {
 				blockStream.RefreshTipsForSummary()
 			}
 
-			if statsCounter == 100 {
-				// Calculate averages (rounded to nearest whole number for CU and txns)
-				avgExec := timeAccumulator / float64(statsCounter)
-				avgWait := waitTimeAccumulator / float64(statsCounter)
-				avgCU := (cuAccumulator + statsCounter/2) / statsCounter // round to nearest
-				avgVoteTx := (voteTxAccumulator + statsCounter/2) / statsCounter
-				avgNonVoteTx := (nonVoteTxAccumulator + statsCounter/2) / statsCounter
+			if statsCounter == summaryInterval {
+				// Calculate statistics for float64 slices
+				medianFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					sorted := make([]float64, len(vals))
+					copy(sorted, vals)
+					sort.Float64s(sorted)
+					n := len(sorted)
+					if n%2 == 0 {
+						return (sorted[n/2-1] + sorted[n/2]) / 2
+					}
+					return sorted[n/2]
+				}
+				minFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v < m {
+							m = v
+						}
+					}
+					return m
+				}
+				maxFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v > m {
+							m = v
+						}
+					}
+					return m
+				}
 
-				// Print summary with newlines for visibility
-				avgTotal := avgExec + avgWait
+				// Calculate statistics for uint64 slices
+				medianUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					sorted := make([]uint64, len(vals))
+					copy(sorted, vals)
+					sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+					n := len(sorted)
+					if n%2 == 0 {
+						return (sorted[n/2-1] + sorted[n/2]) / 2
+					}
+					return sorted[n/2]
+				}
+				minUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v < m {
+							m = v
+						}
+					}
+					return m
+				}
+				maxUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v > m {
+							m = v
+						}
+					}
+					return m
+				}
+
+				// Compute total times (exec + wait for each block)
+				totalTimes := make([]float64, len(execTimes))
+				for i := range execTimes {
+					totalTimes[i] = execTimes[i] + waitTimes[i]
+				}
+
+				// Execution stats
+				medExec := medianFloat(execTimes)
+				minExec := minFloat(execTimes)
+				maxExec := maxFloat(execTimes)
+
+				// Wait stats
+				medWait := medianFloat(waitTimes)
+				minWait := minFloat(waitTimes)
+				maxWait := maxFloat(waitTimes)
+
+				// Total stats (only median needed - min/max can be inferred from execution + wait)
+				medTotal := medianFloat(totalTimes)
+
+				// CU stats
+				medCU := medianUint(cuValues)
+				minCU := minUint(cuValues)
+				maxCU := maxUint(cuValues)
+
+				// Txn stats
+				medVoteTx := medianUint(voteTxCounts)
+				medNonVoteTx := medianUint(nonVoteTxCounts)
+
+				// Blocks per second based on median total time
 				var blocksPerSec float64
-				if avgTotal > 0 {
-					blocksPerSec = 1.0 / avgTotal
+				if medTotal > 0 {
+					blocksPerSec = 1.0 / medTotal
 				}
 
 				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
 				fetchStats := blockStream.GetFetchStats()
 
-				// Calculate distance from tip using precise snapshot data:
-				// ConfirmedTip/ProcessedTip - TipAtSlot gives exact distance when tip was measured.
-				var chainTipStr string
+				// Calculate distance from tip
+				var tipDistanceStr string
 				if fetchStats.ConfirmedTip > 0 && fetchStats.TipAtSlot > 0 && fetchStats.TipAtSlot < fetchStats.ConfirmedTip {
 					behindConfirmed := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
 					if fetchStats.ProcessedTip > 0 && fetchStats.TipAtSlot < fetchStats.ProcessedTip {
 						behindProcessed := fetchStats.ProcessedTip - fetchStats.TipAtSlot
-						chainTipStr = fmt.Sprintf(" | %d behind confirmed, %d behind processed", behindConfirmed, behindProcessed)
+						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed, %d behind processed",
+							behindConfirmed, behindProcessed)
 					} else {
-						chainTipStr = fmt.Sprintf(" | %d slots behind tip", behindConfirmed)
+						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
 					}
 				} else if fetchStats.ConfirmedTip > 0 {
-					chainTipStr = " | caught up to tip"
+					tipDistanceStr = "caught up"
 				} else {
-					chainTipStr = " | tip: unknown"
+					tipDistanceStr = "tip unknown"
 				}
 
+				// Print summary in reorganized format
 				mlog.Log.InfofPrecise("")
-				mlog.Log.InfofPrecise("--- 100 slot summary: exec avg: %.3fs | wait avg: %.3fs | total avg: %.3fs (%.1f blk/s) | buffer: %d%s",
-					avgExec, avgWait, avgTotal, blocksPerSec, blockStream.BufferDepth(), chainTipStr)
-				mlog.Log.InfofPrecise("--- 100 slot summary: cu avg: %d | txns avg: v:%-5d nv:%-5d",
-					avgCU, avgVoteTx, avgNonVoteTx)
+				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
+
+				// Line 1: Catchup info (blocks/sec, tip distance)
+				mlog.Log.InfofPrecise("  catchup: %.1f blocks/sec | %s",
+					blocksPerSec, tipDistanceStr)
+
+				// Line 2: CU and transaction stats (median/min/max)
+				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
+					medCU, minCU, maxCU, medVoteTx, medNonVoteTx)
+
+				// Line 3: Execution stats (median/min/max for execution, wait; median for replay total)
+				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
+					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
+
+				// Line 4: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
-					// prefetch = total blocks already fetched (stream buffer + reorder buffer)
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
-					mlog.Log.InfofPrecise("--- 100 slot summary: fetch avg: %.0fms | retries: %.1f%% | backup: %d | prefetch: %d (buf:%d ro:%d) | wq: %d | errs: na:%d rl:%d bt:%d tr:%d",
-						fetchStats.AvgLatencyMs, retryRate, fetchStats.SpeculativeRetries, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
+					mlog.Log.InfofPrecise("  fetch: avg %.0fms | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
+						fetchStats.AvgLatencyMs, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
 						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
 
 					// Surface tip poll issues (only show if there are problems)
 					if fetchStats.TipStaleSecs > 30 || fetchStats.TotalTipPollFails > 0 {
-						mlog.Log.InfofPrecise("--- 100 slot summary: WARNING tip stale %ds | tip poll fails: %d (consecutive: %d)",
+						mlog.Log.InfofPrecise("  WARNING: tip stale %ds | tip poll fails: %d (consecutive: %d)",
 							fetchStats.TipStaleSecs, fetchStats.TotalTipPollFails, fetchStats.TipPollFailures)
 					}
 
@@ -1219,12 +1336,12 @@ func ReplayBlocks(
 				}
 				mlog.Log.InfofPrecise("")
 
-				// Reset accumulators
-				timeAccumulator = 0
-				waitTimeAccumulator = 0
-				cuAccumulator = 0
-				voteTxAccumulator = 0
-				nonVoteTxAccumulator = 0
+				// Reset slices (reuse capacity)
+				execTimes = execTimes[:0]
+				waitTimes = waitTimes[:0]
+				cuValues = cuValues[:0]
+				voteTxCounts = voteTxCounts[:0]
+				nonVoteTxCounts = nonVoteTxCounts[:0]
 				statsCounter = 0
 			}
 		} else {
