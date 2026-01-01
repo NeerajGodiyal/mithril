@@ -166,7 +166,7 @@ const (
 	defaultMaxInflight     = 10
 	defaultTipPollMs       = 5000
 	defaultTipSafetyMargin = 64
-	defaultMaxPending      = 150
+	defaultMaxPending      = 100
 	streamChanBuffer       = 100
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
