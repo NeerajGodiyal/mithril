@@ -1056,6 +1056,11 @@ func ReplayBlocks(
 			break
 		}
 		start := time.Now()
+
+		// Notify block source we're starting execution - in near-tip mode this
+		// triggers fetching N+1 so RPC latency overlaps with execution time
+		blockStream.NotifyBlockStart(block.Slot)
+
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		var configErr error

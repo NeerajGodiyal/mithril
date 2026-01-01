@@ -178,8 +178,8 @@ const (
 
 	// Near-tip mode settings
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	nearTipThreshold    = 128                     // Switch to near-tip mode when gap <= this
-	catchupThreshold    = 256                     // Switch back to catchup mode when gap >= this (hysteresis)
+	nearTipThreshold    = 32                      // Switch to near-tip mode when gap <= this
+	catchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
 	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
 	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
 )
@@ -492,6 +492,18 @@ func (bs *BlockSource) pollTip() {
 func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
 	bs.lastExecutedSlot.Store(slot)
 	bs.updateMode() // React to replay progress immediately
+}
+
+// NotifyBlockStart is called at the START of block execution.
+// In near-tip mode, this triggers fetching N+1 so the RPC latency (~200ms)
+// overlaps with execution time, hiding the wait from the user.
+func (bs *BlockSource) NotifyBlockStart(slot uint64) {
+	if bs.isNearTip.Load() {
+		nextSlot := slot + 1
+		if bs.canScheduleMore(nextSlot) {
+			bs.scheduleSlot(nextSlot)
+		}
+	}
 }
 
 // updateTipSnapshot stores the confirmed tip along with what slot was last executed.
