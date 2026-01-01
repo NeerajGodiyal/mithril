@@ -1071,7 +1071,7 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 
 func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte, syscallRegistry sbpf.SyscallRegistry) error {
 	start := time.Now()
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.Features)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false, &execCtx.Features)
 	if err != nil {
 		return err
 	}
