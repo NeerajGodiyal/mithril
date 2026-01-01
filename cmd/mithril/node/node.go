@@ -318,7 +318,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [bootstrap] section (new unified mode replacing two booleans)
 	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
 	if bootstrapMode == "" {
-		bootstrapMode = "snapshot" // default: always download fresh snapshot
+		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
 
 	// [replay] section (legacy booleans for verify-range)

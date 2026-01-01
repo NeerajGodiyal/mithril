@@ -133,7 +133,6 @@ rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
 source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
-# rpc = ["https://block-capable-rpc.example.com"]  # Optional: dedicated block fetching RPC
 # overcast_endpoint = "localhost:9000"
 
 [replay]
