@@ -15,7 +15,6 @@ import (
 
 	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
@@ -38,6 +37,7 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
+// BuildAccountsDbWithIncr builds the accounts database from full + incremental snapshots.
 func BuildAccountsDbWithIncr(
 	ctx context.Context,
 	fullSnapshotFile string,
@@ -47,7 +47,6 @@ func BuildAccountsDbWithIncr(
 	accountsDbDir string,
 	rpcEndpoints []string,
 	blockDir string,
-	overcastEndpoint string,
 	snapCfg snapshotdl.SnapshotConfig,
 	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
@@ -274,27 +273,6 @@ func BuildAccountsDbWithIncr(
 		klog.Fatalf("error getting incremental snapshot URL: %s", err)
 	}
 	mlog.Log.Infof("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
-
-	var downloaderOpts blockstream.BackgroundBlockDownloaderOpts
-	if overcastEndpoint != "" {
-		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
-			SourceType:       blockstream.BackgroundBlockDownloaderSourceOvercast,
-			OutDir:           blockDir,
-			OvercastEndpoint: overcastEndpoint,
-			RpcEndpoints:     rpcEndpoints,
-			StartSlot:        uint64(incrSlot),
-		}
-	} else {
-		downloaderOpts = blockstream.BackgroundBlockDownloaderOpts{
-			SourceType:   blockstream.BackgroundBlockDownloaderSourceRpc,
-			OutDir:       blockDir,
-			RpcEndpoints: rpcEndpoints,
-			StartSlot:    uint64(incrSlot),
-		}
-	}
-
-	catchupDownloader := blockstream.NewBlockDownloader(downloaderOpts)
-	go catchupDownloader.Start()
 
 	// Retry loop for incremental snapshot download
 	// If download fails mid-way (not context cancellation), re-discover sources and retry

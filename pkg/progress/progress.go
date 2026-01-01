@@ -229,7 +229,7 @@ func NewDualProgress() *DualProgress {
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
 
 	return &DualProgress{
-		Download: NewProgressBar("Full Snapshot (.tar.zst)"),
+		Download: NewProgressBar("Snapshot Read (.tar.zst)"),
 		Extract:  NewProgressBar("Extract (AppendVecs)"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),

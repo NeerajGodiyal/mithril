@@ -56,6 +56,38 @@ func (fetcher *RpcClient) GetBlockConfirmed(slot uint64) (*rpc.GetBlockResult, e
 
 var SlotSkipped = errors.New("slot skipped")
 
+// GetBlockConfirmedOnce fetches a block with a single RPC attempt (no internal retry).
+// Use this with rate-limited parallel fetching where the scheduler handles retries.
+// Uses a 30-second timeout to prevent worker stalls on hung RPC connections.
+func (fetcher *RpcClient) GetBlockConfirmedOnce(slot uint64) (*rpc.GetBlockResult, error) {
+	includeRewards := true
+	maxSupportedTxVer := uint64(0)
+
+	// Use a timeout to prevent indefinite hangs on slow/stuck RPC connections
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := fetcher.client.GetBlockWithOpts(
+		ctx,
+		slot,
+		&rpc.GetBlockOpts{
+			MaxSupportedTransactionVersion: &maxSupportedTxVer,
+			Commitment:                     rpc.CommitmentConfirmed,
+			TransactionDetails:             rpc.TransactionDetailsFull,
+			Rewards:                        &includeRewards,
+		},
+	)
+
+	if err != nil {
+		if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot)) {
+			return nil, SlotSkipped
+		}
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
@@ -114,11 +146,10 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
-	var result *rpc.GetBlockResult
-	var err error
+	var lastErr error
 
 	for attempt := uint64(0); attempt < 20; attempt++ {
-		result, err = fetcher.client.GetBlockWithOpts(
+		result, err := fetcher.client.GetBlockWithOpts(
 			context.TODO(),
 			slot+attempt,
 			&rpc.GetBlockOpts{
@@ -129,31 +160,48 @@ func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 			},
 		)
 
-		if err == nil {
-			break
-		} else if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot+attempt)) {
-			continue
-		} else {
+		if err != nil {
+			if strings.Contains(err.Error(), fmt.Sprintf("Slot %d was skipped", slot+attempt)) {
+				// Slot was skipped, try next slot
+				continue
+			}
+			// Other error - wait and retry
+			lastErr = err
 			if attempt < 19 {
 				waitTime := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s...
 				if waitTime > 30*time.Second {
 					waitTime = 30 * time.Second
 				}
-				mlog.Log.Infof("might be too early for slot %d, retrying in %v (attempt %d/10)", slot, waitTime, attempt+1)
+				mlog.Log.Infof("might be too early for slot %d, retrying in %v (attempt %d/20): %v", slot, waitTime, attempt+1, err)
 				time.Sleep(waitTime)
 			}
+			continue
 		}
+
+		// Got a block - check if numRewardPartitions field is present
+		if result.NumRewardPartitions == nil {
+			// Some RPC nodes return blocks without this field - treat as retryable
+			lastErr = fmt.Errorf("block %d missing numRewardPartitions field", slot+attempt)
+			if attempt < 19 {
+				waitTime := time.Duration(1<<attempt) * time.Second
+				if waitTime > 30*time.Second {
+					waitTime = 30 * time.Second
+				}
+				mlog.Log.Infof("block %d missing numRewardPartitions field (RPC may be lagging), retrying in %v (attempt %d/20)",
+					slot+attempt, waitTime, attempt+1)
+				time.Sleep(waitTime)
+			}
+			continue
+		}
+
+		// Success - got block with numRewardPartitions
+		return *result.NumRewardPartitions, nil
 	}
 
-	if result == nil {
-		return 0, fmt.Errorf("unable to fetch numRewardPartitions")
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unable to fetch numRewardPartitions after 20 attempts")
 	}
-
-	if result.NumRewardPartitions == nil {
-		return 0, fmt.Errorf("no numRewardPartitions field present")
-	}
-
-	return *result.NumRewardPartitions, nil
+	return 0, lastErr
 }
 
 func (fetcher *RpcClient) GetStakingRewardSlots(startSlot uint64, numPartitions uint64) ([]uint64, error) {
@@ -230,11 +278,35 @@ func (fetcher *RpcClient) GetBlockTime(slot uint64) (int64, error) {
 }
 
 func (fetcher *RpcClient) GetSlot() (uint64, error) {
-	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentFinalized)
+	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentConfirmed)
 	if err != nil {
 		return 0, rpc.ErrNotConfirmed
 	}
 	return slot, err
+}
+
+// GetSlotWithTimeout returns the current slot with a timeout (confirmed commitment).
+// Useful for health probes where we don't want to block indefinitely.
+func (fetcher *RpcClient) GetSlotWithTimeout(timeout time.Duration) (uint64, error) {
+	return fetcher.GetSlotWithTimeoutAndCommitment(timeout, rpc.CommitmentConfirmed)
+}
+
+// GetSlotProcessedWithTimeout returns the current slot with processed commitment.
+// Processed is the most recent slot - useful for measuring true distance to chain tip.
+func (fetcher *RpcClient) GetSlotProcessedWithTimeout(timeout time.Duration) (uint64, error) {
+	return fetcher.GetSlotWithTimeoutAndCommitment(timeout, rpc.CommitmentProcessed)
+}
+
+// GetSlotWithTimeoutAndCommitment returns the current slot with specified commitment and timeout.
+func (fetcher *RpcClient) GetSlotWithTimeoutAndCommitment(timeout time.Duration, commitment rpc.CommitmentType) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	slot, err := fetcher.client.GetSlot(ctx, commitment)
+	if err != nil {
+		return 0, err
+	}
+	return slot, nil
 }
 
 func (fetcher *RpcClient) DownloadBlocksToFile(outDir string, slot uint64, num int64) {

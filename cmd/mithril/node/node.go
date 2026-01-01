@@ -88,8 +88,12 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	blockSource                 string // "rpc" or "overcast"
+	blockSource                 string   // "rpc" or "overcast"
 	overcastEndpoint            string
+	blockMaxRPS                 int      // Rate limit for block fetching
+	blockMaxInflight            int    // Max concurrent block fetch workers
+	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
+	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
 	snapshotDlPath              string
 	numReplaySlots              int64
 	endSlot                     int64
@@ -186,6 +190,10 @@ func init() {
 	// [block] section flags
 	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
 	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
+	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
+	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
+	Run.Flags().IntVar(&blockTipSafetyMargin, "block-tip-safety-margin", 0, "Don't fetch within N slots of tip (0 = use default)")
 
 	// Copy all Run flags to VerifyLive for backwards compatibility
 	VerifyLive.Flags().AddFlagSet(Run.Flags())
@@ -310,7 +318,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [bootstrap] section (new unified mode replacing two booleans)
 	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
 	if bootstrapMode == "" {
-		bootstrapMode = "snapshot" // default: always download fresh snapshot
+		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
 
 	// [replay] section (legacy booleans for verify-range)
@@ -355,10 +363,31 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if blockSource == "" {
 		blockSource = "rpc" // default
 	}
-	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
-		return fmt.Errorf("blockSource=rpc but no endpoints were provided")
-	}
 	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
+
+	// Validate: blockSource=rpc requires RPC endpoints
+	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
+		return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set network.rpc)")
+	}
+
+	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
+	blockMaxInflight = getInt("block-max-inflight", "block.max_inflight")
+	blockTipPollIntervalMs = getInt("block-tip-poll-ms", "block.tip_poll_interval_ms")
+	blockTipSafetyMargin = getInt("block-tip-safety-margin", "block.tip_safety_margin")
+
+	// Validate block fetch parameters - negative values wrap to huge uint64, causing stalls
+	if blockMaxRPS < 0 {
+		blockMaxRPS = 0
+	}
+	if blockMaxInflight < 0 {
+		blockMaxInflight = 0
+	}
+	if blockTipPollIntervalMs < 0 {
+		blockTipPollIntervalMs = 0
+	}
+	if blockTipSafetyMargin < 0 {
+		blockTipSafetyMargin = 0
+	}
 
 	// Snapshot download path - defaults to storage.snapshots, can be overridden
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
@@ -671,6 +700,13 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				} else {
 					mlog.Log.Infof("loaded resume context from state file (no blockhashes)")
 				}
+
+				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
+				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+					resumeState.SlotHashes = &slotHashes
+					mlog.Log.Infof("loaded SlotHashes context with %d entries from state file", len(*resumeState.SlotHashes))
+				}
 			}
 		}
 	}
@@ -732,7 +768,13 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints[0], blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState)
+	blockFetchOpts := &replay.BlockFetchOpts{
+		MaxRPS:          blockMaxRPS,
+		MaxInflight:     blockMaxInflight,
+		TipPollMs:       blockTipPollIntervalMs,
+		TipSafetyMargin: uint64(blockTipSafetyMargin),
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -744,7 +786,22 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
-			resumeCtx = &state.ResumeContext{
+			// Determine shutdown reason
+				shutdownReason := state.ShutdownReasonCompleted
+				if result.WasCancelled {
+					shutdownReason = state.ShutdownReasonNormal
+				} else if result.Error != nil {
+					if strings.Contains(result.Error.Error(), "stall") {
+						shutdownReason = state.ShutdownReasonStall
+					} else if strings.Contains(result.Error.Error(), "leader schedule") {
+						shutdownReason = state.ShutdownReasonLeaderSchedule
+					} else {
+						// Include the actual error for easier debugging
+						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
+					}
+				}
+
+				resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
@@ -756,10 +813,16 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 
+				// SlotHashes context - vote program needs accurate slot→hash mappings
+				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
+
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
 				Commit:       getCommitHash(),
+
+				// Shutdown tracking
+				ShutdownReason: shutdownReason,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -767,8 +830,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Print shutdown summary if cancelled
-	if result.WasCancelled && result.LastPersistedSlot > 0 {
+	// Print shutdown summary if cancelled or error
+	if (result.WasCancelled || result.Error != nil) && result.LastPersistedSlot > 0 {
 		// Calculate epoch from slot using epoch schedule
 		var epoch, snapshotEpoch uint64
 		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
@@ -810,10 +873,24 @@ func runLive(c *cobra.Command, args []string) {
 	statsd.StartMetricsServer()
 
 	// Determine if using Overcast based on block source
+	// NOTE: Overcast mode is TEMPORARILY DISABLED. The background block downloader that
+	// wrote Overcast blocks to disk was removed due to reliability issues (panics, race conditions).
+	// Until Overcast streaming is re-implemented with the new parallel fetcher architecture,
+	// all Overcast requests will fall back to RPC mode.
+	// TODO: Re-implement Overcast as a streaming BlockSource (push model -> reorder buffer)
 	useOvercast := blockSource == "overcast"
-	if useOvercast && overcastEndpoint == "" {
-		mlog.Log.Infof("block.source=overcast but no overcast_endpoint provided, falling back to RPC")
+	if useOvercast {
+		mlog.Log.Infof("WARNING: block.source=overcast is temporarily disabled - falling back to RPC")
+		mlog.Log.Infof("  The background block downloader was removed. Overcast streaming will be")
+		mlog.Log.Infof("  re-implemented in a future PR with the new parallel fetcher architecture.")
 		useOvercast = false
+
+		// Validate RPC endpoints since we're falling back to RPC mode
+		// (This check is normally done in loadConfig but only when blockSource == "rpc")
+		if len(rpcEndpoints) == 0 {
+			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
+				"Set network.rpc in config, or use --rpc flag.")
+		}
 	}
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
@@ -851,12 +928,6 @@ func runLive(c *cobra.Command, args []string) {
 	if hasValidState {
 		hasAccountsDB = true
 		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
-	}
-
-	// Pass overcast endpoint if using overcast, otherwise empty string for RPC mode
-	var overcastAddr string
-	if useOvercast {
-		overcastAddr = overcastEndpoint
 	}
 
 	switch bootstrapMode {
@@ -900,7 +971,7 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
 			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0) // 0 = delete all
 		}
-		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
@@ -935,7 +1006,7 @@ func runLive(c *cobra.Command, args []string) {
 		if existingSnap != nil {
 			// Reuse existing snapshot
 			mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
+			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 		} else {
 			// Download fresh
 			mlog.Log.Infof("no fresh snapshot file found, downloading new one")
@@ -947,7 +1018,7 @@ func runLive(c *cobra.Command, args []string) {
 				}
 				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 			}
-			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 		}
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -1001,7 +1072,7 @@ func runLive(c *cobra.Command, args []string) {
 					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 					if existingSnap != nil {
 						mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
+						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 					} else {
 						// Clean up old snapshot files
 						if snapshotDownloadPath != "" {
@@ -1011,7 +1082,7 @@ func runLive(c *cobra.Command, args []string) {
 							}
 							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 						}
-						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 					}
 					if err != nil {
 						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -1077,7 +1148,7 @@ func runLive(c *cobra.Command, args []string) {
 			existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 			if existingSnap != nil {
 				mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
-				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr, rpcEndpoints)
+				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 			} else {
 				// Clean up old snapshot files based on retention settings
 				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
@@ -1085,7 +1156,7 @@ func runLive(c *cobra.Command, args []string) {
 					maxSnapshots = 1 // default: keep 1 snapshot
 				}
 				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
-				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
+				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 			}
 			if err != nil {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
@@ -1173,6 +1244,12 @@ func runLive(c *cobra.Command, args []string) {
 						}
 					}
 				}
+
+				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
+				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+					resumeState.SlotHashes = &slotHashes
+				}
 			}
 		}
 	}
@@ -1220,7 +1297,13 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	replayStartTime := time.Now()
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints[0], blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState)
+	blockFetchOpts := &replay.BlockFetchOpts{
+		MaxRPS:          blockMaxRPS,
+		MaxInflight:     blockMaxInflight,
+		TipPollMs:       blockTipPollIntervalMs,
+		TipSafetyMargin: uint64(blockTipSafetyMargin),
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
 	// Update state file with last persisted slot and resume context
 	if result.LastPersistedSlot > 0 && mithrilState != nil {
@@ -1231,7 +1314,22 @@ func runLive(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
-			resumeCtx = &state.ResumeContext{
+			// Determine shutdown reason
+				shutdownReason := state.ShutdownReasonCompleted
+				if result.WasCancelled {
+					shutdownReason = state.ShutdownReasonNormal
+				} else if result.Error != nil {
+					if strings.Contains(result.Error.Error(), "stall") {
+						shutdownReason = state.ShutdownReasonStall
+					} else if strings.Contains(result.Error.Error(), "leader schedule") {
+						shutdownReason = state.ShutdownReasonLeaderSchedule
+					} else {
+						// Include the actual error for easier debugging
+						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
+					}
+				}
+
+				resumeCtx = &state.ResumeContext{
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
@@ -1243,10 +1341,16 @@ func runLive(c *cobra.Command, args []string) {
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 
+				// SlotHashes context - vote program needs accurate slot→hash mappings
+				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
+
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
 				Commit:       getCommitHash(),
+
+				// Shutdown tracking
+				ShutdownReason: shutdownReason,
 			}
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
@@ -1254,8 +1358,8 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Print shutdown summary if cancelled
-	if result.WasCancelled && result.LastPersistedSlot > 0 {
+	// Print shutdown summary if cancelled or error
+	if (result.WasCancelled || result.Error != nil) && result.LastPersistedSlot > 0 {
 		// Calculate epoch from slot using epoch schedule
 		var epoch, snapshotEpoch uint64
 		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
@@ -1268,7 +1372,7 @@ func runLive(c *cobra.Command, args []string) {
 			SnapshotBaseSlot: snapshotBaseSlot,
 			AccountsDBPath:   accountsPath,
 			ReplayDuration:   time.Since(replayStartTime),
-			WasCancelled:     true,
+			WasCancelled:     result.WasCancelled,
 			RunID:            replay.CurrentRunID,
 			Epoch:            epoch,
 			SnapshotEpoch:    snapshotEpoch,
@@ -1445,6 +1549,30 @@ func printStartupInfo(commandName string) {
 				}
 				fmt.Printf("  Last run:       %s%s%s\n", dim, runInfo, reset)
 			}
+
+			// Last shutdown reason (if available)
+			if mithrilState.LastShutdownReason != "" {
+				reasonColor := dim
+				reason := mithrilState.LastShutdownReason
+				// Choose color based on reason type
+				switch {
+				case reason == state.ShutdownReasonNormal:
+					reasonColor = dim // normal is fine
+				case reason == state.ShutdownReasonCompleted:
+					reasonColor = dim // completed is fine
+				case strings.HasPrefix(reason, state.ShutdownReasonStall):
+					reasonColor = "\x1b[33m" // yellow - network issue
+				case strings.HasPrefix(reason, state.ShutdownReasonLeaderSchedule):
+					reasonColor = "\x1b[33m" // yellow - network issue
+				case strings.HasPrefix(reason, state.ShutdownReasonError):
+					reasonColor = "\x1b[31m" // red - actual error
+				}
+				shutdownInfo := reason
+				if !mithrilState.LastShutdownAt.IsZero() {
+					shutdownInfo += fmt.Sprintf(" at %s", mithrilState.LastShutdownAt.Format("2006-01-02 15:04:05"))
+				}
+				fmt.Printf("  Last shutdown:  %s%s%s\n", reasonColor, shutdownInfo, reset)
+			}
 		}
 	}
 
@@ -1490,17 +1618,18 @@ func printStartupInfo(commandName string) {
 
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" && overcastEndpoint != "" {
-		fmt.Printf(" %s(%s)%s\n", dim, overcastEndpoint, reset)
+	if blockSource == "overcast" {
+		// Overcast is temporarily disabled - show this in startup info
+		fmt.Printf(" %s(disabled, using rpc)%s\n", dim, reset)
 	} else {
 		fmt.Println()
 	}
 
-	// RPC endpoints
+	// RPC endpoints - show auxiliary (network.rpc) endpoints
 	if len(rpcEndpoints) > 0 {
-		fmt.Printf("  RPC:          %s%s%s\n", gold, rpcEndpoints[0], reset)
+		fmt.Printf("  RPC:          %s%s%s (primary)\n", gold, rpcEndpoints[0], reset)
 		for _, ep := range rpcEndpoints[1:] {
-			fmt.Printf("                %s%s%s\n", gold, ep, reset)
+			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
 	}
 
@@ -1706,7 +1835,7 @@ func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64
 }
 
 // buildFromExistingSnapshot builds AccountsDB from an existing downloaded snapshot file.
-func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, blockstorePath, overcastAddr string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshotDir, accountsPath, blockstorePath string, rpcEndpoints []string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig(rpcEndpoints)
 
 	// Construct full path to snapshot file
@@ -1716,7 +1845,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	// Create progress display for extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -1726,7 +1855,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 }
 
 // downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
-func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
+func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig(rpcEndpoints)
 	fullSnapshotDlStart := time.Now()
 	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
@@ -1750,7 +1879,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, overcastAddr, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -1812,9 +1941,11 @@ func killExistingMithrilProcesses() int {
 // decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes
 func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
 	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
+	dropped := 0
 	for _, entry := range entries {
 		hashBytes, err := base58.Decode(entry.Blockhash)
 		if err != nil || len(hashBytes) != 32 {
+			dropped++
 			continue
 		}
 		var blockhash [32]byte
@@ -1823,6 +1954,32 @@ func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRece
 			Blockhash:     blockhash,
 			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: entry.LamportsPerSignature},
 		})
+	}
+	if dropped > 0 {
+		mlog.Log.Errorf("dropped %d/%d RecentBlockhashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
+	}
+	return result
+}
+
+// decodeSlotHashes converts state.SlotHashEntry list to sealevel.SysvarSlotHashes
+func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
+	result := make(sealevel.SysvarSlotHashes, 0, len(entries))
+	dropped := 0
+	for _, entry := range entries {
+		hashBytes, err := base58.Decode(entry.Hash)
+		if err != nil || len(hashBytes) != 32 {
+			dropped++
+			continue
+		}
+		var hash [32]byte
+		copy(hash[:], hashBytes)
+		result = append(result, sealevel.SlotHash{
+			Slot: entry.Slot,
+			Hash: hash,
+		})
+	}
+	if dropped > 0 {
+		mlog.Log.Errorf("dropped %d/%d SlotHashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
 	}
 	return result
 }
@@ -1837,6 +1994,21 @@ func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.B
 		result = append(result, state.BlockhashEntry{
 			Blockhash:            base58.Encode(entry.Blockhash[:]),
 			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
+		})
+	}
+	return result
+}
+
+// encodeSlotHashes converts sealevel.SysvarSlotHashes to state.SlotHashEntry list
+func encodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.SlotHashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.SlotHashEntry{
+			Slot: entry.Slot,
+			Hash: base58.Encode(entry.Hash[:]),
 		})
 	}
 	return result
@@ -1874,7 +2046,7 @@ func runReplayWithRecovery(
 	manifest *snapshot.SnapshotManifest,
 	resumeState *replay.ResumeState,
 	startSlot, endSlot uint64,
-	rpcEndpoint string,
+	rpcEndpoints []string, // RPC endpoints in priority order (first = primary)
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -1883,6 +2055,7 @@ func runReplayWithRecovery(
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
 	mithrilState *state.MithrilState,
+	blockFetchOpts *replay.BlockFetchOpts,
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
 
@@ -1926,6 +2099,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoint, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
 	return result
 }

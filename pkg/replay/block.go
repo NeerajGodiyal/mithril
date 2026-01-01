@@ -42,6 +42,14 @@ import (
 	"github.com/panjf2000/ants/v2"
 )
 
+// BlockFetchOpts contains options for parallel block fetching
+type BlockFetchOpts struct {
+	MaxRPS          int    // Rate limit (requests per second), 0 = use default
+	MaxInflight     int    // Max concurrent workers, 0 = use default
+	TipPollMs       int    // Tip poll interval ms, 0 = use default
+	TipSafetyMargin uint64 // Don't fetch within N slots of tip, 0 = use default
+}
+
 var SerializedParameterArena *arena.Arena[byte]
 
 // Commit state tracking for panic recovery
@@ -96,6 +104,9 @@ type ReplayResult struct {
 	LastRecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
 	LastEvictedBlockhash  [32]byte                          // 151st blockhash
 	LastBlockhash         [32]byte                          // blockhash of last replayed slot
+
+	// SlotHashes context - same issue, vote program needs accurate slot→hash mappings
+	LastSlotHashes *sealevel.SysvarSlotHashes
 }
 
 // ResumeState contains the state needed to properly configure the first block when resuming.
@@ -118,6 +129,9 @@ type ResumeState struct {
 	RecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
 	EvictedBlockhash  [32]byte                          // 151st blockhash
 	LastBlockhash     [32]byte                          // blockhash of last slot (parent for next)
+
+	// SlotHashes context - vote program needs accurate slot→hash mappings
+	SlotHashes *sealevel.SysvarSlotHashes
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
@@ -349,19 +363,42 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to retrieve slothashes sysvar from acctsdb")
 			}
 
+			var slotHashes sealevel.SysvarSlotHashes
+
+			if sealevel.SysvarCache.SlotHashes.Sysvar == nil {
+				// Fresh start (first slot): unmarshal from AccountsDB
+				decoder := bin.NewBinDecoder(slotHashesAcct.Data)
+				err = slotHashes.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					panic("unable to unmarshal slothashes sysvar")
+				}
+
+				// Debug: log the slot hash range on first load
+				if len(slotHashes) > 0 {
+					mlog.Log.Infof("loaded SlotHashes sysvar: %d entries, newest slot=%d, oldest slot=%d",
+						len(slotHashes), slotHashes[0].Slot, slotHashes[len(slotHashes)-1].Slot)
+				}
+			} else {
+				// SysvarCache already populated (either from resume state file or from previous slot).
+				// The account data from AccountsDB may be stale (appendvec writes are not fsynced),
+				// so overwrite it with the authoritative data from SysvarCache.
+				// This ensures BPF programs reading the account data directly see correct values.
+				slotHashes = *sealevel.SysvarCache.SlotHashes.Sysvar
+				newData := slotHashes.MustMarshal()
+				if len(newData) != len(slotHashesAcct.Data) {
+					panic(fmt.Sprintf("SlotHashes data length mismatch: marshaled=%d, account=%d",
+						len(newData), len(slotHashesAcct.Data)))
+				}
+				copy(slotHashesAcct.Data, newData)
+			}
+
+			// Set parentAccts BEFORE updating slotHashes to ensure LtHash delta is computed correctly
 			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct.Clone())
 			if err != nil {
 				panic("unable to set slothashes sysvar to accountsdb")
 			}
 
-			decoder := bin.NewBinDecoder(slotHashesAcct.Data)
-			var slotHashes sealevel.SysvarSlotHashes
-
-			err = slotHashes.UnmarshalWithDecoder(decoder)
-			if err != nil {
-				panic("unable to unmarshal slothashes sysvar")
-			}
-
+			// Now update with the new slot/bankhash
 			slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
 			newSlotHashesBytes := slotHashes.MustMarshal()
 			copy(slotHashesAcct.Data, newSlotHashesBytes)
@@ -652,7 +689,8 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	snapshotManifest *snapshot.SnapshotManifest,
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient,
+	auxBackupEndpoints []string) error {
 
 	block.ParentBankhash = snapshotManifest.Bank.Hash
 	block.ParentSlot = snapshotManifest.Bank.Slot
@@ -666,11 +704,13 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
+			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -687,13 +727,15 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	block.LatestEvictedBlockhash = ages[150].Key
 
 	snapshotManifest = nil
+	return nil
 }
 
 func configureBlock(block *b.Block,
 	epochCtx *ReplayCtx,
 	lastSlotCtx *sealevel.SlotCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient,
+	auxBackupEndpoints []string) error {
 
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
@@ -715,18 +757,21 @@ func configureBlock(block *b.Block,
 	if global.ManageLeaderSchedule() {
 		// if we've crossed an epoch boundary, fetch the new leader schedule
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+			if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
+				return fmt.Errorf("failed to fetch leader schedule: %w", err)
+			}
 		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
 	if global.ManageBlockHeight() {
 		block.BlockHeight = global.BlockHeight()
 	}
+	return nil
 }
 
 // configureInitialBlockFromResume configures the first block when resuming from a previous run.
@@ -738,7 +783,8 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	snapshotManifest *snapshot.SnapshotManifest, // Still needed for static FeeRateGovernor fields
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient) {
+	rpcClient *rpcclient.RpcClient,
+	auxBackupEndpoints []string) error {
 
 	// Use resume state for parent info (the actual last replayed slot)
 	copy(block.ParentBankhash[:], resumeState.ParentBankhash)
@@ -761,11 +807,13 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Handle leader schedule
 	if global.ManageLeaderSchedule() {
-		prepareLeaderSchedule(block.Epoch, epochSchedule, rpcClient)
+		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
+			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			panic(fmt.Sprintf("unable to find leader for slot %d", block.Slot))
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -793,6 +841,12 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
 		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
 		block.LastBlockhash = resumeState.LastBlockhash
+
+		// Restore SysvarCache.SlotHashes from state file (vote program needs accurate slot→hash mappings)
+		if resumeState.SlotHashes != nil {
+			sealevel.SysvarCache.SlotHashes.Sysvar = resumeState.SlotHashes
+			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file", len(*resumeState.SlotHashes))
+		}
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
 		// but could happen with old state files created before blockhash tracking was added.
@@ -808,6 +862,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Now that block.LastBlockhash is set, update global context
 	global.SetLatestBlockHash(block.LastBlockhash)
+	return nil
 }
 
 func configureGlobalCtx(block *b.Block) {
@@ -846,7 +901,7 @@ func ReplayBlocks(
 	snapshotManifest *snapshot.SnapshotManifest,
 	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
-	rpcEndpoint string,
+	rpcEndpoints []string, // RPC endpoints in priority order (first = primary, rest = fallbacks)
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -854,6 +909,7 @@ func ReplayBlocks(
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
+	blockFetchOpts *BlockFetchOpts,
 ) *ReplayResult {
 	result := &ReplayResult{}
 
@@ -861,13 +917,6 @@ func ReplayBlocks(
 	if CurrentRunID == "" {
 		CurrentRunID = generateRunID()
 	}
-	// Don't show end slot if it's max uint64 (means "forever")
-	if endSlot == ^uint64(0) {
-		mlog.Log.Infof("[run:%s] starting replay from slot %d", CurrentRunID, startSlot)
-	} else {
-		mlog.Log.Infof("[run:%s] starting replay from slot %d to %d", CurrentRunID, startSlot, endSlot)
-	}
-
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
 	bankhashLogFile, bankhashLogErr := os.OpenFile(bankhashLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -883,7 +932,15 @@ func ReplayBlocks(
 	// Track last successfully persisted slot for checkpoint/resume
 	var lastPersistedSlot uint64
 	var lastPersistedBankhash []byte
-	rpcc := rpcclient.NewRpcClient(rpcEndpoint)
+
+	// RPC client - for all cluster access (blocks, leader schedule, tip polling)
+	// First endpoint is primary, rest are backups for failover
+	rpcc := rpcclient.NewRpcClient(rpcEndpoints[0])
+	var rpcBackups []string
+	if len(rpcEndpoints) > 1 {
+		rpcBackups = rpcEndpoints[1:]
+	}
+
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
@@ -915,30 +972,47 @@ func ReplayBlocks(
 	//forkChoice.Start()
 	//global.SetForkChoice(forkChoice)
 
-	var statsCounter uint64
-	var timeAccumulator float64
-	var cuAccumulator uint64
-	var voteTxAccumulator uint64
-	var nonVoteTxAccumulator uint64
-	var cachedChainTip atomic.Uint64 // Accessed from background goroutine, must be atomic
+	var statsCounter int
+	var execTimes []float64      // seconds per block
+	var waitTimes []float64      // seconds per block
+	var cuValues []uint64        // CU per block
+	var voteTxCounts []uint64    // vote txns per block
+	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
+
+	// Preallocate slices for 100 blocks
+	const summaryInterval = 100
+	execTimes = make([]float64, 0, summaryInterval)
+	waitTimes = make([]float64, 0, summaryInterval)
+	cuValues = make([]uint64, 0, summaryInterval)
+	voteTxCounts = make([]uint64, 0, summaryInterval)
+	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
 
 	var opts *blockstream.BlockSourceOpts
 	if useOvercast {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType: blockstream.BlockSourceOvercast,
-			RpcClient:  rpcc,
-			StartSlot:  startSlot,
-			EndSlot:    endSlot,
-			BlockDir:   blockDir,
+			SourceType:         blockstream.BlockSourceOvercast,
+			RpcClient:          rpcc,
+			BackupRpcEndpoints: rpcBackups,
+			StartSlot:          startSlot,
+			EndSlot:            endSlot,
+			BlockDir:           blockDir,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType: blockstream.BlockSourceRpc,
-			RpcClient:  rpcc,
-			StartSlot:  startSlot,
-			EndSlot:    endSlot,
-			BlockDir:   blockDir,
+			SourceType:         blockstream.BlockSourceRpc,
+			RpcClient:          rpcc,
+			BackupRpcEndpoints: rpcBackups,
+			StartSlot:          startSlot,
+			EndSlot:            endSlot,
+			BlockDir:           blockDir,
+		}
+		// Apply block fetching options if provided
+		if blockFetchOpts != nil {
+			opts.MaxRPS = blockFetchOpts.MaxRPS
+			opts.MaxInflight = blockFetchOpts.MaxInflight
+			opts.TipPollMs = blockFetchOpts.TipPollMs
+			opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)
@@ -949,9 +1023,22 @@ func ReplayBlocks(
 	go blockStream.Start()
 
 	for {
+		waitStart := time.Now()
 		block := blockStream.NextBlock()
+		waitTime := time.Since(waitStart)
 		if block == nil {
 			break
+		}
+
+		// Stall detection: warn if waited too long for a block
+		// Threshold is 10s because backup requests are sent at 1s for slow slots.
+		// Skip first block (startup has TLS/connection overhead)
+		if waitTime > 10*time.Second && len(execTimes) > 0 {
+			stats := blockStream.GetFetchStats()
+			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
+				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
+				stats.ErrNotAvail, stats.ErrRateLimit, stats.ErrBeyondTip, stats.ErrTransient,
+				stats.WorkQueueLen, stats.ReorderBufLen)
 		}
 
 		if ctx.Err() != nil {
@@ -960,18 +1047,30 @@ func ReplayBlocks(
 			break
 		}
 		start := time.Now()
+
+		// Notify block source we're starting execution - in near-tip mode this
+		// triggers fetching N+1 so RPC latency overlaps with execution time
+		blockStream.NotifyBlockStart(block.Slot)
+
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
+		var configErr error
 		if currentSlot == startSlot {
 			if resumeState != nil {
 				// RESUME: Use resume state + manifest (for static fields)
-				configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc)
+				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
 			} else {
 				// FRESH START: Use snapshot manifest
-				configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc)
+				configErr = configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
 			}
 		} else {
-			configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc)
+			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc, rpcBackups)
+		}
+		if configErr != nil {
+			mlog.Log.Errorf("FATAL: block configuration failed: %v", configErr)
+			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
+			result.Error = configErr
+			break
 		}
 
 		// epoch boundary
@@ -981,7 +1080,7 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
@@ -1073,8 +1172,9 @@ func ReplayBlocks(
 		}
 
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | execution: %.3fs",
-			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds())
+		totalSlotTime := waitTime + slotReplayDuration
+		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
+			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds(), totalSlotTime.Seconds())
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
@@ -1087,49 +1187,200 @@ func ReplayBlocks(
 		statsd.Gauge(statsd.Slot, float64(block.Slot), nil)
 		statsd.Timing(statsd.TxsPerBlock, uint64(len(block.Transactions)), nil)
 
+		// Track last executed slot for accurate tip distance calculation and mode switching
+		blockStream.SetLastExecutedSlot(block.Slot)
+
 		if !justCrossedEpochBoundary {
 			statsCounter++
-			timeAccumulator += slotReplayDuration.Seconds()
-			cuAccumulator += totalCU
-			voteTxAccumulator += uint64(voteTxCount)
-			nonVoteTxAccumulator += uint64(nonVoteTxCount)
+			execTimes = append(execTimes, slotReplayDuration.Seconds())
+			waitTimes = append(waitTimes, waitTime.Seconds())
+			cuValues = append(cuValues, totalCU)
+			voteTxCounts = append(voteTxCounts, uint64(voteTxCount))
+			nonVoteTxCounts = append(nonVoteTxCounts, uint64(nonVoteTxCount))
 
-			if statsCounter == 100 {
-				// Calculate averages (rounded to nearest whole number for CU and txns)
-				avgExec := timeAccumulator / float64(statsCounter)
-				avgCU := (cuAccumulator + statsCounter/2) / statsCounter // round to nearest
-				avgVoteTx := (voteTxAccumulator + statsCounter/2) / statsCounter
-				avgNonVoteTx := (nonVoteTxAccumulator + statsCounter/2) / statsCounter
+			// Trigger async tip refresh 5 slots before summary so it's fresh when we print
+			if statsCounter == summaryInterval-5 {
+				blockStream.RefreshTipsForSummary()
+			}
 
-				// Query chain tip in background (non-blocking)
-				var chainTipStr string
-				tip := cachedChainTip.Load()
-				if tip > 0 && block.Slot < tip {
-					slotsBehind := tip - block.Slot
-					chainTipStr = fmt.Sprintf(" | %d slots behind tip", slotsBehind)
+			if statsCounter == summaryInterval {
+				// Calculate statistics for float64 slices
+				medianFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					sorted := make([]float64, len(vals))
+					copy(sorted, vals)
+					sort.Float64s(sorted)
+					n := len(sorted)
+					if n%2 == 0 {
+						return (sorted[n/2-1] + sorted[n/2]) / 2
+					}
+					return sorted[n/2]
 				}
-
-				// Print summary with newlines for visibility
-				mlog.Log.Infof("")
-				mlog.Log.Infof("--- 100 slot summary: execution avg: %.3fs | cu avg: %d | txns avg: v:%-5d nv:%-5d%s",
-					avgExec, avgCU, avgVoteTx, avgNonVoteTx, chainTipStr)
-				mlog.Log.Infof("")
-
-				// Reset accumulators
-				timeAccumulator = 0
-				cuAccumulator = 0
-				voteTxAccumulator = 0
-				nonVoteTxAccumulator = 0
-				statsCounter = 0
-
-				// Refresh chain tip in background for next summary
-				go func() {
-					if rpcc != nil {
-						if slot, err := rpcc.GetSlot(); err == nil {
-							cachedChainTip.Store(slot)
+				minFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v < m {
+							m = v
 						}
 					}
-				}()
+					return m
+				}
+				maxFloat := func(vals []float64) float64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v > m {
+							m = v
+						}
+					}
+					return m
+				}
+
+				// Calculate statistics for uint64 slices
+				medianUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					sorted := make([]uint64, len(vals))
+					copy(sorted, vals)
+					sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+					n := len(sorted)
+					if n%2 == 0 {
+						return (sorted[n/2-1] + sorted[n/2]) / 2
+					}
+					return sorted[n/2]
+				}
+				minUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v < m {
+							m = v
+						}
+					}
+					return m
+				}
+				maxUint := func(vals []uint64) uint64 {
+					if len(vals) == 0 {
+						return 0
+					}
+					m := vals[0]
+					for _, v := range vals[1:] {
+						if v > m {
+							m = v
+						}
+					}
+					return m
+				}
+
+				// Compute total times (exec + wait for each block)
+				totalTimes := make([]float64, len(execTimes))
+				for i := range execTimes {
+					totalTimes[i] = execTimes[i] + waitTimes[i]
+				}
+
+				// Execution stats
+				medExec := medianFloat(execTimes)
+				minExec := minFloat(execTimes)
+				maxExec := maxFloat(execTimes)
+
+				// Wait stats
+				medWait := medianFloat(waitTimes)
+				minWait := minFloat(waitTimes)
+				maxWait := maxFloat(waitTimes)
+
+				// Total stats (only median needed - min/max can be inferred from execution + wait)
+				medTotal := medianFloat(totalTimes)
+
+				// CU stats
+				medCU := medianUint(cuValues)
+				minCU := minUint(cuValues)
+				maxCU := maxUint(cuValues)
+
+				// Txn stats
+				medVoteTx := medianUint(voteTxCounts)
+				medNonVoteTx := medianUint(nonVoteTxCounts)
+
+				// Blocks per second based on median total time
+				var blocksPerSec float64
+				if medTotal > 0 {
+					blocksPerSec = 1.0 / medTotal
+				}
+
+				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
+				fetchStats := blockStream.GetFetchStats()
+
+				// Calculate distance from tip
+				var tipDistanceStr string
+				if fetchStats.ConfirmedTip > 0 && fetchStats.TipAtSlot > 0 && fetchStats.TipAtSlot < fetchStats.ConfirmedTip {
+					behindConfirmed := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
+					if fetchStats.ProcessedTip > 0 && fetchStats.TipAtSlot < fetchStats.ProcessedTip {
+						behindProcessed := fetchStats.ProcessedTip - fetchStats.TipAtSlot
+						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed, %d behind processed",
+							behindConfirmed, behindProcessed)
+					} else {
+						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
+					}
+				} else if fetchStats.ConfirmedTip > 0 {
+					tipDistanceStr = "caught up"
+				} else {
+					tipDistanceStr = "tip unknown"
+				}
+
+				// Print summary in reorganized format
+				mlog.Log.InfofPrecise("")
+				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
+
+				// Line 1: Mode, blocks/sec, tip distance
+				modeStr := "catchup"
+				if fetchStats.IsNearTip {
+					modeStr = "near-tip"
+				}
+				mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
+					modeStr, blocksPerSec, tipDistanceStr)
+
+				// Line 2: CU and transaction stats (median/min/max)
+				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
+					medCU, minCU, maxCU, medVoteTx, medNonVoteTx)
+
+				// Line 3: Execution stats (median/min/max for execution, wait; median for replay total)
+				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
+					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
+
+				// Line 4: RPC/fetch debugging info
+				if fetchStats.Attempts > 0 {
+					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
+					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
+					mlog.Log.InfofPrecise("  fetch: avg %.0fms | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
+						fetchStats.AvgLatencyMs, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
+						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
+
+					// Surface tip poll issues (only show if there are problems)
+					if fetchStats.TipStaleSecs > 30 || fetchStats.TotalTipPollFails > 0 {
+						mlog.Log.InfofPrecise("  WARNING: tip stale %ds | tip poll fails: %d (consecutive: %d)",
+							fetchStats.TipStaleSecs, fetchStats.TotalTipPollFails, fetchStats.TipPollFailures)
+					}
+
+					blockStream.ResetStats()
+				}
+				mlog.Log.InfofPrecise("")
+
+				// Reset slices (reuse capacity)
+				execTimes = execTimes[:0]
+				waitTimes = waitTimes[:0]
+				cuValues = cuValues[:0]
+				voteTxCounts = voteTxCounts[:0]
+				nonVoteTxCounts = nonVoteTxCounts[:0]
+				statsCounter = 0
 			}
 		} else {
 			justCrossedEpochBoundary = false
@@ -1149,6 +1400,11 @@ func ReplayBlocks(
 
 	}
 
+	// Check if block source stalled (this provides explicit error info)
+	if blockStream.Stalled() && result.Error == nil {
+		result.Error = fmt.Errorf("block fetch stalled - no progress for %v", blockStream.StallTimeout())
+	}
+
 	result.LastPersistedSlot = lastPersistedSlot
 	result.LastPersistedBankhash = lastPersistedBankhash
 
@@ -1166,6 +1422,9 @@ func ReplayBlocks(
 		result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
 		result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 		result.LastBlockhash = lastSlotCtx.Blockhash
+
+		// Capture SlotHashes context (same issue, vote program needs accurate slot→hash mappings)
+		result.LastSlotHashes = sealevel.SysvarCache.SlotHashes.Sysvar
 	}
 
 	return result

@@ -36,7 +36,7 @@ name = "mithril"
 # development. Once stable, "auto" is a good choice for production.
 
 [bootstrap]
-    mode = "snapshot"
+    mode = "auto"
 
 # ============================================================================
 # [storage] - Storage Paths
@@ -57,6 +57,10 @@ name = "mithril"
 #   Blockstore (varies)
 #     Incoming blocks from RPC/Overcast. Size depends on how much history
 #     you want to keep (0 to hundreds of GB).
+#     NOTE: Block download to disk is TEMPORARILY DISABLED. Blocks are
+#     currently streamed directly from RPC and not persisted to disk.
+#     This path is reserved for future use when block persistence is
+#     re-implemented.
 #
 # Recommended setup (two NVMe drives):
 #   /mnt/mithril-accounts/     <- Fast NVMe (~500GB for AccountsDB)
@@ -73,40 +77,76 @@ name = "mithril"
 
     # Blockstore - incoming blocks from RPC/Overcast
     # Size depends on how much block history you keep.
+    # NOTE: Block persistence is temporarily disabled. Blocks are streamed
+    # directly from RPC without saving to disk. This setting is reserved
+    # for when block persistence is re-implemented.
     blockstore = "/mnt/mithril-ledger/blockstore"
 
     # Snapshots - downloaded on first run (~100GB for full + incremental)
     snapshots = "/mnt/mithril-ledger/snapshots"
 
 # ============================================================================
-# [network] + [block] - Data Sources
+# [network] - RPC Endpoints
 # ============================================================================
 #
-# These settings control where Mithril gets the data it needs:
-#   1. RPC endpoints - Used to discover snapshot sources AND fetch blocks
-#   2. Block source  - Whether to stream blocks from RPC or Overcast
+# Solana RPC endpoints for all cluster access (blocks, leader schedule, etc.)
+# Endpoints are listed in PRIORITY ORDER:
+#   - First endpoint is PRIMARY (used for all calls when healthy)
+#   - Remaining endpoints are FALLBACKS (used when primary fails)
 #
-# On startup, Mithril uses the RPC endpoint(s) to:
-#   - Query the cluster for nodes hosting snapshots
-#   - Speed-test nodes to find the fastest snapshot download
-#   - Fetch new blocks in real-time (if using RPC as block source)
+# On hard connectivity errors (connection refused, DNS failure, etc.), Mithril
+# automatically fails over to the next endpoint in the list. It periodically
+# probes the primary and restores to it when healthy.
 
 [network]
-    # Solana RPC endpoint(s) for cluster access
-    # Used for: discovering snapshot sources, fetching blocks (if source=rpc)
-    # Can be a single URL or multiple URLs for redundancy
+    # RPC endpoints in priority order (first = primary, rest = fallbacks)
+    #
+    # Example with primary + fallback:
+    #   rpc = [
+    #       "https://your-rpc.example.com",        # Primary
+    #       "https://api.mainnet-beta.solana.com"  # Fallback
+    #   ]
     rpc = ["https://api.mainnet-beta.solana.com"]
-    # rpc = ["https://rpc1.example.com", "https://rpc2.example.com"]
+
+# ============================================================================
+# [block] - Block Streaming
+# ============================================================================
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"      - Fetch blocks via RPC (uses network.rpc endpoints above)
+    #   "rpc"      - Fetch blocks via RPC (uses endpoints from [network].rpc)
     #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
+    #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
+    #                The background downloader was removed; Overcast streaming will be
+    #                re-implemented in a future release.
     source = "rpc"
 
     # Overcast endpoint address (only used when source = "overcast")
-    # If source = "overcast" but no endpoint is provided, falls back to RPC
+    # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
     # overcast_endpoint = "localhost:9000"
+
+    # -------------------------------------------------------------------------
+    # Block Fetching Performance (RPC source only)
+    # -------------------------------------------------------------------------
+    # These settings control parallel block fetching during catchup.
+    # Tune based on your RPC provider's rate limits.
+
+    # Maximum RPC requests per second for block fetching.
+    # Check your RPC provider's rate limits. Private nodes can go higher.
+    # Set slightly below provider limit to leave room for other RPC calls.
+    max_rps = 10
+
+    # Maximum concurrent block fetch requests (workers).
+    # Should generally match max_rps.
+    max_inflight = 10
+
+    # How often to poll for chain tip (milliseconds).
+    # Used to avoid fetching slots that don't exist yet.
+    tip_poll_interval_ms = 5000
+
+    # Don't fetch within this many slots of the confirmed tip.
+    # Prevents "slot not available" errors. 64 slots ≈ 25 seconds.
+    tip_safety_margin = 64
 
 # ============================================================================
 # [replay] - Block Replay

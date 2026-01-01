@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,33 +13,71 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-func prepareLeaderSchedule(epoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, rpcClient *rpcclient.RpcClient) {
+// ErrLeaderScheduleFailed is returned when leader schedule cannot be fetched from any endpoint
+var ErrLeaderScheduleFailed = errors.New("leader schedule fetch failed from all RPC endpoints")
+
+// prepareLeaderSchedule fetches the leader schedule for the given epoch.
+// It tries the primary RPC client first, then falls back to backup endpoints.
+// Returns an error instead of panicking to allow graceful shutdown.
+func prepareLeaderSchedule(epoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, rpcClient *rpcclient.RpcClient) error {
+	return prepareLeaderScheduleWithBackups(epoch, epochSchedule, rpcClient, nil)
+}
+
+// prepareLeaderScheduleWithBackups tries the primary client, then backup endpoints in order.
+func prepareLeaderScheduleWithBackups(epoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, rpcClient *rpcclient.RpcClient, backupEndpoints []string) error {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
+	// Try primary endpoint first
+	leaderMap, err := fetchLeaderScheduleWithRetry(rpcClient, 10)
+	if err == nil {
+		leaderSchedule := leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch)
+		global.SetLeaderSchedule(leaderSchedule)
+		return nil
+	}
+
+	lastErr := err
+	mlog.Log.Errorf("leader schedule fetch failed on primary %s: %v", rpcClient.Endpoint(), err)
+
+	// Try backup endpoints
+	for i, endpoint := range backupEndpoints {
+		mlog.Log.Infof("trying backup RPC endpoint #%d for leader schedule: %s", i+1, endpoint)
+		backupClient := rpcclient.NewRpcClient(endpoint)
+		leaderMap, err := fetchLeaderScheduleWithRetry(backupClient, 5) // Fewer retries on backups
+		if err == nil {
+			mlog.Log.Infof("leader schedule fetched from backup endpoint %s", endpoint)
+			leaderSchedule := leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch)
+			global.SetLeaderSchedule(leaderSchedule)
+			return nil
+		}
+		lastErr = err
+		mlog.Log.Errorf("leader schedule fetch failed on backup %s: %v", endpoint, err)
+	}
+
+	// All endpoints failed
+	return fmt.Errorf("%w: last error: %v", ErrLeaderScheduleFailed, lastErr)
+}
+
+// fetchLeaderScheduleWithRetry attempts to fetch leader schedule with exponential backoff
+func fetchLeaderScheduleWithRetry(rpcClient *rpcclient.RpcClient, maxAttempts int) (map[solana.PublicKey][]uint64, error) {
 	var leaderMap map[solana.PublicKey][]uint64
 	var err error
 
-	// Retry with exponential backoff on rate limit
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		leaderMap, err = rpcClient.GetLeaderSchedule()
 		if err == nil {
-			break
+			return leaderMap, nil
 		}
-		// Check if rate limited - retry
-		if attempt < 9 {
+		// Retry with exponential backoff
+		if attempt < maxAttempts-1 {
 			waitTime := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s...
 			if waitTime > 30*time.Second {
 				waitTime = 30 * time.Second
 			}
-			mlog.Log.Infof("rate limited fetching leader schedule from %s, retrying in %v (attempt %d/10)", rpcClient.Endpoint(), waitTime, attempt+1)
+			mlog.Log.Infof("leader schedule fetch from %s failed, retrying in %v (attempt %d/%d): %v",
+				rpcClient.Endpoint(), waitTime, attempt+1, maxAttempts, err)
 			time.Sleep(waitTime)
 		}
 	}
 
-	if err != nil {
-		panic(fmt.Sprintf("unable to fetch leader schedule from %s after 10 attempts: %s", rpcClient.Endpoint(), err))
-	}
-
-	leaderSchedule := leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch)
-	global.SetLeaderSchedule(leaderSchedule)
+	return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, err)
 }
