@@ -182,6 +182,8 @@ const (
 	catchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
 	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
 	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
+	nearTipLookahead    = 3                       // Schedule up to N slots ahead in near-tip mode
+	// RPC latency ~300ms, execution ~100ms - need 2-3 slots buffered to avoid waiting
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
@@ -883,14 +885,16 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 
 // canScheduleMore returns true if we can schedule the given slot.
 // In catchup mode: gate on buffer size (up to defaultMaxPending).
-// In near-tip mode: true JIT - only schedule the exact next slot replay needs.
+// In near-tip mode: allow scheduling a small lookahead (nearTipLookahead slots)
+// to hide RPC latency behind execution time.
 func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 	if bs.isNearTip.Load() {
-		// True JIT: only schedule the exact next slot replay needs
+		// Near-tip mode: allow scheduling up to nearTipLookahead slots ahead
+		// This provides enough buffer to hide RPC latency (~300ms) behind execution (~100ms)
 		lastExecuted := bs.lastExecutedSlot.Load()
 
-		// Only allow N+1, nothing more
-		if lastExecuted > 0 && slot > lastExecuted+1 {
+		// Allow N+1, N+2, ..., N+nearTipLookahead
+		if lastExecuted > 0 && slot > lastExecuted+nearTipLookahead {
 			return false
 		}
 
