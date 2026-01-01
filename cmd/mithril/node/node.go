@@ -1927,9 +1927,11 @@ func killExistingMithrilProcesses() int {
 // decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes
 func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
 	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
+	dropped := 0
 	for _, entry := range entries {
 		hashBytes, err := base58.Decode(entry.Blockhash)
 		if err != nil || len(hashBytes) != 32 {
+			dropped++
 			continue
 		}
 		var blockhash [32]byte
@@ -1939,15 +1941,20 @@ func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRece
 			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: entry.LamportsPerSignature},
 		})
 	}
+	if dropped > 0 {
+		mlog.Log.Errorf("dropped %d/%d RecentBlockhashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
+	}
 	return result
 }
 
 // decodeSlotHashes converts state.SlotHashEntry list to sealevel.SysvarSlotHashes
 func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
 	result := make(sealevel.SysvarSlotHashes, 0, len(entries))
+	dropped := 0
 	for _, entry := range entries {
 		hashBytes, err := base58.Decode(entry.Hash)
 		if err != nil || len(hashBytes) != 32 {
+			dropped++
 			continue
 		}
 		var hash [32]byte
@@ -1956,6 +1963,9 @@ func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
 			Slot: entry.Slot,
 			Hash: hash,
 		})
+	}
+	if dropped > 0 {
+		mlog.Log.Errorf("dropped %d/%d SlotHashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
 	}
 	return result
 }
