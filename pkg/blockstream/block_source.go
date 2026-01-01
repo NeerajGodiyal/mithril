@@ -1076,9 +1076,6 @@ func (bs *BlockSource) Start() {
 		return
 	}
 
-	mlog.Log.Infof("starting parallel block fetch: rps=%d workers=%d safety_margin=%d",
-		int(bs.rateLimiter.Limit()), bs.maxInflight, bs.tipSafetyMargin)
-
 	// Start tip poller
 	go bs.pollTip()
 

@@ -917,13 +917,6 @@ func ReplayBlocks(
 	if CurrentRunID == "" {
 		CurrentRunID = generateRunID()
 	}
-	// Don't show end slot if it's max uint64 (means "forever")
-	if endSlot == ^uint64(0) {
-		mlog.Log.Infof("[run:%s] starting replay from slot %d", CurrentRunID, startSlot)
-	} else {
-		mlog.Log.Infof("[run:%s] starting replay from slot %d to %d", CurrentRunID, startSlot, endSlot)
-	}
-
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
 	bankhashLogFile, bankhashLogErr := os.OpenFile(bankhashLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
