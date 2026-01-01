@@ -1099,8 +1099,25 @@ func (bs *BlockSource) scheduler() {
 			}
 		case <-retryTicker.C:
 			// Handle normal retries
+			// CRITICAL: Get the slot we're waiting for FIRST - this slot must always
+			// be allowed to schedule, even if buffer is full. Otherwise we deadlock:
+			// buffer fills with N+1..N+100, slot N keeps failing, can't reschedule N
+			// because buffer is full, buffer can't drain because waiting for N.
+			bs.reorderMu.Lock()
+			waitingSlot := bs.nextSlotToSend
+			bs.reorderMu.Unlock()
+
 			for _, slot := range bs.getRetrySlots() {
-				if bs.canScheduleMore(slot) {
+				// Always allow scheduling the slot we're waiting for (breaks deadlock)
+				isPrioritySlot := slot == waitingSlot
+				if isPrioritySlot || bs.canScheduleMore(slot) {
+					if isPrioritySlot && !bs.canScheduleMore(slot) {
+						// Log when deadlock prevention kicks in (Infof so it appears in prod)
+						bs.reorderMu.Lock()
+						bufLen := len(bs.reorderBuffer)
+						bs.reorderMu.Unlock()
+						mlog.Log.Infof("priority retry: scheduling waiting slot %d despite full buffer (%d slots)", slot, bufLen)
+					}
 					bs.scheduleSlot(slot)
 				} else {
 					bs.scheduleRetry(slot) // Put back
