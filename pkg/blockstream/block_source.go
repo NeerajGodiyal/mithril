@@ -153,9 +153,8 @@ type BlockSource struct {
 	stallError   atomic.Bool // Set when stall timeout triggers
 
 	// Near-tip mode tracking
-	isNearTip           atomic.Bool   // True when close to confirmed tip
-	catchupTipSafety    uint64        // Original tip safety margin for catchup mode
-	catchupTipPollMs    int           // Original tip poll interval for catchup mode
+	isNearTip        atomic.Bool // True when close to confirmed tip
+	catchupTipSafety uint64      // Original tip safety margin for catchup mode
 
 	// Stats tracking
 	stats BlockSourceStats
@@ -167,7 +166,7 @@ const (
 	defaultMaxInflight     = 10
 	defaultTipPollMs       = 5000
 	defaultTipSafetyMargin = 64
-	defaultMaxPending      = 500
+	defaultMaxPending      = 150
 	streamChanBuffer       = 100
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
@@ -179,11 +178,11 @@ const (
 
 	// Near-tip mode settings
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	nearTipThreshold     = 128             // Switch to near-tip mode when gap <= this
-	catchupThreshold     = 256             // Switch back to catchup mode when gap >= this (hysteresis)
-	nearTipMaxPending    = 16              // Smaller buffer in near-tip mode (just-in-time)
-	nearTipSafetyMargin  = 2               // Much smaller margin in near-tip mode
-	nearTipPollInterval  = 500 * time.Millisecond // Faster tip polling in near-tip mode
+	nearTipThreshold    = 128                      // Switch to near-tip mode when gap <= this
+	catchupThreshold    = 256                      // Switch back to catchup mode when gap >= this (hysteresis)
+	nearTipTargetLead   = 4                        // In near-tip, schedule at most this many slots ahead of last executed
+	nearTipSafetyMargin = 0                        // No margin in near-tip - rely on retries for "not available"
+	nearTipPollInterval = 500 * time.Millisecond  // Faster tip polling in near-tip mode
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -245,7 +244,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		stopChan:         make(chan struct{}),
 		stallTimeout:     defaultStallTimeout,
 		catchupTipSafety: tipSafetyMargin, // Store original for switching back to catchup
-		catchupTipPollMs: tipPollMs,       // Store original for switching back to catchup
 	}
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
@@ -305,14 +303,6 @@ func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
 	return bs.catchupTipSafety
 }
 
-// effectiveMaxPending returns the max pending buffer size for the current mode.
-// In near-tip mode, we use a smaller buffer for just-in-time scheduling.
-func (bs *BlockSource) effectiveMaxPending() int {
-	if bs.isNearTip.Load() {
-		return nearTipMaxPending
-	}
-	return defaultMaxPending
-}
 
 func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
 	if bs.blockDir == "" {
@@ -820,13 +810,25 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 	return slots
 }
 
-// canScheduleMore returns true if we can schedule more slots
-// Uses mode-aware max pending (smaller in near-tip mode)
-func (bs *BlockSource) canScheduleMore() bool {
+// canScheduleMore returns true if we can schedule the given slot.
+// In catchup mode: gate on buffer size (up to defaultMaxPending).
+// In near-tip mode: gate on target lead (only schedule a few slots ahead of last executed).
+func (bs *BlockSource) canScheduleMore(slot uint64) bool {
+	if bs.isNearTip.Load() {
+		// Just-in-time: only schedule if within targetLead of last executed
+		lastExecuted := bs.lastProcessedSlot.Load()
+		// Allow scheduling if slot is at most nearTipTargetLead ahead of last executed
+		// Also allow if we haven't started executing yet (lastExecuted == 0)
+		if lastExecuted > 0 && slot > lastExecuted+nearTipTargetLead {
+			return false
+		}
+	}
+
+	// Also check buffer capacity
 	bs.reorderMu.Lock()
 	pending := len(bs.reorderBuffer)
 	bs.reorderMu.Unlock()
-	return pending < bs.effectiveMaxPending()
+	return pending < defaultMaxPending
 }
 
 // scheduleSlot schedules a slot if not already scheduled
@@ -953,7 +955,7 @@ func (bs *BlockSource) scheduler() {
 		case <-retryTicker.C:
 			// Handle normal retries
 			for _, slot := range bs.getRetrySlots() {
-				if bs.canScheduleMore() {
+				if bs.canScheduleMore(slot) {
 					bs.scheduleSlot(slot)
 				} else {
 					bs.scheduleRetry(slot) // Put back
@@ -983,7 +985,7 @@ func (bs *BlockSource) scheduler() {
 		}
 
 		// Schedule new slots if we have capacity
-		if bs.canScheduleMore() && nextToSchedule < bs.endSlot {
+		if bs.canScheduleMore(nextToSchedule) && nextToSchedule < bs.endSlot {
 			if bs.scheduleSlot(nextToSchedule) {
 				nextToSchedule++
 			} else {
