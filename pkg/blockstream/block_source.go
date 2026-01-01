@@ -182,8 +182,8 @@ const (
 	catchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
 	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
 	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
-	nearTipLookahead    = 3                       // Schedule up to N slots ahead in near-tip mode
-	// RPC latency ~300ms, execution ~100ms - need 2-3 slots buffered to avoid waiting
+	nearTipLookahead    = 2                       // Schedule up to N slots ahead in near-tip mode
+	// RPC latency ~300ms, execution ~100ms - need 1-2 slots buffered to avoid waiting
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
@@ -496,9 +496,66 @@ func (bs *BlockSource) pollTip() {
 // SetLastExecutedSlot is called by the replay loop after each block is fully executed.
 // This allows accurate tip distance calculation without blocking on replay progress.
 // Also triggers mode switching based on replay progress (not just tip polling).
+//
+// In near-tip mode, this also:
+// - Schedules N+2 (prefetch while N+1 executes)
+// - Immediately retries N+1 if it failed (don't wait for 200ms ticker)
 func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
 	bs.lastExecutedSlot.Store(slot)
 	bs.updateMode() // React to replay progress immediately
+
+	// Near-tip: schedule N+2 and flush N+1 retry
+	if bs.isNearTip.Load() {
+		nextSlot := slot + 1
+		nextNextSlot := slot + 2
+
+		// Check if N+1 needs immediate retry (pull from retry queue)
+		bs.flushRetrySlot(nextSlot)
+
+		// Schedule N+2 if not already scheduled/done
+		bs.tryScheduleSlot(nextNextSlot)
+	}
+}
+
+// flushRetrySlot removes a specific slot from the retry queue and schedules it immediately
+func (bs *BlockSource) flushRetrySlot(slot uint64) {
+	bs.retryMu.Lock()
+	var remaining []uint64
+	found := false
+	for _, s := range bs.retrySlots {
+		if s == slot {
+			found = true
+		} else {
+			remaining = append(remaining, s)
+		}
+	}
+	bs.retrySlots = remaining
+	bs.retryMu.Unlock()
+
+	if found {
+		bs.scheduleSlot(slot)
+	}
+}
+
+// tryScheduleSlot schedules a slot if not already scheduled/done/buffered
+func (bs *BlockSource) tryScheduleSlot(slot uint64) {
+	// Check slotState
+	bs.slotStateMu.Lock()
+	state, exists := bs.slotState[slot]
+	bs.slotStateMu.Unlock()
+	if exists && (state == slotInflight || state == slotDone) {
+		return
+	}
+
+	// Check reorder buffer
+	bs.reorderMu.Lock()
+	alreadyHave := bs.reorderBuffer[slot] != nil || bs.skippedSlots[slot]
+	bs.reorderMu.Unlock()
+	if alreadyHave {
+		return
+	}
+
+	bs.scheduleSlot(slot)
 }
 
 // NotifyBlockStart is called at the START of block execution.
