@@ -1309,9 +1309,13 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("")
 				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
 
-				// Line 1: Catchup info (blocks/sec, tip distance)
-				mlog.Log.InfofPrecise("  catchup: %.1f blocks/sec | %s",
-					blocksPerSec, tipDistanceStr)
+				// Line 1: Mode, blocks/sec, tip distance
+				modeStr := "catchup"
+				if fetchStats.IsNearTip {
+					modeStr = "near-tip"
+				}
+				mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
+					modeStr, blocksPerSec, tipDistanceStr)
 
 				// Line 2: CU and transaction stats (median/min/max)
 				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",

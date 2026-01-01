@@ -148,9 +148,14 @@ type BlockSource struct {
 	stopped     atomic.Bool
 
 	// Stall detection
-	lastProgress     atomic.Int64 // Unix timestamp of last successful block emit
-	stallTimeout     time.Duration
-	stallError       atomic.Bool // Set when stall timeout triggers
+	lastProgress atomic.Int64 // Unix timestamp of last successful block emit
+	stallTimeout time.Duration
+	stallError   atomic.Bool // Set when stall timeout triggers
+
+	// Near-tip mode tracking
+	isNearTip           atomic.Bool   // True when close to confirmed tip
+	catchupTipSafety    uint64        // Original tip safety margin for catchup mode
+	catchupTipPollMs    int           // Original tip poll interval for catchup mode
 
 	// Stats tracking
 	stats BlockSourceStats
@@ -167,10 +172,18 @@ const (
 	defaultStallTimeout    = 5 * time.Minute // Trigger graceful shutdown if no progress
 
 	// RPC failover settings
-	primaryRetryInterval      = 100              // Retry primary RPC every N slots after failover (progress-based)
-	primaryProbeInterval      = 1 * time.Minute  // Probe primary RPC every minute when on backup (time-based)
-	failoverErrThreshold      = 10               // Consecutive hard errors before failover (conservative)
-	failoverErrWindowSecs     = 5                // Reset error count if no errors for this long
+	primaryRetryInterval  = 100             // Retry primary RPC every N slots after failover (progress-based)
+	primaryProbeInterval  = 1 * time.Minute // Probe primary RPC every minute when on backup (time-based)
+	failoverErrThreshold  = 10              // Consecutive hard errors before failover (conservative)
+	failoverErrWindowSecs = 5               // Reset error count if no errors for this long
+
+	// Near-tip mode settings
+	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
+	nearTipThreshold     = 128             // Switch to near-tip mode when gap <= this
+	catchupThreshold     = 256             // Switch back to catchup mode when gap >= this (hysteresis)
+	nearTipMaxPending    = 16              // Smaller buffer in near-tip mode (just-in-time)
+	nearTipSafetyMargin  = 2               // Much smaller margin in near-tip mode
+	nearTipPollInterval  = 500 * time.Millisecond // Faster tip polling in near-tip mode
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -227,10 +240,12 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		maxPending:      defaultMaxPending,
 		slotState:       make(map[uint64]slotStatus),
 		inflightStart:   make(map[uint64]time.Time),
-		workQueue:       make(chan uint64, maxInflight*2),
-		resultQueue:     make(chan fetchResult, maxInflight*2),
-		stopChan:        make(chan struct{}),
-		stallTimeout:    defaultStallTimeout,
+		workQueue:        make(chan uint64, maxInflight*2),
+		resultQueue:      make(chan fetchResult, maxInflight*2),
+		stopChan:         make(chan struct{}),
+		stallTimeout:     defaultStallTimeout,
+		catchupTipSafety: tipSafetyMargin, // Store original for switching back to catchup
+		catchupTipPollMs: tipPollMs,       // Store original for switching back to catchup
 	}
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
@@ -243,6 +258,60 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	return bs
+}
+
+// updateMode checks the gap to tip and switches between catchup and near-tip mode.
+// Uses hysteresis to avoid flapping: enter near-tip at <=128 slots, exit at >=256 slots.
+func (bs *BlockSource) updateMode() {
+	tip := bs.confirmedTip.Load()
+	lastExecuted := bs.lastProcessedSlot.Load()
+
+	// Can't determine mode without tip
+	if tip == 0 || lastExecuted == 0 {
+		return
+	}
+
+	// Calculate gap (tip should always be >= lastExecuted, but handle wrap)
+	var gap uint64
+	if tip > lastExecuted {
+		gap = tip - lastExecuted
+	} else {
+		gap = 0
+	}
+
+	wasNearTip := bs.isNearTip.Load()
+
+	if wasNearTip {
+		// Currently in near-tip mode - switch to catchup if gap exceeds threshold
+		if gap >= catchupThreshold {
+			bs.isNearTip.Store(false)
+			mlog.Log.Infof("Switching to CATCHUP mode (gap=%d slots, threshold=%d)", gap, catchupThreshold)
+		}
+	} else {
+		// Currently in catchup mode - switch to near-tip if gap is small
+		if gap <= nearTipThreshold {
+			bs.isNearTip.Store(true)
+			mlog.Log.Infof("Switching to NEAR-TIP mode (gap=%d slots, threshold=%d)", gap, nearTipThreshold)
+		}
+	}
+}
+
+// effectiveTipSafetyMargin returns the tip safety margin for the current mode.
+// In near-tip mode, we use a much smaller margin to stay close to the chain.
+func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
+	if bs.isNearTip.Load() {
+		return nearTipSafetyMargin
+	}
+	return bs.catchupTipSafety
+}
+
+// effectiveMaxPending returns the max pending buffer size for the current mode.
+// In near-tip mode, we use a smaller buffer for just-in-time scheduling.
+func (bs *BlockSource) effectiveMaxPending() int {
+	if bs.isNearTip.Load() {
+		return nearTipMaxPending
+	}
+	return defaultMaxPending
 }
 
 func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
@@ -380,19 +449,23 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, erro
 // pollTip periodically updates the confirmed tip by querying all configured RPCs
 // and using the maximum slot value. This handles RPCs that fall behind.
 // Uses GetSlotWithTimeout to prevent hung RPCs from blocking the poll loop.
+// Polls faster in near-tip mode for lower latency.
 func (bs *BlockSource) pollTip() {
 	const tipPollTimeout = 5 * time.Second
 
-	// Get initial tip
+	// Get initial tip and update mode
 	if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
 		bs.updateTipSnapshot(tip)
 		bs.tipPollFailures.Store(0)
+		bs.updateMode()
 	} else {
 		bs.tipPollFailures.Add(1)
 		bs.totalTipPollFails.Add(1)
 	}
 
-	ticker := time.NewTicker(bs.tipPollInterval)
+	// Start with catchup interval, will adjust based on mode
+	currentInterval := bs.tipPollInterval
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
 	for {
@@ -403,9 +476,22 @@ func (bs *BlockSource) pollTip() {
 			if tip := bs.getMaxTipFromAllRpcs(tipPollTimeout); tip > 0 {
 				bs.updateTipSnapshot(tip)
 				bs.tipPollFailures.Store(0)
+				bs.updateMode() // Check if we should switch modes
 			} else {
 				bs.tipPollFailures.Add(1)
 				bs.totalTipPollFails.Add(1)
+			}
+
+			// Adjust poll interval based on mode
+			var targetInterval time.Duration
+			if bs.isNearTip.Load() {
+				targetInterval = nearTipPollInterval
+			} else {
+				targetInterval = bs.tipPollInterval
+			}
+			if targetInterval != currentInterval {
+				currentInterval = targetInterval
+				ticker.Reset(currentInterval)
 			}
 		}
 	}
@@ -536,13 +622,14 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		// Wait for rate limiter
 		bs.rateLimiter.Wait(context.Background())
 
-		// Tip underflow guard
+		// Tip underflow guard - use mode-aware safety margin
 		tip := bs.confirmedTip.Load()
+		margin := bs.effectiveTipSafetyMargin()
 		var maxSlot uint64
-		if tip <= bs.tipSafetyMargin {
+		if tip <= margin {
 			maxSlot = 0
 		} else {
-			maxSlot = tip - bs.tipSafetyMargin
+			maxSlot = tip - margin
 		}
 
 		// Beyond tip - send back for retry
@@ -734,11 +821,12 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 }
 
 // canScheduleMore returns true if we can schedule more slots
+// Uses mode-aware max pending (smaller in near-tip mode)
 func (bs *BlockSource) canScheduleMore() bool {
 	bs.reorderMu.Lock()
 	pending := len(bs.reorderBuffer)
 	bs.reorderMu.Unlock()
-	return pending < bs.maxPending
+	return pending < bs.effectiveMaxPending()
 }
 
 // scheduleSlot schedules a slot if not already scheduled
@@ -1060,6 +1148,8 @@ type FetchStatsSnapshot struct {
 	TipStaleSecs      int64  // Seconds since last successful tip update (0 = healthy)
 	TipPollFailures   uint64 // Consecutive tip poll failures
 	TotalTipPollFails uint64 // Total tip poll failures this window
+	// Mode tracking
+	IsNearTip bool // True when in near-tip mode (low-latency, just-in-time scheduling)
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -1116,6 +1206,7 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		TipStaleSecs:       tipStaleSecs,
 		TipPollFailures:    bs.tipPollFailures.Load(),
 		TotalTipPollFails:  bs.totalTipPollFails.Load(),
+		IsNearTip:          bs.isNearTip.Load(),
 	}
 }
 
