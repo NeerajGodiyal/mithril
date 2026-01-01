@@ -129,6 +129,7 @@ blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporar
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 
 [network]
+cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]

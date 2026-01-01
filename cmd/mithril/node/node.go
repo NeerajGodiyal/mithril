@@ -35,6 +35,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/version"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
@@ -982,6 +983,13 @@ func runLive(c *cobra.Command, args []string) {
 	// Use configured snapshot directory (storage.snapshots / snapshot.download_path), not scratch
 	snapshotDownloadPath := snapshotDlPath
 
+	// Prune old history entries if needed (keeps last 100)
+	if accountsPath != "" {
+		if err := state.PruneHistory(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to prune state history: %v", err)
+		}
+	}
+
 	// Check for valid state file first (this is the authoritative source of truth)
 	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
 	hasValidState := mithrilState != nil
@@ -1071,6 +1079,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 
 	case "snapshot":
 		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
@@ -1125,6 +1135,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 
 	case "auto":
 		fallthrough
@@ -1191,12 +1203,16 @@ func runLive(c *cobra.Command, args []string) {
 					if err := mithrilState.Save(accountsPath); err != nil {
 						mlog.Log.Errorf("failed to save state file: %v", err)
 					}
+					// Record bootstrap in history
+					state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 					break // Exit the switch, continue with fresh AccountsDB
 				}
 				// choice == 1: continue with existing AccountsDB
 			}
 
 			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			// Record resume in history
+			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit())
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
 			if err != nil {
 				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
@@ -1217,6 +1233,8 @@ func runLive(c *cobra.Command, args []string) {
 					mlog.Log.Errorf("failed to mark state as corrupted: %v", markErr)
 				} else {
 					mlog.Log.Infof("state file updated to indicate corruption")
+					// Record corruption in history
+					state.RecordCorrupted(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit(), err.Error())
 				}
 
 				// Close AccountsDB before exiting
@@ -1287,6 +1305,8 @@ func runLive(c *cobra.Command, args []string) {
 			if err := mithrilState.Save(accountsPath); err != nil {
 				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
+			// Record bootstrap in history
+			state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 		}
 	}
 
@@ -1381,6 +1401,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 	}
 
 	liveEndSlot := uint64(math.MaxUint64)
@@ -1481,9 +1503,16 @@ func runLive(c *cobra.Command, args []string) {
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
 			}
-		}
-		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
-			mlog.Log.Errorf("failed to update state file: %v", err)
+			// Record shutdown in history (must be inside this block where shutdownReason is defined)
+			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+				mlog.Log.Errorf("failed to update state file: %v", err)
+			}
+			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
+		} else {
+			// No resume context - just update slot
+			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+				mlog.Log.Errorf("failed to update state file: %v", err)
+			}
 		}
 	}
 
@@ -1527,16 +1556,14 @@ func getCommitHash() string {
 	return ""
 }
 
-// getVersion returns the build version (set via ldflags or defaults to "dev")
-// TODO: Wire this up to the Version variable in cmd/mithril/version.go via a shared package
+// getVersion returns the build version from the shared version package.
 func getVersion() string {
-	return "dev" // Placeholder - will be set by ldflags at build time
+	return version.Version
 }
 
-// getCommit returns the git commit hash (set via ldflags or defaults to "unknown")
-// TODO: Wire this up to the GitCommit variable in cmd/mithril/version.go via a shared package
+// getCommit returns the git commit hash from the shared version package.
 func getCommit() string {
-	return "unknown" // Placeholder - will be set by ldflags at build time
+	return version.GitCommit
 }
 
 // fetchGenesisHash fetches the genesis hash from the first RPC endpoint.
@@ -2264,6 +2291,9 @@ func runReplayWithRecovery(
 					reason := fmt.Sprintf("panic during commit at slot %d: %v", commitSlot, r)
 					if err := mithrilState.MarkCorrupted(accountsDbPath, reason); err != nil {
 						mlog.Log.Errorf("[run:%s] Failed to mark state as corrupted: %v", runID, err)
+					} else {
+						// Record corruption in history
+						state.RecordCorrupted(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash, runID, getVersion(), getCommit(), reason)
 					}
 				}
 			} else {

@@ -29,7 +29,11 @@ Examples:
   mithril state --full             # Include resume context
   mithril state history            # Show recent events
   mithril state validate           # Validate against AccountsDB`,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Skip config loading if --accounts flag is provided
+			if accountsFlag != "" {
+				return nil
+			}
 			return config.InitConfig()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -77,12 +81,16 @@ This checks:
 	}
 
 	// Flags
-	jsonOutput bool
-	fullOutput bool
-	allHistory bool
+	jsonOutput   bool
+	fullOutput   bool
+	allHistory   bool
+	accountsFlag string // Override for accounts path (allows config-less usage)
 )
 
 func init() {
+	// Persistent flag for accounts path (works on all subcommands)
+	StateCmd.PersistentFlags().StringVar(&accountsFlag, "accounts", "", "Path to AccountsDB directory (overrides config)")
+
 	// Flags for show command
 	StateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output full JSON")
 	StateCmd.Flags().BoolVar(&fullOutput, "full", false, "Include resume context and blockhash details")
@@ -100,7 +108,12 @@ func init() {
 }
 
 func getAccountsPath() string {
-	// Try config file first
+	// Check --accounts flag first (allows config-less usage)
+	if accountsFlag != "" {
+		return accountsFlag
+	}
+
+	// Fall back to config file
 	path := config.GetString("storage.accounts")
 	if path == "" {
 		path = config.GetString("ledger.accounts_path") // Legacy fallback
@@ -108,6 +121,7 @@ func getAccountsPath() string {
 	if path == "" {
 		fmt.Println("Error: storage.accounts not configured")
 		fmt.Println("Use: mithril state --config config.toml")
+		fmt.Println("  or: mithril state --accounts /path/to/accountsdb")
 		os.Exit(1)
 	}
 	return path
