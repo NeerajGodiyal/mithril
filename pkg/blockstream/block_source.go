@@ -613,21 +613,25 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		// Wait for rate limiter
 		bs.rateLimiter.Wait(context.Background())
 
-		// Tip underflow guard - use mode-aware safety margin
-		tip := bs.confirmedTip.Load()
-		margin := bs.effectiveTipSafetyMargin()
-		var maxSlot uint64
-		if tip <= margin {
-			maxSlot = 0
-		} else {
-			maxSlot = tip - margin
-		}
+		// Tip safety gate - only applies in catchup mode.
+		// In near-tip mode, we bypass this entirely and rely on RPC "slot not available"
+		// errors + 200ms retries. This allows true JIT fetching right at the tip.
+		if !bs.isNearTip.Load() {
+			tip := bs.confirmedTip.Load()
+			margin := bs.effectiveTipSafetyMargin()
+			var maxSlot uint64
+			if tip <= margin {
+				maxSlot = 0
+			} else {
+				maxSlot = tip - margin
+			}
 
-		// Beyond tip - send back for retry
-		if maxSlot > 0 && slot > maxSlot {
-			bs.stats.ErrBeyondTip.Add(1)
-			bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
-			continue
+			// Beyond tip - send back for retry
+			if maxSlot > 0 && slot > maxSlot {
+				bs.stats.ErrBeyondTip.Add(1)
+				bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
+				continue
+			}
 		}
 
 		// Capture which RPC we're using BEFORE the fetch (for error attribution)
@@ -816,29 +820,6 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 	bs.retrySlots = nil
 	bs.retryMu.Unlock()
 	return slots
-}
-
-// pendingCount returns total slots pending across all stages:
-// reorder buffer + stream channel + inflight + work queue
-func (bs *BlockSource) pendingCount() int {
-	bs.reorderMu.Lock()
-	reorderLen := len(bs.reorderBuffer)
-	bs.reorderMu.Unlock()
-
-	streamLen := len(bs.streamChan)
-	workLen := len(bs.workQueue)
-
-	// Count inflight slots
-	bs.slotStateMu.Lock()
-	inflightCount := 0
-	for _, status := range bs.slotState {
-		if status == slotInflight {
-			inflightCount++
-		}
-	}
-	bs.slotStateMu.Unlock()
-
-	return reorderLen + streamLen + workLen + inflightCount
 }
 
 // canScheduleMore returns true if we can schedule the given slot.
