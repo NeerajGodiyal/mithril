@@ -993,7 +993,6 @@ func ReplayBlocks(
 		opts = &blockstream.BlockSourceOpts{
 			SourceType:         blockstream.BlockSourceOvercast,
 			RpcClient:          rpcc,
-			AuxRpcClient:       rpcc, // Same client for tip polling (unified RPC list)
 			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
 			EndSlot:            endSlot,
@@ -1003,7 +1002,6 @@ func ReplayBlocks(
 		opts = &blockstream.BlockSourceOpts{
 			SourceType:         blockstream.BlockSourceRpc,
 			RpcClient:          rpcc,
-			AuxRpcClient:       rpcc, // Same client for tip polling (unified RPC list)
 			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
 			EndSlot:            endSlot,
@@ -1082,7 +1080,7 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {

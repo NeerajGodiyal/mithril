@@ -375,6 +375,20 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	blockTipPollIntervalMs = getInt("block-tip-poll-ms", "block.tip_poll_interval_ms")
 	blockTipSafetyMargin = getInt("block-tip-safety-margin", "block.tip_safety_margin")
 
+	// Validate block fetch parameters - negative values wrap to huge uint64, causing stalls
+	if blockMaxRPS < 0 {
+		blockMaxRPS = 0
+	}
+	if blockMaxInflight < 0 {
+		blockMaxInflight = 0
+	}
+	if blockTipPollIntervalMs < 0 {
+		blockTipPollIntervalMs = 0
+	}
+	if blockTipSafetyMargin < 0 {
+		blockTipSafetyMargin = 0
+	}
+
 	// Snapshot download path - defaults to storage.snapshots, can be overridden
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 	if snapshotDlPath == "" {

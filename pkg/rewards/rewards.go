@@ -7,11 +7,13 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -100,22 +102,19 @@ func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.Sy
 		return false
 	}
 }
-func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
-	var totalStakingRewards uint64
-
+// DeterminePartitionedStakingRewardsInfo fetches reward partition info from RPC with failover support.
+// It tries the primary RPC first with retries, then falls back to backup endpoints.
+func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackups []string, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	numRewardPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
+
+	// Try to fetch reward partition info with failover
+	numRewardPartitions, rewardSlots, err := fetchRewardPartitionInfoWithBackups(rpcc, rpcBackups, firstSlotInEpoch)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("failed to fetch reward partition info from all RPC endpoints: %v", err))
 	}
 
 	if numRewardPartitions > 500 {
 		panic(fmt.Sprintf("num_reward_partitions returned by RPC node too large: %d", numRewardPartitions))
-	}
-
-	rewardSlots, err := rpcc.GetStakingRewardSlots(firstSlotInEpoch, numRewardPartitions)
-	if err != nil {
-		panic(err)
 	}
 
 	if len(rewardSlots) == 0 {
@@ -123,13 +122,84 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, epochSche
 	}
 
 	finalStakingRewardSlot := rewardSlots[len(rewardSlots)-1]
-	totalStakingRewards = CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
+	totalStakingRewards := CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
 
 	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
 
 	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1,
 		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot, NumRewardPartitions: numRewardPartitions}
+}
+
+// fetchRewardPartitionInfoWithBackups tries the primary RPC first with retries, then backup endpoints.
+func fetchRewardPartitionInfoWithBackups(rpcc *rpcclient.RpcClient, rpcBackups []string, firstSlotInEpoch uint64) (uint64, []uint64, error) {
+	// Try primary first with retries
+	numPartitions, slots, err := fetchRewardPartitionInfoWithRetry(rpcc, firstSlotInEpoch, 5)
+	if err == nil {
+		return numPartitions, slots, nil
+	}
+
+	lastErr := err
+	mlog.Log.Errorf("reward partition fetch failed on primary %s: %v", rpcc.Endpoint(), err)
+
+	// Try backup endpoints
+	for i, endpoint := range rpcBackups {
+		mlog.Log.Infof("trying backup RPC endpoint #%d for reward partitions: %s", i+1, endpoint)
+		backupClient := rpcclient.NewRpcClient(endpoint)
+		numPartitions, slots, err := fetchRewardPartitionInfoWithRetry(backupClient, firstSlotInEpoch, 3)
+		if err == nil {
+			mlog.Log.Infof("reward partition info fetched from backup endpoint %s", endpoint)
+			return numPartitions, slots, nil
+		}
+		lastErr = err
+		mlog.Log.Errorf("reward partition fetch failed on backup %s: %v", endpoint, err)
+	}
+
+	return 0, nil, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
+}
+
+// fetchRewardPartitionInfoWithRetry attempts to fetch reward partition info with exponential backoff.
+func fetchRewardPartitionInfoWithRetry(rpcc *rpcclient.RpcClient, firstSlotInEpoch uint64, maxAttempts int) (uint64, []uint64, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// First get num partitions
+		numRewardPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
+		if err != nil {
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				waitTime := time.Duration(1<<attempt) * time.Second
+				if waitTime > 30*time.Second {
+					waitTime = 30 * time.Second
+				}
+				mlog.Log.Infof("GetNumRewardPartitions from %s failed, retrying in %v (attempt %d/%d): %v",
+					rpcc.Endpoint(), waitTime, attempt+1, maxAttempts, err)
+				time.Sleep(waitTime)
+			}
+			continue
+		}
+
+		// Then get reward slots
+		rewardSlots, err := rpcc.GetStakingRewardSlots(firstSlotInEpoch, numRewardPartitions)
+		if err != nil {
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				waitTime := time.Duration(1<<attempt) * time.Second
+				if waitTime > 30*time.Second {
+					waitTime = 30 * time.Second
+				}
+				mlog.Log.Infof("GetStakingRewardSlots from %s failed, retrying in %v (attempt %d/%d): %v",
+					rpcc.Endpoint(), waitTime, attempt+1, maxAttempts, err)
+				time.Sleep(waitTime)
+			}
+			continue
+		}
+
+		// Both succeeded
+		return numRewardPartitions, rewardSlots, nil
+	}
+
+	return 0, nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 type idxAndReward struct {

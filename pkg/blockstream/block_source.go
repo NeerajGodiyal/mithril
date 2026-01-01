@@ -28,15 +28,15 @@ const (
 )
 
 type BlockSourceOpts struct {
-	RpcClient    *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
-	AuxRpcClient *rpcclient.RpcClient // For tip polling (getSlot) - falls back to RpcClient if nil
-	SourceType   BlockSourceType
+	RpcClient  *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
+	SourceType BlockSourceType
 	StartSlot    uint64
 	EndSlot      uint64
 	BlockDir     string
 
 	// Backup RPC endpoints for failover (optional)
-	// These are tried in order if the primary fails with timeout errors.
+	// These are tried in order if the primary fails with hard connectivity errors
+	// (connection refused, no such host, etc.). NOT used for timeouts or rate limits.
 	// After 100 slots, the primary is retried and restored if working.
 	BackupRpcEndpoints []string
 
@@ -94,9 +94,8 @@ type BlockSourceStats struct {
 }
 
 type BlockSource struct {
-	rpcClients   []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
-	auxRpcClient *rpcclient.RpcClient   // For tip polling (getSlot)
-	streamChan   chan *b.Block
+	rpcClients []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
+	streamChan chan *b.Block
 	startSlot    uint64
 	endSlot      uint64
 	currentSlot  uint64
@@ -213,12 +212,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		tipSafetyMargin = defaultTipSafetyMargin
 	}
 
-	// Aux RPC client for tip polling - falls back to block RPC if not set
-	auxRpcClient := opts.AuxRpcClient
-	if auxRpcClient == nil {
-		auxRpcClient = opts.RpcClient
-	}
-
 	// Build list of RPC clients: primary + backups
 	rpcClients := make([]*rpcclient.RpcClient, 0, 1+len(opts.BackupRpcEndpoints))
 	rpcClients = append(rpcClients, opts.RpcClient)
@@ -227,9 +220,8 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	bs := &BlockSource{
-		rpcClients:      rpcClients,
-		auxRpcClient:    auxRpcClient,
-		streamChan:      make(chan *b.Block, streamChanBuffer),
+		rpcClients: rpcClients,
+		streamChan: make(chan *b.Block, streamChanBuffer),
 		startSlot:       opts.StartSlot,
 		endSlot:         opts.EndSlot,
 		currentSlot:     opts.StartSlot,
@@ -265,7 +257,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 }
 
 // updateMode checks the gap to tip and switches between catchup and near-tip mode.
-// Uses hysteresis to avoid flapping: enter near-tip at <=128 slots, exit at >=256 slots.
+// Uses hysteresis to avoid flapping: enter near-tip at <=32 slots, exit at >=64 slots.
 func (bs *BlockSource) updateMode() {
 	tip := bs.confirmedTip.Load()
 	lastExecuted := bs.lastExecutedSlot.Load()
@@ -355,7 +347,9 @@ func (bs *BlockSource) isOnPrimary() bool {
 	return bs.activeRpcIdx.Load() == 0
 }
 
-// failoverToNext switches to the next RPC endpoint on timeout errors.
+// failoverToNext switches to the next RPC endpoint on hard connectivity errors
+// (connection refused, no such host, TLS failures, network unreachable).
+// Does NOT failover on timeouts, 502/503, or rate limits - those retry same endpoint.
 // Only fails over if there are backup endpoints available.
 // Returns true if failover occurred.
 func (bs *BlockSource) failoverToNext() bool {
