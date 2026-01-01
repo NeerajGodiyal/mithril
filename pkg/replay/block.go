@@ -1156,6 +1156,9 @@ func ReplayBlocks(
 		statsd.Gauge(statsd.Slot, float64(block.Slot), nil)
 		statsd.Timing(statsd.TxsPerBlock, uint64(len(block.Transactions)), nil)
 
+		// Track last executed slot for accurate tip distance calculation
+		blockStream.SetLastProcessedSlot(block.Slot)
+
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			execTimes = append(execTimes, slotReplayDuration.Seconds())

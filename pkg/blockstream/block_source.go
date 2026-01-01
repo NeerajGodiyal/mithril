@@ -115,14 +115,15 @@ type BlockSource struct {
 	maxInflight int
 
 	// Tip tracking
-	confirmedTip       atomic.Uint64
-	processedTip       atomic.Uint64 // Processed commitment tip (super tip)
-	tipAtSlot          atomic.Uint64 // What slot we were emitting when tip was measured
-	tipSafetyMargin    uint64
-	tipPollInterval    time.Duration
-	lastTipUpdate      atomic.Int64  // Unix timestamp of last successful tip poll
-	tipPollFailures    atomic.Uint64 // Consecutive tip poll failures
-	totalTipPollFails  atomic.Uint64 // Total tip poll failures (for stats)
+	confirmedTip        atomic.Uint64
+	processedTip        atomic.Uint64 // Processed commitment tip (super tip)
+	tipAtSlot           atomic.Uint64 // What slot we had executed when tip was measured
+	lastProcessedSlot   atomic.Uint64 // Last slot fully executed by replay (set by SetLastProcessedSlot)
+	tipSafetyMargin     uint64
+	tipPollInterval     time.Duration
+	lastTipUpdate       atomic.Int64  // Unix timestamp of last successful tip poll
+	tipPollFailures     atomic.Uint64 // Consecutive tip poll failures
+	totalTipPollFails   atomic.Uint64 // Total tip poll failures (for stats)
 
 	// Reorder buffer
 	reorderMu      sync.Mutex
@@ -410,12 +411,16 @@ func (bs *BlockSource) pollTip() {
 	}
 }
 
-// updateTipSnapshot stores the confirmed tip along with what slot we were emitting at that moment.
+// SetLastProcessedSlot is called by the replay loop after each block is fully executed.
+// This allows accurate tip distance calculation without blocking on replay progress.
+func (bs *BlockSource) SetLastProcessedSlot(slot uint64) {
+	bs.lastProcessedSlot.Store(slot)
+}
+
+// updateTipSnapshot stores the confirmed tip along with what slot was last executed.
 // This allows accurate distance calculation: tip - tipAtSlot is precise at measurement time.
 func (bs *BlockSource) updateTipSnapshot(confirmedTip uint64) {
-	bs.reorderMu.Lock()
-	slotAtTip := bs.nextSlotToSend
-	bs.reorderMu.Unlock()
+	slotAtTip := bs.lastProcessedSlot.Load()
 
 	bs.confirmedTip.Store(confirmedTip)
 	bs.tipAtSlot.Store(slotAtTip)
@@ -429,10 +434,8 @@ func (bs *BlockSource) RefreshTipsForSummary() {
 	go func() {
 		const timeout = 5 * time.Second
 
-		// Capture current slot before RPC calls
-		bs.reorderMu.Lock()
-		slotAtTip := bs.nextSlotToSend
-		bs.reorderMu.Unlock()
+		// Capture last executed slot before RPC calls (set by replay loop)
+		slotAtTip := bs.lastProcessedSlot.Load()
 
 		// Query all RPCs for both confirmed and processed tips concurrently
 		type result struct {
