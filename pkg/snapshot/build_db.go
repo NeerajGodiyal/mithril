@@ -53,9 +53,10 @@ func CleanAccountsDbDir(accountsDbDir string) {
 }
 
 // CleanSnapshotDownloadDir removes old snapshot files based on retention settings.
-// maxSnapshots: maximum full snapshots to keep (0 = unlimited)
-// deleteOldSnapshots: if true, always clean excess; if false, only clean when over limit
-func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int, deleteOldSnapshots bool) {
+// maxSnapshots controls how many snapshots to keep:
+//   - 0 = delete all snapshots (stream-only mode, used by new-snapshot bootstrap)
+//   - N > 0 = keep N newest snapshots, delete the rest
+func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 	if downloadPath == "" || maxSnapshots < 0 {
 		return
 	}
@@ -93,11 +94,6 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int, deleteOldSn
 		}
 	}
 
-	// If maxSnapshots is 0 (unlimited) and deleteOldSnapshots is false, don't clean anything
-	if maxSnapshots == 0 && !deleteOldSnapshots {
-		return
-	}
-
 	// Sort by modification time (newest first)
 	sortByTime := func(files []snapshotFile) {
 		for i := 0; i < len(files)-1; i++ {
@@ -109,8 +105,27 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int, deleteOldSn
 		}
 	}
 
-	// Clean full snapshots beyond the retention limit
-	if maxSnapshots > 0 && len(fullSnapshots) > maxSnapshots {
+	// maxSnapshots = 0 means delete ALL (stream-only mode, used by new-snapshot bootstrap)
+	if maxSnapshots == 0 {
+		for _, snap := range fullSnapshots {
+			if err := os.Remove(snap.path); err != nil {
+				mlog.Log.Errorf("failed to remove snapshot %s: %v", snap.name, err)
+			} else {
+				mlog.Log.Infof("cleaned up snapshot file: %s", snap.name)
+			}
+		}
+		for _, snap := range incrSnapshots {
+			if err := os.Remove(snap.path); err != nil {
+				mlog.Log.Errorf("failed to remove incremental snapshot %s: %v", snap.name, err)
+			} else {
+				mlog.Log.Infof("cleaned up incremental snapshot file: %s", snap.name)
+			}
+		}
+		return
+	}
+
+	// maxSnapshots > 0: keep N newest, delete the rest
+	if len(fullSnapshots) > maxSnapshots {
 		sortByTime(fullSnapshots)
 		for i := maxSnapshots; i < len(fullSnapshots); i++ {
 			if err := os.Remove(fullSnapshots[i].path); err != nil {
@@ -122,13 +137,13 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int, deleteOldSn
 	}
 
 	// Clean incremental snapshots beyond the retention limit (same limit as full)
-	if maxSnapshots > 0 && len(incrSnapshots) > maxSnapshots {
+	if len(incrSnapshots) > maxSnapshots {
 		sortByTime(incrSnapshots)
 		for i := maxSnapshots; i < len(incrSnapshots); i++ {
 			if err := os.Remove(incrSnapshots[i].path); err != nil {
 				mlog.Log.Errorf("failed to remove old incremental snapshot %s: %v", incrSnapshots[i].name, err)
 			} else {
-				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", maxSnapshots, incrSnapshots[i].name)
+				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", incrSnapshots[i].name)
 			}
 		}
 	}

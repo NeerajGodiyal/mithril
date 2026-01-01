@@ -240,10 +240,6 @@ name = "mithril"
     #     is this far behind the latest available snapshot
     full_threshold = 100000
 
-    # (Legacy) Always download a new full snapshot even if one exists on disk.
-    # With the new bootstrap modes, use mode=new-snapshot instead.
-    # always_download_full = false
-
     # Maximum age for incremental snapshots (slots)
     # Incrementals are always downloaded (they're small and provide latest state)
     incremental_threshold = 200

@@ -898,7 +898,7 @@ func runLive(c *cobra.Command, args []string) {
 		// Clean ALL existing snapshots (force fresh download)
 		if snapshotDownloadPath != "" {
 			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
-			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0, true) // 0 means delete all
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0) // 0 = delete all
 		}
 		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 		if err != nil {
@@ -943,10 +943,9 @@ func runLive(c *cobra.Command, args []string) {
 			if snapshotDownloadPath != "" {
 				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
 				if maxSnapshots == 0 {
-					maxSnapshots = 2 // default
+					maxSnapshots = 1 // default: keep 1 snapshot
 				}
-				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 			}
 			accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 		}
@@ -1008,10 +1007,9 @@ func runLive(c *cobra.Command, args []string) {
 						if snapshotDownloadPath != "" {
 							maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
 							if maxSnapshots == 0 {
-								maxSnapshots = 2
+								maxSnapshots = 1 // default: keep 1 snapshot
 							}
-							deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+							snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 						}
 						accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 					}
@@ -1084,10 +1082,9 @@ func runLive(c *cobra.Command, args []string) {
 				// Clean up old snapshot files based on retention settings
 				maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
 				if maxSnapshots == 0 {
-					maxSnapshots = 2 // default
+					maxSnapshots = 1 // default: keep 1 snapshot
 				}
-				deleteOld := config.GetBool("snapshot.delete_old_snapshots")
-				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots, deleteOld)
+				snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 				accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath, overcastAddr)
 			}
 			if err != nil {
