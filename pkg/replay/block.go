@@ -104,6 +104,9 @@ type ReplayResult struct {
 	LastRecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
 	LastEvictedBlockhash  [32]byte                          // 151st blockhash
 	LastBlockhash         [32]byte                          // blockhash of last replayed slot
+
+	// SlotHashes context - same issue, vote program needs accurate slot→hash mappings
+	LastSlotHashes *sealevel.SysvarSlotHashes
 }
 
 // ResumeState contains the state needed to properly configure the first block when resuming.
@@ -126,6 +129,9 @@ type ResumeState struct {
 	RecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
 	EvictedBlockhash  [32]byte                          // 151st blockhash
 	LastBlockhash     [32]byte                          // blockhash of last slot (parent for next)
+
+	// SlotHashes context - vote program needs accurate slot→hash mappings
+	SlotHashes *sealevel.SysvarSlotHashes
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
@@ -357,19 +363,42 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to retrieve slothashes sysvar from acctsdb")
 			}
 
+			var slotHashes sealevel.SysvarSlotHashes
+
+			if sealevel.SysvarCache.SlotHashes.Sysvar == nil {
+				// Fresh start (first slot): unmarshal from AccountsDB
+				decoder := bin.NewBinDecoder(slotHashesAcct.Data)
+				err = slotHashes.UnmarshalWithDecoder(decoder)
+				if err != nil {
+					panic("unable to unmarshal slothashes sysvar")
+				}
+
+				// Debug: log the slot hash range on first load
+				if len(slotHashes) > 0 {
+					mlog.Log.Infof("loaded SlotHashes sysvar: %d entries, newest slot=%d, oldest slot=%d",
+						len(slotHashes), slotHashes[0].Slot, slotHashes[len(slotHashes)-1].Slot)
+				}
+			} else {
+				// SysvarCache already populated (either from resume state file or from previous slot).
+				// The account data from AccountsDB may be stale (appendvec writes are not fsynced),
+				// so overwrite it with the authoritative data from SysvarCache.
+				// This ensures BPF programs reading the account data directly see correct values.
+				slotHashes = *sealevel.SysvarCache.SlotHashes.Sysvar
+				newData := slotHashes.MustMarshal()
+				if len(newData) != len(slotHashesAcct.Data) {
+					panic(fmt.Sprintf("SlotHashes data length mismatch: marshaled=%d, account=%d",
+						len(newData), len(slotHashesAcct.Data)))
+				}
+				copy(slotHashesAcct.Data, newData)
+			}
+
+			// Set parentAccts BEFORE updating slotHashes to ensure LtHash delta is computed correctly
 			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct.Clone())
 			if err != nil {
 				panic("unable to set slothashes sysvar to accountsdb")
 			}
 
-			decoder := bin.NewBinDecoder(slotHashesAcct.Data)
-			var slotHashes sealevel.SysvarSlotHashes
-
-			err = slotHashes.UnmarshalWithDecoder(decoder)
-			if err != nil {
-				panic("unable to unmarshal slothashes sysvar")
-			}
-
+			// Now update with the new slot/bankhash
 			slotHashes.Update(block.Slot, block.ParentSlot, block.ParentBankhash)
 			newSlotHashesBytes := slotHashes.MustMarshal()
 			copy(slotHashesAcct.Data, newSlotHashesBytes)
@@ -812,6 +841,12 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		sealevel.SysvarCache.RecentBlockHashes.Sysvar = resumeState.RecentBlockhashes
 		block.LatestEvictedBlockhash = resumeState.EvictedBlockhash
 		block.LastBlockhash = resumeState.LastBlockhash
+
+		// Restore SysvarCache.SlotHashes from state file (vote program needs accurate slot→hash mappings)
+		if resumeState.SlotHashes != nil {
+			sealevel.SysvarCache.SlotHashes.Sysvar = resumeState.SlotHashes
+			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file", len(*resumeState.SlotHashes))
+		}
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
 		// but could happen with old state files created before blockhash tracking was added.
@@ -1391,6 +1426,9 @@ func ReplayBlocks(
 		result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
 		result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 		result.LastBlockhash = lastSlotCtx.Blockhash
+
+		// Capture SlotHashes context (same issue, vote program needs accurate slot→hash mappings)
+		result.LastSlotHashes = sealevel.SysvarCache.SlotHashes.Sysvar
 	}
 
 	return result

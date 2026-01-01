@@ -45,6 +45,10 @@ type MithrilState struct {
 	LastEvictedBlockhash  string           `json:"last_evicted_blockhash,omitempty"`  // 151st blockhash
 	LastBlockhash         string           `json:"last_blockhash,omitempty"`          // blockhash of last replayed slot (parent for next)
 
+	// SlotHashes context - same issue as RecentBlockhashes, appendvec writes not fsynced.
+	// SlotHashes is used by vote program to verify vote slot→hash mappings.
+	LastSlotHashes []SlotHashEntry `json:"last_slot_hashes,omitempty"` // up to 512 entries, newest first
+
 	// Run tracking - for correlating logs with state
 	LastRunID string    `json:"last_run_id,omitempty"` // Run ID from last replay session
 	LastRunAt time.Time `json:"last_run_at,omitempty"` // When last replay session started
@@ -71,6 +75,12 @@ const (
 type BlockhashEntry struct {
 	Blockhash            string `json:"blockhash"`
 	LamportsPerSignature uint64 `json:"lamports_per_sig"`
+}
+
+// SlotHashEntry represents a single entry in the SlotHashes sysvar
+type SlotHashEntry struct {
+	Slot uint64 `json:"slot"`
+	Hash string `json:"hash"` // base58 encoded
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -156,6 +166,9 @@ type ResumeContext struct {
 	EvictedBlockhash  string           // base58 encoded, 151st blockhash
 	LastBlockhash     string           // base58 encoded, blockhash of last slot (parent for next)
 
+	// SlotHashes context - vote program uses this to verify slot→hash mappings
+	SlotHashes []SlotHashEntry // up to 512 entries, newest first
+
 	// Run tracking
 	RunID        string    // Run ID for log correlation
 	RunStartedAt time.Time // When this replay session started
@@ -189,6 +202,9 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastRecentBlockhashes = ctx.RecentBlockhashes
 		s.LastEvictedBlockhash = ctx.EvictedBlockhash
 		s.LastBlockhash = ctx.LastBlockhash
+
+		// SlotHashes context - same issue, vote program needs accurate slot→hash mappings
+		s.LastSlotHashes = ctx.SlotHashes
 
 		// Run tracking - for correlating logs with state
 		s.LastRunID = ctx.RunID
@@ -226,6 +242,9 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		RecentBlockhashes: s.LastRecentBlockhashes,
 		EvictedBlockhash:  s.LastEvictedBlockhash,
 		LastBlockhash:     s.LastBlockhash,
+
+		// SlotHashes context
+		SlotHashes: s.LastSlotHashes,
 
 		// Run tracking (from previous session)
 		RunID:        s.LastRunID,

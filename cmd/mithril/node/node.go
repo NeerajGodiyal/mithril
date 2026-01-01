@@ -686,6 +686,13 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				} else {
 					mlog.Log.Infof("loaded resume context from state file (no blockhashes)")
 				}
+
+				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
+				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+					resumeState.SlotHashes = &slotHashes
+					mlog.Log.Infof("loaded SlotHashes context with %d entries from state file", len(*resumeState.SlotHashes))
+				}
 			}
 		}
 	}
@@ -791,6 +798,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// SlotHashes context - vote program needs accurate slot→hash mappings
+				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
 
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
@@ -1220,6 +1230,12 @@ func runLive(c *cobra.Command, args []string) {
 						}
 					}
 				}
+
+				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
+				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+					resumeState.SlotHashes = &slotHashes
+				}
 			}
 		}
 	}
@@ -1310,6 +1326,9 @@ func runLive(c *cobra.Command, args []string) {
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
+
+				// SlotHashes context - vote program needs accurate slot→hash mappings
+				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
 
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
@@ -1923,6 +1942,24 @@ func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRece
 	return result
 }
 
+// decodeSlotHashes converts state.SlotHashEntry list to sealevel.SysvarSlotHashes
+func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
+	result := make(sealevel.SysvarSlotHashes, 0, len(entries))
+	for _, entry := range entries {
+		hashBytes, err := base58.Decode(entry.Hash)
+		if err != nil || len(hashBytes) != 32 {
+			continue
+		}
+		var hash [32]byte
+		copy(hash[:], hashBytes)
+		result = append(result, sealevel.SlotHash{
+			Slot: entry.Slot,
+			Hash: hash,
+		})
+	}
+	return result
+}
+
 // encodeRecentBlockhashes converts sealevel.SysvarRecentBlockhashes to state.BlockhashEntry list
 func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.BlockhashEntry {
 	if sysvar == nil {
@@ -1933,6 +1970,21 @@ func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.B
 		result = append(result, state.BlockhashEntry{
 			Blockhash:            base58.Encode(entry.Blockhash[:]),
 			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
+		})
+	}
+	return result
+}
+
+// encodeSlotHashes converts sealevel.SysvarSlotHashes to state.SlotHashEntry list
+func encodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.SlotHashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.SlotHashEntry{
+			Slot: entry.Slot,
+			Hash: base58.Encode(entry.Hash[:]),
 		})
 	}
 	return result
