@@ -502,13 +502,36 @@ func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
 // NotifyBlockStart is called at the START of block execution.
 // In near-tip mode, this triggers fetching N+1 so the RPC latency (~200ms)
 // overlaps with execution time, hiding the wait from the user.
+//
+// NOTE: We can't use canScheduleMore() here because lastExecutedSlot hasn't
+// been updated yet (we're about to execute, not finished). Instead, we directly
+// check if the next slot is already scheduled/done and schedule it if not.
 func (bs *BlockSource) NotifyBlockStart(slot uint64) {
-	if bs.isNearTip.Load() {
-		nextSlot := slot + 1
-		if bs.canScheduleMore(nextSlot) {
-			bs.scheduleSlot(nextSlot)
-			mlog.Log.Debugf("near-tip: triggered prefetch of slot %d at start of %d", nextSlot, slot)
-		}
+	if !bs.isNearTip.Load() {
+		return
+	}
+
+	nextSlot := slot + 1
+
+	// Check if already scheduled/inflight/done
+	bs.slotStateMu.Lock()
+	state, exists := bs.slotState[nextSlot]
+	bs.slotStateMu.Unlock()
+	if exists && (state == slotInflight || state == slotDone) {
+		return
+	}
+
+	// Check if we already have the block
+	bs.reorderMu.Lock()
+	alreadyHave := bs.reorderBuffer[nextSlot] != nil || bs.skippedSlots[nextSlot]
+	bs.reorderMu.Unlock()
+	if alreadyHave {
+		return
+	}
+
+	// Schedule the next slot
+	if bs.scheduleSlot(nextSlot) {
+		mlog.Log.Debugf("near-tip: prefetch slot %d at start of %d", nextSlot, slot)
 	}
 }
 
