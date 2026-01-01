@@ -1282,29 +1282,6 @@ func runLive(c *cobra.Command, args []string) {
 	accountsDb.CloseDb()
 }
 
-func logVCSInfo() {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		mlog.Log.Errorf("VCS info: not available")
-		return
-	}
-
-	var revision, vcsTime, modified string
-
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.time":
-			vcsTime = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
-		}
-	}
-
-	mlog.Log.Infof("VCS info: revision=%s time=%s modified=%s", revision, vcsTime, modified)
-}
-
 // getCommitHash returns the short git commit hash from build info
 func getCommitHash() string {
 	if info, ok := debug.ReadBuildInfo(); ok {

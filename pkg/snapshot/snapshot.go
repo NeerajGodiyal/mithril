@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -166,14 +165,9 @@ func newSnapshotReaderWithProgress(ctx context.Context, filename string, savePat
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {
-	manifestFile, err := os.Open(filename)
+	manifestBytes, err := os.ReadFile(filename)
 	if err != nil {
-		mlog.Log.Errorf("failed to open %s\n", filename)
-		return nil, err
-	}
-	manifestBytes, err := ioutil.ReadAll(manifestFile)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading manifest from file=%s: %w", filename, err)
 	}
 
 	manifest := new(SnapshotManifest)
