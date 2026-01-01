@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,14 +51,14 @@ func NewBufMonReaderFromFile(file *os.File) (*bufmonreader, error) {
 	}, nil
 }
 
-func NewBufMonReaderHTTP(url string) (*bufmonreader, error) {
-	return NewBufMonReaderHTTPWithSave(url, "")
+func NewBufMonReaderHTTP(ctx context.Context, url string) (*bufmonreader, error) {
+	return NewBufMonReaderHTTPWithSave(ctx, url, "")
 }
 
 // NewBufMonReaderHTTPWithSave streams from HTTP URL and optionally saves to disk.
 // If savePath is non-empty, the data will be written to disk while streaming.
 // Returns: (*bufmonreader, error)
-func NewBufMonReaderHTTPWithSave(url string, savePath string) (*bufmonreader, error) {
+func NewBufMonReaderHTTPWithSave(ctx context.Context, url string, savePath string) (*bufmonreader, error) {
 	resp, err := http.Head(url)
 	if err != nil {
 		return nil, fmt.Errorf("HEAD %s: %v", url, err)
@@ -68,7 +69,11 @@ func NewBufMonReaderHTTPWithSave(url string, savePath string) (*bufmonreader, er
 	totalSize := resp.ContentLength
 	resp.Body.Close()
 
-	resp, err = http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating GET %s request: %w", url, err)
+	}
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %v", url, err)
 	}

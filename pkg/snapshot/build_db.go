@@ -149,7 +149,7 @@ func BuildAccountsDb(
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
 
-	manifest, err := UnmarshalManifestFromSnapshot(snapshotFile, accountsDbDir)
+	manifest, err := UnmarshalManifestFromSnapshot(ctx, snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
@@ -157,7 +157,7 @@ func BuildAccountsDb(
 
 	var incrementalManifest *SnapshotManifest
 	if incrementalSnapshotFile != "" {
-		incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotFile, accountsDbDir)
+		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotFile, accountsDbDir)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
@@ -398,7 +398,7 @@ func readTar(ctx context.Context, wg *sync.WaitGroup, filename string, appendVec
 }
 
 func readTarWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, closer, err := newSnapshotReaderWithSave(filename, savePath)
+	tarReader, closer, err := newSnapshotReaderWithSave(ctx, filename, savePath)
 	if err != nil {
 		return err
 	}
@@ -460,7 +460,7 @@ func readTarWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, s
 // readTarWithProgress is like readTarWithSave but reports progress to a DualProgress display.
 // If dp is nil, it falls back to the standard behavior without progress reporting.
 func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc, dp *progress.DualProgress) error {
-	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(filename, savePath)
+	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, savePath)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package snapshot
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -19,14 +20,14 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-func UnmarshalManifestFromSnapshot(filename string, accountsDbDir string) (*SnapshotManifest, error) {
+func UnmarshalManifestFromSnapshot(ctx context.Context, filename string, accountsDbDir string) (*SnapshotManifest, error) {
 	manifest := new(SnapshotManifest)
 
 	if err := os.MkdirAll(accountsDbDir, 0775); err != nil {
 		return nil, err
 	}
 
-	tarReader, closer, err := newSnapshotReader(filename)
+	tarReader, closer, err := newSnapshotReader(ctx, filename)
 	if err != nil {
 		return nil, err
 	}
@@ -121,15 +122,15 @@ func parseSnapshotType(snapshotFileName string) int {
 	return snapshotType
 }
 
-func newSnapshotReader(filename string) (*tar.Reader, io.Closer, error) {
-	return newSnapshotReaderWithSave(filename, "")
+func newSnapshotReader(ctx context.Context, filename string) (*tar.Reader, io.Closer, error) {
+	return newSnapshotReaderWithSave(ctx, filename, "")
 }
 
 // newSnapshotReaderWithSave creates a tar reader for a snapshot file or HTTP URL.
 // If filename is an HTTP URL and savePath is non-empty, the data will be saved
 // to disk while streaming (using io.TeeReader for parallel download+processing+saving).
-func newSnapshotReaderWithSave(filename string, savePath string) (*tar.Reader, io.Closer, error) {
-	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(filename, savePath)
+func newSnapshotReaderWithSave(ctx context.Context, filename string, savePath string) (*tar.Reader, io.Closer, error) {
+	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, savePath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -140,12 +141,12 @@ func newSnapshotReaderWithSave(filename string, savePath string) (*tar.Reader, i
 
 // newSnapshotReaderWithProgress creates a tar reader and also returns the bufmonreader
 // for progress tracking. Use bufmonreader.SetProgressCallback() to receive progress updates.
-func newSnapshotReaderWithProgress(filename string, savePath string) (*tar.Reader, *bufmonreader, io.Closer, error) {
+func newSnapshotReaderWithProgress(ctx context.Context, filename string, savePath string) (*tar.Reader, *bufmonreader, io.Closer, error) {
 	snapshotType := parseSnapshotType(filename)
 	var bmr *bufmonreader
 	var err error
 	if strings.HasPrefix(filename, "https://") || strings.HasPrefix(filename, "http://") {
-		bmr, err = NewBufMonReaderHTTPWithSave(filename, savePath)
+		bmr, err = NewBufMonReaderHTTPWithSave(ctx, filename, savePath)
 	} else {
 		snapshotFile, err := os.Open(filename)
 		if err != nil {

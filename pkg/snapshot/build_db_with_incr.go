@@ -54,7 +54,7 @@ func BuildAccountsDbWithIncr(
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
 
-	manifest, err := UnmarshalManifestFromSnapshot(fullSnapshotFile, accountsDbDir)
+	manifest, err := UnmarshalManifestFromSnapshot(ctx, fullSnapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
@@ -313,7 +313,7 @@ func BuildAccountsDbWithIncr(
 		}
 
 		incrSnapshotStart := time.Now()
-		incrementalManifest, err = UnmarshalManifestFromSnapshot(incrementalSnapshotPath, accountsDbDir)
+		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
 		if err != nil {
 			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
 			incrementalErr = fmt.Errorf("reading incremental snapshot manifest: %v", err)
@@ -431,7 +431,7 @@ func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appen
 }
 
 func readTarIncrWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, closer, err := newSnapshotReaderWithSave(filename, savePath)
+	tarReader, closer, err := newSnapshotReaderWithSave(ctx, filename, savePath)
 	if err != nil {
 		return err
 	}
