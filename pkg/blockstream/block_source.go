@@ -502,6 +502,7 @@ func (bs *BlockSource) NotifyBlockStart(slot uint64) {
 		nextSlot := slot + 1
 		if bs.canScheduleMore(nextSlot) {
 			bs.scheduleSlot(nextSlot)
+			mlog.Log.Debugf("near-tip: triggered prefetch of slot %d at start of %d", nextSlot, slot)
 		}
 	}
 }
