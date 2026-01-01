@@ -156,7 +156,8 @@ type BlockSource struct {
 	catchupTipSafety uint64      // Original tip safety margin for catchup mode
 
 	// Stats tracking
-	stats BlockSourceStats
+	stats          BlockSourceStats
+	statsResetTime atomic.Int64 // Unix timestamp when stats were last reset
 }
 
 // Default values
@@ -246,6 +247,9 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
 	bs.lastProgress.Store(time.Now().Unix())
+
+	// Initialize stats reset time for RPS calculation
+	bs.statsResetTime.Store(time.Now().Unix())
 
 	// Log RPC configuration
 	if len(rpcClients) > 1 {
@@ -1290,6 +1294,10 @@ type FetchStatsSnapshot struct {
 	TotalTipPollFails uint64 // Total tip poll failures this window
 	// Mode tracking
 	IsNearTip bool // True when in near-tip mode (low-latency, just-in-time scheduling)
+	// RPS tracking (for RPC credit usage visibility)
+	GetBlockRPS float64 // getBlock calls per second over the stats window
+	SuccessRate float64 // Percentage of fetches that returned block data (vs skipped)
+	WindowSecs  float64 // How long the stats window has been open
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -1322,11 +1330,28 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		tipStaleSecs = time.Now().Unix() - lastTipUpdate
 	}
 
+	// Calculate RPS and success rate
+	skipped := bs.stats.FetchSkipped.Load()
+	var getBlockRPS, successRate, windowSecs float64
+	resetTime := bs.statsResetTime.Load()
+	if resetTime > 0 {
+		windowSecs = float64(time.Now().Unix() - resetTime)
+		if windowSecs > 0 {
+			getBlockRPS = float64(attempts) / windowSecs
+		}
+	}
+	// Success rate = blocks returned / (blocks + skipped)
+	// This shows what percentage of slots had blocks vs were empty
+	totalCompleted := successes + skipped
+	if totalCompleted > 0 {
+		successRate = float64(successes) / float64(totalCompleted) * 100
+	}
+
 	return FetchStatsSnapshot{
 		Attempts:           attempts,
 		Successes:          successes,
 		Retries:            bs.stats.FetchRetries.Load(),
-		Skipped:            bs.stats.FetchSkipped.Load(),
+		Skipped:            skipped,
 		SpeculativeRetries: bs.stats.SpeculativeRetries.Load(),
 		AvgLatencyMs:       avgLatencyMs,
 		ErrNotAvail:        bs.stats.ErrSlotNotAvail.Load(),
@@ -1347,6 +1372,9 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		TipPollFailures:    bs.tipPollFailures.Load(),
 		TotalTipPollFails:  bs.totalTipPollFails.Load(),
 		IsNearTip:          bs.isNearTip.Load(),
+		GetBlockRPS:        getBlockRPS,
+		SuccessRate:        successRate,
+		WindowSecs:         windowSecs,
 	}
 }
 
@@ -1366,4 +1394,6 @@ func (bs *BlockSource) ResetStats() {
 	bs.stats.FetchLatencyCount.Store(0)
 	// Reset tip poll failures for this window (but keep consecutive count for alerting)
 	bs.totalTipPollFails.Store(0)
+	// Reset the stats window start time for RPS calculation
+	bs.statsResetTime.Store(time.Now().Unix())
 }

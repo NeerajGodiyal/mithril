@@ -1360,8 +1360,8 @@ func ReplayBlocks(
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
-					mlog.Log.InfofPrecise("  fetch: avg %.0fms | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
-						fetchStats.AvgLatencyMs, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
+					mlog.Log.InfofPrecise("  getBlock fetch: %.1f rps (%d calls) | avg %.0fms | %.0f%% success | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
+						fetchStats.GetBlockRPS, fetchStats.Attempts, fetchStats.AvgLatencyMs, fetchStats.SuccessRate, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
 						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
 
 					// Surface tip poll issues (only show if there are problems)
