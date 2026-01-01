@@ -2,9 +2,9 @@ VERSION ?= dev
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-LDFLAGS := -X main.Version=$(VERSION) \
-           -X main.GitCommit=$(GIT_COMMIT) \
-           -X main.BuildDate=$(BUILD_DATE)
+LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSION) \
+           -X github.com/Overclock-Validator/mithril/pkg/version.GitCommit=$(GIT_COMMIT) \
+           -X github.com/Overclock-Validator/mithril/pkg/version.BuildDate=$(BUILD_DATE)
 
 .PHONY: build release clean
 

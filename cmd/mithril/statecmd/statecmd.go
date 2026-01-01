@@ -68,13 +68,15 @@ Examples:
 	// ValidateCmd validates state against AccountsDB
 	ValidateCmd = cobra.Command{
 		Use:   "validate",
-		Short: "Validate state file against AccountsDB",
-		Long: `Validates that the state file is consistent with the bankhash database.
+		Short: "Validate state file and AccountsDB artifacts",
+		Long: `Validates that the state file and AccountsDB are in a consistent state.
 
 This checks:
-- State file exists and is valid
-- Last slot matches bankhash database
-- No slots beyond last_slot exist in database`,
+- State file exists and is parseable
+- Stage is "ready" (not corrupted or building)
+- Required AccountsDB artifacts exist on disk
+
+Note: Full bankhash database validation is not yet implemented.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runStateValidate(cmd)
 		},
