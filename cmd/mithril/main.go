@@ -18,8 +18,9 @@ import (
 )
 
 var cmd = cobra.Command{
-	Use:   "mithril",
-	Short: "mithril Solana verifier node",
+	Use:     "mithril",
+	Short:   "mithril Solana verifier node",
+	Version: Version,
 	Long: `Mithril is a lightweight Solana verifier node that replays and validates transactions.
 
 Quick start:

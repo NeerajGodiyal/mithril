@@ -232,6 +232,12 @@ For detailed troubleshooting tips, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHO
 
 ---
 
+## Compatibility
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for supported networks and feature gate requirements per release.
+
+---
+
 ## Development Milestones
 
 ### Milestone 1 (Completed): Reimplementation of the Solana Virtual Machine in Golang
