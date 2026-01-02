@@ -1112,11 +1112,11 @@ func (bs *BlockSource) scheduler() {
 				isPrioritySlot := slot == waitingSlot
 				if isPrioritySlot || bs.canScheduleMore(slot) {
 					if isPrioritySlot && !bs.canScheduleMore(slot) {
-						// Log when deadlock prevention kicks in (Infof so it appears in prod)
+						// Log when deadlock prevention kicks in (Debugf to avoid noise)
 						bs.reorderMu.Lock()
 						bufLen := len(bs.reorderBuffer)
 						bs.reorderMu.Unlock()
-						mlog.Log.Infof("priority retry: scheduling waiting slot %d despite full buffer (%d slots)", slot, bufLen)
+						mlog.Log.Debugf("priority retry: scheduling waiting slot %d despite full buffer (%d slots)", slot, bufLen)
 					}
 					bs.scheduleSlot(slot)
 				} else {

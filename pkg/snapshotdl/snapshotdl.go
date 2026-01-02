@@ -858,11 +858,19 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
 
 		if err == nil && urlInfo != nil && urlInfo.BaseSlot == fullSnapshotSlot {
-			mlog.Log.Infof("📸 Incremental snapshot source: %s (same as full, base=%d, end=%d)",
-				sourceNodeRPC, urlInfo.BaseSlot, urlInfo.Slot)
-			return urlInfo.URL, urlInfo.BaseSlot, urlInfo.Slot, nil
+			// Check freshness: same-source must also meet incremental threshold
+			age := referenceSlot - urlInfo.Slot
+			if cfg.IncrementalThreshold > 0 && age > cfg.IncrementalThreshold {
+				mlog.Log.Infof("Same source incremental too old: %d slots behind (threshold: %d). Searching cluster...",
+					age, cfg.IncrementalThreshold)
+			} else {
+				mlog.Log.Infof("📸 Incremental snapshot source: %s (same as full, base=%d, end=%d, age=%d slots)",
+					sourceNodeRPC, urlInfo.BaseSlot, urlInfo.Slot, age)
+				return urlInfo.URL, urlInfo.BaseSlot, urlInfo.Slot, nil
+			}
+		} else {
+			mlog.Log.Infof("Same source unavailable for incremental. Searching cluster...")
 		}
-		mlog.Log.Infof("Same source unavailable for incremental. Searching cluster...")
 	}
 
 	// Step 2: Fallback - search all nodes for matching incremental
