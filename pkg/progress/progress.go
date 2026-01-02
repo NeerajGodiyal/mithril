@@ -344,6 +344,11 @@ func (d *DualProgress) updateLoop() {
 			d.render()
 			return
 		case <-ticker.C:
+			// Skip rendering until we have actual data to show
+			// This prevents duplicate empty 0% bars from appearing
+			if d.Download.Total() == 0 {
+				continue
+			}
 			d.updateEstimates()
 			d.render()
 		}
