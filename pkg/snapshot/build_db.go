@@ -324,7 +324,7 @@ func BuildAccountsDb(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, appendVecCopyingPool)
+		err = readTar(ctx, wg, snapshotFile, appendVecCopyingPool, readTarOptions{})
 	}()
 
 	var incrementalErr error
@@ -333,7 +333,7 @@ func BuildAccountsDb(
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool)
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool, readTarOptions{isIncremental: true})
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
 		}()
 	}
@@ -408,81 +408,32 @@ func isAppendVec(filename string) bool {
 	return strings.Contains(filename, "accounts/") && strings.Contains(filename, ".")
 }
 
-func readTar(ctx context.Context, wg *sync.WaitGroup, filename string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	return readTarWithSave(ctx, wg, filename, "", appendVecCopyingPool)
+type readTarOptions struct {
+	// Saves snapshot to a file if non-empty.
+	savePath string
+	// Update a progress bar if Progress is non-nil. If nil, will update via log.
+	progress *progress.DualProgress
+	// True if the tar file is incremental or false if it's a full snapshot.
+	isIncremental bool
 }
 
-func readTarWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, closer, err := newSnapshotReaderWithSave(ctx, filename, savePath)
-	if err != nil {
-		return err
-	}
-	defer closer.Close()
-
-	// cleanupPartial deletes the partial download file if it exists
-	cleanupPartial := func(reason string) {
-		if savePath != "" {
-			if _, statErr := os.Stat(savePath); statErr == nil {
-				mlog.Log.Infof("Deleting partial download %s (%s)", savePath, reason)
-				if rmErr := os.Remove(savePath); rmErr != nil {
-					mlog.Log.Errorf("Failed to delete partial download %s: %v", savePath, rmErr)
-				}
-			}
-		}
-	}
-
-	for {
-		if ctx.Err() != nil {
-			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
-			cleanupPartial("cancelled")
-			return ctx.Err()
-		}
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			mlog.Log.Errorf("reading next tar: %s\n", err)
-			cleanupPartial("read error")
-			return err
-		}
-
-		if !isAppendVec(header.Name) {
-			continue
-		}
-
-		writer := bytes.NewBuffer(make([]byte, 0, header.Size))
-		tarBytesRead, err := io.Copy(writer, tarReader)
-		if err != nil {
-			mlog.Log.Errorf("err copying data to reader: %s\n", err)
-			cleanupPartial("copy error")
-			return err
-		}
-		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
-
-		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
-		wg.Add(1)
-		err = appendVecCopyingPool.Invoke(task)
-		if err != nil {
-			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke: %v", err)
-			cleanupPartial("pool error")
-			return err
-		}
-	}
-
-	return nil
-}
-
-// readTarWithProgress is like readTarWithSave but reports progress to a DualProgress display.
-// If dp is nil, it falls back to the standard behavior without progress reporting.
-func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc, dp *progress.DualProgress) error {
-	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, savePath)
+func readTar(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	filename string,
+	appendVecCopyingPool *ants.PoolWithFunc,
+	options readTarOptions,
+) error {
+	dp := options.progress
+	savePath := options.savePath
+	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, options.savePath)
 	if err != nil {
 		return err
 	}
 	defer closer.Close()
 
 	// Set up download progress callback
-	if dp != nil && bmr != nil {
+	if dp != nil {
 		// Use SetDownloadTotal which enables dynamic Extract total estimation
 		// based on observed compression ratio (recalculated in updateLoop)
 		dp.SetDownloadTotal(bmr.TotalSize())
@@ -536,7 +487,7 @@ func readTarWithProgress(ctx context.Context, wg *sync.WaitGroup, filename strin
 			dp.Extract.Add(tarBytesRead)
 		}
 
-		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name}
+		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name, FromIncrementalSnapshot: options.isIncremental}
 		wg.Add(1)
 		err = appendVecCopyingPool.Invoke(task)
 		if err != nil {

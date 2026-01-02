@@ -1,11 +1,9 @@
 package snapshot
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,7 +231,7 @@ func BuildAccountsDbWithIncr(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTarWithProgress(ctx, wg, fullSnapshotFile, fullSavePath, appendVecCopyingPool, dp)
+		err = readTar(ctx, wg, fullSnapshotFile, appendVecCopyingPool, readTarOptions{savePath: fullSavePath, progress: dp})
 	}()
 	wg.Wait()
 
@@ -319,7 +317,7 @@ func BuildAccountsDbWithIncr(
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			incrementalErr = readTarIncrWithSave(ctx, wg, incrementalSnapshotPath, incrSavePath, appendVecCopyingPool)
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotPath, appendVecCopyingPool, readTarOptions{savePath: incrSavePath, isIncremental: true})
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, fmtDuration(time.Since(start)))
 		}()
 		wg.Wait()
@@ -402,68 +400,4 @@ func BuildAccountsDbWithIncr(
 	}
 
 	return accountsDb, incrementalManifest, nil
-}
-
-func readTarIncr(ctx context.Context, wg *sync.WaitGroup, filename string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	return readTarIncrWithSave(ctx, wg, filename, "", appendVecCopyingPool)
-}
-
-func readTarIncrWithSave(ctx context.Context, wg *sync.WaitGroup, filename string, savePath string, appendVecCopyingPool *ants.PoolWithFunc) error {
-	tarReader, closer, err := newSnapshotReaderWithSave(ctx, filename, savePath)
-	if err != nil {
-		return err
-	}
-	defer closer.Close()
-
-	// cleanupPartial deletes the partial download file if it exists
-	cleanupPartial := func(reason string) {
-		if savePath != "" {
-			if _, statErr := os.Stat(savePath); statErr == nil {
-				mlog.Log.Infof("Deleting partial incremental download %s (%s)", savePath, reason)
-				if rmErr := os.Remove(savePath); rmErr != nil {
-					mlog.Log.Errorf("Failed to delete partial incremental download %s: %v", savePath, rmErr)
-				}
-			}
-		}
-	}
-
-	for {
-		if ctx.Err() != nil {
-			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
-			cleanupPartial("cancelled")
-			return ctx.Err()
-		}
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			mlog.Log.Errorf("reading next tar: %s\n", err)
-			cleanupPartial("read error")
-			return err
-		}
-
-		if !isAppendVec(header.Name) {
-			continue
-		}
-
-		writer := bytes.NewBuffer(make([]byte, 0, header.Size))
-		tarBytesRead, err := io.Copy(writer, tarReader)
-		if err != nil {
-			mlog.Log.Errorf("err copying data to reader: %s\n", err)
-			cleanupPartial("copy error")
-			return err
-		}
-		statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
-
-		task := appendVecCopyingTask{TarBuffer: writer, Filename: header.Name, FromIncrementalSnapshot: true}
-		wg.Add(1)
-		err = appendVecCopyingPool.Invoke(task)
-		if err != nil {
-			mlog.Log.Errorf("error calling appendVecCopyingPool.Invoke: %v", err)
-			cleanupPartial("pool error")
-			return err
-		}
-	}
-
-	return nil
 }
