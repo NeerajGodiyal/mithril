@@ -380,8 +380,8 @@ name = "mithril"
     # TCP connection timeout for pre-check (milliseconds)
     tcp_timeout_ms = 1000
 
-    # Minimum Solana version required (e.g., "2.2.0", empty = no filter)
-    # min_node_version = "2.2.0"
+    # Minimum Solana version required (e.g., "3.0.0", empty = no filter)
+    # min_node_version = "3.0.0"
 
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]

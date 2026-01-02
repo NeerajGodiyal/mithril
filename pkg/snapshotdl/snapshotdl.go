@@ -104,7 +104,7 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		// Node filtering
 		MaxRTTMs:            200,     // 200ms max RTT
 		TCPTimeoutMs:        1000,    // 1 second TCP precheck
-		MinNodeVersion:      "2.2.0", // Minimum Agave 2.2.0
+		MinNodeVersion:      "3.0.0", // Minimum Agave 3.0.0
 		AllowedNodeVersions: nil,     // Accept all versions >= minimum
 
 		// Snapshot age thresholds

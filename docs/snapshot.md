@@ -75,7 +75,7 @@ The snapshot finder uses a two-stage algorithm to efficiently find the fastest n
 
 Before speed testing, nodes are filtered by:
 
-- **Version**: `min_node_version` (default: "2.2.0"), `allowed_node_versions` (optional whitelist)
+- **Version**: `min_node_version` (default: "3.0.0"), `allowed_node_versions` (optional whitelist)
 - **RTT**: `max_rtt_ms` (default: 200 ms)
 - **TCP Connectivity**: `tcp_timeout_ms` (default: 1000 ms)
 - **Snapshot Age**: `full_threshold` (default: 100000 slots), `incremental_threshold` (default: 200 slots)
@@ -228,8 +228,8 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
     # TCP connection timeout for pre-check (milliseconds)
     # tcp_timeout_ms = 1000
 
-    # Minimum Solana version required (e.g., "2.2.0", empty = no filter)
-    # min_node_version = "2.2.0"
+    # Minimum Solana version required (e.g., "3.0.0", empty = no filter)
+    # min_node_version = "3.0.0"
 
     # Allowed Solana versions (empty = all versions allowed)
     # allowed_node_versions = []
@@ -293,7 +293,7 @@ All configuration options can be set in `config.toml` under the `[snapshot]` sec
 | `stage2_min_abs_mbs` | `0.0` | Disabled |
 | `max_rtt_ms` | `200` | 200ms max RTT |
 | `tcp_timeout_ms` | `1000` | 1 second TCP check |
-| `min_node_version` | `"2.2.0"` | Minimum Agave 2.2.0 |
+| `min_node_version` | `"3.0.0"` | Minimum Agave 3.0.0 |
 | `full_threshold` | `100000` | ~11 hours old |
 | `incremental_threshold` | `200` | ~80 seconds old |
 | `safety_margin_slots` | `5000` | Warn if close to expiration |

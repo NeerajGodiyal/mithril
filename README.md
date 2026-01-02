@@ -14,6 +14,8 @@ The `run` command starts Mithril as a live full node - it bootstraps from a Sola
 
 ### Hardware Requirements
 
+> **Tip for new users:** The easiest way to run Mithril is on a dedicated small server or mini PC. This avoids disk management headaches from sharing storage with other applications and simplifies the setup process significantly.
+
 **Operating System**
 - Ubuntu 24.04 LTS (recommended)
 
