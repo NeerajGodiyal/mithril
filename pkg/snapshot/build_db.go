@@ -210,121 +210,15 @@ func BuildAccountsDb(
 	}
 	sl := NewShardLogger(numShards, logsDir, ss)
 
-	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
-		tasks := indexEntryCommitterInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(indexEntryCommitterTask)
-
-		for idx, entry := range task.IndexEntries {
-			sl.EnqueueRequest(task.Pubkeys[idx], entry)
-		}
-		statsd.Timing(statsd.TaskIndexEntryCommitterLatency, uint64(time.Since(start).Nanoseconds()), nil)
-		indexEntryCommitterInProgress.Add(-1)
-	})
-
-	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i interface{}) {
-		tasks := indexEntryBuilderInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(indexEntryBuilderTask)
-		pubkeys, entries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
-		if err != nil {
-			mlog.Log.Errorf("%s\n", err)
-			return
-		}
-
-		indexEntryBuilderInProgress.Add(-1)
-		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
-		wg.Add(1)
-		statsd.Timing(statsd.TasksIndexEntryBuilderLatency, uint64(time.Since(start)), nil)
-		err = indexEntryCommiterPool.Invoke(commitTask)
-		if err != nil {
-			mlog.Log.Errorf("error calling indexEntryCommiterPool.Invoke\n")
-		}
-	})
-
-	appendVecCopyingPool, _ := ants.NewPoolWithFunc(maxAppendVecCopying, func(i interface{}) {
-		tasks := appendVecCopyingInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(appendVecCopyingTask)
-		filename := task.Filename
-		writer := task.TarBuffer
-
-		outFilename := filepath.Join(accountsDbDir, filename)
-
-		// validate that the path doesn't escape accountsDbDir (via '../' sequences)
-		cleanPath := filepath.Clean(outFilename)
-		if !strings.HasPrefix(cleanPath, filepath.Clean(accountsDbDir)+string(os.PathSeparator)) {
-			panic(fmt.Sprintf("invalid path in tar archive: %s", filename))
-		}
-
-		appendVecBytes := writer.Bytes()
-		err := os.WriteFile(cleanPath, appendVecBytes, 0644)
-		if err != nil {
-			mlog.Log.Errorf("err writing new file=%s: %v", cleanPath, err)
-			appendVecCopyingInProgress.Add(-1)
-			return
-		}
-
-		var slot, fileId uint64
-		if n, err := fmt.Sscanf(filepath.Base(filename), "%d.%d", &slot, &fileId); n != 2 || err != nil {
-			panic(fmt.Sprintf(
-				"failed to parse slot and file from filename=%s basename=%s; parsed n=%d arguments (expected 2) and had err=%v",
-				filename, filepath.Base(filename), n, err))
-		}
-
-		for {
-			prevLargestFileId := largestFileId.Load()
-			if fileId <= prevLargestFileId {
-				break
-			}
-			swapped := largestFileId.CompareAndSwap(prevLargestFileId, fileId)
-			if swapped {
-				break
-			}
-		}
-
-		// find the relevant appendvec storage info
-		var fileSize uint64
-		for _, av := range manifest.AccountsDb.Storages[slot].AcctVecs {
-			if av.Id == fileId {
-				fileSize = av.FileSize
-				break
-			}
-		}
-
-		if fileSize == 0 && incrementalManifest != nil {
-			for _, av := range incrementalManifest.AccountsDb.Storages[slot].AcctVecs {
-				if av.Id == fileId {
-					fileSize = av.FileSize
-					break
-				}
-			}
-		}
-
-		if fileSize == 0 {
-			panic("programming error - fileSize for appendvec was 0")
-		}
-
-		appendVecCopyingInProgress.Add(-1)
-		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
-		wg.Add(1)
-		statsd.Timing(statsd.TasksAppendVecCopyingLatency, uint64(time.Since(start)), nil)
-		err = indexEntryBuilderPool.Invoke(nextTask)
-		if err != nil {
-			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
-		}
-	})
+	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
+	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, appendVecCopyingPool, readTarOptions{})
+		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{})
 	}()
 
 	var incrementalErr error
@@ -333,7 +227,7 @@ func BuildAccountsDb(
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, appendVecCopyingPool, readTarOptions{isIncremental: true})
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
 		}()
 	}
@@ -377,9 +271,7 @@ func BuildAccountsDb(
 		return nil, nil, err
 	}
 
-	indexEntryCommiterPool.Release()
-	indexEntryBuilderPool.Release()
-	appendVecCopyingPool.Release()
+	pools.Release()
 
 	accountsDb := &accountsdb.AccountsDb{Index: indexDb, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
@@ -498,4 +390,159 @@ func readTar(
 	}
 
 	return nil
+}
+
+type snapshotWorkerPools struct {
+	appendVecCopying    *ants.PoolWithFunc
+	indexEntryBuilder   *ants.PoolWithFunc
+	indexEntryCommitter *ants.PoolWithFunc
+}
+
+func initWorkerPools(
+	wg *sync.WaitGroup,
+	sl *ShardLogger,
+	manifest *SnapshotManifest,
+	incrementalManifest *SnapshotManifest,
+	accountsDbDir string,
+	largestFileId *atomic.Uint64,
+) (*snapshotWorkerPools, error) {
+	indexEntryCommitterPool, err := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i any) {
+		tasks := indexEntryCommitterInProgress.Add(1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"})
+		start := time.Now()
+		defer wg.Done()
+		task := i.(indexEntryCommitterTask)
+
+		for idx, entry := range task.IndexEntries {
+			sl.EnqueueRequest(task.Pubkeys[idx], entry)
+		}
+		statsd.Timing(statsd.TaskIndexEntryCommitterLatency, uint64(time.Since(start)), nil)
+		indexEntryCommitterInProgress.Add(-1)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	indexEntryBuilderPool, err := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i any) {
+		tasks := indexEntryBuilderInProgress.Add(1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
+		start := time.Now()
+		defer wg.Done()
+		task := i.(indexEntryBuilderTask)
+		pubkeys, entries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
+		if err != nil {
+			mlog.Log.Errorf("BuildIndexEntriesFromAppendVecs: %v", err)
+			return
+		}
+
+		indexEntryBuilderInProgress.Add(-1)
+		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
+		wg.Add(1)
+		statsd.Timing(statsd.TasksIndexEntryBuilderLatency, uint64(time.Since(start)), nil)
+		err = indexEntryCommitterPool.Invoke(commitTask)
+		if err != nil {
+			mlog.Log.Errorf("indexEntryCommitterPool.Invoke: %v", err)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	appendVecCopyingPool, err := ants.NewPoolWithFunc(maxAppendVecCopying, func(i any) {
+		tasks := appendVecCopyingInProgress.Add(1)
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"})
+		start := time.Now()
+		defer wg.Done()
+		task := i.(appendVecCopyingTask)
+		filename := task.Filename
+		writer := task.TarBuffer
+
+		outFilename := filepath.Join(accountsDbDir, filename)
+
+		// validate that the path doesn't escape accountsDbDir (via '../' sequences)
+		cleanPath := filepath.Clean(outFilename)
+		if !strings.HasPrefix(cleanPath, filepath.Clean(accountsDbDir)+string(os.PathSeparator)) {
+			panic(fmt.Sprintf("invalid path in tar archive: %s", filename))
+		}
+
+		appendVecBytes := writer.Bytes()
+		err := os.WriteFile(cleanPath, appendVecBytes, 0644)
+		if err != nil {
+			mlog.Log.Errorf("err writing new file=%s: %v", cleanPath, err)
+			appendVecCopyingInProgress.Add(-1)
+			return
+		}
+
+		var slot, fileId uint64
+		if n, err := fmt.Sscanf(filepath.Base(filename), "%d.%d", &slot, &fileId); n != 2 || err != nil {
+			panic(fmt.Sprintf(
+				"failed to parse slot and file from filename=%s basename=%s; parsed n=%d arguments (expected 2) and had err=%v",
+				filename, filepath.Base(filename), n, err))
+		}
+
+		for {
+			prevLargestFileId := largestFileId.Load()
+			if fileId <= prevLargestFileId {
+				break
+			}
+			swapped := largestFileId.CompareAndSwap(prevLargestFileId, fileId)
+			if swapped {
+				break
+			}
+		}
+
+		// find the relevant appendvec storage info. use the info from the incremental
+		// snapshot manifest if this account entry is from the incremental snapshot.
+		var fileSize uint64
+		var usedIncrementalSnapshotVal bool
+		if task.FromIncrementalSnapshot {
+			if incrementalManifest == nil {
+				panic("tried to process incremental snapshot without having parsed incremental snapshot manifest first!")
+			}
+			for _, av := range incrementalManifest.AccountsDb.Storages[slot].AcctVecs {
+				if av.Id == fileId {
+					fileSize = av.FileSize
+					usedIncrementalSnapshotVal = true
+					break
+				}
+			}
+		}
+
+		if !usedIncrementalSnapshotVal {
+			for _, av := range manifest.AccountsDb.Storages[slot].AcctVecs {
+				if av.Id == fileId {
+					fileSize = av.FileSize
+					break
+				}
+			}
+		}
+
+		if fileSize == 0 {
+			panic("programming error - fileSize for appendvec was 0")
+		}
+
+		appendVecCopyingInProgress.Add(-1)
+		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
+		wg.Add(1)
+		statsd.Timing(statsd.TasksAppendVecCopyingLatency, uint64(time.Since(start)), nil)
+		err = indexEntryBuilderPool.Invoke(nextTask)
+		if err != nil {
+			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &snapshotWorkerPools{
+		appendVecCopyingPool,
+		indexEntryBuilderPool,
+		indexEntryCommitterPool,
+	}, nil
+}
+
+func (p *snapshotWorkerPools) Release() {
+	p.appendVecCopying.Release()
+	p.indexEntryBuilder.Release()
+	p.indexEntryCommitter.Release()
 }

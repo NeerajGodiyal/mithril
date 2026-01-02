@@ -17,7 +17,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
-	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/panjf2000/ants/v2"
 	"k8s.io/klog/v2"
 )
@@ -66,7 +65,7 @@ func BuildAccountsDbWithIncr(
 
 	defer ants.Release()
 
-	var incrementalManifest *SnapshotManifest
+	incrementalManifest := &SnapshotManifest{}
 	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
@@ -89,123 +88,10 @@ func BuildAccountsDbWithIncr(
 	}
 	sl := NewShardLogger(numShards, logsDir, ss)
 
-	indexEntryCommiterPool, _ := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i interface{}) {
-		tasks := indexEntryCommitterInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(indexEntryCommitterTask)
-
-		for idx, entry := range task.IndexEntries {
-			sl.EnqueueRequest(task.Pubkeys[idx], entry)
-		}
-		statsd.Timing(statsd.TaskIndexEntryCommitterLatency, uint64(time.Since(start)), nil)
-		indexEntryCommitterInProgress.Add(-1)
-	})
-
-	indexEntryBuilderPool, _ := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i interface{}) {
-		tasks := indexEntryBuilderInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(indexEntryBuilderTask)
-		pubkeys, entries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
-		if err != nil {
-			mlog.Log.Errorf("%s\n", err)
-			return
-		}
-
-		indexEntryBuilderInProgress.Add(-1)
-		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
-		wg.Add(1)
-		statsd.Timing(statsd.TasksIndexEntryBuilderLatency, uint64(time.Since(start)), nil)
-		err = indexEntryCommiterPool.Invoke(commitTask)
-		if err != nil {
-			mlog.Log.Errorf("error calling indexEntryCommiterPool.Invoke\n")
-		}
-	})
-
-	appendVecCopyingPool, _ := ants.NewPoolWithFunc(maxAppendVecCopying, func(i interface{}) {
-		tasks := appendVecCopyingInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"})
-		start := time.Now()
-		defer wg.Done()
-		task := i.(appendVecCopyingTask)
-		filename := task.Filename
-		writer := task.TarBuffer
-
-		outFilename := filepath.Join(accountsDbDir, filename)
-
-		// validate that the path doesn't escape accountsDbDir (via '../' sequences)
-		cleanPath := filepath.Clean(outFilename)
-		if !strings.HasPrefix(cleanPath, filepath.Clean(accountsDbDir)+string(os.PathSeparator)) {
-			panic(fmt.Sprintf("invalid path in tar archive: %s", filename))
-		}
-
-		appendVecBytes := writer.Bytes()
-		err := os.WriteFile(cleanPath, appendVecBytes, 0644)
-		if err != nil {
-			mlog.Log.Errorf("err writing new file=%s: %v", cleanPath, err)
-			appendVecCopyingInProgress.Add(-1)
-			return
-		}
-
-		var slot, fileId uint64
-		if n, err := fmt.Sscanf(filepath.Base(filename), "%d.%d", &slot, &fileId); n != 2 || err != nil {
-			panic(fmt.Sprintf(
-				"failed to parse slot and file from filename=%s basename=%s; parsed n=%d arguments (expected 2) and had err=%v",
-				filename, filepath.Base(filename), n, err))
-		}
-
-		for {
-			prevLargestFileId := largestFileId.Load()
-			if fileId <= prevLargestFileId {
-				break
-			}
-			swapped := largestFileId.CompareAndSwap(prevLargestFileId, fileId)
-			if swapped {
-				break
-			}
-		}
-
-		// find the relevant appendvec storage info. use the info from the incremental
-		// snapshot manifest if this account entry is from the incremental snapshot.
-		var fileSize uint64
-		var usedIncrementalSnapshotVal bool
-		if task.FromIncrementalSnapshot {
-			if incrementalManifest != nil {
-				for _, av := range incrementalManifest.AccountsDb.Storages[slot].AcctVecs {
-					if av.Id == fileId {
-						fileSize = av.FileSize
-						usedIncrementalSnapshotVal = true
-						break
-					}
-				}
-			}
-		}
-
-		if !usedIncrementalSnapshotVal {
-			for _, av := range manifest.AccountsDb.Storages[slot].AcctVecs {
-				if av.Id == fileId {
-					fileSize = av.FileSize
-					break
-				}
-			}
-		}
-
-		if fileSize == 0 {
-			panic("programming error - fileSize for appendvec was 0")
-		}
-
-		appendVecCopyingInProgress.Add(-1)
-		nextTask := indexEntryBuilderTask{Data: appendVecBytes, FileSize: fileSize, Slot: slot, FileId: fileId}
-		wg.Add(1)
-		statsd.Timing(statsd.TasksAppendVecCopyingLatency, uint64(time.Since(start)), nil)
-		err = indexEntryBuilderPool.Invoke(nextTask)
-		if err != nil {
-			mlog.Log.Errorf("error calling indexEntryBuilderPool.Invoke\n")
-		}
-	})
+	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
+	}
 
 	// Determine save path for full snapshot if streaming from HTTP
 	var fullSavePath string
@@ -228,14 +114,7 @@ func BuildAccountsDbWithIncr(
 		dp.Start()
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = readTar(ctx, wg, fullSnapshotFile, appendVecCopyingPool, readTarOptions{savePath: fullSavePath, progress: dp})
-	}()
-	wg.Wait()
-
-	// Check if processing was interrupted (context cancelled or error)
+	err = readTar(ctx, wg, fullSnapshotFile, pools.appendVecCopying, readTarOptions{savePath: fullSavePath, progress: dp})
 	if err != nil {
 		if dp != nil {
 			dp.Interrupt(err)
@@ -250,19 +129,6 @@ func BuildAccountsDbWithIncr(
 
 	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
 
-	// Show indexing progress for shard flush
-	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
-	indexProgress.Start(numShards)
-	err = sl.CloseWithProgress(ctx, func(completed, total int) {
-		indexProgress.Update(completed, total)
-	})
-	if err != nil {
-		indexProgress.Interrupt(err)
-		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
-	}
-
-	sl = NewShardLogger(numShards, logsDir, ss)
-
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
@@ -275,8 +141,10 @@ func BuildAccountsDbWithIncr(
 	// Retry loop for incremental snapshot download
 	// If download fails mid-way (not context cancellation), re-discover sources and retry
 	maxIncrRetries := 3
-	var incrementalErr error
-	for incrAttempt := 0; incrAttempt < maxIncrRetries; incrAttempt++ {
+	for incrAttempt := range maxIncrRetries {
+		if ctx.Err() != nil {
+			return nil, nil, fmt.Errorf("attempting to download incremental snapshot: %w", ctx.Err())
+		}
 		if incrAttempt > 0 {
 			// Re-discover incremental snapshot URL (sources may have changed)
 			mlog.Log.Infof("Incremental download failed, re-discovering sources (attempt %d/%d)...", incrAttempt+1, maxIncrRetries)
@@ -289,12 +157,13 @@ func BuildAccountsDbWithIncr(
 		}
 
 		incrSnapshotStart := time.Now()
-		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
+		incrementalManifestCopy, err := UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
 		if err != nil {
 			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
-			incrementalErr = fmt.Errorf("reading incremental snapshot manifest: %v", err)
 			continue
 		}
+		// Copy the manifest so the worker pool's pointer has the value.
+		*incrementalManifest = *incrementalManifestCopy
 		mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotPath)
 
 		// Determine save path for incremental snapshot if streaming from HTTP
@@ -313,40 +182,26 @@ func BuildAccountsDbWithIncr(
 			}
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotPath, appendVecCopyingPool, readTarOptions{savePath: incrSavePath, isIncremental: true})
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, fmtDuration(time.Since(start)))
-		}()
+		err = readTar(ctx, wg, incrementalSnapshotPath, pools.appendVecCopying, readTarOptions{savePath: incrSavePath, isIncremental: true})
 		wg.Wait()
+		mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, fmtDuration(time.Since(start)))
 		mlog.Log.Infof("done processing incremental snapshot in %s.", fmtDuration(time.Since(incrSnapshotStart)))
-
 		// Check if we should retry
-		if incrementalErr == nil {
+		if err == nil {
 			break // Success
 		}
-		if ctx.Err() != nil {
-			// Context cancelled - don't retry, just exit
-			return nil, nil, ctx.Err()
-		}
 		// Download failed mid-way, will retry with re-discovery
-		mlog.Log.Errorf("Incremental download failed: %v", incrementalErr)
+		mlog.Log.Errorf("Incremental download failed: %v", err)
 	}
-
 	if err != nil {
 		return nil, nil, err
 	}
-	if incrementalErr != nil {
-		return nil, nil, fmt.Errorf("incremental snapshot download failed after %d attempts: %w", maxIncrRetries, incrementalErr)
-	}
 
 	// Show indexing progress for incremental shard flush
-	incrIndexProgress := progress.NewIndexingProgress("Flush (incr shards)")
-	incrIndexProgress.Start(numShards)
+	indexProgress := progress.NewIndexingProgress("Convert log shards to index shards")
+	indexProgress.Start(numShards)
 	sl.CloseWithProgress(ctx, func(completed, total int) {
-		incrIndexProgress.Update(completed, total)
+		indexProgress.Update(completed, total)
 	})
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
@@ -368,9 +223,7 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, err
 	}
 
-	indexEntryCommiterPool.Release()
-	indexEntryBuilderPool.Release()
-	appendVecCopyingPool.Release()
+	pools.Release()
 
 	accountsDb := &accountsdb.AccountsDb{Index: indexDb, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
