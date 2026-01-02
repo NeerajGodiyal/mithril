@@ -148,8 +148,21 @@ See `config.example.toml` for all available configuration options including snap
 
 ### Running Mithril
 
+From inside the `mithril` directory (where you built the binary):
+
 ```bash
-./mithril run --config config.toml
+# If you're not already there:
+cd ~/mithril
+
+# Start Mithril (uses config.toml in current directory by default)
+./mithril run
+```
+
+The `./` prefix tells your shell to run the `mithril` binary in the current directory. Without it, your shell will look for `mithril` in your system PATH.
+
+You can also specify a config file explicitly:
+```bash
+./mithril run --config /path/to/custom-config.toml
 ```
 
 **Note:** Do not run Mithril with `sudo`. The setup scripts automatically configure directory permissions for your user.
