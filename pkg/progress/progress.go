@@ -252,15 +252,15 @@ type DualProgress struct {
 
 // NewDualProgress creates a new dual progress display
 func NewDualProgress() *DualProgress {
-	// Check if stdout is a TTY
-	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	// Use stderr for progress bars to avoid interleaving with log output on stdout
+	useColor := term.IsTerminal(int(os.Stderr.Fd()))
 
 	return &DualProgress{
 		Download: NewProgressBar("Snapshot Read (.tar.zst)"),
 		Extract:  NewProgressBar("Extract (AppendVecs)"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
-		output:   os.Stdout,
+		output:   os.Stderr,
 		useColor: useColor,
 	}
 }
@@ -437,11 +437,12 @@ type IndexingProgress struct {
 
 // NewIndexingProgress creates a new indexing progress display
 func NewIndexingProgress(label string) *IndexingProgress {
+	// Use stderr for progress bars to avoid interleaving with log output on stdout
 	return &IndexingProgress{
 		label:     label,
 		startTime: time.Now(),
-		output:    os.Stdout,
-		useColor:  term.IsTerminal(int(os.Stdout.Fd())),
+		output:    os.Stderr,
+		useColor:  term.IsTerminal(int(os.Stderr.Fd())),
 	}
 }
 
