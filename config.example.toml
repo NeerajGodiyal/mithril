@@ -32,8 +32,8 @@ name = "mithril"
 #                    Cleans AccountsDB and snapshot directories before starting.
 #   "accountsdb"   - Require existing valid AccountsDB, fail fast if missing.
 #
-# The default is "snapshot" which is recommended while Mithril is in early
-# development. Once stable, "auto" is a good choice for production.
+# The default is "auto" which tries to resume from existing AccountsDB if valid,
+# or downloads a fresh snapshot if needed. Use "snapshot" to always check freshness.
 
 [bootstrap]
     mode = "auto"
@@ -413,3 +413,30 @@ name = "mithril"
     # At 2 MB/s: ~8 minutes for 1GB (acceptable)
     # Set to 0 to disable speed filtering.
     min_incremental_speed_mbs = 2.0
+
+# ============================================================================
+# [log] - Logging Configuration
+# ============================================================================
+#
+# Mithril writes logs to files for easy debugging and sharing.
+# Each run creates a new log file with timestamp and run ID.
+
+[log]
+    # Directory for log files (created if missing)
+    # Set to "" to disable file logging (stdout only)
+    dir = "/mnt/mithril-logs"
+
+    # Log level: "debug" | "info" | "warn" | "error"
+    level = "info"
+
+    # Also write to stdout (set to false for daemon/service mode)
+    to_stdout = true
+
+    # Maximum log file size in MB before rotation (0 = no limit)
+    max_size_mb = 100
+
+    # Delete log files older than this many days (0 = never delete)
+    max_age_days = 7
+
+    # Maximum number of old log files to keep (0 = unlimited)
+    max_backups = 10

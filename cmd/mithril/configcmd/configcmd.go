@@ -142,6 +142,13 @@ txpar = 24   # Recommended: 2x your CPU core count
 [rpc]
 port = 8899  # Mithril's RPC server (binds to all interfaces)
 
+[log]
+dir = "/mnt/mithril-logs"  # Log files (created if missing)
+level = "info"             # "debug" | "info" | "warn" | "error"
+to_stdout = true           # Also write to stdout
+max_size_mb = 100          # Max log file size before rotation
+max_age_days = 7           # Delete logs older than this
+
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]
 `

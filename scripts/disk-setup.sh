@@ -183,7 +183,7 @@ fix_mithril_ownership() {
 
     info "Setting ownership to $real_user for Mithril directories..."
 
-    for dir in /mnt/mithril-accounts /mnt/mithril-ledger; do
+    for dir in /mnt/mithril-accounts /mnt/mithril-ledger /mnt/mithril-logs; do
         if [[ -d "$dir" ]]; then
             chown -R "$real_user:$real_user" "$dir"
             success "Set ownership: $dir -> $real_user"
@@ -878,6 +878,7 @@ show_status() {
         "/mnt/mithril-ledger"
         "/mnt/mithril-ledger/snapshots"
         "/mnt/mithril-ledger/blockstore"
+        "/mnt/mithril-logs"
     )
 
     for dir in "${mithril_dirs[@]}"; do

@@ -924,7 +924,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 				// Writer info
 				WriterVersion: getVersion(),
-				WriterCommit:  getCommitHash(),
+				WriterCommit:  getCommit(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
@@ -949,7 +949,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			SnapshotBaseSlot: snapshotBaseSlot,
 			AccountsDBPath:   accountsDbDir,
 			ReplayDuration:   time.Since(replayStartTime),
-			WasCancelled:     true,
+			WasCancelled:     result.WasCancelled,
 			RunID:            replay.CurrentRunID,
 			Epoch:            epoch,
 			SnapshotEpoch:    snapshotEpoch,
@@ -965,6 +965,47 @@ func runLive(c *cobra.Command, args []string) {
 
 	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
+
+	// Generate run ID early so it's available for logging and state tracking
+	replay.CurrentRunID = replay.GenerateRunID()
+
+	// Initialize file logging
+	logCfg := mlog.LogConfig{
+		Dir:        config.GetString("log.dir"),
+		Level:      config.GetString("log.level"),
+		ToStdout:   true, // Default true, override if explicitly set false
+		MaxSizeMB:  config.GetInt("log.max_size_mb"),
+		MaxAgeDays: config.GetInt("log.max_age_days"),
+		MaxBackups: config.GetInt("log.max_backups"),
+	}
+	// Handle to_stdout explicitly (viper returns false for missing bool)
+	if config.IsSet("log.to_stdout") {
+		logCfg.ToStdout = config.GetBool("log.to_stdout")
+	}
+	// Apply defaults if not set
+	if logCfg.Dir == "" {
+		logCfg.Dir = "/mnt/mithril-logs"
+	}
+	if logCfg.Level == "" {
+		logCfg.Level = "info"
+	}
+	if logCfg.MaxSizeMB == 0 {
+		logCfg.MaxSizeMB = 100
+	}
+	if logCfg.MaxAgeDays == 0 {
+		logCfg.MaxAgeDays = 7
+	}
+	if logCfg.MaxBackups == 0 {
+		logCfg.MaxBackups = 10
+	}
+
+	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
+		// Non-fatal, continue with stdout-only logging
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
+	} else if logPath := mlog.GetLogPath(); logPath != "" {
+		fmt.Printf("  Log file: %s\n", logPath)
+	}
+	defer mlog.Shutdown()
 
 	// Kill any existing mithril processes to prevent zombie accumulation
 	if killed := killExistingMithrilProcesses(); killed > 0 {
@@ -1342,7 +1383,7 @@ func runLive(c *cobra.Command, args []string) {
 				Cluster:       cluster,
 				GenesisHash:   fetchGenesisHash(ctx),
 				WriterVersion: getVersion(),
-				WriterCommit:  getCommitHash(),
+				WriterCommit:  getCommit(),
 			})
 			if err := mithrilState.Save(accountsPath); err != nil {
 				mlog.Log.Errorf("failed to save state file: %v", err)
@@ -1541,7 +1582,7 @@ func runLive(c *cobra.Command, args []string) {
 
 				// Writer info
 				WriterVersion: getVersion(),
-				WriterCommit:  getCommitHash(),
+				WriterCommit:  getCommit(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
@@ -1582,21 +1623,6 @@ func runLive(c *cobra.Command, args []string) {
 
 	mlog.Log.Infof("done replaying, closing DB")
 	accountsDb.CloseDb()
-}
-
-// getCommitHash returns the short git commit hash from build info
-func getCommitHash() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			if setting.Key == "vcs.revision" {
-				if len(setting.Value) > 8 {
-					return setting.Value[:8]
-				}
-				return setting.Value
-			}
-		}
-	}
-	return ""
 }
 
 // getVersion returns the build version from the shared version package.
@@ -2360,7 +2386,7 @@ func runReplayWithRecovery(
 
 				// Writer info
 				WriterVersion: getVersion(),
-				WriterCommit:  getCommitHash(),
+				WriterCommit:  getCommit(),
 
 				// Shutdown tracking - this is always a cancel (Ctrl+C)
 				ShutdownReason: state.ShutdownReasonNormal,

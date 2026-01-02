@@ -71,8 +71,8 @@ var commitSlot atomic.Uint64 // The slot currently being committed (for error me
 // CurrentRunID is a unique identifier for this replay session, used to correlate logs
 var CurrentRunID string
 
-// generateRunID creates a short random hex string for log correlation
-func generateRunID() string {
+// GenerateRunID creates a short random hex string for log correlation
+func GenerateRunID() string {
 	b := make([]byte, 4) // 8 hex chars
 	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp-based ID if crypto/rand fails
@@ -933,7 +933,7 @@ func ReplayBlocks(
 
 	// Generate unique run ID for log correlation (only if not already set by startup)
 	if CurrentRunID == "" {
-		CurrentRunID = generateRunID()
+		CurrentRunID = GenerateRunID()
 	}
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
