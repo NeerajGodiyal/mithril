@@ -6,7 +6,7 @@ LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSI
            -X github.com/Overclock-Validator/mithril/pkg/version.GitCommit=$(GIT_COMMIT) \
            -X github.com/Overclock-Validator/mithril/pkg/version.BuildDate=$(BUILD_DATE)
 
-.PHONY: build release clean
+.PHONY: build release clean server-setup disk-setup tune
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o mithril ./cmd/mithril
@@ -16,3 +16,13 @@ release:
 
 clean:
 	rm -f mithril
+
+# Server setup scripts (require sudo)
+server-setup:
+	sudo ./scripts/server-setup.sh $(ARGS)
+
+disk-setup:
+	sudo ./scripts/disk-setup.sh $(ARGS)
+
+tune:
+	sudo ./scripts/performance-tune.sh $(ARGS)
