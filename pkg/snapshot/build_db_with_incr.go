@@ -211,7 +211,7 @@ func BuildAccountsDbWithIncr(
 	}
 
 	// Show indexing progress for incremental shard flush
-	indexProgress := progress.NewIndexingProgress("Convert log shards to index shards")
+	indexProgress = progress.NewIndexingProgress("Convert log shards to index shards")
 	indexProgress.Start(numShards)
 	sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
