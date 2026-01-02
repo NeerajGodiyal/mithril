@@ -875,10 +875,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and resume context
-	if result.LastPersistedSlot > 0 && mithrilState != nil {
+	// Skip if already written during cancellation (eliminates timing window)
+	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
 		// Build resume context for graceful shutdown
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
@@ -1492,10 +1493,11 @@ func runLive(c *cobra.Command, args []string) {
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and resume context
-	if result.LastPersistedSlot > 0 && mithrilState != nil {
+	// Skip if already written during cancellation (eliminates timing window)
+	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
@@ -2317,8 +2319,65 @@ func runReplayWithRecovery(
 	rpcServer *rpcserver.RpcServer,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
+	replayStartTime time.Time, // Start time for resume context
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
+
+	// Create callback to write state immediately on cancellation
+	// This eliminates the timing window between bankhash persistence and state file update
+	onCancelWriteState := func(r *replay.ReplayResult) error {
+		if mithrilState == nil {
+			return nil
+		}
+
+		// Calculate epoch for the last persisted slot
+		var lastEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(r.LastPersistedSlot)
+		}
+
+		// Build resume context
+		var resumeCtx *state.ResumeContext
+		if r.LastAcctsLtHash != nil {
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(r.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: r.LastLamportsPerSignature,
+				PrevLamportsPerSig:   r.LastPrevLamportsPerSig,
+				NumSignatures:        r.LastNumSignatures,
+				Epoch:                lastEpoch,
+
+				// Blockhash context
+				RecentBlockhashes: encodeRecentBlockhashes(r.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(r.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(r.LastBlockhash[:]),
+
+				// SlotHashes context
+				SlotHashes: encodeSlotHashes(r.LastSlotHashes),
+
+				// Run tracking
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommitHash(),
+
+				// Shutdown tracking - this is always a cancel (Ctrl+C)
+				ShutdownReason: state.ShutdownReasonNormal,
+			}
+		}
+
+		// Write state immediately
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, r.LastPersistedSlot, r.LastPersistedBankhash, resumeCtx); err != nil {
+			return err
+		}
+
+		// Record shutdown in history
+		state.RecordShutdown(accountsDbPath, r.LastPersistedSlot, base58.Encode(r.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), state.ShutdownReasonNormal)
+
+		mlog.Log.Infof("state written immediately on cancel at slot %d", r.LastPersistedSlot)
+		return nil
+	}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -2363,6 +2422,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
 	return result
 }

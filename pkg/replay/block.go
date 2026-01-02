@@ -116,7 +116,15 @@ type ReplayResult struct {
 
 	// SlotHashes context - same issue, vote program needs accurate slot→hash mappings
 	LastSlotHashes *sealevel.SysvarSlotHashes
+
+	// StateWrittenOnCancel indicates that the state file was already written during
+	// cancellation handling, so the caller should skip the final write
+	StateWrittenOnCancel bool
 }
+
+// OnCancelWriteState is a callback that writes state immediately on cancellation.
+// This eliminates the timing window between bankhash persistence and state file update.
+type OnCancelWriteState func(result *ReplayResult) error
 
 // ResumeState contains the state needed to properly configure the first block when resuming.
 // This is passed to ReplayBlocks when resuming from a previous run.
@@ -919,6 +927,7 @@ func ReplayBlocks(
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
 	blockFetchOpts *BlockFetchOpts,
+	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
 ) *ReplayResult {
 	result := &ReplayResult{}
 
@@ -1178,6 +1187,34 @@ func ReplayBlocks(
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled after slot %d, exiting replay loop", block.Slot)
 			result.WasCancelled = true
+
+			// Populate result immediately for state write
+			result.LastPersistedSlot = lastPersistedSlot
+			result.LastPersistedBankhash = lastPersistedBankhash
+
+			// Capture resume context from the last slot context
+			if lastSlotCtx != nil {
+				result.LastAcctsLtHash = lastSlotCtx.AcctsLtHash
+				if lastSlotCtx.FeeRateGovernor != nil {
+					result.LastLamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
+					result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
+				}
+				result.LastNumSignatures = lastSlotCtx.NumSignatures
+				result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
+				result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
+				result.LastBlockhash = lastSlotCtx.Blockhash
+				result.LastSlotHashes = sealevel.SysvarCache.SlotHashes.Sysvar
+			}
+
+			// Write state immediately via callback (eliminates timing window for hard kills)
+			if onCancelWriteState != nil {
+				if err := onCancelWriteState(result); err != nil {
+					mlog.Log.Errorf("failed to write state on cancel: %v", err)
+				} else {
+					result.StateWrittenOnCancel = true
+				}
+			}
+
 			break
 		}
 
