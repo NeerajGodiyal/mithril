@@ -912,22 +912,25 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		} else if isRetriable {
 			// All non-skip errors are retriable - schedule retry
 			bs.stats.FetchRetries.Add(1)
+			// CRITICAL: Must delete from slotState BEFORE adding to retry queue!
+			// Otherwise race condition: scheduler picks up from retry queue while
+			// slot is still marked slotInflight, scheduleSlot fails, slot is lost.
+			bs.slotStateMu.Lock()
+			delete(bs.slotState, result.slot)
+			delete(bs.inflightStart, result.slot)
+			bs.slotStateMu.Unlock()
 			bs.scheduleRetry(result.slot)
 		}
 		// Note: if result.block == nil && result.err == nil && !result.skipped,
 		// that's a bug in the worker, but we don't skip - it will stall and be detected.
 
-		// Mark slot done (even on error), unless retriable
-		bs.slotStateMu.Lock()
+		// Mark slot done (for non-retriable cases)
 		if !isRetriable {
+			bs.slotStateMu.Lock()
 			bs.slotState[result.slot] = slotDone
 			delete(bs.inflightStart, result.slot) // Clean up timing data
-		} else {
-			// Will be retried, reset to pending
-			delete(bs.slotState, result.slot)
-			delete(bs.inflightStart, result.slot)
+			bs.slotStateMu.Unlock()
 		}
-		bs.slotStateMu.Unlock()
 
 		// Emit consecutive blocks
 		for {
@@ -1174,7 +1177,12 @@ func (bs *BlockSource) scheduler() {
 							mlog.Log.Debugf("priority retry: scheduling waiting slot %d (buffer full, buf=%d)", slot, bufLen)
 						}
 					}
-					bs.scheduleSlot(slot)
+					// Check return value - if scheduleSlot fails, put back in retry queue.
+					// This makes the retry path lossless even if scheduleSlot fails for
+					// other reasons (work queue full, stopChan closed, etc.)
+					if !bs.scheduleSlot(slot) {
+						bs.scheduleRetry(slot)
+					}
 				} else {
 					bs.scheduleRetry(slot) // Put back
 				}
