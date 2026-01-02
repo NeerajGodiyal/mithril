@@ -127,7 +127,20 @@ func BuildAccountsDbWithIncr(
 		dp.Stop()
 	}
 
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
+	indexProgress.Start(numShards)
+	err = sl.CloseWithProgress(ctx, func(completed, total int) {
+		indexProgress.Update(completed, total)
+	})
+	if err != nil {
+		indexProgress.Interrupt(err)
+		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
+	}
+
 	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
+
+	sl = NewShardLogger(numShards, logsDir, ss)
 
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)

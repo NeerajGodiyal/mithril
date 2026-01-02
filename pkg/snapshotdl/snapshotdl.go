@@ -275,9 +275,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -562,9 +560,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -680,9 +676,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	}
 
 	// Step 2: Evaluate nodes
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{
@@ -889,9 +883,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	}
 
 	// Evaluate nodes
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{
