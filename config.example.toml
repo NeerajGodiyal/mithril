@@ -125,28 +125,66 @@ name = "mithril"
     # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
     # overcast_endpoint = "localhost:9000"
 
-    # -------------------------------------------------------------------------
-    # Block Fetching Performance (RPC source only)
-    # -------------------------------------------------------------------------
-    # These settings control parallel block fetching during catchup.
+    # =========================================================================
+    # Global Fetch Tuning
+    # =========================================================================
+    # These settings control parallel block fetching.
     # Tune based on your RPC provider's rate limits.
 
     # Maximum RPC requests per second for block fetching.
     # Check your RPC provider's rate limits. Private nodes can go higher.
-    # Set slightly below provider limit to leave room for other RPC calls.
-    max_rps = 10
+    max_rps = 8
 
     # Maximum concurrent block fetch requests (workers).
     # Should generally match max_rps.
-    max_inflight = 10
+    max_inflight = 8
 
-    # How often to poll for chain tip (milliseconds).
-    # Used to avoid fetching slots that don't exist yet.
-    tip_poll_interval_ms = 5000
+    # How often to poll for chain tip in CATCHUP mode (milliseconds).
+    tip_poll_interval_ms = 1000
 
     # Don't fetch within this many slots of the confirmed tip.
-    # Prevents "slot not available" errors. 64 slots ≈ 25 seconds.
-    tip_safety_margin = 64
+    # Prevents "slot not available" errors. 32 slots ≈ 13 seconds.
+    # NOTE: Only applied in CATCHUP mode when gap > catchup_tip_gate_threshold.
+    tip_safety_margin = 32
+
+    # =========================================================================
+    # Mode Thresholds (Hysteresis)
+    # =========================================================================
+    # Mithril uses two modes for block fetching:
+    #
+    #   CATCHUP:   Far from tip - aggressive prefetching, fills buffer to ~100 slots
+    #   NEAR-TIP:  Close to tip - JIT scheduling with small lookahead
+    #
+    # Hysteresis prevents mode thrashing: different thresholds for entering vs exiting.
+    # Example: enter near-tip at gap <= 32, exit back to catchup at gap >= 64.
+
+    # Enter NEAR-TIP mode when gap to confirmed tip <= this.
+    near_tip_threshold = 32
+
+    # Exit NEAR-TIP mode (back to CATCHUP) when gap >= this.
+    catchup_threshold = 64
+
+    # Only apply tip_safety_margin when gap > this threshold.
+    # When gap is smaller (transitioning to near-tip), the margin is too restrictive
+    # and causes "beyond tip" storms. Set high enough to give plenty of headroom.
+    catchup_tip_gate_threshold = 128
+
+    # =========================================================================
+    # Near-Tip Tuning
+    # =========================================================================
+    # These settings only apply in NEAR-TIP mode (when close to chain tip).
+
+    # How often to poll for chain tip in NEAR-TIP mode (milliseconds).
+    # Faster than catchup to stay responsive to new slots.
+    near_tip_poll_interval_ms = 500
+
+    # How many slots ahead to schedule in NEAR-TIP mode.
+    # Provides enough buffer to hide RPC latency (~300ms) behind execution (~100ms).
+    near_tip_lookahead = 2
+
+    # Safety margin in NEAR-TIP mode (slots).
+    # Usually 0 - we rely on fast retries for "slot not available" instead of margin.
+    near_tip_safety_margin = 0
 
 # ============================================================================
 # [replay] - Block Replay

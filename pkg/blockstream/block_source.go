@@ -45,6 +45,18 @@ type BlockSourceOpts struct {
 	MaxInflight     int    // Max concurrent workers, 0 = use default
 	TipPollMs       int    // Tip poll interval ms, 0 = use default
 	TipSafetyMargin uint64 // Don't fetch within N slots of tip, 0 = use default
+
+	// Mode thresholds (hysteresis)
+	NearTipThreshold int // Enter near-tip when gap <= this, 0 = use default
+	CatchupThreshold int // Exit near-tip when gap >= this, 0 = use default
+
+	// Tip gate: only apply safety margin when gap > this
+	CatchupTipGateThreshold int // 0 = use default
+
+	// Near-tip tuning
+	NearTipPollMs       int // Faster poll interval in near-tip, 0 = use default
+	NearTipLookahead    int // Slots ahead to schedule in near-tip, 0 = use default
+	NearTipSafetyMargin int // Safety margin in near-tip, -1 = use default (since 0 is valid)
 }
 
 // slotStatus tracks the state of each slot being fetched
@@ -155,6 +167,14 @@ type BlockSource struct {
 	isNearTip        atomic.Bool // True when close to confirmed tip
 	catchupTipSafety uint64      // Original tip safety margin for catchup mode
 
+	// Configurable mode thresholds
+	nearTipThreshold    uint64        // Enter near-tip when gap <= this
+	catchupThreshold    uint64        // Exit near-tip when gap >= this
+	tipGateThreshold    uint64        // Only apply safety margin when gap > this
+	nearTipPollInterval time.Duration // Faster poll in near-tip mode
+	nearTipLookahead    uint64        // Slots ahead to schedule in near-tip
+	nearTipSafetyMargin uint64        // Safety margin in near-tip mode
+
 	// Stats tracking
 	stats          BlockSourceStats
 	statsResetTime atomic.Int64 // Unix timestamp when stats were last reset
@@ -176,23 +196,23 @@ const (
 	failoverErrThreshold  = 10              // Consecutive hard errors before failover (conservative)
 	failoverErrWindowSecs = 5               // Reset error count if no errors for this long
 
-	// Near-tip mode settings
+	// Near-tip mode defaults
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	nearTipThreshold    = 32                      // Switch to near-tip mode when gap <= this
-	catchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
-	nearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
-	nearTipPollInterval = 500 * time.Millisecond // Faster tip polling in near-tip mode
-	nearTipLookahead    = 2                       // Schedule up to N slots ahead in near-tip mode
+	defaultNearTipThreshold    = 32                      // Switch to near-tip mode when gap <= this
+	defaultCatchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
+	defaultNearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
+	defaultNearTipPollMs       = 500                     // Faster tip polling in near-tip mode (ms)
+	defaultNearTipLookahead    = 2                       // Schedule up to N slots ahead in near-tip mode
 	// RPC latency ~300ms, execution ~100ms - need 1-2 slots buffered to avoid waiting
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
 	// because headroom becomes too small (e.g., gap=70, margin=64 → only 6 slots headroom)
-	tipGateThreshold = 128
+	defaultTipGateThreshold = 128
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
-	// Apply defaults
+	// Apply defaults for global fetch settings
 	maxRPS := opts.MaxRPS
 	if maxRPS <= 0 {
 		maxRPS = defaultMaxRPS
@@ -211,6 +231,39 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	tipSafetyMargin := opts.TipSafetyMargin
 	if tipSafetyMargin == 0 {
 		tipSafetyMargin = defaultTipSafetyMargin
+	}
+
+	// Apply defaults for mode thresholds
+	nearTipThreshold := opts.NearTipThreshold
+	if nearTipThreshold <= 0 {
+		nearTipThreshold = defaultNearTipThreshold
+	}
+
+	catchupThreshold := opts.CatchupThreshold
+	if catchupThreshold <= 0 {
+		catchupThreshold = defaultCatchupThreshold
+	}
+
+	tipGateThreshold := opts.CatchupTipGateThreshold
+	if tipGateThreshold <= 0 {
+		tipGateThreshold = defaultTipGateThreshold
+	}
+
+	// Apply defaults for near-tip tuning
+	nearTipPollMs := opts.NearTipPollMs
+	if nearTipPollMs <= 0 {
+		nearTipPollMs = defaultNearTipPollMs
+	}
+
+	nearTipLookahead := opts.NearTipLookahead
+	if nearTipLookahead <= 0 {
+		nearTipLookahead = defaultNearTipLookahead
+	}
+
+	// NearTipSafetyMargin: use -1 as sentinel since 0 is a valid value
+	nearTipSafetyMargin := opts.NearTipSafetyMargin
+	if nearTipSafetyMargin < 0 {
+		nearTipSafetyMargin = defaultNearTipSafetyMargin
 	}
 
 	// Build list of RPC clients: primary + backups
@@ -243,6 +296,14 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		stopChan:         make(chan struct{}),
 		stallTimeout:     defaultStallTimeout,
 		catchupTipSafety: tipSafetyMargin, // Store original for switching back to catchup
+
+		// Configurable mode thresholds
+		nearTipThreshold:    uint64(nearTipThreshold),
+		catchupThreshold:    uint64(catchupThreshold),
+		tipGateThreshold:    uint64(tipGateThreshold),
+		nearTipPollInterval: time.Duration(nearTipPollMs) * time.Millisecond,
+		nearTipLookahead:    uint64(nearTipLookahead),
+		nearTipSafetyMargin: uint64(nearTipSafetyMargin),
 	}
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
@@ -283,15 +344,15 @@ func (bs *BlockSource) updateMode() {
 
 	if wasNearTip {
 		// Currently in near-tip mode - switch to catchup if gap exceeds threshold
-		if gap >= catchupThreshold {
+		if gap >= bs.catchupThreshold {
 			bs.isNearTip.Store(false)
-			mlog.Log.Infof("Switching to CATCHUP mode (gap=%d slots, threshold=%d)", gap, catchupThreshold)
+			mlog.Log.Infof("Switching to CATCHUP mode (gap=%d slots, threshold=%d)", gap, bs.catchupThreshold)
 		}
 	} else {
 		// Currently in catchup mode - switch to near-tip if gap is small
-		if gap <= nearTipThreshold {
+		if gap <= bs.nearTipThreshold {
 			bs.isNearTip.Store(true)
-			mlog.Log.Infof("Switching to NEAR-TIP mode (gap=%d slots, threshold=%d)", gap, nearTipThreshold)
+			mlog.Log.Infof("Switching to NEAR-TIP mode (gap=%d slots, threshold=%d)", gap, bs.nearTipThreshold)
 		}
 	}
 }
@@ -300,7 +361,7 @@ func (bs *BlockSource) updateMode() {
 // In near-tip mode, we use a much smaller margin to stay close to the chain.
 func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
 	if bs.isNearTip.Load() {
-		return nearTipSafetyMargin
+		return bs.nearTipSafetyMargin
 	}
 	return bs.catchupTipSafety
 }
@@ -479,7 +540,7 @@ func (bs *BlockSource) pollTip() {
 			// Adjust poll interval based on mode
 			var targetInterval time.Duration
 			if bs.isNearTip.Load() {
-				targetInterval = nearTipPollInterval
+				targetInterval = bs.nearTipPollInterval
 			} else {
 				targetInterval = bs.tipPollInterval
 			}
@@ -731,7 +792,7 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 
 			// Only apply tip gate if gap > tipGateThreshold (true catchup with plenty of headroom)
 			// When gap <= threshold, we're close enough that the gate does more harm than good
-			if gap > tipGateThreshold {
+			if gap > bs.tipGateThreshold {
 				margin := bs.effectiveTipSafetyMargin()
 				var maxSlot uint64
 				if tip <= margin {
@@ -940,7 +1001,7 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 
 // canScheduleMore returns true if we can schedule the given slot.
 // In catchup mode: gate on buffer size (up to defaultMaxPending).
-// In near-tip mode: allow scheduling a small lookahead (nearTipLookahead slots)
+// In near-tip mode: allow scheduling a small lookahead (bs.nearTipLookahead slots)
 // to hide RPC latency behind execution time.
 func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 	if bs.isNearTip.Load() {
@@ -949,7 +1010,7 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 		lastExecuted := bs.lastExecutedSlot.Load()
 
 		// Allow N+1, N+2, ..., N+nearTipLookahead
-		if lastExecuted > 0 && slot > lastExecuted+nearTipLookahead {
+		if lastExecuted > 0 && slot > lastExecuted+bs.nearTipLookahead {
 			return false
 		}
 
@@ -1116,7 +1177,11 @@ func (bs *BlockSource) scheduler() {
 						bs.reorderMu.Lock()
 						bufLen := len(bs.reorderBuffer)
 						bs.reorderMu.Unlock()
-						mlog.Log.Debugf("priority retry: scheduling waiting slot %d despite full buffer (%d slots)", slot, bufLen)
+						if bs.isNearTip.Load() {
+							mlog.Log.Debugf("priority retry: scheduling waiting slot %d (near-tip lookahead, buf=%d)", slot, bufLen)
+						} else {
+							mlog.Log.Debugf("priority retry: scheduling waiting slot %d (buffer full, buf=%d)", slot, bufLen)
+						}
 					}
 					bs.scheduleSlot(slot)
 				} else {
