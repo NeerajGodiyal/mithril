@@ -121,7 +121,7 @@ func generateStarterConfig() string {
 name = "mithril"
 
 [bootstrap]
-mode = "snapshot"   # "auto" | "snapshot" | "accountsdb"
+mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
@@ -140,7 +140,7 @@ source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back
 txpar = 24   # Recommended: 2x your CPU core count
 
 [rpc]
-port = 8899  # Mithril's RPC server (localhost only)
+port = 8899  # Mithril's RPC server (binds to all interfaces)
 
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]

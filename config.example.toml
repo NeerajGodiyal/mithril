@@ -221,7 +221,7 @@ name = "mithril"
 # [rpc] - Mithril RPC Server
 # ============================================================================
 #
-# Mithril exposes a Solana-compatible JSON-RPC interface on localhost,
+# Mithril exposes a Solana-compatible JSON-RPC interface on all interfaces,
 # allowing other tools to query Mithril's account state directly.
 #
 # Query with: curl http://localhost:8899 -X POST -H "Content-Type: application/json" \

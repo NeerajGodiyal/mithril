@@ -116,15 +116,19 @@ name = "mithril"
 
 [bootstrap]
     # How Mithril initializes state:
-    #   "auto"       - Use existing AccountsDB if valid, else download snapshot (default)
-    #   "snapshot"   - Always download fresh snapshot
-    #   "accountsdb" - Require existing AccountsDB, fail if missing
+    #   "auto"         - Use existing AccountsDB if valid, else download snapshot (default)
+    #   "snapshot"     - Use existing snapshot if valid, else download new
+    #   "new-snapshot" - Always download a fresh snapshot
+    #   "accountsdb"   - Require existing AccountsDB, fail if missing
     mode = "auto"
 
 [storage]
     # AccountsDB path - use your fastest NVMe
     accounts = "/mnt/mithril-accounts"
+    # Blockstore (reserved for future block persistence)
     blockstore = "/mnt/mithril-ledger/blockstore"
+    # Snapshot download location
+    snapshots = "/mnt/mithril-ledger/snapshots"
 
 [network]
     # Solana RPC endpoint(s) for discovering snapshots and fetching blocks
@@ -136,7 +140,7 @@ name = "mithril"
     txpar = 24
 
 [rpc]
-    # Mithril's RPC server (localhost only, enabled by default)
+    # Mithril's RPC server (binds to all interfaces, enabled by default)
     port = 8899
 ```
 
@@ -150,7 +154,7 @@ See `config.example.toml` for all available configuration options including snap
 
 **What happens:**
 1. Mithril queries the Solana cluster to find reliable snapshot sources
-2. The full snapshot is streamed directly into memory and processed
+2. The full snapshot is streamed and processed (optionally saved to disk for faster restarts)
 3. An incremental snapshot is fetched to bring the state closer to the tip
 4. Mithril block execution (aka replay) is initiated and blocks are retrieved with RPC `getBlock` calls and verified
 5. Mithril keeps up very close to the tip of the chain with recommended hardware specs
@@ -182,6 +186,7 @@ curl http://YOUR_MITHRIL_IP:8899 -X POST -H "Content-Type: application/json" -d 
 
 **Currently supported RPC methods:**
 - `getAccountInfo` - Get account data and lamports
+- `getBankHash` - Get bankhash for a slot (Mithril extension, not standard Solana RPC)
 - `getBlockHeight` - Get current block height
 - `getEpochInfo` - Get current epoch info
 - `getLatestBlockhash` - Get recent blockhash
@@ -222,7 +227,7 @@ go build -o mithril ./cmd/mithril
 ./mithril run --config config.toml
 ```
 
-**Note:** The default `bootstrap.mode = "auto"` will reuse an existing valid AccountsDB when available, otherwise it downloads a snapshot. Set `bootstrap.mode = "snapshot"` to always start fresh from a snapshot, or `bootstrap.mode = "new-snapshot"` to always download a new one.
+**Note:** The default `bootstrap.mode = "auto"` will reuse an existing valid AccountsDB when available, otherwise it downloads a snapshot. Set `bootstrap.mode = "snapshot"` to use an existing snapshot if available, or `bootstrap.mode = "new-snapshot"` to always download a fresh one.
 
 ### Operational Best Practices
 
