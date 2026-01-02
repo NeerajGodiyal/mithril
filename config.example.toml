@@ -173,6 +173,8 @@ name = "mithril"
     # Near-Tip Tuning
     # =========================================================================
     # These settings only apply in NEAR-TIP mode (when close to chain tip).
+    # Note: tip_safety_margin is NOT applied in near-tip mode by design.
+    # Near-tip relies on fast retries for "slot not available" instead of margin.
 
     # How often to poll for chain tip in NEAR-TIP mode (milliseconds).
     # Faster than catchup to stay responsive to new slots.
@@ -181,10 +183,6 @@ name = "mithril"
     # How many slots ahead to schedule in NEAR-TIP mode.
     # Provides enough buffer to hide RPC latency (~300ms) behind execution (~100ms).
     near_tip_lookahead = 2
-
-    # Safety margin in NEAR-TIP mode (slots).
-    # Usually 0 - we rely on fast retries for "slot not available" instead of margin.
-    near_tip_safety_margin = 0
 
 # ============================================================================
 # [replay] - Block Replay

@@ -55,9 +55,8 @@ type BlockFetchOpts struct {
 	CatchupTipGateThreshold int // Only apply safety margin when gap > this, 0 = use default
 
 	// Near-tip tuning
-	NearTipPollMs       int // Faster poll interval in near-tip, 0 = use default
-	NearTipLookahead    int // Slots ahead to schedule in near-tip, 0 = use default
-	NearTipSafetyMargin int // Safety margin in near-tip, -1 = use default (since 0 is valid)
+	NearTipPollMs    int // Faster poll interval in near-tip, 0 = use default
+	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1032,7 +1031,6 @@ func ReplayBlocks(
 			// Near-tip tuning
 			opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
 			opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
-			opts.NearTipSafetyMargin = blockFetchOpts.NearTipSafetyMargin
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)

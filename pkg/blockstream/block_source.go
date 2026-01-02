@@ -54,9 +54,8 @@ type BlockSourceOpts struct {
 	CatchupTipGateThreshold int // 0 = use default
 
 	// Near-tip tuning
-	NearTipPollMs       int // Faster poll interval in near-tip, 0 = use default
-	NearTipLookahead    int // Slots ahead to schedule in near-tip, 0 = use default
-	NearTipSafetyMargin int // Safety margin in near-tip, -1 = use default (since 0 is valid)
+	NearTipPollMs    int // Faster poll interval in near-tip, 0 = use default
+	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
 }
 
 // slotStatus tracks the state of each slot being fetched
@@ -173,7 +172,6 @@ type BlockSource struct {
 	tipGateThreshold    uint64        // Only apply safety margin when gap > this
 	nearTipPollInterval time.Duration // Faster poll in near-tip mode
 	nearTipLookahead    uint64        // Slots ahead to schedule in near-tip
-	nearTipSafetyMargin uint64        // Safety margin in near-tip mode
 
 	// Stats tracking
 	stats          BlockSourceStats
@@ -198,12 +196,12 @@ const (
 
 	// Near-tip mode defaults
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	defaultNearTipThreshold    = 32                      // Switch to near-tip mode when gap <= this
-	defaultCatchupThreshold    = 64                      // Switch back to catchup mode when gap >= this (hysteresis)
-	defaultNearTipSafetyMargin = 0                       // No margin in near-tip - rely on retries for "not available"
-	defaultNearTipPollMs       = 500                     // Faster tip polling in near-tip mode (ms)
-	defaultNearTipLookahead    = 2                       // Schedule up to N slots ahead in near-tip mode
+	defaultNearTipThreshold = 32  // Switch to near-tip mode when gap <= this
+	defaultCatchupThreshold = 64  // Switch back to catchup mode when gap >= this (hysteresis)
+	defaultNearTipPollMs    = 500 // Faster tip polling in near-tip mode (ms)
+	defaultNearTipLookahead = 2   // Schedule up to N slots ahead in near-tip mode
 	// RPC latency ~300ms, execution ~100ms - need 1-2 slots buffered to avoid waiting
+	// Note: tip_safety_margin is NOT applied in near-tip mode by design (we rely on retries)
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
@@ -260,12 +258,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		nearTipLookahead = defaultNearTipLookahead
 	}
 
-	// NearTipSafetyMargin: use -1 as sentinel since 0 is a valid value
-	nearTipSafetyMargin := opts.NearTipSafetyMargin
-	if nearTipSafetyMargin < 0 {
-		nearTipSafetyMargin = defaultNearTipSafetyMargin
-	}
-
 	// Build list of RPC clients: primary + backups
 	rpcClients := make([]*rpcclient.RpcClient, 0, 1+len(opts.BackupRpcEndpoints))
 	rpcClients = append(rpcClients, opts.RpcClient)
@@ -303,7 +295,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		tipGateThreshold:    uint64(tipGateThreshold),
 		nearTipPollInterval: time.Duration(nearTipPollMs) * time.Millisecond,
 		nearTipLookahead:    uint64(nearTipLookahead),
-		nearTipSafetyMargin: uint64(nearTipSafetyMargin),
 	}
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
@@ -358,10 +349,10 @@ func (bs *BlockSource) updateMode() {
 }
 
 // effectiveTipSafetyMargin returns the tip safety margin for the current mode.
-// In near-tip mode, we use a much smaller margin to stay close to the chain.
+// In near-tip mode, we return 0 (no margin) - we rely on fast retries instead.
 func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
 	if bs.isNearTip.Load() {
-		return bs.nearTipSafetyMargin
+		return 0 // Near-tip mode: no safety margin, rely on retries
 	}
 	return bs.catchupTipSafety
 }

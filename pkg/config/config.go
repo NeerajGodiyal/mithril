@@ -78,9 +78,8 @@ type BlockConfig struct {
 	CatchupTipGateThreshold int `toml:"catchup_tip_gate_threshold" mapstructure:"catchup_tip_gate_threshold"`
 
 	// Near-tip tuning
-	NearTipPollMs       int `toml:"near_tip_poll_interval_ms" mapstructure:"near_tip_poll_interval_ms"` // Faster poll in near-tip
-	NearTipLookahead    int `toml:"near_tip_lookahead" mapstructure:"near_tip_lookahead"`               // Slots ahead to schedule
-	NearTipSafetyMargin int `toml:"near_tip_safety_margin" mapstructure:"near_tip_safety_margin"`       // Safety margin in near-tip
+	NearTipPollMs    int `toml:"near_tip_poll_interval_ms" mapstructure:"near_tip_poll_interval_ms"` // Faster poll in near-tip
+	NearTipLookahead int `toml:"near_tip_lookahead" mapstructure:"near_tip_lookahead"`               // Slots ahead to schedule
 }
 
 // SnapshotConfig holds snapshot download configuration

@@ -101,11 +101,10 @@ var (
 	blockCatchupTipGateThreshold int   // Only apply safety margin when gap > this
 
 	// Near-tip tuning
-	blockNearTipPollMs          int    // Faster poll in near-tip mode
-	blockNearTipLookahead       int    // Slots ahead to schedule in near-tip
-	blockNearTipSafetyMargin    int    // Safety margin in near-tip (use -1 for default since 0 is valid)
+	blockNearTipPollMs    int // Faster poll in near-tip mode
+	blockNearTipLookahead int // Slots ahead to schedule in near-tip
 
-	snapshotDlPath              string
+	snapshotDlPath string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -394,11 +393,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Near-tip tuning
 	blockNearTipPollMs = getInt("block-near-tip-poll-ms", "block.near_tip_poll_interval_ms")
 	blockNearTipLookahead = getInt("block-near-tip-lookahead", "block.near_tip_lookahead")
-	// Use -1 as sentinel since 0 is valid for nearTipSafetyMargin
-	blockNearTipSafetyMargin = getInt("block-near-tip-safety-margin", "block.near_tip_safety_margin")
-	if blockNearTipSafetyMargin == 0 && !config.IsSet("block.near_tip_safety_margin") {
-		blockNearTipSafetyMargin = -1 // Sentinel: use default
-	}
 
 	// Validate block fetch parameters - negative values wrap to huge uint64, causing stalls
 	if blockMaxRPS < 0 {
@@ -820,9 +814,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		CatchupTipGateThreshold: blockCatchupTipGateThreshold,
 
 		// Near-tip tuning
-		NearTipPollMs:       blockNearTipPollMs,
-		NearTipLookahead:    blockNearTipLookahead,
-		NearTipSafetyMargin: blockNearTipSafetyMargin,
+		NearTipPollMs:    blockNearTipPollMs,
+		NearTipLookahead: blockNearTipLookahead,
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
@@ -1359,9 +1352,8 @@ func runLive(c *cobra.Command, args []string) {
 		CatchupTipGateThreshold: blockCatchupTipGateThreshold,
 
 		// Near-tip tuning
-		NearTipPollMs:       blockNearTipPollMs,
-		NearTipLookahead:    blockNearTipLookahead,
-		NearTipSafetyMargin: blockNearTipSafetyMargin,
+		NearTipPollMs:    blockNearTipPollMs,
+		NearTipLookahead: blockNearTipLookahead,
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
