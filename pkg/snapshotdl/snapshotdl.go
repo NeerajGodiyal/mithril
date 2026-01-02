@@ -82,6 +82,9 @@ type SnapshotConfig struct {
 
 	// Incremental snapshot selection
 	MinIncrementalSpeedMBs float64 // Minimum speed for incremental sources (MB/s, 0 = no minimum)
+
+	// Logging
+	LogDir string // Directory for snapshot finder logs (default: /mnt/mithril-logs/snapshot-finder)
 }
 
 // DefaultSnapshotConfig returns production-ready defaults matching solana-snapshot-finder-go
@@ -132,6 +135,9 @@ func DefaultSnapshotConfig() SnapshotConfig {
 
 		// Incremental selection
 		MinIncrementalSpeedMBs: 2.0, // Minimum 2 MB/s for incrementals (~8min for 1GB)
+
+		// Logging
+		LogDir: "/mnt/mithril-logs/snapshot-finder",
 	}
 }
 
@@ -444,9 +450,8 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	}
 
 	// Write detailed speed test log to file
-	if speedStats != nil {
-		logDir := "/tmp/mithril-logs"
-		if err := speedStats.WriteSpeedTestLog(logDir, filterCfg); err != nil {
+	if speedStats != nil && snapCfg.LogDir != "" {
+		if err := speedStats.WriteSpeedTestLog(snapCfg.LogDir, filterCfg); err != nil {
 			mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
 		}
 	}

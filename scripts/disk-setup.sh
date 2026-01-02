@@ -1341,7 +1341,7 @@ interactive_setup() {
         mkdir -p "$accountsdb_mount"
         mkdir -p /mnt/mithril-ledger/snapshots
         mkdir -p /mnt/mithril-ledger/blockstore
-        mkdir -p /mnt/mithril-logs
+        mkdir -p /mnt/mithril-logs/snapshot-finder
 
         success "Directories created at $accountsdb_mount, /mnt/mithril-ledger, /mnt/mithril-logs"
         return
@@ -1427,7 +1427,7 @@ interactive_setup() {
     fi
 
     # Create logs directory (always on root filesystem)
-    mkdir -p /mnt/mithril-logs
+    mkdir -p /mnt/mithril-logs/snapshot-finder
 
     if [[ -n "$data_disk" ]]; then
         if [[ "$data_disk" == "$root_disk" ]]; then
