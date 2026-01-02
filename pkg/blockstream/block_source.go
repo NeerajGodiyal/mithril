@@ -69,14 +69,70 @@ const (
 
 // fetchResult is sent from workers to the emitter
 type fetchResult struct {
-	slot    uint64
-	block   *b.Block
-	err     error
-	skipped bool  // true if SlotSkipped error
-	rpcIdx  int32 // which RPC endpoint produced this result (for error attribution)
+	slot      uint64
+	block     *b.Block
+	err       error
+	skipped   bool  // true if SlotSkipped error
+	rpcIdx    int32 // which RPC endpoint produced this result (for error attribution)
+	latencyMs int64 // fetch latency in milliseconds (for stall diagnostics)
 }
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
+
+// slotErrorInfo tracks error history for a specific slot (for stall diagnostics)
+type slotErrorInfo struct {
+	slot           uint64
+	retryCount     int
+	firstSeenAt    time.Time
+	lastSeenAt     time.Time
+	lastError      string
+	lastErrorClass string // "slot_not_available", "skipped", "rate_limited", "beyond_tip", "transient", "hard_conn", "other"
+	lastRpcIdx     int32
+	lastLatencyMs  int64
+}
+
+// StallDiagnostics captures comprehensive state when a stall is detected
+type StallDiagnostics struct {
+	// Waiting slot context
+	WaitingSlot      uint64
+	LastExecutedSlot uint64
+	ConfirmedTip     uint64
+	Gap              uint64
+	Mode             string // "near-tip" or "catchup"
+	LastProgressTs   time.Time
+	StallElapsed     time.Duration
+
+	// Slot state snapshot
+	InflightCount    int
+	RetryQueueLen    int
+	WorkQueueLen     int
+	ReorderBufLen    int
+	SkippedSlotsLen  int
+	MaxBufferedSlot  uint64
+	WaitingSlotState string // "inflight", "done", "pending", "missing"
+
+	// Waiting slot error info
+	WaitingSlotErrors *slotErrorInfo
+
+	// RPC health snapshot
+	ActiveRpcIdx     int32
+	ActiveRpcURL     string
+	FailoverCount    uint64
+	LastFailoverTime time.Time
+	IsOnPrimary      bool
+
+	// Per-RPC error counts (current window)
+	ErrSlotNotAvail uint64
+	ErrRateLimited  uint64
+	ErrBeyondTip    uint64
+	ErrTransient    uint64
+	ErrHardConn     uint64
+	ErrOther        uint64
+
+	// Worker pool stats
+	WorkersTotal int
+	RateLimitRPS float64
+}
 
 // BlockSourceStats contains metrics for parallel block fetching
 type BlockSourceStats struct {
@@ -162,6 +218,12 @@ type BlockSource struct {
 	stallTimeout time.Duration
 	stallError   atomic.Bool // Set when stall timeout triggers
 
+	// Stall diagnostics
+	waitingSlotErrorsMu sync.Mutex
+	waitingSlotErrors   map[uint64]*slotErrorInfo // Per-slot error tracking
+	lastStallHeartbeat  atomic.Int64              // Unix timestamp of last stall heartbeat log
+	lastFailoverTime    atomic.Int64              // Unix timestamp of last RPC failover
+
 	// Near-tip mode tracking
 	isNearTip        atomic.Bool // True when close to confirmed tip
 	catchupTipSafety uint64      // Original tip safety margin for catchup mode
@@ -202,6 +264,10 @@ const (
 	defaultNearTipLookahead = 2   // Schedule up to N slots ahead in near-tip mode
 	// RPC latency ~300ms, execution ~100ms - need 1-2 slots buffered to avoid waiting
 	// Note: tip_safety_margin is NOT applied in near-tip mode by design (we rely on retries)
+
+	// Stall diagnostics thresholds
+	stallHeartbeatThreshold = 2 * time.Minute  // Start logging heartbeats when stall exceeds this
+	stallHeartbeatInterval  = 30 * time.Second // Log heartbeat every this interval
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
@@ -295,6 +361,9 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		tipGateThreshold:    uint64(tipGateThreshold),
 		nearTipPollInterval: time.Duration(nearTipPollMs) * time.Millisecond,
 		nearTipLookahead:    uint64(nearTipLookahead),
+
+		// Stall diagnostics
+		waitingSlotErrors: make(map[uint64]*slotErrorInfo),
 	}
 
 	// Initialize lastProgress to now (first block hasn't been fetched yet)
@@ -357,6 +426,229 @@ func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
 	return bs.catchupTipSafety
 }
 
+// classifyError returns a string classification for an error
+func classifyError(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if err == rpcclient.SlotSkipped {
+		return "skipped"
+	}
+	if err == errBeyondTip {
+		return "beyond_tip"
+	}
+	if isSlotNotAvailableErr(err) {
+		return "slot_not_available"
+	}
+	if isRateLimitedErr(err) {
+		return "rate_limited"
+	}
+	if isHardConnectivityErr(err) {
+		return "hard_conn"
+	}
+	if isTransientNetworkErr(err) {
+		return "transient"
+	}
+	return "other"
+}
+
+// trackSlotError records an error for a specific slot (for stall diagnostics)
+func (bs *BlockSource) trackSlotError(slot uint64, err error, rpcIdx int32, latencyMs int64) {
+	bs.waitingSlotErrorsMu.Lock()
+	defer bs.waitingSlotErrorsMu.Unlock()
+
+	info, exists := bs.waitingSlotErrors[slot]
+	if !exists {
+		info = &slotErrorInfo{
+			slot:        slot,
+			firstSeenAt: time.Now(),
+		}
+		bs.waitingSlotErrors[slot] = info
+	}
+
+	info.retryCount++
+	info.lastSeenAt = time.Now()
+	if err != nil {
+		info.lastError = err.Error()
+		// Truncate long error messages
+		if len(info.lastError) > 200 {
+			info.lastError = info.lastError[:200] + "..."
+		}
+	} else {
+		info.lastError = ""
+	}
+	info.lastErrorClass = classifyError(err)
+	info.lastRpcIdx = rpcIdx
+	info.lastLatencyMs = latencyMs
+
+	// Clean up old entries (keep only last 100 slots)
+	if len(bs.waitingSlotErrors) > 100 {
+		// Find the minimum slot to keep
+		minToKeep := slot
+		if minToKeep > 100 {
+			minToKeep -= 100
+		} else {
+			minToKeep = 0
+		}
+		for s := range bs.waitingSlotErrors {
+			if s < minToKeep {
+				delete(bs.waitingSlotErrors, s)
+			}
+		}
+	}
+}
+
+// clearSlotErrors removes error tracking for a slot (called on success)
+func (bs *BlockSource) clearSlotErrors(slot uint64) {
+	bs.waitingSlotErrorsMu.Lock()
+	delete(bs.waitingSlotErrors, slot)
+	bs.waitingSlotErrorsMu.Unlock()
+}
+
+// collectStallDiagnostics gathers comprehensive state for stall analysis
+func (bs *BlockSource) collectStallDiagnostics() StallDiagnostics {
+	diag := StallDiagnostics{}
+
+	// Waiting slot context
+	bs.reorderMu.Lock()
+	diag.WaitingSlot = bs.nextSlotToSend
+	diag.ReorderBufLen = len(bs.reorderBuffer)
+	diag.SkippedSlotsLen = len(bs.skippedSlots)
+	bs.reorderMu.Unlock()
+
+	diag.LastExecutedSlot = bs.lastExecutedSlot.Load()
+	diag.ConfirmedTip = bs.confirmedTip.Load()
+	if diag.ConfirmedTip > diag.LastExecutedSlot {
+		diag.Gap = diag.ConfirmedTip - diag.LastExecutedSlot
+	}
+	if bs.isNearTip.Load() {
+		diag.Mode = "near-tip"
+	} else {
+		diag.Mode = "catchup"
+	}
+	diag.LastProgressTs = time.Unix(bs.lastProgress.Load(), 0)
+	diag.StallElapsed = time.Since(diag.LastProgressTs)
+
+	// Slot state snapshot
+	bs.slotStateMu.Lock()
+	diag.InflightCount = 0
+	for _, state := range bs.slotState {
+		if state == slotInflight {
+			diag.InflightCount++
+		}
+	}
+	// Check waiting slot state
+	if state, exists := bs.slotState[diag.WaitingSlot]; exists {
+		switch state {
+		case slotInflight:
+			diag.WaitingSlotState = "inflight"
+		case slotDone:
+			diag.WaitingSlotState = "done"
+		case slotPending:
+			diag.WaitingSlotState = "pending"
+		}
+	} else {
+		diag.WaitingSlotState = "missing"
+	}
+	bs.slotStateMu.Unlock()
+
+	bs.retryMu.Lock()
+	diag.RetryQueueLen = len(bs.retrySlots)
+	bs.retryMu.Unlock()
+
+	diag.WorkQueueLen = len(bs.workQueue)
+	diag.MaxBufferedSlot = bs.stats.MaxBufferedSlot.Load()
+
+	// Waiting slot error info
+	bs.waitingSlotErrorsMu.Lock()
+	if info, exists := bs.waitingSlotErrors[diag.WaitingSlot]; exists {
+		diag.WaitingSlotErrors = &slotErrorInfo{
+			slot:           info.slot,
+			retryCount:     info.retryCount,
+			firstSeenAt:    info.firstSeenAt,
+			lastSeenAt:     info.lastSeenAt,
+			lastError:      info.lastError,
+			lastErrorClass: info.lastErrorClass,
+			lastRpcIdx:     info.lastRpcIdx,
+			lastLatencyMs:  info.lastLatencyMs,
+		}
+	}
+	bs.waitingSlotErrorsMu.Unlock()
+
+	// RPC health snapshot
+	diag.ActiveRpcIdx = bs.activeRpcIdx.Load()
+	if int(diag.ActiveRpcIdx) < len(bs.rpcClients) {
+		diag.ActiveRpcURL = bs.rpcClients[diag.ActiveRpcIdx].Endpoint()
+	}
+	diag.FailoverCount = bs.failoverCount.Load()
+	diag.LastFailoverTime = time.Unix(bs.lastFailoverTime.Load(), 0)
+	diag.IsOnPrimary = bs.isOnPrimary()
+
+	// Error counts
+	diag.ErrSlotNotAvail = bs.stats.ErrSlotNotAvail.Load()
+	diag.ErrRateLimited = bs.stats.ErrRateLimited.Load()
+	diag.ErrBeyondTip = bs.stats.ErrBeyondTip.Load()
+	diag.ErrTransient = bs.stats.ErrTransient.Load()
+	diag.ErrOther = bs.stats.ErrOther.Load()
+
+	// Worker pool stats
+	diag.WorkersTotal = bs.maxInflight
+	diag.RateLimitRPS = float64(bs.rateLimiter.Limit())
+
+	return diag
+}
+
+// logStallDiagnostics logs comprehensive stall diagnostic information
+func (bs *BlockSource) logStallDiagnostics(prefix string) {
+	diag := bs.collectStallDiagnostics()
+
+	mlog.Log.Errorf("=== %s ===", prefix)
+
+	// 1) Waiting slot context
+	mlog.Log.Errorf("Waiting slot context:")
+	mlog.Log.Errorf("  waiting_slot=%d last_executed=%d confirmed_tip=%d gap=%d",
+		diag.WaitingSlot, diag.LastExecutedSlot, diag.ConfirmedTip, diag.Gap)
+	mlog.Log.Errorf("  mode=%s stall_elapsed=%v last_progress=%s",
+		diag.Mode, diag.StallElapsed.Round(time.Second), diag.LastProgressTs.Format("15:04:05"))
+
+	// 2) Slot state snapshot
+	mlog.Log.Errorf("Slot state snapshot:")
+	mlog.Log.Errorf("  inflight=%d retry_queue=%d work_queue=%d",
+		diag.InflightCount, diag.RetryQueueLen, diag.WorkQueueLen)
+	mlog.Log.Errorf("  reorder_buf=%d skipped_slots=%d max_buffered=%d",
+		diag.ReorderBufLen, diag.SkippedSlotsLen, diag.MaxBufferedSlot)
+	mlog.Log.Errorf("  waiting_slot_state=%s", diag.WaitingSlotState)
+
+	// 3) Waiting slot error info
+	if diag.WaitingSlotErrors != nil {
+		e := diag.WaitingSlotErrors
+		mlog.Log.Errorf("Waiting slot %d error history:", e.slot)
+		mlog.Log.Errorf("  retry_count=%d first_seen=%s last_seen=%s",
+			e.retryCount, e.firstSeenAt.Format("15:04:05"), e.lastSeenAt.Format("15:04:05"))
+		mlog.Log.Errorf("  last_error_class=%s last_rpc_idx=%d last_latency_ms=%d",
+			e.lastErrorClass, e.lastRpcIdx, e.lastLatencyMs)
+		if e.lastError != "" {
+			mlog.Log.Errorf("  last_error: %s", e.lastError)
+		}
+	} else {
+		mlog.Log.Errorf("Waiting slot %d: no error history (never attempted or cleared)", diag.WaitingSlot)
+	}
+
+	// 4) RPC health snapshot
+	mlog.Log.Errorf("RPC health:")
+	mlog.Log.Errorf("  active_rpc_idx=%d active_url=%s is_primary=%v",
+		diag.ActiveRpcIdx, diag.ActiveRpcURL, diag.IsOnPrimary)
+	mlog.Log.Errorf("  failover_count=%d last_failover=%s",
+		diag.FailoverCount, diag.LastFailoverTime.Format("15:04:05"))
+	mlog.Log.Errorf("  errors: slot_not_avail=%d rate_limited=%d beyond_tip=%d transient=%d other=%d",
+		diag.ErrSlotNotAvail, diag.ErrRateLimited, diag.ErrBeyondTip, diag.ErrTransient, diag.ErrOther)
+
+	// 5) Worker pool stats
+	mlog.Log.Errorf("Worker pool: workers=%d rate_limit_rps=%.1f",
+		diag.WorkersTotal, diag.RateLimitRPS)
+
+	mlog.Log.Errorf("=== End %s ===", prefix)
+}
 
 func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
 	if bs.blockDir == "" {
@@ -420,6 +712,7 @@ func (bs *BlockSource) failoverToNext() bool {
 	if bs.activeRpcIdx.CompareAndSwap(currentIdx, nextIdx) {
 		bs.failoverCount.Add(1)
 		bs.slotsSinceFailover.Store(0)
+		bs.lastFailoverTime.Store(time.Now().Unix())
 
 		currentEndpoint := bs.rpcClients[currentIdx].Endpoint()
 		nextEndpoint := bs.rpcClients[nextIdx].Endpoint()
@@ -819,7 +1112,7 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		}
 
 		skipped := err == rpcclient.SlotSkipped
-		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped, rpcIdx: rpcIdx}
+		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped, rpcIdx: rpcIdx, latencyMs: fetchLatency.Milliseconds()}
 	}
 }
 
@@ -889,15 +1182,22 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		// If we truly can't fetch a block, we'll stall and eventually timeout.
 		isRetriable := result.err != nil && !result.skipped
 
+		// Track error for stall diagnostics
+		if isRetriable {
+			bs.trackSlotError(result.slot, result.err, result.rpcIdx, result.latencyMs)
+		}
+
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
 			bs.hardErrCount.Store(0) // Reset on progress
+			bs.clearSlotErrors(result.slot) // Clear stall diagnostics for this slot
 		} else if result.block != nil {
 			// Success! This takes priority over any pending error results.
 			bs.stats.FetchSuccesses.Add(1)
 			bs.reorderBuffer[result.slot] = result.block
 			bs.hardErrCount.Store(0) // Reset error count on success
+			bs.clearSlotErrors(result.slot) // Clear stall diagnostics for this slot
 			// Track max buffered slot
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
 				bs.stats.MaxBufferedSlot.Store(result.slot)
@@ -1106,7 +1406,18 @@ func (bs *BlockSource) scheduler() {
 
 		// Check for stall timeout - if no progress for too long, trigger graceful shutdown
 		lastProgressTime := time.Unix(bs.lastProgress.Load(), 0)
-		if time.Since(lastProgressTime) > bs.stallTimeout {
+		stallDuration := time.Since(lastProgressTime)
+
+		// Periodic heartbeat logging when stall exceeds 2 minutes (but before shutdown)
+		if stallDuration > stallHeartbeatThreshold && stallDuration <= bs.stallTimeout {
+			lastHeartbeat := time.Unix(bs.lastStallHeartbeat.Load(), 0)
+			if time.Since(lastHeartbeat) >= stallHeartbeatInterval {
+				bs.lastStallHeartbeat.Store(time.Now().Unix())
+				bs.logStallDiagnostics(fmt.Sprintf("STALL HEARTBEAT (stall=%v, timeout=%v)", stallDuration.Round(time.Second), bs.stallTimeout))
+			}
+		}
+
+		if stallDuration > bs.stallTimeout {
 			bs.reorderMu.Lock()
 			waitingSlot := bs.nextSlotToSend
 			bs.reorderMu.Unlock()
@@ -1122,6 +1433,9 @@ func (bs *BlockSource) scheduler() {
 				}
 				mlog.Log.Infof("Primary RPC still unavailable, proceeding with shutdown")
 			}
+
+			// Final stall diagnostics dump before shutdown
+			bs.logStallDiagnostics("FINAL STALL DIAGNOSTICS (before shutdown)")
 
 			mlog.Log.Errorf("FATAL: Block fetch stalled for %v - no progress since slot %d",
 				bs.stallTimeout, waitingSlot)
