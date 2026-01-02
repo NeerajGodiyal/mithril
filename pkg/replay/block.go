@@ -48,6 +48,15 @@ type BlockFetchOpts struct {
 	MaxInflight     int    // Max concurrent workers, 0 = use default
 	TipPollMs       int    // Tip poll interval ms, 0 = use default
 	TipSafetyMargin uint64 // Don't fetch within N slots of tip, 0 = use default
+
+	// Mode thresholds (hysteresis)
+	NearTipThreshold        int // Enter near-tip when gap <= this, 0 = use default
+	CatchupThreshold        int // Exit near-tip when gap >= this, 0 = use default
+	CatchupTipGateThreshold int // Only apply safety margin when gap > this, 0 = use default
+
+	// Near-tip tuning
+	NearTipPollMs    int // Faster poll interval in near-tip, 0 = use default
+	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1013,6 +1022,15 @@ func ReplayBlocks(
 			opts.MaxInflight = blockFetchOpts.MaxInflight
 			opts.TipPollMs = blockFetchOpts.TipPollMs
 			opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
+
+			// Mode thresholds
+			opts.NearTipThreshold = blockFetchOpts.NearTipThreshold
+			opts.CatchupThreshold = blockFetchOpts.CatchupThreshold
+			opts.CatchupTipGateThreshold = blockFetchOpts.CatchupTipGateThreshold
+
+			// Near-tip tuning
+			opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
+			opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)
@@ -1055,7 +1073,10 @@ func ReplayBlocks(
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		var configErr error
-		if currentSlot == startSlot {
+		// Use lastSlotCtx == nil to detect first block, not currentSlot == startSlot.
+		// This handles the case where startSlot (or slots after it) are skipped -
+		// the first emitted block might have slot > startSlot.
+		if lastSlotCtx == nil {
 			if resumeState != nil {
 				// RESUME: Use resume state + manifest (for static fields)
 				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
@@ -1093,7 +1114,9 @@ func ReplayBlocks(
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
 			}
-		} else if currentSlot == startSlot && partitionedEpochRewardsEnabled {
+		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
+			// First block being processed - check if we're in rewards period
+			// (uses lastSlotCtx == nil to detect first block, handles skipped startSlot)
 			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
 				panic("bootstrapping during epoch rewards period is currently unsupported.")
 			}

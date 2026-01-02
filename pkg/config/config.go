@@ -63,6 +63,23 @@ type ReportingConfig struct {
 type BlockConfig struct {
 	Source           string `toml:"source" mapstructure:"source"`                       // "rpc" or "overcast"
 	OvercastEndpoint string `toml:"overcast_endpoint" mapstructure:"overcast_endpoint"` // Overcast endpoint (optional)
+
+	// Global fetch tuning
+	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                       // Rate limit (requests per second)
+	MaxInflight     int `toml:"max_inflight" mapstructure:"max_inflight"`             // Max concurrent workers
+	TipPollMs       int `toml:"tip_poll_interval_ms" mapstructure:"tip_poll_interval_ms"` // Tip poll interval in ms
+	TipSafetyMargin int `toml:"tip_safety_margin" mapstructure:"tip_safety_margin"`   // Don't fetch within N slots of tip
+
+	// Mode thresholds (hysteresis)
+	NearTipThreshold int `toml:"near_tip_threshold" mapstructure:"near_tip_threshold"` // Enter near-tip when gap <= this
+	CatchupThreshold int `toml:"catchup_threshold" mapstructure:"catchup_threshold"`   // Exit near-tip when gap >= this
+
+	// Tip gate: only apply safety margin when gap > this
+	CatchupTipGateThreshold int `toml:"catchup_tip_gate_threshold" mapstructure:"catchup_tip_gate_threshold"`
+
+	// Near-tip tuning
+	NearTipPollMs    int `toml:"near_tip_poll_interval_ms" mapstructure:"near_tip_poll_interval_ms"` // Faster poll in near-tip
+	NearTipLookahead int `toml:"near_tip_lookahead" mapstructure:"near_tip_lookahead"`               // Slots ahead to schedule
 }
 
 // SnapshotConfig holds snapshot download configuration

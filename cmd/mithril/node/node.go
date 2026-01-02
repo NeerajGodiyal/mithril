@@ -94,7 +94,17 @@ var (
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
 	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
-	snapshotDlPath              string
+
+	// Mode thresholds
+	blockNearTipThreshold       int    // Enter near-tip when gap <= this
+	blockCatchupThreshold       int    // Exit near-tip when gap >= this
+	blockCatchupTipGateThreshold int   // Only apply safety margin when gap > this
+
+	// Near-tip tuning
+	blockNearTipPollMs    int // Faster poll in near-tip mode
+	blockNearTipLookahead int // Slots ahead to schedule in near-tip
+
+	snapshotDlPath string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -375,6 +385,15 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	blockTipPollIntervalMs = getInt("block-tip-poll-ms", "block.tip_poll_interval_ms")
 	blockTipSafetyMargin = getInt("block-tip-safety-margin", "block.tip_safety_margin")
 
+	// Mode thresholds (hysteresis)
+	blockNearTipThreshold = getInt("block-near-tip-threshold", "block.near_tip_threshold")
+	blockCatchupThreshold = getInt("block-catchup-threshold", "block.catchup_threshold")
+	blockCatchupTipGateThreshold = getInt("block-catchup-tip-gate-threshold", "block.catchup_tip_gate_threshold")
+
+	// Near-tip tuning
+	blockNearTipPollMs = getInt("block-near-tip-poll-ms", "block.near_tip_poll_interval_ms")
+	blockNearTipLookahead = getInt("block-near-tip-lookahead", "block.near_tip_lookahead")
+
 	// Validate block fetch parameters - negative values wrap to huge uint64, causing stalls
 	if blockMaxRPS < 0 {
 		blockMaxRPS = 0
@@ -387,6 +406,21 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	if blockTipSafetyMargin < 0 {
 		blockTipSafetyMargin = 0
+	}
+	if blockNearTipThreshold < 0 {
+		blockNearTipThreshold = 0
+	}
+	if blockCatchupThreshold < 0 {
+		blockCatchupThreshold = 0
+	}
+	if blockCatchupTipGateThreshold < 0 {
+		blockCatchupTipGateThreshold = 0
+	}
+	if blockNearTipPollMs < 0 {
+		blockNearTipPollMs = 0
+	}
+	if blockNearTipLookahead < 0 {
+		blockNearTipLookahead = 0
 	}
 
 	// Snapshot download path - defaults to storage.snapshots, can be overridden
@@ -773,6 +807,15 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		MaxInflight:     blockMaxInflight,
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
+
+		// Mode thresholds
+		NearTipThreshold:        blockNearTipThreshold,
+		CatchupThreshold:        blockCatchupThreshold,
+		CatchupTipGateThreshold: blockCatchupTipGateThreshold,
+
+		// Near-tip tuning
+		NearTipPollMs:    blockNearTipPollMs,
+		NearTipLookahead: blockNearTipLookahead,
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
@@ -1302,6 +1345,15 @@ func runLive(c *cobra.Command, args []string) {
 		MaxInflight:     blockMaxInflight,
 		TipPollMs:       blockTipPollIntervalMs,
 		TipSafetyMargin: uint64(blockTipSafetyMargin),
+
+		// Mode thresholds
+		NearTipThreshold:        blockNearTipThreshold,
+		CatchupThreshold:        blockCatchupThreshold,
+		CatchupTipGateThreshold: blockCatchupTipGateThreshold,
+
+		// Near-tip tuning
+		NearTipPollMs:    blockNearTipPollMs,
+		NearTipLookahead: blockNearTipLookahead,
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
 
@@ -1632,6 +1684,43 @@ func printStartupInfo(commandName string) {
 			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
 	}
+
+	// Block mode config (resolve defaults for display)
+	fmt.Println()
+	fmt.Printf("%s━━━ Block Mode Config ━━━%s\n", gold, reset)
+
+	// Resolve actual values that will be used (0 means default will be applied in BlockSource)
+	displayNearTip := blockNearTipThreshold
+	if displayNearTip == 0 {
+		displayNearTip = 32
+	}
+	displayCatchup := blockCatchupThreshold
+	if displayCatchup == 0 {
+		displayCatchup = 64
+	}
+	displayTipGate := blockCatchupTipGateThreshold
+	if displayTipGate == 0 {
+		displayTipGate = 128
+	}
+	displaySafetyMargin := blockTipSafetyMargin
+	if displaySafetyMargin == 0 {
+		displaySafetyMargin = 64
+	}
+	displayNearTipPoll := blockNearTipPollMs
+	if displayNearTipPoll == 0 {
+		displayNearTipPoll = 500
+	}
+	displayNearTipLookahead := blockNearTipLookahead
+	if displayNearTipLookahead == 0 {
+		displayNearTipLookahead = 2
+	}
+
+	fmt.Printf("  %snear_tip_threshold=%d, catchup_threshold=%d%s\n",
+		dim, displayNearTip, displayCatchup, reset)
+	fmt.Printf("  %stip_safety_margin=%d (applies only when gap > %d)%s\n",
+		dim, displaySafetyMargin, displayTipGate, reset)
+	fmt.Printf("  %snear_tip_poll_interval_ms=%d, near_tip_lookahead=%d%s\n",
+		dim, displayNearTipPoll, displayNearTipLookahead, reset)
 
 	fmt.Println()
 }
