@@ -78,9 +78,9 @@ func Initialize(cfg LogConfig, runID string) error {
 	Log.toStdout = cfg.ToStdout
 	Log.level = parseLevel(cfg.Level)
 
-	// If no dir specified, stdout only
+	// If no dir specified, stderr only (stderr to avoid breaking progress bar cursor positioning)
 	if cfg.Dir == "" {
-		Log.writer = os.Stdout
+		Log.writer = os.Stderr
 		Log.initialized = true
 		return nil
 	}
@@ -109,9 +109,9 @@ func Initialize(cfg LogConfig, runID string) error {
 		Compress:   true,  // gzip old logs
 	}
 
-	// Create multi-writer if stdout is enabled
+	// Create multi-writer if console output is enabled (use stderr to share stream with progress bars)
 	if cfg.ToStdout {
-		Log.writer = io.MultiWriter(os.Stdout, Log.fileWriter)
+		Log.writer = io.MultiWriter(os.Stderr, Log.fileWriter)
 	} else {
 		Log.writer = Log.fileWriter
 	}
@@ -286,8 +286,8 @@ func (l *logger) write(msg string) {
 	} else if l.writer != nil {
 		l.writer.Write([]byte(msg))
 	} else {
-		// Fallback to stdout if not initialized
-		fmt.Print(msg)
+		// Fallback to stderr if not initialized
+		fmt.Fprint(os.Stderr, msg)
 	}
 }
 
@@ -302,7 +302,7 @@ func (l *logger) writeImmediate(msg string) {
 	} else if l.writer != nil {
 		l.writer.Write([]byte(msg))
 	} else {
-		fmt.Print(msg)
+		fmt.Fprint(os.Stderr, msg)
 	}
 }
 
