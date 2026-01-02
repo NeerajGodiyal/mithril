@@ -107,6 +107,7 @@ var (
 	blockNearTipLookahead int // Slots ahead to schedule in near-tip
 
 	snapshotDlPath string
+	logDir         string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -1019,6 +1020,9 @@ func runLive(c *cobra.Command, args []string) {
 		logCfg.MaxBackups = 10
 	}
 
+	// Store log dir for startup info display
+	logDir = logCfg.Dir
+
 	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
 		// Non-fatal, continue with stdout-only logging
 		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
@@ -1888,6 +1892,11 @@ func printStartupInfo(commandName string) {
 		}
 	}
 
+	// Log directory
+	if logDir != "" {
+		fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+	}
+
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
 	if blockSource == "lightbringer" {
@@ -1904,43 +1913,6 @@ func printStartupInfo(commandName string) {
 			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
 	}
-
-	// Block mode config (resolve defaults for display)
-	fmt.Println()
-	fmt.Printf("%s━━━ Block Mode Config ━━━%s\n", gold, reset)
-
-	// Resolve actual values that will be used (0 means default will be applied in BlockSource)
-	displayNearTip := blockNearTipThreshold
-	if displayNearTip == 0 {
-		displayNearTip = 32
-	}
-	displayCatchup := blockCatchupThreshold
-	if displayCatchup == 0 {
-		displayCatchup = 64
-	}
-	displayTipGate := blockCatchupTipGateThreshold
-	if displayTipGate == 0 {
-		displayTipGate = 128
-	}
-	displaySafetyMargin := blockTipSafetyMargin
-	if displaySafetyMargin == 0 {
-		displaySafetyMargin = 64
-	}
-	displayNearTipPoll := blockNearTipPollMs
-	if displayNearTipPoll == 0 {
-		displayNearTipPoll = 500
-	}
-	displayNearTipLookahead := blockNearTipLookahead
-	if displayNearTipLookahead == 0 {
-		displayNearTipLookahead = 2
-	}
-
-	fmt.Printf("  %snear_tip_threshold=%d, catchup_threshold=%d%s\n",
-		dim, displayNearTip, displayCatchup, reset)
-	fmt.Printf("  %stip_safety_margin=%d (applies only when gap > %d)%s\n",
-		dim, displaySafetyMargin, displayTipGate, reset)
-	fmt.Printf("  %snear_tip_poll_interval_ms=%d, near_tip_lookahead=%d%s\n",
-		dim, displayNearTipPoll, displayNearTipLookahead, reset)
 
 	fmt.Println()
 }
