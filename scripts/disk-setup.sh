@@ -1259,7 +1259,7 @@ interactive_setup() {
     # Summary and confirmation
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
-    echo "  │ SETUP SUMMARY                                                            │"
+    echo "  │ SETUP SUMMARY                                                           │"
     echo "  ├─────────────────────────────────────────────────────────────────────────┤"
 
     if [[ -n "$accountsdb_disk" ]]; then
@@ -1269,12 +1269,12 @@ interactive_setup() {
         printf "  │              %-58s │\n" "Model: $adb_model"
         printf "  │              %-58s │\n" "Filesystem: $accountsdb_fstype"
         if [[ "$accountsdb_disk" == "$root_disk" ]]; then
-            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}             │"
+            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}            │"
         else
-            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                │"
         fi
     else
-        echo "  │ AccountsDB:  (skipped - using existing)                                │"
+        echo "  │ AccountsDB:  (skipped - using existing)                               │"
     fi
 
     if [[ -n "$data_disk" ]]; then
@@ -1284,23 +1284,23 @@ interactive_setup() {
         printf "  │              %-58s │\n" "Model: $data_model"
         printf "  │              %-58s │\n" "Filesystem: $data_fstype"
         if [[ "$data_disk" == "$root_disk" ]]; then
-            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}             │"
+            echo -e "  │              ${YELLOW}NEW PARTITION on OS disk (free space only)${NC}            │"
         else
-            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                 │"
+            echo -e "  │              ${RED}THIS DRIVE WILL BE ERASED${NC}                                │"
         fi
     elif [[ -n "$accountsdb_disk" ]]; then
-        echo "  │ Data:        (same drive as AccountsDB)                                │"
+        echo "  │ Data:        (same drive as AccountsDB)                               │"
     fi
 
-    echo "  │                                                                          │"
-    echo "  │ Directory structure to be created:                                       │"
-    printf "  │   %-68s │\n" "$accountsdb_mount (AccountsDB data)"
+    echo "  │                                                                         │"
+    echo "  │ Directory structure to be created:                                      │"
+    printf "  │   %-69s │\n" "$accountsdb_mount (AccountsDB data)"
     if [[ -n "$data_disk" ]]; then
-        printf "  │   %-68s │\n" "$data_mount/snapshots"
-        printf "  │   %-68s │\n" "$data_mount/blockstore"
+        printf "  │   %-69s │\n" "$data_mount/snapshots"
+        printf "  │   %-69s │\n" "$data_mount/blockstore"
     else
-        printf "  │   %-68s │\n" "$accountsdb_mount/snapshots"
-        printf "  │   %-68s │\n" "$accountsdb_mount/blockstore"
+        printf "  │   %-69s │\n" "$accountsdb_mount/snapshots"
+        printf "  │   %-69s │\n" "$accountsdb_mount/blockstore"
     fi
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo ""
