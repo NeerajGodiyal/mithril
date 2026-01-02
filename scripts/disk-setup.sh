@@ -94,6 +94,10 @@
 #   --clean-blockstore   Clear verified blocks only
 #   --clean-all          Clear everything (complete reset)
 #
+# NUCLEAR OPTIONS (full teardown):
+#   --reset              Unmount, remove fstab entries, delete all directories
+#   --reset --wipe-disks Also wipefs the Mithril partitions (requires extra confirmation)
+#
 # MAINTENANCE:
 #   --fix-noatime        Add noatime mount option to existing Mithril partitions
 #
@@ -1315,11 +1319,11 @@ interactive_setup() {
         fi
 
         mkdir -p "$accountsdb_mount"
-        mkdir -p "$accountsdb_mount/snapshots"
-        mkdir -p "$accountsdb_mount/blockstore"
+        mkdir -p /mnt/mithril-ledger/snapshots
+        mkdir -p /mnt/mithril-ledger/blockstore
         mkdir -p /mnt/mithril-logs
 
-        success "Directories created"
+        success "Directories created at $accountsdb_mount, /mnt/mithril-ledger, /mnt/mithril-logs"
         return
     fi
 
@@ -1364,10 +1368,10 @@ interactive_setup() {
         mount "$accountsdb_part" "$accountsdb_mount"
         add_fstab_entry "$accountsdb_part" "$accountsdb_mount" "$accountsdb_fstype"
 
-        # Create subdirectories for snapshots/blockstore if no separate data disk
+        # Always create ledger directories at consistent location (even with single disk)
         if [[ -z "$data_disk" ]]; then
-            mkdir -p "$accountsdb_mount/snapshots"
-            mkdir -p "$accountsdb_mount/blockstore"
+            mkdir -p /mnt/mithril-ledger/snapshots
+            mkdir -p /mnt/mithril-ledger/blockstore
         fi
 
         if [[ "$accountsdb_disk" == "$root_disk" ]]; then
@@ -1424,15 +1428,20 @@ interactive_setup() {
     echo "  │ SETUP COMPLETE                                                           │"
     echo "  ├─────────────────────────────────────────────────────────────────────────┤"
     echo "  │                                                                          │"
+    echo "  │ Directories created:                                                     │"
+    echo "  │   /mnt/mithril-accounts      - AccountsDB storage                        │"
+    echo "  │   /mnt/mithril-ledger        - Snapshots and blockstore                  │"
+    echo "  │   /mnt/mithril-logs          - Log files                                 │"
+    echo "  │                                                                          │"
     echo "  │ Update your config.toml:                                                 │"
     echo "  │                                                                          │"
-    # Determine paths based on whether there's a separate data disk
-    local ledger_base="$accountsdb_mount"
-    [[ -n "$data_disk" ]] && ledger_base="$data_mount"
-    echo "  │   [storage]                                                              │"
-    printf "  │       accounts = \"%s\"%-*s│\n" "$accountsdb_mount" $((39 - ${#accountsdb_mount})) ""
-    printf "  │       blockstore = \"%s/blockstore\"%-*s│\n" "$ledger_base" $((29 - ${#ledger_base})) ""
-    printf "  │       snapshots = \"%s/snapshots\"%-*s│\n" "$ledger_base" $((30 - ${#ledger_base})) ""
+    echo "  │   [ledger]                                                               │"
+    echo "  │       accounts_path = \"/mnt/mithril-accounts\"                            │"
+    echo "  │       snapshot_archive_path = \"/mnt/mithril-ledger/snapshots\"            │"
+    echo "  │       path = \"/mnt/mithril-ledger/blockstore\"                            │"
+    echo "  │                                                                          │"
+    echo "  │   [log]                                                                  │"
+    echo "  │       dir = \"/mnt/mithril-logs\"                                          │"
     echo "  │                                                                          │"
     echo "  │ Next: Run performance-tune.sh to optimize I/O settings                   │"
     echo "  │                                                                          │"
@@ -2056,6 +2065,149 @@ clean_all() {
 }
 
 # ------------------------------------------------------------------------------
+# Reset (Nuclear Option)
+# ------------------------------------------------------------------------------
+
+reset_all() {
+    local wipe_disks="${1:-false}"
+
+    info "MITHRIL FULL RESET"
+    echo ""
+    echo "  This will:"
+    echo "    1. Unmount all Mithril mount points"
+    echo "    2. Remove Mithril entries from /etc/fstab"
+    echo "    3. Delete all Mithril directories"
+    if [[ "$wipe_disks" == "true" ]]; then
+        echo -e "    4. ${RED}WIPE Mithril partitions (wipefs)${NC}"
+    fi
+    echo ""
+
+    # Find all mithril mount points
+    local mithril_mounts=()
+    local mithril_dirs=(
+        "/mnt/mithril-accounts"
+        "/mnt/mithril-ledger"
+        "/mnt/mithril-logs"
+    )
+
+    echo "  Checking mount points..."
+    for dir in "${mithril_dirs[@]}"; do
+        if findmnt "$dir" >/dev/null 2>&1; then
+            local device
+            device=$(findmnt -n -o SOURCE "$dir" 2>/dev/null || echo "unknown")
+            echo -e "    ${YELLOW}MOUNTED${NC}: $dir -> $device"
+            mithril_mounts+=("$dir")
+        elif [[ -d "$dir" ]]; then
+            echo -e "    ${GREEN}EXISTS${NC}:  $dir (not mounted)"
+        else
+            echo "    -       $dir (not found)"
+        fi
+    done
+
+    # Find partitions that would be wiped
+    local partitions_to_wipe=()
+    if [[ "$wipe_disks" == "true" ]]; then
+        echo ""
+        echo "  Partitions that will be wiped:"
+        for dir in "${mithril_mounts[@]}"; do
+            local device
+            device=$(findmnt -n -o SOURCE "$dir" 2>/dev/null)
+            if [[ -n "$device" && "$device" != "/" ]]; then
+                # Safety: never wipe root partition or OS disk partitions
+                local parent_disk
+                parent_disk=$(lsblk -no PKNAME "$device" 2>/dev/null | head -1)
+                local root_disk
+                root_disk=$(get_root_disk)
+                if [[ "$parent_disk" == "$root_disk" ]]; then
+                    echo -e "    ${RED}SKIPPING${NC}: $device (on OS disk - protected)"
+                else
+                    echo -e "    ${RED}WILL WIPE${NC}: $device"
+                    partitions_to_wipe+=("$device")
+                fi
+            fi
+        done
+    fi
+
+    echo ""
+
+    # Require confirmation
+    if [[ "$wipe_disks" == "true" && ${#partitions_to_wipe[@]} -gt 0 ]]; then
+        echo -e "  ${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"
+        echo -e "  ${RED}DESTRUCTIVE ACTION - PARTITIONS WILL BE PERMANENTLY WIPED${NC}"
+        echo -e "  ${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"
+        echo ""
+        echo "  To proceed, type exactly:"
+        echo "    RESET AND WIPE"
+        echo ""
+        read -r -p "> " confirm
+        if [[ "$confirm" != "RESET AND WIPE" ]]; then
+            echo "  Aborted."
+            exit 1
+        fi
+    else
+        confirm_destructive "RESET MITHRIL"
+    fi
+
+    # Step 1: Unmount all mithril mount points
+    info "Unmounting Mithril directories..."
+    for mount_point in "${mithril_mounts[@]}"; do
+        echo "  Unmounting $mount_point..."
+        if ! umount "$mount_point" 2>/dev/null; then
+            # Try lazy unmount if normal unmount fails
+            warn "Normal unmount failed, trying lazy unmount..."
+            if ! umount -l "$mount_point" 2>/dev/null; then
+                warn "Could not unmount $mount_point - is mithril still running?"
+                echo "  Try: sudo lsof +D $mount_point"
+                exit 1
+            fi
+        fi
+        success "Unmounted $mount_point"
+    done
+
+    # Step 2: Remove fstab entries
+    info "Removing Mithril entries from /etc/fstab..."
+    if grep -q mithril /etc/fstab 2>/dev/null; then
+        # Backup fstab
+        cp /etc/fstab /etc/fstab.bak.$(date +%Y%m%d%H%M%S)
+        # Remove mithril lines
+        sed -i '/mithril/d' /etc/fstab
+        success "Removed Mithril entries from fstab (backup created)"
+        systemctl daemon-reload
+    else
+        echo "  No Mithril entries found in fstab"
+    fi
+
+    # Step 3: Delete directories
+    info "Removing Mithril directories..."
+    for dir in "${mithril_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            echo "  Removing $dir..."
+            rm -rf "$dir"
+            success "Deleted $dir"
+        fi
+    done
+
+    # Step 4: Wipe partitions (if requested)
+    if [[ "$wipe_disks" == "true" && ${#partitions_to_wipe[@]} -gt 0 ]]; then
+        info "Wiping Mithril partitions..."
+        for partition in "${partitions_to_wipe[@]}"; do
+            echo "  Wiping $partition..."
+            wipefs -a "$partition" 2>/dev/null || warn "Could not wipe $partition"
+            success "Wiped $partition"
+        done
+    fi
+
+    echo ""
+    success "Mithril has been completely reset"
+    echo ""
+    echo "  Next steps:"
+    echo "    1. Run: sudo ./scripts/disk-setup.sh --setup"
+    echo "    2. Update config.toml with new paths"
+    echo "    3. Run: ./mithril run"
+    echo ""
+}
+
+# ------------------------------------------------------------------------------
 # Disk Summary
 # ------------------------------------------------------------------------------
 
@@ -2674,6 +2826,15 @@ main() {
             check_root
             clean_all
             ;;
+        --reset)
+            check_root
+            # Check for --wipe-disks flag
+            if [[ "${2:-}" == "--wipe-disks" ]]; then
+                reset_all true
+            else
+                reset_all false
+            fi
+            ;;
         --fix-noatime)
             check_root
             fix_noatime
@@ -2711,6 +2872,10 @@ main() {
             echo "  sudo ./scripts/disk-setup.sh --clean-snapshots    # Clear snapshots only"
             echo "  sudo ./scripts/disk-setup.sh --clean-blockstore   # Clear blockstore only"
             echo "  sudo ./scripts/disk-setup.sh --clean-all          # Clear everything"
+            echo ""
+            echo "Nuclear options (full teardown):"
+            echo "  sudo ./scripts/disk-setup.sh --reset              # Unmount + remove fstab + delete dirs"
+            echo "  sudo ./scripts/disk-setup.sh --reset --wipe-disks # Also wipe partitions"
             echo ""
             echo "Maintenance:"
             echo "  sudo ./scripts/disk-setup.sh --fix-noatime        # Add noatime to existing mounts"
