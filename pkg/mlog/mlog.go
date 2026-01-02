@@ -323,12 +323,13 @@ func (l *logger) Infof(format string, args ...interface{}) {
 }
 
 // InfofPrecise logs with millisecond precision timing (for block replay)
+// Flushes immediately to ensure real-time output during replay
 func (l *logger) InfofPrecise(format string, args ...interface{}) {
 	if l.level > LevelInfo {
 		return
 	}
 	msg := fmt.Sprintf("%s%s\n", relativePrefixPrecise(), fmt.Sprintf(format, args...))
-	l.write(msg)
+	l.writeImmediate(msg)
 }
 
 func (l *logger) Warnf(format string, args ...interface{}) {
