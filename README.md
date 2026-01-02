@@ -51,19 +51,19 @@ We provide helper scripts for setting up your system. See the [scripts documenta
 - **Disk Setup** - Benchmark NVMe drives, format with optimal settings, reset Mithril data
 - **Performance Tuning** - Kernel settings, CPU optimization, etc.
 
-The scripts create the following directory structure (following Agave conventions):
+```bash
+# These scripts require root privileges
+sudo ./scripts/disk-setup.sh --setup
+sudo ./scripts/performance-tune.sh
+```
+
+The scripts create the following directory structure and automatically set ownership to your user:
 
 ```
 /mnt/mithril-accounts/   # AccountsDB (needs higher random IOPS - use fastest drive)
 /mnt/mithril-ledger/     # Blockstore and snapshots (can use slower drive)
     ├── blockstore/
     └── snapshots/
-```
-
-After running the disk setup script, set ownership so Mithril can write to these directories:
-
-```bash
-sudo chown -R $USER:$USER /mnt/mithril-accounts /mnt/mithril-ledger
 ```
 
 **Step 3: Install build dependencies**
@@ -151,6 +151,8 @@ See `config.example.toml` for all available configuration options including snap
 ```bash
 ./mithril run --config config.toml
 ```
+
+**Note:** Do not run Mithril with `sudo`. The setup scripts automatically configure directory permissions for your user.
 
 **What happens:**
 1. Mithril queries the Solana cluster to find reliable snapshot sources
