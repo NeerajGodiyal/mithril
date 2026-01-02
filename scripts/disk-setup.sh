@@ -1314,9 +1314,11 @@ interactive_setup() {
         printf "  │   %-69s │\n" "$data_mount/snapshots"
         printf "  │   %-69s │\n" "$data_mount/blockstore"
     else
-        printf "  │   %-69s │\n" "$accountsdb_mount/snapshots"
-        printf "  │   %-69s │\n" "$accountsdb_mount/blockstore"
+        # When no data disk, ledger dirs always go to /mnt/mithril-ledger
+        printf "  │   %-69s │\n" "/mnt/mithril-ledger/snapshots"
+        printf "  │   %-69s │\n" "/mnt/mithril-ledger/blockstore"
     fi
+    printf "  │   %-69s │\n" "/mnt/mithril-logs (log files)"
     echo "  └─────────────────────────────────────────────────────────────────────────┘"
     echo ""
 
