@@ -969,33 +969,53 @@ func runLive(c *cobra.Command, args []string) {
 	// Generate run ID early so it's available for logging and state tracking
 	replay.CurrentRunID = replay.GenerateRunID()
 
-	// Initialize file logging
+	// Initialize file logging with defaults
+	// Use config.IsSet() to allow explicit empty/zero values:
+	//   dir = ""          → disable file logging (stdout only)
+	//   max_size_mb = 0   → no limit
+	//   max_age_days = 0  → never delete
+	//   max_backups = 0   → unlimited
 	logCfg := mlog.LogConfig{
-		Dir:        config.GetString("log.dir"),
-		Level:      config.GetString("log.level"),
-		ToStdout:   true, // Default true, override if explicitly set false
-		MaxSizeMB:  config.GetInt("log.max_size_mb"),
-		MaxAgeDays: config.GetInt("log.max_age_days"),
-		MaxBackups: config.GetInt("log.max_backups"),
+		ToStdout: true, // Default true, override if explicitly set false
 	}
-	// Handle to_stdout explicitly (viper returns false for missing bool)
+
+	// Dir: default to /mnt/mithril-logs, but "" disables file logging
+	if config.IsSet("log.dir") {
+		logCfg.Dir = config.GetString("log.dir")
+	} else {
+		logCfg.Dir = "/mnt/mithril-logs"
+	}
+
+	// Level: default to "info"
+	if config.IsSet("log.level") {
+		logCfg.Level = config.GetString("log.level")
+	} else {
+		logCfg.Level = "info"
+	}
+
+	// ToStdout: default true (viper returns false for missing bool)
 	if config.IsSet("log.to_stdout") {
 		logCfg.ToStdout = config.GetBool("log.to_stdout")
 	}
-	// Apply defaults if not set
-	if logCfg.Dir == "" {
-		logCfg.Dir = "/mnt/mithril-logs"
-	}
-	if logCfg.Level == "" {
-		logCfg.Level = "info"
-	}
-	if logCfg.MaxSizeMB == 0 {
+
+	// MaxSizeMB: default 100, but 0 means no limit
+	if config.IsSet("log.max_size_mb") {
+		logCfg.MaxSizeMB = config.GetInt("log.max_size_mb")
+	} else {
 		logCfg.MaxSizeMB = 100
 	}
-	if logCfg.MaxAgeDays == 0 {
+
+	// MaxAgeDays: default 7, but 0 means never delete
+	if config.IsSet("log.max_age_days") {
+		logCfg.MaxAgeDays = config.GetInt("log.max_age_days")
+	} else {
 		logCfg.MaxAgeDays = 7
 	}
-	if logCfg.MaxBackups == 0 {
+
+	// MaxBackups: default 10, but 0 means unlimited
+	if config.IsSet("log.max_backups") {
+		logCfg.MaxBackups = config.GetInt("log.max_backups")
+	} else {
 		logCfg.MaxBackups = 10
 	}
 
