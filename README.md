@@ -197,7 +197,15 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 
 ### Current Limitations
 
-- **Block Catchup**: Mithril currently relies on `getBlock` RPC calls to catch up to the tip of mainnet-beta. We are actively working on adding support for direct shred replay, which will be more decentralized and performant.
+- **Block Catchup**: Mithril currently relies on `getBlock` RPC calls to catch up to the tip of mainnet-beta. This dependency is temporary — we are actively working on direct shred replay, which will eliminate the need for external RPC sources entirely.
+
+### RPC Sources
+
+Mithril fetches blocks via `getBlock` RPC calls during catchup. For **short-term testing**, most free RPC plans (Helius, QuickNode, Triton, etc.) are sufficient to try out Mithril.
+
+For **extended testing** or if you'd like to help with longer-running nodes, reach out to us on the [Overclock Validator Discord](https://discord.gg/overclock) — we can provide access to our RPC endpoints.
+
+Once direct shred replay is implemented, external RPC sources will no longer be required for block fetching.
 
 ### Troubleshooting
 
