@@ -130,7 +130,8 @@ func BuildAccountsDbWithIncr(
 	// Wait for all workers to finish before continuing to incremental phase
 	wg.Wait()
 
-	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
+	// Log full snapshot processing time to debug log only (noise reduction)
+	mlog.Log.Debugf("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
 
 	// Note: ShardLogger is NOT closed here - we use one logger for both phases
 	// and flush once at the end. This avoids the bug where pools still reference

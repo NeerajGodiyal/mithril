@@ -322,7 +322,6 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
-	fmt.Fprintln(d.output)
 
 	// Print initial empty lines for progress bars (2 bars)
 	fmt.Fprintln(d.output)

@@ -449,12 +449,12 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 		stats.PrintFilterPipeline(filterCfg, speedStats)
 	}
 
-	// Write detailed speed test log to file
-	if speedStats != nil && snapCfg.LogDir != "" {
-		if err := speedStats.WriteSpeedTestLog(snapCfg.LogDir, filterCfg); err != nil {
-			mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
-		}
-	}
+	// Speed test log writing disabled - uncomment to enable
+	// if speedStats != nil && snapCfg.LogDir != "" {
+	// 	if err := speedStats.WriteSpeedTestLog(snapCfg.LogDir, filterCfg); err != nil {
+	// 		mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
+	// 	}
+	// }
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
 	var snapshotURL string
