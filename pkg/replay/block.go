@@ -1172,6 +1172,15 @@ func ReplayBlocks(
 		lastPersistedSlot = block.Slot
 		lastPersistedBankhash = lastSlotCtx.FinalBankhash
 
+		// Check for cancellation immediately after block completes.
+		// This minimizes the window between bankhash persistence and state file update,
+		// preventing false "corruption" detection on graceful shutdown.
+		if ctx.Err() != nil {
+			mlog.Log.Infof("context cancelled after slot %d, exiting replay loop", block.Slot)
+			result.WasCancelled = true
+			break
+		}
+
 		slotReplayDuration := time.Since(start)
 
 		// Calculate slot stats: vote/non-vote tx counts and total CU
