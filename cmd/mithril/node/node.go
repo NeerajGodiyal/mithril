@@ -1026,8 +1026,6 @@ func runLive(c *cobra.Command, args []string) {
 	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
 		// Non-fatal, continue with stdout-only logging
 		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
-	} else if logPath := mlog.GetLogPath(); logPath != "" {
-		fmt.Printf("  Log file: %s\n", logPath)
 	}
 	defer mlog.Shutdown()
 

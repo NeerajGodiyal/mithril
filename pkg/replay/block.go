@@ -862,7 +862,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		// Restore SysvarCache.SlotHashes from state file (vote program needs accurate slot→hash mappings)
 		if resumeState.SlotHashes != nil {
 			sealevel.SysvarCache.SlotHashes.Sysvar = resumeState.SlotHashes
-			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file", len(*resumeState.SlotHashes))
+			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file\n", len(*resumeState.SlotHashes))
 		}
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
