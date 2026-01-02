@@ -133,8 +133,8 @@ cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
-# overcast_endpoint = "localhost:9000"
+source = "rpc"   # "rpc" | "lightbringer" (lightbringer temporarily disabled, falls back to rpc)
+# lightbringer_endpoint = "localhost:9000"
 
 [replay]
 txpar = 24   # Recommended: 2x your CPU core count

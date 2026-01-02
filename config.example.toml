@@ -55,7 +55,7 @@ name = "mithril"
 #     one on first run to bootstrap AccountsDB.
 #
 #   Blockstore (varies)
-#     Incoming blocks from RPC/Overcast. Size depends on how much history
+#     Incoming blocks from RPC/Lightbringer. Size depends on how much history
 #     you want to keep (0 to hundreds of GB).
 #     NOTE: Block download to disk is TEMPORARILY DISABLED. Blocks are
 #     currently streamed directly from RPC and not persisted to disk.
@@ -75,7 +75,7 @@ name = "mithril"
     # Put this on your fastest NVMe due to heavy random I/O.
     accounts = "/mnt/mithril-accounts"
 
-    # Blockstore - incoming blocks from RPC/Overcast
+    # Blockstore - incoming blocks from RPC/Lightbringer
     # Size depends on how much block history you keep.
     # NOTE: Block persistence is temporarily disabled. Blocks are streamed
     # directly from RPC without saving to disk. This setting is reserved
@@ -119,16 +119,16 @@ name = "mithril"
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"      - Fetch blocks via RPC (uses endpoints from [network].rpc)
-    #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
-    #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
-    #                The background downloader was removed; Overcast streaming will be
-    #                re-implemented in a future release.
+    #   "rpc"          - Fetch blocks via RPC (uses endpoints from [network].rpc)
+    #   "lightbringer" - Stream blocks from a Lightbringer endpoint (faster, lower latency)
+    #                    NOTE: Lightbringer mode is TEMPORARILY DISABLED and will fall back to RPC.
+    #                    The background downloader was removed; Lightbringer streaming will be
+    #                    re-implemented in a future release.
     source = "rpc"
 
-    # Overcast endpoint address (only used when source = "overcast")
-    # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
-    # overcast_endpoint = "localhost:9000"
+    # Lightbringer endpoint address (only used when source = "lightbringer")
+    # NOTE: Currently unused - Lightbringer mode is temporarily disabled (see above)
+    # lightbringer_endpoint = "localhost:9000"
 
     # =========================================================================
     # Global Fetch Tuning

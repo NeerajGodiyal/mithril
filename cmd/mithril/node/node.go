@@ -90,8 +90,8 @@ var (
 	scratchDirectory            string
 	rpcEndpoints                []string
 	cluster                     string   // "mainnet-beta", "testnet", "devnet"
-	blockSource                 string   // "rpc" or "overcast"
-	overcastEndpoint            string
+	blockSource                 string   // "rpc" or "lightbringer"
+	lightbringerEndpoint        string
 	blockMaxRPS                 int      // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
@@ -161,7 +161,7 @@ func init() {
 	// [reporting] section flags
 	VerifyRange.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
 
-	// [overcast] section flags
+	// [lightbringer] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
 	// flags for 'mithril run' (live full node mode)
@@ -203,8 +203,8 @@ func init() {
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
-	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'lightbringer'")
+	Run.Flags().StringVar(&lightbringerEndpoint, "lightbringer-endpoint", "", "Address for Lightbringer endpoint (only used when block-source=lightbringer)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -431,7 +431,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if blockSource == "" {
 		blockSource = "rpc" // default
 	}
-	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
+	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
 
 	// Validate: blockSource=rpc requires RPC endpoints
 	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
@@ -977,23 +977,23 @@ func runLive(c *cobra.Command, args []string) {
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
 
-	// Determine if using Overcast based on block source
-	// NOTE: Overcast mode is TEMPORARILY DISABLED. The background block downloader that
-	// wrote Overcast blocks to disk was removed due to reliability issues (panics, race conditions).
-	// Until Overcast streaming is re-implemented with the new parallel fetcher architecture,
-	// all Overcast requests will fall back to RPC mode.
-	// TODO: Re-implement Overcast as a streaming BlockSource (push model -> reorder buffer)
-	useOvercast := blockSource == "overcast"
-	if useOvercast {
-		mlog.Log.Infof("WARNING: block.source=overcast is temporarily disabled - falling back to RPC")
-		mlog.Log.Infof("  The background block downloader was removed. Overcast streaming will be")
+	// Determine if using Lightbringer based on block source
+	// NOTE: Lightbringer mode is TEMPORARILY DISABLED. The background block downloader that
+	// wrote Lightbringer blocks to disk was removed due to reliability issues (panics, race conditions).
+	// Until Lightbringer streaming is re-implemented with the new parallel fetcher architecture,
+	// all Lightbringer requests will fall back to RPC mode.
+	// TODO: Re-implement Lightbringer as a streaming BlockSource (push model -> reorder buffer)
+	useLightbringer := blockSource == "lightbringer"
+	if useLightbringer {
+		mlog.Log.Infof("WARNING: block.source=lightbringer is temporarily disabled - falling back to RPC")
+		mlog.Log.Infof("  The background block downloader was removed. Lightbringer streaming will be")
 		mlog.Log.Infof("  re-implemented in a future PR with the new parallel fetcher architecture.")
-		useOvercast = false
+		useLightbringer = false
 
 		// Validate RPC endpoints since we're falling back to RPC mode
 		// (This check is normally done in loadConfig but only when blockSource == "rpc")
 		if len(rpcEndpoints) == 0 {
-			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
+			klog.Fatalf("block.source=lightbringer requires fallback to RPC, but no RPC endpoints are configured. " +
 				"Set network.rpc in config, or use --rpc flag.")
 		}
 	}
@@ -1493,7 +1493,7 @@ func runLive(c *cobra.Command, args []string) {
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and resume context
 	// Skip if already written during cancellation (eliminates timing window)
@@ -1844,8 +1844,8 @@ func printStartupInfo(commandName string) {
 
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" {
-		// Overcast is temporarily disabled - show this in startup info
+	if blockSource == "lightbringer" {
+		// Lightbringer is temporarily disabled - show this in startup info
 		fmt.Printf(" %s(disabled, using rpc)%s\n", dim, reset)
 	} else {
 		fmt.Println()
@@ -2313,7 +2313,7 @@ func runReplayWithRecovery(
 	blockDir string,
 	txParallelism int,
 	isLive bool,
-	useOvercast bool,
+	useLightbringer bool,
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
@@ -2422,6 +2422,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
 	return result
 }

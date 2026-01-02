@@ -6,7 +6,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-func FromOvercastStreamMsg(resp *overcast.SlotResponse) *Block {
+func FromLightbringerStreamMsg(resp *overcast.SlotResponse) *Block {
 	block := new(Block)
 	block.Slot = resp.Slot
 	block.Transactions = make([]*solana.Transaction, 0, 2000)
@@ -39,7 +39,7 @@ func FromOvercastStreamMsg(resp *overcast.SlotResponse) *Block {
 
 	block.Blockhash = solana.HashFromBytes(resp.Entries[len(resp.Entries)-1].Hash[:])
 	block.BlockHeight = global.BlockHeight()
-	block.FromOvercast = true
+	block.FromLightbringer = true
 
 	return block
 }

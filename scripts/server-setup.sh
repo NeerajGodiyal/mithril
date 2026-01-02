@@ -703,7 +703,7 @@ mode_install() {
     echo "  Enable UFW firewall? (Recommended)"
     echo "    - Blocks unsolicited incoming connections"
     echo "    - Allows SSH (port 22) incoming"
-    echo "    - Allows ALL outgoing connections (RPC, Overcast, etc.)"
+    echo "    - Allows ALL outgoing connections (RPC, Lightbringer, etc.)"
     echo ""
     local ENABLE_UFW="yes"
     if yesno "  Enable UFW firewall?" "y"; then

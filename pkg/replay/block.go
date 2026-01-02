@@ -922,7 +922,7 @@ func ReplayBlocks(
 	blockDir string,
 	txParallelism int,
 	isLive bool,
-	useOvercast bool,
+	useLightbringer bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
@@ -1007,9 +1007,9 @@ func ReplayBlocks(
 	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
 
 	var opts *blockstream.BlockSourceOpts
-	if useOvercast {
+	if useLightbringer {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:         blockstream.BlockSourceOvercast,
+			SourceType:         blockstream.BlockSourceLightbringer,
 			RpcClient:          rpcc,
 			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
@@ -1634,7 +1634,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
-	if rblock.FromOvercast {
+	if rblock.FromLightbringer {
 		wg := &sync.WaitGroup{}
 		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
 			defer wg.Done()
@@ -1722,7 +1722,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	for i := range block.Transactions {
 		unresolvedBlock.Transactions[i] = &solana.Transaction{}
 		*(unresolvedBlock.Transactions[i]) = *block.Transactions[i]
-		if unresolvedBlock.TxMetas != nil && !block.FromOvercast {
+		if unresolvedBlock.TxMetas != nil && !block.FromLightbringer {
 			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
 			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
 		}

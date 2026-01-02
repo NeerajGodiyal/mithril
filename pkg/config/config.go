@@ -61,8 +61,8 @@ type ReportingConfig struct {
 
 // BlockConfig holds block source configuration
 type BlockConfig struct {
-	Source           string `toml:"source" mapstructure:"source"`                       // "rpc" or "overcast"
-	OvercastEndpoint string `toml:"overcast_endpoint" mapstructure:"overcast_endpoint"` // Overcast endpoint (optional)
+	Source              string `toml:"source" mapstructure:"source"`                             // "rpc" or "lightbringer"
+	LightbringerEndpoint string `toml:"lightbringer_endpoint" mapstructure:"lightbringer_endpoint"` // Lightbringer endpoint (optional)
 
 	// Global fetch tuning
 	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                       // Rate limit (requests per second)

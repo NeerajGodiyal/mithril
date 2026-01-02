@@ -45,7 +45,7 @@ type Block struct {
 	LatestEvictedBlockhash              [32]byte
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
-	FromOvercast                        bool
+	FromLightbringer                    bool
 }
 
 func (b *Block) FixupTxVersions() {

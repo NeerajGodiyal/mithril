@@ -28,16 +28,16 @@ example with multiple endpoints:
 go build ./cmd/mithril ; ./mithril verify-live --accounts-path /mnt/accounts_db/ -r http://rpc1,http://rpc2,http://rpc3 --txpar 96
 ```
 
-### Using Overcast block source:
+### Using Lightbringer block source:
 
-Set block source to overcast in config.toml:
+Set block source to lightbringer in config.toml:
 ```toml
 [block]
-    source = "overcast"
-    overcast_endpoint = "localhost:9000"
+    source = "lightbringer"
+    lightbringer_endpoint = "localhost:9000"
 ```
 
 Or via CLI:
 ```
-./mithril verify-live --config config.toml --block-source overcast --overcast-endpoint localhost:9000
+./mithril verify-live --config config.toml --block-source lightbringer --lightbringer-endpoint localhost:9000
 ```

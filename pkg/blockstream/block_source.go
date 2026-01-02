@@ -24,7 +24,7 @@ type BlockSourceType int
 const (
 	BlockSourceRpc = iota
 	BlockSourceFile
-	BlockSourceOvercast
+	BlockSourceLightbringer
 )
 
 type BlockSourceOpts struct {
@@ -1632,12 +1632,12 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			}
 			blk = block.FromBlockResult(blockResult, slot, rpc)
 		}
-	} else if bs.sourceType == BlockSourceOvercast {
-		// NOTE: BlockSourceOvercast is TEMPORARILY NON-FUNCTIONAL.
+	} else if bs.sourceType == BlockSourceLightbringer {
+		// NOTE: BlockSourceLightbringer is TEMPORARILY NON-FUNCTIONAL.
 		// The background block downloader that populated files for this path was removed.
-		// This code path will return SlotSkipped for every slot until Overcast streaming
+		// This code path will return SlotSkipped for every slot until Lightbringer streaming
 		// is re-implemented as a push-based source feeding directly into the reorder buffer.
-		// TODO: Implement Overcast as a streaming source (gRPC stream -> reorder buffer)
+		// TODO: Implement Lightbringer as a streaming source (gRPC stream -> reorder buffer)
 		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
 			return nil, rpcclient.SlotSkipped
