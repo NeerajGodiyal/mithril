@@ -999,17 +999,29 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 		r = colorReset
 	}
 
-	// Print the prompt box
+	// Format slot values
+	accountsSlot := formatSlots(info.AccountsDBSlot)
+	latestSlot := formatSlots(info.LatestSnapshotSlot)
+	slotsBehind := formatSlots(info.SlotsBehind)
+
+	// Build option 1 text and calculate padding
+	opt1Text := fmt.Sprintf("  [1] Continue from AccountsDB (replay %s slots)", slotsBehind)
+	opt1Padding := 76 - len(opt1Text)
+	if opt1Padding < 0 {
+		opt1Padding = 0
+	}
+
+	// Print the prompt box (76 chars inner width)
 	fmt.Println()
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
 	fmt.Printf("%s│%s ACCOUNTSDB BEHIND CHAIN TIP                                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "AccountsDB last slot:", formatSlots(info.AccountsDBSlot), c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Latest snapshot slot:", formatSlots(info.LatestSnapshotSlot), c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Slots behind:", formatSlots(info.SlotsBehind), c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "AccountsDB last slot:", accountsSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Chain tip slot:", latestSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Slots behind:", slotsBehind, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
 	fmt.Printf("%s│%s OPTIONS:                                                                     %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   [1] Continue from AccountsDB (replay %s slots)%-26s%s│%s\n", c, r, formatSlots(info.SlotsBehind), "", c, r)
+	fmt.Printf("%s│%s%s%*s %s│%s\n", c, r, opt1Text, opt1Padding, "", c, r)
 	fmt.Printf("%s│%s   [2] Start fresh from latest snapshot (faster to catch up)                 %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)

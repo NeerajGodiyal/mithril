@@ -1188,12 +1188,13 @@ func runLive(c *cobra.Command, args []string) {
 		}
 
 		if hasValidState {
-			// Check if AccountsDB is stale (significantly behind chain tip)
+			// Check if AccountsDB is behind chain tip (more than 2000 slots triggers prompt)
 			// Use queryCurrentSlot instead of queryLatestSnapshotSlot to avoid expensive node discovery
+			const stalePromptThreshold = 2000
 			currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
 			if err != nil {
 				mlog.Log.Infof("could not query current slot: %v (continuing with existing AccountsDB)", err)
-			} else if mithrilState.IsStale(currentSlot, uint64(fullThreshold)) {
+			} else if mithrilState.IsStale(currentSlot, stalePromptThreshold) {
 				slotsBehind := currentSlot - mithrilState.GetCurrentSlot()
 				mlog.Log.Infof("AccountsDB is %d slots behind chain tip", slotsBehind)
 
