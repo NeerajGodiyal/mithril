@@ -214,6 +214,42 @@ func init() {
 	VerifyLive.Flags().AddFlagSet(Run.Flags())
 }
 
+// checkDirWritable verifies the current user can write to a directory.
+// Returns an error with a helpful fix message if the directory exists but is not writable.
+func checkDirWritable(path, description string) error {
+	if path == "" {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		// Directory doesn't exist yet - will be created later
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access %s at %s: %v", description, path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s path is not a directory: %s", description, path)
+	}
+
+	// Try to create a temp file to verify write permission
+	testFile := filepath.Join(path, ".mithril_write_test")
+	f, err := os.Create(testFile)
+	if err != nil {
+		// Get owner info for helpful error message
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			return fmt.Errorf("%s directory not writable: %s (owned by uid %d, running as uid %d)\n\nFix: sudo chown -R $USER:$USER %s",
+				description, path, stat.Uid, os.Getuid(), path)
+		}
+		return fmt.Errorf("%s directory not writable: %s\n\nFix: sudo chown -R $USER:$USER %s",
+			description, path, path)
+	}
+	f.Close()
+	os.Remove(testFile)
+	return nil
+}
+
 // initConfigAndBindFlags loads TOML config file (if specified) and binds flags to viper.
 // After this runs, config values can be read from either CLI flags or config file,
 // with CLI flags taking precedence.
@@ -355,6 +391,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	accountsPath = getString("accounts-path", "storage.accounts")
 	if accountsPath == "" {
 		accountsPath = getString("accounts-path", "ledger.accounts_path")
+	}
+	// Check write permission early to fail fast with helpful error
+	if err := checkDirWritable(accountsPath, "AccountsDB"); err != nil {
+		return err
 	}
 	blockstorePath = getString("ledger-path", "storage.blockstore")
 	if blockstorePath == "" {
