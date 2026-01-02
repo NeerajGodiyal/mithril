@@ -201,7 +201,7 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 
 ### RPC Sources
 
-Mithril fetches blocks via `getBlock` RPC calls during catchup. For **short-term testing**, most free RPC plans (Helius, QuickNode, Triton, etc.) are sufficient to try out Mithril.
+Mithril fetches blocks via `getBlock` RPC calls during catchup. For **short-term testing**, most free Solana RPC plans are sufficient to try out Mithril.
 
 For **extended testing** or if you'd like to help with longer-running nodes, reach out to us on the [Overclock Validator Discord](https://discord.gg/overclock) — we can provide access to our RPC endpoints.
 
