@@ -1301,10 +1301,21 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 	if bs.isNearTip.Load() {
 		// Near-tip mode: allow scheduling up to nearTipLookahead slots ahead
 		// This provides enough buffer to hide RPC latency (~300ms) behind execution (~100ms)
-		lastExecuted := bs.lastExecutedSlot.Load()
+		//
+		// CRITICAL: Use nextSlotToSend (not lastExecutedSlot) because skipped slots
+		// advance nextSlotToSend but don't advance lastExecutedSlot. If we used
+		// lastExecutedSlot, consecutive skipped slots would block scheduling and stall.
+		bs.reorderMu.Lock()
+		nextToSend := bs.nextSlotToSend
+		alreadyHave := bs.reorderBuffer[slot] != nil || bs.skippedSlots[slot]
+		bs.reorderMu.Unlock()
 
-		// Allow N+1, N+2, ..., N+nearTipLookahead
-		if lastExecuted > 0 && slot > lastExecuted+bs.nearTipLookahead {
+		if alreadyHave {
+			return false
+		}
+
+		// Allow scheduling up to nearTipLookahead slots ahead of what we're waiting to emit
+		if nextToSend > 0 && slot > nextToSend+bs.nearTipLookahead {
 			return false
 		}
 
@@ -1316,12 +1327,7 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 			return false
 		}
 
-		// Also check if we already have it
-		bs.reorderMu.Lock()
-		alreadyHave := bs.reorderBuffer[slot] != nil || bs.skippedSlots[slot]
-		bs.reorderMu.Unlock()
-
-		return !alreadyHave
+		return true
 	}
 
 	// Catchup mode: gate on buffer capacity
