@@ -925,7 +925,22 @@ format_disk() {
     echo "  This improves SSD longevity and maintains consistent performance."
 
     # Wipe and create GPT
-    wipefs -a "$disk"
+    local wipefs_output
+    if ! wipefs_output=$(wipefs -a "$disk" 2>&1); then
+        if [[ "$wipefs_output" == *"busy"* ]]; then
+            echo ""
+            die "Device $disk is busy and cannot be wiped.
+
+  This usually happens when the kernel still holds a reference to the device.
+
+  Solution: Reboot your machine and try again.
+
+  After rebooting, run:
+    sudo ./scripts/disk-setup.sh --setup"
+        else
+            die "Failed to wipe $disk: $wipefs_output"
+        fi
+    fi
     parted -s "$disk" mklabel gpt
     parted -s "$disk" mkpart primary 1MiB "${use_percent}%"
 
@@ -2193,11 +2208,28 @@ reset_all() {
     # Step 4: Wipe partitions (if requested)
     if [[ "$wipe_disks" == "true" && ${#partitions_to_wipe[@]} -gt 0 ]]; then
         info "Wiping Mithril partitions..."
+        local wipe_had_busy=false
         for partition in "${partitions_to_wipe[@]}"; do
             echo "  Wiping $partition..."
-            wipefs -a "$partition" 2>/dev/null || warn "Could not wipe $partition"
-            success "Wiped $partition"
+            local wipe_output
+            if wipe_output=$(wipefs -a "$partition" 2>&1); then
+                success "Wiped $partition"
+            elif [[ "$wipe_output" == *"busy"* ]]; then
+                warn "Could not wipe $partition - device is busy"
+                wipe_had_busy=true
+            else
+                warn "Could not wipe $partition: $wipe_output"
+            fi
         done
+        if [[ "$wipe_had_busy" == "true" ]]; then
+            echo ""
+            warn "Some partitions could not be wiped because they are busy."
+            echo "      This usually happens when the kernel still holds a reference."
+            echo ""
+            echo "      Solution: Reboot your machine and run again:"
+            echo "        sudo ./scripts/disk-setup.sh --reset --wipe-disks"
+            echo ""
+        fi
     fi
 
     echo ""
