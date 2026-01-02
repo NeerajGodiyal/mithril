@@ -136,6 +136,9 @@ type ShardLogger struct {
 	totalBytes atomic.Int64 // total bytes written to shard logs
 	bytesDone  atomic.Int64 // bytes flushed to cache
 	onProgress ShardProgressCallback
+
+	// closed flag to prevent sends after Close is called (defensive)
+	closed atomic.Bool
 }
 
 // shard represents a single log shard
@@ -305,6 +308,9 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 
 // EnqueueRequest adds a request to the appropriate shard
 func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIndexEntry) {
+	if sl.closed.Load() {
+		return // Already closed, silently ignore
+	}
 	hash := xxhash.Sum64(k[:])
 	shardIdx := uint32(hash % uint64(len(sl.shards)))
 	sl.shards[shardIdx].requests <- shardRequest{k, v}
@@ -318,6 +324,8 @@ func (sl *ShardLogger) Close(ctx context.Context) error {
 // CloseWithProgress closes all shards with optional progress callback.
 // The callback is called after each shard flush completes with (completed, total) counts.
 func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(completed, total int)) error {
+	// Mark as closed before closing channels to prevent late sends
+	sl.closed.Store(true)
 	for _, s := range sl.shards {
 		close(s.requests)
 	}

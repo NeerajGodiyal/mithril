@@ -127,20 +127,14 @@ func BuildAccountsDbWithIncr(
 		dp.Stop()
 	}
 
-	// Show indexing progress for shard flush
-	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
-	indexProgress.Start(numShards)
-	err = sl.CloseWithProgress(ctx, func(completed, total int) {
-		indexProgress.Update(completed, total)
-	})
-	if err != nil {
-		indexProgress.Interrupt(err)
-		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
-	}
+	// Wait for all workers to finish before continuing to incremental phase
+	wg.Wait()
 
 	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
 
-	sl = NewShardLogger(numShards, logsDir, ss)
+	// Note: ShardLogger is NOT closed here - we use one logger for both phases
+	// and flush once at the end. This avoids the bug where pools still reference
+	// the old ShardLogger after reinit.
 
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
@@ -210,8 +204,8 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, err
 	}
 
-	// Show indexing progress for incremental shard flush
-	indexProgress = progress.NewIndexingProgress("Convert log shards to index shards")
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
 	sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
