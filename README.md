@@ -4,7 +4,14 @@ Mithril is a Solana full node client written in Golang with the goal of serving 
 
 This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release in early Q1 2026.
 
-While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the dev branch for the latest updates.
+While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the **alpha** branch for the latest stable updates.
+
+### Release Channels
+
+- **alpha** (recommended): Latest tagged alpha release. Tested for mainnet and suitable for public use.
+- **dev** (cutting-edge): New features land here first and may be less stable.
+
+Use **alpha** for reliability; use **dev** if you want the newest changes and can tolerate breakage.
 
 ---
 
@@ -44,6 +51,9 @@ The `run` command starts Mithril as a live full node - it bootstraps from a Sola
 ```bash
 git clone https://github.com/Overclock-Validator/mithril.git
 cd mithril
+git checkout alpha  # More stable alpha branch
+# OR
+git checkout dev    # Cutting-edge, may be less stable
 ```
 
 **Step 2 (Optional): Run setup scripts**
@@ -112,42 +122,19 @@ Generate a starter config with sensible defaults:
 ./mithril config init
 ```
 
-This creates `config.toml` with all essential settings. Key options to review:
+This creates `config.toml`. **We strongly recommend reviewing [`config.example.toml`](config.example.toml)** for all available options and detailed documentation.
+
+**Important: RPC Configuration**
+
+The default config uses `api.mainnet-beta.solana.com` as the RPC endpoint, but this public endpoint has rate limits. For reliable operation, add a dedicated RPC provider (Helius, Triton, etc.) as the primary endpoint:
 
 ```toml
-name = "mithril"
-
-[bootstrap]
-    # How Mithril initializes state:
-    #   "auto"         - Use existing AccountsDB if valid, else download snapshot (default)
-    #   "snapshot"     - Use existing snapshot if valid, else download new
-    #   "new-snapshot" - Always download a fresh snapshot
-    #   "accountsdb"   - Require existing AccountsDB, fail if missing
-    mode = "auto"
-
-[storage]
-    # AccountsDB path - use your fastest NVMe
-    accounts = "/mnt/mithril-accounts"
-    # Blockstore (reserved for future block persistence)
-    blockstore = "/mnt/mithril-ledger/blockstore"
-    # Snapshot download location
-    snapshots = "/mnt/mithril-ledger/snapshots"
-
 [network]
-    # Solana RPC endpoint(s) for discovering snapshots and fetching blocks
-    rpc = ["https://api.mainnet-beta.solana.com"]
-
-[replay]
-    # Transaction parallelism - recommended: 2x your CPU core count
-    # e.g., 192 for a 96-core machine, 24 for a 12-core machine
-    txpar = 24
-
-[rpc]
-    # Mithril's RPC server (binds to all interfaces, enabled by default)
-    port = 8899
+    # Primary RPC first, public endpoint as fallback
+    rpc = ["https://your-rpc-provider.com", "https://api.mainnet-beta.solana.com"]
 ```
 
-See `config.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
+Mithril will use the first endpoint for block fetching and fall back to others if needed.
 
 ### Running Mithril
 
