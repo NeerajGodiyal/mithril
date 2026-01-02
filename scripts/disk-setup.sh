@@ -1317,6 +1317,7 @@ interactive_setup() {
         mkdir -p "$accountsdb_mount"
         mkdir -p "$accountsdb_mount/snapshots"
         mkdir -p "$accountsdb_mount/blockstore"
+        mkdir -p /mnt/mithril-logs
 
         success "Directories created"
         return
@@ -1399,7 +1400,12 @@ interactive_setup() {
 
         mkdir -p "$data_mount/snapshots"
         mkdir -p "$data_mount/blockstore"
+    fi
 
+    # Create logs directory (always on root filesystem)
+    mkdir -p /mnt/mithril-logs
+
+    if [[ -n "$data_disk" ]]; then
         if [[ "$data_disk" == "$root_disk" ]]; then
             success "Ledger partition created on OS disk: $data_part -> $data_mount ($data_fstype)"
         else

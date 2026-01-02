@@ -64,6 +64,7 @@ The scripts create the following directory structure and automatically set owner
 /mnt/mithril-ledger/     # Blockstore and snapshots (can use slower drive)
     ├── blockstore/
     └── snapshots/
+/mnt/mithril-logs/       # Log files (auto-rotated)
 ```
 
 **Step 3: Install build dependencies**
