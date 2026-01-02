@@ -43,13 +43,16 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 	blockReward := blockRewardRewards(blockResult.Rewards)
 
 	if !global.ManageLeaderSchedule() {
+		// In verify mode, set block.Leader from block reward data (no global schedule available)
 		if blockReward != nil {
 			block.BlockReward = &BlockRewardsInfo{Leader: blockReward.Pubkey, Lamports: uint64(blockReward.Lamports), PostBalance: blockReward.PostBalance}
+			block.Leader = blockReward.Pubkey
 		} else {
 			if rpcc != nil {
 				leaderForSlot, err := rpcc.GetLeaderForSlot(slot)
 				if err == nil {
 					block.BlockReward = &BlockRewardsInfo{Leader: leaderForSlot}
+					block.Leader = leaderForSlot
 				}
 			}
 		}

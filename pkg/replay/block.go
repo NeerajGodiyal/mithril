@@ -1188,10 +1188,10 @@ func ReplayBlocks(
 			}
 		}
 
-		// Get leader from internal schedule (no RPC call)
+		// Get leader from block (set by configureBlock in live mode, or by block source in verify mode)
 		leaderStr := "unknown"
-		if leader, ok := global.LeaderForSlot(block.Slot); ok {
-			leaderStr = leader.String()
+		if !block.Leader.IsZero() {
+			leaderStr = block.Leader.String()
 		}
 
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
