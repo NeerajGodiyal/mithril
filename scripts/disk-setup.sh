@@ -204,6 +204,9 @@ check_disk_deps() {
     command -v wipefs >/dev/null 2>&1 || missing+=("util-linux")  # wipefs is in util-linux
     command -v mkfs.ext4 >/dev/null 2>&1 || missing+=("e2fsprogs")
     command -v mkfs.xfs >/dev/null 2>&1 || missing+=("xfsprogs")
+    command -v fuser >/dev/null 2>&1 || missing+=("psmisc")       # fuser, killall
+    command -v lsof >/dev/null 2>&1 || missing+=("lsof")
+    command -v pvs >/dev/null 2>&1 || missing+=("lvm2")           # LVM tools
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo ""
@@ -2828,6 +2831,7 @@ main() {
             ;;
         --reset)
             check_root
+            check_disk_deps
             # Check for --wipe-disks flag
             if [[ "${2:-}" == "--wipe-disks" ]]; then
                 reset_all true
