@@ -17,12 +17,12 @@ release:
 clean:
 	rm -f mithril
 
-# Server setup scripts (require sudo)
+# Server setup scripts (require sudo - run as: sudo make server-setup ...)
 server-setup:
-	sudo ./scripts/server-setup.sh $(ARGS)
+	./scripts/server-setup.sh $(ARGS)
 
 disk-setup:
-	sudo ./scripts/disk-setup.sh $(ARGS)
+	./scripts/disk-setup.sh $(ARGS)
 
 tune:
-	sudo ./scripts/performance-tune.sh $(ARGS)
+	./scripts/performance-tune.sh $(ARGS)

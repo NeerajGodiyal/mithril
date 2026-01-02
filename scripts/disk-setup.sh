@@ -152,6 +152,45 @@ check_root() {
     [[ $EUID -eq 0 ]] || die "This script must be run as root. Try: sudo $0"
 }
 
+# Get the real user (the one who ran sudo, not root)
+get_real_user() {
+    # SUDO_USER is set when running with sudo
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        echo "$SUDO_USER"
+    else
+        # Fallback: try to find a non-root user who owns common home dirs
+        for user in ubuntu mithril; do
+            if id -u "$user" &>/dev/null; then
+                echo "$user"
+                return
+            fi
+        done
+        # Last resort: current user (might be root)
+        whoami
+    fi
+}
+
+# Fix ownership of Mithril directories so non-root user can access
+fix_mithril_ownership() {
+    local real_user
+    real_user=$(get_real_user)
+
+    if [[ "$real_user" == "root" ]]; then
+        warn "Could not determine non-root user. Directories will be owned by root."
+        warn "Run: sudo chown -R YOUR_USER:YOUR_USER /mnt/mithril-*"
+        return
+    fi
+
+    info "Setting ownership to $real_user for Mithril directories..."
+
+    for dir in /mnt/mithril-accounts /mnt/mithril-ledger; do
+        if [[ -d "$dir" ]]; then
+            chown -R "$real_user:$real_user" "$dir"
+            success "Set ownership: $dir -> $real_user"
+        fi
+    done
+}
+
 # Check and install required dependencies for disk operations
 check_disk_deps() {
     local missing=()
@@ -1370,6 +1409,9 @@ interactive_setup() {
     # Reload systemd to pick up fstab changes
     systemctl daemon-reload
 
+    # Fix ownership so non-root user can run Mithril
+    fix_mithril_ownership
+
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
     echo "  │ SETUP COMPLETE                                                           │"
@@ -1575,6 +1617,9 @@ clean_subdir() {
     echo ""
     success "$description has been deleted"
 
+    # Fix ownership so non-root user can run Mithril
+    fix_mithril_ownership
+
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
 }
@@ -1749,6 +1794,9 @@ clean_snapshots() {
     echo ""
     success "Snapshots have been cleaned"
 
+    # Fix ownership so non-root user can run Mithril
+    fix_mithril_ownership
+
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
 
@@ -1856,6 +1904,9 @@ clean_ledger() {
 
     echo ""
     success "Ledger data has been cleaned"
+
+    # Fix ownership so non-root user can run Mithril
+    fix_mithril_ownership
 
     # Show before/after disk space summary
     show_disk_space_summary "$mount_point" "$before_used" "$before_free" "$after_used" "$after_free" "$before_total" "$fstype"
@@ -1982,6 +2033,9 @@ clean_all() {
 
     echo ""
     success "All Mithril data has been cleaned"
+
+    # Fix ownership so non-root user can run Mithril
+    fix_mithril_ownership
 
     # Show before/after disk space summary for each mount point
     for mp in "${unique_mount_points[@]}"; do
