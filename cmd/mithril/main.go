@@ -20,9 +20,12 @@ import (
 
 var cmd = cobra.Command{
 	Use:     "mithril",
-	Short:   "mithril Solana verifier node",
+	Short:   "Mithril - Solana full node client",
 	Version: Version,
-	Long: `Mithril is a lightweight Solana verifier node that replays and validates transactions.
+	Long: `Mithril - Solana Full Node Client
+
+A lightweight full node client for Solana written in Go. Mithril replays and
+validates transactions, enabling independent verification of the Solana blockchain.
 
 Quick start:
   1. mithril config init              # Generate config.toml
@@ -31,8 +34,7 @@ Quick start:
 
 Disk setup (recommended before first run):
   sudo ./scripts/disk-setup.sh --setup    # Format and mount NVMe drives
-  ./scripts/disk-setup.sh --status        # Show current storage status
-  ./scripts/disk-setup.sh                 # Show all disk commands`,
+  ./scripts/disk-setup.sh --status        # Show current storage status`,
 }
 
 func init() {

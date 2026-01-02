@@ -54,11 +54,11 @@ var (
 		},
 	}
 
-	// Run is the main command for running Mithril as a live verifier.
+	// Run is the main command for running Mithril as a live full node.
 	// This is the primary way most users will run Mithril.
 	Run = cobra.Command{
 		Use:   "run",
-		Short: "Run Mithril as a live verifier (downloads snapshot, builds AccountsDB, verifies blocks)",
+		Short: "Run Mithril full node (downloads snapshot, builds AccountsDB, replays blocks)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return initConfigAndBindFlags(cmd)
 		},
@@ -125,7 +125,7 @@ var (
 )
 
 func init() {
-	// flags for verifier mode
+	// flags for verify-range mode
 	// [replay] section flags
 	VerifyRange.Flags().BoolVarP(&loadFromSnapshot, "load-from-snapshot", "s", false, "Load from a full snapshot")
 	VerifyRange.Flags().BoolVarP(&loadFromAccountsDb, "load-from-accounts-db", "a", false, "Load from AccountsDB")
@@ -164,7 +164,7 @@ func init() {
 	// [overcast] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
-	// flags for 'mithril run' (live verifier mode)
+	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 

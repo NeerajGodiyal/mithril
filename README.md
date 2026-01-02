@@ -10,7 +10,7 @@ While Mithril is already functional and runs reliably for many use cases, it is 
 
 ## Running Mithril
 
-The `run` command starts Mithril as a live verifier - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
+The `run` command starts Mithril as a live full node - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
 
 ### Hardware Requirements
 
