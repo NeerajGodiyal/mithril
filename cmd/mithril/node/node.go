@@ -1652,9 +1652,26 @@ func getVersion() string {
 	return version.Version
 }
 
-// getCommit returns the git commit hash from the shared version package.
+// getCommit returns the git commit hash, preferring ldflags but falling back to
+// runtime/debug.BuildInfo for dev builds.
 func getCommit() string {
-	return version.GitCommit
+	// If set via ldflags (release builds), use that
+	if version.GitCommit != "" && version.GitCommit != "unknown" {
+		return version.GitCommit
+	}
+	// Fallback to runtime/debug for dev builds (go build without ldflags)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				// Return short hash (8 chars) for consistency
+				if len(setting.Value) > 8 {
+					return setting.Value[:8]
+				}
+				return setting.Value
+			}
+		}
+	}
+	return "unknown"
 }
 
 // fetchGenesisHash fetches the genesis hash from the first RPC endpoint.
