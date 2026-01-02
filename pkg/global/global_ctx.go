@@ -217,6 +217,9 @@ func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
 }
 
 func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
+	if instance.leaderSchedule == nil {
+		return solana.PublicKey{}, false
+	}
 	return instance.leaderSchedule.LeaderForSlot(slot)
 }
 
