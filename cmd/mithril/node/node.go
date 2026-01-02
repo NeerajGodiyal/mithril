@@ -1804,7 +1804,7 @@ func printStartupInfo(commandName string) {
 
 				// Slots replayed since snapshot
 				slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
-				fmt.Printf("  Replayed:       %s%d slots since snapshot%s\n", dim, slotsReplayed, reset)
+				fmt.Printf("  Replayed:       %s%d slots since snapshot bootstrap%s\n", dim, slotsReplayed, reset)
 			} else {
 				fmt.Printf("  Resume from:    %ssnapshot (fresh start)%s\n", dim, reset)
 			}
