@@ -113,7 +113,7 @@ func logInputSnapshot(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64,
 	mismatchLogMu.Lock()
 	defer mismatchLogMu.Unlock()
 
-	mismatchLogWriter.WriteString(fmt.Sprintf("\n[INPUTS] epoch=%d top_stakes:\n", epoch))
+	mismatchLogWriter.WriteString(fmt.Sprintf("\n[INPUTS] stake_epoch=%d top_stakes:\n", epoch))
 	for i := 0; i < min(10, len(entries)); i++ {
 		e := entries[i]
 		mismatchLogWriter.WriteString(fmt.Sprintf("  %d. vote=%s node=%s stake=%d\n",
