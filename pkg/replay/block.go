@@ -1052,9 +1052,44 @@ func ReplayBlocks(
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 
 	for {
+		// Start stall monitor goroutine (only after first block to avoid startup false positives)
+		// Logs to file every second while waiting for a block
+		var stallDone chan struct{}
+		if len(execTimes) > 0 {
+			stallDone = make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
+				secondsWaiting := 0
+				for {
+					select {
+					case <-stallDone:
+						return
+					case <-ticker.C:
+						secondsWaiting++
+						stats := blockStream.GetFetchStats()
+						modeStr := "catchup"
+						if stats.IsNearTip {
+							modeStr = "near-tip"
+						}
+						stallMsg := fmt.Sprintf("STALL: waiting %ds for slot %d | mode: %s | tip_stale: %ds | state: %s | retries: %d | inflight: %d | retry_q: %d | tip: %d",
+							secondsWaiting, stats.NextSlot, modeStr, stats.TipStaleSecs, stats.WaitingSlotState,
+							stats.WaitingSlotRetries, stats.InflightCount, stats.RetryQueueLen, stats.ConfirmedTip)
+						mlog.Log.FileOnlyf("%s", stallMsg)
+					}
+				}
+			}()
+		}
+
 		waitStart := time.Now()
 		block := blockStream.NextBlock()
 		waitTime := time.Since(waitStart)
+
+		// Stop stall monitor
+		if stallDone != nil {
+			close(stallDone)
+		}
+
 		if block == nil {
 			break
 		}
@@ -1067,30 +1102,11 @@ func ReplayBlocks(
 				leaderStr = leader.String()
 			}
 			// Log skipped slot in same format as regular blocks (with N/A for missing values)
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A           | exec: N/A   | total: %.3fs (skipped)",
+			// Padding matches normal format: cu=10 chars, txns=16 chars (v:%-5d nv:%-5d), exec=no padding
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A       | txns: N/A             | exec: N/A | total: %.3fs (skipped)",
 				block.Slot, leaderStr, waitTime.Seconds())
 			skippedSlotsCount++
 			continue // Skip all execution - no state changes for skipped slots
-		}
-
-		// Stall detection: log if waited too long for a block
-		// 2-5s: log to file only (FileOnlyf) for diagnostics without terminal noise
-		// >5s: log to terminal too (Warnf) because something is definitely wrong
-		// Don't log for first block - startup has TLS/connection overhead that causes false positives
-		if waitTime > 2*time.Second && len(execTimes) > 0 {
-			stats := blockStream.GetFetchStats()
-			modeStr := "catchup"
-			if stats.IsNearTip {
-				modeStr = "near-tip"
-			}
-			stallMsg := fmt.Sprintf("STALL: waited %.1fs for slot %d | mode: %s | tip_stale: %ds | state: %s | retries: %d | inflight: %d | retry_q: %d | tip: %d",
-				waitTime.Seconds(), stats.NextSlot, modeStr, stats.TipStaleSecs, stats.WaitingSlotState,
-				stats.WaitingSlotRetries, stats.InflightCount, stats.RetryQueueLen, stats.ConfirmedTip)
-			if waitTime > 5*time.Second {
-				mlog.Log.Warnf("%s", stallMsg) // Terminal + log file
-			} else {
-				mlog.Log.FileOnlyf("%s", stallMsg) // Log file only
-			}
 		}
 
 		if ctx.Err() != nil {
