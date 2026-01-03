@@ -1433,17 +1433,12 @@ func ReplayBlocks(
 				// TipAtSlot is when we started the refresh, but block.Slot is what we just executed
 				var tipDistanceStr string
 				currentSlotForTip := block.Slot
-				if fetchStats.ConfirmedTip > 0 && currentSlotForTip < fetchStats.ConfirmedTip {
-					behindConfirmed := fetchStats.ConfirmedTip - currentSlotForTip
-					if fetchStats.ProcessedTip > 0 && currentSlotForTip < fetchStats.ProcessedTip {
-						behindProcessed := fetchStats.ProcessedTip - currentSlotForTip
-						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed, %d behind processed",
-							behindConfirmed, behindProcessed)
-					} else {
-						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
+				if fetchStats.ConfirmedTip > 0 {
+					var behindConfirmed uint64
+					if currentSlotForTip < fetchStats.ConfirmedTip {
+						behindConfirmed = fetchStats.ConfirmedTip - currentSlotForTip
 					}
-				} else if fetchStats.ConfirmedTip > 0 {
-					tipDistanceStr = "caught up"
+					tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
 				} else {
 					tipDistanceStr = "tip unknown"
 				}
