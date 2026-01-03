@@ -131,11 +131,15 @@ func newFromLeaders(voteKeyedSlotLeaders []solana.PublicKey,
 
 func sortStakes(stakes []pubkeyAndStakePair) []pubkeyAndStakePair {
 	slices.SortFunc(stakes, func(l, r pubkeyAndStakePair) int {
-		if r.stake == l.stake {
-			return bytes.Compare(r.pubkey[:], l.pubkey[:])
-		} else {
-			return int(r.stake - l.stake)
+		if r.stake != l.stake {
+			// Sort by stake descending (matches Agave's r_stake.cmp(l_stake))
+			if r.stake > l.stake {
+				return 1
+			}
+			return -1
 		}
+		// Tiebreak by pubkey descending (matches Agave's r_pubkey.cmp(l_pubkey))
+		return bytes.Compare(r.pubkey[:], l.pubkey[:])
 	})
 	return slices.Compact(stakes)
 }
