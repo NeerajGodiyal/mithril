@@ -5,11 +5,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"slices"
+	"sort"
 
+	"github.com/Overclock-Validator/frand"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/weightedrand"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -70,27 +71,36 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	repeat uint64) []solana.PublicKey {
 	keyedStakes = sortStakes(keyedStakes)
 
-	choices := make([]weightedrand.Choice[solana.PublicKey, uint64], 0)
-
-	for _, pair := range keyedStakes {
-		choice := weightedrand.NewChoice(pair.pubkey, pair.stake)
-		choices = append(choices, choice)
+	// Build cumulative weights, preserving input order (stake desc, pubkey desc)
+	// This matches Agave's WeightedU64Index which does NOT re-sort
+	cumulative := make([]uint64, len(keyedStakes))
+	var total uint64
+	for i, pair := range keyedStakes {
+		total += pair.stake
+		cumulative[i] = total
 	}
 
+	if total == 0 {
+		panic("stakeWeightedSlotLeaders: total stake is zero")
+	}
+
+	// Create ChaCha20 RNG with epoch as seed (little-endian u64 in 32-byte seed)
 	var seed [32]byte
 	binary.LittleEndian.PutUint64(seed[:], epoch)
+	rng := frand.NewCustom(seed[:], 1024, 20)
 
-	chooser, err := weightedrand.NewChaCha20ChooserWithSeed(seed[:], choices...)
-	if err != nil {
-		panic(err)
-	}
-
-	leaders := make([]solana.PublicKey, 0)
+	leaders := make([]solana.PublicKey, 0, length)
 	var currentSlotLeader solana.PublicKey
 
 	for i := range length {
 		if i%repeat == 0 {
-			currentSlotLeader = chooser.PickWithChaCha20()
+			// Generate random in [0, total) and find first cumulative > r
+			// This matches Agave's weighted random selection
+			r := rng.Uint64n(total)
+			idx := sort.Search(len(cumulative), func(j int) bool {
+				return cumulative[j] > r
+			})
+			currentSlotLeader = keyedStakes[idx].pubkey
 		}
 		leaders = append(leaders, currentSlotLeader)
 	}
