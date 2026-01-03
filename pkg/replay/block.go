@@ -1073,15 +1073,24 @@ func ReplayBlocks(
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
-		// Stall detection: warn if waited too long for a block
-		// Threshold is 10s because backup requests are sent at 1s for slow slots.
-		// Skip first block (startup has TLS/connection overhead)
-		if waitTime > 10*time.Second && len(execTimes) > 0 {
+		// Stall detection: log if waited too long for a block
+		// 2-5s: log to file only (FileOnlyf) for diagnostics without terminal noise
+		// >5s: log to terminal too (Warnf) because something is definitely wrong
+		// Don't log for first block - startup has TLS/connection overhead that causes false positives
+		if waitTime > 2*time.Second && len(execTimes) > 0 {
 			stats := blockStream.GetFetchStats()
-			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
-				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
-				stats.ErrNotAvail, stats.ErrRateLimit, stats.ErrBeyondTip, stats.ErrTransient,
-				stats.WorkQueueLen, stats.ReorderBufLen)
+			modeStr := "catchup"
+			if stats.IsNearTip {
+				modeStr = "near-tip"
+			}
+			stallMsg := fmt.Sprintf("STALL: waited %.1fs for slot %d | mode: %s | tip_stale: %ds | state: %s | retries: %d | inflight: %d | retry_q: %d | tip: %d",
+				waitTime.Seconds(), stats.NextSlot, modeStr, stats.TipStaleSecs, stats.WaitingSlotState,
+				stats.WaitingSlotRetries, stats.InflightCount, stats.RetryQueueLen, stats.ConfirmedTip)
+			if waitTime > 5*time.Second {
+				mlog.Log.Warnf("%s", stallMsg) // Terminal + log file
+			} else {
+				mlog.Log.FileOnlyf("%s", stallMsg) // Log file only
+			}
 		}
 
 		if ctx.Err() != nil {

@@ -306,6 +306,19 @@ func (l *logger) writeImmediate(msg string) {
 	}
 }
 
+// writeFileOnly outputs a log message only to the file, not to stdout/stderr.
+// Used for diagnostics that should be captured for debugging but not clutter the terminal.
+func (l *logger) writeFileOnly(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Write only to file writer, bypassing the multi-writer
+	if l.fileWriter != nil {
+		l.fileWriter.Write([]byte(msg))
+	}
+	// If no file writer, silently discard (file-only logging disabled)
+}
+
 func (l *logger) Debugf(format string, args ...interface{}) {
 	if l.level > LevelDebug && !l.enableVerbose.Load() {
 		return
@@ -320,6 +333,16 @@ func (l *logger) Infof(format string, args ...interface{}) {
 	}
 	msg := fmt.Sprintf("%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
 	l.write(msg)
+}
+
+// FileOnlyf logs a message only to the log file, not to the terminal.
+// Used for diagnostics that should be captured for debugging but not clutter the terminal.
+func (l *logger) FileOnlyf(format string, args ...interface{}) {
+	if l.level > LevelInfo {
+		return
+	}
+	msg := fmt.Sprintf("%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
+	l.writeFileOnly(msg)
 }
 
 // InfofPrecise logs with millisecond precision timing (for block replay)
