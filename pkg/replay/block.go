@@ -1194,6 +1194,20 @@ func ReplayBlocks(
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
 			}
+
+			// Re-validate leader schedule after epoch transition completes.
+			// This handles the edge case where validation was skipped in configureBlock
+			// because scheduleEpoch == blockEpoch and the cache wasn't populated yet.
+			// Now that handleEpochTransition has run, the cache is populated.
+			if config.GetBool("replay.validate_leader_schedule") {
+				logsDir := config.GetString("log.dir")
+				if logsDir == "" {
+					logsDir = "/mnt/mithril-logs"
+				}
+				// Use validateLeaderSchedule (not FromVoteCache) since epoch stakes cache
+				// is now populated by cacheEpochStakesForValidation in handleEpochTransition
+				validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
+			}
 		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
 			// First block being processed - check if we're in rewards period
 			// (uses lastSlotCtx == nil to detect first block, handles skipped startSlot)
