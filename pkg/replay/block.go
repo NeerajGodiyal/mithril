@@ -1102,8 +1102,8 @@ func ReplayBlocks(
 				leaderStr = leader.String()
 			}
 			// Log skipped slot in same format as regular blocks (with N/A for missing values)
-			// Padding matches normal format: cu=10 chars, txns=16 chars (v:%-5d nv:%-5d), exec=no padding
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A       | txns: N/A             | exec: N/A | total: %.3fs (skipped)",
+			// Padding: cu=10 chars + space, txns=16 chars + space, exec=variable (matches normal format)
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
 				block.Slot, leaderStr, waitTime.Seconds())
 			skippedSlotsCount++
 			continue // Skip all execution - no state changes for skipped slots
