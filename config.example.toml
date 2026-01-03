@@ -202,6 +202,14 @@ name = "mithril"
     txpar = 24
 
     # -------------------------------------------------------------------------
+    # Leader Schedule Validation (for developers)
+    # -------------------------------------------------------------------------
+    # Validate leader schedule by computing locally and comparing to RPC.
+    # Mismatches are logged to [log].dir/leader_schedule_mismatch.log
+    # Does NOT affect block replay - RPC schedule is still used as source of truth.
+    # validate_leader_schedule = false
+
+    # -------------------------------------------------------------------------
     # Advanced: verify-range settings (for developers)
     # -------------------------------------------------------------------------
     # These settings are only used with 'mithril verify-range', not 'mithril run'.
