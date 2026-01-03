@@ -119,8 +119,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 	if err := accountsDb.BankHashStore.Close(); err != nil {
 		mlog.Log.Errorf("CloseDb: BankHashStore.Close() error: %v", err)
 	}
-	mlog.Log.Infof("CloseDb: done")
-	fmt.Println() // spacing after close
+	mlog.Log.Infof("CloseDb: done\n") // extra newline for spacing after close
 }
 
 func (accountsDb *AccountsDb) InitCaches() {

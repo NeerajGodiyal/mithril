@@ -4,15 +4,24 @@ Mithril is a Solana full node client written in Golang with the goal of serving 
 
 This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release in early Q1 2026.
 
-While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the dev branch for the latest updates.
+While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the **alpha** branch for the latest stable updates.
+
+### Release Channels
+
+- **alpha** (recommended): Latest tagged alpha release. Tested for mainnet and suitable for public use.
+- **dev** (cutting-edge): New features land here first and may be less stable.
+
+Use **alpha** for reliability; use **dev** if you want the newest changes and can tolerate breakage.
 
 ---
 
 ## Running Mithril
 
-The `run` command starts Mithril as a live verifier - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
+The `run` command starts Mithril as a live full node - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
 
 ### Hardware Requirements
+
+> **Tip for new users:** The easiest way to run Mithril is on a dedicated small server or mini PC. This avoids disk management headaches from sharing storage with other applications and simplifies the setup process significantly.
 
 **Operating System**
 - Ubuntu 24.04 LTS (recommended)
@@ -42,6 +51,9 @@ The `run` command starts Mithril as a live verifier - it bootstraps from a Solan
 ```bash
 git clone https://github.com/Overclock-Validator/mithril.git
 cd mithril
+git checkout alpha  # More stable alpha branch
+# OR
+git checkout dev    # Cutting-edge, may be less stable
 ```
 
 **Step 2 (Optional): Run setup scripts**
@@ -51,19 +63,20 @@ We provide helper scripts for setting up your system. See the [scripts documenta
 - **Disk Setup** - Benchmark NVMe drives, format with optimal settings, reset Mithril data
 - **Performance Tuning** - Kernel settings, CPU optimization, etc.
 
-The scripts create the following directory structure (following Agave conventions):
+```bash
+# These scripts require root privileges
+sudo ./scripts/disk-setup.sh --setup
+sudo ./scripts/performance-tune.sh
+```
+
+The scripts create the following directory structure and automatically set ownership to your user:
 
 ```
 /mnt/mithril-accounts/   # AccountsDB (needs higher random IOPS - use fastest drive)
 /mnt/mithril-ledger/     # Blockstore and snapshots (can use slower drive)
     ├── blockstore/
     └── snapshots/
-```
-
-After running the disk setup script, set ownership so Mithril can write to these directories:
-
-```bash
-sudo chown -R $USER:$USER /mnt/mithril-accounts /mnt/mithril-ledger
+/mnt/mithril-logs/       # Log files (auto-rotated)
 ```
 
 **Step 3: Install build dependencies**
@@ -109,48 +122,44 @@ Generate a starter config with sensible defaults:
 ./mithril config init
 ```
 
-This creates `config.toml` with all essential settings. Key options to review:
+This creates `config.toml`. **We strongly recommend reviewing [`config.example.toml`](config.example.toml)** for all available options and detailed documentation.
+
+**Important: RPC Configuration**
+
+The default config uses `api.mainnet-beta.solana.com` as the RPC endpoint, but this public endpoint has rate limits. For reliable operation, add a dedicated RPC provider (Helius, Triton, etc.) as the primary endpoint:
 
 ```toml
-name = "mithril"
-
-[bootstrap]
-    # How Mithril initializes state:
-    #   "auto"       - Use existing AccountsDB if valid, else download snapshot (default)
-    #   "snapshot"   - Always download fresh snapshot
-    #   "accountsdb" - Require existing AccountsDB, fail if missing
-    mode = "auto"
-
-[storage]
-    # AccountsDB path - use your fastest NVMe
-    accounts = "/mnt/mithril-accounts"
-    blockstore = "/mnt/mithril-ledger/blockstore"
-
 [network]
-    # Solana RPC endpoint(s) for discovering snapshots and fetching blocks
-    rpc = ["https://api.mainnet-beta.solana.com"]
-
-[replay]
-    # Transaction parallelism - recommended: 2x your CPU core count
-    # e.g., 192 for a 96-core machine, 24 for a 12-core machine
-    txpar = 24
-
-[rpc]
-    # Mithril's RPC server (localhost only, enabled by default)
-    port = 8899
+    # Primary RPC first, public endpoint as fallback
+    rpc = ["https://your-rpc-provider.com", "https://api.mainnet-beta.solana.com"]
 ```
 
-See `config.example.toml` for all available configuration options including snapshot finder tuning and performance settings.
+Mithril will use the first endpoint for block fetching and fall back to others if needed.
 
 ### Running Mithril
 
+From inside the `mithril` directory (where you built the binary):
+
 ```bash
-./mithril run --config config.toml
+# If you're not already there:
+cd ~/mithril
+
+# Start Mithril (uses config.toml in current directory by default)
+./mithril run
 ```
+
+The `./` prefix tells your shell to run the `mithril` binary in the current directory. Without it, your shell will look for `mithril` in your system PATH.
+
+You can also specify a config file explicitly:
+```bash
+./mithril run --config /path/to/custom-config.toml
+```
+
+**Note:** Do not run Mithril with `sudo`. The setup scripts automatically configure directory permissions for your user.
 
 **What happens:**
 1. Mithril queries the Solana cluster to find reliable snapshot sources
-2. The full snapshot is streamed directly into memory and processed
+2. The full snapshot is streamed and processed (optionally saved to disk for faster restarts)
 3. An incremental snapshot is fetched to bring the state closer to the tip
 4. Mithril block execution (aka replay) is initiated and blocks are retrieved with RPC `getBlock` calls and verified
 5. Mithril keeps up very close to the tip of the chain with recommended hardware specs
@@ -182,6 +191,7 @@ curl http://YOUR_MITHRIL_IP:8899 -X POST -H "Content-Type: application/json" -d 
 
 **Currently supported RPC methods:**
 - `getAccountInfo` - Get account data and lamports
+- `getBankHash` - Get bankhash for a slot (Mithril extension, not standard Solana RPC)
 - `getBlockHeight` - Get current block height
 - `getEpochInfo` - Get current epoch info
 - `getLatestBlockhash` - Get recent blockhash
@@ -190,7 +200,15 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 
 ### Current Limitations
 
-- **Block Catchup**: Mithril currently relies on `getBlock` RPC calls to catch up to the tip of mainnet-beta. We are actively working on adding support for direct shred replay, which will be more decentralized and performant.
+- **Block Catchup**: Mithril currently relies on `getBlock` RPC calls to catch up to the tip of mainnet-beta. This dependency is temporary — we are actively working on direct shred replay, which will eliminate the need for external RPC sources entirely.
+
+### RPC Sources
+
+Mithril fetches blocks via `getBlock` RPC calls during catchup. For **short-term testing**, most free Solana RPC plans are sufficient to try out Mithril.
+
+For **extended testing** or if you'd like to help with longer-running nodes, reach out to us on the [Overclock Validator Discord](https://discord.gg/overclock) — we can provide access to our RPC endpoints.
+
+Once direct shred replay is implemented, external RPC sources will no longer be required for block fetching.
 
 ### Troubleshooting
 
@@ -222,13 +240,19 @@ go build -o mithril ./cmd/mithril
 ./mithril run --config config.toml
 ```
 
-**Note:** The default `bootstrap.mode = "auto"` will reuse an existing valid AccountsDB when available, otherwise it downloads a snapshot. Set `bootstrap.mode = "snapshot"` to always start fresh from a snapshot, or `bootstrap.mode = "new-snapshot"` to always download a new one.
+**Note:** The default `bootstrap.mode = "auto"` will reuse an existing valid AccountsDB when available, otherwise it downloads a snapshot. Set `bootstrap.mode = "snapshot"` to use an existing snapshot if available, or `bootstrap.mode = "new-snapshot"` to always download a fresh one.
 
 ### Operational Best Practices
 
 **Clean Shutdown**: Always use `Ctrl+C` to stop Mithril cleanly rather than killing the terminal or closing the SSH session. This allows Mithril to flush data and exit gracefully.
 
 For detailed troubleshooting tips, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+---
+
+## Compatibility
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for supported networks and feature gate requirements per release.
 
 ---
 

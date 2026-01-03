@@ -61,8 +61,8 @@ type ReportingConfig struct {
 
 // BlockConfig holds block source configuration
 type BlockConfig struct {
-	Source           string `toml:"source" mapstructure:"source"`                       // "rpc" or "overcast"
-	OvercastEndpoint string `toml:"overcast_endpoint" mapstructure:"overcast_endpoint"` // Overcast endpoint (optional)
+	Source              string `toml:"source" mapstructure:"source"`                             // "rpc" or "lightbringer"
+	LightbringerEndpoint string `toml:"lightbringer_endpoint" mapstructure:"lightbringer_endpoint"` // Lightbringer endpoint (optional)
 
 	// Global fetch tuning
 	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                       // Rate limit (requests per second)
@@ -133,6 +133,16 @@ type SnapshotConfig struct {
 	MinIncrementalSpeedMBs float64 `toml:"min_incremental_speed_mbs" mapstructure:"min_incremental_speed_mbs"`
 }
 
+// LogConfig holds logging configuration
+type LogConfig struct {
+	Dir        string `toml:"dir" mapstructure:"dir"`                 // Log directory (default: /mnt/mithril-logs)
+	Level      string `toml:"level" mapstructure:"level"`             // Log level: debug, info, warn, error
+	ToStdout   bool   `toml:"to_stdout" mapstructure:"to_stdout"`     // Also write to stdout (default: true)
+	MaxSizeMB  int    `toml:"max_size_mb" mapstructure:"max_size_mb"` // Max log file size in MB before rotation
+	MaxAgeDays int    `toml:"max_age_days" mapstructure:"max_age_days"` // Delete logs older than this many days
+	MaxBackups int    `toml:"max_backups" mapstructure:"max_backups"` // Keep up to N old log files
+}
+
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)
 type Config struct {
 	// Top-level (matches Firedancer style)
@@ -147,6 +157,7 @@ type Config struct {
 	Snapshot    SnapshotConfig    `toml:"snapshot" mapstructure:"snapshot"`
 	Development DevelopmentConfig `toml:"development" mapstructure:"development"`
 	Reporting   ReportingConfig   `toml:"reporting" mapstructure:"reporting"`
+	Log         LogConfig         `toml:"log" mapstructure:"log"`
 }
 
 // ConfigFile holds the path to the config file (set via --config flag)

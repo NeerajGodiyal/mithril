@@ -254,7 +254,7 @@ func BuildAccountsDb(
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 
-	mlog.Log.Infof("snapshot processed in %s.\n", fmtDuration(time.Since(start)))
+	mlog.Log.Infof("snapshot processed in %s.", fmtDuration(time.Since(start)))
 
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())

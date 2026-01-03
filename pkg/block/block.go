@@ -45,7 +45,8 @@ type Block struct {
 	LatestEvictedBlockhash              [32]byte
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
-	FromOvercast                        bool
+	FromLightbringer                    bool
+	IsSkipped                           bool // True for slots that were skipped by the leader
 }
 
 func (b *Block) FixupTxVersions() {

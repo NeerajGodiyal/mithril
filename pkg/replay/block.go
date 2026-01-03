@@ -71,8 +71,8 @@ var commitSlot atomic.Uint64 // The slot currently being committed (for error me
 // CurrentRunID is a unique identifier for this replay session, used to correlate logs
 var CurrentRunID string
 
-// generateRunID creates a short random hex string for log correlation
-func generateRunID() string {
+// GenerateRunID creates a short random hex string for log correlation
+func GenerateRunID() string {
 	b := make([]byte, 4) // 8 hex chars
 	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp-based ID if crypto/rand fails
@@ -116,7 +116,15 @@ type ReplayResult struct {
 
 	// SlotHashes context - same issue, vote program needs accurate slot→hash mappings
 	LastSlotHashes *sealevel.SysvarSlotHashes
+
+	// StateWrittenOnCancel indicates that the state file was already written during
+	// cancellation handling, so the caller should skip the final write
+	StateWrittenOnCancel bool
 }
+
+// OnCancelWriteState is a callback that writes state immediately on cancellation.
+// This eliminates the timing window between bankhash persistence and state file update.
+type OnCancelWriteState func(result *ReplayResult) error
 
 // ResumeState contains the state needed to properly configure the first block when resuming.
 // This is passed to ReplayBlocks when resuming from a previous run.
@@ -854,7 +862,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		// Restore SysvarCache.SlotHashes from state file (vote program needs accurate slot→hash mappings)
 		if resumeState.SlotHashes != nil {
 			sealevel.SysvarCache.SlotHashes.Sysvar = resumeState.SlotHashes
-			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file", len(*resumeState.SlotHashes))
+			mlog.Log.Infof("restored SlotHashes sysvar cache with %d entries from state file\n", len(*resumeState.SlotHashes))
 		}
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
@@ -914,17 +922,18 @@ func ReplayBlocks(
 	blockDir string,
 	txParallelism int,
 	isLive bool,
-	useOvercast bool,
+	useLightbringer bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
 	blockFetchOpts *BlockFetchOpts,
+	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
 ) *ReplayResult {
 	result := &ReplayResult{}
 
 	// Generate unique run ID for log correlation (only if not already set by startup)
 	if CurrentRunID == "" {
-		CurrentRunID = generateRunID()
+		CurrentRunID = GenerateRunID()
 	}
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
@@ -998,9 +1007,9 @@ func ReplayBlocks(
 	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
 
 	var opts *blockstream.BlockSourceOpts
-	if useOvercast {
+	if useLightbringer {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:         blockstream.BlockSourceOvercast,
+			SourceType:         blockstream.BlockSourceLightbringer,
 			RpcClient:          rpcc,
 			BackupRpcEndpoints: rpcBackups,
 			StartSlot:          startSlot,
@@ -1040,23 +1049,64 @@ func ReplayBlocks(
 	}
 	go blockStream.Start()
 
+	var skippedSlotsCount int // Track skipped slots for 100-slot summary
+
 	for {
+		// Start stall monitor goroutine (only after first block to avoid startup false positives)
+		// Logs to file every second while waiting for a block
+		var stallDone chan struct{}
+		if len(execTimes) > 0 {
+			stallDone = make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(1 * time.Second)
+				defer ticker.Stop()
+				secondsWaiting := 0
+				for {
+					select {
+					case <-stallDone:
+						return
+					case <-ticker.C:
+						secondsWaiting++
+						stats := blockStream.GetFetchStats()
+						modeStr := "catchup"
+						if stats.IsNearTip {
+							modeStr = "near-tip"
+						}
+						stallMsg := fmt.Sprintf("STALL: waiting %ds for slot %d | mode: %s | tip_stale: %ds | state: %s | retries: %d | inflight: %d | retry_q: %d | tip: %d",
+							secondsWaiting, stats.NextSlot, modeStr, stats.TipStaleSecs, stats.WaitingSlotState,
+							stats.WaitingSlotRetries, stats.InflightCount, stats.RetryQueueLen, stats.ConfirmedTip)
+						mlog.Log.FileOnlyf("%s", stallMsg)
+					}
+				}
+			}()
+		}
+
 		waitStart := time.Now()
 		block := blockStream.NextBlock()
 		waitTime := time.Since(waitStart)
+
+		// Stop stall monitor
+		if stallDone != nil {
+			close(stallDone)
+		}
+
 		if block == nil {
 			break
 		}
 
-		// Stall detection: warn if waited too long for a block
-		// Threshold is 10s because backup requests are sent at 1s for slow slots.
-		// Skip first block (startup has TLS/connection overhead)
-		if waitTime > 10*time.Second && len(execTimes) > 0 {
-			stats := blockStream.GetFetchStats()
-			mlog.Log.Errorf("STALL: waited %.1fs for slot %d (max fetched: %d) | buffer: %d | lead: %d | tip: %d | errs: na:%d rl:%d bt:%d tr:%d | wq:%d ro:%d",
-				waitTime.Seconds(), stats.NextSlot, stats.MaxBuffered, stats.BufferDepth, stats.LeadSlots, stats.ConfirmedTip,
-				stats.ErrNotAvail, stats.ErrRateLimit, stats.ErrBeyondTip, stats.ErrTransient,
-				stats.WorkQueueLen, stats.ReorderBufLen)
+		// Handle skipped slots - log and continue without execution
+		if block.IsSkipped {
+			// Look up leader for informational logging
+			leaderStr := "unknown"
+			if leader, exists := global.LeaderForSlot(block.Slot); exists {
+				leaderStr = leader.String()
+			}
+			// Log skipped slot in same format as regular blocks (with N/A for missing values)
+			// Padding: cu=10 chars + space, txns=16 chars + space, exec=variable (matches normal format)
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
+				block.Slot, leaderStr, waitTime.Seconds())
+			skippedSlotsCount++
+			continue // Skip all execution - no state changes for skipped slots
 		}
 
 		if ctx.Err() != nil {
@@ -1171,6 +1221,43 @@ func ReplayBlocks(
 		// Track last successfully persisted slot for checkpoint/resume
 		lastPersistedSlot = block.Slot
 		lastPersistedBankhash = lastSlotCtx.FinalBankhash
+
+		// Check for cancellation immediately after block completes.
+		// This minimizes the window between bankhash persistence and state file update,
+		// preventing false "corruption" detection on graceful shutdown.
+		if ctx.Err() != nil {
+			mlog.Log.Infof("context cancelled after slot %d, exiting replay loop", block.Slot)
+			result.WasCancelled = true
+
+			// Populate result immediately for state write
+			result.LastPersistedSlot = lastPersistedSlot
+			result.LastPersistedBankhash = lastPersistedBankhash
+
+			// Capture resume context from the last slot context
+			if lastSlotCtx != nil {
+				result.LastAcctsLtHash = lastSlotCtx.AcctsLtHash
+				if lastSlotCtx.FeeRateGovernor != nil {
+					result.LastLamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
+					result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
+				}
+				result.LastNumSignatures = lastSlotCtx.NumSignatures
+				result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
+				result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
+				result.LastBlockhash = lastSlotCtx.Blockhash
+				result.LastSlotHashes = sealevel.SysvarCache.SlotHashes.Sysvar
+			}
+
+			// Write state immediately via callback (eliminates timing window for hard kills)
+			if onCancelWriteState != nil {
+				if err := onCancelWriteState(result); err != nil {
+					mlog.Log.Errorf("failed to write state on cancel: %v", err)
+				} else {
+					result.StateWrittenOnCancel = true
+				}
+			}
+
+			break
+		}
 
 		slotReplayDuration := time.Since(start)
 
@@ -1342,19 +1429,16 @@ func ReplayBlocks(
 				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
 				fetchStats := blockStream.GetFetchStats()
 
-				// Calculate distance from tip
+				// Calculate distance from tip using current slot (more accurate than TipAtSlot)
+				// TipAtSlot is when we started the refresh, but block.Slot is what we just executed
 				var tipDistanceStr string
-				if fetchStats.ConfirmedTip > 0 && fetchStats.TipAtSlot > 0 && fetchStats.TipAtSlot < fetchStats.ConfirmedTip {
-					behindConfirmed := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
-					if fetchStats.ProcessedTip > 0 && fetchStats.TipAtSlot < fetchStats.ProcessedTip {
-						behindProcessed := fetchStats.ProcessedTip - fetchStats.TipAtSlot
-						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed, %d behind processed",
-							behindConfirmed, behindProcessed)
-					} else {
-						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
+				currentSlotForTip := block.Slot
+				if fetchStats.ConfirmedTip > 0 {
+					var behindConfirmed uint64
+					if currentSlotForTip < fetchStats.ConfirmedTip {
+						behindConfirmed = fetchStats.ConfirmedTip - currentSlotForTip
 					}
-				} else if fetchStats.ConfirmedTip > 0 {
-					tipDistanceStr = "caught up"
+					tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
 				} else {
 					tipDistanceStr = "tip unknown"
 				}
@@ -1363,13 +1447,18 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("")
 				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
 
-				// Line 1: Mode, blocks/sec, tip distance
+				// Line 1: Mode, blocks/sec, skipped slots, tip distance
 				modeStr := "catchup"
 				if fetchStats.IsNearTip {
 					modeStr = "near-tip"
 				}
-				mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
-					modeStr, blocksPerSec, tipDistanceStr)
+				if skippedSlotsCount > 0 {
+					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %d skipped | %s",
+						modeStr, blocksPerSec, skippedSlotsCount, tipDistanceStr)
+				} else {
+					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
+						modeStr, blocksPerSec, tipDistanceStr)
+				}
 
 				// Line 2: CU and transaction stats (median/min/max)
 				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
@@ -1404,6 +1493,7 @@ func ReplayBlocks(
 				voteTxCounts = voteTxCounts[:0]
 				nonVoteTxCounts = nonVoteTxCounts[:0]
 				statsCounter = 0
+				skippedSlotsCount = 0
 			}
 		} else {
 			justCrossedEpochBoundary = false
@@ -1588,7 +1678,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
-	if rblock.FromOvercast {
+	if rblock.FromLightbringer {
 		wg := &sync.WaitGroup{}
 		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
 			defer wg.Done()
@@ -1676,7 +1766,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	for i := range block.Transactions {
 		unresolvedBlock.Transactions[i] = &solana.Transaction{}
 		*(unresolvedBlock.Transactions[i]) = *block.Transactions[i]
-		if unresolvedBlock.TxMetas != nil && !block.FromOvercast {
+		if unresolvedBlock.TxMetas != nil && !block.FromLightbringer {
 			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
 			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
 		}

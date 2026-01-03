@@ -127,7 +127,15 @@ func BuildAccountsDbWithIncr(
 		dp.Stop()
 	}
 
-	mlog.Log.Infof("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
+	// Wait for all workers to finish before continuing to incremental phase
+	wg.Wait()
+
+	// Log full snapshot processing time to debug log only (noise reduction)
+	mlog.Log.Debugf("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
+
+	// Note: ShardLogger is NOT closed here - we use one logger for both phases
+	// and flush once at the end. This avoids the bug where pools still reference
+	// the old ShardLogger after reinit.
 
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
@@ -197,8 +205,8 @@ func BuildAccountsDbWithIncr(
 		return nil, nil, err
 	}
 
-	// Show indexing progress for incremental shard flush
-	indexProgress := progress.NewIndexingProgress("Convert log shards to index shards")
+	// Show indexing progress for shard flush
+	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
 	sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
@@ -206,7 +214,7 @@ func BuildAccountsDbWithIncr(
 	mlog.Log.Infof("Stopping shard setter.")
 	ss.Stop()
 
-	mlog.Log.Infof("snapshots processed in %s.\n", fmtDuration(time.Since(start)))
+	mlog.Log.Infof("snapshots processed in %s.", fmtDuration(time.Since(start)))
 
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())

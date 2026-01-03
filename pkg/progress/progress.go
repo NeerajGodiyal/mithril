@@ -130,15 +130,17 @@ func (p *ProgressBar) Render(useColor bool) string {
 
 	throughput := p.updateThroughput()
 
-	// Calculate ETA
-	var eta string
-	if throughput > 0 && total > current {
+	// Calculate ETA or show elapsed time if complete
+	elapsed := time.Since(p.startTime)
+	var etaStr string
+	if current >= total && total > 0 {
+		// Complete - show how long it took
+		etaStr = fmt.Sprintf("Finished in %s", formatDurationRounded(elapsed))
+	} else if throughput > 0 && total > current {
 		remaining := float64(total-current) / throughput
-		eta = formatDuration(time.Duration(remaining * float64(time.Second)))
-	} else if current >= total && total > 0 {
-		eta = "done"
+		etaStr = fmt.Sprintf("ETA %s", formatDuration(time.Duration(remaining*float64(time.Second))))
 	} else {
-		eta = "--:--"
+		etaStr = "ETA --:--"
 	}
 
 	// Build the bar
@@ -156,13 +158,13 @@ func (p *ProgressBar) Render(useColor bool) string {
 
 	// Build the line with size progress
 	if useColor {
-		return fmt.Sprintf("%s%-24s%s [%s%s%s] %5.1f%% %13s %8s  ETA %s",
+		return fmt.Sprintf("%s%-24s%s [%s%s%s] %5.1f%% %13s %8s  %s",
 			colorTeal, p.label, colorReset,
 			colorTeal, bar, colorReset,
-			percent, sizeStr, throughputStr, eta)
+			percent, sizeStr, throughputStr, etaStr)
 	}
-	return fmt.Sprintf("%-24s [%s] %5.1f%% %13s %8s  ETA %s",
-		p.label, bar, percent, sizeStr, throughputStr, eta)
+	return fmt.Sprintf("%-24s [%s] %5.1f%% %13s %8s  %s",
+		p.label, bar, percent, sizeStr, throughputStr, etaStr)
 }
 
 func formatThroughput(bytesPerSec float64) string {
@@ -205,6 +207,31 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
+// formatDurationRounded formats duration with friendlier spacing and rounds up to nearest second
+func formatDurationRounded(d time.Duration) string {
+	if d < 0 {
+		return "0s"
+	}
+	// Round up to nearest second
+	if d%time.Second != 0 {
+		d = d.Truncate(time.Second) + time.Second
+	}
+
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
 // DualProgress manages two progress bars displayed simultaneously:
 // - Download: compressed snapshot bytes from network
 // - Extract: decompressed tar bytes (AppendVec files)
@@ -225,15 +252,15 @@ type DualProgress struct {
 
 // NewDualProgress creates a new dual progress display
 func NewDualProgress() *DualProgress {
-	// Check if stdout is a TTY
-	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	// Use stderr for progress bars to avoid interleaving with log output on stdout
+	useColor := term.IsTerminal(int(os.Stderr.Fd()))
 
 	return &DualProgress{
 		Download: NewProgressBar("Snapshot Read (.tar.zst)"),
 		Extract:  NewProgressBar("Extract (AppendVecs)"),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
-		output:   os.Stdout,
+		output:   os.Stderr,
 		useColor: useColor,
 	}
 }
@@ -295,7 +322,6 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
-	fmt.Fprintln(d.output)
 
 	// Print initial empty lines for progress bars (2 bars)
 	fmt.Fprintln(d.output)
@@ -317,6 +343,11 @@ func (d *DualProgress) updateLoop() {
 			d.render()
 			return
 		case <-ticker.C:
+			// Skip rendering until we have actual data to show
+			// This prevents duplicate empty 0% bars from appearing
+			if d.Download.Total() == 0 {
+				continue
+			}
 			d.updateEstimates()
 			d.render()
 		}
@@ -405,11 +436,12 @@ type IndexingProgress struct {
 
 // NewIndexingProgress creates a new indexing progress display
 func NewIndexingProgress(label string) *IndexingProgress {
+	// Use stderr for progress bars to avoid interleaving with log output on stdout
 	return &IndexingProgress{
 		label:     label,
 		startTime: time.Now(),
-		output:    os.Stdout,
-		useColor:  term.IsTerminal(int(os.Stdout.Fd())),
+		output:    os.Stderr,
+		useColor:  term.IsTerminal(int(os.Stderr.Fd())),
 	}
 }
 
@@ -448,24 +480,25 @@ func (p *IndexingProgress) Update(completed, total int) {
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
 	elapsed := time.Since(p.startTime)
-	var eta string
-	if completed > 0 && completed < total {
+	var etaStr string
+	if completed >= total {
+		// Complete - show how long it took
+		etaStr = fmt.Sprintf("Finished in %s", formatDurationRounded(elapsed))
+	} else if completed > 0 && completed < total {
 		remaining := elapsed * time.Duration(total-completed) / time.Duration(completed)
-		eta = formatDuration(remaining)
-	} else if completed >= total {
-		eta = "done"
+		etaStr = fmt.Sprintf("ETA %s", formatDuration(remaining))
 	} else {
-		eta = "--:--"
+		etaStr = "ETA --:--"
 	}
 
 	if p.useColor {
-		fmt.Fprintf(p.output, "%s%-24s%s [%s%s%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
+		fmt.Fprintf(p.output, "%s%-24s%s [%s%s%s] %5.1f%% %4d/%-4d shards  %s\n",
 			colorTeal, p.label, colorReset,
 			colorTeal, bar, colorReset,
-			percent, completed, total, eta)
+			percent, completed, total, etaStr)
 	} else {
-		fmt.Fprintf(p.output, "%-24s [%s] %5.1f%% %4d/%-4d shards  ETA %s\n",
-			p.label, bar, percent, completed, total, eta)
+		fmt.Fprintf(p.output, "%-24s [%s] %5.1f%% %4d/%-4d shards  %s\n",
+			p.label, bar, percent, completed, total, etaStr)
 	}
 }
 
@@ -971,17 +1004,29 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 		r = colorReset
 	}
 
-	// Print the prompt box
+	// Format slot values
+	accountsSlot := formatSlots(info.AccountsDBSlot)
+	latestSlot := formatSlots(info.LatestSnapshotSlot)
+	slotsBehind := formatSlots(info.SlotsBehind)
+
+	// Build option 1 text and calculate padding
+	opt1Text := fmt.Sprintf("  [1] Continue from AccountsDB (replay %s slots)", slotsBehind)
+	opt1Padding := 76 - len(opt1Text)
+	if opt1Padding < 0 {
+		opt1Padding = 0
+	}
+
+	// Print the prompt box (76 chars inner width)
 	fmt.Println()
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
 	fmt.Printf("%s│%s ACCOUNTSDB BEHIND CHAIN TIP                                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "AccountsDB last slot:", formatSlots(info.AccountsDBSlot), c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Latest snapshot slot:", formatSlots(info.LatestSnapshotSlot), c, r)
-	fmt.Printf("%s│%s %-24s%-52s%s│%s\n", c, r, "Slots behind:", formatSlots(info.SlotsBehind), c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "AccountsDB last slot:", accountsSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Chain tip slot:", latestSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Slots behind:", slotsBehind, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
 	fmt.Printf("%s│%s OPTIONS:                                                                     %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s   [1] Continue from AccountsDB (replay %s slots)%-26s%s│%s\n", c, r, formatSlots(info.SlotsBehind), "", c, r)
+	fmt.Printf("%s│%s%s%*s %s│%s\n", c, r, opt1Text, opt1Padding, "", c, r)
 	fmt.Printf("%s│%s   [2] Start fresh from latest snapshot (faster to catch up)                 %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)

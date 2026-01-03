@@ -35,6 +35,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/version"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
@@ -53,11 +54,11 @@ var (
 		},
 	}
 
-	// Run is the main command for running Mithril as a live verifier.
+	// Run is the main command for running Mithril as a live full node.
 	// This is the primary way most users will run Mithril.
 	Run = cobra.Command{
 		Use:   "run",
-		Short: "Run Mithril as a live verifier (downloads snapshot, builds AccountsDB, verifies blocks)",
+		Short: "Run Mithril full node (downloads snapshot, builds AccountsDB, replays blocks)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return initConfigAndBindFlags(cmd)
 		},
@@ -88,8 +89,9 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	blockSource                 string   // "rpc" or "overcast"
-	overcastEndpoint            string
+	cluster                     string   // "mainnet-beta", "testnet", "devnet"
+	blockSource                 string   // "rpc" or "lightbringer"
+	lightbringerEndpoint        string
 	blockMaxRPS                 int      // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
@@ -105,6 +107,7 @@ var (
 	blockNearTipLookahead int // Slots ahead to schedule in near-tip
 
 	snapshotDlPath string
+	logDir         string
 	numReplaySlots              int64
 	endSlot                     int64
 	pprofPort                   int64
@@ -123,7 +126,7 @@ var (
 )
 
 func init() {
-	// flags for verifier mode
+	// flags for verify-range mode
 	// [replay] section flags
 	VerifyRange.Flags().BoolVarP(&loadFromSnapshot, "load-from-snapshot", "s", false, "Load from a full snapshot")
 	VerifyRange.Flags().BoolVarP(&loadFromAccountsDb, "load-from-accounts-db", "a", false, "Load from AccountsDB")
@@ -159,10 +162,10 @@ func init() {
 	// [reporting] section flags
 	VerifyRange.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
 
-	// [overcast] section flags
+	// [lightbringer] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
-	// flags for 'mithril run' (live verifier mode)
+	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 
@@ -170,8 +173,11 @@ func init() {
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
 	Run.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
 
-	// [rpc] section flags
+	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
+	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'mainnet-beta', 'testnet', or 'devnet'")
+
+	// [rpc] section flags (Mithril's RPC server)
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -198,8 +204,8 @@ func init() {
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'overcast'")
-	Run.Flags().StringVar(&overcastEndpoint, "overcast-endpoint", "", "Address for Overcast endpoint (only used when block-source=overcast)")
+	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'lightbringer'")
+	Run.Flags().StringVar(&lightbringerEndpoint, "lightbringer-endpoint", "", "Address for Lightbringer endpoint (only used when block-source=lightbringer)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -207,6 +213,42 @@ func init() {
 
 	// Copy all Run flags to VerifyLive for backwards compatibility
 	VerifyLive.Flags().AddFlagSet(Run.Flags())
+}
+
+// checkDirWritable verifies the current user can write to a directory.
+// Returns an error with a helpful fix message if the directory exists but is not writable.
+func checkDirWritable(path, description string) error {
+	if path == "" {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		// Directory doesn't exist yet - will be created later
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access %s at %s: %v", description, path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s path is not a directory: %s", description, path)
+	}
+
+	// Try to create a temp file to verify write permission
+	testFile := filepath.Join(path, ".mithril_write_test")
+	f, err := os.Create(testFile)
+	if err != nil {
+		// Get owner info for helpful error message
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			return fmt.Errorf("%s directory not writable: %s (owned by uid %d, running as uid %d)\n\nFix: sudo chown -R $USER:$USER %s",
+				description, path, stat.Uid, os.Getuid(), path)
+		}
+		return fmt.Errorf("%s directory not writable: %s\n\nFix: sudo chown -R $USER:$USER %s",
+			description, path, path)
+	}
+	f.Close()
+	os.Remove(testFile)
+	return nil
 }
 
 // initConfigAndBindFlags loads TOML config file (if specified) and binds flags to viper.
@@ -351,6 +393,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if accountsPath == "" {
 		accountsPath = getString("accounts-path", "ledger.accounts_path")
 	}
+	// Check write permission early to fail fast with helpful error
+	if err := checkDirWritable(accountsPath, "AccountsDB"); err != nil {
+		return err
+	}
 	blockstorePath = getString("ledger-path", "storage.blockstore")
 	if blockstorePath == "" {
 		blockstorePath = getString("ledger-path", "ledger.path")
@@ -360,6 +406,19 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	rpcEndpoints = getStringSlice("rpc", "network.rpc")
 	if len(rpcEndpoints) == 0 {
 		rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
+	}
+
+	// Cluster is required for safety (prevents mainnet/testnet mixups)
+	cluster = getString("cluster", "network.cluster")
+	if cluster == "" {
+		return fmt.Errorf("network.cluster is required - set to 'mainnet-beta', 'testnet', or 'devnet'")
+	}
+	// Validate cluster value
+	switch cluster {
+	case "mainnet-beta", "testnet", "devnet":
+		// Valid
+	default:
+		return fmt.Errorf("invalid network.cluster %q - must be 'mainnet-beta', 'testnet', or 'devnet'", cluster)
 	}
 
 	// [rpc] section - Mithril's RPC server
@@ -373,7 +432,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if blockSource == "" {
 		blockSource = "rpc" // default
 	}
-	overcastEndpoint = getString("overcast-endpoint", "block.overcast_endpoint")
+	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
 
 	// Validate: blockSource=rpc requires RPC endpoints
 	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
@@ -817,10 +876,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and resume context
-	if result.LastPersistedSlot > 0 && mithrilState != nil {
+	// Skip if already written during cancellation (eliminates timing window)
+	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
 		// Build resume context for graceful shutdown
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
@@ -862,7 +922,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
-				Commit:       getCommitHash(),
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommit(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
@@ -887,7 +950,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			SnapshotBaseSlot: snapshotBaseSlot,
 			AccountsDBPath:   accountsDbDir,
 			ReplayDuration:   time.Since(replayStartTime),
-			WasCancelled:     true,
+			WasCancelled:     result.WasCancelled,
 			RunID:            replay.CurrentRunID,
 			Epoch:            epoch,
 			SnapshotEpoch:    snapshotEpoch,
@@ -904,6 +967,68 @@ func runLive(c *cobra.Command, args []string) {
 	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
 
+	// Generate run ID early so it's available for logging and state tracking
+	replay.CurrentRunID = replay.GenerateRunID()
+
+	// Initialize file logging with defaults
+	// Use config.IsSet() to allow explicit empty/zero values:
+	//   dir = ""          → disable file logging (stdout only)
+	//   max_size_mb = 0   → no limit
+	//   max_age_days = 0  → never delete
+	//   max_backups = 0   → unlimited
+	logCfg := mlog.LogConfig{
+		ToStdout: true, // Default true, override if explicitly set false
+	}
+
+	// Dir: default to /mnt/mithril-logs, but "" disables file logging
+	if config.IsSet("log.dir") {
+		logCfg.Dir = config.GetString("log.dir")
+	} else {
+		logCfg.Dir = "/mnt/mithril-logs"
+	}
+
+	// Level: default to "info"
+	if config.IsSet("log.level") {
+		logCfg.Level = config.GetString("log.level")
+	} else {
+		logCfg.Level = "info"
+	}
+
+	// ToStdout: default true (viper returns false for missing bool)
+	if config.IsSet("log.to_stdout") {
+		logCfg.ToStdout = config.GetBool("log.to_stdout")
+	}
+
+	// MaxSizeMB: default 100, but 0 means no limit
+	if config.IsSet("log.max_size_mb") {
+		logCfg.MaxSizeMB = config.GetInt("log.max_size_mb")
+	} else {
+		logCfg.MaxSizeMB = 100
+	}
+
+	// MaxAgeDays: default 7, but 0 means never delete
+	if config.IsSet("log.max_age_days") {
+		logCfg.MaxAgeDays = config.GetInt("log.max_age_days")
+	} else {
+		logCfg.MaxAgeDays = 7
+	}
+
+	// MaxBackups: default 10, but 0 means unlimited
+	if config.IsSet("log.max_backups") {
+		logCfg.MaxBackups = config.GetInt("log.max_backups")
+	} else {
+		logCfg.MaxBackups = 10
+	}
+
+	// Store log dir for startup info display
+	logDir = logCfg.Dir
+
+	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
+		// Non-fatal, continue with stdout-only logging
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
+	}
+	defer mlog.Shutdown()
+
 	// Kill any existing mithril processes to prevent zombie accumulation
 	if killed := killExistingMithrilProcesses(); killed > 0 {
 		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
@@ -915,23 +1040,23 @@ func runLive(c *cobra.Command, args []string) {
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
 
-	// Determine if using Overcast based on block source
-	// NOTE: Overcast mode is TEMPORARILY DISABLED. The background block downloader that
-	// wrote Overcast blocks to disk was removed due to reliability issues (panics, race conditions).
-	// Until Overcast streaming is re-implemented with the new parallel fetcher architecture,
-	// all Overcast requests will fall back to RPC mode.
-	// TODO: Re-implement Overcast as a streaming BlockSource (push model -> reorder buffer)
-	useOvercast := blockSource == "overcast"
-	if useOvercast {
-		mlog.Log.Infof("WARNING: block.source=overcast is temporarily disabled - falling back to RPC")
-		mlog.Log.Infof("  The background block downloader was removed. Overcast streaming will be")
+	// Determine if using Lightbringer based on block source
+	// NOTE: Lightbringer mode is TEMPORARILY DISABLED. The background block downloader that
+	// wrote Lightbringer blocks to disk was removed due to reliability issues (panics, race conditions).
+	// Until Lightbringer streaming is re-implemented with the new parallel fetcher architecture,
+	// all Lightbringer requests will fall back to RPC mode.
+	// TODO: Re-implement Lightbringer as a streaming BlockSource (push model -> reorder buffer)
+	useLightbringer := blockSource == "lightbringer"
+	if useLightbringer {
+		mlog.Log.Infof("WARNING: block.source=lightbringer is temporarily disabled - falling back to RPC")
+		mlog.Log.Infof("  The background block downloader was removed. Lightbringer streaming will be")
 		mlog.Log.Infof("  re-implemented in a future PR with the new parallel fetcher architecture.")
-		useOvercast = false
+		useLightbringer = false
 
 		// Validate RPC endpoints since we're falling back to RPC mode
 		// (This check is normally done in loadConfig but only when blockSource == "rpc")
 		if len(rpcEndpoints) == 0 {
-			klog.Fatalf("block.source=overcast requires fallback to RPC, but no RPC endpoints are configured. " +
+			klog.Fatalf("block.source=lightbringer requires fallback to RPC, but no RPC endpoints are configured. " +
 				"Set network.rpc in config, or use --rpc flag.")
 		}
 	}
@@ -962,9 +1087,34 @@ func runLive(c *cobra.Command, args []string) {
 	// Use configured snapshot directory (storage.snapshots / snapshot.download_path), not scratch
 	snapshotDownloadPath := snapshotDlPath
 
+	// Prune old history entries if needed (keeps last 100)
+	if accountsPath != "" {
+		if err := state.PruneHistory(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to prune state history: %v", err)
+		}
+	}
+
 	// Check for valid state file first (this is the authoritative source of truth)
 	mithrilState, _ = state.CheckAndLoadValidState(accountsPath)
 	hasValidState := mithrilState != nil
+
+	// Validate genesis hash if we have a valid state (prevents mainnet/testnet mixups)
+	if hasValidState {
+		genesisHash := fetchGenesisHash(ctx)
+		if genesisHash != "" {
+			if err := mithrilState.ValidateGenesisHash(genesisHash); err != nil {
+				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap-mode=snapshot to rebuild.", err)
+			}
+			// If state has no genesis hash (older version), set it now
+			if mithrilState.GenesisHash == "" {
+				mlog.Log.Infof("updating state file with cluster=%s genesis=%s", cluster, genesisHash[:12]+"...")
+				mithrilState.SetClusterInfo(cluster, genesisHash)
+				if err := mithrilState.Save(accountsPath); err != nil {
+					mlog.Log.Infof("WARNING: failed to update state file with cluster info: %v", err)
+				}
+			}
+		}
+	}
 
 	// Fall back to legacy detection if no state file
 	hasAccountsDB, accountsDBSlot := detectExistingAccountsDB(accountsPath)
@@ -1006,6 +1156,12 @@ func runLive(c *cobra.Command, args []string) {
 		}
 		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
 		if accountsPath != "" {
+			// Record rebuild in history before cleanup (history file is preserved)
+			if mithrilState != nil {
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "new-snapshot mode")
+			} else {
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "new-snapshot mode (no prior state)")
+			}
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
@@ -1027,6 +1183,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 
 	case "snapshot":
 		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
@@ -1035,6 +1193,12 @@ func runLive(c *cobra.Command, args []string) {
 		}
 		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
+			// Record rebuild in history before cleanup (history file is preserved)
+			if mithrilState != nil {
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "snapshot mode")
+			} else {
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "snapshot mode (no prior state)")
+			}
 			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
@@ -1075,6 +1239,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 
 	case "auto":
 		fallthrough
@@ -1086,12 +1252,13 @@ func runLive(c *cobra.Command, args []string) {
 		}
 
 		if hasValidState {
-			// Check if AccountsDB is stale (significantly behind chain tip)
+			// Check if AccountsDB is behind chain tip (more than 2000 slots triggers prompt)
 			// Use queryCurrentSlot instead of queryLatestSnapshotSlot to avoid expensive node discovery
+			const stalePromptThreshold = 2000
 			currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
 			if err != nil {
 				mlog.Log.Infof("could not query current slot: %v (continuing with existing AccountsDB)", err)
-			} else if mithrilState.IsStale(currentSlot, uint64(fullThreshold)) {
+			} else if mithrilState.IsStale(currentSlot, stalePromptThreshold) {
 				slotsBehind := currentSlot - mithrilState.GetCurrentSlot()
 				mlog.Log.Infof("AccountsDB is %d slots behind chain tip", slotsBehind)
 
@@ -1109,6 +1276,9 @@ func runLive(c *cobra.Command, args []string) {
 					}
 					mlog.Log.Infof("user chose to rebuild from latest snapshot")
 					if accountsPath != "" {
+						// Record rebuild in history before cleanup (history file is preserved)
+						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
+						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "user chose rebuild (stale AccountsDB)")
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// Check for existing fresh snapshot
@@ -1138,12 +1308,16 @@ func runLive(c *cobra.Command, args []string) {
 					if err := mithrilState.Save(accountsPath); err != nil {
 						mlog.Log.Errorf("failed to save state file: %v", err)
 					}
+					// Record bootstrap in history
+					state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 					break // Exit the switch, continue with fresh AccountsDB
 				}
 				// choice == 1: continue with existing AccountsDB
 			}
 
 			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			// Record resume in history
+			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit())
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
 			if err != nil {
 				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
@@ -1164,6 +1338,8 @@ func runLive(c *cobra.Command, args []string) {
 					mlog.Log.Errorf("failed to mark state as corrupted: %v", markErr)
 				} else {
 					mlog.Log.Infof("state file updated to indicate corruption")
+					// Record corruption in history
+					state.RecordCorrupted(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit(), err.Error())
 				}
 
 				// Close AccountsDB before exiting
@@ -1183,6 +1359,19 @@ func runLive(c *cobra.Command, args []string) {
 				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
 			}
 			if accountsPath != "" {
+				// Record rebuild in history before cleanup (history file is preserved)
+				// Try to load any existing state (even invalid) to capture slot info
+				var reason string
+				if hasAccountsDB {
+					reason = "auto mode (AccountsDB exists but state invalid)"
+				} else {
+					reason = "auto mode (no existing AccountsDB)"
+				}
+				if existingState, _ := state.LoadState(accountsPath); existingState != nil {
+					state.RecordRebuild(accountsPath, existingState.LastSlot, existingState.LastBankhash, getVersion(), getCommit(), reason)
+				} else {
+					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), reason)
+				}
 				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
 			}
@@ -1209,10 +1398,20 @@ func runLive(c *cobra.Command, args []string) {
 			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
 				snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
 			}
-			mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+			mithrilState = state.NewReadyStateWithOpts(state.NewReadyStateOpts{
+				SnapshotSlot:  manifest.Bank.Slot,
+				SnapshotEpoch: snapshotEpoch,
+				BuildMode:     bootstrapMode,
+				Cluster:       cluster,
+				GenesisHash:   fetchGenesisHash(ctx),
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommit(),
+			})
 			if err := mithrilState.Save(accountsPath); err != nil {
 				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
+			// Record bootstrap in history
+			state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 		}
 	}
 
@@ -1307,6 +1506,8 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
+		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 	}
 
 	liveEndSlot := uint64(math.MaxUint64)
@@ -1355,10 +1556,11 @@ func runLive(c *cobra.Command, args []string) {
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useOvercast, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and resume context
-	if result.LastPersistedSlot > 0 && mithrilState != nil {
+	// Skip if already written during cancellation (eliminates timing window)
+	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
 		var resumeCtx *state.ResumeContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
@@ -1399,14 +1601,24 @@ func runLive(c *cobra.Command, args []string) {
 				// Run tracking - for log correlation
 				RunID:        replay.CurrentRunID,
 				RunStartedAt: replayStartTime,
-				Commit:       getCommitHash(),
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommit(),
 
 				// Shutdown tracking
 				ShutdownReason: shutdownReason,
 			}
-		}
-		if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
-			mlog.Log.Errorf("failed to update state file: %v", err)
+			// Record shutdown in history (must be inside this block where shutdownReason is defined)
+			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+				mlog.Log.Errorf("failed to update state file: %v", err)
+			}
+			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
+		} else {
+			// No resume context - just update slot
+			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+				mlog.Log.Errorf("failed to update state file: %v", err)
+			}
 		}
 	}
 
@@ -1435,11 +1647,23 @@ func runLive(c *cobra.Command, args []string) {
 	accountsDb.CloseDb()
 }
 
-// getCommitHash returns the short git commit hash from build info
-func getCommitHash() string {
+// getVersion returns the build version from the shared version package.
+func getVersion() string {
+	return version.Version
+}
+
+// getCommit returns the git commit hash, preferring ldflags but falling back to
+// runtime/debug.BuildInfo for dev builds.
+func getCommit() string {
+	// If set via ldflags (release builds), use that
+	if version.GitCommit != "" && version.GitCommit != "unknown" {
+		return version.GitCommit
+	}
+	// Fallback to runtime/debug for dev builds (go build without ldflags)
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range info.Settings {
 			if setting.Key == "vcs.revision" {
+				// Return short hash (8 chars) for consistency
 				if len(setting.Value) > 8 {
 					return setting.Value[:8]
 				}
@@ -1447,7 +1671,22 @@ func getCommitHash() string {
 			}
 		}
 	}
-	return ""
+	return "unknown"
+}
+
+// fetchGenesisHash fetches the genesis hash from the first RPC endpoint.
+// Returns empty string on error (caller should log and continue).
+func fetchGenesisHash(ctx context.Context) string {
+	if len(rpcEndpoints) == 0 {
+		return ""
+	}
+	client := solrpc.New(rpcEndpoints[0])
+	hash, err := client.GetGenesisHash(ctx)
+	if err != nil {
+		mlog.Log.Infof("WARNING: failed to fetch genesis hash from RPC: %v", err)
+		return ""
+	}
+	return hash.String()
 }
 
 // formatDurationShort formats a duration in a compact human-readable format (e.g., "2h 30m", "45m", "3d 2h")
@@ -1582,7 +1821,7 @@ func printStartupInfo(commandName string) {
 
 				// Slots replayed since snapshot
 				slotsReplayed := mithrilState.LastSlot - mithrilState.SnapshotSlot
-				fmt.Printf("  Replayed:       %s%d slots since snapshot%s\n", dim, slotsReplayed, reset)
+				fmt.Printf("  Replayed:       %s%d slots since snapshot bootstrap%s\n", dim, slotsReplayed, reset)
 			} else {
 				fmt.Printf("  Resume from:    %ssnapshot (fresh start)%s\n", dim, reset)
 			}
@@ -1668,10 +1907,15 @@ func printStartupInfo(commandName string) {
 		}
 	}
 
+	// Log directory
+	if logDir != "" {
+		fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+	}
+
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "overcast" {
-		// Overcast is temporarily disabled - show this in startup info
+	if blockSource == "lightbringer" {
+		// Lightbringer is temporarily disabled - show this in startup info
 		fmt.Printf(" %s(disabled, using rpc)%s\n", dim, reset)
 	} else {
 		fmt.Println()
@@ -1684,43 +1928,6 @@ func printStartupInfo(commandName string) {
 			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
 	}
-
-	// Block mode config (resolve defaults for display)
-	fmt.Println()
-	fmt.Printf("%s━━━ Block Mode Config ━━━%s\n", gold, reset)
-
-	// Resolve actual values that will be used (0 means default will be applied in BlockSource)
-	displayNearTip := blockNearTipThreshold
-	if displayNearTip == 0 {
-		displayNearTip = 32
-	}
-	displayCatchup := blockCatchupThreshold
-	if displayCatchup == 0 {
-		displayCatchup = 64
-	}
-	displayTipGate := blockCatchupTipGateThreshold
-	if displayTipGate == 0 {
-		displayTipGate = 128
-	}
-	displaySafetyMargin := blockTipSafetyMargin
-	if displaySafetyMargin == 0 {
-		displaySafetyMargin = 64
-	}
-	displayNearTipPoll := blockNearTipPollMs
-	if displayNearTipPoll == 0 {
-		displayNearTipPoll = 500
-	}
-	displayNearTipLookahead := blockNearTipLookahead
-	if displayNearTipLookahead == 0 {
-		displayNearTipLookahead = 2
-	}
-
-	fmt.Printf("  %snear_tip_threshold=%d, catchup_threshold=%d%s\n",
-		dim, displayNearTip, displayCatchup, reset)
-	fmt.Printf("  %stip_safety_margin=%d (applies only when gap > %d)%s\n",
-		dim, displaySafetyMargin, displayTipGate, reset)
-	fmt.Printf("  %snear_tip_poll_interval_ms=%d, near_tip_lookahead=%d%s\n",
-		dim, displayNearTipPoll, displayNearTipLookahead, reset)
 
 	fmt.Println()
 }
@@ -2139,14 +2346,71 @@ func runReplayWithRecovery(
 	blockDir string,
 	txParallelism int,
 	isLive bool,
-	useOvercast bool,
+	useLightbringer bool,
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer *rpcserver.RpcServer,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
+	replayStartTime time.Time, // Start time for resume context
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
+
+	// Create callback to write state immediately on cancellation
+	// This eliminates the timing window between bankhash persistence and state file update
+	onCancelWriteState := func(r *replay.ReplayResult) error {
+		if mithrilState == nil {
+			return nil
+		}
+
+		// Calculate epoch for the last persisted slot
+		var lastEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(r.LastPersistedSlot)
+		}
+
+		// Build resume context
+		var resumeCtx *state.ResumeContext
+		if r.LastAcctsLtHash != nil {
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(r.LastAcctsLtHash.Hash()),
+				LamportsPerSignature: r.LastLamportsPerSignature,
+				PrevLamportsPerSig:   r.LastPrevLamportsPerSig,
+				NumSignatures:        r.LastNumSignatures,
+				Epoch:                lastEpoch,
+
+				// Blockhash context
+				RecentBlockhashes: encodeRecentBlockhashes(r.LastRecentBlockhashes),
+				EvictedBlockhash:  base58.Encode(r.LastEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(r.LastBlockhash[:]),
+
+				// SlotHashes context
+				SlotHashes: encodeSlotHashes(r.LastSlotHashes),
+
+				// Run tracking
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommit(),
+
+				// Shutdown tracking - this is always a cancel (Ctrl+C)
+				ShutdownReason: state.ShutdownReasonNormal,
+			}
+		}
+
+		// Write state immediately
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, r.LastPersistedSlot, r.LastPersistedBankhash, resumeCtx); err != nil {
+			return err
+		}
+
+		// Record shutdown in history
+		state.RecordShutdown(accountsDbPath, r.LastPersistedSlot, base58.Encode(r.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), state.ShutdownReasonNormal)
+
+		mlog.Log.Infof("state written immediately on cancel at slot %d", r.LastPersistedSlot)
+		return nil
+	}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -2160,6 +2424,9 @@ func runReplayWithRecovery(
 					reason := fmt.Sprintf("panic during commit at slot %d: %v", commitSlot, r)
 					if err := mithrilState.MarkCorrupted(accountsDbPath, reason); err != nil {
 						mlog.Log.Errorf("[run:%s] Failed to mark state as corrupted: %v", runID, err)
+					} else {
+						// Record corruption in history
+						state.RecordCorrupted(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash, runID, getVersion(), getCommit(), reason)
 					}
 				}
 			} else {
@@ -2188,6 +2455,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useOvercast, dbgOpts, metricsWriter, rpcServer, blockFetchOpts)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
 	return result
 }

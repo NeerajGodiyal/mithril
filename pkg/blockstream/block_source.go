@@ -24,7 +24,7 @@ type BlockSourceType int
 const (
 	BlockSourceRpc = iota
 	BlockSourceFile
-	BlockSourceOvercast
+	BlockSourceLightbringer
 )
 
 type BlockSourceOpts struct {
@@ -219,10 +219,11 @@ type BlockSource struct {
 	stallError   atomic.Bool // Set when stall timeout triggers
 
 	// Stall diagnostics
-	waitingSlotErrorsMu sync.Mutex
-	waitingSlotErrors   map[uint64]*slotErrorInfo // Per-slot error tracking
-	lastStallHeartbeat  atomic.Int64              // Unix timestamp of last stall heartbeat log
-	lastFailoverTime    atomic.Int64              // Unix timestamp of last RPC failover
+	waitingSlotErrorsMu     sync.Mutex
+	waitingSlotErrors       map[uint64]*slotErrorInfo // Per-slot error tracking
+	lastStallHeartbeat      atomic.Int64              // Unix timestamp of last stall heartbeat log
+	lastFailoverTime        atomic.Int64              // Unix timestamp of last RPC failover
+	lastPriorityBlockedLog  atomic.Int64              // Unix timestamp of last "priority slot blocked" log
 
 	// Near-tip mode tracking
 	isNearTip        atomic.Bool // True when close to confirmed tip
@@ -406,13 +407,15 @@ func (bs *BlockSource) updateMode() {
 		// Currently in near-tip mode - switch to catchup if gap exceeds threshold
 		if gap >= bs.catchupThreshold {
 			bs.isNearTip.Store(false)
-			mlog.Log.Infof("Switching to CATCHUP mode (gap=%d slots, threshold=%d)", gap, bs.catchupThreshold)
+			mlog.Log.Infof("MODE SWITCH: near-tip → CATCHUP | gap=%d (threshold=%d) | exec_slot=%d | tip=%d",
+				gap, bs.catchupThreshold, lastExecuted, tip)
 		}
 	} else {
 		// Currently in catchup mode - switch to near-tip if gap is small
 		if gap <= bs.nearTipThreshold {
 			bs.isNearTip.Store(true)
-			mlog.Log.Infof("Switching to NEAR-TIP mode (gap=%d slots, threshold=%d)", gap, bs.nearTipThreshold)
+			mlog.Log.Infof("MODE SWITCH: catchup → NEAR-TIP | gap=%d (threshold=%d) | exec_slot=%d | tip=%d",
+				gap, bs.nearTipThreshold, lastExecuted, tip)
 		}
 	}
 }
@@ -1254,9 +1257,20 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
-				// Slot was skipped (SlotSkipped from RPC), advance without emitting
-				delete(bs.skippedSlots, bs.nextSlotToSend)
-				// Also update progress - skipped slots count as progress
+				// Slot was skipped (SlotSkipped from RPC) - emit a skip marker block
+				skippedSlot := bs.nextSlotToSend
+				delete(bs.skippedSlots, skippedSlot)
+				bs.nextSlotToSend++
+				bs.reorderMu.Unlock()
+
+				// Emit a minimal block with IsSkipped=true for logging
+				skipBlock := &b.Block{
+					Slot:      skippedSlot,
+					IsSkipped: true,
+				}
+				bs.streamChan <- skipBlock
+
+				// Update progress - skipped slots count as progress
 				bs.lastProgress.Store(time.Now().Unix())
 
 				// Track slots since failover for primary retry (skipped slots count too)
@@ -1267,7 +1281,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 					}
 				}
 
-				bs.nextSlotToSend++
+				bs.reorderMu.Lock()
 			} else {
 				break
 			}
@@ -1508,6 +1522,33 @@ func (bs *BlockSource) scheduler() {
 				}
 			}
 
+			// Check for priority slot blocked condition (rate-limited to once per 2s)
+			// This detects when the waiting slot keeps getting retried but isn't making progress
+			bs.waitingSlotErrorsMu.Lock()
+			waitingSlotInfo := bs.waitingSlotErrors[waitingSlot]
+			bs.waitingSlotErrorsMu.Unlock()
+
+			if waitingSlotInfo != nil && waitingSlotInfo.retryCount >= 3 {
+				bs.slotStateMu.Lock()
+				state, exists := bs.slotState[waitingSlot]
+				isInflight := exists && state == slotInflight
+				bs.slotStateMu.Unlock()
+
+				// Only log if slot is not currently inflight (stuck in retry cycle)
+				if !isInflight {
+					lastLog := time.Unix(bs.lastPriorityBlockedLog.Load(), 0)
+					if time.Since(lastLog) >= 2*time.Second {
+						bs.lastPriorityBlockedLog.Store(time.Now().Unix())
+						modeStr := "catchup"
+						if bs.isNearTip.Load() {
+							modeStr = "near-tip"
+						}
+						mlog.Log.Warnf("priority slot blocked: slot %d retried %d times but not inflight | mode: %s | last_err: %s",
+							waitingSlot, waitingSlotInfo.retryCount, modeStr, waitingSlotInfo.lastErrorClass)
+					}
+				}
+			}
+
 			// Send backup requests for stale slots (>1 second old)
 			for _, slot := range bs.getStaleSlots(1 * time.Second) {
 				if !backupSent[slot] {
@@ -1632,12 +1673,12 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			}
 			blk = block.FromBlockResult(blockResult, slot, rpc)
 		}
-	} else if bs.sourceType == BlockSourceOvercast {
-		// NOTE: BlockSourceOvercast is TEMPORARILY NON-FUNCTIONAL.
+	} else if bs.sourceType == BlockSourceLightbringer {
+		// NOTE: BlockSourceLightbringer is TEMPORARILY NON-FUNCTIONAL.
 		// The background block downloader that populated files for this path was removed.
-		// This code path will return SlotSkipped for every slot until Overcast streaming
+		// This code path will return SlotSkipped for every slot until Lightbringer streaming
 		// is re-implemented as a push-based source feeding directly into the reorder buffer.
-		// TODO: Implement Overcast as a streaming source (gRPC stream -> reorder buffer)
+		// TODO: Implement Lightbringer as a streaming source (gRPC stream -> reorder buffer)
 		blk, err = bs.tryGetBlockFromFile(slot)
 		if err != nil {
 			return nil, rpcclient.SlotSkipped
@@ -1699,6 +1740,11 @@ type FetchStatsSnapshot struct {
 	GetBlockRPS float64 // getBlock calls per second over the stats window
 	SuccessRate float64 // Percentage of fetches that returned block data (vs skipped)
 	WindowSecs  float64 // How long the stats window has been open
+	// Stall diagnostics (for STALL log in replay loop)
+	WaitingSlotState   string // "inflight", "done", "pending", "missing"
+	WaitingSlotRetries int    // How many times the waiting slot has been retried
+	InflightCount      int    // Number of slots currently being fetched
+	RetryQueueLen      int    // Number of slots waiting to be retried
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -1717,6 +1763,40 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 	nextSlot := bs.nextSlotToSend
 	reorderLen := len(bs.reorderBuffer)
 	bs.reorderMu.Unlock()
+
+	// Stall diagnostics: waiting slot state and retry info
+	var waitingSlotState string
+	var inflightCount int
+	bs.slotStateMu.Lock()
+	if state, exists := bs.slotState[nextSlot]; exists {
+		switch state {
+		case slotInflight:
+			waitingSlotState = "inflight"
+		case slotDone:
+			waitingSlotState = "done"
+		case slotPending:
+			waitingSlotState = "pending"
+		}
+	} else {
+		waitingSlotState = "missing"
+	}
+	for _, state := range bs.slotState {
+		if state == slotInflight {
+			inflightCount++
+		}
+	}
+	bs.slotStateMu.Unlock()
+
+	var waitingSlotRetries int
+	bs.waitingSlotErrorsMu.Lock()
+	if info, exists := bs.waitingSlotErrors[nextSlot]; exists {
+		waitingSlotRetries = info.retryCount
+	}
+	bs.waitingSlotErrorsMu.Unlock()
+
+	bs.retryMu.Lock()
+	retryQueueLen := len(bs.retrySlots)
+	bs.retryMu.Unlock()
 
 	maxBuffered := bs.stats.MaxBufferedSlot.Load()
 	var leadSlots int64
@@ -1776,6 +1856,11 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		GetBlockRPS:        getBlockRPS,
 		SuccessRate:        successRate,
 		WindowSecs:         windowSecs,
+		// Stall diagnostics
+		WaitingSlotState:   waitingSlotState,
+		WaitingSlotRetries: waitingSlotRetries,
+		InflightCount:      inflightCount,
+		RetryQueueLen:      retryQueueLen,
 	}
 }
 

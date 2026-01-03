@@ -86,7 +86,7 @@ func NewBufMonReaderHTTPWithSave(ctx context.Context, url string, savePath strin
 
 	// If savePath is provided, use TeeReader to write to disk while streaming
 	if savePath != "" {
-		mlog.Log.Infof("Saving snapshot to %s while streaming...", savePath)
+		// Note: Don't log here - caller logs before progress bar starts to avoid breaking cursor positioning
 		outFile, err := os.Create(savePath)
 		if err != nil {
 			resp.Body.Close()

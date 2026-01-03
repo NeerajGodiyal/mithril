@@ -49,9 +49,9 @@ sudo ./scripts/performance-tune.sh          # Apply performance tuning
 
 **Resetting Mithril data** (when needed):
 ```bash
-sudo ./scripts/disk-setup.sh --delete-accounts    # After bankhash mismatch / bug fix
-sudo ./scripts/disk-setup.sh --delete-ledger      # Delete snapshots + blockstore
-sudo ./scripts/disk-setup.sh --delete-all         # Complete reset
+sudo ./scripts/disk-setup.sh --clean-accounts    # After bankhash mismatch / bug fix
+sudo ./scripts/disk-setup.sh --clean-ledger      # Clear snapshots + blockstore
+sudo ./scripts/disk-setup.sh --clean-all         # Complete reset
 ```
 
 ---
@@ -513,12 +513,12 @@ Mithril stores three types of data that can be reset independently:
 
 Sometimes you need to start fresh. These commands delete this data so you can re-sync from scratch.
 
-### Delete AccountsDB Only
+### Clean AccountsDB Only
 
 Forces Mithril to rebuild from a fresh snapshot on next run:
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-accounts
+sudo ./scripts/disk-setup.sh --clean-accounts
 ```
 
 **When to use:**
@@ -528,12 +528,12 @@ sudo ./scripts/disk-setup.sh --delete-accounts
 
 After deleting, Mithril will fetch a fresh snapshot on next run and rebuild AccountsDB from scratch.
 
-### Delete Ledger Only (Snapshots + Blockstore)
+### Clean Ledger Only (Snapshots + Blockstore)
 
 Removes both snapshots and blockstore while preserving AccountsDB:
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-ledger
+sudo ./scripts/disk-setup.sh --clean-ledger
 ```
 
 **When to use:**
@@ -541,24 +541,24 @@ sudo ./scripts/disk-setup.sh --delete-ledger
 - Reclaiming space from old snapshots and blocks together
 - When you want to clear all "ledger" data (everything except account state)
 
-### Delete Snapshots Only
+### Clean Snapshots Only
 
 Removes downloaded snapshots (Mithril will re-download them):
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-snapshots
+sudo ./scripts/disk-setup.sh --clean-snapshots
 ```
 
 **When to use:** Snapshots are old or corrupted.
 
 > **Tip:** We recommend retaining snapshots when possible (current + previous) as they're helpful for debugging. If you encounter issues, having the snapshot you synced from makes it easier for the Mithril team to reproduce and fix bugs. Only delete if you need disk space.
 
-### Delete Blockstore Only
+### Clean Blockstore Only
 
 Removes stored blocks (Mithril will rebuild them):
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-blockstore
+sudo ./scripts/disk-setup.sh --clean-blockstore
 ```
 
 **When to use:**
@@ -566,12 +566,12 @@ sudo ./scripts/disk-setup.sh --delete-blockstore
 - You want to clear block history but keep AccountsDB
 - Reclaiming disk space from old block data
 
-### Delete Everything
+### Clean Everything
 
 Complete reset - removes all Mithril data:
 
 ```bash
-sudo ./scripts/disk-setup.sh --delete-all
+sudo ./scripts/disk-setup.sh --clean-all
 ```
 
 **When to use:** Starting completely fresh, or decommissioning the node.
@@ -664,9 +664,9 @@ sudo ./scripts/performance-tune.sh --status      # Show current settings
 ./scripts/performance-tune.sh --goamd64          # Configure GOAMD64 for CPU
 
 # Reset Data
-sudo ./scripts/disk-setup.sh --delete-accounts   # Delete AccountsDB
-sudo ./scripts/disk-setup.sh --delete-ledger     # Delete ledger (snapshots + blockstore)
-sudo ./scripts/disk-setup.sh --delete-snapshots  # Delete snapshots only
-sudo ./scripts/disk-setup.sh --delete-blockstore # Delete blockstore only
-sudo ./scripts/disk-setup.sh --delete-all        # Delete everything
+sudo ./scripts/disk-setup.sh --clean-accounts   # Clean AccountsDB
+sudo ./scripts/disk-setup.sh --clean-ledger     # Clean ledger (snapshots + blockstore)
+sudo ./scripts/disk-setup.sh --clean-snapshots  # Clean snapshots only
+sudo ./scripts/disk-setup.sh --clean-blockstore # Clean blockstore only
+sudo ./scripts/disk-setup.sh --clean-all        # Clean everything
 ```

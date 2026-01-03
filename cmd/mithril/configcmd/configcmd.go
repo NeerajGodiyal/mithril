@@ -121,7 +121,7 @@ func generateStarterConfig() string {
 name = "mithril"
 
 [bootstrap]
-mode = "snapshot"   # "auto" | "snapshot" | "accountsdb"
+mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
@@ -129,17 +129,25 @@ blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporar
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 
 [network]
+cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "overcast" (overcast temporarily disabled, falls back to rpc)
-# overcast_endpoint = "localhost:9000"
+source = "rpc"   # "rpc" | "lightbringer" (lightbringer temporarily disabled, falls back to rpc)
+# lightbringer_endpoint = "localhost:9000"
 
 [replay]
 txpar = 24   # Recommended: 2x your CPU core count
 
 [rpc]
-port = 8899  # Mithril's RPC server (localhost only)
+port = 8899  # Mithril's RPC server (binds to all interfaces)
+
+[log]
+dir = "/mnt/mithril-logs"  # Log files (created if missing)
+level = "info"             # "debug" | "info" | "warn" | "error"
+to_stdout = true           # Also write to stdout
+max_size_mb = 100          # Max log file size before rotation
+max_age_days = 7           # Delete logs older than this
 
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]

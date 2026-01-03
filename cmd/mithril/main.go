@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/statecmd"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -18,9 +19,13 @@ import (
 )
 
 var cmd = cobra.Command{
-	Use:   "mithril",
-	Short: "mithril Solana verifier node",
-	Long: `Mithril is a lightweight Solana verifier node that replays and validates transactions.
+	Use:     "mithril",
+	Short:   "Mithril - Solana full node client",
+	Version: Version,
+	Long: `Mithril - Solana Full Node Client
+
+A lightweight full node client for Solana written in Go. Mithril replays and
+validates transactions, enabling independent verification of the Solana blockchain.
 
 Quick start:
   1. mithril config init              # Generate config.toml
@@ -29,8 +34,7 @@ Quick start:
 
 Disk setup (recommended before first run):
   sudo ./scripts/disk-setup.sh --setup    # Format and mount NVMe drives
-  ./scripts/disk-setup.sh --status        # Show current storage status
-  ./scripts/disk-setup.sh                 # Show all disk commands`,
+  ./scripts/disk-setup.sh --status        # Show current storage status`,
 }
 
 func init() {
@@ -44,6 +48,7 @@ func init() {
 	cmd.AddCommand(
 		&node.Run,              // Primary command for running Mithril
 		&configcmd.ConfigCmd,   // Config management (init, etc.)
+		&statecmd.StateCmd,     // State file inspection and management
 		&node.VerifyRange,      // Developer/advanced command
 		&node.VerifyLive,       // Backwards compatibility alias for Run
 	)

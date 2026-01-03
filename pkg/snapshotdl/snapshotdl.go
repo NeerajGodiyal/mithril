@@ -82,6 +82,9 @@ type SnapshotConfig struct {
 
 	// Incremental snapshot selection
 	MinIncrementalSpeedMBs float64 // Minimum speed for incremental sources (MB/s, 0 = no minimum)
+
+	// Logging
+	LogDir string // Directory for snapshot finder logs (default: /mnt/mithril-logs/snapshot-finder)
 }
 
 // DefaultSnapshotConfig returns production-ready defaults matching solana-snapshot-finder-go
@@ -104,7 +107,7 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		// Node filtering
 		MaxRTTMs:            200,     // 200ms max RTT
 		TCPTimeoutMs:        1000,    // 1 second TCP precheck
-		MinNodeVersion:      "2.2.0", // Minimum Agave 2.2.0
+		MinNodeVersion:      "3.0.0", // Minimum Agave 3.0.0
 		AllowedNodeVersions: nil,     // Accept all versions >= minimum
 
 		// Snapshot age thresholds
@@ -132,6 +135,9 @@ func DefaultSnapshotConfig() SnapshotConfig {
 
 		// Incremental selection
 		MinIncrementalSpeedMBs: 2.0, // Minimum 2 MB/s for incrementals (~8min for 1GB)
+
+		// Logging
+		LogDir: "/mnt/mithril-logs/snapshot-finder",
 	}
 }
 
@@ -275,9 +281,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -445,13 +449,12 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 		stats.PrintFilterPipeline(filterCfg, speedStats)
 	}
 
-	// Write detailed speed test log to file
-	if speedStats != nil {
-		logDir := "/tmp/mithril-logs"
-		if err := speedStats.WriteSpeedTestLog(logDir, filterCfg); err != nil {
-			mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
-		}
-	}
+	// Speed test log writing disabled - uncomment to enable
+	// if speedStats != nil && snapCfg.LogDir != "" {
+	// 	if err := speedStats.WriteSpeedTestLog(snapCfg.LogDir, filterCfg); err != nil {
+	// 		mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
+	// 	}
+	// }
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
 	var snapshotURL string
@@ -562,9 +565,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -680,9 +681,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	}
 
 	// Step 2: Evaluate nodes
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{
@@ -889,9 +888,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	}
 
 	// Evaluate nodes
-	evaluateStart := time.Now()
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
-	mlog.Log.Infof("Node evaluation completed in %s", time.Since(evaluateStart))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{

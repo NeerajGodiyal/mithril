@@ -32,8 +32,8 @@ name = "mithril"
 #                    Cleans AccountsDB and snapshot directories before starting.
 #   "accountsdb"   - Require existing valid AccountsDB, fail fast if missing.
 #
-# The default is "snapshot" which is recommended while Mithril is in early
-# development. Once stable, "auto" is a good choice for production.
+# The default is "auto" which tries to resume from existing AccountsDB if valid,
+# or downloads a fresh snapshot if needed. Use "snapshot" to always check freshness.
 
 [bootstrap]
     mode = "auto"
@@ -55,7 +55,7 @@ name = "mithril"
 #     one on first run to bootstrap AccountsDB.
 #
 #   Blockstore (varies)
-#     Incoming blocks from RPC/Overcast. Size depends on how much history
+#     Incoming blocks from RPC/Lightbringer. Size depends on how much history
 #     you want to keep (0 to hundreds of GB).
 #     NOTE: Block download to disk is TEMPORARILY DISABLED. Blocks are
 #     currently streamed directly from RPC and not persisted to disk.
@@ -75,7 +75,7 @@ name = "mithril"
     # Put this on your fastest NVMe due to heavy random I/O.
     accounts = "/mnt/mithril-accounts"
 
-    # Blockstore - incoming blocks from RPC/Overcast
+    # Blockstore - incoming blocks from RPC/Lightbringer
     # Size depends on how much block history you keep.
     # NOTE: Block persistence is temporarily disabled. Blocks are streamed
     # directly from RPC without saving to disk. This setting is reserved
@@ -99,6 +99,11 @@ name = "mithril"
 # probes the primary and restores to it when healthy.
 
 [network]
+    # Solana cluster (required): "mainnet-beta", "testnet", or "devnet"
+    # This is validated against the RPC's genesis hash to prevent accidentally
+    # running mainnet state against testnet, or vice versa.
+    cluster = "mainnet-beta"
+
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
     #
     # Example with primary + fallback:
@@ -114,16 +119,16 @@ name = "mithril"
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"      - Fetch blocks via RPC (uses endpoints from [network].rpc)
-    #   "overcast" - Stream blocks from an Overcast endpoint (faster, lower latency)
-    #                NOTE: Overcast mode is TEMPORARILY DISABLED and will fall back to RPC.
-    #                The background downloader was removed; Overcast streaming will be
-    #                re-implemented in a future release.
+    #   "rpc"          - Fetch blocks via RPC (uses endpoints from [network].rpc)
+    #   "lightbringer" - Stream blocks from a Lightbringer endpoint (faster, lower latency)
+    #                    NOTE: Lightbringer mode is TEMPORARILY DISABLED and will fall back to RPC.
+    #                    The background downloader was removed; Lightbringer streaming will be
+    #                    re-implemented in a future release.
     source = "rpc"
 
-    # Overcast endpoint address (only used when source = "overcast")
-    # NOTE: Currently unused - Overcast mode is temporarily disabled (see above)
-    # overcast_endpoint = "localhost:9000"
+    # Lightbringer endpoint address (only used when source = "lightbringer")
+    # NOTE: Currently unused - Lightbringer mode is temporarily disabled (see above)
+    # lightbringer_endpoint = "localhost:9000"
 
     # =========================================================================
     # Global Fetch Tuning
@@ -216,7 +221,7 @@ name = "mithril"
 # [rpc] - Mithril RPC Server
 # ============================================================================
 #
-# Mithril exposes a Solana-compatible JSON-RPC interface on localhost,
+# Mithril exposes a Solana-compatible JSON-RPC interface on all interfaces,
 # allowing other tools to query Mithril's account state directly.
 #
 # Query with: curl http://localhost:8899 -X POST -H "Content-Type: application/json" \
@@ -375,8 +380,8 @@ name = "mithril"
     # TCP connection timeout for pre-check (milliseconds)
     tcp_timeout_ms = 1000
 
-    # Minimum Solana version required (e.g., "2.2.0", empty = no filter)
-    # min_node_version = "2.2.0"
+    # Minimum Solana version required (e.g., "3.0.0", empty = no filter)
+    # min_node_version = "3.0.0"
 
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]
@@ -408,3 +413,30 @@ name = "mithril"
     # At 2 MB/s: ~8 minutes for 1GB (acceptable)
     # Set to 0 to disable speed filtering.
     min_incremental_speed_mbs = 2.0
+
+# ============================================================================
+# [log] - Logging Configuration
+# ============================================================================
+#
+# Mithril writes logs to files for easy debugging and sharing.
+# Each run creates a new log file with timestamp and run ID.
+
+[log]
+    # Directory for log files (created if missing)
+    # Set to "" to disable file logging (stdout only)
+    dir = "/mnt/mithril-logs"
+
+    # Log level: "debug" | "info" | "warn" | "error"
+    level = "info"
+
+    # Also write to stdout (set to false for daemon/service mode)
+    to_stdout = true
+
+    # Maximum log file size in MB before rotation (0 = no limit)
+    max_size_mb = 100
+
+    # Delete log files older than this many days (0 = never delete)
+    max_age_days = 7
+
+    # Maximum number of old log files to keep (0 = unlimited)
+    max_backups = 10
