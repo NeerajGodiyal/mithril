@@ -1,11 +1,13 @@
 package leaderschedule
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSortStakesOrdering(t *testing.T) {
@@ -73,4 +75,87 @@ func TestSortStakesOrdering(t *testing.T) {
 		assert.Equal(t, pk2, sorted[0].pubkey)
 		assert.Equal(t, pk1, sorted[1].pubkey)
 	})
+}
+
+// pubkeyFromU16 creates a deterministic pubkey matching Agave's test helper
+// fn pubkey_from_u16(n: u16) -> Pubkey {
+//     let mut bytes = [0; 32];
+//     bytes[0..2].copy_from_slice(&n.to_le_bytes());
+//     Pubkey::new_from_array(bytes)
+// }
+func pubkeyFromU16(n uint16) solana.PublicKey {
+	var bytes [32]byte
+	binary.LittleEndian.PutUint16(bytes[:], n)
+	return solana.PublicKeyFromBytes(bytes[:])
+}
+
+// TestAgaveStakeWeightedScheduleVectors tests exact compatibility with Agave's test vectors.
+// These are from agave/ledger/src/leader_schedule.rs test_stake_leader_schedule_exact_order.
+//
+// CRITICAL: If any of these tests fail, the local leader schedule will NOT match the network.
+func TestAgaveStakeWeightedScheduleVectors(t *testing.T) {
+	testCases := []struct {
+		name     string
+		epoch    uint64
+		stakes   []uint64
+		length   uint64
+		repeat   uint64
+		expected []int // indices into sorted pubkeys
+	}{
+		// From Agave leader_schedule.rs lines 176-197
+		{"epoch1_stakes10-20-30_len12_rep1", 1, []uint64{10, 20, 30}, 12, 1, []int{1, 1, 2, 1, 1, 0, 0, 1, 2, 1, 0, 1}},
+		{"epoch1_stakes10-20-30_len12_rep2", 1, []uint64{10, 20, 30}, 12, 2, []int{1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 0, 0}},
+		{"epoch1_stakes30-10-20_len12_rep1", 1, []uint64{30, 10, 20}, 12, 1, []int{2, 2, 0, 2, 2, 1, 1, 2, 0, 2, 1, 2}},
+		{"epoch1_stakes30-10-20_len12_rep2", 1, []uint64{30, 10, 20}, 12, 2, []int{2, 2, 2, 2, 0, 0, 2, 2, 2, 2, 1, 1}},
+		{"epoch1_stakes10-20-25-30_len12_rep1", 1, []uint64{10, 20, 25, 30}, 12, 1, []int{2, 2, 3, 1, 2, 0, 1, 1, 3, 2, 1, 2}},
+		{"epoch1_7stakes_len15_rep1", 1, []uint64{10, 20, 25, 30, 35, 40, 100}, 15, 1, []int{4, 5, 6, 3, 4, 1, 2, 3, 6, 4, 2, 4, 5, 6, 6}},
+		{"epoch1_8stakes_len15_rep1", 1, []uint64{10, 20, 25, 30, 35, 40, 100, 1000}, 15, 1, []int{7, 7, 7, 7, 7, 4, 6, 7, 7, 7, 6, 7, 7, 7, 7}},
+		{"epoch1_9stakes_len20_rep1", 1, []uint64{10, 20, 25, 30, 35, 40, 100, 1000, 10_000}, 20, 1, []int{8, 8, 8, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7}},
+		{"epoch1_9stakes_len25_rep1", 1, []uint64{10, 20, 25, 30, 35, 40, 100, 1000, 10_000}, 25, 1, []int{8, 8, 8, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 8, 8, 8, 8, 8}},
+		{"epoch457468_len12_rep1", 457468, []uint64{10, 20, 30}, 12, 1, []int{2, 2, 0, 1, 0, 2, 1, 2, 1, 2, 2, 2}},
+		{"epoch457468_len12_rep2", 457468, []uint64{10, 20, 30}, 12, 2, []int{2, 2, 2, 2, 0, 0, 1, 1, 0, 0, 2, 2}},
+		{"epoch457469_len12_rep1", 457469, []uint64{10, 20, 30}, 12, 1, []int{1, 2, 2, 2, 2, 2, 2, 1, 0, 2, 2, 0}},
+		{"epoch457470_len12_rep1", 457470, []uint64{10, 20, 30}, 12, 1, []int{2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 2}},
+		{"epoch3466545_len12_rep1", 3466545, []uint64{10, 20, 30}, 12, 1, []int{2, 2, 0, 0, 2, 1, 1, 1, 0, 0, 2, 2}},
+		{"epoch3466545_len13_rep1", 3466545, []uint64{10, 20, 30}, 13, 1, []int{2, 2, 0, 0, 2, 1, 1, 1, 0, 0, 2, 2, 1}},
+		{"epoch3466545_len13_rep2", 3466545, []uint64{10, 20, 30}, 13, 2, []int{2, 2, 2, 2, 0, 0, 0, 0, 2, 2, 1, 1, 1}},
+		{"epoch3466545_len14_rep1", 3466545, []uint64{10, 20, 30}, 14, 1, []int{2, 2, 0, 0, 2, 1, 1, 1, 0, 0, 2, 2, 1, 2}},
+		{"epoch3466545_len14_rep2", 3466545, []uint64{10, 20, 30}, 14, 2, []int{2, 2, 2, 2, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create pubkeys matching Agave's test: pubkey_from_u16(0), pubkey_from_u16(1), ...
+			pubkeys := make([]solana.PublicKey, len(tc.stakes))
+			for i := range tc.stakes {
+				pubkeys[i] = pubkeyFromU16(uint16(i))
+			}
+
+			// Build keyed stakes (same input order as Agave test)
+			keyedStakes := make([]pubkeyAndStakePair, len(tc.stakes))
+			for i, stake := range tc.stakes {
+				keyedStakes[i] = pubkeyAndStakePair{pubkey: pubkeys[i], stake: stake}
+			}
+
+			// Generate leaders
+			leaders := stakeWeightedSlotLeaders(keyedStakes, tc.epoch, tc.length, tc.repeat)
+			require.Len(t, leaders, int(tc.length), "wrong number of leaders")
+
+			// Convert leaders back to indices
+			result := make([]int, len(leaders))
+			for i, leader := range leaders {
+				found := false
+				for j, pk := range pubkeys {
+					if leader == pk {
+						result[i] = j
+						found = true
+						break
+					}
+				}
+				require.True(t, found, "leader %s at slot %d not found in pubkeys", leader, i)
+			}
+
+			assert.Equal(t, tc.expected, result, "leader schedule mismatch")
+		})
+	}
 }

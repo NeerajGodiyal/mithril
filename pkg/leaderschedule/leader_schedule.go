@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"slices"
 	"sort"
 
-	"github.com/Overclock-Validator/frand"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
+	"github.com/nixberg/chacha-rng-go"
 )
 
 type LeaderSchedule struct {
@@ -84,19 +85,29 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 		panic("stakeWeightedSlotLeaders: total stake is zero")
 	}
 
-	// Create ChaCha20 RNG with epoch as seed (little-endian u64 in 32-byte seed)
-	var seed [32]byte
-	binary.LittleEndian.PutUint64(seed[:], epoch)
-	rng := frand.NewCustom(seed[:], 1024, 20)
+	// Create ChaCha20 RNG with epoch as seed, matching Agave's seeding:
+	// let mut seed = [0u8; 32];
+	// seed[0..8].copy_from_slice(&epoch.to_le_bytes());
+	// let rng = &mut ChaChaRng::from_seed(seed);
+	//
+	// The nixberg/chacha-rng-go library takes [8]uint32 which is the same 32 bytes
+	// interpreted as little-endian uint32s.
+	var seedBytes [32]byte
+	binary.LittleEndian.PutUint64(seedBytes[:], epoch)
+	var seed [8]uint32
+	for i := 0; i < 8; i++ {
+		seed[i] = binary.LittleEndian.Uint32(seedBytes[i*4:])
+	}
+	rng := chacha.Seeded20(seed, 0) // stream=0 matches default
 
 	leaders := make([]solana.PublicKey, 0, length)
 	var currentSlotLeader solana.PublicKey
 
 	for i := range length {
 		if i%repeat == 0 {
-			// Generate random in [0, total) and find first cumulative > r
-			// This matches Agave's weighted random selection
-			r := rng.Uint64n(total)
+			// Generate random in [0, total) using rejection sampling
+			// This matches Rust's gen_range behavior
+			r := uint64n(rng, total)
 			idx := sort.Search(len(cumulative), func(j int) bool {
 				return cumulative[j] > r
 			})
@@ -106,6 +117,39 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	}
 
 	return leaders
+}
+
+// uint64n generates a uniform random uint64 in [0,n) using Lemire's method.
+// This matches Rust's rand 0.8.x uniform distribution algorithm.
+// See: https://lemire.me/blog/2019/06/06/nearly-divisionless-random-integer-generation-on-various-systems/
+func uint64n(rng *chacha.ChaCha, n uint64) uint64 {
+	if n == 0 {
+		panic("uint64n: n cannot be 0")
+	}
+
+	// Lemire's nearly divisionless method
+	// 1. Generate random x
+	// 2. Compute wide multiply: m = x * n (as 128-bit)
+	// 3. l = low 64 bits of m
+	// 4. If l < n, need rejection check
+	// 5. Return high 64 bits of m
+
+	x := rng.Uint64()
+
+	// Compute 128-bit product: m = x * n
+	// mHi = high 64 bits, mLo = low 64 bits
+	mHi, mLo := bits.Mul64(x, n)
+
+	if mLo < n {
+		// Rejection threshold: (2^64 - n) % n = (-n) % n
+		threshold := -n % n
+		for mLo < threshold {
+			x = rng.Uint64()
+			mHi, mLo = bits.Mul64(x, n)
+		}
+	}
+
+	return mHi
 }
 
 type slotLeaderInfo struct {
