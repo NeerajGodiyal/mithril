@@ -213,6 +213,23 @@ func GetLogPath() string {
 	return Log.logPath
 }
 
+// GetRunID returns the run ID for the current session
+func GetRunID() string {
+	Log.mu.Lock()
+	defer Log.mu.Unlock()
+	return Log.runID
+}
+
+// GetLogDir returns the log directory path
+func GetLogDir() string {
+	Log.mu.Lock()
+	defer Log.mu.Unlock()
+	if Log.logPath == "" {
+		return ""
+	}
+	return filepath.Dir(Log.logPath)
+}
+
 // parseLevel converts a string level to LogLevel
 func parseLevel(level string) LogLevel {
 	switch level {

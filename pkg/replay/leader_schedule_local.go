@@ -42,16 +42,26 @@ var (
 // defaultLogsDir is the fallback directory for mismatch logs
 const defaultLogsDir = "/mnt/mithril-logs"
 
-// resolveLogsDir returns a non-empty logs directory path
+// mismatchLogPath stores the resolved path for use in warnings
+var mismatchLogPath string
+
+// resolveLogsDir returns a non-empty logs directory path.
+// Prefers mlog's configured directory for consistency with main logs.
 func resolveLogsDir(logsDir string) string {
-	if logsDir == "" {
-		return defaultLogsDir
+	// First try mlog's directory (for run ID correlation)
+	if mlogDir := mlog.GetLogDir(); mlogDir != "" {
+		return mlogDir
 	}
-	return logsDir
+	// Then use provided logsDir
+	if logsDir != "" {
+		return logsDir
+	}
+	// Fallback to default
+	return defaultLogsDir
 }
 
 // initMismatchLog creates/opens the mismatch log file (once per process).
-// Uses the same log directory as Mithril's main logs.
+// Uses the same log directory as Mithril's main logs with run ID for correlation.
 func initMismatchLog(logsDir string) {
 	mismatchLogOnce.Do(func() {
 		logsDir = resolveLogsDir(logsDir)
@@ -60,16 +70,38 @@ func initMismatchLog(logsDir string) {
 			mlog.Log.Warnf("failed to create mismatch log directory: %v", err)
 			return
 		}
-		logPath := filepath.Join(logsDir, "leader_schedule_mismatch.log")
+
+		// Use run ID in filename for correlation with main log
+		runID := mlog.GetRunID()
+		var filename string
+		if runID != "" {
+			shortRunID := runID
+			if len(shortRunID) > 8 {
+				shortRunID = shortRunID[:8]
+			}
+			filename = fmt.Sprintf("leader_schedule_mismatch-%s.log", shortRunID)
+		} else {
+			filename = "leader_schedule_mismatch.log"
+		}
+		mismatchLogPath = filepath.Join(logsDir, filename)
+
 		var err error
-		mismatchLogFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		mismatchLogFile, err = os.OpenFile(mismatchLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			mlog.Log.Warnf("failed to open leader schedule mismatch log: %v", err)
 			return
 		}
 		mismatchLogWriter = bufio.NewWriter(mismatchLogFile)
-		mlog.Log.Infof("leader schedule mismatch log: %s", logPath)
+		mlog.Log.Infof("leader schedule mismatch log: %s", mismatchLogPath)
 	})
+}
+
+// getMismatchLogPath returns the path to the mismatch log file
+func getMismatchLogPath() string {
+	if mismatchLogPath != "" {
+		return mismatchLogPath
+	}
+	return filepath.Join(resolveLogsDir(""), "leader_schedule_mismatch.log")
 }
 
 // flushMismatchLog flushes buffered writes (call at end of epoch validation)
@@ -428,8 +460,8 @@ func validateLeaderSchedule(
 			blockEpoch, stats.LocalFingerprint, stats.RPCFingerprint)
 	}
 	if stats.MismatchCount > 0 {
-		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
-			stats.MismatchCount, blockEpoch, resolveLogsDir(logsDir))
+		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s",
+			stats.MismatchCount, blockEpoch, getMismatchLogPath())
 	}
 }
 
@@ -553,8 +585,8 @@ func validateLeaderScheduleFromVoteCache(
 			blockEpoch, stats.LocalFingerprint, stats.RPCFingerprint)
 	}
 	if stats.MismatchCount > 0 {
-		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
-			stats.MismatchCount, blockEpoch, resolveLogsDir(logsDir))
+		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s",
+			stats.MismatchCount, blockEpoch, getMismatchLogPath())
 	}
 }
 
@@ -676,8 +708,8 @@ func BackgroundValidateAgainstRPC(
 	}
 	mismatchLogMu.Unlock()
 
-	mlog.Log.Warnf("leader schedule RPC validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s - see %s/leader_schedule_mismatch.log",
-		epoch, localFP, rpcFP, resolveLogsDir(logsDir))
+	mlog.Log.Warnf("leader schedule RPC validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s - see %s",
+		epoch, localFP, rpcFP, getMismatchLogPath())
 
 	flushMismatchLog()
 }
