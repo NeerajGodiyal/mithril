@@ -1254,9 +1254,20 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
-				// Slot was skipped (SlotSkipped from RPC), advance without emitting
-				delete(bs.skippedSlots, bs.nextSlotToSend)
-				// Also update progress - skipped slots count as progress
+				// Slot was skipped (SlotSkipped from RPC) - emit a skip marker block
+				skippedSlot := bs.nextSlotToSend
+				delete(bs.skippedSlots, skippedSlot)
+				bs.nextSlotToSend++
+				bs.reorderMu.Unlock()
+
+				// Emit a minimal block with IsSkipped=true for logging
+				skipBlock := &b.Block{
+					Slot:      skippedSlot,
+					IsSkipped: true,
+				}
+				bs.streamChan <- skipBlock
+
+				// Update progress - skipped slots count as progress
 				bs.lastProgress.Store(time.Now().Unix())
 
 				// Track slots since failover for primary retry (skipped slots count too)
@@ -1267,7 +1278,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 					}
 				}
 
-				bs.nextSlotToSend++
+				bs.reorderMu.Lock()
 			} else {
 				break
 			}

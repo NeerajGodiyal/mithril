@@ -1049,12 +1049,28 @@ func ReplayBlocks(
 	}
 	go blockStream.Start()
 
+	var skippedSlotsCount int // Track skipped slots for 100-slot summary
+
 	for {
 		waitStart := time.Now()
 		block := blockStream.NextBlock()
 		waitTime := time.Since(waitStart)
 		if block == nil {
 			break
+		}
+
+		// Handle skipped slots - log and continue without execution
+		if block.IsSkipped {
+			// Look up leader for informational logging
+			leaderStr := "unknown"
+			if leader, exists := global.LeaderForSlot(block.Slot); exists {
+				leaderStr = leader.String()
+			}
+			// Log skipped slot in same format as regular blocks (with N/A for missing values)
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A           | exec: N/A   | total: %.3fs (skipped)",
+				block.Slot, leaderStr, waitTime.Seconds())
+			skippedSlotsCount++
+			continue // Skip all execution - no state changes for skipped slots
 		}
 
 		// Stall detection: warn if waited too long for a block
@@ -1388,12 +1404,14 @@ func ReplayBlocks(
 				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
 				fetchStats := blockStream.GetFetchStats()
 
-				// Calculate distance from tip
+				// Calculate distance from tip using current slot (more accurate than TipAtSlot)
+				// TipAtSlot is when we started the refresh, but block.Slot is what we just executed
 				var tipDistanceStr string
-				if fetchStats.ConfirmedTip > 0 && fetchStats.TipAtSlot > 0 && fetchStats.TipAtSlot < fetchStats.ConfirmedTip {
-					behindConfirmed := fetchStats.ConfirmedTip - fetchStats.TipAtSlot
-					if fetchStats.ProcessedTip > 0 && fetchStats.TipAtSlot < fetchStats.ProcessedTip {
-						behindProcessed := fetchStats.ProcessedTip - fetchStats.TipAtSlot
+				currentSlotForTip := block.Slot
+				if fetchStats.ConfirmedTip > 0 && currentSlotForTip < fetchStats.ConfirmedTip {
+					behindConfirmed := fetchStats.ConfirmedTip - currentSlotForTip
+					if fetchStats.ProcessedTip > 0 && currentSlotForTip < fetchStats.ProcessedTip {
+						behindProcessed := fetchStats.ProcessedTip - currentSlotForTip
 						tipDistanceStr = fmt.Sprintf("%d slots behind confirmed, %d behind processed",
 							behindConfirmed, behindProcessed)
 					} else {
@@ -1409,13 +1427,18 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("")
 				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
 
-				// Line 1: Mode, blocks/sec, tip distance
+				// Line 1: Mode, blocks/sec, skipped slots, tip distance
 				modeStr := "catchup"
 				if fetchStats.IsNearTip {
 					modeStr = "near-tip"
 				}
-				mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
-					modeStr, blocksPerSec, tipDistanceStr)
+				if skippedSlotsCount > 0 {
+					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %d skipped | %s",
+						modeStr, blocksPerSec, skippedSlotsCount, tipDistanceStr)
+				} else {
+					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
+						modeStr, blocksPerSec, tipDistanceStr)
+				}
 
 				// Line 2: CU and transaction stats (median/min/max)
 				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
@@ -1450,6 +1473,7 @@ func ReplayBlocks(
 				voteTxCounts = voteTxCounts[:0]
 				nonVoteTxCounts = nonVoteTxCounts[:0]
 				statsCounter = 0
+				skippedSlotsCount = 0
 			}
 		} else {
 			justCrossedEpochBoundary = false

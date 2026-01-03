@@ -46,6 +46,7 @@ type Block struct {
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
 	FromLightbringer                    bool
+	IsSkipped                           bool // True for slots that were skipped by the leader
 }
 
 func (b *Block) FixupTxVersions() {
