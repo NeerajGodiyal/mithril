@@ -83,9 +83,11 @@ var (
 
 	loadFromSnapshot            bool
 	loadFromAccountsDb          bool
-	bootstrapMode               string // "auto", "snapshot", or "accountsdb"
+	bootstrapMode               string // "auto", "snapshot", "local-snapshot", or "accountsdb"
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
+	localFullSnapshotPath       string // Path to existing full snapshot file (for local-snapshot mode)
+	localIncrSnapshotPath       string // Path to existing incremental snapshot file (optional)
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
@@ -167,7 +169,9 @@ func init() {
 
 	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto', 'accountsdb', 'snapshot', 'new-snapshot', or 'local-snapshot'")
+	Run.Flags().StringVar(&localFullSnapshotPath, "full-snapshot", "", "Path to existing full snapshot file (triggers local-snapshot mode)")
+	Run.Flags().StringVar(&localIncrSnapshotPath, "incremental-snapshot", "", "Path to existing incremental snapshot file (optional, used with --full-snapshot)")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -1087,6 +1091,23 @@ func runLive(c *cobra.Command, args []string) {
 	// Use configured snapshot directory (storage.snapshots / snapshot.download_path), not scratch
 	snapshotDownloadPath := snapshotDlPath
 
+	// Auto-detect local-snapshot mode when --full-snapshot is provided
+	if localFullSnapshotPath != "" {
+		if bootstrapMode != "auto" && bootstrapMode != "local-snapshot" {
+			mlog.Log.Infof("WARNING: --full-snapshot provided, overriding --bootstrap-mode=%s with local-snapshot", bootstrapMode)
+		}
+		bootstrapMode = "local-snapshot"
+		// Validate the snapshot file exists
+		if _, err := os.Stat(localFullSnapshotPath); os.IsNotExist(err) {
+			klog.Fatalf("full snapshot file not found: %s", localFullSnapshotPath)
+		}
+		if localIncrSnapshotPath != "" {
+			if _, err := os.Stat(localIncrSnapshotPath); os.IsNotExist(err) {
+				klog.Fatalf("incremental snapshot file not found: %s", localIncrSnapshotPath)
+			}
+		}
+	}
+
 	// Prune old history entries if needed (keeps last 100)
 	if accountsPath != "" {
 		if err := state.PruneHistory(accountsPath); err != nil {
@@ -1240,6 +1261,70 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 		// Record bootstrap in history
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+
+	case "local-snapshot":
+		// Mode: Build from user-provided snapshot files (no download)
+		if localFullSnapshotPath == "" {
+			klog.Fatalf("mode=local-snapshot requires --full-snapshot flag")
+		}
+		if accountsPath == "" {
+			klog.Fatalf("mode=local-snapshot requires --accounts-path flag")
+		}
+
+		mlog.Log.Infof("mode=local-snapshot: building AccountsDB from local snapshot files")
+		mlog.Log.Infof("  full snapshot: %s", localFullSnapshotPath)
+		if localIncrSnapshotPath != "" {
+			mlog.Log.Infof("  incremental snapshot: %s", localIncrSnapshotPath)
+		} else {
+			mlog.Log.Infof("  incremental snapshot: (will fetch from network)")
+		}
+
+		// Clean previous AccountsDB
+		if mithrilState != nil {
+			state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "local-snapshot mode")
+		} else {
+			state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "local-snapshot mode (no prior state)")
+		}
+		mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+		snapshot.CleanAccountsDbDir(accountsPath)
+
+		// Build from local snapshot
+		// BuildAccountsDb accepts an optional incremental as second param
+		var incrPath string
+		if localIncrSnapshotPath != "" {
+			// Both full and incremental provided
+			mlog.Log.Infof("building AccountsDB from full + incremental snapshots")
+			incrPath = localIncrSnapshotPath
+		} else {
+			// Only full provided - try to fetch incremental
+			mlog.Log.Infof("building AccountsDB from full snapshot (will attempt to fetch incremental)")
+			fullSlot := parseSlotFromSnapshotName(filepath.Base(localFullSnapshotPath))
+			if fullSlot > 0 && snapshotDownloadPath != "" {
+				fetchedIncr, incrErr := downloadIncrementalForFullSnapshot(ctx, rpcEndpoints, fullSlot, snapshotDownloadPath)
+				if incrErr == nil && fetchedIncr != "" {
+					mlog.Log.Infof("found matching incremental snapshot at %s", fetchedIncr)
+					incrPath = fetchedIncr
+				} else if incrErr != nil {
+					mlog.Log.Infof("could not fetch incremental: %v (building from full snapshot only)", incrErr)
+				}
+			}
+		}
+
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, localFullSnapshotPath, incrPath, accountsPath)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from local snapshot: %v", err)
+		}
+
+		// Write state file
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
 		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
 
 	case "auto":
@@ -1773,9 +1858,11 @@ func printStartupInfo(commandName string) {
 	case "auto":
 		bootstrapDesc = "use existing AccountsDB if valid, else download snapshot"
 	case "snapshot":
-		bootstrapDesc = "rebuild from local snapshot"
+		bootstrapDesc = "rebuild from snapshot (reuse if fresh)"
 	case "new-snapshot":
 		bootstrapDesc = "download fresh snapshot from network"
+	case "local-snapshot":
+		bootstrapDesc = "build from user-provided snapshot file"
 	case "accountsdb":
 		bootstrapDesc = "require existing AccountsDB"
 	default:
@@ -2069,6 +2156,30 @@ func parseSlotFromIncrementalName(name string) uint64 {
 		}
 	}
 	return 0
+}
+
+// downloadIncrementalForFullSnapshot attempts to download an incremental snapshot
+// that builds on the given full snapshot slot.
+func downloadIncrementalForFullSnapshot(ctx context.Context, rpcEndpoints []string, fullSlot uint64, downloadPath string) (string, error) {
+	if downloadPath == "" {
+		return "", fmt.Errorf("no download path specified")
+	}
+
+	// Query current slot to get reference
+	currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
+	if err != nil {
+		return "", fmt.Errorf("could not query current slot: %w", err)
+	}
+
+	mlog.Log.Infof("searching for incremental snapshot (full=%d, current=%d)", fullSlot, currentSlot)
+
+	// Use snapshotdl to find and download an incremental
+	incrPath, _, _, err := snapshotdl.DownloadIncrementalSnapshot(rpcEndpoints, downloadPath, int(currentSlot), int(fullSlot))
+	if err != nil {
+		return "", fmt.Errorf("failed to download incremental: %w", err)
+	}
+
+	return incrPath, nil
 }
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
