@@ -113,7 +113,7 @@ func logInputSnapshot(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64,
 	mismatchLogMu.Lock()
 	defer mismatchLogMu.Unlock()
 
-	mismatchLogWriter.WriteString(fmt.Sprintf("\n[INPUTS] stake_epoch=%d top_stakes:\n", epoch))
+	mismatchLogWriter.WriteString(fmt.Sprintf("\n[INPUTS] epoch=%d top_stakes:\n", epoch))
 	for i := 0; i < min(10, len(entries)); i++ {
 		e := entries[i]
 		mismatchLogWriter.WriteString(fmt.Sprintf("  %d. vote=%s node=%s stake=%d\n",
@@ -293,11 +293,6 @@ func scheduleFingerprint(ls *leaderschedule.LeaderSchedule, firstSlot uint64, nu
 
 // validateLeaderSchedule compares local vs RPC schedule and logs mismatches.
 // Does NOT return error - mismatches are logged but don't stop replay.
-//
-// Key insight: RPC schedule is fetched for blockEpoch, so we must build local
-// schedule for blockEpoch too (same RNG seed, same slot range). However, the
-// *stakes* used to build the schedule come from scheduleEpoch (the epoch whose
-// stakes determine who leads in blockEpoch).
 func validateLeaderSchedule(
 	blockEpoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -312,36 +307,36 @@ func validateLeaderSchedule(
 	// Initialize mismatch log file (once per process)
 	initMismatchLog(logsDir)
 
-	// Compute scheduleEpoch - this is the epoch whose stakes determine the schedule
-	// But we build the schedule FOR blockEpoch (same as RPC)
+	// Stakes are stored under the epoch they're EFFECTIVE for, not the boundary epoch.
+	// E.g., stakes frozen at end of epoch 499 are effective during epoch 500,
+	// so they're stored as EpochStakes(500). LeaderScheduleEpoch returns 499 (the
+	// boundary), but lookup should use blockEpoch (500).
 	firstSlot := epochSchedule.FirstSlotInEpoch(blockEpoch)
-	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
 
-	// Fetch stakes for scheduleEpoch (this is which epoch's stakes to use)
-	voteAcctStakes := global.EpochStakes(scheduleEpoch)
-	voteAcctMap := global.EpochStakesVoteAccts(scheduleEpoch)
+	// Fetch stakes for blockEpoch (stored under the epoch they're effective for)
+	voteAcctStakes := global.EpochStakes(blockEpoch)
+	voteAcctMap := global.EpochStakesVoteAccts(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
 	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
-		mlog.Log.Warnf("leader schedule validation: no stake data for stake_epoch=%d (block_epoch=%d), skipping",
-			scheduleEpoch, blockEpoch)
+		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
 
 	// Use blockEpoch for slot count (this is the epoch we're building schedule for)
 	numSlots := epochSchedule.SlotsInEpoch(blockEpoch)
 
-	// Log input snapshot for debugging (labeled with stake epoch)
-	logInputSnapshot(scheduleEpoch, voteAcctStakes, voteAcctMap)
+	// Log input snapshot for debugging
+	logInputSnapshot(blockEpoch, voteAcctStakes, voteAcctMap)
 
-	// Build local schedule for blockEpoch (same as RPC), using stakes from scheduleEpoch
+	// Build local schedule for blockEpoch (same as RPC)
 	localSchedule, stats := buildLocalLeaderSchedule(blockEpoch, epochSchedule, voteAcctStakes, voteAcctMap)
 
 	// Guard: skip if local schedule couldn't be built (empty stakes after filtering)
 	if localSchedule == nil {
 		mlog.Log.Warnf("leader schedule validation: could not build local schedule (no valid stakes), skipping")
-		mlog.Log.Infof("  block_epoch=%d stake_epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
-			blockEpoch, scheduleEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+		mlog.Log.Infof("  epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
+			blockEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 		return
 	}
 
@@ -410,8 +405,8 @@ func validateLeaderSchedule(
 	flushMismatchLog()
 
 	// Log per-epoch summary
-	mlog.Log.Infof("leader schedule validation: block_epoch=%d stake_epoch=%d first_slot=%d slots=%d",
-		blockEpoch, scheduleEpoch, firstSlot, numSlots)
+	mlog.Log.Infof("leader schedule validation: epoch=%d first_slot=%d slots=%d",
+		blockEpoch, firstSlot, numSlots)
 	mlog.Log.Infof("  vote_accts=%d total_stake=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	mlog.Log.Infof("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
@@ -420,11 +415,6 @@ func validateLeaderSchedule(
 
 // validateLeaderScheduleFromVoteCache validates using global.VoteCache() for NodePubkey lookups.
 // Used at epoch boundaries when epochVoteAcctsMap may not be available from snapshot.
-//
-// Key insight: RPC schedule is fetched for blockEpoch, so we must build local
-// schedule for blockEpoch too (same RNG seed, same slot range). However, the
-// *stakes* used to build the schedule come from scheduleEpoch (the epoch whose
-// stakes determine who leads in blockEpoch).
 func validateLeaderScheduleFromVoteCache(
 	blockEpoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -439,32 +429,29 @@ func validateLeaderScheduleFromVoteCache(
 	// Initialize mismatch log file (once per process)
 	initMismatchLog(logsDir)
 
-	// Compute scheduleEpoch - this is the epoch whose stakes determine the schedule
-	// But we build the schedule FOR blockEpoch (same as RPC)
+	// Stakes are stored under the epoch they're EFFECTIVE for, not the boundary epoch.
 	firstSlot := epochSchedule.FirstSlotInEpoch(blockEpoch)
-	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
 
-	// Fetch stakes for scheduleEpoch (this is which epoch's stakes to use)
-	voteAcctStakes := global.EpochStakes(scheduleEpoch)
+	// Fetch stakes for blockEpoch (stored under the epoch they're effective for)
+	voteAcctStakes := global.EpochStakes(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
 	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
-		mlog.Log.Warnf("leader schedule validation: no stake data for stake_epoch=%d (block_epoch=%d), skipping",
-			scheduleEpoch, blockEpoch)
+		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
 
 	// Use blockEpoch for slot count (this is the epoch we're building schedule for)
 	numSlots := epochSchedule.SlotsInEpoch(blockEpoch)
 
-	// Build local schedule for blockEpoch (same as RPC), using stakes from scheduleEpoch
+	// Build local schedule for blockEpoch (same as RPC)
 	localSchedule, stats := buildLocalLeaderScheduleFromVoteCache(blockEpoch, epochSchedule, voteAcctStakes)
 
 	// Guard: skip if local schedule couldn't be built (empty stakes after filtering)
 	if localSchedule == nil {
 		mlog.Log.Warnf("leader schedule validation: could not build local schedule (no valid stakes), skipping")
-		mlog.Log.Infof("  block_epoch=%d stake_epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
-			blockEpoch, scheduleEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+		mlog.Log.Infof("  epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
+			blockEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 		return
 	}
 
@@ -533,8 +520,8 @@ func validateLeaderScheduleFromVoteCache(
 	flushMismatchLog()
 
 	// Log per-epoch summary
-	mlog.Log.Infof("leader schedule validation (vote cache): block_epoch=%d stake_epoch=%d first_slot=%d slots=%d",
-		blockEpoch, scheduleEpoch, firstSlot, numSlots)
+	mlog.Log.Infof("leader schedule validation (vote cache): epoch=%d first_slot=%d slots=%d",
+		blockEpoch, firstSlot, numSlots)
 	mlog.Log.Infof("  vote_accts=%d total_stake=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	mlog.Log.Infof("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
