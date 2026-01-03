@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
@@ -630,6 +631,11 @@ func PrepareLeaderScheduleLocal(
 			stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	}
 
+	// Dump first 1000 slots if dump flag is set (for debugging against RPC)
+	if config.GetBool("replay.dump_leader_schedule") {
+		DumpLeaderSchedule(epoch, epochSchedule, schedule, logsDir, 1000)
+	}
+
 	return nil
 }
 
@@ -670,7 +676,71 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 			stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	}
 
+	// Dump first 1000 slots if dump flag is set (for debugging against RPC)
+	if config.GetBool("replay.dump_leader_schedule") {
+		DumpLeaderSchedule(epoch, epochSchedule, schedule, logsDir, 1000)
+	}
+
 	return nil
+}
+
+// DumpLeaderSchedule writes the first N slots of the schedule to a file for debugging.
+// File is written to logsDir/leader_schedule_dump_epoch<N>.txt
+// Useful for comparing against RPC getLeaderSchedule results.
+func DumpLeaderSchedule(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	schedule *leaderschedule.LeaderSchedule,
+	logsDir string,
+	numSlots int,
+) {
+	if schedule == nil {
+		mlog.Log.Warnf("DumpLeaderSchedule: schedule is nil")
+		return
+	}
+
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("DumpLeaderSchedule: failed to create logs dir: %v", err)
+		return
+	}
+
+	filename := fmt.Sprintf("leader_schedule_dump_epoch%d.txt", epoch)
+	filepath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filepath)
+	if err != nil {
+		mlog.Log.Warnf("DumpLeaderSchedule: failed to create file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	totalSlots := epochSchedule.SlotsInEpoch(epoch)
+
+	// Write header
+	w.WriteString(fmt.Sprintf("# Leader Schedule Dump - Epoch %d\n", epoch))
+	w.WriteString(fmt.Sprintf("# First slot: %d\n", firstSlot))
+	w.WriteString(fmt.Sprintf("# Total slots in epoch: %d\n", totalSlots))
+	w.WriteString(fmt.Sprintf("# Dumping first %d slots\n", numSlots))
+	w.WriteString(fmt.Sprintf("# Format: slot_offset,absolute_slot,leader_pubkey\n"))
+	w.WriteString("#\n")
+
+	// Dump first N slots
+	for i := 0; i < numSlots && uint64(i) < totalSlots; i++ {
+		slot := firstSlot + uint64(i)
+		leader, ok := schedule.LeaderForSlot(slot)
+		if ok {
+			w.WriteString(fmt.Sprintf("%d,%d,%s\n", i, slot, leader.String()))
+		} else {
+			w.WriteString(fmt.Sprintf("%d,%d,NOT_FOUND\n", i, slot))
+		}
+	}
+
+	mlog.Log.Infof("leader schedule dumped to: %s (first %d slots)", filepath, numSlots)
 }
 
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.

@@ -206,8 +206,13 @@ name = "mithril"
     # -------------------------------------------------------------------------
     # Validate leader schedule by computing locally and comparing to RPC.
     # Mismatches are logged to [log].dir/leader_schedule_mismatch.log
-    # Does NOT affect block replay - RPC schedule is still used as source of truth.
+    # Does NOT affect block replay - local schedule is source of truth.
     # validate_leader_schedule = false
+
+    # Dump first 1000 slots of leader schedule to file for manual comparison.
+    # File: [log].dir/leader_schedule_dump_epoch<N>.txt
+    # Format: slot_offset,absolute_slot,leader_pubkey
+    # dump_leader_schedule = false
 
     # -------------------------------------------------------------------------
     # Advanced: verify-range settings (for developers)
