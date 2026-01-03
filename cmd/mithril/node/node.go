@@ -16,6 +16,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2258,7 +2259,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	// Create progress display for extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -2267,38 +2268,146 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	return accountsDb, manifest, nil
 }
 
-// downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot
+// downloadAndBuildFromSnapshot finds, downloads, and builds AccountsDB from a snapshot.
+// Supports interactive source switching during download - press 'n' to try the next source.
 func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig(rpcEndpoints)
-	fullSnapshotDlStart := time.Now()
-	fullSnapshotInfo, err := snapshotdl.GetSnapshotURLWithInfo(ctx, snapCfg)
+
+	// Get all ranked snapshot sources (runs Stage 1 + Stage 2 testing)
+	sourceSelector, err := snapshotdl.GetRankedSnapshotSources(ctx, snapCfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error getting snapshot URL: %w", err)
+		return nil, nil, fmt.Errorf("error getting snapshot sources: %w", err)
 	}
-	fullSnapshotURL := fullSnapshotInfo.URL
-	fullSnapshotSlot := fullSnapshotInfo.Slot
+	defer sourceSelector.Close()
+
+	// Get initial source
+	currentSource := sourceSelector.Current()
+	if currentSource == nil {
+		return nil, nil, fmt.Errorf("no snapshot sources available")
+	}
 
 	// Print a clean summary of the selected snapshot source
 	progress.PrintSnapshotSourceSummary(
-		fullSnapshotInfo.NodeIP,
-		fullSnapshotInfo.Slot,
-		fullSnapshotInfo.ReferenceSlot,
-		fullSnapshotInfo.NodeVersion,
-		fullSnapshotInfo.SpeedMBs,
-		fullSnapshotInfo.RTTMs,
-		time.Since(fullSnapshotDlStart),
+		currentSource.NodeIP,
+		currentSource.Slot,
+		currentSource.ReferenceSlot,
+		currentSource.Version,
+		currentSource.SpeedMBs,
+		currentSource.RTTMs,
+		sourceSelector.SearchTime,
 	)
 
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
-	}
-	mlog.Log.Infof("finished building AccountsDB")
+	// Track if source switch was requested
+	var sourceSwitchRequested atomic.Bool
 
-	return accountsDb, manifest, nil
+	// Try sources with interactive switching support
+	for {
+		// Check if parent context was cancelled
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+
+		currentSource = sourceSelector.Current()
+		if currentSource == nil {
+			return nil, nil, fmt.Errorf("exhausted all %d snapshot sources", sourceSelector.TotalSources())
+		}
+
+		// Create a cancellable context for this download attempt
+		downloadCtx, cancelDownload := context.WithCancel(ctx)
+
+		// Format source info for display
+		sourceInfo := fmt.Sprintf("Source %d/%d: %s (%.1f MB/s)",
+			sourceSelector.CurrentIndex()+1,
+			sourceSelector.TotalSources(),
+			currentSource.NodeIP,
+			currentSource.SpeedMBs,
+		)
+
+		// Enable source switching UI on progress bar
+		sourceSwitchRequested.Store(false)
+		dp.EnableSourceSwitching(sourceInfo, func() {
+			if sourceSelector.HasMore() {
+				sourceSwitchRequested.Store(true)
+				cancelDownload()
+				mlog.Log.Infof("User requested source switch - cancelling current download...")
+			} else {
+				mlog.Log.Infof("No more sources available to switch to")
+			}
+		})
+
+		// Attempt download from current source
+		accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(
+			downloadCtx,
+			currentSource.URL,
+			snapshotDownloadPath,
+			currentSource.Slot,
+			currentSource.Slot,
+			accountsPath,
+			rpcEndpoints,
+			blockstorePath,
+			snapCfg,
+			dp,
+			sourceSelector, // Pass selector for cached incremental source lookup
+		)
+
+		// Disable source switching after this attempt
+		dp.DisableSourceSwitching()
+		cancelDownload() // Clean up context
+
+		// Check results
+		if err == nil {
+			// Success!
+			mlog.Log.Infof("finished building AccountsDB")
+			return accountsDb, manifest, nil
+		}
+
+		// Handle source switch request
+		if sourceSwitchRequested.Load() || (downloadCtx.Err() != nil && ctx.Err() == nil) {
+			// Source switch was requested or download was cancelled (but not parent ctx)
+			nextSource := sourceSelector.Next()
+			if nextSource == nil {
+				return nil, nil, fmt.Errorf("exhausted all %d snapshot sources after user-initiated switch", sourceSelector.TotalSources())
+			}
+
+			// Clean up any partial download
+			snapshot.CleanAccountsDbDir(accountsPath)
+
+			// Update source info and continue
+			mlog.Log.Infof("Switching to source %d/%d: %s (%.1f MB/s)",
+				sourceSelector.CurrentIndex()+1,
+				sourceSelector.TotalSources(),
+				nextSource.NodeIP,
+				nextSource.SpeedMBs,
+			)
+			continue
+		}
+
+		// Actual error (not source switch)
+		// Check if parent context was cancelled
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+
+		// Try next source automatically on error
+		mlog.Log.Errorf("Download from %s failed: %v", currentSource.NodeIP, err)
+		nextSource := sourceSelector.Next()
+		if nextSource == nil {
+			return nil, nil, fmt.Errorf("failed to download from all %d sources, last error: %w", sourceSelector.TotalSources(), err)
+		}
+
+		// Clean up any partial download
+		snapshot.CleanAccountsDbDir(accountsPath)
+
+		mlog.Log.Infof("Trying next source %d/%d: %s (%.1f MB/s)",
+			sourceSelector.CurrentIndex()+1,
+			sourceSelector.TotalSources(),
+			nextSource.NodeIP,
+			nextSource.SpeedMBs,
+		)
+	}
 }
 
 // killExistingMithrilProcesses finds and kills any other running mithril processes.
