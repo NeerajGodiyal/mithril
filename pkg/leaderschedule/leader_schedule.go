@@ -70,6 +70,10 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	epoch uint64,
 	length uint64,
 	repeat uint64) []solana.PublicKey {
+	if repeat == 0 {
+		panic("stakeWeightedSlotLeaders: repeat cannot be 0")
+	}
+
 	keyedStakes = sortStakes(keyedStakes)
 
 	// Build cumulative weights, preserving input order (stake desc, pubkey desc)
@@ -77,7 +81,11 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	cumulative := make([]uint64, len(keyedStakes))
 	var total uint64
 	for i, pair := range keyedStakes {
-		total += pair.stake
+		newTotal, err := safemath.CheckedAddU64(total, pair.stake)
+		if err != nil {
+			panic(fmt.Sprintf("stakeWeightedSlotLeaders: cumulative stake overflow at index %d", i))
+		}
+		total = newTotal
 		cumulative[i] = total
 	}
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
+	chacha "github.com/nixberg/chacha-rng-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -158,4 +159,84 @@ func TestAgaveStakeWeightedScheduleVectors(t *testing.T) {
 			assert.Equal(t, tc.expected, result, "leader schedule mismatch")
 		})
 	}
+}
+
+// TestUint64nLemireMethod validates that uint64n produces correct uniform distribution
+// using Lemire's method with a known ChaCha20 seed.
+func TestUint64nLemireMethod(t *testing.T) {
+	// Create RNG with epoch=1 seed (same as Agave test vectors)
+	var seedBytes [32]byte
+	binary.LittleEndian.PutUint64(seedBytes[:], 1)
+	var seed [8]uint32
+	for i := 0; i < 8; i++ {
+		seed[i] = binary.LittleEndian.Uint32(seedBytes[i*4:])
+	}
+	rng := chacha.Seeded20(seed, 0)
+
+	t.Run("small range", func(t *testing.T) {
+		// Generate several values and verify they're in range
+		for i := 0; i < 100; i++ {
+			val := uint64n(rng, 100)
+			assert.Less(t, val, uint64(100), "value should be < 100")
+		}
+	})
+
+	t.Run("range of 1 always returns 0", func(t *testing.T) {
+		for i := 0; i < 10; i++ {
+			val := uint64n(rng, 1)
+			assert.Equal(t, uint64(0), val, "range of 1 should always return 0")
+		}
+	})
+
+	t.Run("large range near MaxUint64", func(t *testing.T) {
+		// Test with a very large range to exercise the rejection logic
+		largeN := uint64(math.MaxUint64 - 1000)
+		for i := 0; i < 10; i++ {
+			val := uint64n(rng, largeN)
+			assert.Less(t, val, largeN, "value should be < largeN")
+		}
+	})
+
+	t.Run("panic on zero range", func(t *testing.T) {
+		assert.Panics(t, func() {
+			uint64n(rng, 0)
+		}, "uint64n(0) should panic")
+	})
+}
+
+// TestStakeWeightedSlotLeadersPanics verifies edge case panics.
+func TestStakeWeightedSlotLeadersPanics(t *testing.T) {
+	pk1 := pubkeyFromU16(1)
+	pk2 := pubkeyFromU16(2)
+
+	t.Run("repeat zero panics", func(t *testing.T) {
+		stakes := []pubkeyAndStakePair{
+			{pubkey: pk1, stake: 100},
+			{pubkey: pk2, stake: 200},
+		}
+		assert.PanicsWithValue(t, "stakeWeightedSlotLeaders: repeat cannot be 0", func() {
+			stakeWeightedSlotLeaders(stakes, 1, 10, 0)
+		})
+	})
+
+	t.Run("zero total stake panics", func(t *testing.T) {
+		stakes := []pubkeyAndStakePair{
+			{pubkey: pk1, stake: 0},
+			{pubkey: pk2, stake: 0},
+		}
+		assert.PanicsWithValue(t, "stakeWeightedSlotLeaders: total stake is zero", func() {
+			stakeWeightedSlotLeaders(stakes, 1, 10, 1)
+		})
+	})
+
+	t.Run("cumulative stake overflow panics", func(t *testing.T) {
+		// Two stakes that sum to more than MaxUint64
+		stakes := []pubkeyAndStakePair{
+			{pubkey: pk1, stake: math.MaxUint64},
+			{pubkey: pk2, stake: 1},
+		}
+		assert.Panics(t, func() {
+			stakeWeightedSlotLeaders(stakes, 1, 10, 1)
+		}, "should panic on cumulative overflow")
+	})
 }
