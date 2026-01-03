@@ -1,13 +1,18 @@
 package snapshotdl
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/config"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/rpc"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/snapshot"
 )
@@ -484,6 +489,26 @@ func GetRankedSnapshotSources(ctx context.Context, snapCfg SnapshotConfig) (*Sou
 		stats.PrintFilterPipeline(filterCfg, speedStats)
 	}
 
+	// Write detailed speed test log
+	searchDuration := time.Since(searchStart)
+	if snapCfg.LogDir != "" {
+		logPath, err := writeDetailedSpeedTestLog(
+			snapCfg.LogDir,
+			snapCfg.RunID,
+			cfg,
+			snapCfg,
+			referenceSlot,
+			incBaseStats,
+			rankedNodes,
+			searchDuration,
+		)
+		if err != nil {
+			mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
+		} else if logPath != "" {
+			mlog.Log.Infof("Detailed speed test log written to: %s", logPath)
+		}
+	}
+
 	// Step 5: Build RankedSource list from ranked nodes
 	// Use all ranked nodes (not limited by MaxSnapshotURLAttempts for switching)
 	maxSources := len(rankedNodes)
@@ -508,4 +533,216 @@ func GetRankedSnapshotSources(ctx context.Context, snapCfg SnapshotConfig) (*Sou
 	selector.referenceSlot = referenceSlot
 	selector.incrThreshold = cfg.IncrementalThreshold
 	return selector, nil
+}
+
+// writeDetailedSpeedTestLog writes a comprehensive log file with all filtering parameters and results.
+// The log is written to logDir/snapshot-search-{runID}-{timestamp}.log
+func writeDetailedSpeedTestLog(
+	logDir string,
+	runID string,
+	cfg config.Config,
+	snapCfg SnapshotConfig,
+	referenceSlot int,
+	incBaseStats incBaseMatchStats,
+	rankedNodes []rpc.RankedNode,
+	searchDuration time.Duration,
+) (string, error) {
+	if logDir == "" {
+		return "", nil // Logging disabled
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	// Generate filename with timestamp and run ID
+	timestamp := time.Now().UTC().Format("2006-01-02_15-04-05")
+	var filename string
+	if runID != "" {
+		filename = fmt.Sprintf("snapshot-search-%s-%s.log", runID, timestamp)
+	} else {
+		filename = fmt.Sprintf("snapshot-search-%s.log", timestamp)
+	}
+	logPath := filepath.Join(logDir, filename)
+
+	// Create log file
+	file, err := os.Create(logPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create log file: %w", err)
+	}
+	defer file.Close()
+
+	w := bufio.NewWriter(file)
+	defer w.Flush()
+
+	// Header
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                    MITHRIL SNAPSHOT SEARCH DETAILED LOG\n")
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "Timestamp:      %s UTC\n", time.Now().UTC().Format("2006-01-02 15:04:05"))
+	if runID != "" {
+		fmt.Fprintf(w, "Run ID:         %s\n", runID)
+	}
+	fmt.Fprintf(w, "Reference Slot: %d\n", referenceSlot)
+	fmt.Fprintf(w, "Search Duration: %s\n", searchDuration.Round(time.Millisecond))
+	fmt.Fprintf(w, "\n")
+
+	// Configuration Parameters
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                         CONFIGURATION PARAMETERS\n")
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Node Filtering ---\n")
+	fmt.Fprintf(w, "  Max RTT:              %d ms\n", cfg.MaxRTTMs)
+	fmt.Fprintf(w, "  TCP Timeout:          %d ms\n", cfg.TCPTimeoutMs)
+	fmt.Fprintf(w, "  Min Node Version:     %s\n", cfg.MinNodeVersion)
+	if len(cfg.AllowedNodeVersions) > 0 {
+		fmt.Fprintf(w, "  Allowed Versions:     %v\n", cfg.AllowedNodeVersions)
+	} else {
+		fmt.Fprintf(w, "  Allowed Versions:     (all >= min version)\n")
+	}
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Snapshot Thresholds ---\n")
+	fmt.Fprintf(w, "  Full Threshold:       %d slots (~%.1f min)\n", cfg.FullThreshold, float64(cfg.FullThreshold)*0.4/60)
+	fmt.Fprintf(w, "  Incremental Thresh:   %d slots (~%.1f sec)\n", cfg.IncrementalThreshold, float64(cfg.IncrementalThreshold)*0.4)
+	fmt.Fprintf(w, "  Safety Margin:        %d slots\n", cfg.SafetyMarginSlots)
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Stage 1 (Fast Triage) ---\n")
+	fmt.Fprintf(w, "  Warmup:               %d KiB\n", cfg.Stage1WarmKiB)
+	fmt.Fprintf(w, "  Window Size:          %d KiB\n", cfg.Stage1WindowKiB)
+	fmt.Fprintf(w, "  Windows:              %d (total: %d KiB)\n", cfg.Stage1Windows, cfg.Stage1WindowKiB*int64(cfg.Stage1Windows))
+	fmt.Fprintf(w, "  Timeout:              %d ms\n", cfg.Stage1TimeoutMS)
+	fmt.Fprintf(w, "  Concurrency:          %d (0=auto)\n", cfg.Stage1Concurrency)
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Stage 2 (Sustained Test) ---\n")
+	fmt.Fprintf(w, "  Top K Candidates:     %d\n", cfg.Stage2TopK)
+	fmt.Fprintf(w, "  Warmup Duration:      %d sec\n", cfg.Stage2WarmSec)
+	fmt.Fprintf(w, "  Measure Duration:     %d sec\n", cfg.Stage2MeasureSec)
+	fmt.Fprintf(w, "  Min Ratio:            %.0f%% (collapse threshold)\n", cfg.Stage2MinRatio*100)
+	if cfg.Stage2MinAbsMBs > 0 {
+		fmt.Fprintf(w, "  Min Absolute Speed:   %.1f MB/s\n", cfg.Stage2MinAbsMBs)
+	} else {
+		fmt.Fprintf(w, "  Min Absolute Speed:   (disabled)\n")
+	}
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Other Settings ---\n")
+	fmt.Fprintf(w, "  Worker Count:         %d\n", cfg.WorkerCount)
+	fmt.Fprintf(w, "  Max Snapshot Attempts: %d\n", snapCfg.MaxSnapshotURLAttempts)
+	fmt.Fprintf(w, "  Min Incr Speed:       %.1f MB/s\n", snapCfg.MinIncrementalSpeedMBs)
+	fmt.Fprintf(w, "\n")
+
+	// Incremental Base Matching Statistics
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                    INCREMENTAL BASE MATCHING STATISTICS\n")
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "--- Incremental Base Matching ---\n")
+	fmt.Fprintf(w, "  Nodes with full snapshot:     %d\n", incBaseStats.totalWithFull)
+	fmt.Fprintf(w, "  Nodes with any incremental:   %d\n", incBaseStats.totalWithInc)
+	fmt.Fprintf(w, "  Unique full snapshot slots:   %d\n", incBaseStats.uniqueFullSlots)
+	fmt.Fprintf(w, "  Unique incremental bases:     %d\n", incBaseStats.uniqueIncBases)
+	fmt.Fprintf(w, "  Full slots with matching inc: %d\n", incBaseStats.matchingFullSlots)
+	fmt.Fprintf(w, "  Nodes after base matching:    %d\n", incBaseStats.afterIncBaseMatch)
+	fmt.Fprintf(w, "\n")
+
+	// Full Snapshot Slots Distribution
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                      FULL SNAPSHOT SLOTS DISTRIBUTION\n")
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "\n")
+
+	// Count nodes by full snapshot slot
+	slotCounts := make(map[int64]int)
+	for _, node := range rankedNodes {
+		if node.Result.FullSlot > 0 {
+			slotCounts[node.Result.FullSlot]++
+		}
+	}
+
+	// Sort slots by count (descending), then by slot (descending)
+	type slotCount struct {
+		slot  int64
+		count int
+	}
+	var sortedSlots []slotCount
+	for slot, count := range slotCounts {
+		sortedSlots = append(sortedSlots, slotCount{slot, count})
+	}
+	sort.Slice(sortedSlots, func(i, j int) bool {
+		if sortedSlots[i].count != sortedSlots[j].count {
+			return sortedSlots[i].count > sortedSlots[j].count
+		}
+		return sortedSlots[i].slot > sortedSlots[j].slot
+	})
+
+	fmt.Fprintf(w, "Slot              Age (slots)   Nodes   Notes\n")
+	fmt.Fprintf(w, "-----------------------------------------------------\n")
+	for _, sc := range sortedSlots {
+		age := referenceSlot - int(sc.slot)
+		notes := ""
+		if age > cfg.FullThreshold {
+			notes = "(outside threshold)"
+		}
+		fmt.Fprintf(w, "%-16d  %10d   %5d   %s\n", sc.slot, age, sc.count, notes)
+	}
+	fmt.Fprintf(w, "\n")
+
+	// Stage 2 Ranked Nodes
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                        STAGE 2 RANKED NODES (TOP %d)\n", len(rankedNodes))
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "Rank  RPC                               Version      RTT    S1 MB/s  S2 MB/s  Full Slot\n")
+	fmt.Fprintf(w, "--------------------------------------------------------------------------------------------\n")
+
+	maxShow := 50
+	if len(rankedNodes) < maxShow {
+		maxShow = len(rankedNodes)
+	}
+	for i := 0; i < maxShow; i++ {
+		node := rankedNodes[i]
+		// Extract IP from RPC URL
+		nodeIP := node.Result.RPC
+		if idx := strings.Index(nodeIP, "://"); idx != -1 {
+			nodeIP = nodeIP[idx+3:]
+		}
+		// Truncate if too long
+		if len(nodeIP) > 30 {
+			nodeIP = nodeIP[:27] + "..."
+		}
+
+		s2Speed := "-"
+		if node.S2.MinMBs > 0 {
+			s2Speed = fmt.Sprintf("%.1f", node.S2.MinMBs)
+		}
+
+		fmt.Fprintf(w, "%4d  %-30s  %-10s  %4dms  %7.1f  %7s  %d\n",
+			i+1,
+			nodeIP,
+			node.Result.Version,
+			int(node.Result.Latency),
+			node.S1.MedianMBs,
+			s2Speed,
+			node.Result.FullSlot,
+		)
+	}
+	if len(rankedNodes) > maxShow {
+		fmt.Fprintf(w, "... and %d more nodes\n", len(rankedNodes)-maxShow)
+	}
+	fmt.Fprintf(w, "\n")
+
+	// Footer
+	fmt.Fprintf(w, "================================================================================\n")
+	fmt.Fprintf(w, "                               END OF LOG\n")
+	fmt.Fprintf(w, "================================================================================\n")
+
+	return logPath, nil
 }

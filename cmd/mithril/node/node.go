@@ -2273,6 +2273,10 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, snapshotDownloadPath, accountsPath, blockstorePath string) (*accountsdb.AccountsDb, *snapshot.SnapshotManifest, error) {
 	snapCfg := buildSnapshotConfig(rpcEndpoints)
 
+	// Set logging info for detailed speed test log
+	snapCfg.LogDir = logDir
+	snapCfg.RunID = replay.CurrentRunID
+
 	// Get all ranked snapshot sources (runs Stage 1 + Stage 2 testing)
 	sourceSelector, err := snapshotdl.GetRankedSnapshotSources(ctx, snapCfg)
 	if err != nil {
