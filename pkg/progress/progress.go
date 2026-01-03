@@ -317,6 +317,7 @@ func (d *DualProgress) Start() {
 		return
 	}
 	d.started = true
+	sourceEnabled := d.sourceSwitchEnabled
 	d.mu.Unlock()
 
 	// Print pipeline description using stages (same stage = parallel)
@@ -328,6 +329,11 @@ func (d *DualProgress) Start() {
 	fmt.Fprintln(d.output, "  [3] Download Incremental + Process → [4] Fetch Blocks → Replay")
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
+	}
+
+	// Print source info if enabled (above the progress bars)
+	if sourceEnabled {
+		d.printSourceInfo()
 	}
 
 	// Print initial empty lines for progress bars (2 bars)
@@ -363,44 +369,24 @@ func (d *DualProgress) updateLoop() {
 
 // render updates the display with both bars
 func (d *DualProgress) render() {
-	d.mu.Lock()
-	sourceEnabled := d.sourceSwitchEnabled
-	sourceInfo := d.sourceInfo
-	d.mu.Unlock()
-
 	downloadLine := d.Download.Render(d.useColor)
 	extractLine := d.Extract.Render(d.useColor)
 
 	if d.useColor {
-		if sourceEnabled && sourceInfo != "" {
-			// Include source info line with keyboard hint
-			// Move up 3 lines, render 3 lines
-			hint := fmt.Sprintf("%s[Press 'n' for next source, Ctrl+C to exit]%s", colorDim, colorReset)
-			sourceLine := fmt.Sprintf("%s%s%s  %s", colorTeal, sourceInfo, colorReset, hint)
-			fmt.Fprintf(d.output, "\r\x1b[3A\x1b[2K%s\n\x1b[2K%s\n\x1b[2K%s\n",
-				sourceLine,
-				downloadLine,
-				extractLine)
-		} else {
-			// Standard 2-line output
-			// Single atomic write to avoid terminal buffering issues:
-			// \r - carriage return to start of line (ensures clean positioning)
-			// \x1b[2A - move cursor up 2 lines
-			// \x1b[2K - clear the current line (download bar line)
-			// print download bar + newline
-			// \x1b[2K - clear the current line (extract bar line)
-			// print extract bar + newline
-			fmt.Fprintf(d.output, "\r\x1b[2A\x1b[2K%s\n\x1b[2K%s\n",
-				downloadLine,
-				extractLine)
-		}
+		// Always use 2-line mode (source info was printed once above, if enabled)
+		// Single atomic write to avoid terminal buffering issues:
+		// \r - carriage return to start of line (ensures clean positioning)
+		// \x1b[2A - move cursor up 2 lines
+		// \x1b[2K - clear the current line (download bar line)
+		// print download bar + newline
+		// \x1b[2K - clear the current line (extract bar line)
+		// print extract bar + newline
+		fmt.Fprintf(d.output, "\r\x1b[2A\x1b[2K%s\n\x1b[2K%s\n",
+			downloadLine,
+			extractLine)
 	} else {
 		// Non-TTY: skip in-place updates, bars will scroll
-		if sourceEnabled && sourceInfo != "" {
-			fmt.Fprintf(d.output, "%s\n%s\n%s\n", sourceInfo, downloadLine, extractLine)
-		} else {
-			fmt.Fprintf(d.output, "%s\n%s\n", downloadLine, extractLine)
-		}
+		fmt.Fprintf(d.output, "%s\n%s\n", downloadLine, extractLine)
 	}
 }
 
@@ -452,15 +438,13 @@ func (d *DualProgress) IsInterrupted() bool {
 
 // EnableSourceSwitching enables keyboard-based source switching during download.
 // The onSwitch callback is called when the user presses 'n' or 's' to switch sources.
-// sourceInfo is displayed in the progress bar (e.g., "Source 1/5: 192.168.1.1").
+// sourceInfo is displayed ONCE above the progress bars (e.g., "Source 1/5: 192.168.1.1").
+// If called before Start(), the source info will be printed when Start() is called.
+// If called after Start(), the source info is printed immediately above the progress bars.
 func (d *DualProgress) EnableSourceSwitching(sourceInfo string, onSwitch func()) {
 	d.mu.Lock()
 
-	// If already started, print an extra line for the source info
-	// (render will now use 3-line mode instead of 2-line)
-	if d.started && !d.sourceSwitchEnabled {
-		fmt.Fprintln(d.output) // Extra line for source info
-	}
+	alreadyStarted := d.started
 
 	d.sourceSwitchEnabled = true
 	d.sourceInfo = sourceInfo
@@ -468,9 +452,35 @@ func (d *DualProgress) EnableSourceSwitching(sourceInfo string, onSwitch func())
 	d.keyboardStopCh = make(chan struct{})
 	d.mu.Unlock()
 
+	// If already started, print the source info line now (above the progress bars)
+	// This requires moving cursor up, printing, and adjusting
+	if alreadyStarted {
+		d.printSourceInfo()
+	}
+	// If not started yet, Start() will print the source info
+
 	// Start keyboard listener if terminal supports it
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		go d.keyboardListener()
+	}
+}
+
+// printSourceInfo prints the source info line once
+func (d *DualProgress) printSourceInfo() {
+	d.mu.Lock()
+	sourceInfo := d.sourceInfo
+	d.mu.Unlock()
+
+	if sourceInfo == "" {
+		return
+	}
+
+	if d.useColor {
+		hint := fmt.Sprintf("%s[Press 'n' for next source, Ctrl+C to exit]%s", colorDim, colorReset)
+		sourceLine := fmt.Sprintf("%s%s%s  %s", colorTeal, sourceInfo, colorReset, hint)
+		fmt.Fprintf(d.output, "%s\n", sourceLine)
+	} else {
+		fmt.Fprintf(d.output, "%s  [Press 'n' for next source, Ctrl+C to exit]\n", sourceInfo)
 	}
 }
 
