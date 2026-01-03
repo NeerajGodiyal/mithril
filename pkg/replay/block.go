@@ -22,6 +22,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
@@ -724,6 +725,19 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
 			return fmt.Errorf("failed to fetch leader schedule: %w", err)
 		}
+
+		// Validate local schedule against RPC if configured
+		if config.GetBool("replay.validate_leader_schedule") {
+			logsDir := config.GetString("log.dir")
+			if logsDir == "" {
+				logsDir = "/mnt/mithril-logs"
+			}
+			voteAcctStakes := global.EpochStakes(block.Epoch)
+			voteAcctMap := global.EpochStakesVoteAccts(block.Epoch)
+			rpcSchedule := global.LeaderSchedule()
+			validateLeaderSchedule(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, voteAcctMap, logsDir)
+		}
+
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
@@ -777,6 +791,17 @@ func configureBlock(block *b.Block,
 			if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
 				return fmt.Errorf("failed to fetch leader schedule: %w", err)
 			}
+
+			// Validate local schedule against RPC if configured (uses vote cache for NodePubkey)
+			if config.GetBool("replay.validate_leader_schedule") {
+				logsDir := config.GetString("log.dir")
+				if logsDir == "" {
+					logsDir = "/mnt/mithril-logs"
+				}
+				voteAcctStakes := global.EpochStakes(block.Epoch)
+				rpcSchedule := global.LeaderSchedule()
+				validateLeaderScheduleFromVoteCache(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, logsDir)
+			}
 		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -827,6 +852,19 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
 			return fmt.Errorf("failed to fetch leader schedule: %w", err)
 		}
+
+		// Validate local schedule against RPC if configured
+		if config.GetBool("replay.validate_leader_schedule") {
+			logsDir := config.GetString("log.dir")
+			if logsDir == "" {
+				logsDir = "/mnt/mithril-logs"
+			}
+			voteAcctStakes := global.EpochStakes(block.Epoch)
+			voteAcctMap := global.EpochStakesVoteAccts(block.Epoch)
+			rpcSchedule := global.LeaderSchedule()
+			validateLeaderSchedule(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, voteAcctMap, logsDir)
+		}
+
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
