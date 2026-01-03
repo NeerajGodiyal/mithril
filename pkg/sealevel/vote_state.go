@@ -1377,6 +1377,25 @@ func (voteStateVersions *VoteStateVersions) LastTimestamp() *BlockTimestamp {
 	}
 }
 
+// NodePubkey returns the validator identity pubkey from the vote state.
+// Returns zero pubkey if the receiver is nil or has an unknown version type.
+// Callers should count zero returns as "missing" for divergence debugging.
+func (voteStateVersions *VoteStateVersions) NodePubkey() solana.PublicKey {
+	if voteStateVersions == nil {
+		return solana.PublicKey{}
+	}
+	switch voteStateVersions.Type {
+	case VoteStateVersionV0_23_5:
+		return voteStateVersions.V0_23_5.NodePubkey
+	case VoteStateVersionV1_14_11:
+		return voteStateVersions.V1_14_11.NodePubkey
+	case VoteStateVersionCurrent:
+		return voteStateVersions.Current.NodePubkey
+	default:
+		return solana.PublicKey{} // Unknown version - count as missing
+	}
+}
+
 func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	versioned := new(VoteStateVersions)
 	decoder := bin.NewBinDecoder(data)
