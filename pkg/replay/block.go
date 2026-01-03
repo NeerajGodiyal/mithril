@@ -26,8 +26,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
@@ -734,13 +734,15 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 
 		// Optional: background RPC validation for debugging
 		if config.GetBool("replay.validate_leader_schedule") {
+			// Capture schedule pointer BEFORE goroutine to avoid race if schedule changes
+			localSchedule := global.LeaderSchedule()
 			go func() {
 				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
 				if rpcErr != nil {
 					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
 					return
 				}
-				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
+				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
 			}()
 		}
 
@@ -800,31 +802,15 @@ func configureBlock(block *b.Block,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		// if we've crossed an epoch boundary, build new leader schedule from local state
+		// NOTE: At epoch boundary, schedule building is deferred to AFTER handleEpochTransition
+		// runs in the main loop. This ensures we have the correct stakes for the new epoch.
+		// The schedule is built and block.Leader is set in the epoch boundary handling code.
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			logsDir := config.GetString("log.dir")
-			if logsDir == "" {
-				logsDir = "/mnt/mithril-logs"
-			}
-
-			// Build leader schedule from local state (source of truth)
-			// Uses vote cache for NodePubkey lookups at epoch boundary
-			if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
-				return fmt.Errorf("failed to build leader schedule: %w", err)
-			}
-
-			// Optional: background RPC validation for debugging
-			if config.GetBool("replay.validate_leader_schedule") {
-				go func() {
-					rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-					if rpcErr != nil {
-						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-						return
-					}
-					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
-				}()
-			}
+			// Epoch boundary - schedule will be built after handleEpochTransition
+			// Don't look up leader here; it will be set after schedule is built
+			return nil
 		}
+		// Same epoch - use existing schedule
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
@@ -891,13 +877,15 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 		// Optional: background RPC validation for debugging
 		if config.GetBool("replay.validate_leader_schedule") {
+			// Capture schedule pointer BEFORE goroutine to avoid race if schedule changes
+			localSchedule := global.LeaderSchedule()
 			go func() {
 				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
 				if rpcErr != nil {
 					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
 					return
 				}
-				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
+				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
 			}()
 		}
 
@@ -1247,18 +1235,49 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 
-			// Re-validate leader schedule after epoch transition completes.
-			// This handles the edge case where validation was skipped in configureBlock
-			// because scheduleEpoch == blockEpoch and the cache wasn't populated yet.
-			// Now that handleEpochTransition has run, the cache is populated.
-			if config.GetBool("replay.validate_leader_schedule") {
+			// Build leader schedule for new epoch AFTER handleEpochTransition has computed stakes.
+			// configureBlock deferred schedule building at epoch boundary to ensure correct stake data.
+			if global.ManageLeaderSchedule() {
 				logsDir := config.GetString("log.dir")
 				if logsDir == "" {
 					logsDir = "/mnt/mithril-logs"
 				}
-				// Use validateLeaderSchedule (not FromVoteCache) since epoch stakes cache
-				// is now populated by cacheEpochStakesForValidation in handleEpochTransition
-				validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
+
+				// Build schedule from VoteCache (has NodePubkeys from block replay)
+				if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
+					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
+					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
+					break
+				}
+
+				// Set block.Leader for this block (was deferred in configureBlock)
+				var exists bool
+				block.Leader, exists = global.LeaderForSlot(block.Slot)
+				if !exists {
+					firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
+					numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
+					lastSlot := firstSlot + numSlots - 1
+					fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
+					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
+						block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+					result.Error = fmt.Errorf("unable to find leader for slot %d at epoch boundary (epoch=%d range=[%d,%d])",
+						block.Slot, block.Epoch, firstSlot, lastSlot)
+					break
+				}
+
+				// Optional: background RPC validation for debugging
+				if config.GetBool("replay.validate_leader_schedule") {
+					// Capture schedule pointer BEFORE goroutine to avoid race
+					localSchedule := global.LeaderSchedule()
+					go func() {
+						rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcc, rpcBackups)
+						if rpcErr != nil {
+							mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+							return
+						}
+						BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+					}()
+				}
 			}
 		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
 			// First block being processed - check if we're in rewards period
@@ -1289,19 +1308,19 @@ func ReplayBlocks(
 		// in this case (see ProcessBlock's early return when HasEahWorkaround is true).
 		// Uncomment if you need to replay pre-AccountsLtHash historical slots.
 		/*
-		if !block.Features.IsActive(features.AccountsLtHash) {
-			if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
-				if replayCtx.HasEpochAcctsHash {
-					block.EpochAcctsHash = replayCtx.EpochAcctsHash
-				} else {
-					block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
-					if err != nil {
-						panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+			if !block.Features.IsActive(features.AccountsLtHash) {
+				if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
+					if replayCtx.HasEpochAcctsHash {
+						block.EpochAcctsHash = replayCtx.EpochAcctsHash
+					} else {
+						block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
+						if err != nil {
+							panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+						}
+						block.HasEahWorkaround = true
 					}
-					block.HasEahWorkaround = true
 				}
 			}
-		}
 		*/
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
