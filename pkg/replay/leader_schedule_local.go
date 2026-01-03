@@ -15,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"golang.org/x/exp/rand"
@@ -546,4 +547,162 @@ func validateLeaderScheduleFromVoteCache(
 		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
 			stats.MismatchCount, blockEpoch, logsDir)
 	}
+}
+
+// PrepareLeaderScheduleLocal builds the leader schedule from local state and sets it as the source of truth.
+// This is the primary entry point for leader schedule - no RPC dependency.
+// Returns error if schedule cannot be built (missing stake data).
+func PrepareLeaderScheduleLocal(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	logsDir string,
+) error {
+	voteAcctStakes := global.EpochStakes(epoch)
+	voteAcctMap := global.EpochStakesVoteAccts(epoch)
+
+	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+		return fmt.Errorf("no stake data available for epoch %d", epoch)
+	}
+
+	schedule, stats := buildLocalLeaderSchedule(epoch, epochSchedule, voteAcctStakes, voteAcctMap)
+	if schedule == nil {
+		return fmt.Errorf("could not build leader schedule for epoch %d: no valid stakes after filtering (zero_stake=%d, missing_nodepk=%d, missing_vote_acct=%d)",
+			epoch, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+	}
+
+	// Set as source of truth
+	global.SetLeaderSchedule(schedule)
+
+	// Compute fingerprint for logging
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
+
+	// Log summary (single line for normal operation)
+	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d fingerprint=%s",
+		epoch, numSlots, len(voteAcctStakes)-stats.SkippedZeroStake-stats.SkippedMissingNodePk-stats.SkippedMissingVoteAcct,
+		stats.TotalStake, fingerprint)
+
+	// Log skipped entries only if there are any (debug info)
+	if stats.SkippedZeroStake > 0 || stats.SkippedMissingNodePk > 0 || stats.SkippedMissingVoteAcct > 0 {
+		mlog.Log.Debugf("leader schedule skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
+			stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+	}
+
+	return nil
+}
+
+// PrepareLeaderScheduleLocalFromVoteCache builds the leader schedule using vote cache for NodePubkey lookups.
+// Used at epoch boundaries when EpochStakesVoteAccts may not have the new epoch's data yet.
+func PrepareLeaderScheduleLocalFromVoteCache(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	logsDir string,
+) error {
+	voteAcctStakes := global.EpochStakes(epoch)
+
+	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+		return fmt.Errorf("no stake data available for epoch %d", epoch)
+	}
+
+	schedule, stats := buildLocalLeaderScheduleFromVoteCache(epoch, epochSchedule, voteAcctStakes)
+	if schedule == nil {
+		return fmt.Errorf("could not build leader schedule for epoch %d: no valid stakes after filtering (zero_stake=%d, missing_nodepk=%d, missing_vote_state=%d)",
+			epoch, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+	}
+
+	// Set as source of truth
+	global.SetLeaderSchedule(schedule)
+
+	// Compute fingerprint for logging
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
+
+	// Log summary
+	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d fingerprint=%s",
+		epoch, numSlots, len(voteAcctStakes)-stats.SkippedZeroStake-stats.SkippedMissingNodePk-stats.SkippedMissingVoteAcct,
+		stats.TotalStake, fingerprint)
+
+	if stats.SkippedZeroStake > 0 || stats.SkippedMissingNodePk > 0 || stats.SkippedMissingVoteAcct > 0 {
+		mlog.Log.Debugf("leader schedule skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
+			stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+	}
+
+	return nil
+}
+
+// BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
+// This is purely for debugging and does not affect the source of truth.
+// Pass rpcScheduleFetcher as a function that fetches from RPC so it can run async.
+func BackgroundValidateAgainstRPC(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	localSchedule *leaderschedule.LeaderSchedule,
+	rpcSchedule *leaderschedule.LeaderSchedule,
+	logsDir string,
+) {
+	if rpcSchedule == nil || localSchedule == nil {
+		return
+	}
+
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+
+	localFP := scheduleFingerprint(localSchedule, firstSlot, numSlots)
+	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
+
+	if localFP == rpcFP {
+		mlog.Log.Debugf("leader schedule RPC validation: epoch=%d fingerprints match (%s)", epoch, localFP)
+		return
+	}
+
+	// Fingerprints differ - log to mismatch file
+	initMismatchLog(logsDir)
+
+	mismatchLogMu.Lock()
+	if mismatchLogWriter != nil {
+		mismatchLogWriter.WriteString(fmt.Sprintf("\n[%s] RPC VALIDATION epoch=%d local_fp=%s rpc_fp=%s\n",
+			time.Now().Format(time.RFC3339), epoch, localFP, rpcFP))
+	}
+	mismatchLogMu.Unlock()
+
+	mlog.Log.Warnf("leader schedule RPC validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s - see %s/leader_schedule_mismatch.log",
+		epoch, localFP, rpcFP, logsDir)
+
+	flushMismatchLog()
+}
+
+// fetchLeaderScheduleFromRPC fetches leader schedule from RPC for validation purposes.
+// Does NOT set it as the global schedule - this is for background validation only.
+// Tries primary endpoint first, then backups with fewer retries.
+func fetchLeaderScheduleFromRPC(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	rpcClient *rpcclient.RpcClient,
+	backupEndpoints []string,
+) (*leaderschedule.LeaderSchedule, error) {
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+
+	// Try primary endpoint first (fewer retries since this is background validation)
+	leaderMap, err := fetchLeaderScheduleWithRetry(rpcClient, 3)
+	if err == nil {
+		return leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch), nil
+	}
+
+	lastErr := err
+	mlog.Log.Debugf("RPC leader schedule fetch (validation) failed on primary %s: %v", rpcClient.Endpoint(), err)
+
+	// Try backup endpoints with fewer retries
+	for _, endpoint := range backupEndpoints {
+		backupClient := rpcclient.NewRpcClient(endpoint)
+		leaderMap, err := fetchLeaderScheduleWithRetry(backupClient, 2)
+		if err == nil {
+			mlog.Log.Debugf("RPC leader schedule fetched from backup %s (for validation)", endpoint)
+			return leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch), nil
+		}
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("RPC leader schedule fetch failed from all endpoints: %w", lastErr)
 }

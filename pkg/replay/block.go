@@ -722,17 +722,26 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		logsDir := config.GetString("log.dir")
+		if logsDir == "" {
+			logsDir = "/mnt/mithril-logs"
 		}
 
-		// Validate local schedule against RPC if configured
+		// Build leader schedule from local state (source of truth)
+		if err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir); err != nil {
+			return fmt.Errorf("failed to build leader schedule: %w", err)
+		}
+
+		// Optional: background RPC validation for debugging
 		if config.GetBool("replay.validate_leader_schedule") {
-			logsDir := config.GetString("log.dir")
-			if logsDir == "" {
-				logsDir = "/mnt/mithril-logs"
-			}
-			validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
+			go func() {
+				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
+				if rpcErr != nil {
+					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+					return
+				}
+				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
+			}()
 		}
 
 		var exists bool
@@ -783,19 +792,29 @@ func configureBlock(block *b.Block,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		// if we've crossed an epoch boundary, fetch the new leader schedule
+		// if we've crossed an epoch boundary, build new leader schedule from local state
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-				return fmt.Errorf("failed to fetch leader schedule: %w", err)
+			logsDir := config.GetString("log.dir")
+			if logsDir == "" {
+				logsDir = "/mnt/mithril-logs"
 			}
 
-			// Validate local schedule against RPC if configured (uses vote cache for NodePubkey)
+			// Build leader schedule from local state (source of truth)
+			// Uses vote cache for NodePubkey lookups at epoch boundary
+			if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
+				return fmt.Errorf("failed to build leader schedule: %w", err)
+			}
+
+			// Optional: background RPC validation for debugging
 			if config.GetBool("replay.validate_leader_schedule") {
-				logsDir := config.GetString("log.dir")
-				if logsDir == "" {
-					logsDir = "/mnt/mithril-logs"
-				}
-				validateLeaderScheduleFromVoteCache(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
+				go func() {
+					rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
+					if rpcErr != nil {
+						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+						return
+					}
+					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
+				}()
 			}
 		}
 		var exists bool
@@ -844,17 +863,26 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Handle leader schedule
 	if global.ManageLeaderSchedule() {
-		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		logsDir := config.GetString("log.dir")
+		if logsDir == "" {
+			logsDir = "/mnt/mithril-logs"
 		}
 
-		// Validate local schedule against RPC if configured
+		// Build leader schedule from local state (source of truth)
+		if err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir); err != nil {
+			return fmt.Errorf("failed to build leader schedule: %w", err)
+		}
+
+		// Optional: background RPC validation for debugging
 		if config.GetBool("replay.validate_leader_schedule") {
-			logsDir := config.GetString("log.dir")
-			if logsDir == "" {
-				logsDir = "/mnt/mithril-logs"
-			}
-			validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
+			go func() {
+				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
+				if rpcErr != nil {
+					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+					return
+				}
+				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, global.LeaderSchedule(), rpcSchedule, logsDir)
+			}()
 		}
 
 		var exists bool
