@@ -197,6 +197,7 @@ func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.Publi
 	skippedMissingVoteCache := 0
 	skippedZeroNodePk := 0
 	missingVoteCacheStake := uint64(0) // Track stake of validators we couldn't cache
+	missingNodePkStake := uint64(0)    // Track stake of validators with zero nodePk
 
 	for votePk, stake := range voteAcctStakes {
 		if stake == 0 {
@@ -216,6 +217,7 @@ func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.Publi
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
 			skippedZeroNodePk++
+			missingNodePkStake += stake
 			continue
 		}
 
@@ -229,19 +231,33 @@ func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.Publi
 
 	global.PutEpochTotalStake(epoch, totalStake)
 
-	// Log at Info level so it appears in normal logs for debugging
-	mlog.Log.Infof("cached epoch stakes for validation: epoch=%d cached=%d total_stake=%d",
-		epoch, cachedCount, totalStake)
-	if skippedZeroStake > 0 || skippedMissingVoteCache > 0 || skippedZeroNodePk > 0 {
-		mlog.Log.Infof("  skipped: zero_stake=%d missing_vote_cache=%d zero_nodepk=%d missing_stake=%d",
-			skippedZeroStake, skippedMissingVoteCache, skippedZeroNodePk, missingVoteCacheStake)
+	// Calculate total missing stake (both missing vote cache AND zero nodePk)
+	totalMissingStake := missingVoteCacheStake + missingNodePkStake
+	hasIssues := skippedMissingVoteCache > 0 || skippedZeroNodePk > 0
+
+	// Log at Debug level if no issues, Info if there are skips
+	if hasIssues {
+		mlog.Log.Infof("cached epoch stakes: epoch=%d cached=%d/%d total_stake=%d",
+			epoch, cachedCount, len(voteAcctStakes), totalStake)
+		mlog.Log.Infof("  skipped: zero_stake=%d missing_vote_cache=%d(%d) zero_nodepk=%d(%d)",
+			skippedZeroStake, skippedMissingVoteCache, missingVoteCacheStake, skippedZeroNodePk, missingNodePkStake)
+	} else {
+		mlog.Log.Debugf("cached epoch stakes: epoch=%d cached=%d total_stake=%d",
+			epoch, cachedCount, totalStake)
 	}
-	// Warn if significant stake is missing from cache (>1% of total)
-	if missingVoteCacheStake > 0 && totalStake > 0 {
-		missingPct := float64(missingVoteCacheStake) / float64(totalStake) * 100
+
+	// Warn if significant stake is missing (>1% of total)
+	if totalMissingStake > 0 && totalStake > 0 {
+		missingPct := float64(totalMissingStake) / float64(totalStake) * 100
 		if missingPct > 1.0 {
-			mlog.Log.Warnf("leader schedule validation: %.2f%% of stake (%d) missing from vote cache for epoch %d",
-				missingPct, missingVoteCacheStake, epoch)
+			mlog.Log.Warnf("leader schedule: %.2f%% of stake (%d) missing for epoch %d (vote_cache=%d nodepk=%d)",
+				missingPct, totalMissingStake, epoch, missingVoteCacheStake, missingNodePkStake)
 		}
+	}
+
+	// Fatal warning if no validators could be cached
+	if cachedCount == 0 && len(voteAcctStakes) > 0 {
+		mlog.Log.Errorf("leader schedule: FATAL - no validators cached for epoch %d (vote_accts=%d)",
+			epoch, len(voteAcctStakes))
 	}
 }

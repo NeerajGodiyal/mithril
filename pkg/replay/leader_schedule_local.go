@@ -39,13 +39,22 @@ var (
 	mismatchLogMu     sync.Mutex
 )
 
+// defaultLogsDir is the fallback directory for mismatch logs
+const defaultLogsDir = "/mnt/mithril-logs"
+
+// resolveLogsDir returns a non-empty logs directory path
+func resolveLogsDir(logsDir string) string {
+	if logsDir == "" {
+		return defaultLogsDir
+	}
+	return logsDir
+}
+
 // initMismatchLog creates/opens the mismatch log file (once per process).
 // Uses the same log directory as Mithril's main logs.
 func initMismatchLog(logsDir string) {
 	mismatchLogOnce.Do(func() {
-		if logsDir == "" {
-			logsDir = "/mnt/mithril-logs"
-		}
+		logsDir = resolveLogsDir(logsDir)
 		// Create directory if it doesn't exist
 		if err := os.MkdirAll(logsDir, 0755); err != nil {
 			mlog.Log.Warnf("failed to create mismatch log directory: %v", err)
@@ -420,7 +429,7 @@ func validateLeaderSchedule(
 	}
 	if stats.MismatchCount > 0 {
 		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
-			stats.MismatchCount, blockEpoch, logsDir)
+			stats.MismatchCount, blockEpoch, resolveLogsDir(logsDir))
 	}
 }
 
@@ -545,7 +554,7 @@ func validateLeaderScheduleFromVoteCache(
 	}
 	if stats.MismatchCount > 0 {
 		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
-			stats.MismatchCount, blockEpoch, logsDir)
+			stats.MismatchCount, blockEpoch, resolveLogsDir(logsDir))
 	}
 }
 
@@ -668,7 +677,7 @@ func BackgroundValidateAgainstRPC(
 	mismatchLogMu.Unlock()
 
 	mlog.Log.Warnf("leader schedule RPC validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s - see %s/leader_schedule_mismatch.log",
-		epoch, localFP, rpcFP, logsDir)
+		epoch, localFP, rpcFP, resolveLogsDir(logsDir))
 
 	flushMismatchLog()
 }

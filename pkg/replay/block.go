@@ -747,7 +747,15 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
+			// Log schedule context for debugging
+			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
+			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
+			lastSlot := firstSlot + numSlots - 1
+			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
+				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
 	}
 
@@ -820,7 +828,15 @@ func configureBlock(block *b.Block,
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
+			// Log schedule context for debugging
+			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
+			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
+			lastSlot := firstSlot + numSlots - 1
+			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
+				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
 	}
 
@@ -888,7 +904,15 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
+			// Log schedule context for debugging
+			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
+			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
+			lastSlot := firstSlot + numSlots - 1
+			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
+				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
 	}
 
