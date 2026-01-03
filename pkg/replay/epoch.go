@@ -193,21 +193,29 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64, totalStake uint64) {
 	voteCache := global.VoteCache()
 	cachedCount := 0
+	skippedZeroStake := 0
+	skippedMissingVoteCache := 0
+	skippedZeroNodePk := 0
+	missingVoteCacheStake := uint64(0) // Track stake of validators we couldn't cache
 
 	for votePk, stake := range voteAcctStakes {
 		if stake == 0 {
+			skippedZeroStake++
 			continue
 		}
 
 		// Get NodePubkey from vote cache
 		vs := voteCache[votePk]
 		if vs == nil {
+			skippedMissingVoteCache++
+			missingVoteCacheStake += stake
 			continue
 		}
 
 		nodePk := vs.NodePubkey()
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
+			skippedZeroNodePk++
 			continue
 		}
 
@@ -220,5 +228,20 @@ func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.Publi
 	}
 
 	global.PutEpochTotalStake(epoch, totalStake)
-	mlog.Log.Debugf("cached epoch stakes for validation: epoch=%d validators=%d total_stake=%d", epoch, cachedCount, totalStake)
+
+	// Log at Info level so it appears in normal logs for debugging
+	mlog.Log.Infof("cached epoch stakes for validation: epoch=%d cached=%d total_stake=%d",
+		epoch, cachedCount, totalStake)
+	if skippedZeroStake > 0 || skippedMissingVoteCache > 0 || skippedZeroNodePk > 0 {
+		mlog.Log.Infof("  skipped: zero_stake=%d missing_vote_cache=%d zero_nodepk=%d missing_stake=%d",
+			skippedZeroStake, skippedMissingVoteCache, skippedZeroNodePk, missingVoteCacheStake)
+	}
+	// Warn if significant stake is missing from cache (>1% of total)
+	if missingVoteCacheStake > 0 && totalStake > 0 {
+		missingPct := float64(missingVoteCacheStake) / float64(totalStake) * 100
+		if missingPct > 1.0 {
+			mlog.Log.Warnf("leader schedule validation: %.2f%% of stake (%d) missing from vote cache for epoch %d",
+				missingPct, missingVoteCacheStake, epoch)
+		}
+	}
 }

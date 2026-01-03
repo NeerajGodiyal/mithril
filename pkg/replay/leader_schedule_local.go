@@ -411,6 +411,16 @@ func validateLeaderSchedule(
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	mlog.Log.Infof("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
 	mlog.Log.Infof("  sampled=%d mismatches=%d (capped=%v)", len(slotsToSample), stats.MismatchCount, stats.Capped)
+
+	// Warn if there are mismatches or fingerprint differences
+	if stats.LocalFingerprint != stats.RPCFingerprint {
+		mlog.Log.Warnf("leader schedule validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s",
+			blockEpoch, stats.LocalFingerprint, stats.RPCFingerprint)
+	}
+	if stats.MismatchCount > 0 {
+		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
+			stats.MismatchCount, blockEpoch, logsDir)
+	}
 }
 
 // validateLeaderScheduleFromVoteCache validates using global.VoteCache() for NodePubkey lookups.
@@ -526,4 +536,14 @@ func validateLeaderScheduleFromVoteCache(
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	mlog.Log.Infof("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
 	mlog.Log.Infof("  sampled=%d mismatches=%d (capped=%v)", len(slotsToSample), stats.MismatchCount, stats.Capped)
+
+	// Warn if there are mismatches or fingerprint differences
+	if stats.LocalFingerprint != stats.RPCFingerprint {
+		mlog.Log.Warnf("leader schedule validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s",
+			blockEpoch, stats.LocalFingerprint, stats.RPCFingerprint)
+	}
+	if stats.MismatchCount > 0 {
+		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES found for epoch=%d - see %s/leader_schedule_mismatch.log",
+			stats.MismatchCount, blockEpoch, logsDir)
+	}
 }
