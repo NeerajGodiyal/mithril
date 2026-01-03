@@ -10,6 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -176,7 +177,48 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	}
 
 	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch, epochSchedule, f)
+
+	// Cache epoch stakes for leader schedule validation
+	// This allows validation to work across long runs (not just snapshot epochs)
+	cacheEpochStakesForValidation(newEpoch, block.VoteAccts, block.TotalEpochStake)
+
 	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
 
 	return partitionedRewardsInfo
+}
+
+// cacheEpochStakesForValidation populates global.EpochStakes with stake data
+// computed during epoch transition. This enables leader schedule validation
+// for epochs beyond the initial snapshot.
+func cacheEpochStakesForValidation(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64, totalStake uint64) {
+	voteCache := global.VoteCache()
+	cachedCount := 0
+
+	for votePk, stake := range voteAcctStakes {
+		if stake == 0 {
+			continue
+		}
+
+		// Get NodePubkey from vote cache
+		vs := voteCache[votePk]
+		if vs == nil {
+			continue
+		}
+
+		nodePk := vs.NodePubkey()
+		var zeroPk solana.PublicKey
+		if nodePk == zeroPk {
+			continue
+		}
+
+		// Create VoteAccount entry with NodePubkey for leader schedule computation
+		voteAcct := &epochstakes.VoteAccount{
+			NodePubkey: nodePk,
+		}
+		global.PutEpochStakesEntry(epoch, votePk, stake, voteAcct)
+		cachedCount++
+	}
+
+	global.PutEpochTotalStake(epoch, totalStake)
+	mlog.Log.Debugf("cached epoch stakes for validation: epoch=%d validators=%d total_stake=%d", epoch, cachedCount, totalStake)
 }
