@@ -732,10 +732,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 			if logsDir == "" {
 				logsDir = "/mnt/mithril-logs"
 			}
-			voteAcctStakes := global.EpochStakes(block.Epoch)
-			voteAcctMap := global.EpochStakesVoteAccts(block.Epoch)
-			rpcSchedule := global.LeaderSchedule()
-			validateLeaderSchedule(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, voteAcctMap, logsDir)
+			validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
 		}
 
 		var exists bool
@@ -798,9 +795,7 @@ func configureBlock(block *b.Block,
 				if logsDir == "" {
 					logsDir = "/mnt/mithril-logs"
 				}
-				voteAcctStakes := global.EpochStakes(block.Epoch)
-				rpcSchedule := global.LeaderSchedule()
-				validateLeaderScheduleFromVoteCache(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, logsDir)
+				validateLeaderScheduleFromVoteCache(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
 			}
 		}
 		var exists bool
@@ -859,10 +854,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 			if logsDir == "" {
 				logsDir = "/mnt/mithril-logs"
 			}
-			voteAcctStakes := global.EpochStakes(block.Epoch)
-			voteAcctMap := global.EpochStakesVoteAccts(block.Epoch)
-			rpcSchedule := global.LeaderSchedule()
-			validateLeaderSchedule(block.Epoch, epochSchedule, rpcSchedule, voteAcctStakes, voteAcctMap, logsDir)
+			validateLeaderSchedule(block.Epoch, epochSchedule, global.LeaderSchedule(), logsDir)
 		}
 
 		var exists bool

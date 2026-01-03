@@ -135,7 +135,7 @@ type ValidationStats struct {
 }
 
 // buildLocalLeaderSchedule builds a leader schedule from local state.
-// Returns the schedule and validation statistics.
+// Returns nil schedule if no valid stakes are available.
 func buildLocalLeaderSchedule(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -172,8 +172,13 @@ func buildLocalLeaderSchedule(
 		stats.TotalStake += stake
 	}
 
-	// Get epoch length
-	slotsInEpoch := epochSchedule.SlotsPerEpoch
+	// Guard: empty stakes would panic in weightedrand
+	if len(filteredStakes) == 0 {
+		return nil, stats
+	}
+
+	// Get epoch length (handles warmup epochs correctly)
+	slotsInEpoch := epochSchedule.SlotsInEpoch(epoch)
 
 	// Build the schedule using leaderschedule.New
 	ls := leaderschedule.New(
@@ -190,6 +195,7 @@ func buildLocalLeaderSchedule(
 
 // buildLocalLeaderScheduleFromVoteCache builds schedule using global.VoteCache() for NodePubkey lookups.
 // Used at epoch boundaries when epochVoteAcctsMap may not be available.
+// Returns nil schedule if no valid stakes are available.
 func buildLocalLeaderScheduleFromVoteCache(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -231,7 +237,13 @@ func buildLocalLeaderScheduleFromVoteCache(
 		stats.TotalStake += stake
 	}
 
-	slotsInEpoch := epochSchedule.SlotsPerEpoch
+	// Guard: empty stakes would panic in weightedrand
+	if len(filteredStakes) == 0 {
+		return nil, stats
+	}
+
+	// Get epoch length (handles warmup epochs correctly)
+	slotsInEpoch := epochSchedule.SlotsInEpoch(epoch)
 
 	ls := leaderschedule.New(
 		epochVoteAccts,
@@ -248,6 +260,10 @@ func buildLocalLeaderScheduleFromVoteCache(
 // scheduleFingerprint computes a short hash of schedule for quick comparison.
 // Returns: "<base64(hash_first64)>/<base64(hash_last64)>"
 func scheduleFingerprint(ls *leaderschedule.LeaderSchedule, firstSlot uint64, numSlots uint64) string {
+	if ls == nil {
+		return "nil/nil"
+	}
+
 	hashFirst := sha256.New()
 	hashLast := sha256.New()
 
@@ -277,12 +293,11 @@ func scheduleFingerprint(ls *leaderschedule.LeaderSchedule, firstSlot uint64, nu
 
 // validateLeaderSchedule compares local vs RPC schedule and logs mismatches.
 // Does NOT return error - mismatches are logged but don't stop replay.
+// Uses scheduleEpoch (from LeaderScheduleEpoch) for consistency with RPC.
 func validateLeaderSchedule(
 	blockEpoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	rpcSchedule *leaderschedule.LeaderSchedule,
-	voteAcctStakes map[solana.PublicKey]uint64,
-	voteAcctMap map[solana.PublicKey]*epochstakes.VoteAccount,
 	logsDir string,
 ) {
 	if rpcSchedule == nil {
@@ -293,15 +308,37 @@ func validateLeaderSchedule(
 	// Initialize mismatch log file (once per process)
 	initMismatchLog(logsDir)
 
+	// Compute scheduleEpoch - this is the epoch whose stakes determine the schedule
 	firstSlot := epochSchedule.FirstSlotInEpoch(blockEpoch)
 	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
-	numSlots := epochSchedule.SlotsPerEpoch
+
+	// Fetch stakes for scheduleEpoch (not blockEpoch!)
+	voteAcctStakes := global.EpochStakes(scheduleEpoch)
+	voteAcctMap := global.EpochStakesVoteAccts(scheduleEpoch)
+
+	// Guard: skip if no stake data available for this epoch
+	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+		mlog.Log.Warnf("leader schedule validation: no stake data for schedule_epoch=%d (block_epoch=%d), skipping",
+			scheduleEpoch, blockEpoch)
+		return
+	}
+
+	// Use SlotsInEpoch for correct warmup handling
+	numSlots := epochSchedule.SlotsInEpoch(scheduleEpoch)
 
 	// Log input snapshot for debugging
 	logInputSnapshot(scheduleEpoch, voteAcctStakes, voteAcctMap)
 
-	// Build local schedule
+	// Build local schedule using scheduleEpoch
 	localSchedule, stats := buildLocalLeaderSchedule(scheduleEpoch, epochSchedule, voteAcctStakes, voteAcctMap)
+
+	// Guard: skip if local schedule couldn't be built (empty stakes after filtering)
+	if localSchedule == nil {
+		mlog.Log.Warnf("leader schedule validation: could not build local schedule (no valid stakes), skipping")
+		mlog.Log.Infof("  schedule_epoch=%d block_epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
+			scheduleEpoch, blockEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+		return
+	}
 
 	// Compute fingerprints
 	stats.LocalFingerprint = scheduleFingerprint(localSchedule, firstSlot, numSlots)
@@ -378,11 +415,11 @@ func validateLeaderSchedule(
 
 // validateLeaderScheduleFromVoteCache validates using global.VoteCache() for NodePubkey lookups.
 // Used at epoch boundaries when epochVoteAcctsMap may not be available from snapshot.
+// Uses scheduleEpoch (from LeaderScheduleEpoch) for consistency with RPC.
 func validateLeaderScheduleFromVoteCache(
 	blockEpoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	rpcSchedule *leaderschedule.LeaderSchedule,
-	voteAcctStakes map[solana.PublicKey]uint64,
 	logsDir string,
 ) {
 	if rpcSchedule == nil {
@@ -393,12 +430,33 @@ func validateLeaderScheduleFromVoteCache(
 	// Initialize mismatch log file (once per process)
 	initMismatchLog(logsDir)
 
+	// Compute scheduleEpoch - this is the epoch whose stakes determine the schedule
 	firstSlot := epochSchedule.FirstSlotInEpoch(blockEpoch)
 	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
-	numSlots := epochSchedule.SlotsPerEpoch
 
-	// Build local schedule from vote cache
+	// Fetch stakes for scheduleEpoch (not blockEpoch!)
+	voteAcctStakes := global.EpochStakes(scheduleEpoch)
+
+	// Guard: skip if no stake data available for this epoch
+	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+		mlog.Log.Warnf("leader schedule validation: no stake data for schedule_epoch=%d (block_epoch=%d), skipping",
+			scheduleEpoch, blockEpoch)
+		return
+	}
+
+	// Use SlotsInEpoch for correct warmup handling
+	numSlots := epochSchedule.SlotsInEpoch(scheduleEpoch)
+
+	// Build local schedule from vote cache using scheduleEpoch
 	localSchedule, stats := buildLocalLeaderScheduleFromVoteCache(scheduleEpoch, epochSchedule, voteAcctStakes)
+
+	// Guard: skip if local schedule couldn't be built (empty stakes after filtering)
+	if localSchedule == nil {
+		mlog.Log.Warnf("leader schedule validation: could not build local schedule (no valid stakes), skipping")
+		mlog.Log.Infof("  schedule_epoch=%d block_epoch=%d vote_accts=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
+			scheduleEpoch, blockEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+		return
+	}
 
 	// Compute fingerprints
 	stats.LocalFingerprint = scheduleFingerprint(localSchedule, firstSlot, numSlots)
