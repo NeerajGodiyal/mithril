@@ -2,6 +2,7 @@ package replay
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -994,9 +995,13 @@ func buildLocalLeaderSchedule(
 		return nil, stats, validEntries, skippedEntries
 	}
 
-	// Sort entries by stake descending for top/bottom lists and CSV output
+	// Sort entries by stake descending, then node pubkey descending (matches schedule computation)
 	sort.Slice(validEntries, func(i, j int) bool {
-		return validEntries[i].Stake > validEntries[j].Stake
+		if validEntries[i].Stake != validEntries[j].Stake {
+			return validEntries[i].Stake > validEntries[j].Stake
+		}
+		// Tie-break by node pubkey descending (higher bytes first) - matches Agave
+		return bytes.Compare(validEntries[i].NodePubkey[:], validEntries[j].NodePubkey[:]) > 0
 	})
 
 	// Capture top 10 and bottom 10 for log summary
@@ -1128,9 +1133,13 @@ func buildLocalLeaderScheduleFromVoteCache(
 		return nil, stats, validEntries, skippedEntries
 	}
 
-	// Sort entries by stake descending for top/bottom lists and CSV output
+	// Sort entries by stake descending, then node pubkey descending (matches schedule computation)
 	sort.Slice(validEntries, func(i, j int) bool {
-		return validEntries[i].Stake > validEntries[j].Stake
+		if validEntries[i].Stake != validEntries[j].Stake {
+			return validEntries[i].Stake > validEntries[j].Stake
+		}
+		// Tie-break by node pubkey descending (higher bytes first) - matches Agave
+		return bytes.Compare(validEntries[i].NodePubkey[:], validEntries[j].NodePubkey[:]) > 0
 	})
 
 	// Capture top 10 and bottom 10 for log summary
