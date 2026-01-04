@@ -37,9 +37,10 @@ const (
 	// MaxMissingVoteCacheStakePercent is the maximum percentage of stake that can be
 	// missing from VoteCache before we fail. Since local schedule is the source of truth,
 	// missing VoteCache entries mean that stake is dropped from the schedule, which would
-	// produce an incorrect schedule. 1% threshold catches significant issues while allowing
-	// for minor discrepancies (closed/deactivated accounts).
-	MaxMissingVoteCacheStakePercent = 1.0
+	// produce an incorrect schedule.
+	// Set to 0 for zero tolerance - any missing stake is a hard failure.
+	// The VoteCache rebuild from AccountsDB should ensure this never triggers.
+	MaxMissingVoteCacheStakePercent = 0.0
 	// DefaultVoteCacheRebuildConcurrency is the default number of concurrent workers
 	// for rebuilding vote cache from AccountsDB at epoch boundaries.
 	DefaultVoteCacheRebuildConcurrency = 16

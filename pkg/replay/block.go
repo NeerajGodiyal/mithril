@@ -1253,14 +1253,19 @@ func ReplayBlocks(
 				}
 
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
+				// Use block.VoteAccts (the complete stake map from handleEpochTransition)
+				// NOT global.EpochStakes which may be incomplete if VoteCache was stale.
 				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
 				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
-				voteAcctStakes := global.EpochStakes(block.Epoch)
-				if err := RebuildVoteCacheFromAccountsDB(acctsDb, lastSlotCtx.Slot, voteAcctStakes, 0); err != nil {
+				if err := RebuildVoteCacheFromAccountsDB(acctsDb, lastSlotCtx.Slot, block.VoteAccts, 0); err != nil {
 					mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
 					result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
 					break
 				}
+
+				// Refresh global.EpochStakes now that VoteCache is complete
+				// This overwrites the potentially incomplete cache from handleEpochTransition
+				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
 				// Build schedule from VoteCache (now guaranteed complete from AccountsDB rebuild)
 				if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
