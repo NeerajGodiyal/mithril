@@ -1243,6 +1243,15 @@ func ReplayBlocks(
 					logsDir = "/mnt/mithril-logs"
 				}
 
+				// Sanity check: verify epoch schedule consistency
+				// The schedule epoch (used for RNG seed) should match block.Epoch
+				firstSlotNewEpoch := epochSchedule.FirstSlotInEpoch(block.Epoch)
+				schedEpoch := epochSchedule.LeaderScheduleEpoch(firstSlotNewEpoch)
+				if schedEpoch != block.Epoch {
+					mlog.Log.Warnf("leader schedule epoch mismatch: block_epoch=%d schedule_epoch=%d first_slot=%d (warmup edge case?)",
+						block.Epoch, schedEpoch, firstSlotNewEpoch)
+				}
+
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
 				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
 				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.

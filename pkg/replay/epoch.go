@@ -139,12 +139,12 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	workerPool.Release()
 	ants.Release()
 
-	newVoteAccts := make(map[solana.PublicKey]uint64, len(prevSlotCtx.VoteAccts))
-	for voteAcctPk := range prevSlotCtx.VoteAccts {
-		newVoteAccts[voteAcctPk] = voteAcctStakes[voteAcctPk]
-	}
-
-	return newVoteAccts
+	// Return full stake map - don't filter by previous epoch's vote accounts.
+	// New vote accounts can appear during an epoch (via CreateAccount + Initialize),
+	// and their stake should be included in the next epoch's leader schedule.
+	// The old filtering logic would drop any vote accounts that didn't exist
+	// in prevSlotCtx.VoteAccts, causing missing stake in the schedule.
+	return voteAcctStakes
 }
 
 func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
