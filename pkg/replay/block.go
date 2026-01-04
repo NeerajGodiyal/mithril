@@ -1218,12 +1218,15 @@ func ReplayBlocks(
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
-			mlog.Log.Infof("epoch boundary, %d -> %d", currentEpoch, currentEpoch+1)
+			mlog.Log.Infof("")
+			mlog.Log.Infof("=== Epoch Boundary: %d -> %d ===", currentEpoch, currentEpoch+1)
+			mlog.Log.Infof("  first_slot_new_epoch=%d num_reward_partitions=%d", block.Slot, block.NumRewardPartitions)
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			mlog.Log.Infof("  stake_computation: vote_accts=%d total_stake=%d", len(block.VoteAccts), block.TotalEpochStake)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
