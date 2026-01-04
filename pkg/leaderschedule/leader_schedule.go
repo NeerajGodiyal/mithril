@@ -52,16 +52,38 @@ func New(
 	length uint64,
 	repeat uint64) *LeaderSchedule {
 
-	keyedStakes := make([]pubkeyAndStakePair, 0, len(epochVoteAcctStakes))
-	for pubkey, stake := range epochVoteAcctStakes {
-		if stake > 0 {
-			keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: pubkey, stake: stake})
+	// Aggregate stake by NODE IDENTITY, not vote account.
+	// This matches Agave's StakedNodes::new() which sums stake per node.
+	// If a validator has multiple vote accounts, their stakes are combined.
+	nodeStakes := make(map[solana.PublicKey]uint64)
+	for voteAcctPubkey, stake := range epochVoteAcctStakes {
+		if stake == 0 {
+			continue
 		}
+		voteAcct := epochVoteAcctsMap[voteAcctPubkey]
+		if voteAcct == nil {
+			continue
+		}
+		nodePubkey := voteAcct.NodePubkey
+		var zeroPk solana.PublicKey
+		if nodePubkey == zeroPk {
+			continue
+		}
+		nodeStakes[nodePubkey] += stake
 	}
 
+	// Build keyed stakes from aggregated node stakes
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(nodeStakes))
+	for nodePubkey, stake := range nodeStakes {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: nodePubkey, stake: stake})
+	}
+
+	// Sample node identities directly (not vote accounts)
 	leaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, repeat)
+
+	// Leaders are already node identities, no conversion needed
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	leaderSchedule := newFromLeaders(leaders, epochVoteAcctsMap, firstSlotInEpoch, length)
+	leaderSchedule := newFromLeadersDirect(leaders, firstSlotInEpoch)
 
 	return leaderSchedule
 }
@@ -160,34 +182,14 @@ func uint64n(rng *chacha.ChaCha, n uint64) uint64 {
 	return mHi
 }
 
-type slotLeaderInfo struct {
-	voteAcctAddr          solana.PublicKey
-	validatorIdentityAddr solana.PublicKey
-}
-
-func newFromLeaders(voteKeyedSlotLeaders []solana.PublicKey,
-	voteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
-	firstSlotInEpoch uint64,
-	length uint64) *LeaderSchedule {
-
-	var defaultPubkey solana.PublicKey
-	currentSlotLeaderInfo := slotLeaderInfo{voteAcctAddr: defaultPubkey, validatorIdentityAddr: defaultPubkey}
-
-	slotLeaders := make([]solana.PublicKey, 0)
-	for _, voteAcctAddr := range voteKeyedSlotLeaders {
-		if voteAcctAddr != currentSlotLeaderInfo.voteAcctAddr {
-			validatorIdentityAddr := voteAcctsMap[voteAcctAddr].NodePubkey
-			currentSlotLeaderInfo = slotLeaderInfo{voteAcctAddr: voteAcctAddr, validatorIdentityAddr: validatorIdentityAddr}
-		}
-		slotLeaders = append(slotLeaders, currentSlotLeaderInfo.validatorIdentityAddr)
-	}
-
-	leaderScheduleMap := make(map[uint64]solana.PublicKey)
-	for i, leader := range slotLeaders {
+// newFromLeadersDirect creates a LeaderSchedule from node identity pubkeys directly.
+// Used when leaders are already node identities (after aggregating by node).
+func newFromLeadersDirect(nodeLeaders []solana.PublicKey, firstSlotInEpoch uint64) *LeaderSchedule {
+	leaderScheduleMap := make(map[uint64]solana.PublicKey, len(nodeLeaders))
+	for i, leader := range nodeLeaders {
 		slotNum := uint64(i) + firstSlotInEpoch
 		leaderScheduleMap[slotNum] = leader
 	}
-
 	return &LeaderSchedule{lsMap: leaderScheduleMap}
 }
 
