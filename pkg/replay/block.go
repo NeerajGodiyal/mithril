@@ -1225,8 +1225,11 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+
+			// Step 1: Compute stakes for the new epoch (BEFORE leader schedule and rewards)
+			epochTransitionCtx := prepareEpochStakes(acctsDb, lastSlotCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			mlog.Log.Infof("  stake_computation: vote_accts=%d total_stake=%d", len(block.VoteAccts), block.TotalEpochStake)
+
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
@@ -1240,8 +1243,8 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 
-			// Build leader schedule for new epoch AFTER handleEpochTransition has computed stakes.
-			// configureBlock deferred schedule building at epoch boundary to ensure correct stake data.
+			// Step 2: Build leader schedule BEFORE rewards distribution.
+			// This ensures schedule verification works even if rewards distribution crashes.
 			if global.ManageLeaderSchedule() {
 				logsDir := config.GetString("log.dir")
 				if logsDir == "" {
@@ -1259,7 +1262,7 @@ func ReplayBlocks(
 				}
 
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
-				// Use block.VoteAccts (the complete stake map from handleEpochTransition)
+				// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
 				// NOT global.EpochStakes which may be incomplete if VoteCache was stale.
 				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
 				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
@@ -1270,7 +1273,6 @@ func ReplayBlocks(
 				}
 
 				// Refresh global.EpochStakes now that VoteCache is complete
-				// This overwrites the potentially incomplete cache from handleEpochTransition
 				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
 				// Build schedule from VoteCache (now guaranteed complete from AccountsDB rebuild)
@@ -1307,6 +1309,10 @@ func ReplayBlocks(
 					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
 				}()
 			}
+
+			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
+			// If this crashes, we still have leader schedule logs for debugging.
+			partitionedRewardsInfo = handleEpochRewards(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
 
 			// Set block height (was deferred in configureBlock's early return at epoch boundary)
 			if global.ManageBlockHeight() {

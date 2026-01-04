@@ -147,7 +147,20 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	return voteAcctStakes
 }
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
+// EpochTransitionContext holds the intermediate state needed between stake computation
+// and rewards distribution. This allows leader schedule to be built in between,
+// so schedule verification works even if rewards distribution crashes.
+type EpochTransitionContext struct {
+	StakeHistory               *sealevel.SysvarStakeHistory
+	NewEpoch                   uint64
+	FirstSlotInEpoch           uint64
+	NewWarmupCooldownRateEpoch *uint64
+}
+
+// prepareEpochStakes computes the stake distribution for the new epoch.
+// This must be called BEFORE leader schedule computation and rewards distribution.
+// Returns the context needed by handleEpochRewards.
+func prepareEpochStakes(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.SlotCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *EpochTransitionContext {
 	var stakeHistory sealevel.SysvarStakeHistory
 	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
 	if err != nil {
@@ -159,7 +172,6 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
-	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
@@ -170,21 +182,39 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 		block.TotalEpochStake += stake
 	}
 
+	return &EpochTransitionContext{
+		StakeHistory:               &stakeHistory,
+		NewEpoch:                   newEpoch,
+		FirstSlotInEpoch:           firstSlotInEpoch,
+		NewWarmupCooldownRateEpoch: newWarmupCooldownRateEpoch,
+	}
+}
+
+// handleEpochRewards distributes rewards and updates stake history.
+// This should be called AFTER leader schedule computation to ensure schedule
+// verification works even if rewards distribution crashes.
+func handleEpochRewards(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, ctx *EpochTransitionContext) *rewards.PartitionedRewardDistributionInfo {
+	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
+
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, rpcc, rpcBackups, block, f, newEpoch, firstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, rpcc, rpcBackups, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
 	} else {
 		panic("only partitioned rewards supported")
 	}
 
 	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch, epochSchedule, f)
 
-	// Note: cacheEpochStakesForValidation is called AFTER the VoteCache rebuild
-	// in the epoch boundary handling code (block.go). This ensures global.EpochStakes
-	// is populated from the rebuilt VoteCache, not the potentially stale one.
-
-	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
+	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, ctx.NewEpoch)
 
 	return partitionedRewardsInfo
+}
+
+// handleEpochTransition is the legacy function that bundles stake computation and rewards.
+// Prefer using prepareEpochStakes + handleEpochRewards separately to allow leader schedule
+// computation between them.
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
+	ctx := prepareEpochStakes(acctsDb, prevSlotCtx, epochSchedule, f, block, epoch)
+	return handleEpochRewards(acctsDb, rpcc, rpcBackups, partitionedEpochRewards, prevSlotCtx, replayCtx, epochSchedule, f, block, epoch, ctx)
 }
 
 // cacheEpochStakesForValidation populates global.EpochStakes with stake data

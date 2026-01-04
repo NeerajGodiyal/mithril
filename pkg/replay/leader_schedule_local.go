@@ -1520,7 +1520,7 @@ func PrepareLeaderScheduleLocal(
 		SkippedZeroNodePk:   stats.SkippedMissingNodePk,
 		LocalHash:           fullHash,
 		RunID:               mlog.GetRunID(),
-		Source:              "local", // Use consistent naming with log
+		Source:              "snapshot", // From snapshot loading at startup
 		Timestamp:           time.Now().UTC(),
 	}
 
@@ -1629,7 +1629,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 		SkippedZeroNodePk:   stats.SkippedMissingNodePk,
 		LocalHash:           fullHash,
 		RunID:               mlog.GetRunID(),
-		Source:              "local", // Use consistent naming with log
+		Source:              "transition", // From epoch boundary transition
 		Timestamp:           time.Now().UTC(),
 	}
 
