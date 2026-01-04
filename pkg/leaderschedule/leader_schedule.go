@@ -149,37 +149,36 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	return leaders
 }
 
-// uint64n generates a uniform random uint64 in [0,n) using Lemire's method.
-// This matches Rust's rand 0.8.x uniform distribution algorithm.
-// See: https://lemire.me/blog/2019/06/06/nearly-divisionless-random-integer-generation-on-various-systems/
+// uint64n generates a uniform random uint64 in [0,n) matching Agave's UniformU64Sampler.
+// This matches agave_random::weighted::UniformU64Sampler::new_like_instance_sample
+// which is used for leader schedule computation.
+//
+// The algorithm uses wide multiplication (128-bit product) with rejection sampling:
+// - zone = u64::MAX - ((u64::MAX - n + 1) % n)
+// - Accept when lo <= zone, reject when lo > zone
 func uint64n(rng *chacha.ChaCha, n uint64) uint64 {
 	if n == 0 {
 		panic("uint64n: n cannot be 0")
 	}
 
-	// Lemire's nearly divisionless method
-	// 1. Generate random x
-	// 2. Compute wide multiply: m = x * n (as 128-bit)
-	// 3. l = low 64 bits of m
-	// 4. If l < n, need rejection check
-	// 5. Return high 64 bits of m
+	// Calculate zone following Agave's new_like_instance_sample:
+	// ints_to_reject = (u64::MAX - range_end + 1) % range_end
+	// zone = u64::MAX - ints_to_reject
+	intsToReject := (^uint64(0) - n + 1) % n
+	zone := ^uint64(0) - intsToReject
 
-	x := rng.Uint64()
+	for {
+		x := rng.Uint64()
+		// Compute 128-bit product: m = x * n
+		// mHi = high 64 bits (result), mLo = low 64 bits (for rejection test)
+		mHi, mLo := bits.Mul64(x, n)
 
-	// Compute 128-bit product: m = x * n
-	// mHi = high 64 bits, mLo = low 64 bits
-	mHi, mLo := bits.Mul64(x, n)
-
-	if mLo < n {
-		// Rejection threshold: (2^64 - n) % n = (-n) % n
-		threshold := -n % n
-		for mLo < threshold {
-			x = rng.Uint64()
-			mHi, mLo = bits.Mul64(x, n)
+		// Accept if lo <= zone (Agave's acceptance condition)
+		if mLo <= zone {
+			return mHi
 		}
+		// Reject and retry
 	}
-
-	return mHi
 }
 
 // newFromLeadersDirect creates a LeaderSchedule from node identity pubkeys directly.

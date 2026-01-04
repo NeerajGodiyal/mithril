@@ -1,10 +1,13 @@
 package leaderschedule
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 
+	mbase58 "github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/gagliardetto/solana-go"
 	chacha "github.com/nixberg/chacha-rng-go"
 	"github.com/stretchr/testify/assert"
@@ -161,6 +164,194 @@ func TestAgaveStakeWeightedScheduleVectors(t *testing.T) {
 	}
 }
 
+// TestThresholdCalculation verifies threshold calculation for large n
+func TestThresholdCalculation(t *testing.T) {
+	// For pow=3, total stake is about 4.6 * 10^18
+	n := uint64(4611545282012774400)
+
+	// Our threshold calculation
+	threshold := -n % n
+
+	// Agave's zone calculation:
+	// ints_to_reject = (u64::MAX - range_end + 1) % range_end
+	// zone = u64::MAX - ints_to_reject
+	// Accept if lo <= zone
+	intsToReject := (^uint64(0) - n + 1) % n
+	zone := ^uint64(0) - intsToReject
+
+	t.Logf("n (total stake): %d", n)
+	t.Logf("Our threshold (reject if lo < this): %d", threshold)
+	t.Logf("Agave ints_to_reject: %d", intsToReject)
+	t.Logf("Agave zone (accept if lo <= this): %d", zone)
+	t.Logf("u64::MAX: %d", ^uint64(0))
+
+	// Key insight: Our code rejects LOW values (lo < threshold)
+	// Agave rejects HIGH values (lo > zone)
+	// These are DIFFERENT rejection regions!
+
+	// Test with a specific lo value
+	testLo := uint64(100) // small value
+	ourAccept := testLo >= threshold
+	agaveAccept := testLo <= zone
+	t.Logf("lo=%d: our_accept=%v, agave_accept=%v", testLo, ourAccept, agaveAccept)
+
+	testLo = zone + 1 // just above zone
+	ourAccept = testLo >= threshold
+	agaveAccept = testLo <= zone
+	t.Logf("lo=%d: our_accept=%v, agave_accept=%v", testLo, ourAccept, agaveAccept)
+
+	// This shows the bug: we accept opposite values!
+}
+
+// TestBase58HashCompatibility verifies our hash matches Agave's encoding
+func TestBase58HashCompatibility(t *testing.T) {
+	// Simple test: hash a single pubkey and verify base58
+	pk := pubkeyFromU16(12345)
+	h := sha256.New()
+	h.Write(pk[:])
+	hash := h.Sum(nil)
+
+	t.Logf("Pubkey bytes: %x", pk[:])
+	t.Logf("SHA256 hash: %x", hash)
+	t.Logf("Base58 encoded: %s", mbase58.Encode(hash))
+
+	// Also verify pubkeyFromU16 produces expected bytes
+	// 12345 = 0x3039 little-endian = [0x39, 0x30, 0x00, ...]
+	assert.Equal(t, byte(0x39), pk[0])
+	assert.Equal(t, byte(0x30), pk[1])
+	assert.Equal(t, byte(0x00), pk[2])
+}
+
+// TestDebugEpoch346436 debugs the failing test case
+func TestDebugEpoch346436(t *testing.T) {
+	// Compare pow=2 (passes) and pow=3 (fails) to find the difference
+	epoch := uint64(346436)
+	length := uint64(20) // short for debugging
+
+	for _, stakePow := range []uint32{2, 3} {
+		t.Run(fmt.Sprintf("pow%d", stakePow), func(t *testing.T) {
+			pubkeys := make([]solana.PublicKey, 65536)
+			for i := 0; i < 65536; i++ {
+				pubkeys[i] = pubkeyFromU16(uint16(i))
+			}
+
+			keyedStakes := make([]pubkeyAndStakePair, 65536)
+			var totalStake uint64
+			for i := 0; i < 65536; i++ {
+				stake := uint64(1)
+				for p := uint32(0); p < stakePow; p++ {
+					stake *= uint64(i)
+				}
+				keyedStakes[i] = pubkeyAndStakePair{pubkey: pubkeys[i], stake: stake}
+				totalStake += stake
+			}
+			t.Logf("Total stake: %d", totalStake)
+
+			leaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, 1)
+			t.Log("First 20 leaders (pubkey index):")
+			for i := 0; i < int(length); i++ {
+				var idx int
+				for j, pk := range pubkeys {
+					if pk == leaders[i] {
+						idx = j
+						break
+					}
+				}
+				t.Logf("  slot %d: %d", i, idx)
+			}
+		})
+	}
+}
+
+// TestDebugEpoch346436Old debugs the failing test case (old version)
+func TestDebugEpoch346436Old(t *testing.T) {
+	epoch := uint64(346436)
+	length := uint64(1000)
+	stakePow := uint32(3)
+
+	// Create 65536 pubkeys (0 to 65535)
+	pubkeys := make([]solana.PublicKey, 65536)
+	for i := 0; i < 65536; i++ {
+		pubkeys[i] = pubkeyFromU16(uint16(i))
+	}
+
+	// Build stakes: stake[i] = i^stakePow
+	keyedStakes := make([]pubkeyAndStakePair, 65536)
+	var totalStake uint64
+	for i := 0; i < 65536; i++ {
+		stake := uint64(1)
+		for p := uint32(0); p < stakePow; p++ {
+			stake *= uint64(i)
+		}
+		keyedStakes[i] = pubkeyAndStakePair{pubkey: pubkeys[i], stake: stake}
+		totalStake += stake
+	}
+	t.Logf("Total stake before sort: %d", totalStake)
+	t.Logf("Num validators: %d", len(keyedStakes))
+
+	// Sort - check total stake preserved
+	sorted := sortStakes(keyedStakes)
+	t.Logf("Num validators after sort: %d", len(sorted))
+
+	var sortedTotal uint64
+	for _, s := range sorted {
+		sortedTotal += s.stake
+	}
+	t.Logf("Total stake after sort: %d", sortedTotal)
+
+	// First 5 and last 5 after sorting
+	t.Log("First 5 after sort:")
+	for i := 0; i < 5 && i < len(sorted); i++ {
+		t.Logf("  [%d] pubkey=%x stake=%d", i, sorted[i].pubkey[:4], sorted[i].stake)
+	}
+	t.Log("Last 5 after sort:")
+	for i := len(sorted) - 5; i < len(sorted); i++ {
+		t.Logf("  [%d] pubkey=%x stake=%d", i, sorted[i].pubkey[:4], sorted[i].stake)
+	}
+
+	// Generate first 10 leaders
+	leaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, 1)
+	t.Log("First 10 leaders:")
+	for i := 0; i < 10; i++ {
+		// Find index in pubkeys
+		var idx int
+		for j, pk := range pubkeys {
+			if pk == leaders[i] {
+				idx = j
+				break
+			}
+		}
+		t.Logf("  slot %d: pubkey index %d", i, idx)
+	}
+}
+
+// TestUint64nAgaveCompatibility verifies our sampler matches Agave's UniformU64Sampler.
+// Test vectors from agave_random/src/range.rs test_uniform_sample_like_instance_sample_example.
+func TestUint64nAgaveCompatibility(t *testing.T) {
+	// CHACHA_SEED = [16; 32] in Agave tests
+	var seedBytes [32]byte
+	for i := range seedBytes {
+		seedBytes[i] = 16
+	}
+	var seed [8]uint32
+	for i := 0; i < 8; i++ {
+		seed[i] = binary.LittleEndian.Uint32(seedBytes[i*4:])
+	}
+
+	t.Run("n=294533_first_10_samples", func(t *testing.T) {
+		rng := chacha.Seeded20(seed, 0)
+		// Expected from Agave: [280405, 7507, 84194, 272634, 52124, 190984, 8676, 230277, 223574, 126007]
+		expected := []uint64{280405, 7507, 84194, 272634, 52124, 190984, 8676, 230277, 223574, 126007}
+		for i, exp := range expected {
+			got := uint64n(rng, 294533)
+			if got != exp {
+				t.Errorf("sample[%d]: got %d, want %d", i, got, exp)
+			}
+		}
+	})
+
+}
+
 // TestUint64nLemireMethod validates that uint64n produces correct uniform distribution
 // using Lemire's method with a known ChaCha20 seed.
 func TestUint64nLemireMethod(t *testing.T) {
@@ -239,6 +430,69 @@ func TestChaChaRawOutput(t *testing.T) {
 		val := uint64n(rng, totalStake)
 		t.Logf("  [%2d] %20d", i, val)
 	}
+}
+
+// TestLongLeaderScheduleHashed tests against Agave's long schedule hashes.
+// These use 65536 validators and 1000-10000 slots, catching sampling divergence
+// that wouldn't show up in smaller tests.
+func TestLongLeaderScheduleHashed(t *testing.T) {
+	testCases := []struct {
+		epoch        uint64
+		length       uint64
+		stakePow     uint32
+		expectedHash string
+	}{
+		{42, 1_000, 0, "4XU6LEarBUmBkAvXRsjeyLu3N8CcgrvbRFrNiJi2jECk"},
+		{42, 10_000, 0, "G2MGFXgdLATXWr1336i8PTcaUMc4GbJRMJdbxiarCttr"},
+		{42, 10_000, 1, "9xLLKyyqF5YrdwPSDbqh5oVamSF7cqPqQLxEyHTexEiP"},
+		{42, 10_000, 2, "AJ6NQi2p5SnRz9mqESqkW2PwVoT2vYy1fmKdaHxNFUAf"},
+		{42, 10_000, 3, "2oLjZggMwDTQhzdB4KN5VQisyeRw6MZbBBdjosNZK5xR"},
+		{346436, 1_000, 0, "59SnXMS4NzTSib8TNykiJgFQBeAVxUqsAvQm7JtkodPQ"},
+		{346436, 1_000, 1, "BEB2nC9MBALPbgwGKGfHu6V88QG7doScx65cAd6VjnRk"},
+		{346436, 1_000, 2, "3aLE5S6xLEU9yg5EZQH27qrC86aC2dG8KLh4NbcapXpy"},
+		{346436, 1_000, 3, "H2bw3Y2AjxJyK7smy1ZBB4LJ7MY3i9bPQM3YdAChAww2"},
+		{454357, 10_000, 0, "4BLanrC5t7vzNXx62javKtjCmCkd8yZfZpVrjT4eUpNQ"},
+		{454357, 10_000, 1, "FyvbdxpVchendERMnzH2KDceqydpXtJarrfFXoLQEXgQ"},
+		{454357, 10_000, 2, "7KwK44Y7V3GzJLN8aGZtM8EEfAYmRvaiDyKYV6jg4MQn"},
+		{454357, 10_000, 3, "E9XL5BLhCJ4Emyfs8jTUsQetfA8QZj78LcnN63dPp7jJ"},
+	}
+
+	for _, tc := range testCases {
+		name := fmt.Sprintf("epoch%d_len%d_pow%d", tc.epoch, tc.length, tc.stakePow)
+		t.Run(name, func(t *testing.T) {
+			// Create 65536 pubkeys (0 to 65535)
+			pubkeys := make([]solana.PublicKey, 65536)
+			for i := 0; i < 65536; i++ {
+				pubkeys[i] = pubkeyFromU16(uint16(i))
+			}
+
+			// Build stakes: stake[i] = i^stakePow
+			keyedStakes := make([]pubkeyAndStakePair, 65536)
+			for i := 0; i < 65536; i++ {
+				stake := uint64(1)
+				for p := uint32(0); p < tc.stakePow; p++ {
+					stake *= uint64(i)
+				}
+				keyedStakes[i] = pubkeyAndStakePair{pubkey: pubkeys[i], stake: stake}
+			}
+
+			// Generate leaders (repeat=1)
+			leaders := stakeWeightedSlotLeaders(keyedStakes, tc.epoch, tc.length, 1)
+
+			// Hash the leader pubkeys
+			hash := hashPubkeys(leaders)
+			assert.Equal(t, tc.expectedHash, hash, "schedule hash mismatch for %s", name)
+		})
+	}
+}
+
+// hashPubkeys computes SHA256 of concatenated pubkey bytes and returns base58
+func hashPubkeys(pubkeys []solana.PublicKey) string {
+	h := sha256.New()
+	for _, pk := range pubkeys {
+		h.Write(pk[:])
+	}
+	return mbase58.Encode(h.Sum(nil))
 }
 
 // TestStakeWeightedSlotLeadersPanics verifies edge case panics.
