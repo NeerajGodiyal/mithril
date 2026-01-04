@@ -2,21 +2,23 @@ package snapshot
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
-	"github.com/Overclock-Validator/mithril/pkg/statsd"
-	"github.com/cespare/xxhash"
+	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
+	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/gagliardetto/solana-go"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -27,99 +29,6 @@ var MaxConcurrentFlushers int = 16
 type shardRequest struct {
 	k solana.PublicKey
 	v accountsdb.AccountIndexEntry
-}
-
-type shardedSetter struct {
-	cache      fastcache.Cache
-	inputChans []chan shardRequest
-	wg         *sync.WaitGroup
-}
-
-// NewShardedSetter creates a new shardedSetter with the specified number of shards
-func NewShardedSetter(cache fastcache.Cache, numShards int, bufsz int) *shardedSetter {
-	s := &shardedSetter{
-		cache:      cache,
-		inputChans: make([]chan shardRequest, numShards),
-		wg:         &sync.WaitGroup{},
-	}
-	for i := range numShards {
-		s.inputChans[i] = make(chan shardRequest, bufsz)
-	}
-	s.wg.Add(len(s.inputChans))
-
-	for i := range s.inputChans {
-		go s.processRequests(i)
-	}
-
-	return s
-}
-
-// processRequests processes requests from a specific channel
-func (s *shardedSetter) processRequests(chanIndex int) {
-	defer s.wg.Done()
-
-	var buf [24]byte
-	ch := s.inputChans[chanIndex]
-	reqCount := 0
-	var start time.Time
-	// Use a slightly awkward for loop, since for req := range ch {
-	// called runtime.newobject
-	var req shardRequest
-	var ok bool
-	for {
-		if req, ok = <-ch; !ok {
-			break
-		}
-		if reqCount%100 == 0 {
-			start = time.Now()
-		}
-		shouldSet := true
-		kb := req.k[:]
-		req.v.Marshal(&buf)
-
-		dst, err := s.cache.Get(kb)
-		if err == nil {
-			if len(dst) >= 8 {
-				currentSlot := binary.LittleEndian.Uint64(dst[:8])
-				if currentSlot >= req.v.Slot {
-					shouldSet = false
-				}
-			}
-		}
-
-		if shouldSet {
-			err = s.cache.Set(kb, buf[:])
-			if err != nil {
-				mlog.Log.Infof("failed to set value for %s: %s", req.k, err)
-			}
-		}
-
-		if reqCount%100 == 0 {
-			statsd.Timing(statsd.TaskSetIfSlotHigherLatency, uint64(time.Since(start)), nil)
-			statsd.Gauge(statsd.TasksSetIfSlotHigherQueueSize, float64(len(ch)), nil)
-		}
-		reqCount++
-	}
-}
-
-func (s *shardedSetter) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIndexEntry) {
-	// Calculate shard index from key hash the same way the hashmap does,
-	// so each worker has exclusive access to a shard of the hashmap
-	hash := xxhash.Sum64(k[:])
-	index := hash % uint64(len(s.inputChans))
-
-	s.inputChans[int(index)] <- shardRequest{k, v}
-}
-
-// Stop closes all channels and waits for all goroutines to finish
-func (s *shardedSetter) Stop() {
-	// Close all channels
-	for _, ch := range s.inputChans {
-		close(ch)
-	}
-
-	// Wait for all goroutines to finish
-	s.wg.Wait()
 }
 
 // ShardProgressCallback is called with (bytesDone, totalBytes) to report shard flush progress
@@ -148,7 +57,6 @@ type shard struct {
 	file     *os.File
 	requests chan shardRequest
 	logSize  int
-	ss       *shardedSetter
 	flushSem *semaphore.Weighted
 	parent   *ShardLogger // parent for progress reporting
 }
@@ -156,7 +64,7 @@ type shard struct {
 // NewShardLogger creates a new ShardLogger with the specified number of
 // shards for logging entries. Entries are flushed to shardedSetter
 // when log reaches a certain size or on shard closure.
-func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter) *ShardLogger {
+func NewShardLogger(numShards int, filePrefix string) *ShardLogger {
 	if numShards > 1000 {
 		panic(fmt.Sprintf("numShards=%d > 1000 is too many shards", numShards))
 	}
@@ -169,7 +77,7 @@ func NewShardLogger(numShards int, filePrefix string, ss *shardedSetter) *ShardL
 
 	sl.wg.Add(numShards)
 	for i := range numShards {
-		sl.shards[i] = newShard(i, filePrefix, ss, sl.flushSem, sl)
+		sl.shards[i] = newShard(i, filePrefix, sl.flushSem, sl)
 		go sl.shards[i].processRequests(sl.wg)
 	}
 
@@ -193,7 +101,7 @@ func (sl *ShardLogger) BytesDone() int64 {
 }
 
 // newShard creates a new shard with the given ID
-func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.Weighted, parent *ShardLogger) *shard {
+func newShard(id int, filePrefix string, flushSem *semaphore.Weighted, parent *ShardLogger) *shard {
 	filename := filepath.Join(filePrefix, fmt.Sprintf("%03d", id))
 	file, err := os.Create(filename)
 	if err != nil {
@@ -205,7 +113,6 @@ func newShard(id int, filePrefix string, ss *shardedSetter, flushSem *semaphore.
 		writer:   bufio.NewWriter(file),
 		file:     file,
 		requests: make(chan shardRequest, 100),
-		ss:       ss,
 		flushSem: flushSem,
 		parent:   parent,
 	}
@@ -223,9 +130,7 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 	for req := range s.requests {
 		kBytes = [32]byte(req.k)
 		s.writer.Write(kBytes[:])
-		binary.LittleEndian.PutUint64(vBytes[0:8], req.v.Slot)
-		binary.LittleEndian.PutUint64(vBytes[8:16], req.v.FileId)
-		binary.LittleEndian.PutUint64(vBytes[16:24], req.v.Offset)
+		req.v.Marshal(&vBytes)
 		s.writer.Write(vBytes[:24])
 
 		bytesWritten := int64(len(req.k) + vlen)
@@ -243,7 +148,7 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 	}
 }
 
-func (s *shard) flushLogToCache(ctx context.Context) error {
+func (s *shard) logToSST(ctx context.Context) error {
 	err := s.flushSem.Acquire(ctx, 1)
 	if err != nil {
 		return fmt.Errorf("acquiring flush semaphore: %w", err)
@@ -264,27 +169,32 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 		return fmt.Errorf("failed to reopen file for reading: %w", err)
 	}
 	defer file.Close()
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", filename, err)
+	}
+	size := fileInfo.Size()
+
+	const recordSize = int64(32 + vlen)
+	if rem := size % recordSize; rem != 0 {
+		return fmt.Errorf("filename=%s had (size=%d) %% (recordSize=%d) = %d", filename, size, recordSize, rem)
+	}
+	i := 0
+	pairs := make([]shardRequest, size/recordSize)
+
 	reader := bufio.NewReader(file)
 	var buf [32 + vlen]byte
-	const recordSize = int64(32 + vlen)
 	for {
 		_, err := io.ReadFull(reader, buf[:32+vlen])
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("flushLogToCache read loop: %v", err)
+			return fmt.Errorf("logToSST read loop: %v", err)
 		}
-
-		k := solana.PublicKey(buf[:32])
-		v := accountsdb.AccountIndexEntry{
-			Slot:   binary.LittleEndian.Uint64(buf[32:40]),
-			FileId: binary.LittleEndian.Uint64(buf[40:48]),
-			Offset: binary.LittleEndian.Uint64(buf[48:56]),
-		}
-
-		// Flush to cache
-		s.ss.EnqueueRequest(k, v)
+		pairs[i].k = solana.PublicKey(buf[:32])
+		pairs[i].v.Unmarshal((*[24]byte)(buf[32:56]))
+		i++
 
 		// Track progress
 		if s.parent != nil {
@@ -303,16 +213,58 @@ func (s *shard) flushLogToCache(ctx context.Context) error {
 	s.file = newFile
 	s.writer = bufio.NewWriter(newFile)
 	s.logSize = 0
+
+	// Sort
+	slices.SortFunc(pairs, func(a, b shardRequest) int {
+		if c := bytes.Compare(a.k[:], b.k[:]); c != 0 {
+			return c
+		}
+		// Make the bigger slot appear first.
+		if a.v.Slot > b.v.Slot {
+			return -1
+		} else if a.v.Slot == b.v.Slot {
+			return 0
+		} else {
+			return 1
+		}
+	})
+	var vBytes [vlen]byte
+	// Write to SST
+	sstFilename := fmt.Sprintf("%s.sst", filename)
+	sstFile, err := vfs.Default.Create(sstFilename)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", sstFilename, err)
+	}
+	defer sstFile.Close()
+	w := sstable.NewWriter(objstorageprovider.NewFileWritable(sstFile), sstable.WriterOptions{})
+	defer w.Close()
+	lastWritten := -1
+	for i, kv := range pairs {
+		if lastWritten >= 0 && bytes.Equal(kv.k[:], pairs[lastWritten].k[:]) {
+			continue
+		}
+		kv.v.Marshal(&vBytes)
+		if err := w.Set(kv.k[:], vBytes[:]); err != nil {
+			return fmt.Errorf("writing to SST: %w", err)
+		}
+		lastWritten = i
+	}
+
 	return nil
 }
 
 // EnqueueRequest adds a request to the appropriate shard
 func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIndexEntry) {
 	if sl.closed.Load() {
-		return // Already closed, silently ignore
+		mlog.Log.Errorf("unexpectedly still receiving requests after shard logger is closed!")
+		return // Already closed
 	}
-	hash := xxhash.Sum64(k[:])
-	shardIdx := uint32(hash % uint64(len(sl.shards)))
+	keyPrefix := binary.BigEndian.Uint64(k[:8])
+	shardSize := math.MaxUint64 / uint64(len(sl.shards))
+	shardIdx := int(keyPrefix / shardSize)
+	if shardIdx >= len(sl.shards) {
+		shardIdx = len(sl.shards) - 1
+	}
 	sl.shards[shardIdx].requests <- shardRequest{k, v}
 }
 
@@ -338,7 +290,7 @@ func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(co
 	flushWg := &errgroup.Group{}
 	for _, s := range sl.shards {
 		flushWg.Go(func() error {
-			err := s.flushLogToCache(ctx)
+			err := s.logToSST(ctx)
 			if onProgress != nil {
 				onProgress(int(completed.Add(1)), total)
 			}

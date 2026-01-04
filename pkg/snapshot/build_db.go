@@ -14,13 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/cockroachdb/pebble"
 	"github.com/panjf2000/ants/v2"
-
-	"github.com/Overclock-Validator/fastcache"
 )
 
 const (
@@ -191,24 +191,12 @@ func BuildAccountsDb(
 	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
-	numShards := 256
-	dbFn := filepath.Join(accountsDbDir, "mithril_db")
-
-	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
-		Shards:     uint32(numShards),
-		MemoryType: fastcache.MMAP,
-		MemoryKey:  dbFn,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	ss := NewShardedSetter(indexDb, numShards, 100)
 	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
 	if err = os.MkdirAll(logsDir, 0775); err != nil {
 		return nil, nil, err
 	}
-	sl := NewShardLogger(numShards, logsDir, ss)
+	numShards := 256
+	sl := NewShardLogger(numShards, logsDir)
 
 	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId)
 	if err != nil {
@@ -248,11 +236,11 @@ func BuildAccountsDb(
 	if err != nil {
 		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
 	}
-
-	mlog.Log.Infof("Snapshot indexing complete in %s", fmtDuration(time.Since(start)))
-
-	mlog.Log.Infof("Stopping shard setter.")
-	ss.Stop()
+	indexDir := filepath.Join(accountsDbDir, "mithril_db")
+	index, err := ingestSSTFiles(indexDir, logsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
+	}
 
 	mlog.Log.Infof("snapshot processed in %s.", fmtDuration(time.Since(start)))
 
@@ -273,7 +261,7 @@ func BuildAccountsDb(
 
 	pools.Release()
 
-	accountsDb := &accountsdb.AccountsDb{Index: indexDb, AcctsDir: appendVecsOutputDir}
+	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
@@ -545,4 +533,27 @@ func (p *snapshotWorkerPools) Release() {
 	p.appendVecCopying.Release()
 	p.indexEntryBuilder.Release()
 	p.indexEntryCommitter.Release()
+}
+
+// Ingest SSTs into a fresh pebble DB and return it.
+func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
+	db, err := pebble.Open(indexDir, &pebble.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("pebble.Open(%s): %w", indexDir, err)
+	}
+
+	glob := filepath.Join(logsDir, "*.sst")
+	sstFiles, err := filepath.Glob(glob)
+	if err != nil {
+		return nil, fmt.Errorf("filepath.Glob(%s): %w", glob, err)
+	}
+	if len(sstFiles) == 0 {
+		return nil, fmt.Errorf("filepath.Glob(%s): unexpectedly globbed 0 SST files!", glob)
+	}
+
+	err = db.Ingest(sstFiles)
+	if err != nil {
+		return nil, fmt.Errorf("ingesting SSTs: %w", err)
+	}
+	return db, nil
 }

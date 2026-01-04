@@ -70,23 +70,11 @@ func BuildAccountsDbWithIncr(
 	wg := &sync.WaitGroup{}
 
 	numShards := 256
-	dbFn := filepath.Join(accountsDbDir, "mithril_db")
-
-	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
-		Shards:     uint32(numShards),
-		MemoryType: fastcache.MMAP,
-		MemoryKey:  dbFn,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	ss := NewShardedSetter(indexDb, numShards, 100)
 	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
 	if err = os.MkdirAll(logsDir, 0775); err != nil {
 		return nil, nil, err
 	}
-	sl := NewShardLogger(numShards, logsDir, ss)
+	sl := NewShardLogger(numShards, logsDir)
 
 	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId)
 	if err != nil {
@@ -211,8 +199,11 @@ func BuildAccountsDbWithIncr(
 	sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
 	})
-	mlog.Log.Infof("Stopping shard setter.")
-	ss.Stop()
+	indexDir := filepath.Join(accountsDbDir, "mithril_db")
+	index, err := ingestSSTFiles(indexDir, logsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
+	}
 
 	mlog.Log.Infof("snapshots processed in %s.", fmtDuration(time.Since(start)))
 
@@ -233,7 +224,7 @@ func BuildAccountsDbWithIncr(
 
 	pools.Release()
 
-	accountsDb := &accountsdb.AccountsDb{Index: indexDb, AcctsDir: appendVecsOutputDir}
+	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
 	copy(accountsDb.BankHashBytes[:], manifest.Bank.Hash[:])
 
