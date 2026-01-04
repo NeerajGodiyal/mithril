@@ -110,6 +110,8 @@ def main():
     parser.add_argument('rpc_csv', type=Path, help='RPC schedule CSV file')
     parser.add_argument('-n', '--max-show', type=int, default=20,
                         help='Max individual mismatches to show (default: 20)')
+    parser.add_argument('-o', '--out', type=Path, default=None,
+                        help='Write full mismatch list to CSV (slot,local,rpc)')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show more details')
     args = parser.parse_args()
@@ -135,9 +137,19 @@ def main():
         print("All slots have identical leaders!")
         sys.exit(0)
 
-    # Summary
+    # Write full mismatch list if requested
+    if args.out:
+        with open(args.out, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['slot', 'local', 'rpc'])
+            for m in mismatches:
+                writer.writerow([m.slot, m.local_leader, m.rpc_leader])
+        print(f"\nWrote {len(mismatches):,} mismatches to {args.out}")
+
+    # Summary - use max slot count for percentage when counts differ
+    total_slots = max(len(local), len(rpc))
     print(f"\n=== MISMATCH SUMMARY ===")
-    print(f"Total mismatches: {len(mismatches):,} / {len(local):,} slots ({len(mismatches)/len(local)*100:.2f}%)")
+    print(f"Total mismatches: {len(mismatches):,} / {total_slots:,} slots ({len(mismatches)/total_slots*100:.2f}%)")
     print(f"First mismatch: slot {mismatches[0].slot:,}")
     print(f"Last mismatch:  slot {mismatches[-1].slot:,}")
 
