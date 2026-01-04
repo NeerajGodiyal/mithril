@@ -728,7 +728,8 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		}
 
 		// Build leader schedule from local state (source of truth)
-		if err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir); err != nil {
+		localSummary, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir)
+		if err != nil {
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
@@ -740,7 +741,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
 				return
 			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
 		}()
 
 		var exists bool
@@ -868,7 +869,8 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		}
 
 		// Build leader schedule from local state (source of truth)
-		if err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir); err != nil {
+		localSummary, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir)
+		if err != nil {
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
@@ -880,7 +882,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
 				return
 			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
 		}()
 
 		var exists bool
@@ -1266,7 +1268,8 @@ func ReplayBlocks(
 				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
 				// Build schedule from VoteCache (now guaranteed complete from AccountsDB rebuild)
-				if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
+				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
+				if err != nil {
 					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
 					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
 					break
@@ -1295,7 +1298,7 @@ func ReplayBlocks(
 						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
 						return
 					}
-					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
 				}()
 			}
 
