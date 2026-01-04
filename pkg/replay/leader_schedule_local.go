@@ -1492,8 +1492,8 @@ func PrepareLeaderScheduleLocal(
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary (use "local" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "local", stats, fullHash)
+	// Log comprehensive summary
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "snapshot", stats, fullHash)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1601,8 +1601,8 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary (use "local" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "local", stats, fullHash)
+	// Log comprehensive summary
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "vote_cache", stats, fullHash)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1918,13 +1918,13 @@ func BackgroundValidateAgainstRPC(
 	// Always write validation summary file with full local summary + RPC data
 	writeValidationSummary(localSummary, matched, logsDir)
 
-	// Dump RPC-derived validator list (slot counts per leader)
-	dumpRPCValidatorList(epoch, rpcSchedule, firstSlot, numSlots, logsDir)
-
 	if matched {
 		mlog.Log.FileOnlyf("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
 		return
 	}
+
+	// Only dump RPC validator list on mismatch (expensive I/O)
+	dumpRPCValidatorList(epoch, rpcSchedule, firstSlot, numSlots, logsDir)
 
 	// Hashes differ - log to mismatch file with details
 	initMismatchLog(logsDir)

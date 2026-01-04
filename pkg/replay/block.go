@@ -1243,6 +1243,11 @@ func ReplayBlocks(
 				// which is typically epoch+1 due to LeaderScheduleSlotOffset. But the RNG SEED should be
 				// the TARGET epoch (block.Epoch) - Agave seeds ChaCha20 with the epoch number directly.
 				// We use block.Epoch for both stake lookup and RNG seed, which matches network behavior.
+				scheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
+				if scheduleEpoch != block.Epoch {
+					mlog.Log.Warnf("schedule epoch mismatch: LeaderScheduleEpoch(%d)=%d but block.Epoch=%d (warmup/non-mainnet?)",
+						block.Slot, scheduleEpoch, block.Epoch)
+				}
 
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
 				// Use block.VoteAccts (the complete stake map from handleEpochTransition)
