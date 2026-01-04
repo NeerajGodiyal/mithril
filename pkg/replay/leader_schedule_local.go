@@ -334,6 +334,26 @@ func scheduleFingerprint(ls *leaderschedule.LeaderSchedule, firstSlot uint64, nu
 	return fmt.Sprintf("%s/%s", firstB64, lastB64)
 }
 
+// scheduleFullHash computes a SHA256 hash of the entire leader schedule.
+// Returns base64-encoded first 16 bytes of the hash.
+// Takes ~20-50ms for a full epoch (432k slots).
+func scheduleFullHash(ls *leaderschedule.LeaderSchedule, firstSlot uint64, numSlots uint64) string {
+	if ls == nil {
+		return "nil"
+	}
+
+	h := sha256.New()
+	for i := uint64(0); i < numSlots; i++ {
+		slot := firstSlot + i
+		leader, ok := ls.LeaderForSlot(slot)
+		if ok {
+			h.Write(leader[:])
+		}
+	}
+
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)[:16])
+}
+
 // validateLeaderSchedule compares local vs RPC schedule and logs mismatches.
 // Does NOT return error - mismatches are logged but don't stop replay.
 func validateLeaderSchedule(
@@ -615,15 +635,15 @@ func PrepareLeaderScheduleLocal(
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
 
-	// Compute fingerprint for logging
+	// Compute hashes for logging
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
-	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
+	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 
 	// Log summary (single line for normal operation)
-	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d fingerprint=%s",
+	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d hash=%s",
 		epoch, numSlots, len(voteAcctStakes)-stats.SkippedZeroStake-stats.SkippedMissingNodePk-stats.SkippedMissingVoteAcct,
-		stats.TotalStake, fingerprint)
+		stats.TotalStake, fullHash)
 
 	// Log skipped entries only if there are any (debug info)
 	if stats.SkippedZeroStake > 0 || stats.SkippedMissingNodePk > 0 || stats.SkippedMissingVoteAcct > 0 {
@@ -661,15 +681,15 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
 
-	// Compute fingerprint for logging
+	// Compute hashes for logging
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
-	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
+	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 
 	// Log summary
-	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d fingerprint=%s",
+	mlog.Log.Infof("leader schedule: epoch=%d slots=%d validators=%d stake=%d hash=%s",
 		epoch, numSlots, len(voteAcctStakes)-stats.SkippedZeroStake-stats.SkippedMissingNodePk-stats.SkippedMissingVoteAcct,
-		stats.TotalStake, fingerprint)
+		stats.TotalStake, fullHash)
 
 	if stats.SkippedZeroStake > 0 || stats.SkippedMissingNodePk > 0 || stats.SkippedMissingVoteAcct > 0 {
 		mlog.Log.Debugf("leader schedule skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
@@ -745,7 +765,7 @@ func DumpLeaderSchedule(
 
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
 // This is purely for debugging and does not affect the source of truth.
-// Pass rpcScheduleFetcher as a function that fetches from RPC so it can run async.
+// Computes full SHA256 hash of entire schedule (~20-50ms) for complete comparison.
 func BackgroundValidateAgainstRPC(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -760,26 +780,32 @@ func BackgroundValidateAgainstRPC(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	localFP := scheduleFingerprint(localSchedule, firstSlot, numSlots)
-	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
+	// Compute full hash of entire schedule for complete comparison
+	localHash := scheduleFullHash(localSchedule, firstSlot, numSlots)
+	rpcHash := scheduleFullHash(rpcSchedule, firstSlot, numSlots)
 
-	if localFP == rpcFP {
-		mlog.Log.Debugf("leader schedule RPC validation: epoch=%d fingerprints match (%s)", epoch, localFP)
+	if localHash == rpcHash {
+		mlog.Log.Infof("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
 		return
 	}
 
-	// Fingerprints differ - log to mismatch file
+	// Hashes differ - log to mismatch file with details
 	initMismatchLog(logsDir)
+
+	// Also compute fingerprints to show where divergence starts
+	localFP := scheduleFingerprint(localSchedule, firstSlot, numSlots)
+	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
 
 	mismatchLogMu.Lock()
 	if mismatchLogWriter != nil {
-		mismatchLogWriter.WriteString(fmt.Sprintf("\n[%s] RPC VALIDATION epoch=%d local_fp=%s rpc_fp=%s\n",
-			time.Now().Format(time.RFC3339), epoch, localFP, rpcFP))
+		mismatchLogWriter.WriteString(fmt.Sprintf("\n[%s] RPC VALIDATION MISMATCH epoch=%d\n", time.Now().Format(time.RFC3339), epoch))
+		mismatchLogWriter.WriteString(fmt.Sprintf("  local_hash=%s rpc_hash=%s\n", localHash, rpcHash))
+		mismatchLogWriter.WriteString(fmt.Sprintf("  local_fp=%s rpc_fp=%s\n", localFP, rpcFP))
 	}
 	mismatchLogMu.Unlock()
 
-	mlog.Log.Warnf("leader schedule RPC validation: FINGERPRINT MISMATCH epoch=%d local=%s rpc=%s - see %s",
-		epoch, localFP, rpcFP, getMismatchLogPath())
+	mlog.Log.Warnf("leader schedule RPC validation: MISMATCH epoch=%d local_hash=%s rpc_hash=%s - see %s",
+		epoch, localHash, rpcHash, getMismatchLogPath())
 
 	flushMismatchLog()
 }
