@@ -1243,13 +1243,17 @@ func ReplayBlocks(
 					logsDir = "/mnt/mithril-logs"
 				}
 
-				// Sanity check: verify epoch schedule consistency
-				// The schedule epoch (used for RNG seed) should match block.Epoch
+				// Verify epoch schedule consistency - the schedule epoch (used for RNG seed) must match block.Epoch.
+				// If they differ, we would use the wrong RNG seed and produce an incorrect schedule.
+				// This should only happen during warmup epochs (which mainnet passed long ago).
 				firstSlotNewEpoch := epochSchedule.FirstSlotInEpoch(block.Epoch)
 				schedEpoch := epochSchedule.LeaderScheduleEpoch(firstSlotNewEpoch)
 				if schedEpoch != block.Epoch {
-					mlog.Log.Warnf("leader schedule epoch mismatch: block_epoch=%d schedule_epoch=%d first_slot=%d (warmup edge case?)",
+					mlog.Log.Errorf("FATAL: leader schedule epoch mismatch: block_epoch=%d schedule_epoch=%d first_slot=%d",
 						block.Epoch, schedEpoch, firstSlotNewEpoch)
+					result.Error = fmt.Errorf("leader schedule epoch mismatch: block_epoch=%d != schedule_epoch=%d (warmup not supported)",
+						block.Epoch, schedEpoch)
+					break
 				}
 
 				// Rebuild VoteCache from AccountsDB to ensure correctness.

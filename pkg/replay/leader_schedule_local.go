@@ -211,8 +211,11 @@ func RebuildVoteCacheFromAccountsDB(
 	var unmarshalErrStake atomic.Uint64
 	var zeroNodePkStake atomic.Uint64
 
-	// Track first error for reporting
-	var firstError atomic.Value
+	// Track first error for reporting (use mutex, not atomic.Value, to avoid
+	// type consistency issues - atomic.Value panics if different concrete types are stored)
+	var firstError error
+	var firstErrorMu sync.Mutex
+	var firstErrorOnce sync.Once
 
 	// Create worker pool
 	var wg sync.WaitGroup
@@ -229,9 +232,11 @@ func RebuildVoteCacheFromAccountsDB(
 		if err != nil {
 			missingCount.Add(1)
 			missingStake.Add(item.stake)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("missing vote account %s (stake=%d): %w", item.pk, item.stake, err))
-			}
+			firstErrorOnce.Do(func() {
+				firstErrorMu.Lock()
+				firstError = fmt.Errorf("missing vote account %s (stake=%d): %w", item.pk, item.stake, err)
+				firstErrorMu.Unlock()
+			})
 			return
 		}
 
@@ -240,9 +245,11 @@ func RebuildVoteCacheFromAccountsDB(
 		if err != nil {
 			unmarshalErrCount.Add(1)
 			unmarshalErrStake.Add(item.stake)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("failed to unmarshal vote account %s (stake=%d): %w", item.pk, item.stake, err))
-			}
+			firstErrorOnce.Do(func() {
+				firstErrorMu.Lock()
+				firstError = fmt.Errorf("failed to unmarshal vote account %s (stake=%d): %w", item.pk, item.stake, err)
+				firstErrorMu.Unlock()
+			})
 			return
 		}
 
@@ -252,9 +259,11 @@ func RebuildVoteCacheFromAccountsDB(
 		if nodePk == zeroPk {
 			zeroNodePkCount.Add(1)
 			zeroNodePkStake.Add(item.stake)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("vote account %s has zero NodePubkey (stake=%d)", item.pk, item.stake))
-			}
+			firstErrorOnce.Do(func() {
+				firstErrorMu.Lock()
+				firstError = fmt.Errorf("vote account %s has zero NodePubkey (stake=%d)", item.pk, item.stake)
+				firstErrorMu.Unlock()
+			})
 			return
 		}
 
@@ -303,9 +312,12 @@ func RebuildVoteCacheFromAccountsDB(
 		mlog.Log.Errorf("vote cache rebuild FAILED: missing=%d(%d stake) unmarshal_err=%d(%d stake) zero_nodepk=%d(%d stake)",
 			missing, missingStake.Load(), unmarshalErr, unmarshalErrStake.Load(), zeroNodePk, zeroNodePkStake.Load())
 
-		if storedErr := firstError.Load(); storedErr != nil {
+		firstErrorMu.Lock()
+		capturedErr := firstError
+		firstErrorMu.Unlock()
+		if capturedErr != nil {
 			return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d): %w",
-				totalFailed, totalFailedStake, storedErr.(error))
+				totalFailed, totalFailedStake, capturedErr)
 		}
 		return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d)",
 			totalFailed, totalFailedStake)
