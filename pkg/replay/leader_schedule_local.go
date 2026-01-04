@@ -1633,6 +1633,93 @@ func DumpLeaderSchedule(
 	mlog.Log.Infof("leader schedule dumped to: %s (first %d slots)", filepath, numSlots)
 }
 
+// dumpScheduleSlotsCSV dumps the full schedule to a CSV for slot-by-slot comparison.
+// Format: slot,leader_pubkey (simple format for easy diffing)
+// Called when mismatch is detected or when replay.dump_leader_schedule is set.
+func dumpScheduleSlotsCSV(
+	epoch uint64,
+	source string, // "local" or "rpc"
+	schedule *leaderschedule.LeaderSchedule,
+	firstSlot uint64,
+	numSlots uint64,
+	logsDir string,
+) string {
+	if schedule == nil {
+		return ""
+	}
+
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("dumpScheduleSlotsCSV: failed to create logs dir: %v", err)
+		return ""
+	}
+
+	// Get short run ID for filename
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
+	filename := fmt.Sprintf("leader_schedule_epoch%d_%s_slots%s.csv", epoch, source, shortRunID)
+	filePath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("dumpScheduleSlotsCSV: failed to create file: %v", err)
+		return ""
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	// Minimal header - just slot,leader for easy diffing
+	w.WriteString("slot,leader\n")
+
+	// Dump all slots
+	for i := uint64(0); i < numSlots; i++ {
+		slot := firstSlot + i
+		leader, ok := schedule.LeaderForSlot(slot)
+		if ok {
+			w.WriteString(fmt.Sprintf("%d,%s\n", slot, leader.String()))
+		} else {
+			w.WriteString(fmt.Sprintf("%d,\n", slot)) // Empty leader for missing
+		}
+	}
+
+	mlog.Log.FileOnlyf("leader schedule slots dumped to: %s (%d slots)", filePath, numSlots)
+	return filePath
+}
+
+// DumpScheduleMismatch dumps both local and RPC schedules to CSV files for analysis.
+// Called when a hash mismatch is detected during validation.
+// Returns paths to local and RPC slot files.
+func DumpScheduleMismatch(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	localSchedule *leaderschedule.LeaderSchedule,
+	rpcSchedule *leaderschedule.LeaderSchedule,
+	logsDir string,
+) (localPath, rpcPath string) {
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+
+	localPath = dumpScheduleSlotsCSV(epoch, "local", localSchedule, firstSlot, numSlots, logsDir)
+	rpcPath = dumpScheduleSlotsCSV(epoch, "rpc", rpcSchedule, firstSlot, numSlots, logsDir)
+
+	if localPath != "" && rpcPath != "" {
+		mlog.Log.Infof("schedule mismatch dumps: local=%s rpc=%s", localPath, rpcPath)
+		mlog.Log.Infof("  run: scripts/diff_leader_schedules.py %s %s", localPath, rpcPath)
+	}
+
+	return localPath, rpcPath
+}
+
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
 // This is purely for debugging and does not affect the source of truth.
 // Computes full SHA256 hash of entire schedule (~20-50ms) for complete comparison.
@@ -1678,6 +1765,9 @@ func BackgroundValidateAgainstRPC(
 		epoch, localHash, rpcHash, getMismatchLogPath())
 
 	flushMismatchLog()
+
+	// Dump both schedules to CSV for detailed analysis
+	DumpScheduleMismatch(epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
 }
 
 // fetchLeaderScheduleFromRPC fetches leader schedule from RPC for validation purposes.
