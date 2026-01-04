@@ -1243,7 +1243,17 @@ func ReplayBlocks(
 					logsDir = "/mnt/mithril-logs"
 				}
 
-				// Build schedule from VoteCache (has NodePubkeys from block replay)
+				// Rebuild VoteCache from AccountsDB to ensure correctness.
+				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
+				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
+				voteAcctStakes := global.EpochStakes(block.Epoch)
+				if err := RebuildVoteCacheFromAccountsDB(acctsDb, lastSlotCtx.Slot, voteAcctStakes, 0); err != nil {
+					mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
+					result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
+					break
+				}
+
+				// Build schedule from VoteCache (now guaranteed complete from AccountsDB rebuild)
 				if err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir); err != nil {
 					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
 					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
@@ -1278,6 +1288,11 @@ func ReplayBlocks(
 						BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
 					}()
 				}
+			}
+
+			// Set block height (was deferred in configureBlock's early return at epoch boundary)
+			if global.ManageBlockHeight() {
+				block.BlockHeight = global.BlockHeight()
 			}
 		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
 			// First block being processed - check if we're in rewards period

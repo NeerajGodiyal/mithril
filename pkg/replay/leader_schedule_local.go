@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -19,6 +21,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
+	"github.com/panjf2000/ants/v2"
 	"golang.org/x/exp/rand"
 )
 
@@ -31,6 +34,15 @@ const (
 	SampleBoundarySlots = 2000
 	// SampleRandomSlots is how many random slots to sample in the middle
 	SampleRandomSlots = 1000
+	// MaxMissingVoteCacheStakePercent is the maximum percentage of stake that can be
+	// missing from VoteCache before we fail. Since local schedule is the source of truth,
+	// missing VoteCache entries mean that stake is dropped from the schedule, which would
+	// produce an incorrect schedule. 1% threshold catches significant issues while allowing
+	// for minor discrepancies (closed/deactivated accounts).
+	MaxMissingVoteCacheStakePercent = 1.0
+	// DefaultVoteCacheRebuildConcurrency is the default number of concurrent workers
+	// for rebuilding vote cache from AccountsDB at epoch boundaries.
+	DefaultVoteCacheRebuildConcurrency = 16
 )
 
 var (
@@ -164,17 +176,155 @@ func logInputSnapshot(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64,
 	}
 }
 
+// RebuildVoteCacheFromAccountsDB rebuilds the VoteCache from AccountsDB for all vote accounts
+// in the stake map. This ensures correctness at epoch boundaries by reading the canonical
+// state directly from AccountsDB.
+//
+// Parameters:
+//   - acctsDb: the AccountsDB instance
+//   - slot: the slot at which to read account state (typically lastSlotCtx.Slot)
+//   - voteAcctStakes: the stake map for the new epoch (vote account -> stake)
+//   - maxConcurrency: number of concurrent workers (0 = use default)
+//
+// Returns error if any vote account is missing or has invalid state.
+// This is a blocking operation and should be called before building the leader schedule.
+func RebuildVoteCacheFromAccountsDB(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	maxConcurrency int,
+) error {
+	if maxConcurrency <= 0 {
+		maxConcurrency = DefaultVoteCacheRebuildConcurrency
+	}
+
+	startTime := time.Now()
+	totalAccounts := len(voteAcctStakes)
+
+	// Counters for stats (use atomics for thread safety)
+	var successCount atomic.Int64
+	var missingCount atomic.Int64
+	var unmarshalErrCount atomic.Int64
+	var zeroNodePkCount atomic.Int64
+	var missingStake atomic.Uint64
+	var unmarshalErrStake atomic.Uint64
+	var zeroNodePkStake atomic.Uint64
+
+	// Track first error for reporting
+	var firstError atomic.Value
+
+	// Create worker pool
+	var wg sync.WaitGroup
+	pool, err := ants.NewPoolWithFunc(maxConcurrency, func(i interface{}) {
+		defer wg.Done()
+
+		item := i.(struct {
+			pk    solana.PublicKey
+			stake uint64
+		})
+
+		// Read vote account from AccountsDB
+		voteAcct, err := acctsDb.GetAccount(slot, item.pk)
+		if err != nil {
+			missingCount.Add(1)
+			missingStake.Add(item.stake)
+			if firstError.Load() == nil {
+				firstError.Store(fmt.Errorf("missing vote account %s (stake=%d): %w", item.pk, item.stake, err))
+			}
+			return
+		}
+
+		// Unmarshal vote state
+		versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+		if err != nil {
+			unmarshalErrCount.Add(1)
+			unmarshalErrStake.Add(item.stake)
+			if firstError.Load() == nil {
+				firstError.Store(fmt.Errorf("failed to unmarshal vote account %s (stake=%d): %w", item.pk, item.stake, err))
+			}
+			return
+		}
+
+		// Validate NodePubkey is non-zero
+		nodePk := versionedVoteState.NodePubkey()
+		var zeroPk solana.PublicKey
+		if nodePk == zeroPk {
+			zeroNodePkCount.Add(1)
+			zeroNodePkStake.Add(item.stake)
+			if firstError.Load() == nil {
+				firstError.Store(fmt.Errorf("vote account %s has zero NodePubkey (stake=%d)", item.pk, item.stake))
+			}
+			return
+		}
+
+		// Update VoteCache
+		global.PutVoteCacheItem(item.pk, versionedVoteState)
+		successCount.Add(1)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create worker pool: %w", err)
+	}
+	defer pool.Release()
+
+	// Submit all vote accounts to the pool
+	for pk, stake := range voteAcctStakes {
+		if stake == 0 {
+			continue // Skip zero-stake accounts
+		}
+		wg.Add(1)
+		item := struct {
+			pk    solana.PublicKey
+			stake uint64
+		}{pk: pk, stake: stake}
+		if err := pool.Invoke(item); err != nil {
+			wg.Done()
+			return fmt.Errorf("failed to submit work to pool: %w", err)
+		}
+	}
+
+	// Wait for all workers to complete
+	wg.Wait()
+
+	duration := time.Since(startTime)
+
+	// Log results
+	mlog.Log.Infof("vote cache rebuild: slot=%d accounts=%d success=%d duration=%v concurrency=%d",
+		slot, totalAccounts, successCount.Load(), duration, maxConcurrency)
+
+	// Check for any failures
+	missing := missingCount.Load()
+	unmarshalErr := unmarshalErrCount.Load()
+	zeroNodePk := zeroNodePkCount.Load()
+	totalFailed := missing + unmarshalErr + zeroNodePk
+
+	if totalFailed > 0 {
+		totalFailedStake := missingStake.Load() + unmarshalErrStake.Load() + zeroNodePkStake.Load()
+		mlog.Log.Errorf("vote cache rebuild FAILED: missing=%d(%d stake) unmarshal_err=%d(%d stake) zero_nodepk=%d(%d stake)",
+			missing, missingStake.Load(), unmarshalErr, unmarshalErrStake.Load(), zeroNodePk, zeroNodePkStake.Load())
+
+		if storedErr := firstError.Load(); storedErr != nil {
+			return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d): %w",
+				totalFailed, totalFailedStake, storedErr.(error))
+		}
+		return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d)",
+			totalFailed, totalFailedStake)
+	}
+
+	return nil
+}
+
 // ValidationStats holds statistics from schedule validation
 type ValidationStats struct {
-	SkippedZeroStake       int
-	SkippedMissingNodePk   int
-	SkippedMissingVoteAcct int
-	TotalVoteAccts         int
-	TotalStake             uint64
-	MismatchCount          int
-	Capped                 bool
-	LocalFingerprint       string
-	RPCFingerprint         string
+	SkippedZeroStake           int
+	SkippedMissingNodePk       int
+	SkippedMissingVoteAcct     int
+	SkippedMissingVoteAcctStake uint64 // Stake dropped due to missing VoteCache entries
+	TotalVoteAccts             int
+	TotalStake                 uint64
+	MismatchCount              int
+	Capped                     bool
+	LocalFingerprint           string
+	RPCFingerprint             string
 }
 
 // buildLocalLeaderSchedule builds a leader schedule from local state.
@@ -261,6 +411,7 @@ func buildLocalLeaderScheduleFromVoteCache(
 		vs := voteCache[votePk]
 		if vs == nil {
 			stats.SkippedMissingVoteAcct++
+			stats.SkippedMissingVoteAcctStake += stake
 			continue
 		}
 
@@ -676,6 +827,22 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	if schedule == nil {
 		return fmt.Errorf("could not build leader schedule for epoch %d: no valid stakes after filtering (zero_stake=%d, missing_nodepk=%d, missing_vote_state=%d)",
 			epoch, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
+	}
+
+	// Safety check: fail if too much stake is missing from VoteCache.
+	// Since local schedule is the source of truth, missing entries produce incorrect schedules.
+	// We compute total input stake (included + skipped) to get the true denominator.
+	totalInputStake := stats.TotalStake + stats.SkippedMissingVoteAcctStake
+	if totalInputStake > 0 && stats.SkippedMissingVoteAcctStake > 0 {
+		missingPercent := float64(stats.SkippedMissingVoteAcctStake) / float64(totalInputStake) * 100.0
+		if missingPercent > MaxMissingVoteCacheStakePercent {
+			return fmt.Errorf("vote cache too incomplete for epoch %d: %.2f%% stake missing (threshold %.1f%%), missing_accts=%d missing_stake=%d total_stake=%d",
+				epoch, missingPercent, MaxMissingVoteCacheStakePercent,
+				stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, totalInputStake)
+		}
+		// Log warning if any stake is missing, even below threshold
+		mlog.Log.Warnf("leader schedule: epoch=%d has %.2f%% stake missing from VoteCache (count=%d stake=%d)",
+			epoch, missingPercent, stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake)
 	}
 
 	// Set as source of truth
