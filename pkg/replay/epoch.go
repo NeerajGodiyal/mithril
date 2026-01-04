@@ -178,9 +178,9 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 
 	updateStakeHistorySysvar(acctsDb, block, prevSlotCtx, epoch, epochSchedule, f)
 
-	// Cache epoch stakes for leader schedule validation
-	// This allows validation to work across long runs (not just snapshot epochs)
-	cacheEpochStakesForValidation(newEpoch, block.VoteAccts, block.TotalEpochStake)
+	// Note: cacheEpochStakesForValidation is called AFTER the VoteCache rebuild
+	// in the epoch boundary handling code (block.go). This ensures global.EpochStakes
+	// is populated from the rebuilt VoteCache, not the potentially stale one.
 
 	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
 
