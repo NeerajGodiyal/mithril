@@ -732,19 +732,16 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
-		// Optional: background RPC validation for debugging
-		if config.GetBool("replay.validate_leader_schedule") {
-			// Capture schedule pointer BEFORE goroutine to avoid race if schedule changes
-			localSchedule := global.LeaderSchedule()
-			go func() {
-				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-				if rpcErr != nil {
-					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-					return
-				}
-				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
-			}()
-		}
+		// Background RPC validation - always runs for debugging
+		localSchedule := global.LeaderSchedule()
+		go func() {
+			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
+			if rpcErr != nil {
+				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+				return
+			}
+			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+		}()
 
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -875,19 +872,16 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
-		// Optional: background RPC validation for debugging
-		if config.GetBool("replay.validate_leader_schedule") {
-			// Capture schedule pointer BEFORE goroutine to avoid race if schedule changes
-			localSchedule := global.LeaderSchedule()
-			go func() {
-				rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-				if rpcErr != nil {
-					mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-					return
-				}
-				BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
-			}()
-		}
+		// Background RPC validation - always runs for debugging
+		localSchedule := global.LeaderSchedule()
+		go func() {
+			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
+			if rpcErr != nil {
+				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+				return
+			}
+			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+		}()
 
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -1293,19 +1287,16 @@ func ReplayBlocks(
 					break
 				}
 
-				// Optional: background RPC validation for debugging
-				if config.GetBool("replay.validate_leader_schedule") {
-					// Capture schedule pointer BEFORE goroutine to avoid race
-					localSchedule := global.LeaderSchedule()
-					go func() {
-						rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcc, rpcBackups)
-						if rpcErr != nil {
-							mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-							return
-						}
-						BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
-					}()
-				}
+				// Background RPC validation - always runs for debugging
+				localSchedule := global.LeaderSchedule()
+				go func() {
+					rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcc, rpcBackups)
+					if rpcErr != nil {
+						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
+						return
+					}
+					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+				}()
 			}
 
 			// Set block height (was deferred in configureBlock's early return at epoch boundary)

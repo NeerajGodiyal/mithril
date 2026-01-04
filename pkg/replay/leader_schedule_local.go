@@ -1388,14 +1388,14 @@ func PrepareLeaderScheduleLocal(
 	voteAcctStakes := global.EpochStakes(epoch)
 	voteAcctMap := global.EpochStakesVoteAccts(epoch)
 
-	// Compute schedule epoch for RNG (should match epoch in normal cases)
+	// The RNG seed uses `epoch` directly (the epoch we're building the schedule for)
+	// Note: LeaderScheduleEpoch() returns something different (next epoch's prep slot) - don't use it here
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
-	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
 	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
-		mlog.Log.FileOnlyf("  schedule_epoch=%d first_slot=%d slots=%d", scheduleEpoch, firstSlot, numSlots)
+		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
 		return fmt.Errorf("no stake data available for epoch %d", epoch)
 	}
@@ -1424,7 +1424,7 @@ func PrepareLeaderScheduleLocal(
 	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
 	// Log comprehensive summary (use "snapshot" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, scheduleEpoch, firstSlot, numSlots, "snapshot", stats, fullHash, fingerprint)
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "snapshot", stats, fullHash, fingerprint)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1435,7 +1435,7 @@ func PrepareLeaderScheduleLocal(
 	}
 	summary := ScheduleSummary{
 		BlockEpoch:          epoch,
-		ScheduleEpoch:       scheduleEpoch,
+		ScheduleEpoch:       epoch, // RNG seed epoch = block epoch
 		FirstSlot:           firstSlot,
 		SlotsInEpoch:        numSlots,
 		Repeat:              NumConsecutiveLeaderSlots,
@@ -1476,14 +1476,14 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 ) error {
 	voteAcctStakes := global.EpochStakes(epoch)
 
-	// Compute schedule epoch for RNG (should match epoch in normal cases)
+	// The RNG seed uses `epoch` directly (the epoch we're building the schedule for)
+	// Note: LeaderScheduleEpoch() returns something different (next epoch's prep slot) - don't use it here
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
-	scheduleEpoch := epochSchedule.LeaderScheduleEpoch(firstSlot)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
 	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
-		mlog.Log.FileOnlyf("  schedule_epoch=%d first_slot=%d slots=%d source=vote_cache", scheduleEpoch, firstSlot, numSlots)
+		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d source=vote_cache", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
 		mlog.Log.FileOnlyf("  VoteCache size=%d", len(global.VoteCache()))
 		return fmt.Errorf("no stake data available for epoch %d", epoch)
@@ -1531,7 +1531,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
 	// Log comprehensive summary (use "vote_cache" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, scheduleEpoch, firstSlot, numSlots, "vote_cache", stats, fullHash, fingerprint)
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "vote_cache", stats, fullHash, fingerprint)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1542,7 +1542,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	}
 	summary := ScheduleSummary{
 		BlockEpoch:          epoch,
-		ScheduleEpoch:       scheduleEpoch,
+		ScheduleEpoch:       epoch, // RNG seed epoch = block epoch
 		FirstSlot:           firstSlot,
 		SlotsInEpoch:        numSlots,
 		Repeat:              NumConsecutiveLeaderSlots,
