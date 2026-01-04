@@ -1057,6 +1057,7 @@ func ReplayBlocks(
 	//global.SetForkChoice(forkChoice)
 
 	var statsCounter int
+	var totalSlotsReplayed int   // cumulative slots replayed this run (for summary display)
 	var execTimes []float64      // seconds per block
 	var waitTimes []float64      // seconds per block
 	var cuValues []uint64        // CU per block
@@ -1117,6 +1118,10 @@ func ReplayBlocks(
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 
+	// Print replay start marker for clear log separation
+	mlog.Log.InfofPrecise("")
+	mlog.Log.InfofPrecise("=== Replay Start ===")
+
 	for {
 		// Start stall monitor goroutine (only after first block to avoid startup false positives)
 		// Logs to file every second while waiting for a block
@@ -1172,6 +1177,7 @@ func ReplayBlocks(
 			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
 				block.Slot, leaderStr, waitTime.Seconds())
 			skippedSlotsCount++
+			totalSlotsReplayed++
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -1439,6 +1445,9 @@ func ReplayBlocks(
 		// Track last executed slot for accurate tip distance calculation and mode switching
 		blockStream.SetLastExecutedSlot(block.Slot)
 
+		// Increment cumulative slot counter (for all slots, including epoch boundaries)
+		totalSlotsReplayed++
+
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			execTimes = append(execTimes, slotReplayDuration.Seconds())
@@ -1584,7 +1593,7 @@ func ReplayBlocks(
 
 				// Print summary in reorganized format
 				mlog.Log.InfofPrecise("")
-				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
+				mlog.Log.InfofPrecise("=== 100 Slot Summary (%d slots replayed) ===", totalSlotsReplayed)
 
 				// Line 1: Mode, blocks/sec, skipped slots, tip distance
 				modeStr := "catchup"
