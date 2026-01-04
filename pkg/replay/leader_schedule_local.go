@@ -424,10 +424,10 @@ type StakeEntry struct {
 
 // dumpFullScheduleData writes complete validator data to CSV files for debugging.
 // Creates epoch-specific files in the logs directory with ALL validators.
-// Also writes a summary file with comprehensive metadata.
+// Includes run ID in filename to prevent overwriting on re-runs.
 func dumpFullScheduleData(
 	epoch uint64,
-	source string, // "local", "local_vote_cache", or "rpc"
+	source string, // "snapshot", "vote_cache", or "rpc"
 	validEntries []StakeEntry,
 	skippedEntries []StakeEntry,
 	totalStake uint64,
@@ -439,8 +439,19 @@ func dumpFullScheduleData(
 		return
 	}
 
+	// Get short run ID for filename (prevents overwriting on re-runs)
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
 	// Write validators CSV
-	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s.csv", epoch, source))
+	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s.csv", epoch, source, shortRunID))
 	if err := writeValidatorsCSV(validatorsFile, epoch, source, validEntries, totalStake); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleData: failed to write validators CSV: %v", err)
 	} else {
@@ -449,7 +460,7 @@ func dumpFullScheduleData(
 
 	// Write skipped CSV if there are any
 	if len(skippedEntries) > 0 {
-		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s_skipped.csv", epoch, source))
+		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
 		if err := writeSkippedCSV(skippedFile, epoch, skippedEntries); err != nil {
 			mlog.Log.Warnf("dumpFullScheduleData: failed to write skipped CSV: %v", err)
 		} else {
@@ -460,6 +471,7 @@ func dumpFullScheduleData(
 
 // dumpFullScheduleDataWithSummary writes validators CSV, skipped CSV, and a summary file.
 // This is the preferred function when all metadata is available.
+// Includes run ID in filenames to prevent overwriting on re-runs.
 func dumpFullScheduleDataWithSummary(
 	validEntries []StakeEntry,
 	skippedEntries []StakeEntry,
@@ -475,8 +487,18 @@ func dumpFullScheduleDataWithSummary(
 	epoch := summary.BlockEpoch
 	source := summary.Source
 
+	// Get short run ID for filename (prevents overwriting on re-runs)
+	shortRunID := ""
+	if summary.RunID != "" {
+		shortRunID = summary.RunID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
 	// Write validators CSV
-	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s.csv", epoch, source))
+	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s.csv", epoch, source, shortRunID))
 	if err := writeValidatorsCSV(validatorsFile, epoch, source, validEntries, summary.FilteredStake); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write validators CSV: %v", err)
 	} else {
@@ -485,7 +507,7 @@ func dumpFullScheduleDataWithSummary(
 
 	// Write skipped CSV if there are any
 	if len(skippedEntries) > 0 {
-		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s_skipped.csv", epoch, source))
+		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
 		if err := writeSkippedCSV(skippedFile, epoch, skippedEntries); err != nil {
 			mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write skipped CSV: %v", err)
 		} else {
@@ -494,7 +516,7 @@ func dumpFullScheduleDataWithSummary(
 	}
 
 	// Write summary file
-	summaryFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s_summary.txt", epoch, source))
+	summaryFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_summary.txt", epoch, source, shortRunID))
 	if err := writeSummaryFile(summaryFile, summary); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write summary: %v", err)
 	} else {
@@ -524,7 +546,10 @@ func writeValidatorsCSV(filepath string, epoch uint64, source string, entries []
 
 	// Write all entries (already sorted by stake descending)
 	for i, e := range entries {
-		stakePercent := float64(e.Stake) / float64(totalStake) * 100.0
+		var stakePercent float64
+		if totalStake > 0 {
+			stakePercent = float64(e.Stake) / float64(totalStake) * 100.0
+		}
 		w.WriteString(fmt.Sprintf("%d,%s,%s,%d,%.6f\n",
 			i+1, e.VoteAcct, e.NodePubkey, e.Stake, stakePercent))
 	}
@@ -658,6 +683,7 @@ func writeSummaryFile(filepath string, summary ScheduleSummary) error {
 type ValidationStats struct {
 	SkippedZeroStake            int
 	SkippedMissingNodePk        int
+	SkippedMissingNodePkStake   uint64 // Stake dropped due to zero NodePubkey
 	SkippedMissingVoteAcct      int
 	SkippedMissingVoteAcctStake uint64 // Stake dropped due to missing VoteCache entries
 	TotalVoteAccts              int
@@ -698,8 +724,8 @@ func logScheduleBuildSummary(
 	mlog.Log.FileOnlyf("  validators=%d total_stake=%d min_stake=%d max_stake=%d zero_stake_count=%d",
 		stats.ValidatorCount, stats.TotalStake, stats.MinStake, stats.MaxStake, stats.SkippedZeroStake)
 	mlog.Log.FileOnlyf("  hash=%s fingerprint=%s", fullHash, fingerprint)
-	mlog.Log.FileOnlyf("  skipped: missing_vote_acct=%d (stake=%d) missing_nodepk=%d",
-		stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, stats.SkippedMissingNodePk)
+	mlog.Log.FileOnlyf("  skipped: missing_vote_acct=%d (stake=%d) missing_nodepk=%d (stake=%d)",
+		stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, stats.SkippedMissingNodePk, stats.SkippedMissingNodePkStake)
 
 	// File only: top 10 stakes
 	if len(stats.TopStakes) > 0 {
@@ -750,8 +776,8 @@ func logHardFailContext(
 	mlog.Log.FileOnlyf("  epoch=%d reason=%s", epoch, reason)
 	mlog.Log.FileOnlyf("  input_vote_accts=%d total_stake_available=%d",
 		stats.TotalVoteAccts, stats.TotalStake)
-	mlog.Log.FileOnlyf("  skipped: zero_stake=%d missing_vote_acct=%d (stake=%d) missing_nodepk=%d",
-		stats.SkippedZeroStake, stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, stats.SkippedMissingNodePk)
+	mlog.Log.FileOnlyf("  skipped: zero_stake=%d missing_vote_acct=%d (stake=%d) missing_nodepk=%d (stake=%d)",
+		stats.SkippedZeroStake, stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, stats.SkippedMissingNodePk, stats.SkippedMissingNodePkStake)
 
 	// File only: first few offending accounts
 	if len(stats.MissingVoteAccts) > 0 {
@@ -833,6 +859,7 @@ func buildLocalLeaderSchedule(
 		var zeroPk solana.PublicKey
 		if va.NodePubkey == zeroPk {
 			stats.SkippedMissingNodePk++
+			stats.SkippedMissingNodePkStake += stake
 			skippedEntries = append(skippedEntries, StakeEntry{
 				VoteAcct: votePk,
 				Stake:    stake,
@@ -962,6 +989,7 @@ func buildLocalLeaderScheduleFromVoteCache(
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
 			stats.SkippedMissingNodePk++
+			stats.SkippedMissingNodePkStake += stake
 			skippedEntries = append(skippedEntries, StakeEntry{
 				VoteAcct: votePk,
 				Stake:    stake,
@@ -1395,11 +1423,12 @@ func PrepareLeaderScheduleLocal(
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary
+	// Log comprehensive summary (use "snapshot" for both terminal log and file naming consistency)
 	logScheduleBuildSummary(epoch, scheduleEpoch, firstSlot, numSlots, "snapshot", stats, fullHash, fingerprint)
 
 	// Build summary with all metadata
-	missingStake := stats.SkippedMissingVoteAcctStake // stake lost due to missing data
+	// Include all missing stake: missing_vote_acct + zero_nodepk
+	missingStake := stats.SkippedMissingVoteAcctStake + stats.SkippedMissingNodePkStake
 	var missingPercent float64
 	if totalInputStake > 0 {
 		missingPercent = float64(missingStake) / float64(totalInputStake) * 100.0
@@ -1423,7 +1452,7 @@ func PrepareLeaderScheduleLocal(
 		LocalHash:           fullHash,
 		LocalFingerprint:    fingerprint,
 		RunID:               mlog.GetRunID(),
-		Source:              "local",
+		Source:              "snapshot", // Use consistent naming with log
 		Timestamp:           time.Now().UTC(),
 	}
 
@@ -1501,13 +1530,15 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary
+	// Log comprehensive summary (use "vote_cache" for both terminal log and file naming consistency)
 	logScheduleBuildSummary(epoch, scheduleEpoch, firstSlot, numSlots, "vote_cache", stats, fullHash, fingerprint)
 
 	// Build summary with all metadata
+	// Include all missing stake: missing_vote_acct + zero_nodepk
+	totalMissingStake := stats.SkippedMissingVoteAcctStake + stats.SkippedMissingNodePkStake
 	var missingPercent float64
 	if totalInputStake > 0 {
-		missingPercent = float64(missingStake) / float64(totalInputStake) * 100.0
+		missingPercent = float64(totalMissingStake) / float64(totalInputStake) * 100.0
 	}
 	summary := ScheduleSummary{
 		BlockEpoch:          epoch,
@@ -1517,7 +1548,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 		Repeat:              NumConsecutiveLeaderSlots,
 		TotalInputStake:     totalInputStake,
 		FilteredStake:       stats.TotalStake,
-		MissingStake:        missingStake,
+		MissingStake:        totalMissingStake,
 		MissingStakePercent: missingPercent,
 		ValidatorsInput:     stats.TotalVoteAccts,
 		ValidatorsUsed:      stats.ValidatorCount,
@@ -1528,7 +1559,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 		LocalHash:           fullHash,
 		LocalFingerprint:    fingerprint,
 		RunID:               mlog.GetRunID(),
-		Source:              "local_vote_cache",
+		Source:              "vote_cache", // Use consistent naming with log
 		Timestamp:           time.Now().UTC(),
 	}
 
