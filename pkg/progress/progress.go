@@ -323,9 +323,6 @@ func (d *DualProgress) Start() {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
 
-	// Extra blank line for visual separation between header and progress bars
-	fmt.Fprintln(d.output)
-
 	// Print initial empty lines for progress bars (2 bars)
 	fmt.Fprintln(d.output)
 	fmt.Fprintln(d.output)
