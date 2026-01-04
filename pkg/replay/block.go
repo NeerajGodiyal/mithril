@@ -751,9 +751,9 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
 			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
 			lastSlot := firstSlot + numSlots - 1
-			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
 			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
 				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
@@ -816,9 +816,9 @@ func configureBlock(block *b.Block,
 			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
 			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
 			lastSlot := firstSlot + numSlots - 1
-			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
 			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
 				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
@@ -892,9 +892,9 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
 			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
 			lastSlot := firstSlot + numSlots - 1
-			fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
+			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
+				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
 			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
 				block.Slot, block.Epoch, firstSlot, lastSlot)
 		}
@@ -1239,18 +1239,10 @@ func ReplayBlocks(
 					logsDir = "/mnt/mithril-logs"
 				}
 
-				// Verify epoch schedule consistency - the schedule epoch (used for RNG seed) must match block.Epoch.
-				// If they differ, we would use the wrong RNG seed and produce an incorrect schedule.
-				// This should only happen during warmup epochs (which mainnet passed long ago).
-				firstSlotNewEpoch := epochSchedule.FirstSlotInEpoch(block.Epoch)
-				schedEpoch := epochSchedule.LeaderScheduleEpoch(firstSlotNewEpoch)
-				if schedEpoch != block.Epoch {
-					mlog.Log.Errorf("FATAL: leader schedule epoch mismatch: block_epoch=%d schedule_epoch=%d first_slot=%d",
-						block.Epoch, schedEpoch, firstSlotNewEpoch)
-					result.Error = fmt.Errorf("leader schedule epoch mismatch: block_epoch=%d != schedule_epoch=%d (warmup not supported)",
-						block.Epoch, schedEpoch)
-					break
-				}
+				// NOTE: LeaderScheduleEpoch(slot) returns the epoch whose STAKES are used for the schedule,
+				// which is typically epoch+1 due to LeaderScheduleSlotOffset. But the RNG SEED should be
+				// the TARGET epoch (block.Epoch) - Agave seeds ChaCha20 with the epoch number directly.
+				// We use block.Epoch for both stake lookup and RNG seed, which matches network behavior.
 
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
 				// Use block.VoteAccts (the complete stake map from handleEpochTransition)
@@ -1282,9 +1274,9 @@ func ReplayBlocks(
 					firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
 					numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
 					lastSlot := firstSlot + numSlots - 1
-					fingerprint := scheduleFingerprint(global.LeaderSchedule(), firstSlot, numSlots)
-					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d fingerprint=%s",
-						block.Slot, block.Epoch, firstSlot, lastSlot, fingerprint)
+					hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
+					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
+						block.Slot, block.Epoch, firstSlot, lastSlot, hash)
 					result.Error = fmt.Errorf("unable to find leader for slot %d at epoch boundary (epoch=%d range=[%d,%d])",
 						block.Slot, block.Epoch, firstSlot, lastSlot)
 					break

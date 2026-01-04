@@ -1874,26 +1874,6 @@ func printStartupInfo(commandName string) {
 				fmt.Printf("  Last shutdown:  %s%s%s\n", reasonColor, shutdownInfo, reset)
 			}
 
-			// Log state info to file for cross-referencing with other logs
-			mlog.Log.Infof("=== RESUME CONTEXT FROM STATE FILE ===")
-			mlog.Log.Infof("state: snapshot_slot=%d snapshot_epoch=%d", mithrilState.SnapshotSlot, mithrilState.SnapshotEpoch)
-			if mithrilState.LastSlot > 0 {
-				mlog.Log.Infof("state: last_slot=%d last_epoch=%d bankhash=%s",
-					mithrilState.LastSlot, mithrilState.LastEpoch, mithrilState.LastBankhash)
-				mlog.Log.Infof("state: replayed=%d slots since snapshot", mithrilState.LastSlot-mithrilState.SnapshotSlot)
-			}
-			if mithrilState.LastRunID != "" {
-				mlog.Log.Infof("state: prev_run_id=%s prev_run_at=%s",
-					mithrilState.LastRunID, mithrilState.LastRunAt.Format("2006-01-02T15:04:05Z"))
-			}
-			if mithrilState.LastShutdownReason != "" {
-				mlog.Log.Infof("state: prev_shutdown=%s at=%s",
-					mithrilState.LastShutdownReason, mithrilState.LastShutdownAt.Format("2006-01-02T15:04:05Z"))
-			}
-			if mithrilState.Cluster != "" {
-				mlog.Log.Infof("state: cluster=%s genesis=%s", mithrilState.Cluster, mithrilState.GenesisHash)
-			}
-			mlog.Log.Infof("=== END RESUME CONTEXT ===")
 		}
 	}
 

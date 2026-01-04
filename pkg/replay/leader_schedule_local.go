@@ -108,7 +108,7 @@ func initMismatchLog(logsDir string) {
 			return
 		}
 		mismatchLogWriter = bufio.NewWriter(mismatchLogFile)
-		mlog.Log.Infof("leader schedule mismatch log: %s", mismatchLogPath)
+		mlog.Log.FileOnlyf("leader schedule mismatch log: %s", mismatchLogPath)
 	})
 }
 
@@ -371,18 +371,15 @@ func RebuildVoteCacheFromAccountsDB(
 
 	if totalFailed > 0 {
 		totalFailedStake := missingStake.Load() + unmarshalErrStake.Load() + zeroNodePkStake.Load()
+		failedPercent := float64(totalFailedStake) / float64(totalStake) * 100
 
-		// Terminal: brief error
-		mlog.Log.Errorf("VOTE CACHE REBUILD FAILED: slot=%d failed=%d (%.2f%% stake)",
-			slot, totalFailed, float64(totalFailedStake)/float64(totalStake)*100)
-
-		// File only: detailed failure info
-		mlog.Log.FileOnlyf("VOTE CACHE REBUILD FAILED DETAILS:")
+		// File only: detailed failure info (always log for debugging)
+		mlog.Log.FileOnlyf("vote cache rebuild failures:")
 		mlog.Log.FileOnlyf("  slot=%d", slot)
 		mlog.Log.FileOnlyf("  failures: missing=%d (stake=%d) unmarshal_err=%d (stake=%d) zero_nodepk=%d (stake=%d)",
 			missing, missingStake.Load(), unmarshalErr, unmarshalErrStake.Load(), zeroNodePk, zeroNodePkStake.Load())
-		mlog.Log.FileOnlyf("  total_failed=%d total_failed_stake=%d (%.2f%% of total)",
-			totalFailed, totalFailedStake, float64(totalFailedStake)/float64(totalStake)*100)
+		mlog.Log.FileOnlyf("  total_failed=%d total_failed_stake=%d (%.4f%% of total)",
+			totalFailed, totalFailedStake, failedPercent)
 
 		// File only: first few errors in each category
 		if len(missingErrors) > 0 {
@@ -404,12 +401,16 @@ func RebuildVoteCacheFromAccountsDB(
 			}
 		}
 
+		// Any failure is an error - vote cache must be complete for correct leader schedule
+		mlog.Log.Errorf("VOTE CACHE REBUILD FAILED: slot=%d failed=%d (%.4f%% stake)",
+			slot, totalFailed, failedPercent)
+
 		if firstError != nil {
-			return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d, %.2f%%): %w",
-				totalFailed, totalFailedStake, float64(totalFailedStake)/float64(totalStake)*100, firstError)
+			return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake): %w",
+				totalFailed, failedPercent, firstError)
 		}
-		return fmt.Errorf("vote cache rebuild failed with %d errors (total_failed_stake=%d, %.2f%%)",
-			totalFailed, totalFailedStake, float64(totalFailedStake)/float64(totalStake)*100)
+		return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake)",
+			totalFailed, failedPercent)
 	}
 
 	mlog.Log.FileOnlyf("  result: SUCCESS (all %d non-zero accounts rebuilt)", nonZeroAccounts)
@@ -605,14 +606,14 @@ func DumpTieBreakDebug(
 		w.WriteString("\n")
 	}
 
-	// Also log to mlog
-	mlog.Log.Infof("tie-break debug: epoch=%d tie_groups=%d written to %s", epoch, len(tieGroups), filePath)
+	// Log to file only (not terminal)
+	mlog.Log.FileOnlyf("tie-break debug: epoch=%d tie_groups=%d written to %s", epoch, len(tieGroups), filePath)
 
 	// Log the specific tie if we're looking for it (stake 2499999939665440)
 	if group, ok := tieGroups[2499999939665440]; ok {
-		mlog.Log.Infof("tie-break debug: found target tie group stake=2499999939665440:")
+		mlog.Log.FileOnlyf("tie-break debug: found target tie group stake=2499999939665440:")
 		for _, entry := range group {
-			mlog.Log.Infof("  rank=%d node=%s bytes_cmp=%d", entry.Rank, entry.NodePk.String(), entry.BytesCmp)
+			mlog.Log.FileOnlyf("  rank=%d node=%s bytes_cmp=%d", entry.Rank, entry.NodePk.String(), entry.BytesCmp)
 		}
 	}
 
@@ -737,10 +738,8 @@ type ScheduleSummary struct {
 	SkippedZeroNodePk  int
 
 	// Hashes
-	LocalHash        string
-	LocalFingerprint string
-	RPCHash          string // Empty if RPC validation not enabled
-	RPCFingerprint   string
+	LocalHash string
+	RPCHash   string // Empty if RPC validation not enabled
 
 	// Run info
 	RunID     string
@@ -791,10 +790,8 @@ func writeSummaryFile(filepath string, summary ScheduleSummary) error {
 
 	w.WriteString("## Hashes\n")
 	w.WriteString(fmt.Sprintf("local_hash=%s\n", summary.LocalHash))
-	w.WriteString(fmt.Sprintf("local_fingerprint=%s\n", summary.LocalFingerprint))
 	if summary.RPCHash != "" {
 		w.WriteString(fmt.Sprintf("rpc_hash=%s\n", summary.RPCHash))
-		w.WriteString(fmt.Sprintf("rpc_fingerprint=%s\n", summary.RPCFingerprint))
 	}
 	w.WriteString("\n")
 
@@ -813,11 +810,9 @@ type ValidationStats struct {
 	MinStake                    uint64
 	MaxStake                    uint64
 	ValidatorCount              int // Validators with non-zero stake and valid NodePubkey
-	MismatchCount               int
-	Capped                      bool
-	LocalFingerprint            string
-	RPCFingerprint              string
-	TopStakes                   []StakeEntry    // Top 10 by stake
+	MismatchCount int
+	Capped        bool
+	TopStakes     []StakeEntry // Top 10 by stake
 	BottomStakes                []StakeEntry    // Bottom 10 by stake
 	MissingVoteAccts            []StakeEntry    // First few missing vote accounts (for debugging)
 	ZeroNodePkAccts             []StakeEntry    // First few zero NodePubkey accounts
@@ -834,10 +829,9 @@ func logScheduleBuildSummary(
 	source string, // "snapshot" or "vote_cache"
 	stats ValidationStats,
 	fullHash string,
-	fingerprint string,
 ) {
-	// Terminal: single line summary
-	mlog.Log.Infof("leader schedule: epoch=%d validators=%d stake=%d hash=%s",
+	// File only: single line summary
+	mlog.Log.FileOnlyf("leader schedule: epoch=%d validators=%d stake=%d hash=%s",
 		epoch, stats.ValidatorCount, stats.TotalStake, fullHash)
 
 	// File only: detailed build info
@@ -845,7 +839,7 @@ func logScheduleBuildSummary(
 		epoch, scheduleEpoch, firstSlot, slotsInEpoch, NumConsecutiveLeaderSlots, source)
 	mlog.Log.FileOnlyf("  validators=%d total_stake=%d min_stake=%d max_stake=%d zero_stake_count=%d",
 		stats.ValidatorCount, stats.TotalStake, stats.MinStake, stats.MaxStake, stats.SkippedZeroStake)
-	mlog.Log.FileOnlyf("  hash=%s fingerprint=%s", fullHash, fingerprint)
+	mlog.Log.FileOnlyf("  hash=%s", fullHash)
 	mlog.Log.FileOnlyf("  skipped: missing_vote_acct=%d (stake=%d) missing_nodepk=%d (stake=%d)",
 		stats.SkippedMissingVoteAcct, stats.SkippedMissingVoteAcctStake, stats.SkippedMissingNodePk, stats.SkippedMissingNodePkStake)
 
@@ -1194,40 +1188,6 @@ func buildLocalLeaderScheduleFromVoteCache(
 	return ls, stats, validEntries, skippedEntries
 }
 
-// scheduleFingerprint computes a short hash of schedule for quick comparison.
-// Returns: "<base64(hash_first64)>/<base64(hash_last64)>"
-func scheduleFingerprint(ls *leaderschedule.LeaderSchedule, firstSlot uint64, numSlots uint64) string {
-	if ls == nil {
-		return "nil/nil"
-	}
-
-	hashFirst := sha256.New()
-	hashLast := sha256.New()
-
-	// Hash first 64 slot leaders
-	for i := uint64(0); i < min(64, numSlots); i++ {
-		slot := firstSlot + i
-		leader, ok := ls.LeaderForSlot(slot)
-		if ok {
-			hashFirst.Write(leader[:])
-		}
-	}
-
-	// Hash last 64 slot leaders
-	startLast := numSlots - min(64, numSlots)
-	for i := startLast; i < numSlots; i++ {
-		slot := firstSlot + i
-		leader, ok := ls.LeaderForSlot(slot)
-		if ok {
-			hashLast.Write(leader[:])
-		}
-	}
-
-	firstB64 := base64.StdEncoding.EncodeToString(hashFirst.Sum(nil)[:8])
-	lastB64 := base64.StdEncoding.EncodeToString(hashLast.Sum(nil)[:8])
-	return fmt.Sprintf("%s/%s", firstB64, lastB64)
-}
-
 // scheduleFullHash computes a SHA256 hash of the entire leader schedule.
 // Returns base64-encoded first 16 bytes of the hash.
 // Takes ~20-50ms for a full epoch (432k slots).
@@ -1297,10 +1257,6 @@ func validateLeaderSchedule(
 		return
 	}
 
-	// Compute fingerprints (using blockEpoch's first slot and slot count)
-	stats.LocalFingerprint = scheduleFingerprint(localSchedule, firstSlot, numSlots)
-	stats.RPCFingerprint = scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
-
 	// Sample and compare slots
 	mismatchCount := 0
 
@@ -1366,15 +1322,9 @@ func validateLeaderSchedule(
 		blockEpoch, firstSlot, numSlots)
 	mlog.Log.FileOnlyf("  vote_accts=%d total_stake=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_acct=%d",
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
-	mlog.Log.FileOnlyf("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
 	mlog.Log.FileOnlyf("  sampled=%d mismatches=%d (capped=%v)", len(slotsToSample), stats.MismatchCount, stats.Capped)
 
 	// Terminal: only warn on mismatches
-	if stats.LocalFingerprint != stats.RPCFingerprint {
-		mlog.Log.Warnf("leader schedule validation: FINGERPRINT MISMATCH epoch=%d - see log file",
-			blockEpoch)
-		mlog.Log.FileOnlyf("  FINGERPRINT MISMATCH: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
-	}
 	if stats.MismatchCount > 0 {
 		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES epoch=%d - see %s",
 			stats.MismatchCount, blockEpoch, getMismatchLogPath())
@@ -1422,10 +1372,6 @@ func validateLeaderScheduleFromVoteCache(
 			blockEpoch, stats.TotalVoteAccts, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 		return
 	}
-
-	// Compute fingerprints (using blockEpoch's first slot and slot count)
-	stats.LocalFingerprint = scheduleFingerprint(localSchedule, firstSlot, numSlots)
-	stats.RPCFingerprint = scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
 
 	// Sample and compare slots
 	mismatchCount := 0
@@ -1492,15 +1438,9 @@ func validateLeaderScheduleFromVoteCache(
 		blockEpoch, firstSlot, numSlots)
 	mlog.Log.FileOnlyf("  vote_accts=%d total_stake=%d skipped: zero_stake=%d missing_nodepk=%d missing_vote_state=%d",
 		stats.TotalVoteAccts, stats.TotalStake, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
-	mlog.Log.FileOnlyf("  fingerprint: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
 	mlog.Log.FileOnlyf("  sampled=%d mismatches=%d (capped=%v)", len(slotsToSample), stats.MismatchCount, stats.Capped)
 
 	// Terminal: only warn on mismatches
-	if stats.LocalFingerprint != stats.RPCFingerprint {
-		mlog.Log.Warnf("leader schedule validation: FINGERPRINT MISMATCH epoch=%d - see log file",
-			blockEpoch)
-		mlog.Log.FileOnlyf("  FINGERPRINT MISMATCH: local=%s rpc=%s", stats.LocalFingerprint, stats.RPCFingerprint)
-	}
 	if stats.MismatchCount > 0 {
 		mlog.Log.Warnf("leader schedule validation: %d MISMATCHES epoch=%d - see %s",
 			stats.MismatchCount, blockEpoch, getMismatchLogPath())
@@ -1549,12 +1489,11 @@ func PrepareLeaderScheduleLocal(
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
 
-	// Compute hashes for logging
+	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
-	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary (use "snapshot" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "snapshot", stats, fullHash, fingerprint)
+	// Log comprehensive summary (use "local" for both terminal log and file naming consistency)
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "local", stats, fullHash)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1580,9 +1519,8 @@ func PrepareLeaderScheduleLocal(
 		SkippedMissingData:  stats.SkippedMissingVoteAcct,
 		SkippedZeroNodePk:   stats.SkippedMissingNodePk,
 		LocalHash:           fullHash,
-		LocalFingerprint:    fingerprint,
 		RunID:               mlog.GetRunID(),
-		Source:              "snapshot", // Use consistent naming with log
+		Source:              "local", // Use consistent naming with log
 		Timestamp:           time.Now().UTC(),
 	}
 
@@ -1660,12 +1598,11 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
 
-	// Compute hashes for logging
+	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
-	fingerprint := scheduleFingerprint(schedule, firstSlot, numSlots)
 
-	// Log comprehensive summary (use "vote_cache" for both terminal log and file naming consistency)
-	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "vote_cache", stats, fullHash, fingerprint)
+	// Log comprehensive summary (use "local" for both terminal log and file naming consistency)
+	logScheduleBuildSummary(epoch, epoch, firstSlot, numSlots, "local", stats, fullHash)
 
 	// Build summary with all metadata
 	// Include all missing stake: missing_vote_acct + zero_nodepk
@@ -1691,9 +1628,8 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 		SkippedMissingData:  stats.SkippedMissingVoteAcct,
 		SkippedZeroNodePk:   stats.SkippedMissingNodePk,
 		LocalHash:           fullHash,
-		LocalFingerprint:    fingerprint,
 		RunID:               mlog.GetRunID(),
-		Source:              "vote_cache", // Use consistent naming with log
+		Source:              "local", // Use consistent naming with log
 		Timestamp:           time.Now().UTC(),
 	}
 
@@ -1764,7 +1700,7 @@ func DumpLeaderSchedule(
 		}
 	}
 
-	mlog.Log.Infof("leader schedule dumped to: %s (first %d slots)", filepath, numSlots)
+	mlog.Log.FileOnlyf("leader schedule dumped to: %s (first %d slots)", filepath, numSlots)
 }
 
 // dumpScheduleSlotsCSV dumps the full schedule to a CSV for slot-by-slot comparison.
@@ -1847,17 +1783,109 @@ func DumpScheduleMismatch(
 	rpcPath = dumpScheduleSlotsCSV(epoch, "rpc", rpcSchedule, firstSlot, numSlots, logsDir)
 
 	if localPath != "" && rpcPath != "" {
-		mlog.Log.Infof("schedule mismatch dumps: local=%s rpc=%s", localPath, rpcPath)
-		mlog.Log.Infof("  run: scripts/diff_leader_schedules.py %s %s", localPath, rpcPath)
+		mlog.Log.FileOnlyf("schedule mismatch dumps: local=%s rpc=%s", localPath, rpcPath)
+		mlog.Log.FileOnlyf("  run: scripts/diff_leader_schedules.py %s %s", localPath, rpcPath)
 	}
 
 	return localPath, rpcPath
 }
 
+// dumpRPCValidatorList extracts validators from RPC schedule and dumps to CSV.
+// Since RPC only gives us slot -> leader, we count slot appearances per leader.
+// File is named epoch<N>_rpc_<runid>_validators.csv for comparison with local.
+func dumpRPCValidatorList(
+	epoch uint64,
+	rpcSchedule *leaderschedule.LeaderSchedule,
+	firstSlot uint64,
+	numSlots uint64,
+	logsDir string,
+) {
+	if rpcSchedule == nil {
+		return
+	}
+
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("dumpRPCValidatorList: failed to create logs dir: %v", err)
+		return
+	}
+
+	// Count slot appearances per leader
+	leaderSlots := make(map[solana.PublicKey]uint64)
+	for i := uint64(0); i < numSlots; i++ {
+		slot := firstSlot + i
+		leader, ok := rpcSchedule.LeaderForSlot(slot)
+		if ok {
+			leaderSlots[leader]++
+		}
+	}
+
+	// Build entries sorted by slot count (descending) for comparison with local
+	type rpcEntry struct {
+		leader    solana.PublicKey
+		slotCount uint64
+	}
+	entries := make([]rpcEntry, 0, len(leaderSlots))
+	for leader, count := range leaderSlots {
+		entries = append(entries, rpcEntry{leader: leader, slotCount: count})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].slotCount != entries[j].slotCount {
+			return entries[i].slotCount > entries[j].slotCount
+		}
+		// Tie-break by pubkey descending (matches local sort)
+		return bytes.Compare(entries[i].leader[:], entries[j].leader[:]) > 0
+	})
+
+	// Get short run ID for filename
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
+	filename := fmt.Sprintf("epoch%d_rpc%s_validators.csv", epoch, shortRunID)
+	filePath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("dumpRPCValidatorList: failed to create file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	// Header
+	w.WriteString(fmt.Sprintf("# RPC Leader Schedule - Epoch %d\n", epoch))
+	w.WriteString(fmt.Sprintf("# Source: rpc\n"))
+	w.WriteString(fmt.Sprintf("# Total Leaders: %d\n", len(entries)))
+	w.WriteString(fmt.Sprintf("# Total Slots: %d\n", numSlots))
+	w.WriteString(fmt.Sprintf("# Generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	w.WriteString("#\n")
+	w.WriteString("# NOTE: RPC schedule only provides slot->leader mapping.\n")
+	w.WriteString("# Stake is not available from RPC, so we show slot_count instead.\n")
+	w.WriteString("# Compare slot_count with local schedule to identify discrepancies.\n")
+	w.WriteString("#\n")
+	w.WriteString("rank,node_pubkey,slot_count\n")
+
+	for i, e := range entries {
+		w.WriteString(fmt.Sprintf("%d,%s,%d\n", i+1, e.leader, e.slotCount))
+	}
+
+	mlog.Log.FileOnlyf("RPC validator list dumped to: %s (%d leaders)", filePath, len(entries))
+}
+
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
 // This is purely for debugging and does not affect the source of truth.
 // Computes full SHA256 hash of entire schedule (~20-50ms) for complete comparison.
-// Always writes a validation summary file with full local summary and RPC fingerprints.
+// Always writes a validation summary file with full local summary and RPC hash.
+// Also dumps RPC-derived validator list for comparison.
 func BackgroundValidateAgainstRPC(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -1873,31 +1901,28 @@ func BackgroundValidateAgainstRPC(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	// Compute full hash and fingerprint for RPC schedule
+	// Compute full hash for RPC schedule
 	rpcHash := scheduleFullHash(rpcSchedule, firstSlot, numSlots)
-	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
 
-	// Use local summary's hash/fingerprint if available, else compute
+	// Use local summary's hash if available, else compute
 	localHash := localSummary.LocalHash
-	localFP := localSummary.LocalFingerprint
 	if localHash == "" {
 		localHash = scheduleFullHash(localSchedule, firstSlot, numSlots)
-	}
-	if localFP == "" {
-		localFP = scheduleFingerprint(localSchedule, firstSlot, numSlots)
 	}
 
 	matched := localHash == rpcHash
 
 	// Update summary with RPC data and write validation file
 	localSummary.RPCHash = rpcHash
-	localSummary.RPCFingerprint = rpcFP
 
 	// Always write validation summary file with full local summary + RPC data
 	writeValidationSummary(localSummary, matched, logsDir)
 
+	// Dump RPC-derived validator list (slot counts per leader)
+	dumpRPCValidatorList(epoch, rpcSchedule, firstSlot, numSlots, logsDir)
+
 	if matched {
-		mlog.Log.Infof("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
+		mlog.Log.FileOnlyf("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
 		return
 	}
 
@@ -1908,7 +1933,6 @@ func BackgroundValidateAgainstRPC(
 	if mismatchLogWriter != nil {
 		mismatchLogWriter.WriteString(fmt.Sprintf("\n[%s] RPC VALIDATION MISMATCH epoch=%d\n", time.Now().Format(time.RFC3339), epoch))
 		mismatchLogWriter.WriteString(fmt.Sprintf("  local_hash=%s rpc_hash=%s\n", localHash, rpcHash))
-		mismatchLogWriter.WriteString(fmt.Sprintf("  local_fp=%s rpc_fp=%s\n", localFP, rpcFP))
 	}
 	mismatchLogMu.Unlock()
 
@@ -1994,8 +2018,6 @@ func writeValidationSummary(summary *ScheduleSummary, matched bool, logsDir stri
 	w.WriteString("## Comparison\n")
 	w.WriteString(fmt.Sprintf("local_hash=%s\n", summary.LocalHash))
 	w.WriteString(fmt.Sprintf("rpc_hash=%s\n", summary.RPCHash))
-	w.WriteString(fmt.Sprintf("local_fingerprint=%s\n", summary.LocalFingerprint))
-	w.WriteString(fmt.Sprintf("rpc_fingerprint=%s\n", summary.RPCFingerprint))
 	w.WriteString(fmt.Sprintf("\nstatus=%s\n", status))
 
 	mlog.Log.FileOnlyf("leader schedule validation summary written to: %s", filePath)
