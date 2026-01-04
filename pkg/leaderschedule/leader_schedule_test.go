@@ -204,6 +204,43 @@ func TestUint64nLemireMethod(t *testing.T) {
 	})
 }
 
+// TestChaChaRawOutput prints raw ChaCha20 output for comparison with Agave.
+// Run with: go test -v -run TestChaChaRawOutput ./pkg/leaderschedule
+func TestChaChaRawOutput(t *testing.T) {
+	epoch := uint64(905)
+
+	// Seed ChaCha the same way as stakeWeightedSlotLeaders
+	var seedBytes [32]byte
+	binary.LittleEndian.PutUint64(seedBytes[:], epoch)
+	var seed [8]uint32
+	for i := 0; i < 8; i++ {
+		seed[i] = binary.LittleEndian.Uint32(seedBytes[i*4:])
+	}
+	rng := chacha.Seeded20(seed, 0)
+
+	t.Logf("ChaCha20 raw Uint64 output for epoch %d:", epoch)
+	t.Logf("Seed bytes: %x", seedBytes)
+
+	// Print first 20 raw uint64 values
+	for i := 0; i < 20; i++ {
+		val := rng.Uint64()
+		t.Logf("  [%2d] %20d (0x%016x)", i, val, val)
+	}
+
+	// Now test with Lemire's method using a realistic total stake
+	// Mainnet epoch 905 has ~400M SOL staked = ~400 trillion lamports
+	totalStake := uint64(400_000_000_000_000_000) // 400M SOL in lamports
+
+	// Reset RNG
+	rng = chacha.Seeded20(seed, 0)
+
+	t.Logf("\nLemire uint64n output for total_stake=%d:", totalStake)
+	for i := 0; i < 20; i++ {
+		val := uint64n(rng, totalStake)
+		t.Logf("  [%2d] %20d", i, val)
+	}
+}
+
 // TestStakeWeightedSlotLeadersPanics verifies edge case panics.
 func TestStakeWeightedSlotLeadersPanics(t *testing.T) {
 	pk1 := pubkeyFromU16(1)
