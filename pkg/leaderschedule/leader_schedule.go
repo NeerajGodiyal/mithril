@@ -207,6 +207,79 @@ func sortStakes(stakes []pubkeyAndStakePair) []pubkeyAndStakePair {
 	return slices.Compact(stakes)
 }
 
+// TieBreakEntry represents an entry in a tie-break group for debugging
+type TieBreakEntry struct {
+	Rank      int
+	NodePk    solana.PublicKey
+	Stake     uint64
+	RawBytes  []byte // First 8 bytes of pubkey for comparison
+	BytesCmp  int    // Comparison result vs previous entry
+}
+
+// GetSortedStakesDebug returns sorted stakes with tie-break debugging info.
+// Used to verify tie-break ordering matches Agave.
+func GetSortedStakesDebug(
+	epochVoteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
+	epochVoteAcctStakes map[solana.PublicKey]uint64,
+) ([]TieBreakEntry, map[uint64][]TieBreakEntry) {
+	// Aggregate stake by NODE IDENTITY (same as New())
+	nodeStakes := make(map[solana.PublicKey]uint64)
+	for voteAcctPubkey, stake := range epochVoteAcctStakes {
+		if stake == 0 {
+			continue
+		}
+		voteAcct := epochVoteAcctsMap[voteAcctPubkey]
+		if voteAcct == nil {
+			continue
+		}
+		nodePubkey := voteAcct.NodePubkey
+		var zeroPk solana.PublicKey
+		if nodePubkey == zeroPk {
+			continue
+		}
+		nodeStakes[nodePubkey] += stake
+	}
+
+	// Build and sort stakes
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(nodeStakes))
+	for nodePubkey, stake := range nodeStakes {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: nodePubkey, stake: stake})
+	}
+	keyedStakes = sortStakes(keyedStakes)
+
+	// Build debug entries
+	entries := make([]TieBreakEntry, len(keyedStakes))
+	for i, pair := range keyedStakes {
+		entry := TieBreakEntry{
+			Rank:     i + 1,
+			NodePk:   pair.pubkey,
+			Stake:    pair.stake,
+			RawBytes: pair.pubkey[:8],
+		}
+		if i > 0 {
+			entry.BytesCmp = bytes.Compare(pair.pubkey[:], keyedStakes[i-1].pubkey[:])
+		}
+		entries[i] = entry
+	}
+
+	// Group ties by stake
+	tieGroups := make(map[uint64][]TieBreakEntry)
+	for i := 0; i < len(entries); i++ {
+		stake := entries[i].Stake
+		// Find all entries with same stake
+		j := i
+		for j < len(entries) && entries[j].Stake == stake {
+			j++
+		}
+		if j-i > 1 { // More than one entry = tie
+			tieGroups[stake] = entries[i:j]
+		}
+		i = j - 1
+	}
+
+	return entries, tieGroups
+}
+
 func (ls *LeaderSchedule) LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 	leader, exists := ls.lsMap[slot]
 	return leader, exists

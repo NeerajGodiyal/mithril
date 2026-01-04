@@ -525,6 +525,97 @@ func dumpFullScheduleDataWithSummary(
 	}
 }
 
+// DumpTieBreakDebug writes tie-break debugging info to a file.
+// This verifies that equal-stake validators are sorted by pubkey DESC (Agave behavior).
+func DumpTieBreakDebug(
+	epoch uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	voteAcctMap map[solana.PublicKey]*epochstakes.VoteAccount,
+	logsDir string,
+) {
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("DumpTieBreakDebug: failed to create logs dir: %v", err)
+		return
+	}
+
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
+	filename := fmt.Sprintf("epoch%d_tiebreak%s.txt", epoch, shortRunID)
+	filePath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("DumpTieBreakDebug: failed to create file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	// Get sorted stakes with tie-break info
+	allEntries, tieGroups := leaderschedule.GetSortedStakesDebug(voteAcctMap, voteAcctStakes)
+
+	w.WriteString("# Tie-Break Debug for Leader Schedule\n")
+	w.WriteString(fmt.Sprintf("# Epoch: %d\n", epoch))
+	w.WriteString(fmt.Sprintf("# Total validators: %d\n", len(allEntries)))
+	w.WriteString(fmt.Sprintf("# Tie groups (equal stake): %d\n", len(tieGroups)))
+	w.WriteString(fmt.Sprintf("# Generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	w.WriteString("#\n")
+	w.WriteString("# Expected behavior: within each tie group, pubkeys should be sorted DESC (higher bytes first)\n")
+	w.WriteString("# BytesCmp shows comparison vs previous entry: -1 means current < previous (correct for DESC)\n")
+	w.WriteString("#\n\n")
+
+	if len(tieGroups) == 0 {
+		w.WriteString("No tie groups found - all validators have unique stake.\n")
+		mlog.Log.FileOnlyf("tie-break debug: epoch=%d no ties found", epoch)
+		return
+	}
+
+	// Sort tie groups by stake descending for consistent output
+	type tieGroupInfo struct {
+		stake   uint64
+		entries []leaderschedule.TieBreakEntry
+	}
+	var sortedGroups []tieGroupInfo
+	for stake, entries := range tieGroups {
+		sortedGroups = append(sortedGroups, tieGroupInfo{stake: stake, entries: entries})
+	}
+	sort.Slice(sortedGroups, func(i, j int) bool {
+		return sortedGroups[i].stake > sortedGroups[j].stake
+	})
+
+	for _, group := range sortedGroups {
+		w.WriteString(fmt.Sprintf("## Tie group: stake=%d (%d validators)\n", group.stake, len(group.entries)))
+		w.WriteString("rank,node_pubkey,stake,first_8_bytes_hex,bytes_cmp_vs_prev\n")
+		for _, entry := range group.entries {
+			w.WriteString(fmt.Sprintf("%d,%s,%d,%x,%d\n",
+				entry.Rank, entry.NodePk.String(), entry.Stake, entry.RawBytes, entry.BytesCmp))
+		}
+		w.WriteString("\n")
+	}
+
+	// Also log to mlog
+	mlog.Log.Infof("tie-break debug: epoch=%d tie_groups=%d written to %s", epoch, len(tieGroups), filePath)
+
+	// Log the specific tie if we're looking for it (stake 2499999939665440)
+	if group, ok := tieGroups[2499999939665440]; ok {
+		mlog.Log.Infof("tie-break debug: found target tie group stake=2499999939665440:")
+		for _, entry := range group {
+			mlog.Log.Infof("  rank=%d node=%s bytes_cmp=%d", entry.Rank, entry.NodePk.String(), entry.BytesCmp)
+		}
+	}
+}
+
 // writeValidatorsCSV writes all validators to a CSV file
 func writeValidatorsCSV(filepath string, epoch uint64, source string, entries []StakeEntry, totalStake uint64) error {
 	f, err := os.Create(filepath)
@@ -1459,6 +1550,9 @@ func PrepareLeaderScheduleLocal(
 
 	// Dump ALL validators, skipped accounts, and summary to files
 	dumpFullScheduleDataWithSummary(validEntries, skippedEntries, summary, logsDir)
+
+	// Dump tie-break debug info (shows how equal-stake validators are ordered)
+	DumpTieBreakDebug(epoch, voteAcctStakes, voteAcctMap, logsDir)
 
 	// Dump first 1000 slots if dump flag is set (for debugging against RPC)
 	if config.GetBool("replay.dump_leader_schedule") {
