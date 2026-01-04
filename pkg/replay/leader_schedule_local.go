@@ -59,19 +59,20 @@ const defaultLogsDir = "/mnt/mithril-logs"
 // mismatchLogPath stores the resolved path for use in warnings
 var mismatchLogPath string
 
-// resolveLogsDir returns a non-empty logs directory path.
-// Prefers mlog's configured directory for consistency with main logs.
+// resolveLogsDir returns the leader_schedule subdirectory within the run directory.
+// Creates a dedicated subdirectory to keep leader schedule files organized.
 func resolveLogsDir(logsDir string) string {
+	var baseDir string
 	// First try mlog's directory (for run ID correlation)
 	if mlogDir := mlog.GetLogDir(); mlogDir != "" {
-		return mlogDir
+		baseDir = mlogDir
+	} else if logsDir != "" {
+		baseDir = logsDir
+	} else {
+		baseDir = defaultLogsDir
 	}
-	// Then use provided logsDir
-	if logsDir != "" {
-		return logsDir
-	}
-	// Fallback to default
-	return defaultLogsDir
+	// Return leader_schedule subdirectory
+	return filepath.Join(baseDir, "leader_schedule")
 }
 
 // initMismatchLog creates/opens the mismatch log file (once per process).
@@ -93,9 +94,9 @@ func initMismatchLog(logsDir string) {
 			if len(shortRunID) > 8 {
 				shortRunID = shortRunID[:8]
 			}
-			filename = fmt.Sprintf("leader_schedule_mismatch-%s.log", shortRunID)
+			filename = fmt.Sprintf("mismatch_%s.log", shortRunID)
 		} else {
-			filename = "leader_schedule_mismatch.log"
+			filename = "mismatch.log"
 		}
 		mismatchLogPath = filepath.Join(logsDir, filename)
 
@@ -451,7 +452,7 @@ func dumpFullScheduleData(
 	}
 
 	// Write validators CSV
-	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s.csv", epoch, source, shortRunID))
+	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("epoch%d_%s%s_validators.csv", epoch, source, shortRunID))
 	if err := writeValidatorsCSV(validatorsFile, epoch, source, validEntries, totalStake); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleData: failed to write validators CSV: %v", err)
 	} else {
@@ -460,7 +461,7 @@ func dumpFullScheduleData(
 
 	// Write skipped CSV if there are any
 	if len(skippedEntries) > 0 {
-		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
+		skippedFile := filepath.Join(logsDir, fmt.Sprintf("epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
 		if err := writeSkippedCSV(skippedFile, epoch, skippedEntries); err != nil {
 			mlog.Log.Warnf("dumpFullScheduleData: failed to write skipped CSV: %v", err)
 		} else {
@@ -498,7 +499,7 @@ func dumpFullScheduleDataWithSummary(
 	}
 
 	// Write validators CSV
-	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s.csv", epoch, source, shortRunID))
+	validatorsFile := filepath.Join(logsDir, fmt.Sprintf("epoch%d_%s%s_validators.csv", epoch, source, shortRunID))
 	if err := writeValidatorsCSV(validatorsFile, epoch, source, validEntries, summary.FilteredStake); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write validators CSV: %v", err)
 	} else {
@@ -507,7 +508,7 @@ func dumpFullScheduleDataWithSummary(
 
 	// Write skipped CSV if there are any
 	if len(skippedEntries) > 0 {
-		skippedFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
+		skippedFile := filepath.Join(logsDir, fmt.Sprintf("epoch%d_%s%s_skipped.csv", epoch, source, shortRunID))
 		if err := writeSkippedCSV(skippedFile, epoch, skippedEntries); err != nil {
 			mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write skipped CSV: %v", err)
 		} else {
@@ -516,7 +517,7 @@ func dumpFullScheduleDataWithSummary(
 	}
 
 	// Write summary file
-	summaryFile := filepath.Join(logsDir, fmt.Sprintf("leader_schedule_epoch%d_%s%s_summary.txt", epoch, source, shortRunID))
+	summaryFile := filepath.Join(logsDir, fmt.Sprintf("epoch%d_%s%s_summary.txt", epoch, source, shortRunID))
 	if err := writeSummaryFile(summaryFile, summary); err != nil {
 		mlog.Log.Warnf("dumpFullScheduleDataWithSummary: failed to write summary: %v", err)
 	} else {
@@ -1665,7 +1666,7 @@ func dumpScheduleSlotsCSV(
 		shortRunID = "_" + shortRunID
 	}
 
-	filename := fmt.Sprintf("leader_schedule_epoch%d_%s_slots%s.csv", epoch, source, shortRunID)
+	filename := fmt.Sprintf("epoch%d_%s_slots%s.csv", epoch, source, shortRunID)
 	filePath := filepath.Join(logsDir, filename)
 
 	f, err := os.Create(filePath)
@@ -1723,6 +1724,7 @@ func DumpScheduleMismatch(
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
 // This is purely for debugging and does not affect the source of truth.
 // Computes full SHA256 hash of entire schedule (~20-50ms) for complete comparison.
+// Always writes a validation summary file with both local and RPC fingerprints.
 func BackgroundValidateAgainstRPC(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -1737,21 +1739,24 @@ func BackgroundValidateAgainstRPC(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	// Compute full hash of entire schedule for complete comparison
+	// Compute full hash and fingerprint for both schedules
 	localHash := scheduleFullHash(localSchedule, firstSlot, numSlots)
 	rpcHash := scheduleFullHash(rpcSchedule, firstSlot, numSlots)
+	localFP := scheduleFingerprint(localSchedule, firstSlot, numSlots)
+	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
 
-	if localHash == rpcHash {
+	matched := localHash == rpcHash
+
+	// Always write validation summary file with both fingerprints
+	writeValidationSummary(epoch, firstSlot, numSlots, localHash, rpcHash, localFP, rpcFP, matched, logsDir)
+
+	if matched {
 		mlog.Log.Infof("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
 		return
 	}
 
 	// Hashes differ - log to mismatch file with details
 	initMismatchLog(logsDir)
-
-	// Also compute fingerprints to show where divergence starts
-	localFP := scheduleFingerprint(localSchedule, firstSlot, numSlots)
-	rpcFP := scheduleFingerprint(rpcSchedule, firstSlot, numSlots)
 
 	mismatchLogMu.Lock()
 	if mismatchLogWriter != nil {
@@ -1768,6 +1773,61 @@ func BackgroundValidateAgainstRPC(
 
 	// Dump both schedules to CSV for detailed analysis
 	DumpScheduleMismatch(epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+}
+
+// writeValidationSummary writes a summary file comparing local vs RPC schedule.
+func writeValidationSummary(epoch, firstSlot, numSlots uint64, localHash, rpcHash, localFP, rpcFP string, matched bool, logsDir string) {
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("writeValidationSummary: failed to create logs dir: %v", err)
+		return
+	}
+
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
+	filename := fmt.Sprintf("epoch%d_validation%s.txt", epoch, shortRunID)
+	filePath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("writeValidationSummary: failed to create file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	status := "MATCH"
+	if !matched {
+		status = "MISMATCH"
+	}
+
+	w.WriteString("# Leader Schedule Validation Summary\n")
+	w.WriteString(fmt.Sprintf("# Generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	w.WriteString(fmt.Sprintf("# Run ID: %s\n", runID))
+	w.WriteString("#\n")
+	w.WriteString(fmt.Sprintf("## Result: %s\n\n", status))
+	w.WriteString("## Epoch Info\n")
+	w.WriteString(fmt.Sprintf("epoch=%d\n", epoch))
+	w.WriteString(fmt.Sprintf("first_slot=%d\n", firstSlot))
+	w.WriteString(fmt.Sprintf("slots_in_epoch=%d\n", numSlots))
+	w.WriteString("\n## Hashes\n")
+	w.WriteString(fmt.Sprintf("local_hash=%s\n", localHash))
+	w.WriteString(fmt.Sprintf("rpc_hash=%s\n", rpcHash))
+	w.WriteString(fmt.Sprintf("local_fingerprint=%s\n", localFP))
+	w.WriteString(fmt.Sprintf("rpc_fingerprint=%s\n", rpcFP))
+	w.WriteString(fmt.Sprintf("\nstatus=%s\n", status))
+
+	mlog.Log.FileOnlyf("leader schedule validation summary written to: %s", filePath)
 }
 
 // fetchLeaderScheduleFromRPC fetches leader schedule from RPC for validation purposes.

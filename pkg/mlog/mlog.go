@@ -73,11 +73,16 @@ func DefaultConfig() LogConfig {
 // Directory structure:
 //
 //	<dir>/
-//	├── runs.log                           # Append-only log tracking all runs
-//	├── latest -> <run_dir>/               # Symlink to latest run directory
-//	├── 20250104-120000Z_abc123_12345678/  # Per-run directory
-//	│   ├── mithril.log                    # Main log file
-//	│   └── leader_schedule_*.csv          # Other run artifacts
+//	├── runs.log                               # Append-only log tracking all runs
+//	├── latest -> <run_dir>/                   # Symlink to latest run directory
+//	├── 20250104-120000Z_abc123_12345678/      # Per-run directory
+//	│   ├── mithril.log                        # Main log file
+//	│   ├── config.toml                        # Copy of config used for this run
+//	│   └── leader_schedule/                   # Leader schedule artifacts
+//	│       ├── epoch905_local_12345678_validators.csv
+//	│       ├── epoch905_local_12345678_skipped.csv
+//	│       ├── epoch905_local_12345678_summary.txt
+//	│       └── mismatch_12345678.log
 //	└── 20250104-130000Z_def456_87654321/
 //	    └── ...
 func Initialize(cfg LogConfig, runID string) error {
