@@ -1,6 +1,7 @@
 package leaderschedule
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -78,6 +79,88 @@ func TestSortStakesOrdering(t *testing.T) {
 		assert.Len(t, sorted, 2, "duplicates should be removed")
 		assert.Equal(t, pk2, sorted[0].pubkey)
 		assert.Equal(t, pk1, sorted[1].pubkey)
+	})
+}
+
+// TestEpoch905TieBreakPubkeys tests the specific pubkeys from epoch 905 that have identical stake.
+// These two validators caused schedule mismatches due to tie-break ordering.
+// Node identities (not vote accounts):
+//   - Aw5wEMXhbygFLR7jHtHpih8QvxVBGAMTqsQ2SjWPk1ex (vote: 33hurzEz6aEnzfESL6pnNyR6DCgcKzssT1pwSzDCBTRQ)
+//   - 2GUnfxZavKoPfS9s3VSEjaWDzB3vNf5RojUhprCS1rSx (vote: BU3ZgGBXFJwNTrN6VUJ88k9SJ71SyWfBJTabYqRErm4F)
+//
+// CRITICAL: Agave has TWO leader schedule modes:
+//   - IdentityKeyedLeaderSchedule: tie-break by NODE IDENTITY pubkey
+//   - VoteKeyedLeaderSchedule: tie-break by VOTE ACCOUNT pubkey
+//
+// The order differs between modes:
+//   - Identity-keyed: Aw5wEM > 2GUnfx → Aw5wEM first
+//   - Vote-keyed: BU3ZgGBX > 33hurzEz → 2GUnfx first (via vote BU3ZgGBX)
+func TestEpoch905TieBreakPubkeys(t *testing.T) {
+	// NODE IDENTITY pubkeys
+	pkAw5wEM := solana.MustPublicKeyFromBase58("Aw5wEMXhbygFLR7jHtHpih8QvxVBGAMTqsQ2SjWPk1ex")
+	pk2GUnfx := solana.MustPublicKeyFromBase58("2GUnfxZavKoPfS9s3VSEjaWDzB3vNf5RojUhprCS1rSx")
+
+	// VOTE ACCOUNT pubkeys
+	vote33hurz := solana.MustPublicKeyFromBase58("33hurzEz6aEnzfESL6pnNyR6DCgcKzssT1pwSzDCBTRQ") // → Aw5wEM
+	voteBU3Zg := solana.MustPublicKeyFromBase58("BU3ZgGBXFJwNTrN6VUJ88k9SJ71SyWfBJTabYqRErm4F")  // → 2GUnfx
+
+	// The stake they both have (from epoch 905 analysis)
+	tiedStake := uint64(2499999939665440)
+
+	t.Run("identity_keyed_ordering", func(t *testing.T) {
+		// In identity-keyed mode, compare NODE IDENTITY pubkeys
+		cmp := bytes.Compare(pkAw5wEM[:], pk2GUnfx[:])
+		t.Logf("IDENTITY-KEYED: bytes.Compare(Aw5wEM, 2GUnfx) = %d", cmp)
+		t.Logf("  Aw5wEM bytes[0:8]: %x", pkAw5wEM[:8])
+		t.Logf("  2GUnfx bytes[0:8]: %x", pk2GUnfx[:8])
+
+		assert.Equal(t, 1, cmp, "Aw5wEM > 2GUnfx (identity comparison)")
+		t.Log("  → Identity-keyed: Aw5wEM comes first")
+	})
+
+	t.Run("vote_keyed_ordering", func(t *testing.T) {
+		// In vote-keyed mode, compare VOTE ACCOUNT pubkeys
+		cmp := bytes.Compare(voteBU3Zg[:], vote33hurz[:])
+		t.Logf("VOTE-KEYED: bytes.Compare(BU3ZgGBX, 33hurzEz) = %d", cmp)
+		t.Logf("  BU3ZgGBX bytes[0:8]: %x (→ node 2GUnfx)", voteBU3Zg[:8])
+		t.Logf("  33hurzEz bytes[0:8]: %x (→ node Aw5wEM)", vote33hurz[:8])
+
+		// This tells us which mode the network uses!
+		if cmp > 0 {
+			t.Log("  → Vote-keyed: BU3ZgGBX (2GUnfx) comes first")
+			t.Log("  ⚠️  If network uses vote-keyed, our identity-keyed schedule is WRONG!")
+		} else {
+			t.Log("  → Vote-keyed: 33hurzEz (Aw5wEM) comes first")
+		}
+	})
+
+	t.Run("sortStakes_identity_keyed", func(t *testing.T) {
+		// Our current implementation uses identity-keyed
+		stakes := []pubkeyAndStakePair{
+			{pubkey: pk2GUnfx, stake: tiedStake},
+			{pubkey: pkAw5wEM, stake: tiedStake},
+		}
+		sorted := sortStakes(stakes)
+
+		require.Len(t, sorted, 2)
+		assert.Equal(t, pkAw5wEM, sorted[0].pubkey, "Identity-keyed: Aw5wEM should come first")
+		assert.Equal(t, pk2GUnfx, sorted[1].pubkey, "Identity-keyed: 2GUnfx should come second")
+	})
+
+	t.Run("sortStakes_vote_keyed_simulation", func(t *testing.T) {
+		// Simulate vote-keyed mode by sorting on vote account pubkeys
+		stakes := []pubkeyAndStakePair{
+			{pubkey: vote33hurz, stake: tiedStake}, // Aw5wEM's vote
+			{pubkey: voteBU3Zg, stake: tiedStake},  // 2GUnfx's vote
+		}
+		sorted := sortStakes(stakes)
+
+		require.Len(t, sorted, 2)
+		// Which vote account wins the tie-break?
+		t.Logf("Vote-keyed order: [%s, %s]", sorted[0].pubkey, sorted[1].pubkey)
+		if sorted[0].pubkey == voteBU3Zg {
+			t.Log("⚠️  Vote-keyed puts BU3ZgGBX (2GUnfx) FIRST - opposite of identity-keyed!")
+		}
 	})
 }
 

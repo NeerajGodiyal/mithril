@@ -615,6 +615,35 @@ func DumpTieBreakDebug(
 			mlog.Log.Infof("  rank=%d node=%s bytes_cmp=%d", entry.Rank, entry.NodePk.String(), entry.BytesCmp)
 		}
 	}
+
+	// Diagnostic: Check specific vote account → node mappings for epoch 905 debugging
+	// Vote accounts that caused the tie-break mismatch:
+	debugVoteAccts := []struct {
+		vote         string
+		expectedNode string
+	}{
+		{"33hurzEz6aEnzfESL6pnNyR6DCgcKzssT1pwSzDCBTRQ", "Aw5wEMXhbygFLR7jHtHpih8QvxVBGAMTqsQ2SjWPk1ex"},
+		{"BU3ZgGBXFJwNTrN6VUJ88k9SJ71SyWfBJTabYqRErm4F", "2GUnfxZavKoPfS9s3VSEjaWDzB3vNf5RojUhprCS1rSx"},
+	}
+	for _, d := range debugVoteAccts {
+		votePk := solana.MustPublicKeyFromBase58(d.vote)
+		expectedNodePk := solana.MustPublicKeyFromBase58(d.expectedNode)
+		stake, hasStake := voteAcctStakes[votePk]
+		va := voteAcctMap[votePk]
+		if hasStake || va != nil {
+			var actualNode solana.PublicKey
+			if va != nil {
+				actualNode = va.NodePubkey
+			}
+			match := actualNode == expectedNodePk
+			mlog.Log.FileOnlyf("vote-node-mapping: vote=%s expected_node=%s actual_node=%s stake=%d match=%v",
+				d.vote, d.expectedNode, actualNode.String(), stake, match)
+			if !match {
+				mlog.Log.Warnf("VOTE-NODE MISMATCH: vote=%s expected=%s actual=%s stake=%d",
+					d.vote, d.expectedNode, actualNode.String(), stake)
+			}
+		}
+	}
 }
 
 // writeValidatorsCSV writes all validators to a CSV file

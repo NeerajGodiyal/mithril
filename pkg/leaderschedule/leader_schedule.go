@@ -44,6 +44,13 @@ type pubkeyAndStakePair struct {
 	stake  uint64
 }
 
+// voteAcctAndNodePair holds vote account info for vote-keyed scheduling
+type voteAcctAndNodePair struct {
+	voteAcct   solana.PublicKey
+	nodePubkey solana.PublicKey
+	stake      uint64
+}
+
 func New(
 	epochVoteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
 	epochVoteAcctStakes map[solana.PublicKey]uint64,
@@ -52,10 +59,16 @@ func New(
 	length uint64,
 	repeat uint64) *LeaderSchedule {
 
-	// Aggregate stake by NODE IDENTITY, not vote account.
-	// This matches Agave's StakedNodes::new() which sums stake per node.
-	// If a validator has multiple vote accounts, their stakes are combined.
-	nodeStakes := make(map[solana.PublicKey]uint64)
+	// VOTE-KEYED SCHEDULE (matches Agave's VoteKeyedLeaderSchedule):
+	// 1. Sort by VOTE ACCOUNT pubkey (stake desc, vote pubkey desc)
+	// 2. Sample weighted by stake → returns vote account pubkeys
+	// 3. Convert each selected vote account → node identity
+	//
+	// This differs from identity-keyed which would aggregate and sort by node identity.
+	// The tie-break is on VOTE ACCOUNT pubkey, not node identity!
+
+	// Build vote account entries with their node mappings
+	var voteAccts []voteAcctAndNodePair
 	for voteAcctPubkey, stake := range epochVoteAcctStakes {
 		if stake == 0 {
 			continue
@@ -69,21 +82,36 @@ func New(
 		if nodePubkey == zeroPk {
 			continue
 		}
-		nodeStakes[nodePubkey] += stake
+		voteAccts = append(voteAccts, voteAcctAndNodePair{
+			voteAcct:   voteAcctPubkey,
+			nodePubkey: nodePubkey,
+			stake:      stake,
+		})
 	}
 
-	// Build keyed stakes from aggregated node stakes
-	keyedStakes := make([]pubkeyAndStakePair, 0, len(nodeStakes))
-	for nodePubkey, stake := range nodeStakes {
-		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: nodePubkey, stake: stake})
+	// Build keyed stakes using VOTE ACCOUNT pubkeys (not node identities)
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(voteAccts))
+	for _, va := range voteAccts {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: va.voteAcct, stake: va.stake})
 	}
 
-	// Sample node identities directly (not vote accounts)
-	leaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, repeat)
+	// Sample vote accounts (sorting happens inside stakeWeightedSlotLeaders)
+	voteAccountLeaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, repeat)
 
-	// Leaders are already node identities, no conversion needed
+	// Build vote account → node identity lookup
+	voteToNode := make(map[solana.PublicKey]solana.PublicKey, len(voteAccts))
+	for _, va := range voteAccts {
+		voteToNode[va.voteAcct] = va.nodePubkey
+	}
+
+	// Convert vote account leaders → node identity leaders
+	nodeLeaders := make([]solana.PublicKey, len(voteAccountLeaders))
+	for i, voteAcctPk := range voteAccountLeaders {
+		nodeLeaders[i] = voteToNode[voteAcctPk]
+	}
+
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	leaderSchedule := newFromLeadersDirect(leaders, firstSlotInEpoch)
+	leaderSchedule := newFromLeadersDirect(nodeLeaders, firstSlotInEpoch)
 
 	return leaderSchedule
 }
@@ -217,13 +245,20 @@ type TieBreakEntry struct {
 }
 
 // GetSortedStakesDebug returns sorted stakes with tie-break debugging info.
-// Used to verify tie-break ordering matches Agave.
+// Used to verify tie-break ordering matches Agave's vote-keyed schedule.
+// NOTE: This now uses VOTE ACCOUNT pubkeys for sorting (not node identities)
+// to match the actual leader schedule computation.
 func GetSortedStakesDebug(
 	epochVoteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
 	epochVoteAcctStakes map[solana.PublicKey]uint64,
 ) ([]TieBreakEntry, map[uint64][]TieBreakEntry) {
-	// Aggregate stake by NODE IDENTITY (same as New())
-	nodeStakes := make(map[solana.PublicKey]uint64)
+	// Build vote account entries (matching New())
+	type voteEntry struct {
+		voteAcct   solana.PublicKey
+		nodePubkey solana.PublicKey
+		stake      uint64
+	}
+	var voteEntries []voteEntry
 	for voteAcctPubkey, stake := range epochVoteAcctStakes {
 		if stake == 0 {
 			continue
@@ -237,26 +272,37 @@ func GetSortedStakesDebug(
 		if nodePubkey == zeroPk {
 			continue
 		}
-		nodeStakes[nodePubkey] += stake
+		voteEntries = append(voteEntries, voteEntry{
+			voteAcct:   voteAcctPubkey,
+			nodePubkey: nodePubkey,
+			stake:      stake,
+		})
 	}
 
-	// Build and sort stakes
-	keyedStakes := make([]pubkeyAndStakePair, 0, len(nodeStakes))
-	for nodePubkey, stake := range nodeStakes {
-		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: nodePubkey, stake: stake})
+	// Sort by VOTE ACCOUNT pubkey (stake desc, vote pubkey desc) - matches New()
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(voteEntries))
+	for _, ve := range voteEntries {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: ve.voteAcct, stake: ve.stake})
 	}
 	keyedStakes = sortStakes(keyedStakes)
 
-	// Build debug entries
+	// Build lookup for vote → node
+	voteToNode := make(map[solana.PublicKey]solana.PublicKey, len(voteEntries))
+	for _, ve := range voteEntries {
+		voteToNode[ve.voteAcct] = ve.nodePubkey
+	}
+
+	// Build debug entries showing the actual schedule order
 	entries := make([]TieBreakEntry, len(keyedStakes))
 	for i, pair := range keyedStakes {
 		entry := TieBreakEntry{
 			Rank:     i + 1,
-			NodePk:   pair.pubkey,
+			NodePk:   voteToNode[pair.pubkey], // Show node identity (the actual leader)
 			Stake:    pair.stake,
-			RawBytes: pair.pubkey[:8],
+			RawBytes: pair.pubkey[:8], // Show vote account bytes (the sort key)
 		}
 		if i > 0 {
+			// Compare VOTE ACCOUNT pubkeys (the actual sort key)
 			entry.BytesCmp = bytes.Compare(pair.pubkey[:], keyedStakes[i-1].pubkey[:])
 		}
 		entries[i] = entry
