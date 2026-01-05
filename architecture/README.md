@@ -9,7 +9,7 @@ This directory contains detailed documentation about Solana protocol internals a
 - [Stake Accounts](stake-accounts.md) - Stake delegation lifecycle, warmup/cooldown, and the stake cache
 
 ### Leader Selection
-- [Leader Schedule](leader-schedule.md) - How the leader schedule is computed from stake weights
+- [Leader Schedule](leader-schedule.md) - How the leader schedule is computed from stake weights (TODO)
 
 ### Accounts & State
 - [AccountsDB](accountsdb.md) - Account storage, snapshots, and state management (TODO)

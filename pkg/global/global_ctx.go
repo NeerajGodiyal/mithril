@@ -307,14 +307,15 @@ type StakeCacheEntry struct {
 // StakeCacheFile is the top-level structure for stake_cache.json with metadata
 type StakeCacheFile struct {
 	Slot       uint64            `json:"slot"`        // Slot when cache was saved
+	Bankhash   string            `json:"bankhash"`    // Bankhash for fork validation
 	EntryCount int               `json:"entry_count"` // Expected number of entries
 	Entries    []StakeCacheEntry `json:"entries"`
 }
 
 // SaveStakeCache persists the stake cache to disk for resume.
 // Uses atomic write (temp file + rename) to prevent corruption.
-// Includes metadata (slot, entry count) for validation on load.
-func SaveStakeCache(accountsDbDir string, slot uint64) error {
+// Includes metadata (slot, bankhash, entry count) for validation on load.
+func SaveStakeCache(accountsDbDir string, slot uint64, bankhash string) error {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 
@@ -337,6 +338,7 @@ func SaveStakeCache(accountsDbDir string, slot uint64) error {
 
 	cacheFile := StakeCacheFile{
 		Slot:       slot,
+		Bankhash:   bankhash,
 		EntryCount: len(entries),
 		Entries:    entries,
 	}
@@ -364,8 +366,9 @@ func SaveStakeCache(accountsDbDir string, slot uint64) error {
 // LoadStakeCache loads the stake cache from disk.
 // Returns (loaded_count, nil) on success, (0, nil) if file doesn't exist.
 // Returns error if file is corrupt or has invalid entries (triggers scan fallback).
-// The expectedSlot parameter validates the cache is from the correct AccountsDB state.
-func LoadStakeCache(accountsDbDir string, expectedSlot uint64) (int, error) {
+// The expectedSlot and expectedBankhash parameters validate the cache is from the correct AccountsDB state.
+// Pass empty string for expectedBankhash to skip bankhash validation.
+func LoadStakeCache(accountsDbDir string, expectedSlot uint64, expectedBankhash string) (int, error) {
 	cacheFilePath := filepath.Join(accountsDbDir, StakeCacheFileName)
 
 	data, err := os.ReadFile(cacheFilePath)
@@ -384,6 +387,11 @@ func LoadStakeCache(accountsDbDir string, expectedSlot uint64) (int, error) {
 	// Validate metadata - slot must match to ensure cache is from correct state
 	if cacheFile.Slot != expectedSlot {
 		return 0, fmt.Errorf("stake cache slot mismatch: file=%d expected=%d (stale cache?)", cacheFile.Slot, expectedSlot)
+	}
+
+	// Validate bankhash if provided - detects fork divergence at same slot
+	if expectedBankhash != "" && cacheFile.Bankhash != expectedBankhash {
+		return 0, fmt.Errorf("stake cache bankhash mismatch: file=%s expected=%s (different fork?)", cacheFile.Bankhash, expectedBankhash)
 	}
 
 	// Validate entry count matches
