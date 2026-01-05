@@ -46,6 +46,8 @@ func BuildIndexEntriesFromAppendVecs(data []byte, fileSize uint64, slot uint64, 
 		acctIdxEntries = append(acctIdxEntries, AccountIndexEntry{})
 		err = parser.ParseNextAcct(&pubkeys[len(pubkeys)-1], &acctIdxEntries[len(acctIdxEntries)-1])
 		if err != nil {
+			pubkeys = pubkeys[:len(pubkeys)-1]
+			acctIdxEntries = acctIdxEntries[:len(acctIdxEntries)-1]
 			break
 		}
 	}
