@@ -238,10 +238,6 @@ func RebuildVoteCacheFromAccountsDB(
 	var unmarshalErrors []VoteCacheRebuildError
 	var zeroNodePkErrors []VoteCacheRebuildError
 
-	// Track first error for reporting (use sync.Once to capture exactly one error)
-	var firstError error
-	var firstErrorOnce sync.Once
-
 	// Create worker pool
 	var wg sync.WaitGroup
 	pool, err := ants.NewPoolWithFunc(maxConcurrency, func(i interface{}) {
@@ -267,9 +263,6 @@ func RebuildVoteCacheFromAccountsDB(
 				})
 			}
 			errorsMu.Unlock()
-			firstErrorOnce.Do(func() {
-				firstError = fmt.Errorf("missing vote account %s (stake=%d): %w", item.pk, item.stake, err)
-			})
 			return
 		}
 
@@ -288,9 +281,6 @@ func RebuildVoteCacheFromAccountsDB(
 				})
 			}
 			errorsMu.Unlock()
-			firstErrorOnce.Do(func() {
-				firstError = fmt.Errorf("failed to unmarshal vote account %s (stake=%d): %w", item.pk, item.stake, err)
-			})
 			return
 		}
 
@@ -309,9 +299,6 @@ func RebuildVoteCacheFromAccountsDB(
 				})
 			}
 			errorsMu.Unlock()
-			firstErrorOnce.Do(func() {
-				firstError = fmt.Errorf("vote account %s has zero NodePubkey (stake=%d)", item.pk, item.stake)
-			})
 			return
 		}
 
