@@ -25,6 +25,7 @@ type GlobalCtx struct {
 	epoch                      uint64
 	transactionCount           uint64
 	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
+	stakeCacheSlots            map[solana.PublicKey]uint64 // Tracks which slot each stake cache entry came from
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochStakes                *epochstakes.EpochStakesCache
 	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
@@ -74,19 +75,46 @@ func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
 }
 
+// PutStakeCacheItem adds or updates a stake cache entry without slot tracking.
+// Use this during replay where operations are strictly sequential.
 func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
 	if instance.stakeCache == nil {
 		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
 	}
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+	instance.stakeCache[pubkey] = delegation
+	// During replay, always use max slot to indicate "most recent"
+	instance.stakeCacheSlots[pubkey] = ^uint64(0)
+}
+
+// PutStakeCacheItemWithSlot adds or updates a stake cache entry with slot tracking.
+// Only updates if slot >= existing slot (latest wins). Use during parallel snapshot loading.
+func PutStakeCacheItemWithSlot(pubkey solana.PublicKey, delegation *sealevel.Delegation, slot uint64) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
-	instance.stakeCache[pubkey] = delegation
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+	// Only update if this slot is >= existing slot (latest wins)
+	existingSlot, exists := instance.stakeCacheSlots[pubkey]
+	if !exists || slot >= existingSlot {
+		instance.stakeCache[pubkey] = delegation
+		instance.stakeCacheSlots[pubkey] = slot
+	}
 }
 
 func DeleteStakeCacheItem(pubkey solana.PublicKey) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 	delete(instance.stakeCache, pubkey)
+	delete(instance.stakeCacheSlots, pubkey)
 }
 
 func PutEpochAuthorizedVoter(voteAcct solana.PublicKey, authorizedVoter solana.PublicKey) {
@@ -454,6 +482,7 @@ func ClearStakeCache() {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 	instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
 }
 
 // StakeCacheSize returns the number of entries in the stake cache.
