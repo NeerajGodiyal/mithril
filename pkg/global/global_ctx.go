@@ -304,9 +304,17 @@ type StakeCacheEntry struct {
 	CreditsObserved    uint64  `json:"credits_observed"`
 }
 
+// StakeCacheFile is the top-level structure for stake_cache.json with metadata
+type StakeCacheFile struct {
+	Slot       uint64            `json:"slot"`        // Slot when cache was saved
+	EntryCount int               `json:"entry_count"` // Expected number of entries
+	Entries    []StakeCacheEntry `json:"entries"`
+}
+
 // SaveStakeCache persists the stake cache to disk for resume.
 // Uses atomic write (temp file + rename) to prevent corruption.
-func SaveStakeCache(accountsDbDir string) error {
+// Includes metadata (slot, entry count) for validation on load.
+func SaveStakeCache(accountsDbDir string, slot uint64) error {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 
@@ -327,19 +335,25 @@ func SaveStakeCache(accountsDbDir string) error {
 		})
 	}
 
-	data, err := json.Marshal(entries)
+	cacheFile := StakeCacheFile{
+		Slot:       slot,
+		EntryCount: len(entries),
+		Entries:    entries,
+	}
+
+	data, err := json.Marshal(cacheFile)
 	if err != nil {
 		return fmt.Errorf("failed to marshal stake cache: %w", err)
 	}
 
-	cacheFile := filepath.Join(accountsDbDir, StakeCacheFileName)
-	tmpFile := cacheFile + ".tmp"
+	cacheFilePath := filepath.Join(accountsDbDir, StakeCacheFileName)
+	tmpFile := cacheFilePath + ".tmp"
 
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write stake cache file: %w", err)
 	}
 
-	if err := os.Rename(tmpFile, cacheFile); err != nil {
+	if err := os.Rename(tmpFile, cacheFilePath); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("failed to rename stake cache file: %w", err)
 	}
@@ -349,10 +363,12 @@ func SaveStakeCache(accountsDbDir string) error {
 
 // LoadStakeCache loads the stake cache from disk.
 // Returns (loaded_count, nil) on success, (0, nil) if file doesn't exist.
-func LoadStakeCache(accountsDbDir string) (int, error) {
-	cacheFile := filepath.Join(accountsDbDir, StakeCacheFileName)
+// Returns error if file is corrupt or has invalid entries (triggers scan fallback).
+// The expectedSlot parameter validates the cache is from the correct AccountsDB state.
+func LoadStakeCache(accountsDbDir string, expectedSlot uint64) (int, error) {
+	cacheFilePath := filepath.Join(accountsDbDir, StakeCacheFileName)
 
-	data, err := os.ReadFile(cacheFile)
+	data, err := os.ReadFile(cacheFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil // File doesn't exist, not an error
@@ -360,9 +376,19 @@ func LoadStakeCache(accountsDbDir string) (int, error) {
 		return 0, fmt.Errorf("failed to read stake cache file: %w", err)
 	}
 
-	var entries []StakeCacheEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	var cacheFile StakeCacheFile
+	if err := json.Unmarshal(data, &cacheFile); err != nil {
 		return 0, fmt.Errorf("failed to parse stake cache file: %w", err)
+	}
+
+	// Validate metadata - slot must match to ensure cache is from correct state
+	if cacheFile.Slot != expectedSlot {
+		return 0, fmt.Errorf("stake cache slot mismatch: file=%d expected=%d (stale cache?)", cacheFile.Slot, expectedSlot)
+	}
+
+	// Validate entry count matches
+	if cacheFile.EntryCount != len(cacheFile.Entries) {
+		return 0, fmt.Errorf("stake cache entry count mismatch: header=%d actual=%d (corrupt file?)", cacheFile.EntryCount, len(cacheFile.Entries))
 	}
 
 	instance.stakeCacheMutex.Lock()
@@ -373,14 +399,16 @@ func LoadStakeCache(accountsDbDir string) (int, error) {
 	}
 
 	loadedCount := 0
-	for _, entry := range entries {
+	skippedCount := 0
+	for _, entry := range cacheFile.Entries {
 		pubkey, err := solana.PublicKeyFromBase58(entry.Pubkey)
 		if err != nil {
-			// Skip corrupt entry but continue loading
+			skippedCount++
 			continue
 		}
 		voterPubkey, err := solana.PublicKeyFromBase58(entry.VoterPubkey)
 		if err != nil {
+			skippedCount++
 			continue
 		}
 
@@ -393,6 +421,13 @@ func LoadStakeCache(accountsDbDir string) (int, error) {
 			CreditsObserved:    entry.CreditsObserved,
 		}
 		loadedCount++
+	}
+
+	// If any entries were skipped, treat as corrupt and return error to trigger scan
+	if skippedCount > 0 {
+		// Clear partial load
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+		return 0, fmt.Errorf("stake cache has %d corrupt entries out of %d (forcing scan)", skippedCount, len(cacheFile.Entries))
 	}
 
 	return loadedCount, nil

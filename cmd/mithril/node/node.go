@@ -854,12 +854,12 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	// Try to load persisted stake cache if resuming (must be after InitCaches for scan fallback)
 	// This provides accurate stake data between snapshot slot and resume slot
 	if mithrilState != nil && mithrilState.HasResumeContext() {
-		loadedEntries, loadErr := global.LoadStakeCache(accountsDbDir)
+		loadedEntries, loadErr := global.LoadStakeCache(accountsDbDir, mithrilState.LastSlot)
 		if loadErr != nil {
 			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
 		}
 		if loadErr != nil || loadedEntries == 0 {
-			// Cache file missing, corrupt, or empty - scan AccountsDB to build stake cache
+			// Cache file missing, corrupt, stale, or empty - scan AccountsDB to build stake cache
 			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
 			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
 			if scanErr != nil {
@@ -972,10 +972,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 		// Save stake cache alongside state file for resume
-		if err := global.SaveStakeCache(accountsDbDir); err != nil {
+		if err := global.SaveStakeCache(accountsDbDir, result.LastPersistedSlot); err != nil {
 			mlog.Log.Errorf("failed to save stake cache: %v", err)
 		} else {
-			mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
+			mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
 		}
 	}
 
@@ -1627,12 +1627,12 @@ postBootstrap:
 	// Try to load persisted stake cache if resuming (must be after InitCaches for scan fallback)
 	// This provides accurate stake data between snapshot slot and resume slot
 	if mithrilState != nil && mithrilState.HasResumeContext() {
-		loadedEntries, loadErr := global.LoadStakeCache(accountsPath)
+		loadedEntries, loadErr := global.LoadStakeCache(accountsPath, mithrilState.LastSlot)
 		if loadErr != nil {
 			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
 		}
 		if loadErr != nil || loadedEntries == 0 {
-			// Cache file missing, corrupt, or empty - scan AccountsDB to build stake cache
+			// Cache file missing, corrupt, stale, or empty - scan AccountsDB to build stake cache
 			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
 			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
 			if scanErr != nil {
@@ -1745,10 +1745,10 @@ postBootstrap:
 			}
 			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
 			// Save stake cache alongside state file for resume
-			if err := global.SaveStakeCache(accountsPath); err != nil {
+			if err := global.SaveStakeCache(accountsPath, result.LastPersistedSlot); err != nil {
 				mlog.Log.Errorf("failed to save stake cache: %v", err)
 			} else {
-				mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
+				mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
 			}
 		} else {
 			// No resume context - just update slot
@@ -1756,10 +1756,10 @@ postBootstrap:
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
 			// Save stake cache alongside state file for resume
-			if err := global.SaveStakeCache(accountsPath); err != nil {
+			if err := global.SaveStakeCache(accountsPath, result.LastPersistedSlot); err != nil {
 				mlog.Log.Errorf("failed to save stake cache: %v", err)
 			} else {
-				mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
+				mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
 			}
 		}
 	}
@@ -2582,10 +2582,10 @@ func runReplayWithRecovery(
 		}
 
 		// Save stake cache alongside state file for resume
-		if err := global.SaveStakeCache(accountsDbPath); err != nil {
+		if err := global.SaveStakeCache(accountsDbPath, r.LastPersistedSlot); err != nil {
 			mlog.Log.Errorf("failed to save stake cache: %v", err)
 		} else {
-			mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
+			mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), r.LastPersistedSlot)
 		}
 
 		// Record shutdown in history
