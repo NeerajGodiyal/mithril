@@ -29,7 +29,20 @@ const (
 	RewardTypeRent    string = "Rent"
 	RewardTypeVoting  string = "Voting"
 	RewardTypeStaking string = "Staking"
+
+	// MaxRewardsPerBlock is the maximum number of stake accounts to process per block.
+	// Matches Agave's MAX_REWARDS_PER_BLOCK constant.
+	MaxRewardsPerBlock uint64 = 4096
 )
+
+// ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
+// Matches Agave's get_rewards_num_partitions formula: (n + MAX - 1) / MAX (ceiling division).
+func ComputeNumRewardPartitions(numStakeAccounts uint64) uint64 {
+	if numStakeAccounts == 0 {
+		return 1 // Minimum 1 partition
+	}
+	return (numStakeAccounts + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+}
 
 type PartitionedRewardDistributionInfo struct {
 	TotalStakingRewards    uint64
