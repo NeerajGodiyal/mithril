@@ -1055,6 +1055,11 @@ func runLive(c *cobra.Command, args []string) {
 		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
 	}
 
+	// Override bootstrap mode display when explicit snapshot paths are provided
+	if snapshotArchivePath != "" {
+		bootstrapMode = "explicit"
+	}
+
 	// Print consolidated startup info
 	printStartupInfo("run")
 
@@ -1851,6 +1856,8 @@ func printStartupInfo(commandName string) {
 		bootstrapDesc = "download fresh snapshot from network"
 	case "accountsdb":
 		bootstrapDesc = "require existing AccountsDB"
+	case "explicit":
+		bootstrapDesc = "build from explicit --snapshot path"
 	default:
 		bootstrapDesc = ""
 	}
