@@ -83,6 +83,13 @@ type SnapshotConfig struct {
 	// Incremental snapshot selection
 	MinIncrementalSpeedMBs float64 // Minimum speed for incremental sources (MB/s, 0 = no minimum)
 
+	// Slot constraints
+	MaxSlot int64 // Maximum slot for snapshots (0 = no limit). Filters out full snapshots and incrementals above this slot.
+
+	// Incremental snapshot targeting
+	TargetIncrementalBase int64 // Only consider incrementals with this base slot (0 = any base)
+	MaxIncrementalSlot    int64 // Maximum slot for incremental snapshots (0 = no limit)
+
 	// Logging
 	LogDir string // Directory for snapshot finder logs (default: /mnt/mithril-logs/snapshot-finder)
 }
@@ -171,6 +178,28 @@ func (sc SnapshotConfig) toInternalConfig(path string) config.Config {
 		SafetyMarginSlots: sc.SafetyMarginSlots,
 		Quiet:                true, // Mithril prints its own summary
 	}
+}
+
+// filterByMaxSlot filters results to only include nodes whose FullSlot is at or below maxSlot.
+// If maxSlot is 0, no filtering is applied (returns all results).
+// Returns (filtered results, count of filtered out nodes).
+func filterByMaxSlot(results []rpc.NodeResult, maxSlot int64) ([]rpc.NodeResult, int) {
+	if maxSlot == 0 {
+		return results, 0
+	}
+
+	var filtered []rpc.NodeResult
+	filteredOut := 0
+
+	for _, r := range results {
+		if r.FullSlot > 0 && r.FullSlot <= maxSlot {
+			filtered = append(filtered, r)
+		} else if r.FullSlot > maxSlot {
+			filteredOut++
+		}
+	}
+
+	return filtered, filteredOut
 }
 
 // incBaseMatchStats tracks statistics for incremental base matching filter
