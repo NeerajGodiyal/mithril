@@ -401,24 +401,12 @@ func RebuildVoteCacheFromAccountsDB(
 			}
 		}
 
-		// Threshold: allow up to 0.01% stake to fail (closed/empty vote accounts are common)
-		// These are typically vote accounts that were closed after stake delegation
-		const maxFailedStakePercent = 0.01
-		if failedPercent <= maxFailedStakePercent {
-			mlog.Log.Warnf("vote cache rebuild: %d accounts failed (%.4f%% stake) - within tolerance, continuing",
-				totalFailed, failedPercent)
-		} else {
-			// Above threshold - this is a real problem
-			mlog.Log.Errorf("VOTE CACHE REBUILD FAILED: slot=%d failed=%d (%.4f%% stake > %.2f%% threshold)",
-				slot, totalFailed, failedPercent, maxFailedStakePercent)
-
-			if firstError != nil {
-				return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake): %w",
-					totalFailed, failedPercent, firstError)
-			}
-			return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake)",
-				totalFailed, failedPercent)
-		}
+		// Skip missing/closed vote accounts - matches Firedancer behavior (fd_stakes.c:73-77).
+		// Stake delegations can point to vote accounts that have since been closed (data_len=0).
+		// Firedancer silently skips these: if( FD_LIKELY( vote_state ) ) { ... }
+		// We do the same - the stake simply isn't counted in the epoch's active stake.
+		mlog.Log.Warnf("vote cache rebuild: skipped %d closed/invalid vote accounts (%.4f%% stake)",
+			totalFailed, failedPercent)
 	}
 
 	mlog.Log.FileOnlyf("  result: SUCCESS (all %d non-zero accounts rebuilt)", nonZeroAccounts)
