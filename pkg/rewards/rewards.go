@@ -326,6 +326,7 @@ type StakeAccountStats struct {
 	Eligible     uint64 // Accounts that will earn rewards
 	BelowMin     uint64 // Accounts below minimum stake delegation
 	NoVote       uint64 // Accounts with no vote state in cache
+	NoCredits    uint64 // Accounts with vote but no new credits to earn (creditsInVote <= creditsInStake)
 	ZeroStake    uint64 // Accounts with StakeLamports == 0 (subset of BelowMin when min > 0)
 	ZeroWithVote uint64 // Zero-stake accounts that DO have vote cache (potential overcounting)
 	MinimumStake uint64 // The minimum stake delegation threshold
@@ -353,6 +354,7 @@ func CountEligibleStakeAccounts(f *features.Features) (eligible uint64, total ui
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
 // Use this for debugging partition count mismatches.
+// Eligibility requires: stake >= min AND has vote cache AND has new credits to earn.
 func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
 	stats := StakeAccountStats{
@@ -363,7 +365,8 @@ func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats 
 
 	for _, delegation := range global.StakeCache() {
 		stake := delegation.StakeLamports
-		hasVote := global.VoteCacheItem(delegation.VoterPubkey) != nil
+		voteState := global.VoteCacheItem(delegation.VoterPubkey)
+		hasVote := voteState != nil
 
 		// Track zero-stake accounts explicitly
 		if stake == 0 {
@@ -403,7 +406,31 @@ func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats 
 			continue
 		}
 
-		// This account is eligible
+		// Check if this account will earn rewards (has new credits)
+		// An account earns rewards only if creditsInVote > creditsInStake
+		creditsInStake := delegation.CreditsObserved
+		var epochCredits []sealevel.EpochCredits
+		switch voteState.Type {
+		case sealevel.VoteStateVersionCurrent:
+			epochCredits = voteState.Current.EpochCredits
+		case sealevel.VoteStateVersionV0_23_5:
+			epochCredits = voteState.V0_23_5.EpochCredits
+		case sealevel.VoteStateVersionV1_14_11:
+			epochCredits = voteState.V1_14_11.EpochCredits
+		}
+
+		var creditsInVote uint64
+		if len(epochCredits) > 0 {
+			creditsInVote = epochCredits[len(epochCredits)-1].Credits
+		}
+
+		// No new credits to earn - this account won't earn rewards
+		if creditsInVote <= creditsInStake || len(epochCredits) == 0 {
+			stats.NoCredits++
+			continue
+		}
+
+		// This account is eligible (stake >= min, has vote, has new credits)
 		stats.Eligible++
 		if stake < stats.MinEligibleStake {
 			stats.MinEligibleStake = stake
@@ -416,8 +443,8 @@ func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats 
 	}
 
 	// Log detailed stats for debugging partition mismatches
-	mlog.Log.Infof("stake account stats: total=%d eligible=%d below_min=%d no_vote=%d zero_stake=%d zero_with_vote=%d min_stake=%d",
-		stats.Total, stats.Eligible, stats.BelowMin, stats.NoVote, stats.ZeroStake, stats.ZeroWithVote, stats.MinimumStake)
+	mlog.Log.Infof("stake account stats: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_stake=%d zero_with_vote=%d min_stake=%d",
+		stats.Total, stats.Eligible, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroStake, stats.ZeroWithVote, stats.MinimumStake)
 	mlog.Log.Infof("  boundary analysis: min_eligible_stake=%d max_ineligible_with_vote=%d",
 		stats.MinEligibleStake, stats.MaxIneligibleWithVote)
 	mlog.Log.Infof("  histogram (with vote): zero=%d 1-999=%d 1K-1M=%d 1M-1B=%d >=1B=%d",
