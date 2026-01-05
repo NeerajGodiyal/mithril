@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -143,7 +142,7 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 			if err := os.Remove(incrSnapshots[i].path); err != nil {
 				mlog.Log.Errorf("failed to remove old incremental snapshot %s: %v", incrSnapshots[i].name, err)
 			} else {
-				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", incrSnapshots[i].name)
+				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", maxSnapshots, incrSnapshots[i].name)
 			}
 		}
 	}
@@ -160,6 +159,7 @@ func BuildAccountsDb(
 	snapshotFile string,
 	incrementalSnapshotFile string,
 	accountsDbDir string,
+	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
@@ -203,28 +203,40 @@ func BuildAccountsDb(
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{})
-	}()
-
-	var incrementalErr error
-	if incrementalSnapshotFile != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
-		}()
+	// Start progress display if provided
+	if dp != nil {
+		dp.Start()
 	}
 
+	// Process full snapshot first (synchronously, not in goroutine)
+	err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
+	if err != nil {
+		if dp != nil {
+			dp.Interrupt(err)
+		}
+		return nil, nil, fmt.Errorf("processing full snapshot: %w", err)
+	}
+
+	// Stop progress display after full snapshot is processed
+	if dp != nil {
+		dp.Stop()
+	}
+
+	// Wait for all workers to finish before continuing to incremental phase
 	wg.Wait()
-	if err := errors.Join(err, incrementalErr); err != nil {
-		mlog.Log.Errorf("failed while processing snapshots: %v", err)
-		return nil, nil, err
+	mlog.Log.Debugf("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
+
+	// Then process incremental snapshot (if provided)
+	if incrementalSnapshotFile != "" {
+		incrStart := time.Now()
+		err = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
+		if err != nil {
+			return nil, nil, fmt.Errorf("processing incremental snapshot: %w", err)
+		}
+		wg.Wait()
+		mlog.Log.Infof("done processing incremental snapshot in %s.", fmtDuration(time.Since(incrStart)))
 	}
+
 	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", fmtDuration(time.Since(start)))
 
 	// Show indexing progress for shard flush
