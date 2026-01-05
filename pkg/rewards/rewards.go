@@ -329,6 +329,18 @@ type StakeAccountStats struct {
 	ZeroStake    uint64 // Accounts with StakeLamports == 0 (subset of BelowMin when min > 0)
 	ZeroWithVote uint64 // Zero-stake accounts that DO have vote cache (potential overcounting)
 	MinimumStake uint64 // The minimum stake delegation threshold
+
+	// Boundary analysis - helps debug partition count mismatches
+	MinEligibleStake      uint64 // Minimum stake among eligible accounts
+	MaxIneligibleWithVote uint64 // Max stake among accounts with vote but below min (boundary cases)
+
+	// Histogram buckets (accounts with vote cache, by stake range)
+	// This helps identify where Agave's cutoff might differ
+	StakeZero    uint64 // stake == 0
+	Stake1To999  uint64 // 1-999 lamports
+	Stake1KTo1M  uint64 // 1,000 - 999,999 lamports (< 0.001 SOL)
+	Stake1MTo1B  uint64 // 1,000,000 - 999,999,999 lamports (0.001 - 1 SOL)
+	StakeAbove1B uint64 // >= 1,000,000,000 lamports (>= 1 SOL)
 }
 
 // CountEligibleStakeAccounts counts stake accounts that will actually earn rewards.
@@ -344,37 +356,72 @@ func CountEligibleStakeAccounts(f *features.Features) (eligible uint64, total ui
 func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
 	stats := StakeAccountStats{
-		Total:        uint64(len(global.StakeCache())),
-		MinimumStake: minimum,
+		Total:            uint64(len(global.StakeCache())),
+		MinimumStake:     minimum,
+		MinEligibleStake: ^uint64(0), // Start with max value
 	}
 
 	for _, delegation := range global.StakeCache() {
+		stake := delegation.StakeLamports
+		hasVote := global.VoteCacheItem(delegation.VoterPubkey) != nil
+
 		// Track zero-stake accounts explicitly
-		if delegation.StakeLamports == 0 {
+		if stake == 0 {
 			stats.ZeroStake++
-			// Check if zero-stake account has vote cache (would be counted if min=0)
-			if global.VoteCacheItem(delegation.VoterPubkey) != nil {
+			if hasVote {
 				stats.ZeroWithVote++
 			}
 		}
 
-		if delegation.StakeLamports < minimum {
+		// Histogram for accounts WITH vote cache (these are candidates for eligibility)
+		if hasVote {
+			switch {
+			case stake == 0:
+				stats.StakeZero++
+			case stake < 1000:
+				stats.Stake1To999++
+			case stake < 1000000:
+				stats.Stake1KTo1M++
+			case stake < 1000000000:
+				stats.Stake1MTo1B++
+			default:
+				stats.StakeAbove1B++
+			}
+		}
+
+		if stake < minimum {
 			stats.BelowMin++
+			// Track max stake among accounts that have vote but are below minimum
+			if hasVote && stake > stats.MaxIneligibleWithVote {
+				stats.MaxIneligibleWithVote = stake
+			}
 			continue
 		}
 
-		voteState := global.VoteCacheItem(delegation.VoterPubkey)
-		if voteState == nil {
+		if !hasVote {
 			stats.NoVote++
 			continue
 		}
 
+		// This account is eligible
 		stats.Eligible++
+		if stake < stats.MinEligibleStake {
+			stats.MinEligibleStake = stake
+		}
+	}
+
+	// Fix MinEligibleStake if no eligible accounts found
+	if stats.Eligible == 0 {
+		stats.MinEligibleStake = 0
 	}
 
 	// Log detailed stats for debugging partition mismatches
 	mlog.Log.Infof("stake account stats: total=%d eligible=%d below_min=%d no_vote=%d zero_stake=%d zero_with_vote=%d min_stake=%d",
 		stats.Total, stats.Eligible, stats.BelowMin, stats.NoVote, stats.ZeroStake, stats.ZeroWithVote, stats.MinimumStake)
+	mlog.Log.Infof("  boundary analysis: min_eligible_stake=%d max_ineligible_with_vote=%d",
+		stats.MinEligibleStake, stats.MaxIneligibleWithVote)
+	mlog.Log.Infof("  histogram (with vote): zero=%d 1-999=%d 1K-1M=%d 1M-1B=%d >=1B=%d",
+		stats.StakeZero, stats.Stake1To999, stats.Stake1KTo1M, stats.Stake1MTo1B, stats.StakeAbove1B)
 
 	return stats
 }
