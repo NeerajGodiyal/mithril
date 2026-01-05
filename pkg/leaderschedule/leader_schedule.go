@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
@@ -92,7 +93,7 @@ func New(
 		voteStr := voteAcctPubkey.String()
 		if voteStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
 			voteStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
-			fmt.Printf("DEBUG_SCHEDULE_INPUT: epoch=%d vote=%s node=%s stake=%d\n",
+			mlog.Log.Infof("DEBUG_SCHEDULE_INPUT: epoch=%d vote=%s node=%s stake=%d",
 				epoch, voteStr, nodePubkey.String(), stake)
 		}
 	}
@@ -245,11 +246,11 @@ func sortStakes(stakes []pubkeyAndStakePair) []pubkeyAndStakePair {
 
 // TieBreakEntry represents an entry in a tie-break group for debugging
 type TieBreakEntry struct {
-	Rank      int
-	NodePk    solana.PublicKey
-	Stake     uint64
-	RawBytes  []byte // First 8 bytes of pubkey for comparison
-	BytesCmp  int    // Comparison result vs previous entry
+	Rank     int
+	NodePk   solana.PublicKey
+	Stake    uint64
+	RawBytes []byte // First 8 bytes of pubkey for comparison
+	BytesCmp int    // Comparison result vs previous entry
 }
 
 // GetSortedStakesDebug returns sorted stakes with tie-break debugging info.

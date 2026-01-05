@@ -710,6 +710,11 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		}
 	})
 
+	// Counters for stake cache loading diagnostics
+	var stakeLoaded atomic.Uint64
+	var stakeNotFound atomic.Uint64
+	var stakeUnmarshalFailed atomic.Uint64
+
 	stakeAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
 		defer wg.Done()
 
@@ -721,12 +726,15 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		if err != nil {
 			// Account doesn't exist in AccountsDB - skip it
 			// This can happen if stake account was closed after snapshot
+			stakeNotFound.Add(1)
 			return
 		}
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			// Can't parse stake state - skip it
+			// Can't parse stake state - log and skip
+			stakeUnmarshalFailed.Add(1)
+			mlog.Log.Warnf("stake cache: failed to unmarshal stake account %s: %v", sa.Account, err)
 			return
 		}
 
@@ -734,13 +742,14 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		delegation := stakeState.Stake.Stake.Delegation
 		global.PutStakeCacheItem(sa.Account,
 			&sealevel.Delegation{
-				VoterPubkey:       delegation.VoterPubkey,
-				StakeLamports:     delegation.StakeLamports,
-				ActivationEpoch:   delegation.ActivationEpoch,
-				DeactivationEpoch: delegation.DeactivationEpoch,
+				VoterPubkey:        delegation.VoterPubkey,
+				StakeLamports:      delegation.StakeLamports,
+				ActivationEpoch:    delegation.ActivationEpoch,
+				DeactivationEpoch:  delegation.DeactivationEpoch,
 				WarmupCooldownRate: delegation.WarmupCooldownRate,
-				CreditsObserved:   stakeState.Stake.Stake.CreditsObserved,
+				CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
 			})
+		stakeLoaded.Add(1)
 	})
 
 	wg.Add(1)
@@ -769,6 +778,18 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 	wg.Wait()
 	stakeAcctWorkerPool.Release()
 	ants.Release()
+
+	// Log stake cache loading summary
+	loaded := stakeLoaded.Load()
+	notFound := stakeNotFound.Load()
+	unmarshalFailed := stakeUnmarshalFailed.Load()
+	total := loaded + notFound + unmarshalFailed
+	mlog.Log.Infof("stake cache loaded: total=%d loaded=%d not_found=%d unmarshal_failed=%d",
+		total, loaded, notFound, unmarshalFailed)
+	if notFound > 0 || unmarshalFailed > 0 {
+		mlog.Log.Warnf("stake cache: %d accounts skipped (not_found=%d, unmarshal_failed=%d)",
+			notFound+unmarshalFailed, notFound, unmarshalFailed)
+	}
 }
 
 func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
