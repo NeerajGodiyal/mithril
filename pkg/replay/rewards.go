@@ -8,7 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -82,6 +82,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 // This works because stake accounts cannot change during the rewards period (stake program
 // rejects all operations when EpochRewards.Active == true), so the same inputs produce
 // the same partition assignments and reward calculations.
+//
+// Returns (nil, nil) if rewards period is already complete (Active == false).
+// Returns (nil, error) if EpochRewards sysvar cannot be loaded.
 func recalculatePartitionedRewardsForResume(
 	acctsDb *accountsdb.AccountsDb,
 	stakeHistory *sealevel.SysvarStakeHistory,
@@ -89,16 +92,39 @@ func recalculatePartitionedRewardsForResume(
 	f *features.Features,
 	epoch uint64,
 	slot uint64,
-) *rewards.PartitionedRewardDistributionInfo {
-	// Get stored EpochRewards sysvar (already loaded into cache during resume)
-	epochRewards := sealevel.SysvarCache.EpochRewards.Sysvar
-	if epochRewards == nil {
-		panic("recalculatePartitionedRewardsForResume: EpochRewards sysvar not in cache")
+) (*rewards.PartitionedRewardDistributionInfo, error) {
+	// Try cache first, fall back to AccountsDB
+	var epochRewards *sealevel.SysvarEpochRewards
+	if sealevel.SysvarCache.EpochRewards.Sysvar != nil {
+		epochRewards = sealevel.SysvarCache.EpochRewards.Sysvar
+	} else {
+		// Load from AccountsDB
+		epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load EpochRewards sysvar from AccountsDB: %w", err)
+		}
+		var er sealevel.SysvarEpochRewards
+		decoder := bin.NewBinDecoder(epochRewardsAcct.Data)
+		er.MustUnmarshalWithDecoder(decoder)
+		epochRewards = &er
+		// Update cache for future use
+		sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
+		sealevel.SysvarCache.EpochRewards.Sysvar = epochRewards
 	}
 
+	// Gate on Active flag - if rewards already complete, skip reconstruction
+	if !epochRewards.Active {
+		mlog.Log.Infof("rewards resume: EpochRewards.Active=false, rewards period already complete (distributed=%d)",
+			epochRewards.DistributedRewards)
+		return nil, nil
+	}
+
+	numStakeAccounts := uint64(len(global.StakeCache()))
 	mlog.Log.Infof("rewards resume: reconstructing partitionedRewardsInfo from stored state")
-	mlog.Log.Infof("  epoch=%d slot=%d num_partitions=%d total_rewards=%d distributed=%d",
-		epoch, slot, epochRewards.NumPartitions, epochRewards.TotalRewards, epochRewards.DistributedRewards)
+	mlog.Log.Infof("  epoch=%d slot=%d active=%v distributed=%d/%d",
+		epoch, slot, epochRewards.Active, epochRewards.DistributedRewards, epochRewards.TotalRewards)
+	mlog.Log.Infof("  num_partitions=%d distribution_start_height=%d stake_accts=%d",
+		epochRewards.NumPartitions, epochRewards.DistributionStartingBlockHeight, numStakeAccounts)
 
 	// Create a minimal SlotCtx with the stored ParentBlockhash
 	// This blockhash is used by CalculateRewardPartitionForPubkey for deterministic partition assignment
@@ -113,13 +139,14 @@ func recalculatePartitionedRewardsForResume(
 	pointsPerStakeAcct, points, partitions := rewards.CalculateTotalPointsAndPartitions(
 		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch)
 
-	// Validate points match stored value
+	// Validate points match stored value - mismatch indicates stake cache divergence
 	if !points.Eq(epochRewards.TotalPoints) {
-		mlog.Log.Warnf("rewards resume: points mismatch - computed=%s stored=%s",
-			points.String(), epochRewards.TotalPoints.String())
+		mlog.Log.Errorf("rewards resume: CRITICAL points mismatch - computed=%s stored=%s (stake_accts=%d)",
+			points.String(), epochRewards.TotalPoints.String(), numStakeAccounts)
+		mlog.Log.Errorf("  this may indicate stake cache divergence; using stored points for consistency")
 	}
 
-	// Rebuild reward calculations using stored total rewards and computed points
+	// Rebuild reward calculations using stored total rewards and points
 	pointValue := rewards.PointValue{
 		Rewards: epochRewards.TotalRewards,
 		Points:  epochRewards.TotalPoints, // Use stored points for consistency
@@ -131,8 +158,8 @@ func recalculatePartitionedRewardsForResume(
 	// Build the partitioned rewards info struct
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
-	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d",
-		len(partitions), len(stakingRewards))
+	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d total_points=%s",
+		len(partitions), len(stakingRewards), epochRewards.TotalPoints.String())
 
 	return &rewards.PartitionedRewardDistributionInfo{
 		TotalStakingRewards:    epochRewards.TotalRewards,
@@ -141,7 +168,7 @@ func recalculatePartitionedRewardsForResume(
 		NumRewardPartitions:    epochRewards.NumPartitions,
 		RewardPartitions:       partitions,
 		StakingRewards:         stakingRewards,
-	}
+	}, nil
 }
 
 func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {

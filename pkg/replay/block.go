@@ -1337,9 +1337,16 @@ func ReplayBlocks(
 				decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 				stakeHistory.MustUnmarshalWithDecoder(decoder)
 
-				partitionedRewardsInfo = recalculatePartitionedRewardsForResume(
+				var recalcErr error
+				partitionedRewardsInfo, recalcErr = recalculatePartitionedRewardsForResume(
 					acctsDb, &stakeHistory, epochSchedule, replayCtx.CurrentFeatures,
 					block.Epoch, currentSlot)
+				if recalcErr != nil {
+					result.Error = fmt.Errorf("failed to reconstruct rewards info for resume: %w", recalcErr)
+					break
+				}
+				// nil partitionedRewardsInfo means rewards already complete (Active=false)
+				// The distribution gate below will skip since Active check will fail
 			}
 		}
 
@@ -1347,7 +1354,9 @@ func ReplayBlocks(
 
 		// Gate rewards distribution using epochRewards.Active instead of slot upper bound.
 		// This handles skipped slots correctly since Active is set false when last partition is processed.
+		// partitionedRewardsInfo is nil if rewards period already complete (resume case with Active=false)
 		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled &&
+			partitionedRewardsInfo != nil &&
 			currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot &&
 			sealevel.SysvarCache.EpochRewards.Sysvar != nil &&
 			sealevel.SysvarCache.EpochRewards.Sysvar.Active {
