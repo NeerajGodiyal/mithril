@@ -372,9 +372,17 @@ func LoadStakeCache(accountsDbDir string) (int, error) {
 		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
 	}
 
+	loadedCount := 0
 	for _, entry := range entries {
-		pubkey := solana.MustPublicKeyFromBase58(entry.Pubkey)
-		voterPubkey := solana.MustPublicKeyFromBase58(entry.VoterPubkey)
+		pubkey, err := solana.PublicKeyFromBase58(entry.Pubkey)
+		if err != nil {
+			// Skip corrupt entry but continue loading
+			continue
+		}
+		voterPubkey, err := solana.PublicKeyFromBase58(entry.VoterPubkey)
+		if err != nil {
+			continue
+		}
 
 		instance.stakeCache[pubkey] = &sealevel.Delegation{
 			VoterPubkey:        voterPubkey,
@@ -384,9 +392,10 @@ func LoadStakeCache(accountsDbDir string) (int, error) {
 			WarmupCooldownRate: entry.WarmupCooldownRate,
 			CreditsObserved:    entry.CreditsObserved,
 		}
+		loadedCount++
 	}
 
-	return len(entries), nil
+	return loadedCount, nil
 }
 
 // StakeCacheExists checks if the stake cache file exists on disk.

@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -815,7 +816,23 @@ func BuildStakeCacheFromAccountsDB(acctsDb *accountsdb.AccountsDb) (int, error) 
 	var parseFailed atomic.Uint64
 
 	stakeProgramAddr := solana.PublicKeyFromBytes(a.StakeProgramAddr[:])
+	var skipped atomic.Uint64
 	err := acctsDb.ScanAccountsByOwner(stakeProgramAddr, func(pubkey solana.PublicKey, acct *accounts.Account) bool {
+		// Skip empty accounts (like recordStakeDelegation does)
+		if acct.Lamports == 0 {
+			skipped.Add(1)
+			return true // Continue scanning
+		}
+
+		// Skip uninitialized stake accounts
+		if len(acct.Data) >= 4 {
+			acctType := binary.LittleEndian.Uint32(acct.Data)
+			if acctType == sealevel.StakeStateV2StatusUninitialized {
+				skipped.Add(1)
+				return true // Continue scanning
+			}
+		}
+
 		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
 		if err != nil {
 			parseFailed.Add(1)
@@ -841,10 +858,11 @@ func BuildStakeCacheFromAccountsDB(acctsDb *accountsdb.AccountsDb) (int, error) 
 
 	loadedCount := int(loaded.Load())
 	parseFailedCount := parseFailed.Load()
+	skippedCount := skipped.Load()
 	elapsed := time.Since(start)
 
-	mlog.Log.Infof("stake cache scan complete: loaded=%d parse_failed=%d elapsed=%v",
-		loadedCount, parseFailedCount, elapsed)
+	mlog.Log.Infof("stake cache scan complete: loaded=%d skipped=%d parse_failed=%d elapsed=%v",
+		loadedCount, skippedCount, parseFailedCount, elapsed)
 
 	return loadedCount, nil
 }

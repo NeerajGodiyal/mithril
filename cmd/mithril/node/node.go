@@ -820,26 +820,6 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Try to load persisted stake cache if resuming
-	// This provides accurate stake data between snapshot slot and resume slot
-	if mithrilState != nil && mithrilState.HasResumeContext() {
-		loadedEntries, err := global.LoadStakeCache(accountsDbDir)
-		if err != nil {
-			mlog.Log.Warnf("failed to load stake cache from file: %v", err)
-		} else if loadedEntries > 0 {
-			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
-		} else {
-			// No cache file exists - scan AccountsDB to build stake cache
-			mlog.Log.Infof("stake cache file not found - scanning AccountsDB")
-			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
-			if scanErr != nil {
-				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
-			} else {
-				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
-			}
-		}
-	}
-
 	if mithrilState == nil {
 		// Create a new state file for this session
 		var snapshotEpoch uint64
@@ -870,6 +850,27 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
+
+	// Try to load persisted stake cache if resuming (must be after InitCaches for scan fallback)
+	// This provides accurate stake data between snapshot slot and resume slot
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		loadedEntries, loadErr := global.LoadStakeCache(accountsDbDir)
+		if loadErr != nil {
+			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
+		}
+		if loadErr != nil || loadedEntries == 0 {
+			// Cache file missing, corrupt, or empty - scan AccountsDB to build stake cache
+			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
+			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+			if scanErr != nil {
+				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+			} else {
+				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			}
+		} else {
+			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
+		}
+	}
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
 	if err != nil {
@@ -1604,26 +1605,6 @@ postBootstrap:
 		}
 	}
 
-	// Try to load persisted stake cache if resuming
-	// This provides accurate stake data between snapshot slot and resume slot
-	if mithrilState != nil && mithrilState.HasResumeContext() {
-		loadedEntries, err := global.LoadStakeCache(accountsPath)
-		if err != nil {
-			mlog.Log.Warnf("failed to load stake cache from file: %v", err)
-		} else if loadedEntries > 0 {
-			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
-		} else {
-			// No cache file exists - scan AccountsDB to build stake cache
-			mlog.Log.Infof("stake cache file not found - scanning AccountsDB")
-			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
-			if scanErr != nil {
-				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
-			} else {
-				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
-			}
-		}
-	}
-
 	if mithrilState == nil {
 		// Initialize state for this session
 		var snapshotEpoch uint64
@@ -1642,6 +1623,27 @@ postBootstrap:
 
 	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
+
+	// Try to load persisted stake cache if resuming (must be after InitCaches for scan fallback)
+	// This provides accurate stake data between snapshot slot and resume slot
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		loadedEntries, loadErr := global.LoadStakeCache(accountsPath)
+		if loadErr != nil {
+			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
+		}
+		if loadErr != nil || loadedEntries == 0 {
+			// Cache file missing, corrupt, or empty - scan AccountsDB to build stake cache
+			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
+			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+			if scanErr != nil {
+				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+			} else {
+				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			}
+		} else {
+			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
+		}
+	}
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
 	if err != nil {
