@@ -1032,6 +1032,10 @@ func ReplayBlocks(
 		rpcBackups = rpcEndpoints[1:]
 	}
 
+	// Enable pre-commit validation for epoch boundary partition counts.
+	// This catches partition count mismatches BEFORE committing corrupted state.
+	rewards.SetValidationRpcClient(rpcc, rpcBackups)
+
 	cacheConstantSysvars(acctsDb)
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 

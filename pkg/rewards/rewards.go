@@ -24,6 +24,60 @@ import (
 	"github.com/panjf2000/ants/v2"
 )
 
+// Package-level validation settings for epoch boundary
+var (
+	// validationRpcClient is used for pre-commit validation at epoch boundary.
+	// Set via SetValidationRpcClient() before replay starts.
+	validationRpcClient *rpcclient.RpcClient
+
+	// validationRpcBackups are backup RPC endpoints for validation failover.
+	validationRpcBackups []string
+
+	// validatePartitionCount enables partition count validation against RPC at epoch boundary.
+	// When enabled, panics if local partition count differs from RPC, preventing corrupted state.
+	// Default: true (for debugging). Set to false for production if confident in local computation.
+	validatePartitionCount = true
+)
+
+// SetValidationRpcClient configures the RPC client used for epoch boundary validation.
+// Call this before replay starts to enable partition count validation.
+func SetValidationRpcClient(client *rpcclient.RpcClient, backups []string) {
+	validationRpcClient = client
+	validationRpcBackups = backups
+}
+
+// SetValidatePartitionCount enables or disables partition count validation at epoch boundary.
+func SetValidatePartitionCount(enabled bool) {
+	validatePartitionCount = enabled
+}
+
+// fetchRpcPartitionCountWithBackups fetches numRewardPartitions from RPC with failover.
+// Used for pre-commit validation at epoch boundary.
+func fetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []string, firstSlotInEpoch uint64) (uint64, error) {
+	// Try primary first
+	numPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
+	if err == nil {
+		return numPartitions, nil
+	}
+
+	lastErr := err
+	mlog.Log.Warnf("partition validation: primary RPC failed: %v", err)
+
+	// Try backup endpoints
+	for i, endpoint := range backups {
+		mlog.Log.Infof("partition validation: trying backup #%d: %s", i+1, endpoint)
+		backupClient := rpcclient.NewRpcClient(endpoint)
+		numPartitions, err := backupClient.GetNumRewardPartitions(firstSlotInEpoch)
+		if err == nil {
+			return numPartitions, nil
+		}
+		lastErr = err
+		mlog.Log.Warnf("partition validation: backup #%d failed: %v", i+1, err)
+	}
+
+	return 0, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
+}
+
 const (
 	RewardTypeFee     string = "Fee"
 	RewardTypeRent    string = "Rent"
@@ -247,8 +301,48 @@ func fetchRewardPartitionInfoWithRetry(rpcc *rpcclient.RpcClient, firstSlotInEpo
 	return 0, nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// CountEligibleStakeAccounts counts stake accounts that will actually earn rewards.
+// This matches Agave's filtering logic: stake >= minimum_stake_delegation AND has vote state in cache.
+// IMPORTANT: This count is used for partition calculation, not the raw stake cache size.
+func CountEligibleStakeAccounts(f *features.Features) (eligible uint64, total uint64, belowMin uint64, noVote uint64) {
+	minimum := minimumStakeDelegationFromFeatures(f)
+	total = uint64(len(global.StakeCache()))
+
+	for _, delegation := range global.StakeCache() {
+		if delegation.StakeLamports < minimum {
+			belowMin++
+			continue
+		}
+
+		voteState := global.VoteCacheItem(delegation.VoterPubkey)
+		if voteState == nil {
+			noVote++
+			continue
+		}
+
+		eligible++
+	}
+
+	return eligible, total, belowMin, noVote
+}
+
+// minimumStakeDelegationFromFeatures returns the minimum stake delegation based on features.
+// This is a feature-only version that doesn't require SlotCtx.
+func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
+	if !f.IsActive(features.StakeMinimumDelegationForRewards) {
+		return 0
+	}
+
+	if f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
+		return 1000000000
+	}
+
+	return 1
+}
+
 // DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
-// Uses stake cache count and ComputeNumRewardPartitions to calculate partitions.
+// Uses ELIGIBLE stake account count (filtered by min stake and vote cache) for partition calculation.
+// This matches Agave's behavior where only accounts that actually earn rewards are counted.
 func DeterminePartitionedStakingRewardsInfoLocal(
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	inflation *Inflation,
@@ -260,8 +354,10 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 ) *PartitionedRewardDistributionInfo {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
-	// Count stake accounts from cache
-	numStakeAccounts := uint64(len(global.StakeCache()))
+	// Count ELIGIBLE stake accounts (filtered like Agave does)
+	// This is critical: Agave counts accounts that actually earn rewards, not total stake cache
+	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts := CountEligibleStakeAccounts(f)
+	numStakeAccounts := eligibleAccounts
 
 	// Get slots per epoch for this epoch
 	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
@@ -286,8 +382,29 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 
 	mlog.Log.Infof("local rewards partition: epoch=%d prev_epoch=%d first_slot=%d slots_per_epoch=%d",
 		epoch, prevEpoch, firstSlotInEpoch, slotsPerEpoch)
-	mlog.Log.Infof("  stake_accts=%d partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
-		numStakeAccounts, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
+	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d",
+		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts)
+	mlog.Log.Infof("  partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
+		numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
+
+	// PRE-COMMIT VALIDATION: Validate partition count against RPC before processing epoch boundary.
+	// This prevents committing corrupted state that would cause vote failures on subsequent blocks.
+	if validatePartitionCount && validationRpcClient != nil {
+		rpcNumPartitions, err := fetchRpcPartitionCountWithBackups(validationRpcClient, validationRpcBackups, firstSlotInEpoch)
+		if err != nil {
+			mlog.Log.Warnf("partition validation: RPC fetch failed (continuing anyway): %v", err)
+		} else {
+			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
+			if numRewardPartitions != rpcNumPartitions {
+				// CRITICAL: Partition count mismatch will cause bankhash divergence.
+				// Panic now to prevent corrupted state from being committed.
+				// The safe state file will be written for clean resume.
+				panic(fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible_stake_accts=%d total_stake_accts=%d below_min=%d no_vote=%d. "+
+					"This would cause epoch boundary divergence. Check stake account filtering logic.",
+					numRewardPartitions, rpcNumPartitions, eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts))
+			}
+		}
+	}
 
 	return &PartitionedRewardDistributionInfo{
 		TotalStakingRewards:    totalStakingRewards,
