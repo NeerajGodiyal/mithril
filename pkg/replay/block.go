@@ -1322,7 +1322,24 @@ func ReplayBlocks(
 			// First block being processed - check if we're in rewards period
 			// (uses lastSlotCtx == nil to detect first block, handles skipped startSlot)
 			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
-				panic("bootstrapping during epoch rewards period is currently unsupported.")
+				// Resume during rewards period: reconstruct partitionedRewardsInfo from persisted state
+				// This works because stake accounts cannot change during rewards period (stake program
+				// rejects all operations when EpochRewards.Active == true)
+				mlog.Log.Infof("resuming during rewards period: epoch=%d slot=%d", block.Epoch, currentSlot)
+
+				// Read stake history from AccountsDB (may not be in cache yet during resume)
+				stakeHistoryAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarStakeHistoryAddr)
+				if err != nil {
+					result.Error = fmt.Errorf("failed to read StakeHistory for rewards resume: %w", err)
+					break
+				}
+				var stakeHistory sealevel.SysvarStakeHistory
+				decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
+				stakeHistory.MustUnmarshalWithDecoder(decoder)
+
+				partitionedRewardsInfo = recalculatePartitionedRewardsForResume(
+					acctsDb, &stakeHistory, epochSchedule, replayCtx.CurrentFeatures,
+					block.Epoch, currentSlot)
 			}
 		}
 

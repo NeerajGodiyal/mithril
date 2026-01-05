@@ -73,6 +73,77 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	return partitionedRewardsInfo, updatedAccts, parentUpdatedAccts
 }
 
+// recalculatePartitionedRewardsForResume rebuilds the partitionedRewardsInfo when resuming
+// during the epoch rewards period. This is needed because the in-memory partitionedRewardsInfo
+// is lost on crash/restart, but we can reconstruct it from:
+//   - EpochRewards sysvar: NumPartitions, TotalRewards, TotalPoints, ParentBlockhash
+//   - Stake/Vote caches: populated from AccountsDB during resume
+//
+// This works because stake accounts cannot change during the rewards period (stake program
+// rejects all operations when EpochRewards.Active == true), so the same inputs produce
+// the same partition assignments and reward calculations.
+func recalculatePartitionedRewardsForResume(
+	acctsDb *accountsdb.AccountsDb,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	f *features.Features,
+	epoch uint64,
+	slot uint64,
+) *rewards.PartitionedRewardDistributionInfo {
+	// Get stored EpochRewards sysvar (already loaded into cache during resume)
+	epochRewards := sealevel.SysvarCache.EpochRewards.Sysvar
+	if epochRewards == nil {
+		panic("recalculatePartitionedRewardsForResume: EpochRewards sysvar not in cache")
+	}
+
+	mlog.Log.Infof("rewards resume: reconstructing partitionedRewardsInfo from stored state")
+	mlog.Log.Infof("  epoch=%d slot=%d num_partitions=%d total_rewards=%d distributed=%d",
+		epoch, slot, epochRewards.NumPartitions, epochRewards.TotalRewards, epochRewards.DistributedRewards)
+
+	// Create a minimal SlotCtx with the stored ParentBlockhash
+	// This blockhash is used by CalculateRewardPartitionForPubkey for deterministic partition assignment
+	mockSlotCtx := &sealevel.SlotCtx{
+		Blockhash:  epochRewards.ParentBlockhash,
+		Features:   f,
+		AccountsDb: acctsDb,
+	}
+
+	// Rebuild partition assignments and calculate points
+	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
+	pointsPerStakeAcct, points, partitions := rewards.CalculateTotalPointsAndPartitions(
+		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch)
+
+	// Validate points match stored value
+	if !points.Eq(epochRewards.TotalPoints) {
+		mlog.Log.Warnf("rewards resume: points mismatch - computed=%s stored=%s",
+			points.String(), epochRewards.TotalPoints.String())
+	}
+
+	// Rebuild reward calculations using stored total rewards and computed points
+	pointValue := rewards.PointValue{
+		Rewards: epochRewards.TotalRewards,
+		Points:  epochRewards.TotalPoints, // Use stored points for consistency
+	}
+	stakingRewards := rewards.CalculateStakeRewards(
+		pointsPerStakeAcct, mockSlotCtx, stakeHistory, slot, epoch-1,
+		pointValue, newWarmupCooldownRateEpoch, f)
+
+	// Build the partitioned rewards info struct
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+
+	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d",
+		len(partitions), len(stakingRewards))
+
+	return &rewards.PartitionedRewardDistributionInfo{
+		TotalStakingRewards:    epochRewards.TotalRewards,
+		FirstStakingRewardSlot: firstSlotInEpoch + 1,
+		LastStakingRewardSlot:  firstSlotInEpoch + epochRewards.NumPartitions,
+		NumRewardPartitions:    epochRewards.NumPartitions,
+		RewardPartitions:       partitions,
+		StakingRewards:         stakingRewards,
+	}
+}
+
 func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
