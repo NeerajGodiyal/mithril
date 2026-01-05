@@ -1312,7 +1312,7 @@ func ReplayBlocks(
 
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
 			// If this crashes, we still have leader schedule logs for debugging.
-			partitionedRewardsInfo = handleEpochRewards(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
+			partitionedRewardsInfo = handleEpochRewards(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
 
 			// Set block height (was deferred in configureBlock's early return at epoch boundary)
 			if global.ManageBlockHeight() {

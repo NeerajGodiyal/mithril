@@ -15,7 +15,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
-	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	bin "github.com/gagliardetto/binary"
@@ -193,11 +192,11 @@ func prepareEpochStakes(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.Sl
 // handleEpochRewards distributes rewards and updates stake history.
 // This should be called AFTER leader schedule computation to ensure schedule
 // verification works even if rewards distribution crashes.
-func handleEpochRewards(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, ctx *EpochTransitionContext) *rewards.PartitionedRewardDistributionInfo {
+func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, ctx *EpochTransitionContext) *rewards.PartitionedRewardDistributionInfo {
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, rpcc, rpcBackups, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
 	} else {
 		panic("only partitioned rewards supported")
 	}
@@ -212,9 +211,9 @@ func handleEpochRewards(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClien
 // handleEpochTransition is the legacy function that bundles stake computation and rewards.
 // Prefer using prepareEpochStakes + handleEpochRewards separately to allow leader schedule
 // computation between them.
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
 	ctx := prepareEpochStakes(acctsDb, prevSlotCtx, epochSchedule, f, block, epoch)
-	return handleEpochRewards(acctsDb, rpcc, rpcBackups, partitionedEpochRewards, prevSlotCtx, replayCtx, epochSchedule, f, block, epoch, ctx)
+	return handleEpochRewards(acctsDb, partitionedEpochRewards, prevSlotCtx, replayCtx, epochSchedule, f, block, epoch, ctx)
 }
 
 // cacheEpochStakesForValidation populates global.EpochStakes with stake data
