@@ -362,7 +362,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 				if txAcct.Lamports != txMeta.PreBalances[count] {
 					mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s pre-balance mismatch for %s: mithril=%d, onchain=%d",
 						CurrentRunID, slotCtx.Slot, tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count])
-					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
+					return nil, &DivergenceError{
+					Slot:      slotCtx.Slot,
+					TxSig:     tx.Signatures[0].String(),
+					LocalErr:  nil,
+					OnchainOk: true,
+					Message:   fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count]),
+				}
 				}
 			}
 
@@ -383,7 +389,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	if txMeta != nil && txFeeInfo.TotalFee != txMeta.Fee {
 		mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s fee mismatch: mithril=%d, onchain=%d",
 			CurrentRunID, slotCtx.Slot, tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
-		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
+		return nil, &DivergenceError{
+			Slot:      slotCtx.Slot,
+			TxSig:     tx.Signatures[0].String(),
+			LocalErr:  nil,
+			OnchainOk: true,
+			Message:   fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee),
+		}
 	}
 
 	start = time.Now()
@@ -488,8 +500,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		if errBuf.Len() > 0 {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s post-balance mismatches detected",
 				CurrentRunID, slotCtx.Slot, tx.Signatures[0])
-			msg := fmt.Sprintf("tx %s post-balance divergences:", tx.Signatures[0]) + errBuf.String()
-			panic(msg)
+			return nil, &DivergenceError{
+				Slot:      slotCtx.Slot,
+				TxSig:     tx.Signatures[0].String(),
+				LocalErr:  nil,
+				OnchainOk: true,
+				Message:   fmt.Sprintf("tx %s post-balance divergences:%s", tx.Signatures[0], errBuf.String()),
+			}
 		}
 	}
 	metrics.GlobalBlockReplay.PostBalanceDivergenceCheck.AddTimingSince(start)

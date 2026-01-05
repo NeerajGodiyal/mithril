@@ -158,6 +158,20 @@ type ResumeState struct {
 	SlotHashes *sealevel.SysvarSlotHashes
 }
 
+// DivergenceError represents a transaction execution divergence from on-chain results.
+// This is returned instead of panicking so that the caller can write state and exit cleanly.
+type DivergenceError struct {
+	Slot      uint64
+	TxSig     string
+	LocalErr  error  // nil if succeeded locally
+	OnchainOk bool   // true if onchain succeeded
+	Message   string // Human-readable description
+}
+
+func (e *DivergenceError) Error() string {
+	return e.Message
+}
+
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
@@ -1871,7 +1885,7 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, error) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
@@ -1885,7 +1899,13 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 			if txMeta.Err == nil && tx.IsVote() {
 				mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: vote tx %s failed locally but succeeded onchain => bankhash mismatch at parent slot %d",
 					CurrentRunID, block.Slot, tx.Signatures[0], block.ParentSlot)
-				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
+				return txFeeAccumulator, &DivergenceError{
+					Slot:      block.Slot,
+					TxSig:     tx.Signatures[0].String(),
+					LocalErr:  txErr,
+					OnchainOk: true,
+					Message:   fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot),
+				}
 			}
 		}
 
@@ -1893,23 +1913,38 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		if txErr == nil && txMeta.Err != nil {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
 				CurrentRunID, block.Slot, tx.Signatures[0], block.TxMetas[idx].Err)
-			panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
+			return txFeeAccumulator, &DivergenceError{
+				Slot:      block.Slot,
+				TxSig:     tx.Signatures[0].String(),
+				LocalErr:  nil,
+				OnchainOk: false,
+				Message:   fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err),
+			}
 		} else if txErr != nil && txMeta.Err == nil {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
 				CurrentRunID, block.Slot, tx.Signatures[0], txErr)
-			panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+			return txFeeAccumulator, &DivergenceError{
+				Slot:      block.Slot,
+				TxSig:     tx.Signatures[0].String(),
+				LocalErr:  txErr,
+				OnchainOk: true,
+				Message:   fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr),
+			}
 		}
 
 		txFeeAccumulator.Add(txFeeInfo)
 	}
-	return txFeeAccumulator
+	return txFeeAccumulator, nil
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, error) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
+
+	// Atomic storage for first divergence error - workers store here instead of panicking
+	var divergenceErr atomic.Pointer[DivergenceError]
 
 	if rblock.FromLightbringer {
 		wg := &sync.WaitGroup{}
@@ -1945,11 +1980,25 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
 							CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
+						// Store divergence error atomically (first one wins)
+						divergenceErr.CompareAndSwap(nil, &DivergenceError{
+							Slot:      block.Slot,
+							TxSig:     tx.Signatures[0].String(),
+							LocalErr:  nil,
+							OnchainOk: false,
+							Message:   fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err),
+						})
 					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
 							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+						// Store divergence error atomically (first one wins)
+						divergenceErr.CompareAndSwap(nil, &DivergenceError{
+							Slot:      block.Slot,
+							TxSig:     tx.Signatures[0].String(),
+							LocalErr:  txErr,
+							OnchainOk: true,
+							Message:   fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr),
+						})
 					}
 					txDurations[i] += time.Since(txStart)
 					done <- idx
@@ -1960,6 +2009,20 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 		wg.Wait()
 		close(done)
+	}
+
+	// Check if any worker recorded a divergence (success/failure mismatch)
+	if err := divergenceErr.Load(); err != nil {
+		return txFeeAccumulator, err
+	}
+
+	// Also check errs[] for DivergenceErrors from ProcessTransaction (pre-balance, fee, post-balance)
+	for _, txErr := range errs {
+		if txErr != nil {
+			if divErr, ok := txErr.(*DivergenceError); ok {
+				return txFeeAccumulator, divErr
+			}
+		}
 	}
 
 	for idx, txFeeInfo := range txFeeInfos {
@@ -1976,12 +2039,18 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			} else {
 				mlog.Log.Errorf("  RecentBlockhashes: nil or empty!")
 			}
-			panic(fmt.Sprintf("txFeeInfo is nil - blockhash validation failed for tx %s", tx.Signatures[0]))
+			return txFeeAccumulator, &DivergenceError{
+				Slot:      block.Slot,
+				TxSig:     tx.Signatures[0].String(),
+				LocalErr:  fmt.Errorf("blockhash validation failed"),
+				OnchainOk: true,
+				Message:   fmt.Sprintf("txFeeInfo is nil - blockhash validation failed for tx %s", tx.Signatures[0]),
+			}
 		}
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 
-	return txFeeAccumulator
+	return txFeeAccumulator, nil
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
@@ -2015,14 +2084,20 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	var divergenceErr error
 	start = time.Now()
 
 	if txParallelism > 0 {
-		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
+		txFeeAccumulator, divergenceErr = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
-		txFeeAccumulator = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
+		txFeeAccumulator, divergenceErr = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
 	}
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
+
+	// Return divergence errors immediately so caller can write state and exit cleanly
+	if divergenceErr != nil {
+		return slotCtx, divergenceErr
+	}
 
 	start = time.Now()
 
