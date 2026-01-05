@@ -383,7 +383,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
-	snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	// Check both "snapshot" (Run command) and "snapshot-archive-path" (VerifyRange command) flag names
+	snapshotArchivePath = getString("snapshot", "storage.snapshots")
+	if snapshotArchivePath == "" {
+		snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	}
 	if snapshotArchivePath == "" {
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
