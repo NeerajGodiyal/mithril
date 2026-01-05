@@ -244,6 +244,55 @@ func fetchRewardPartitionInfoWithRetry(rpcc *rpcclient.RpcClient, firstSlotInEpo
 	return 0, nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
+// Uses stake cache count and ComputeNumRewardPartitions to calculate partitions.
+func DeterminePartitionedStakingRewardsInfoLocal(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	inflation *Inflation,
+	prevEpochCapitalization uint64,
+	epoch uint64,
+	prevEpoch uint64,
+	slotsPerYear float64,
+	f *features.Features,
+) *PartitionedRewardDistributionInfo {
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+
+	// Count stake accounts from cache
+	numStakeAccounts := uint64(len(global.StakeCache()))
+
+	// Get slots per epoch for this epoch
+	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
+
+	// Compute partitions using local formula
+	numRewardPartitions := ComputeNumRewardPartitions(epoch, slotsPerEpoch, numStakeAccounts, epochSchedule.FirstNormalEpoch)
+
+	// First reward slot is firstSlotInEpoch + 1
+	firstStakingRewardSlot := firstSlotInEpoch + 1
+
+	// Last reward slot is an upper bound (actual may be lower if slots skipped)
+	// This is used for IsWithinRewardsPeriod bounds check
+	lastStakingRewardSlot := firstSlotInEpoch + numRewardPartitions
+
+	totalStakingRewards := CalculatePreviousEpochInflationRewards(
+		epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
+
+	// EAH calculation slots (epoch accounts hash)
+	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
+	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
+
+	mlog.Log.Infof("local rewards partition: epoch=%d stake_accts=%d partitions=%d first=%d last=%d",
+		epoch, numStakeAccounts, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot)
+
+	return &PartitionedRewardDistributionInfo{
+		TotalStakingRewards:    totalStakingRewards,
+		FirstStakingRewardSlot: firstStakingRewardSlot,
+		LastStakingRewardSlot:  lastStakingRewardSlot,
+		EahStartOffsetSlot:     eahCalcSlot,
+		EahStopOffsetSlot:      eahInclusionSlot,
+		NumRewardPartitions:    numRewardPartitions,
+	}
+}
+
 type idxAndReward struct {
 	idx    int
 	reward rpc.BlockReward
