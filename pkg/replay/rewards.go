@@ -61,11 +61,20 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
 
+	numStakeAccounts := uint64(len(global.StakeCache()))
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	slotsInEpoch := epochSchedule.SlotsInEpoch(epoch)
+
 	mlog.Log.Infof("rewards distribution start: epoch=%d slot=%d block_height=%d",
 		epoch, slot, block.BlockHeight)
+	mlog.Log.Infof("  first_slot_in_epoch=%d slots_in_epoch=%d stake_accts=%d",
+		firstSlotInEpoch, slotsInEpoch, numStakeAccounts)
 	mlog.Log.Infof("  distribution_start_height=%d partitions=%d total_rewards=%d vote_rewards=%d",
 		newEpochRewards.DistributionStartingBlockHeight, newEpochRewards.NumPartitions,
 		newEpochRewards.TotalRewards, voteRewardsDistributed)
+	mlog.Log.Infof("  first_reward_slot=%d last_reward_slot=%d total_points=%s",
+		partitionedRewardsInfo.FirstStakingRewardSlot, partitionedRewardsInfo.LastStakingRewardSlot,
+		points.String())
 
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
@@ -205,16 +214,25 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		return nil, nil
 	}
 
+	partitionSize := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx).NumPubkeys()
 	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
 	epochRewards.Distribute(distributedLamports)
 
+	// Log partition progress at debug level (every partition)
+	mlog.Log.Debugf("rewards partition %d/%d: slot=%d height=%d stake_accts=%d lamports=%d cumulative=%d",
+		partitionIdx+1, partitionedEpochRewardsInfo.NumRewardPartitions,
+		currentSlot, currentBlockHeight, partitionSize, distributedLamports, epochRewards.DistributedRewards)
+
 	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
 	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions-1 {
 		epochRewards.Active = false
-		mlog.Log.Infof("rewards distribution complete: slot=%d block_height=%d partition_idx=%d num_partitions=%d distributed=%d",
-			currentSlot, currentBlockHeight, partitionIdx, partitionedEpochRewardsInfo.NumRewardPartitions, epochRewards.DistributedRewards)
+		mlog.Log.Infof("rewards distribution complete: slot=%d block_height=%d",
+			currentSlot, currentBlockHeight)
+		mlog.Log.Infof("  partition_idx=%d num_partitions=%d total_distributed=%d total_rewards=%d",
+			partitionIdx+1, partitionedEpochRewardsInfo.NumRewardPartitions,
+			epochRewards.DistributedRewards, partitionedEpochRewardsInfo.TotalStakingRewards)
 	}
 
 	writer := new(bytes.Buffer)
