@@ -27,11 +27,15 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 }
 
 func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, error) {
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
+	// IMPORTANT: Validate partition count BEFORE any account writes.
+	// If validation fails, we want to exit cleanly without having modified AccountsDB.
 	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	// Now safe to distribute vote rewards since validation passed
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
