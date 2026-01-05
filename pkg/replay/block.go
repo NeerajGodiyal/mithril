@@ -714,23 +714,33 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		defer wg.Done()
 
 		sa := i.(snapshot.DelegationPair)
-		var creditsObserved uint64
 
+		// Read the actual stake account from AccountsDB (not snapshot data)
+		// This is critical for resume: AccountsDB has the current state, snapshot is stale
 		stakeAcct, err := acctsDb.GetAccount(block.Slot, sa.Account)
-		if err == nil {
-			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-			if err == nil {
-				creditsObserved = stakeState.Stake.Stake.CreditsObserved
-			}
+		if err != nil {
+			// Account doesn't exist in AccountsDB - skip it
+			// This can happen if stake account was closed after snapshot
+			return
 		}
-		global.PutStakeCacheItem(sa.Account,
-			&sealevel.Delegation{VoterPubkey: sa.Delegation.VoterPubkey,
-				StakeLamports:      sa.Delegation.Stake,
-				ActivationEpoch:    sa.Delegation.ActivationEpoch,
-				DeactivationEpoch:  sa.Delegation.DeactivationEpoch,
-				WarmupCooldownRate: sa.Delegation.WarmupCooldownRate,
-				CreditsObserved:    creditsObserved})
 
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			// Can't parse stake state - skip it
+			return
+		}
+
+		// Use delegation data from AccountsDB, not from snapshot manifest
+		delegation := stakeState.Stake.Stake.Delegation
+		global.PutStakeCacheItem(sa.Account,
+			&sealevel.Delegation{
+				VoterPubkey:       delegation.VoterPubkey,
+				StakeLamports:     delegation.StakeLamports,
+				ActivationEpoch:   delegation.ActivationEpoch,
+				DeactivationEpoch: delegation.DeactivationEpoch,
+				WarmupCooldownRate: delegation.WarmupCooldownRate,
+				CreditsObserved:   stakeState.Stake.Stake.CreditsObserved,
+			})
 	})
 
 	wg.Add(1)
