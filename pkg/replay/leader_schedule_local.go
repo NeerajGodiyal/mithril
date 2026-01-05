@@ -707,9 +707,9 @@ type ScheduleSummary struct {
 	Repeat        uint64
 
 	// Stake info
-	TotalInputStake    uint64 // Total stake from EpochStakes (before filtering)
-	FilteredStake      uint64 // Stake used in schedule (after filtering)
-	MissingStake       uint64 // Stake skipped due to missing data
+	TotalInputStake     uint64 // Total stake from EpochStakes (before filtering)
+	FilteredStake       uint64 // Stake used in schedule (after filtering)
+	MissingStake        uint64 // Stake skipped due to missing data
 	MissingStakePercent float64
 
 	// Validator counts
@@ -793,12 +793,12 @@ type ValidationStats struct {
 	MinStake                    uint64
 	MaxStake                    uint64
 	ValidatorCount              int // Validators with non-zero stake and valid NodePubkey
-	MismatchCount int
-	Capped        bool
-	TopStakes     []StakeEntry // Top 10 by stake
-	BottomStakes                []StakeEntry    // Bottom 10 by stake
-	MissingVoteAccts            []StakeEntry    // First few missing vote accounts (for debugging)
-	ZeroNodePkAccts             []StakeEntry    // First few zero NodePubkey accounts
+	MismatchCount               int
+	Capped                      bool
+	TopStakes                   []StakeEntry // Top 10 by stake
+	BottomStakes                []StakeEntry // Bottom 10 by stake
+	MissingVoteAccts            []StakeEntry // First few missing vote accounts (for debugging)
+	ZeroNodePkAccts             []StakeEntry // First few zero NodePubkey accounts
 }
 
 // logScheduleBuildSummary logs a comprehensive summary of the schedule build.
@@ -1751,6 +1751,7 @@ func dumpScheduleSlotsCSV(
 
 // DumpScheduleMismatch dumps both local and RPC schedules to CSV files for analysis.
 // Called when a hash mismatch is detected during validation.
+// Also creates a dedicated mismatch file showing all differing slots.
 // Returns paths to local and RPC slot files.
 func DumpScheduleMismatch(
 	epoch uint64,
@@ -1765,9 +1766,14 @@ func DumpScheduleMismatch(
 	localPath = dumpScheduleSlotsCSV(epoch, "local", localSchedule, firstSlot, numSlots, logsDir)
 	rpcPath = dumpScheduleSlotsCSV(epoch, "rpc", rpcSchedule, firstSlot, numSlots, logsDir)
 
+	// Dump dedicated mismatch file with summary and all differing slots
+	mismatchPath := dumpAllSlotMismatches(epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+
 	if localPath != "" && rpcPath != "" {
 		mlog.Log.FileOnlyf("schedule mismatch dumps: local=%s rpc=%s", localPath, rpcPath)
-		mlog.Log.FileOnlyf("  run: scripts/diff_leader_schedules.py %s %s", localPath, rpcPath)
+		if mismatchPath != "" {
+			mlog.Log.Infof("schedule mismatch details: %s", mismatchPath)
+		}
 	}
 
 	return localPath, rpcPath
@@ -2094,4 +2100,159 @@ func fetchLeaderScheduleFromRPC(
 	}
 
 	return nil, fmt.Errorf("RPC leader schedule fetch for epoch %d (slot %d) failed from all endpoints: %w", epoch, firstSlotInEpoch, lastErr)
+}
+
+// dumpAllSlotMismatches compares local and RPC schedules slot-by-slot and writes ALL differences to a file.
+// Creates epoch<N>_slot_mismatches_<runid>.txt with every differing slot for easy debugging.
+// Also includes summary stats and validator presence differences at the top.
+func dumpAllSlotMismatches(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	localSchedule *leaderschedule.LeaderSchedule,
+	rpcSchedule *leaderschedule.LeaderSchedule,
+	logsDir string,
+) string {
+	if localSchedule == nil || rpcSchedule == nil {
+		return ""
+	}
+
+	logsDir = resolveLogsDir(logsDir)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("dumpAllSlotMismatches: failed to create logs dir: %v", err)
+		return ""
+	}
+
+	// Get short run ID for filename
+	runID := mlog.GetRunID()
+	shortRunID := ""
+	if runID != "" {
+		shortRunID = runID
+		if len(shortRunID) > 8 {
+			shortRunID = shortRunID[:8]
+		}
+		shortRunID = "_" + shortRunID
+	}
+
+	filename := fmt.Sprintf("epoch%d_slot_mismatches%s.txt", epoch, shortRunID)
+	filePath := filepath.Join(logsDir, filename)
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("dumpAllSlotMismatches: failed to create file: %v", err)
+		return ""
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+
+	// First pass: count slot appearances per leader and collect all mismatches
+	localLeaderSlots := make(map[solana.PublicKey]uint64)
+	rpcLeaderSlots := make(map[solana.PublicKey]uint64)
+	var mismatches []struct {
+		slot        uint64
+		localLeader solana.PublicKey
+		rpcLeader   solana.PublicKey
+	}
+
+	for i := uint64(0); i < numSlots; i++ {
+		slot := firstSlot + i
+		localLeader, localOk := localSchedule.LeaderForSlot(slot)
+		rpcLeader, rpcOk := rpcSchedule.LeaderForSlot(slot)
+
+		if localOk {
+			localLeaderSlots[localLeader]++
+		}
+		if rpcOk {
+			rpcLeaderSlots[rpcLeader]++
+		}
+
+		if localOk && rpcOk && localLeader != rpcLeader {
+			mismatches = append(mismatches, struct {
+				slot        uint64
+				localLeader solana.PublicKey
+				rpcLeader   solana.PublicKey
+			}{slot, localLeader, rpcLeader})
+		}
+	}
+
+	// Find validators only in local or only in RPC
+	type validatorDiff struct {
+		nodePk    solana.PublicKey
+		slotCount uint64
+	}
+	var onlyInLocal, onlyInRPC []validatorDiff
+
+	for leader, count := range localLeaderSlots {
+		if _, inRPC := rpcLeaderSlots[leader]; !inRPC {
+			onlyInLocal = append(onlyInLocal, validatorDiff{leader, count})
+		}
+	}
+	for leader, count := range rpcLeaderSlots {
+		if _, inLocal := localLeaderSlots[leader]; !inLocal {
+			onlyInRPC = append(onlyInRPC, validatorDiff{leader, count})
+		}
+	}
+
+	// Sort by slot count descending
+	sort.Slice(onlyInLocal, func(i, j int) bool {
+		return onlyInLocal[i].slotCount > onlyInLocal[j].slotCount
+	})
+	sort.Slice(onlyInRPC, func(i, j int) bool {
+		return onlyInRPC[i].slotCount > onlyInRPC[j].slotCount
+	})
+
+	// Write header and summary
+	w.WriteString("# Leader Schedule Slot Mismatches\n")
+	w.WriteString(fmt.Sprintf("# Epoch: %d\n", epoch))
+	w.WriteString(fmt.Sprintf("# First Slot: %d\n", firstSlot))
+	w.WriteString(fmt.Sprintf("# Total Slots: %d\n", numSlots))
+	w.WriteString(fmt.Sprintf("# Generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	w.WriteString("#\n")
+
+	// Summary stats
+	w.WriteString("## Summary\n")
+	w.WriteString(fmt.Sprintf("total_mismatched_slots=%d\n", len(mismatches)))
+	w.WriteString(fmt.Sprintf("mismatch_percent=%.4f%%\n", float64(len(mismatches))/float64(numSlots)*100))
+	w.WriteString(fmt.Sprintf("local_validator_count=%d\n", len(localLeaderSlots)))
+	w.WriteString(fmt.Sprintf("rpc_validator_count=%d\n", len(rpcLeaderSlots)))
+	w.WriteString(fmt.Sprintf("validators_only_in_local=%d\n", len(onlyInLocal)))
+	w.WriteString(fmt.Sprintf("validators_only_in_rpc=%d\n", len(onlyInRPC)))
+	w.WriteString("\n")
+
+	// Validators only in local (these won't appear in RPC schedule)
+	if len(onlyInLocal) > 0 {
+		w.WriteString("## Validators Only In Local Schedule (Not In RPC)\n")
+		w.WriteString("# These validators have slots in local but zero slots in RPC\n")
+		w.WriteString("node_pubkey,local_slot_count\n")
+		for _, v := range onlyInLocal {
+			w.WriteString(fmt.Sprintf("%s,%d\n", v.nodePk, v.slotCount))
+		}
+		w.WriteString("\n")
+	}
+
+	// Validators only in RPC (these won't appear in local schedule)
+	if len(onlyInRPC) > 0 {
+		w.WriteString("## Validators Only In RPC Schedule (Not In Local)\n")
+		w.WriteString("# These validators have slots in RPC but zero slots in local\n")
+		w.WriteString("node_pubkey,rpc_slot_count\n")
+		for _, v := range onlyInRPC {
+			w.WriteString(fmt.Sprintf("%s,%d\n", v.nodePk, v.slotCount))
+		}
+		w.WriteString("\n")
+	}
+
+	// All slot mismatches
+	w.WriteString("## All Slot Mismatches\n")
+	w.WriteString("# Each line shows a slot where local and RPC disagree on the leader\n")
+	w.WriteString("slot,local_leader,rpc_leader\n")
+	for _, m := range mismatches {
+		w.WriteString(fmt.Sprintf("%d,%s,%s\n", m.slot, m.localLeader, m.rpcLeader))
+	}
+
+	mlog.Log.FileOnlyf("slot mismatches dumped to: %s (%d mismatches)", filePath, len(mismatches))
+	return filePath
 }
