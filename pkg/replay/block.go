@@ -640,6 +640,13 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 
 		if err == nil {
 			if acct.Owner != a.FeatureAddr {
+				// Debug: log when owner check fails for critical features
+				for _, df := range debugFeatures {
+					if featureGate.Name == df {
+						mlog.Log.Warnf("DEBUG_FEATURE: slot=%d %s WRONG_OWNER expected=%s got=%s",
+							slot, df, a.FeatureAddr, acct.Owner)
+					}
+				}
 				continue
 			}
 			parentNewlyActivatedFeatureAccts = append(parentNewlyActivatedFeatureAccts, acct.Clone())
