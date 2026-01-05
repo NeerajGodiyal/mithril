@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/fastcache"
@@ -13,12 +14,13 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
 	"github.com/maypok86/otter"
 )
 
 type AccountsDb struct {
-	Index            fastcache.Cache
+	Index            *pebble.DB
 	BankHashStore    fastcache.Cache
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
@@ -79,16 +81,10 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	}
 	mlog.Log.Infof("accountsdb.OpenDb: bankHashBytes=%x", bankHashBytes)
 
-	// attempt to open the index kv store
-	dbFn := fmt.Sprintf("%s/mithril_db", accountsDbDir)
-	indexDb, err := fastcache.NewCache(fastcache.GB*256, &fastcache.Config{
-		Shards: 256,
-		//MaxElementLen: 2000000000,
-		MemoryType: fastcache.MMAP,
-		MemoryKey:  dbFn,
-	})
+	indexDir := filepath.Join(accountsDbDir, "mithril_db")
+	db, err := pebble.Open(indexDir, &pebble.Options{})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("opening indexDir=%s: %w", indexDir, err)
 	}
 
 	// attempt to open the index kv store
@@ -103,7 +99,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		panic(err)
 	}
 
-	accountsDb := &AccountsDb{Index: indexDb, BankHashStore: bankhashDb, AcctsDir: appendVecsDir}
+	accountsDb := &AccountsDb{Index: db, BankHashStore: bankhashDb, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
 	copy(accountsDb.BankHashBytes[:], bankHashBytes)
 
@@ -169,7 +165,6 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
-
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
@@ -181,7 +176,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		return cachedAcct, nil
 	}
 
-	acctIdxEntryBytes, err := accountsDb.Index.Get(pubkey[:])
+	acctIdxEntryBytes, c, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {
 		//mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
 		return nil, ErrNoAccount
@@ -191,6 +186,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	if err != nil {
 		panic("failed to unmarshal AccountIndexEntry from index kv database")
 	}
+	c.Close()
 
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 
@@ -285,12 +281,13 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 		// we can make the account state update in-place iff the existing version's data length is the same as the
 		// new version's data length, which is the case about 98% of the time.
 		// if not, then we write out a new appendvec.
-		existingacctIdxEntryBuf, err := accountsDb.Index.Get(acct.Key[:])
+		existingacctIdxEntryBuf, c, err := accountsDb.Index.Get(acct.Key[:])
 		if err == nil {
 			acctIdxEntry, err := unmarshalAcctIdxEntry(existingacctIdxEntryBuf)
 			if err != nil {
 				panic("failed to unmarshal AccountIndexEntry from index kv database")
 			}
+			c.Close()
 
 			existingAppendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 			existingAppendVecFile, err := os.OpenFile(existingAppendVecFileName, os.O_RDWR, 0666)
@@ -327,7 +324,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 			}
 		}
 
-		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:])
+		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:], &pebble.WriteOptions{})
 		if err != nil {
 			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
 		}
