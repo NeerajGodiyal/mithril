@@ -1037,7 +1037,17 @@ func ReplayBlocks(
 
 	var err error
 	var currentSlot uint64
-	currentEpoch := epochSchedule.GetEpoch(startSlot)
+	// When resuming, use the epoch of the LAST completed slot (startSlot - 1).
+	// This ensures epoch boundary detection works when resuming at exactly the first slot of a new epoch.
+	// Example: resume from slot 391391999 (epoch 905), startSlot=391392000 (epoch 906)
+	// Without this fix: currentEpoch=906, block.Epoch=906 → no boundary triggered
+	// With this fix: currentEpoch=905, block.Epoch=906 → boundary triggered correctly
+	var currentEpoch uint64
+	if resumeState != nil && startSlot > 0 {
+		currentEpoch = epochSchedule.GetEpoch(startSlot - 1)
+	} else {
+		currentEpoch = epochSchedule.GetEpoch(startSlot)
+	}
 	var lastSlotCtx *sealevel.SlotCtx
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
@@ -1226,8 +1236,21 @@ func ReplayBlocks(
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
+			// When resuming at epoch boundary, lastSlotCtx is nil. Create a minimal SlotCtx
+			// with the previous slot info so epoch transition functions work correctly.
+			prevSlotCtxForEpochBoundary := lastSlotCtx
+			if prevSlotCtxForEpochBoundary == nil && startSlot > 0 {
+				mlog.Log.Infof("  resume_at_epoch_boundary: creating minimal SlotCtx for previous slot %d", startSlot-1)
+				prevSlotCtxForEpochBoundary = &sealevel.SlotCtx{
+					Slot:       startSlot - 1,
+					Features:   replayCtx.CurrentFeatures,
+					Blockhash:  block.LastBlockhash,
+					AccountsDb: acctsDb,
+				}
+			}
+
 			// Step 1: Compute stakes for the new epoch (BEFORE leader schedule and rewards)
-			epochTransitionCtx := prepareEpochStakes(acctsDb, lastSlotCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			epochTransitionCtx := prepareEpochStakes(acctsDb, prevSlotCtxForEpochBoundary, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			mlog.Log.Infof("  stake_computation: vote_accts=%d total_stake=%d", len(block.VoteAccts), block.TotalEpochStake)
 
 			currentEpoch = block.Epoch
@@ -1264,9 +1287,9 @@ func ReplayBlocks(
 				// Rebuild VoteCache from AccountsDB to ensure correctness.
 				// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
 				// NOT global.EpochStakes which may be incomplete if VoteCache was stale.
-				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
+				// This reads the canonical state at the end of the previous epoch (prevSlotCtxForEpochBoundary.Slot)
 				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
-				if err := RebuildVoteCacheFromAccountsDB(acctsDb, lastSlotCtx.Slot, block.VoteAccts, 0); err != nil {
+				if err := RebuildVoteCacheFromAccountsDB(acctsDb, prevSlotCtxForEpochBoundary.Slot, block.VoteAccts, 0); err != nil {
 					mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
 					result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
 					break
@@ -1312,7 +1335,7 @@ func ReplayBlocks(
 
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
 			// If this crashes, we still have leader schedule logs for debugging.
-			partitionedRewardsInfo = handleEpochRewards(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
+			partitionedRewardsInfo = handleEpochRewards(acctsDb, partitionedEpochRewardsEnabled, prevSlotCtxForEpochBoundary, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
 
 			// Set block height (was deferred in configureBlock's early return at epoch boundary)
 			if global.ManageBlockHeight() {
