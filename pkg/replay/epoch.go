@@ -124,6 +124,17 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 		votePk := delegation.VoterPubkey
 		stakeLamports := delegation.Stake(newEpoch, stakeHistory, newRateActivationEpoch)
 
+		// Debug: log stake computation for validators known to differ between local/RPC
+		// Vote accounts from epoch 906 mismatch investigation
+		voteStr := votePk.String()
+		if voteStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
+			voteStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
+			entry := delegation.StakeActivatingAndDeactivating(newEpoch, stakeHistory, newRateActivationEpoch)
+			mlog.Log.Infof("DEBUG_STAKE_CALC: epoch=%d vote=%s raw_stake=%d effective=%d activating=%d deactivating=%d activation_epoch=%d deactivation_epoch=%d",
+				newEpoch, voteStr, delegation.StakeLamports, entry.Effective, entry.Activating, entry.Deactivating,
+				delegation.ActivationEpoch, delegation.DeactivationEpoch)
+		}
+
 		mu.Lock()
 		voteAcctStakes[votePk] += stakeLamports
 		mu.Unlock()
@@ -137,6 +148,19 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	wg.Wait()
 	workerPool.Release()
 	ants.Release()
+
+	// Debug: log final aggregated stakes for problematic validators
+	debugVotes := []string{"6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc", "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ"}
+	for _, voteStr := range debugVotes {
+		votePk := solana.MustPublicKeyFromBase58(voteStr)
+		if stake, ok := voteAcctStakes[votePk]; ok {
+			mlog.Log.Infof("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s total_effective_stake=%d",
+				newEpoch, voteStr, stake)
+		} else {
+			mlog.Log.Warnf("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s NOT_FOUND in voteAcctStakes",
+				newEpoch, voteStr)
+		}
+	}
 
 	// Return full stake map - don't filter by previous epoch's vote accounts.
 	// New vote accounts can appear during an epoch (via CreateAccount + Initialize),

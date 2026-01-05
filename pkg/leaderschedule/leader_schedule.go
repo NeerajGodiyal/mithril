@@ -87,6 +87,14 @@ func New(
 			nodePubkey: nodePubkey,
 			stake:      stake,
 		})
+
+		// Debug: log stake for validators known to differ between local/RPC
+		voteStr := voteAcctPubkey.String()
+		if voteStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
+			voteStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
+			fmt.Printf("DEBUG_SCHEDULE_INPUT: epoch=%d vote=%s node=%s stake=%d\n",
+				epoch, voteStr, nodePubkey.String(), stake)
+		}
 	}
 
 	// Build keyed stakes using VOTE ACCOUNT pubkeys (not node identities)

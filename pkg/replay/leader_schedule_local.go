@@ -991,6 +991,17 @@ func buildLocalLeaderSchedule(
 			NodePubkey: va.NodePubkey,
 			Stake:      stake,
 		})
+
+		// Debug: log stake for validators known to differ between local/RPC
+		// Vote accounts from epoch 906 mismatch investigation:
+		// - 6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc (HwRia5... identity) - only in LOCAL
+		// - MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ (toshB4t... identity) - only in RPC
+		voteAcctStr := votePk.String()
+		if voteAcctStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
+			voteAcctStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
+			mlog.Log.Infof("DEBUG_STAKE_DISCREPANCY: vote=%s node=%s stake=%d",
+				voteAcctStr, va.NodePubkey.String(), stake)
+		}
 	}
 
 	stats.ValidatorCount = len(validEntries)
