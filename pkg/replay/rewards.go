@@ -35,7 +35,10 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	}
 
 	// Now safe to distribute vote rewards since validation passed
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
+	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
@@ -52,7 +55,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 
 	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
-		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
+		return nil, nil, nil, fmt.Errorf("unable to get EpochRewards from acctsdb: %w", err)
 	}
 	parentUpdatedAccts = append(parentUpdatedAccts, epochRewardsAcct.Clone())
 
@@ -63,7 +66,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 
 	err = acctsDb.StoreAccounts([]*accounts.Account{epochRewardsAcct}, slot)
 	if err != nil {
-		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
+		return nil, nil, nil, fmt.Errorf("unable to update EpochRewards sysvar to acctsdb: %w", err)
 	}
 	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
@@ -187,10 +190,10 @@ func recalculatePartitionedRewardsForResume(
 	}, nil
 }
 
-func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account, error) {
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
-		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
+		return nil, nil, fmt.Errorf("unable to get EpochRewards from acctsdb: %w", err)
 	}
 
 	var epochRewards sealevel.SysvarEpochRewards
@@ -213,16 +216,19 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 		err = acctsDb.StoreAccounts([]*accounts.Account{epochRewardsAcct}, currentSlot)
 		if err != nil {
-			panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
+			return nil, nil, fmt.Errorf("unable to update EpochRewards sysvar to acctsdb: %w", err)
 		}
 		sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 		sealevel.SysvarCache.EpochRewards.Sysvar = &epochRewards
 
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	partitionSize := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx).NumPubkeys()
-	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
+	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("staking rewards distribution failed for partition %d: %w", partitionIdx, err)
+	}
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
 	epochRewards.Distribute(distributedLamports)
@@ -249,7 +255,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	err = acctsDb.StoreAccounts([]*accounts.Account{epochRewardsAcct}, currentSlot)
 	if err != nil {
-		panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
+		return nil, nil, fmt.Errorf("unable to update EpochRewards sysvar to acctsdb: %w", err)
 	}
 	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 	sealevel.SysvarCache.EpochRewards.Sysvar = &epochRewards
@@ -257,5 +263,5 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	distributedAccts = append(distributedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += distributedLamports
 
-	return distributedAccts, parentDistributedAccts
+	return distributedAccts, parentDistributedAccts, nil
 }

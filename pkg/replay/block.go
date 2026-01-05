@@ -1400,7 +1400,12 @@ func ReplayBlocks(
 			currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot &&
 			sealevel.SysvarCache.EpochRewards.Sysvar != nil &&
 			sealevel.SysvarCache.EpochRewards.Sysvar.Active {
-			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
+			distributedAccts, parentDistributedAccts, rewardsErr := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
+			if rewardsErr != nil {
+				mlog.Log.Errorf("staking rewards distribution error at slot %d: %v", currentSlot, rewardsErr)
+				result.Error = rewardsErr
+				break
+			}
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}

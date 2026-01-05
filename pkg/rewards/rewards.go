@@ -445,8 +445,9 @@ type idxAndReward struct {
 	reward rpc.BlockReward
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
 	var totalVotingRewards atomic.Uint64
+	var workerErr atomic.Pointer[error]
 
 	accts := make([]*accounts.Account, len(rewards))
 	parentUpdatedAccts := make([]*accounts.Account, len(rewards))
@@ -464,24 +465,32 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 		if string(reward.RewardType) == RewardTypeVoting /*&& reward.Lamports != 0*/ {
 			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
 			if err != nil {
-				panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", reward.Pubkey, slot))
+				errVal := fmt.Errorf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d: %w", reward.Pubkey, slot, err)
+				workerErr.CompareAndSwap(nil, &errVal)
+				return
 			}
 			parentUpdatedAccts[idx] = stakeAcct.Clone()
 
 			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
 			if err != nil {
-				panic(fmt.Sprintf("overflow in voting rewards distribution in slot %d to acct %s: %s", slot, reward.Pubkey, err))
+				errVal := fmt.Errorf("overflow in voting rewards distribution in slot %d to acct %s: %w", slot, reward.Pubkey, err)
+				workerErr.CompareAndSwap(nil, &errVal)
+				return
 			}
 
 			if stakeAcct.Lamports != reward.PostBalance {
-				panic(fmt.Sprintf("post-balance for acct %s in distributing voting rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports))
+				errVal := fmt.Errorf("post-balance for acct %s in distributing voting rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports)
+				workerErr.CompareAndSwap(nil, &errVal)
+				return
 			}
 
 			accts[idx] = stakeAcct
 
 			new := totalVotingRewards.Add(uint64(reward.Lamports))
 			if new < uint64(reward.Lamports) {
-				panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
+				errVal := fmt.Errorf("overflow in accumulating voting rewards in slot %d", slot)
+				workerErr.CompareAndSwap(nil, &errVal)
+				return
 			}
 		}
 	})
@@ -496,12 +505,17 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	workerPool.Release()
 	ants.Release()
 
-	err := acctsDb.StoreAccounts(accts, slot)
-	if err != nil {
-		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
+	// Check for worker errors
+	if errPtr := workerErr.Load(); errPtr != nil {
+		return nil, nil, 0, *errPtr
 	}
 
-	return accts, parentUpdatedAccts, totalVotingRewards.Load()
+	err := acctsDb.StoreAccounts(accts, slot)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("error updating accounts for voting rewards in slot %d: %w", slot, err)
+	}
+
+	return accts, parentUpdatedAccts, totalVotingRewards.Load(), nil
 }
 
 type idxAndPubkey struct {
@@ -509,8 +523,9 @@ type idxAndPubkey struct {
 	pubkey solana.PublicKey
 }
 
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
 	var distributedLamports atomic.Uint64
+	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
 	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
 
@@ -532,14 +547,18 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			panic(fmt.Sprintf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d", stakePk, slot))
+			errVal := fmt.Errorf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d: %w", stakePk, slot, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
 		}
 		parentAccts[idx] = stakeAcct.Clone()
 
 		// update the delegation in the stake account state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			panic(fmt.Sprintf("unable to deserialize stake account in distributing partitioned rewards: %s", err))
+			errVal := fmt.Errorf("unable to deserialize stake account %s in distributing partitioned rewards: %w", stakePk, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
 		}
 
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
@@ -547,14 +566,18 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		newStakeStateBytes, err := sealevel.MarshalStakeStake(stakeState)
 		if err != nil {
-			panic(fmt.Sprintf("unable to serialize new stake account state in distributing partitioned rewards: %s", err))
+			errVal := fmt.Errorf("unable to serialize new stake account state for %s in distributing partitioned rewards: %w", stakePk, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
 		}
 		copy(stakeAcct.Data, newStakeStateBytes)
 
 		// update lamports in stake account
 		stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.StakerRewards))
 		if err != nil {
-			panic(fmt.Sprintf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %s", slot, stakePk, err))
+			errVal := fmt.Errorf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %w", slot, stakePk, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
 		}
 
 		accts[idx] = stakeAcct
@@ -572,12 +595,17 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	workerPool.Release()
 	ants.Release()
 
-	err := acctsDb.StoreAccounts(accts, slot)
-	if err != nil {
-		panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
+	// Check for worker errors
+	if errPtr := workerErr.Load(); errPtr != nil {
+		return nil, nil, 0, *errPtr
 	}
 
-	return accts, parentAccts, distributedLamports.Load()
+	err := acctsDb.StoreAccounts(accts, slot)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in slot %d: %w", slot, err)
+	}
+
+	return accts, parentAccts, distributedLamports.Load(), nil
 }
 
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
