@@ -1037,14 +1037,15 @@ func ReplayBlocks(
 
 	var err error
 	var currentSlot uint64
-	// When resuming, use the epoch of the LAST completed slot (startSlot - 1).
+	// When resuming, use the epoch of the LAST completed slot (resumeState.ParentSlot).
 	// This ensures epoch boundary detection works when resuming at exactly the first slot of a new epoch.
 	// Example: resume from slot 391391999 (epoch 905), startSlot=391392000 (epoch 906)
 	// Without this fix: currentEpoch=906, block.Epoch=906 → no boundary triggered
 	// With this fix: currentEpoch=905, block.Epoch=906 → boundary triggered correctly
+	// Use resumeState.ParentSlot (not startSlot-1) for accuracy in case of non-contiguous resume.
 	var currentEpoch uint64
-	if resumeState != nil && startSlot > 0 {
-		currentEpoch = epochSchedule.GetEpoch(startSlot - 1)
+	if resumeState != nil {
+		currentEpoch = epochSchedule.GetEpoch(resumeState.ParentSlot)
 	} else {
 		currentEpoch = epochSchedule.GetEpoch(startSlot)
 	}
@@ -1238,14 +1239,19 @@ func ReplayBlocks(
 
 			// When resuming at epoch boundary, lastSlotCtx is nil. Create a minimal SlotCtx
 			// with the previous slot info so epoch transition functions work correctly.
+			// Accounts must be initialized (empty MemAccounts) so GetAccount returns error
+			// and falls back to AccountsDb, rather than panicking on nil interface call.
 			prevSlotCtxForEpochBoundary := lastSlotCtx
-			if prevSlotCtxForEpochBoundary == nil && startSlot > 0 {
-				mlog.Log.Infof("  resume_at_epoch_boundary: creating minimal SlotCtx for previous slot %d", startSlot-1)
+			if prevSlotCtxForEpochBoundary == nil && resumeState != nil {
+				prevSlot := resumeState.ParentSlot
+				mlog.Log.Infof("  resume_at_epoch_boundary: creating minimal SlotCtx for previous slot %d", prevSlot)
+				emptyAccts := accounts.NewMemAccounts()
 				prevSlotCtxForEpochBoundary = &sealevel.SlotCtx{
-					Slot:       startSlot - 1,
+					Slot:       prevSlot,
 					Features:   replayCtx.CurrentFeatures,
 					Blockhash:  block.LastBlockhash,
 					AccountsDb: acctsDb,
+					Accounts:   emptyAccts,
 				}
 			}
 
