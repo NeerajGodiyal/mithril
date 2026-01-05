@@ -127,6 +127,12 @@ type ReplayResult struct {
 // This eliminates the timing window between bankhash persistence and state file update.
 type OnCancelWriteState func(result *ReplayResult) error
 
+// OnSlotComplete is a callback that writes state immediately after each slot completes.
+// This ensures state file is always in sync with bankhash_db, preventing the partial-commit
+// issue where process dies after bankhash commit but before state file update.
+// The callback receives the slot number and bankhash for the completed slot.
+type OnSlotComplete func(slot uint64, bankhash []byte, slotCtx *sealevel.SlotCtx) error
+
 // ResumeState contains the state needed to properly configure the first block when resuming.
 // This is passed to ReplayBlocks when resuming from a previous run.
 type ResumeState struct {
@@ -994,6 +1000,7 @@ func ReplayBlocks(
 	rpcServer *rpcserver.RpcServer,
 	blockFetchOpts *BlockFetchOpts,
 	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
+	onSlotComplete OnSlotComplete, // callback to write state after each slot completes (can be nil)
 ) *ReplayResult {
 	result := &ReplayResult{}
 
@@ -1435,6 +1442,15 @@ func ReplayBlocks(
 		// Track last successfully persisted slot for checkpoint/resume
 		lastPersistedSlot = block.Slot
 		lastPersistedBankhash = lastSlotCtx.FinalBankhash
+
+		// Write state immediately after commit - this makes bankhash + state file atomic
+		// If we crash after this point, state file will match bankhash_db
+		if onSlotComplete != nil {
+			if err := onSlotComplete(lastPersistedSlot, lastPersistedBankhash, lastSlotCtx); err != nil {
+				mlog.Log.Errorf("failed to write state after slot %d: %v", lastPersistedSlot, err)
+				// Continue anyway - the callback already logged the error
+			}
+		}
 
 		// Check for cancellation immediately after block completes.
 		// This minimizes the window between bankhash persistence and state file update,
@@ -1977,6 +1993,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	defer sigverifyWg.Wait()
 	start := time.Now()
 	unresolvedBlock := &b.Block{
+		Slot:         block.Slot, // Needed for error logging in parallelTxLoop
 		Transactions: make([]*solana.Transaction, len(block.Transactions)),
 		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
 	}

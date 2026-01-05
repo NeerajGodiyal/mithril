@@ -2527,6 +2527,52 @@ func runReplayWithRecovery(
 		return nil
 	}
 
+	// Create callback to write state immediately after each slot completes.
+	// This makes bankhash + state file writes effectively atomic, preventing
+	// the partial-commit issue where process dies after bankhash but before state.
+	onSlotComplete := func(slot uint64, bankhash []byte, slotCtx *sealevel.SlotCtx) error {
+		if mithrilState == nil {
+			return nil
+		}
+
+		// Calculate epoch for the slot
+		var epoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(slot)
+		}
+
+		// Build resume context for this slot
+		var resumeCtx *state.ResumeContext
+		if slotCtx.AcctsLtHash != nil {
+			resumeCtx = &state.ResumeContext{
+				AcctsLtHash:          base64.StdEncoding.EncodeToString(slotCtx.AcctsLtHash.Hash()),
+				LamportsPerSignature: slotCtx.FeeRateGovernor.LamportsPerSignature,
+				PrevLamportsPerSig:   slotCtx.FeeRateGovernor.PrevLamportsPerSignature,
+				NumSignatures:        slotCtx.NumSignatures,
+				Epoch:                epoch,
+
+				// Blockhash context
+				RecentBlockhashes: encodeRecentBlockhashes(sealevel.SysvarCache.RecentBlockHashes.Sysvar),
+				EvictedBlockhash:  base58.Encode(slotCtx.LatestEvictedBlockhash[:]),
+				LastBlockhash:     base58.Encode(slotCtx.Blockhash[:]),
+
+				// SlotHashes context
+				SlotHashes: encodeSlotHashes(sealevel.SysvarCache.SlotHashes.Sysvar),
+
+				// Run tracking
+				RunID:        replay.CurrentRunID,
+				RunStartedAt: replayStartTime,
+
+				// Writer info
+				WriterVersion: getVersion(),
+				WriterCommit:  getCommit(),
+			}
+		}
+
+		// Update state file immediately
+		return mithrilState.UpdateLastSlotWithContext(accountsDbPath, slot, bankhash, resumeCtx)
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			runID := replay.CurrentRunID
@@ -2570,6 +2616,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, manifest, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState, onSlotComplete)
 	return result
 }
