@@ -753,16 +753,9 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
-		// Background RPC validation - always runs for debugging
+		// Synchronous RPC validation - always logs both hashes and writes validation file
 		localSchedule := global.LeaderSchedule()
-		go func() {
-			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-			if rpcErr != nil {
-				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-				return
-			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-		}()
+		ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcClient, auxBackupEndpoints, logsDir)
 
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -894,16 +887,9 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 			return fmt.Errorf("failed to build leader schedule: %w", err)
 		}
 
-		// Background RPC validation - always runs for debugging
+		// Synchronous RPC validation - always logs both hashes and writes validation file
 		localSchedule := global.LeaderSchedule()
-		go func() {
-			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-			if rpcErr != nil {
-				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-				return
-			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-		}()
+		ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcClient, auxBackupEndpoints, logsDir)
 
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -1348,16 +1334,9 @@ func ReplayBlocks(
 					break
 				}
 
-				// Background RPC validation - always runs for debugging
+				// Synchronous RPC validation - always logs both hashes and writes validation file
 				localSchedule := global.LeaderSchedule()
-				go func() {
-					rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcc, rpcBackups)
-					if rpcErr != nil {
-						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-						return
-					}
-					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-				}()
+				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 			}
 
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.

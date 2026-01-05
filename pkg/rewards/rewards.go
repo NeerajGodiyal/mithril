@@ -480,6 +480,9 @@ type CalculatedStakeRewards struct {
 func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
 	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
 	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
+	var belowMinCount atomic.Uint64
+	var noVoteCount atomic.Uint64
+	var eligibleCount atomic.Uint64
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -490,14 +493,17 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 		delegation := i.(*delegationAndPubkey)
 
 		if delegation.delegation.StakeLamports < minimumStakeDelegation {
+			belowMinCount.Add(1)
 			return
 		}
 
 		voterPk := delegation.delegation.VoterPubkey
 		voteStateVersioned := global.VoteCacheItem(voterPk)
 		if voteStateVersioned == nil {
+			noVoteCount.Add(1)
 			return
 		}
+		eligibleCount.Add(1)
 
 		pointsForStakeAcct := pointsPerStakeAcct[delegation.pubkey]
 		calculatedStakeRewards := CalculateStakeRewardsForAcct(delegation.pubkey, pointsForStakeAcct, delegation.delegation, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
@@ -516,6 +522,10 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 	wg.Wait()
 	workerPool.Release()
 	ants.Release()
+
+	mlog.Log.Debugf("rewards: stake filter counts (rewards): slot=%d epoch=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
+		slot, rewardedEpoch, minimumStakeDelegation, len(global.StakeCache()),
+		eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())
 
 	return stakeInfoResults
 }
@@ -621,6 +631,9 @@ func CalculateTotalPointsAndPartitions(
 	defer debug.SetGCPercent(old)*/
 
 	minimum := minimumStakeDelegation(slotCtx)
+	var belowMinCount atomic.Uint64
+	var noVoteCount atomic.Uint64
+	var eligibleCount atomic.Uint64
 
 	n := len(global.StakeCache())
 	pks := make([]solana.PublicKey, 0, n)
@@ -656,14 +669,17 @@ func CalculateTotalPointsAndPartitions(
 		t := i.(*delegationAndPubkey)
 		d := t.delegation
 		if d.StakeLamports < minimum {
+			belowMinCount.Add(1)
 			return
 		}
 
 		voterPk := d.VoterPubkey
 		voteState := global.VoteCacheItem(voterPk)
 		if voteState == nil {
+			noVoteCount.Add(1)
 			return
 		}
+		eligibleCount.Add(1)
 
 		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch)
 		pointsAccum.Add(t.pubkey, pcs)
@@ -687,6 +703,9 @@ func CalculateTotalPointsAndPartitions(
 		close(assigns)
 		wgMerge.Wait()
 	}
+
+	mlog.Log.Debugf("rewards: stake filter counts (points): slot=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
+		slot, minimum, n, eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())
 
 	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints(), partitions
 }

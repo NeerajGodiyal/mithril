@@ -1864,6 +1864,59 @@ func dumpRPCValidatorList(
 	mlog.Log.FileOnlyf("RPC validator list dumped to: %s (%d leaders)", filePath, len(entries))
 }
 
+// ValidateLeaderScheduleAgainstRPC synchronously validates local schedule against RPC.
+// This is the primary validation function - always logs both hashes and writes validation file.
+// Returns (matched bool, rpcHash string, error) - error is nil even if RPC fails (just logs it).
+func ValidateLeaderScheduleAgainstRPC(
+	epoch uint64,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	localSchedule *leaderschedule.LeaderSchedule,
+	localSummary *ScheduleSummary,
+	rpcClient *rpcclient.RpcClient,
+	backupEndpoints []string,
+	logsDir string,
+) (bool, string) {
+	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+	numSlots := epochSchedule.SlotsInEpoch(epoch)
+
+	localHash := localSummary.LocalHash
+	if localHash == "" {
+		localHash = scheduleFullHash(localSchedule, firstSlot, numSlots)
+	}
+
+	// Fetch RPC schedule synchronously
+	rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(epoch, epochSchedule, rpcClient, backupEndpoints)
+
+	var rpcHash string
+	var matched bool
+
+	if rpcErr != nil {
+		rpcHash = "RPC_FETCH_FAILED"
+		matched = false
+		mlog.Log.Warnf("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s (error: %v)",
+			epoch, localHash, rpcHash, rpcErr)
+	} else {
+		rpcHash = scheduleFullHash(rpcSchedule, firstSlot, numSlots)
+		matched = localHash == rpcHash
+
+		if matched {
+			mlog.Log.Infof("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s MATCH",
+				epoch, localHash, rpcHash)
+		} else {
+			mlog.Log.Warnf("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s MISMATCH",
+				epoch, localHash, rpcHash)
+			// Dump both schedules to CSV for detailed analysis
+			DumpScheduleMismatch(epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
+		}
+	}
+
+	// Always update summary and write validation file
+	localSummary.RPCHash = rpcHash
+	writeValidationSummary(localSummary, matched, logsDir)
+
+	return matched, rpcHash
+}
+
 // BackgroundValidateAgainstRPC optionally validates local schedule against RPC in background.
 // This is purely for debugging and does not affect the source of truth.
 // Computes full SHA256 hash of entire schedule (~20-50ms) for complete comparison.
