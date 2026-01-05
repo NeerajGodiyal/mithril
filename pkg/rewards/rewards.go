@@ -155,9 +155,9 @@ type PartitionedRewardDistributionInfo struct {
 	EahStartOffsetSlot  uint64
 	EahStopOffsetSlot   uint64
 	NumRewardPartitions uint64
-	Credits                map[solana.PublicKey]CalculatedStakePoints
-	RewardPartitions       Partitions
-	StakingRewards         map[solana.PublicKey]*CalculatedStakeRewards
+	Credits             map[solana.PublicKey]CalculatedStakePoints
+	RewardPartitions    Partitions
+	StakingRewards      map[solana.PublicKey]*CalculatedStakeRewards
 }
 
 type CalculatedStakePoints struct {
@@ -219,6 +219,7 @@ func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.Sy
 		return false
 	}
 }
+
 // DeterminePartitionedStakingRewardsInfo fetches reward partition info from RPC with failover support.
 // It tries the primary RPC first with retries, then falls back to backup endpoints.
 func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackups []string, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
@@ -319,29 +320,63 @@ func fetchRewardPartitionInfoWithRetry(rpcc *rpcclient.RpcClient, firstSlotInEpo
 	return 0, nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// StakeAccountStats holds detailed statistics about stake account filtering.
+type StakeAccountStats struct {
+	Total        uint64 // Total stake accounts in cache
+	Eligible     uint64 // Accounts that will earn rewards
+	BelowMin     uint64 // Accounts below minimum stake delegation
+	NoVote       uint64 // Accounts with no vote state in cache
+	ZeroStake    uint64 // Accounts with StakeLamports == 0 (subset of BelowMin when min > 0)
+	ZeroWithVote uint64 // Zero-stake accounts that DO have vote cache (potential overcounting)
+	MinimumStake uint64 // The minimum stake delegation threshold
+}
+
 // CountEligibleStakeAccounts counts stake accounts that will actually earn rewards.
 // This matches Agave's filtering logic: stake >= minimum_stake_delegation AND has vote state in cache.
 // IMPORTANT: This count is used for partition calculation, not the raw stake cache size.
 func CountEligibleStakeAccounts(f *features.Features) (eligible uint64, total uint64, belowMin uint64, noVote uint64) {
+	stats := CountEligibleStakeAccountsDetailed(f)
+	return stats.Eligible, stats.Total, stats.BelowMin, stats.NoVote
+}
+
+// CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
+// Use this for debugging partition count mismatches.
+func CountEligibleStakeAccountsDetailed(f *features.Features) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
-	total = uint64(len(global.StakeCache()))
+	stats := StakeAccountStats{
+		Total:        uint64(len(global.StakeCache())),
+		MinimumStake: minimum,
+	}
 
 	for _, delegation := range global.StakeCache() {
+		// Track zero-stake accounts explicitly
+		if delegation.StakeLamports == 0 {
+			stats.ZeroStake++
+			// Check if zero-stake account has vote cache (would be counted if min=0)
+			if global.VoteCacheItem(delegation.VoterPubkey) != nil {
+				stats.ZeroWithVote++
+			}
+		}
+
 		if delegation.StakeLamports < minimum {
-			belowMin++
+			stats.BelowMin++
 			continue
 		}
 
 		voteState := global.VoteCacheItem(delegation.VoterPubkey)
 		if voteState == nil {
-			noVote++
+			stats.NoVote++
 			continue
 		}
 
-		eligible++
+		stats.Eligible++
 	}
 
-	return eligible, total, belowMin, noVote
+	// Log detailed stats for debugging partition mismatches
+	mlog.Log.Infof("stake account stats: total=%d eligible=%d below_min=%d no_vote=%d zero_stake=%d zero_with_vote=%d min_stake=%d",
+		stats.Total, stats.Eligible, stats.BelowMin, stats.NoVote, stats.ZeroStake, stats.ZeroWithVote, stats.MinimumStake)
+
+	return stats
 }
 
 // minimumStakeDelegationFromFeatures returns the minimum stake delegation based on features.
