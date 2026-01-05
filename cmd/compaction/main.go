@@ -34,7 +34,7 @@ func calculateFileWastedBytes(db *pebble.DB, appendVecPath string, manifestSize 
 	if err != nil {
 		return 0, 0, err
 	}
-	wastedBytes := uint64(0)
+	wastedBytes := 0
 
 	for i, e := range entries {
 		pubkey := pubkeys[i]
@@ -93,7 +93,7 @@ func calculateTotalWastedBytes(db *pebble.DB, appendVecDir string, m ManifestLoo
 	workChan := make(chan workItem)
 
 	// Atomic counters for results
-	var totalWasted atomic.Uint64
+	var totalWasted atomic.Int64
 	var totalSize atomic.Uint64
 	var processed atomic.Uint64
 	var wg sync.WaitGroup
@@ -115,7 +115,7 @@ func calculateTotalWastedBytes(db *pebble.DB, appendVecDir string, m ManifestLoo
 					continue
 				}
 
-				totalWasted.Add(wasted)
+				totalWasted.Add(int64(wasted))
 				totalSize.Add(size)
 
 				p := processed.Add(1)
@@ -154,7 +154,7 @@ func calculateTotalWastedBytes(db *pebble.DB, appendVecDir string, m ManifestLoo
 
 	wg.Wait()
 
-	return totalWasted.Load(), totalSize.Load(), nil
+	return int(totalWasted.Load()), totalSize.Load(), nil
 }
 
 // ManifestLookup provides fast lookups of append vec file sizes
