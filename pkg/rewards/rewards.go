@@ -36,12 +36,41 @@ const (
 )
 
 // ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
-// Matches Agave's get_rewards_num_partitions formula: (n + MAX - 1) / MAX (ceiling division).
-func ComputeNumRewardPartitions(numStakeAccounts uint64) uint64 {
-	if numStakeAccounts == 0 {
-		return 1 // Minimum 1 partition
+// Matches Agave's get_rewards_num_partitions formula with warmup check and max blocks clamping.
+//
+// Logic:
+//  1. If in warmup period (epoch < firstNormalEpoch): return 1
+//  2. numChunks = ceil(numStakeAccounts / MaxRewardsPerBlock)
+//  3. maxBlocks = max(slotsPerEpoch / 10, 1)
+//  4. return clamp(numChunks, 1, maxBlocks)
+func ComputeNumRewardPartitions(epoch uint64, slotsPerEpoch uint64, numStakeAccounts uint64, firstNormalEpoch uint64) uint64 {
+	// During warmup, use single partition
+	if epoch < firstNormalEpoch {
+		return 1
 	}
-	return (numStakeAccounts + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+
+	// Calculate number of chunks needed (ceiling division)
+	var numChunks uint64
+	if numStakeAccounts == 0 {
+		numChunks = 1
+	} else {
+		numChunks = (numStakeAccounts + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	}
+
+	// Calculate max blocks allowed (10% of epoch)
+	maxBlocks := slotsPerEpoch / 10
+	if maxBlocks == 0 {
+		maxBlocks = 1
+	}
+
+	// Clamp to [1, maxBlocks]
+	if numChunks < 1 {
+		return 1
+	}
+	if numChunks > maxBlocks {
+		return maxBlocks
+	}
+	return numChunks
 }
 
 type PartitionedRewardDistributionInfo struct {
