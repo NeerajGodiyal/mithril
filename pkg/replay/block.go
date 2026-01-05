@@ -1328,7 +1328,12 @@ func ReplayBlocks(
 
 		block.Features = replayCtx.CurrentFeatures
 
-		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
+		// Gate rewards distribution using epochRewards.Active instead of slot upper bound.
+		// This handles skipped slots correctly since Active is set false when last partition is processed.
+		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled &&
+			currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot &&
+			sealevel.SysvarCache.EpochRewards.Sysvar != nil &&
+			sealevel.SysvarCache.EpochRewards.Sysvar.Active {
 			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
