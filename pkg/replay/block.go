@@ -1220,7 +1220,7 @@ func ReplayBlocks(
 		if block.Epoch != currentEpoch {
 			mlog.Log.Infof("")
 			mlog.Log.Infof("=== Epoch Boundary: %d -> %d ===", currentEpoch, currentEpoch+1)
-			mlog.Log.Infof("  first_slot_new_epoch=%d num_reward_partitions=%d", block.Slot, block.NumRewardPartitions)
+			mlog.Log.Infof("  first_slot_new_epoch=%d rpc_num_partitions=%d", block.Slot, block.NumRewardPartitions)
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
