@@ -2062,8 +2062,7 @@ func writeValidationSummary(summary *ScheduleSummary, matched bool, logsDir stri
 // fetchLeaderScheduleFromRPC fetches leader schedule from RPC for validation purposes.
 // Does NOT set it as the global schedule - this is for background validation only.
 // Tries primary endpoint first, then backups with fewer retries.
-// Uses the epoch-aware RPC method to ensure correct schedule during historical catchup.
-// RPC method: getLeaderSchedule with epoch parameter
+// RPC method: getLeaderSchedule with slot parameter (returns schedule for epoch containing that slot)
 func fetchLeaderScheduleFromRPC(
 	epoch uint64,
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -2073,19 +2072,20 @@ func fetchLeaderScheduleFromRPC(
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
 	// Try primary endpoint first (fewer retries since this is background validation)
-	// Pass epoch explicitly to get correct schedule during catchup
-	leaderMap, err := fetchLeaderScheduleForEpochWithRetry(rpcClient, epoch, 3)
+	// Pass firstSlotInEpoch to get correct schedule - RPC takes slot, not epoch number
+	leaderMap, err := fetchLeaderScheduleForSlotWithRetry(rpcClient, firstSlotInEpoch, 3)
 	if err == nil {
 		return leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch), nil
 	}
 
 	lastErr := err
-	mlog.Log.Debugf("RPC leader schedule fetch (validation) for epoch %d failed on primary %s: %v", epoch, rpcClient.Endpoint(), err)
+	mlog.Log.Debugf("RPC leader schedule fetch (validation) for epoch %d (slot %d) failed on primary %s: %v",
+		epoch, firstSlotInEpoch, rpcClient.Endpoint(), err)
 
 	// Try backup endpoints with fewer retries
 	for _, endpoint := range backupEndpoints {
 		backupClient := rpcclient.NewRpcClient(endpoint)
-		leaderMap, err := fetchLeaderScheduleForEpochWithRetry(backupClient, epoch, 2)
+		leaderMap, err := fetchLeaderScheduleForSlotWithRetry(backupClient, firstSlotInEpoch, 2)
 		if err == nil {
 			mlog.Log.Debugf("RPC leader schedule for epoch %d fetched from backup %s (for validation)", epoch, endpoint)
 			return leaderschedule.NewLeaderScheduleFromKeyedSlots(leaderMap, firstSlotInEpoch), nil
@@ -2093,5 +2093,5 @@ func fetchLeaderScheduleFromRPC(
 		lastErr = err
 	}
 
-	return nil, fmt.Errorf("RPC leader schedule fetch for epoch %d failed from all endpoints: %w", epoch, lastErr)
+	return nil, fmt.Errorf("RPC leader schedule fetch for epoch %d (slot %d) failed from all endpoints: %w", epoch, firstSlotInEpoch, lastErr)
 }

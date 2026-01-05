@@ -12,11 +12,13 @@ func (fetcher *RpcClient) GetLeaderSchedule() (map[solana.PublicKey][]uint64, er
 	return leaderSchedule, err
 }
 
-// GetLeaderScheduleForEpoch fetches the leader schedule for a specific epoch.
-// This is needed when validating historical epochs (during catchup) since the
-// default GetLeaderSchedule returns the current epoch's schedule.
-func (fetcher *RpcClient) GetLeaderScheduleForEpoch(epoch uint64) (map[solana.PublicKey][]uint64, error) {
+// GetLeaderScheduleForSlot fetches the leader schedule for the epoch containing the given slot.
+// IMPORTANT: The solana-go library's GetLeaderScheduleOpts.Epoch field is misleadingly named -
+// it actually expects a SLOT, not an epoch number. The RPC method getLeaderSchedule takes a
+// slot parameter and returns the schedule for the epoch containing that slot.
+// Pass firstSlotInEpoch to get the schedule for a specific epoch.
+func (fetcher *RpcClient) GetLeaderScheduleForSlot(slot uint64) (map[solana.PublicKey][]uint64, error) {
 	return fetcher.client.GetLeaderScheduleWithOpts(context.Background(), &rpc.GetLeaderScheduleOpts{
-		Epoch: &epoch,
+		Epoch: &slot, // Despite the name, this field is passed as the slot parameter to RPC
 	})
 }
