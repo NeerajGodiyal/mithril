@@ -66,7 +66,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	return partitionedRewardsInfo, updatedAccts, parentUpdatedAccts
 }
 
-func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64, lastRewardsDistributionSlot uint64) ([]*accounts.Account, []*accounts.Account) {
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
 	epochRewardsAcct, err := acctsDb.GetAccount(currentSlot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
 		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
@@ -82,7 +82,8 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	epochRewards.Distribute(distributedLamports)
 
-	if currentSlot == lastRewardsDistributionSlot {
+	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
+	if partitionIdx == partitionedEpochRewardsInfo.NumRewardPartitions-1 {
 		epochRewards.Active = false
 	}
 
