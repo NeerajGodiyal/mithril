@@ -27,9 +27,12 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 }
 
 func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, error) {
+	// Compute warmup/cooldown rate epoch first - needed for partition count calculation
+	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
+
 	// IMPORTANT: Validate partition count BEFORE any account writes.
 	// If validation fails, we want to exit cleanly without having modified AccountsDB.
-	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f)
+	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f, stakeHistory, newWarmupCooldownRateEpoch)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -40,8 +43,6 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
 	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
-
-	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
