@@ -9,7 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 
-	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
@@ -78,13 +78,36 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	epochRewards.MustUnmarshalWithDecoder(decoder)
 
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
+
+	// Bounds check: if partitionIdx is out of range, set inactive and return early.
+	// This prevents panic from out-of-bounds Partition() access and handles any unexpected height drift.
+	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions {
+		mlog.Log.Warnf("rewards distribution: partitionIdx %d >= numPartitions %d, setting inactive",
+			partitionIdx, partitionedEpochRewardsInfo.NumRewardPartitions)
+		epochRewards.Active = false
+
+		writer := new(bytes.Buffer)
+		encoder := bin.NewBinEncoder(writer)
+		epochRewards.MustMarshalWithEncoder(encoder)
+		copy(epochRewardsAcct.Data, writer.Bytes())
+
+		err = acctsDb.StoreAccounts([]*accounts.Account{epochRewardsAcct}, currentSlot)
+		if err != nil {
+			panic(fmt.Sprintf("unable to update EpochRewards sysvar to acctsdb: %s", err))
+		}
+		sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
+		sealevel.SysvarCache.EpochRewards.Sysvar = &epochRewards
+
+		return nil, nil
+	}
+
 	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
 	epochRewards.Distribute(distributedLamports)
 
 	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
-	if partitionIdx == partitionedEpochRewardsInfo.NumRewardPartitions-1 {
+	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions-1 {
 		epochRewards.Active = false
 	}
 
