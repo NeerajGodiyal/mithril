@@ -24,6 +24,24 @@ import (
 	"github.com/panjf2000/ants/v2"
 )
 
+// PartitionMismatchError represents a partition count mismatch between local computation and RPC.
+// This is a critical error that will cause bankhash divergence if not handled.
+type PartitionMismatchError struct {
+	Epoch             uint64
+	LocalPartitions   uint64
+	RpcPartitions     uint64
+	EligibleStakeAcct uint64
+	TotalStakeAcct    uint64
+	BelowMinAcct      uint64
+	NoVoteAcct        uint64
+}
+
+func (e *PartitionMismatchError) Error() string {
+	return fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible_stake_accts=%d total_stake_accts=%d below_min=%d no_vote=%d. "+
+		"This would cause epoch boundary divergence. Check stake account filtering logic.",
+		e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct, e.BelowMinAcct, e.NoVoteAcct)
+}
+
 // Package-level validation settings for epoch boundary
 var (
 	// validationRpcClient is used for pre-commit validation at epoch boundary.
@@ -343,6 +361,7 @@ func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
 // DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
 // Uses ELIGIBLE stake account count (filtered by min stake and vote cache) for partition calculation.
 // This matches Agave's behavior where only accounts that actually earn rewards are counted.
+// Returns PartitionMismatchError if validation is enabled and local partition count doesn't match RPC.
 func DeterminePartitionedStakingRewardsInfoLocal(
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	inflation *Inflation,
@@ -351,7 +370,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	prevEpoch uint64,
 	slotsPerYear float64,
 	f *features.Features,
-) *PartitionedRewardDistributionInfo {
+) (*PartitionedRewardDistributionInfo, error) {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
 	// Count ELIGIBLE stake accounts (filtered like Agave does)
@@ -397,11 +416,16 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
 			if numRewardPartitions != rpcNumPartitions {
 				// CRITICAL: Partition count mismatch will cause bankhash divergence.
-				// Panic now to prevent corrupted state from being committed.
-				// The safe state file will be written for clean resume.
-				panic(fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible_stake_accts=%d total_stake_accts=%d below_min=%d no_vote=%d. "+
-					"This would cause epoch boundary divergence. Check stake account filtering logic.",
-					numRewardPartitions, rpcNumPartitions, eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts))
+				// Return error to allow clean shutdown with state file writing.
+				return nil, &PartitionMismatchError{
+					Epoch:             epoch,
+					LocalPartitions:   numRewardPartitions,
+					RpcPartitions:     rpcNumPartitions,
+					EligibleStakeAcct: eligibleAccounts,
+					TotalStakeAcct:    totalAccounts,
+					BelowMinAcct:      belowMinAccounts,
+					NoVoteAcct:        noVoteAccounts,
+				}
 			}
 		}
 	}
@@ -413,7 +437,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 		EahStartOffsetSlot:     eahCalcSlot,
 		EahStopOffsetSlot:      eahInclusionSlot,
 		NumRewardPartitions:    numRewardPartitions,
-	}
+	}, nil
 }
 
 type idxAndReward struct {

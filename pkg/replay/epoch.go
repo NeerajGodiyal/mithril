@@ -192,11 +192,16 @@ func prepareEpochStakes(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.Sl
 // handleEpochRewards distributes rewards and updates stake history.
 // This should be called AFTER leader schedule computation to ensure schedule
 // verification works even if rewards distribution crashes.
-func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, ctx *EpochTransitionContext) *rewards.PartitionedRewardDistributionInfo {
+// Returns PartitionMismatchError if partition validation fails.
+func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, ctx *EpochTransitionContext) (*rewards.PartitionedRewardDistributionInfo, error) {
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
+	var err error
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		panic("only partitioned rewards supported")
 	}
@@ -205,13 +210,14 @@ func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards 
 
 	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, ctx.NewEpoch)
 
-	return partitionedRewardsInfo
+	return partitionedRewardsInfo, nil
 }
 
 // handleEpochTransition is the legacy function that bundles stake computation and rewards.
 // Prefer using prepareEpochStakes + handleEpochRewards separately to allow leader schedule
 // computation between them.
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
+// Returns PartitionMismatchError if partition validation fails.
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) (*rewards.PartitionedRewardDistributionInfo, error) {
 	ctx := prepareEpochStakes(acctsDb, prevSlotCtx, epochSchedule, f, block, epoch)
 	return handleEpochRewards(acctsDb, partitionedEpochRewards, prevSlotCtx, replayCtx, epochSchedule, f, block, epoch, ctx)
 }
