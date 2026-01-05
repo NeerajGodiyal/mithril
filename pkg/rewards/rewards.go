@@ -284,8 +284,10 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
 
-	mlog.Log.Infof("local rewards partition: epoch=%d stake_accts=%d partitions=%d first=%d last=%d",
-		epoch, numStakeAccounts, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot)
+	mlog.Log.Infof("local rewards partition: epoch=%d prev_epoch=%d first_slot=%d slots_per_epoch=%d",
+		epoch, prevEpoch, firstSlotInEpoch, slotsPerEpoch)
+	mlog.Log.Infof("  stake_accts=%d partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
+		numStakeAccounts, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
 	return &PartitionedRewardDistributionInfo{
 		TotalStakingRewards:    totalStakingRewards,

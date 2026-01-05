@@ -61,6 +61,12 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
 
+	mlog.Log.Infof("rewards distribution start: epoch=%d slot=%d block_height=%d",
+		epoch, slot, block.BlockHeight)
+	mlog.Log.Infof("  distribution_start_height=%d partitions=%d total_rewards=%d vote_rewards=%d",
+		newEpochRewards.DistributionStartingBlockHeight, newEpochRewards.NumPartitions,
+		newEpochRewards.TotalRewards, voteRewardsDistributed)
+
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
 
@@ -109,6 +115,8 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
 	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions-1 {
 		epochRewards.Active = false
+		mlog.Log.Infof("rewards distribution complete: slot=%d block_height=%d partition_idx=%d num_partitions=%d distributed=%d",
+			currentSlot, currentBlockHeight, partitionIdx, partitionedEpochRewardsInfo.NumRewardPartitions, epochRewards.DistributedRewards)
 	}
 
 	writer := new(bytes.Buffer)
