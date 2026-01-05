@@ -24,9 +24,11 @@ type AppendVecAccount struct {
 }
 
 const (
-	hdrLen        = 136
-	dataLenOffset = 8
-	pubkeyOffset  = 16
+	hdrLen         = 136
+	dataLenOffset  = 8
+	pubkeyOffset   = 16
+	lamportsOffset = 48
+	ownerOffset    = 64
 )
 
 type appendVecParser struct {
@@ -144,4 +146,60 @@ func unmarshalAcctFromAppendVecAcctHeader(buf io.Reader) (*accounts.Account, err
 	}
 
 	return appendVecAcct.ToAccount(), nil
+}
+
+// StakeAccountEntry holds the extracted stake account data for cache population.
+type StakeAccountEntry struct {
+	Pubkey  solana.PublicKey
+	Data    []byte
+	Lamports uint64
+}
+
+// ExtractStakeAccountsFromAppendVec extracts all stake accounts from an appendvec buffer.
+// It checks the owner field (offset 64-96) against the stake program address and
+// returns only accounts owned by the stake program.
+func ExtractStakeAccountsFromAppendVec(data []byte, fileSize uint64, stakeProgram solana.PublicKey) []StakeAccountEntry {
+	var result []StakeAccountEntry
+	offset := uint64(0)
+
+	for offset+hdrLen <= fileSize {
+		dataLen := binary.LittleEndian.Uint64(data[offset+dataLenOffset : offset+dataLenOffset+8])
+
+		// Check if this is a stake account by comparing owner
+		owner := solana.PublicKeyFromBytes(data[offset+ownerOffset : offset+ownerOffset+32])
+
+		if owner == stakeProgram {
+			// Extract lamports and check if non-zero
+			lamports := binary.LittleEndian.Uint64(data[offset+lamportsOffset : offset+lamportsOffset+8])
+			if lamports > 0 {
+				// Extract pubkey
+				pubkey := solana.PublicKeyFromBytes(data[offset+pubkeyOffset : offset+pubkeyOffset+32])
+
+				// Calculate data start position (after header)
+				dataStart := offset + hdrLen
+				dataEnd := dataStart + dataLen
+
+				if dataEnd <= fileSize {
+					// Make a copy of the account data
+					accountData := make([]byte, dataLen)
+					copy(accountData, data[dataStart:dataEnd])
+
+					result = append(result, StakeAccountEntry{
+						Pubkey:   pubkey,
+						Data:     accountData,
+						Lamports: lamports,
+					})
+				}
+			}
+		}
+
+		// Move to next account
+		offset += hdrLen
+		if offset+dataLen > fileSize {
+			break
+		}
+		offset += util.AlignUp(dataLen, 8)
+	}
+
+	return result
 }

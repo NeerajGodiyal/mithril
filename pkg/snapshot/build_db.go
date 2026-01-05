@@ -15,10 +15,14 @@ import (
 
 	"github.com/Overclock-Validator/fastcache"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cockroachdb/pebble"
+	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -288,6 +292,22 @@ func BuildAccountsDb(
 		panic(err)
 	}
 
+	// Persist stake cache built during snapshot loading
+	stakeCacheSize := len(global.StakeCache())
+	if stakeCacheSize > 0 {
+		finalManifest := manifest
+		if incrementalManifest != nil {
+			finalManifest = incrementalManifest
+		}
+		bankhashStr := fmt.Sprintf("%x", finalManifest.Bank.Hash[:])
+		if err := global.SaveStakeCache(accountsDbDir, finalManifest.Bank.Slot, bankhashStr); err != nil {
+			mlog.Log.Warnf("failed to persist stake cache: %v", err)
+		} else {
+			mlog.Log.Infof("stake cache built and persisted: %d accounts at slot %d",
+				stakeCacheSize, finalManifest.Bank.Slot)
+		}
+	}
+
 	if incrementalManifest != nil {
 		return accountsDb, incrementalManifest, nil
 	} else {
@@ -423,6 +443,9 @@ func initWorkerPools(
 		return nil, err
 	}
 
+	// Stake program address for filtering during snapshot loading
+	stakeProgram := solana.PublicKeyFromBytes(addresses.StakeProgramAddr[:])
+
 	indexEntryBuilderPool, err := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i any) {
 		tasks := indexEntryBuilderInProgress.Add(1)
 		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
@@ -433,6 +456,34 @@ func initWorkerPools(
 		if err != nil {
 			mlog.Log.Errorf("BuildIndexEntriesFromAppendVecs: %v", err)
 			return
+		}
+
+		// Extract stake accounts and add to global stake cache
+		stakeAccounts := accountsdb.ExtractStakeAccountsFromAppendVec(task.Data, task.FileSize, stakeProgram)
+		for _, stakeAcct := range stakeAccounts {
+			// Parse stake state
+			if len(stakeAcct.Data) < 4 {
+				continue
+			}
+			acctType := binary.LittleEndian.Uint32(stakeAcct.Data)
+			if acctType != sealevel.StakeStateV2StatusStake {
+				continue // Skip uninitialized/initialized accounts
+			}
+
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				continue
+			}
+
+			delegation := stakeState.Stake.Stake.Delegation
+			global.PutStakeCacheItem(stakeAcct.Pubkey, &sealevel.Delegation{
+				VoterPubkey:        delegation.VoterPubkey,
+				StakeLamports:      delegation.StakeLamports,
+				ActivationEpoch:    delegation.ActivationEpoch,
+				DeactivationEpoch:  delegation.DeactivationEpoch,
+				WarmupCooldownRate: delegation.WarmupCooldownRate,
+				CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
+			})
 		}
 
 		indexEntryBuilderInProgress.Add(-1)
