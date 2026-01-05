@@ -612,8 +612,32 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 
 	f := features.NewFeaturesDefault()
 
+	// Debug: track feature detection for stake minimum delegation
+	debugFeatures := []string{"StakeMinimumDelegationForRewards", "StakeRaiseMinimumDelegationTo1Sol"}
+	var enabledCount int
+
 	for _, featureGate := range features.AllFeatureGates {
 		acct, err := acctsDb.GetAccount(slot, featureGate.Address)
+
+		// Debug logging for critical features
+		for _, df := range debugFeatures {
+			if featureGate.Name == df {
+				if err != nil {
+					mlog.Log.Warnf("DEBUG_FEATURE: slot=%d %s NOT_FOUND err=%v", slot, df, err)
+				} else {
+					featureAcct := features.UnmarshalFeatureAcct(acct.Data)
+					var activatedAt string
+					if featureAcct.ActivatedAt != nil {
+						activatedAt = fmt.Sprintf("%d", *featureAcct.ActivatedAt)
+					} else {
+						activatedAt = "nil"
+					}
+					mlog.Log.Infof("DEBUG_FEATURE: slot=%d %s FOUND activated_at=%s owner=%s",
+						slot, df, activatedAt, acct.Owner)
+				}
+			}
+		}
+
 		if err == nil {
 			if acct.Owner != a.FeatureAddr {
 				continue
@@ -625,6 +649,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			// already activated
 			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
 				f.EnableFeature(featureGate, *featureAcct.ActivatedAt)
+				enabledCount++
 			}
 
 			if featureAcct.ActivatedAt == nil && startOfEpoch {
@@ -638,9 +663,16 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 				newlyActivatedFeatureAccts = append(newlyActivatedFeatureAccts, acct)
 
 				f.EnableFeature(featureGate, slot)
+				enabledCount++
 			}
 		}
 	}
+
+	// Debug: log summary of feature detection
+	minDelegationActive := f.IsActive(features.StakeMinimumDelegationForRewards)
+	raise1SolActive := f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol)
+	mlog.Log.Infof("DEBUG_FEATURE_SUMMARY: slot=%d enabled_features=%d StakeMinimumDelegationForRewards=%v StakeRaiseMinimumDelegationTo1Sol=%v",
+		slot, enabledCount, minDelegationActive, raise1SolActive)
 
 	if len(newlyActivatedFeatureAccts) != 0 {
 		err := acctsDb.StoreAccounts(newlyActivatedFeatureAccts, slot)
