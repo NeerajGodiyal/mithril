@@ -77,9 +77,12 @@ type PartitionedRewardDistributionInfo struct {
 	TotalStakingRewards    uint64
 	FirstStakingRewardSlot uint64
 	LastStakingRewardSlot  uint64
-	EahStartOffsetSlot     uint64
-	EahStopOffsetSlot      uint64
-	NumRewardPartitions    uint64
+	// EahStartOffsetSlot and EahStopOffsetSlot are legacy fields for Epoch Accounts Hash.
+	// EAH was deprecated after AccountsLtHash activation (~Nov 2024). These fields are only
+	// relevant for replaying historical pre-AccountsLtHash slots and are not used in current flow.
+	EahStartOffsetSlot  uint64
+	EahStopOffsetSlot   uint64
+	NumRewardPartitions uint64
 	Credits                map[solana.PublicKey]CalculatedStakePoints
 	RewardPartitions       Partitions
 	StakingRewards         map[solana.PublicKey]*CalculatedStakeRewards
@@ -276,7 +279,8 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	totalStakingRewards := CalculatePreviousEpochInflationRewards(
 		epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
 
-	// EAH calculation slots (epoch accounts hash)
+	// EAH calculation slots (epoch accounts hash) - LEGACY, not used after AccountsLtHash (~Nov 2024)
+	// Hardcoded 432000 is mainnet slots-per-epoch; doesn't matter since EAH is deprecated
 	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
 
