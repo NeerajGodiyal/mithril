@@ -24,6 +24,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
@@ -819,6 +820,26 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
+	// Try to load persisted stake cache if resuming
+	// This provides accurate stake data between snapshot slot and resume slot
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		loadedEntries, err := global.LoadStakeCache(accountsDbDir)
+		if err != nil {
+			mlog.Log.Warnf("failed to load stake cache from file: %v", err)
+		} else if loadedEntries > 0 {
+			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
+		} else {
+			// No cache file exists - scan AccountsDB to build stake cache
+			mlog.Log.Infof("stake cache file not found - scanning AccountsDB")
+			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+			if scanErr != nil {
+				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+			} else {
+				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			}
+		}
+	}
+
 	if mithrilState == nil {
 		// Create a new state file for this session
 		var snapshotEpoch uint64
@@ -948,6 +969,12 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 			mlog.Log.Errorf("failed to update state file: %v", err)
+		}
+		// Save stake cache alongside state file for resume
+		if err := global.SaveStakeCache(accountsDbDir); err != nil {
+			mlog.Log.Errorf("failed to save stake cache: %v", err)
+		} else {
+			mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
 		}
 	}
 
@@ -1577,6 +1604,26 @@ postBootstrap:
 		}
 	}
 
+	// Try to load persisted stake cache if resuming
+	// This provides accurate stake data between snapshot slot and resume slot
+	if mithrilState != nil && mithrilState.HasResumeContext() {
+		loadedEntries, err := global.LoadStakeCache(accountsPath)
+		if err != nil {
+			mlog.Log.Warnf("failed to load stake cache from file: %v", err)
+		} else if loadedEntries > 0 {
+			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
+		} else {
+			// No cache file exists - scan AccountsDB to build stake cache
+			mlog.Log.Infof("stake cache file not found - scanning AccountsDB")
+			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+			if scanErr != nil {
+				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+			} else {
+				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			}
+		}
+	}
+
 	if mithrilState == nil {
 		// Initialize state for this session
 		var snapshotEpoch uint64
@@ -1695,10 +1742,22 @@ postBootstrap:
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
 			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
+			// Save stake cache alongside state file for resume
+			if err := global.SaveStakeCache(accountsPath); err != nil {
+				mlog.Log.Errorf("failed to save stake cache: %v", err)
+			} else {
+				mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
+			}
 		} else {
 			// No resume context - just update slot
 			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
+			}
+			// Save stake cache alongside state file for resume
+			if err := global.SaveStakeCache(accountsPath); err != nil {
+				mlog.Log.Errorf("failed to save stake cache: %v", err)
+			} else {
+				mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
 			}
 		}
 	}
@@ -2518,6 +2577,13 @@ func runReplayWithRecovery(
 		// Write state immediately
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, r.LastPersistedSlot, r.LastPersistedBankhash, resumeCtx); err != nil {
 			return err
+		}
+
+		// Save stake cache alongside state file for resume
+		if err := global.SaveStakeCache(accountsDbPath); err != nil {
+			mlog.Log.Errorf("failed to save stake cache: %v", err)
+		} else {
+			mlog.Log.Infof("stake cache saved: %d entries", global.StakeCacheSize())
 		}
 
 		// Record shutdown in history

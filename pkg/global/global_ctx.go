@@ -3,6 +3,10 @@
 package global
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
@@ -11,6 +15,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
+
+const StakeCacheFileName = "stake_cache.json"
 
 type GlobalCtx struct {
 	latestBlockhash            [32]byte
@@ -285,4 +291,122 @@ func (globctx *GlobalCtx) TransactionCount() uint64 {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	return globctx.transactionCount
+}
+
+// StakeCacheEntry is the JSON-serializable form of a stake delegation
+type StakeCacheEntry struct {
+	Pubkey             string  `json:"pubkey"`
+	VoterPubkey        string  `json:"voter_pubkey"`
+	StakeLamports      uint64  `json:"stake_lamports"`
+	ActivationEpoch    uint64  `json:"activation_epoch"`
+	DeactivationEpoch  uint64  `json:"deactivation_epoch"`
+	WarmupCooldownRate float64 `json:"warmup_cooldown_rate"`
+	CreditsObserved    uint64  `json:"credits_observed"`
+}
+
+// SaveStakeCache persists the stake cache to disk for resume.
+// Uses atomic write (temp file + rename) to prevent corruption.
+func SaveStakeCache(accountsDbDir string) error {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+
+	if instance.stakeCache == nil || len(instance.stakeCache) == 0 {
+		return nil // Nothing to save
+	}
+
+	entries := make([]StakeCacheEntry, 0, len(instance.stakeCache))
+	for pubkey, delegation := range instance.stakeCache {
+		entries = append(entries, StakeCacheEntry{
+			Pubkey:             pubkey.String(),
+			VoterPubkey:        delegation.VoterPubkey.String(),
+			StakeLamports:      delegation.StakeLamports,
+			ActivationEpoch:    delegation.ActivationEpoch,
+			DeactivationEpoch:  delegation.DeactivationEpoch,
+			WarmupCooldownRate: delegation.WarmupCooldownRate,
+			CreditsObserved:    delegation.CreditsObserved,
+		})
+	}
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("failed to marshal stake cache: %w", err)
+	}
+
+	cacheFile := filepath.Join(accountsDbDir, StakeCacheFileName)
+	tmpFile := cacheFile + ".tmp"
+
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write stake cache file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, cacheFile); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename stake cache file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadStakeCache loads the stake cache from disk.
+// Returns (loaded_count, nil) on success, (0, nil) if file doesn't exist.
+func LoadStakeCache(accountsDbDir string) (int, error) {
+	cacheFile := filepath.Join(accountsDbDir, StakeCacheFileName)
+
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // File doesn't exist, not an error
+		}
+		return 0, fmt.Errorf("failed to read stake cache file: %w", err)
+	}
+
+	var entries []StakeCacheEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return 0, fmt.Errorf("failed to parse stake cache file: %w", err)
+	}
+
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+
+	for _, entry := range entries {
+		pubkey := solana.MustPublicKeyFromBase58(entry.Pubkey)
+		voterPubkey := solana.MustPublicKeyFromBase58(entry.VoterPubkey)
+
+		instance.stakeCache[pubkey] = &sealevel.Delegation{
+			VoterPubkey:        voterPubkey,
+			StakeLamports:      entry.StakeLamports,
+			ActivationEpoch:    entry.ActivationEpoch,
+			DeactivationEpoch:  entry.DeactivationEpoch,
+			WarmupCooldownRate: entry.WarmupCooldownRate,
+			CreditsObserved:    entry.CreditsObserved,
+		}
+	}
+
+	return len(entries), nil
+}
+
+// StakeCacheExists checks if the stake cache file exists on disk.
+func StakeCacheExists(accountsDbDir string) bool {
+	cacheFile := filepath.Join(accountsDbDir, StakeCacheFileName)
+	_, err := os.Stat(cacheFile)
+	return err == nil
+}
+
+// ClearStakeCache clears the in-memory stake cache.
+// Used before loading from file or scanning AccountsDB.
+func ClearStakeCache() {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+}
+
+// StakeCacheSize returns the number of entries in the stake cache.
+func StakeCacheSize() int {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	return len(instance.stakeCache)
 }

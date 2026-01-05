@@ -378,3 +378,35 @@ func (accountsDb *AccountsDb) AllKeys() [][]byte {
 func (accountsDb *AccountsDb) BankHash() [32]byte {
 	return accountsDb.BankHashBytes
 }
+
+// ScanAccountsByOwner iterates all accounts in the index and returns those owned by the specified owner.
+// This is an expensive operation - O(all accounts in index).
+// Callback receives pubkey and account; return false to stop iteration.
+func (accountsDb *AccountsDb) ScanAccountsByOwner(owner solana.PublicKey, callback func(pubkey solana.PublicKey, acct *accounts.Account) bool) error {
+	iter, err := accountsDb.Index.NewIter(nil)
+	if err != nil {
+		return fmt.Errorf("failed to create iterator: %w", err)
+	}
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if len(key) != 32 {
+			continue // Skip non-pubkey entries
+		}
+
+		pubkey := solana.PublicKeyFromBytes(key)
+		acct, err := accountsDb.GetAccount(0, pubkey)
+		if err != nil {
+			continue // Account may have been deleted
+		}
+
+		if bytes.Equal(acct.Owner[:], owner[:]) {
+			if !callback(pubkey, acct) {
+				break // Callback requested stop
+			}
+		}
+	}
+
+	return iter.Error()
+}

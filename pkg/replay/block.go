@@ -710,6 +710,13 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		}
 	})
 
+	// Check if stake cache was already populated (from persisted file on resume)
+	// If so, skip loading from snapshot manifest - persisted cache is more accurate
+	existingStakeCacheSize := len(global.StakeCache())
+	if existingStakeCacheSize > 0 {
+		mlog.Log.Infof("stake cache already populated from persisted file: %d entries, skipping snapshot load", existingStakeCacheSize)
+	}
+
 	// Counters for stake cache loading diagnostics
 	var stakeLoaded atomic.Uint64
 	var stakeNotFound atomic.Uint64
@@ -766,30 +773,80 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
-			wg.Add(1)
-			stakeAcctWorkerPool.Invoke(sa)
-		}
-	}()
+	// Only load stake cache from snapshot if not already populated from persisted file
+	if existingStakeCacheSize == 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
+				wg.Add(1)
+				stakeAcctWorkerPool.Invoke(sa)
+			}
+		}()
+	}
 
 	wg.Wait()
 	stakeAcctWorkerPool.Release()
 	ants.Release()
 
 	// Log stake cache loading summary
-	loaded := stakeLoaded.Load()
-	notFound := stakeNotFound.Load()
-	unmarshalFailed := stakeUnmarshalFailed.Load()
-	total := loaded + notFound + unmarshalFailed
-	mlog.Log.Infof("stake cache loaded: total=%d loaded=%d not_found=%d unmarshal_failed=%d",
-		total, loaded, notFound, unmarshalFailed)
-	if notFound > 0 || unmarshalFailed > 0 {
-		mlog.Log.Warnf("stake cache: %d accounts skipped (not_found=%d, unmarshal_failed=%d)",
-			notFound+unmarshalFailed, notFound, unmarshalFailed)
+	if existingStakeCacheSize == 0 {
+		loaded := stakeLoaded.Load()
+		notFound := stakeNotFound.Load()
+		unmarshalFailed := stakeUnmarshalFailed.Load()
+		total := loaded + notFound + unmarshalFailed
+		mlog.Log.Infof("stake cache loaded: total=%d loaded=%d not_found=%d unmarshal_failed=%d",
+			total, loaded, notFound, unmarshalFailed)
+		if notFound > 0 || unmarshalFailed > 0 {
+			mlog.Log.Warnf("stake cache: %d accounts skipped (not_found=%d, unmarshal_failed=%d)",
+				notFound+unmarshalFailed, notFound, unmarshalFailed)
+		}
 	}
+}
+
+// BuildStakeCacheFromAccountsDB scans AccountsDB for all stake accounts and populates the stake cache.
+// This is an expensive one-time operation used when resuming without a persisted stake cache.
+// Returns the number of stake accounts found.
+func BuildStakeCacheFromAccountsDB(acctsDb *accountsdb.AccountsDb) (int, error) {
+	mlog.Log.Infof("scanning AccountsDB for stake accounts (this may take a while)...")
+	start := time.Now()
+
+	var loaded atomic.Uint64
+	var parseFailed atomic.Uint64
+
+	stakeProgramAddr := solana.PublicKeyFromBytes(a.StakeProgramAddr[:])
+	err := acctsDb.ScanAccountsByOwner(stakeProgramAddr, func(pubkey solana.PublicKey, acct *accounts.Account) bool {
+		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
+		if err != nil {
+			parseFailed.Add(1)
+			return true // Continue scanning
+		}
+
+		delegation := stakeState.Stake.Stake.Delegation
+		global.PutStakeCacheItem(pubkey, &sealevel.Delegation{
+			VoterPubkey:        delegation.VoterPubkey,
+			StakeLamports:      delegation.StakeLamports,
+			ActivationEpoch:    delegation.ActivationEpoch,
+			DeactivationEpoch:  delegation.DeactivationEpoch,
+			WarmupCooldownRate: delegation.WarmupCooldownRate,
+			CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
+		})
+		loaded.Add(1)
+		return true // Continue scanning
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("stake cache scan failed: %w", err)
+	}
+
+	loadedCount := int(loaded.Load())
+	parseFailedCount := parseFailed.Load()
+	elapsed := time.Since(start)
+
+	mlog.Log.Infof("stake cache scan complete: loaded=%d parse_failed=%d elapsed=%v",
+		loadedCount, parseFailedCount, elapsed)
+
+	return loadedCount, nil
 }
 
 func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
