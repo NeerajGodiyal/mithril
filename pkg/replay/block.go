@@ -1284,10 +1284,7 @@ func ReplayBlocks(
 	go blockStream.Start()
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
-
-	// Print replay start marker for clear log separation
-	mlog.Log.InfofPrecise("")
-	mlog.Log.InfofPrecise("=== Replay Start ===")
+	var replayStartPrinted bool
 
 	for {
 		// Start stall monitor goroutine (only after first block to avoid startup false positives)
@@ -1338,6 +1335,12 @@ func ReplayBlocks(
 			leaderStr := "unknown"
 			if leader, exists := global.LeaderForSlot(block.Slot); exists {
 				leaderStr = leader.String()
+			}
+			// Print replay start header before first block
+			if !replayStartPrinted {
+				mlog.Log.InfofPrecise("")
+				mlog.Log.InfofPrecise("=== Replay Start ===")
+				replayStartPrinted = true
 			}
 			// Log skipped slot in same format as regular blocks (with N/A for missing values)
 			// Padding: cu=10 chars + space, txns=16 chars + space, exec=variable (matches normal format)
@@ -1665,6 +1668,12 @@ func ReplayBlocks(
 			leaderStr = block.Leader.String()
 		}
 
+		// Print replay start header before first block
+		if !replayStartPrinted {
+			mlog.Log.InfofPrecise("")
+			mlog.Log.InfofPrecise("=== Replay Start ===")
+			replayStartPrinted = true
+		}
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
 		totalSlotTime := waitTime + slotReplayDuration
 		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
