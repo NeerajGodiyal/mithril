@@ -351,3 +351,21 @@ func (ls *LeaderSchedule) Merge(other *LeaderSchedule) {
 		ls.lsMap[slot] = leader
 	}
 }
+
+// PruneOldSlots removes all slots older than minSlot to prevent unbounded memory growth.
+// Call this after merging a new epoch's schedule to clean up old epochs.
+func (ls *LeaderSchedule) PruneOldSlots(minSlot uint64) int {
+	pruned := 0
+	for slot := range ls.lsMap {
+		if slot < minSlot {
+			delete(ls.lsMap, slot)
+			pruned++
+		}
+	}
+	return pruned
+}
+
+// Size returns the number of slots in the schedule.
+func (ls *LeaderSchedule) Size() int {
+	return len(ls.lsMap)
+}

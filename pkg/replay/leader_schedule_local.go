@@ -1592,6 +1592,18 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	// Merge into existing schedule (don't overwrite - preserves current epoch's slots at epoch boundary)
 	global.MergeLeaderSchedule(schedule)
 
+	// Prune old epochs to prevent unbounded memory growth.
+	// Keep current epoch + 1 previous epoch for safety (in case of slot lookups near boundary).
+	if globalSchedule := global.LeaderSchedule(); globalSchedule != nil && epoch >= 1 {
+		// Keep slots from (current epoch - 1) onwards
+		prevEpochFirstSlot := epochSchedule.FirstSlotInEpoch(epoch - 1)
+		pruned := globalSchedule.PruneOldSlots(prevEpochFirstSlot)
+		if pruned > 0 {
+			mlog.Log.Debugf("leader schedule: pruned %d old slots (keeping epoch %d onwards, schedule size=%d)",
+				pruned, epoch-1, globalSchedule.Size())
+		}
+	}
+
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
 

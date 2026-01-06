@@ -1463,20 +1463,14 @@ func ReplayBlocks(
 				// Refresh global.EpochStakes now that VoteCache is complete
 				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
-				// Build schedule for the NEXT leader schedule epoch, NOT the current epoch.
-				// At epoch boundary entering epoch N, LeaderScheduleEpoch returns N+1.
-				// The schedule for epoch N uses stakes from epoch N-2 (already in snapshot).
-				// The schedule for epoch N+1 uses stakes from epoch N-1 (what we just computed).
-				// We must NOT rebuild epoch N's schedule as it would use wrong stakes.
-				leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
-				mlog.Log.Infof("epoch boundary: block.Epoch=%d leaderScheduleEpoch=%d (building schedule for epoch %d)",
-					block.Epoch, leaderScheduleEpoch, leaderScheduleEpoch)
+				// Build schedule for the CURRENT epoch (block.Epoch = N).
+				// At epoch boundary entering N, block.VoteAccts has stakes effective for N.
+				// Schedule for epoch E uses stakes effective for E (Agave's epoch_vote_accounts(E)).
+				// LeaderScheduleEpoch returns N+1 but we can't build that yet - no N+1 stakes.
+				mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule for current epoch)",
+					block.Epoch)
 
-				// Cache epoch stakes for leaderScheduleEpoch so PrepareLeaderScheduleLocalFromVoteCache can find them.
-				// Schedule for N+1 uses stakes from N-1, which is what block.VoteAccts contains at this boundary.
-				cacheEpochStakesForValidation(leaderScheduleEpoch, block.VoteAccts, block.TotalEpochStake)
-
-				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(leaderScheduleEpoch, epochSchedule, logsDir)
+				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
 				if err != nil {
 					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
 					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
@@ -1500,7 +1494,7 @@ func ReplayBlocks(
 
 				// Synchronous RPC validation - always logs both hashes and writes validation file
 				localSchedule := global.LeaderSchedule()
-				ValidateLeaderScheduleAgainstRPC(leaderScheduleEpoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
+				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 			}
 
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
