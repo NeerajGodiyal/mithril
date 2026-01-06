@@ -356,20 +356,22 @@ type StakeAccountStats struct {
 	StakeAbove1B uint64 // >= 1,000,000,000 lamports (>= 1 SOL)
 }
 
-// CountEligibleStakeAccounts counts stake accounts that will actually earn rewards.
+// CountEligibleStakeAccounts counts stake accounts that will actually earn rewards for the given epoch.
 // This matches Agave's filtering logic: points > 0 (effective stake > 0 AND new credits to earn).
 // IMPORTANT: This count is used for partition calculation, not the raw stake cache size.
-func CountEligibleStakeAccounts(f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64) {
-	stats := CountEligibleStakeAccountsDetailed(f, stakeHistory, newRateActivationEpoch)
+// rewardedEpoch is the epoch being rewarded (typically prevEpoch at epoch boundary).
+func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64) {
+	stats := CountEligibleStakeAccountsDetailed(rewardedEpoch, f, stakeHistory, newRateActivationEpoch)
 	return stats.Eligible, stats.Total, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroPoints
 }
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
 // Use this for debugging partition count mismatches.
-// Eligibility requires: stake >= min AND has vote cache AND points > 0.
-// Points > 0 means: has new credits to earn AND effective stake > 0 for at least one epoch.
+// Eligibility requires: stake >= min AND has vote cache AND points > 0 for the rewarded epoch.
+// Points > 0 means: has new credits to earn AND effective stake > 0 for the specific rewarded epoch.
 // This matches Agave's "rewardable stake accounts" set used in partition calculation.
-func CountEligibleStakeAccountsDetailed(f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) StakeAccountStats {
+// rewardedEpoch is the epoch being rewarded (typically prevEpoch at epoch boundary).
+func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
 	stats := StakeAccountStats{
 		Total:            uint64(len(global.StakeCache())),
@@ -444,9 +446,9 @@ func CountEligibleStakeAccountsDetailed(f *features.Features, stakeHistory *seal
 			continue
 		}
 
-		// Check if account has points > 0 (effective stake > 0 for at least one credit-earning epoch)
-		// This matches the logic in calculateStakePointsAndCredits
-		if !hasPositivePoints(delegation, epochCredits, creditsInStake, stakeHistory, newRateActivationEpoch) {
+		// Check if account has points > 0 for the rewarded epoch specifically
+		// This matches the logic in calculateStakePointsAndCredits but filtered to just the rewarded epoch
+		if !hasPositivePointsForEpoch(delegation, epochCredits, creditsInStake, rewardedEpoch, stakeHistory, newRateActivationEpoch) {
 			stats.ZeroPoints++
 			continue
 		}
@@ -522,6 +524,46 @@ func hasPositivePoints(
 	return false
 }
 
+// hasPositivePointsForEpoch checks if a delegation would earn any points for a SPECIFIC epoch.
+// This is used for partition counting where we only count accounts that earn rewards for the
+// rewarded epoch, not accounts that might have earned rewards in historical epochs.
+// Returns true if the rewarded epoch has earnedCredits > 0 AND effectiveStake > 0.
+func hasPositivePointsForEpoch(
+	delegation *sealevel.Delegation,
+	epochCredits []sealevel.EpochCredits,
+	creditsInStake uint64,
+	rewardedEpoch uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newRateActivationEpoch *uint64,
+) bool {
+	newObserved := creditsInStake
+
+	for _, ec := range epochCredits {
+		final := ec.Credits
+		initial := ec.PrevCredits
+
+		var earnedCredits uint64
+		if creditsInStake < initial {
+			earnedCredits = final - initial
+		} else if creditsInStake < final {
+			earnedCredits = final - newObserved
+		}
+
+		// Only check the specific rewarded epoch
+		if ec.Epoch == rewardedEpoch && earnedCredits != 0 {
+			// Check effective stake for this epoch
+			effectiveStake := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
+			if effectiveStake > 0 {
+				return true
+			}
+		}
+
+		newObserved = max(newObserved, final)
+	}
+
+	return false
+}
+
 // minimumStakeDelegationFromFeatures returns the minimum stake delegation based on features.
 // This is a feature-only version that doesn't require SlotCtx.
 func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
@@ -553,9 +595,10 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 ) (*PartitionedRewardDistributionInfo, error) {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
-	// Count ELIGIBLE stake accounts (filtered like Agave does: points > 0)
+	// Count ELIGIBLE stake accounts (filtered like Agave does: points > 0 for the rewarded epoch)
 	// This is critical: Agave counts accounts that actually earn rewards, not total stake cache
-	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts := CountEligibleStakeAccounts(f, stakeHistory, newRateActivationEpoch)
+	// prevEpoch is the epoch being rewarded (rewards for epoch N-1 are distributed at start of epoch N)
+	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts := CountEligibleStakeAccounts(prevEpoch, f, stakeHistory, newRateActivationEpoch)
 	numStakeAccounts := eligibleAccounts
 
 	// Get slots per epoch for this epoch
