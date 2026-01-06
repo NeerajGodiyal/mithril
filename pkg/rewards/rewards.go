@@ -414,6 +414,31 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	var noCreditsEmpty uint64    // len(epochCredits) == 0
 	var noCreditsZeroVote uint64 // creditsInVote == 0
 
+	// Credits delta histogram (for accounts that pass min stake and have vote)
+	var creditsDeltaNeg uint64      // creditsInVote < creditsInStake (negative delta)
+	var creditsDeltaZero uint64     // creditsInVote == creditsInStake
+	var creditsDelta1to10 uint64    // delta 1-10
+	var creditsDelta11to100 uint64  // delta 11-100
+	var creditsDelta101to1k uint64  // delta 101-1000
+	var creditsDeltaAbove1k uint64  // delta > 1000
+
+	// Sample accounts for debugging (collect first few from each bucket)
+	type sampleAccount struct {
+		pubkey          solana.PublicKey
+		voterPubkey     solana.PublicKey
+		creditsInStake  uint64
+		creditsInVote   uint64
+		activationEpoch uint64
+		epochCreditsLen int
+		stake           uint64
+		points          string
+		rewards         string
+		commission      uint8
+		bucket          string
+	}
+	var samples []sampleAccount
+	const maxSamples = 3 // per bucket
+
 	// PASS 1: Calculate total_points and collect accounts
 	// Also identify force_credits_update accounts (credits < stake OR activation == rewarded epoch)
 	var processed uint64
@@ -461,6 +486,42 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		var creditsInVote uint64
 		if len(epochCredits) > 0 {
 			creditsInVote = epochCredits[len(epochCredits)-1].Credits
+		}
+
+		// CREDITS DELTA HISTOGRAM: Track raw delta for all accounts with min stake + vote
+		// This helps identify where the eligibility cutoff differs from RPC
+		if creditsInVote < creditsInStake {
+			creditsDeltaNeg++
+			if len(samples) < maxSamples*6 { // 6 buckets
+				samples = append(samples, sampleAccount{
+					pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
+					creditsInStake: creditsInStake, creditsInVote: creditsInVote,
+					activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
+					stake: stake, bucket: "credits_delta_neg",
+				})
+			}
+		} else {
+			delta := creditsInVote - creditsInStake
+			switch {
+			case delta == 0:
+				creditsDeltaZero++
+				if len(samples) < maxSamples*6 {
+					samples = append(samples, sampleAccount{
+						pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
+						creditsInStake: creditsInStake, creditsInVote: creditsInVote,
+						activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
+						stake: stake, bucket: "credits_delta_zero",
+					})
+				}
+			case delta <= 10:
+				creditsDelta1to10++
+			case delta <= 100:
+				creditsDelta11to100++
+			case delta <= 1000:
+				creditsDelta101to1k++
+			default:
+				creditsDeltaAbove1k++
+			}
 		}
 
 		// FORCE_CREDITS_UPDATE CHECK #1: credits_in_vote < credits_in_stake
@@ -546,11 +607,34 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		totalActivationMatchRaw)
 	mlog.Log.Infof("  noCredits breakdown: equal=%d empty_epochs=%d zero_vote=%d (may overlap)",
 		noCreditsEqual, noCreditsEmpty, noCreditsZeroVote)
+	// CREDITS DELTA HISTOGRAM (accounts with min_stake + vote, before other filters)
+	mlog.Log.Infof("  CREDITS DELTA HISTOGRAM (min_stake + vote): neg=%d zero=%d 1-10=%d 11-100=%d 101-1k=%d >1k=%d",
+		creditsDeltaNeg, creditsDeltaZero, creditsDelta1to10, creditsDelta11to100, creditsDelta101to1k, creditsDeltaAbove1k)
+	histogramTotal := creditsDeltaNeg + creditsDeltaZero + creditsDelta1to10 + creditsDelta11to100 + creditsDelta101to1k + creditsDeltaAbove1k
+	mlog.Log.Infof("  histogram total=%d (should equal total - below_min - no_vote = %d)", histogramTotal, total-belowMin-noVote)
+	// Sample accounts for debugging
+	if len(samples) > 0 {
+		mlog.Log.Infof("  SAMPLE ACCOUNTS (first %d from each bucket):", maxSamples)
+		for _, s := range samples {
+			mlog.Log.Infof("    %s: stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d epoch_credits_len=%d stake_lamports=%d",
+				s.bucket, s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
+				s.activationEpoch, s.epochCreditsLen, s.stake)
+		}
+	}
 	// CRITICAL: Log total_points and total_rewards for comparison with RPC
 	// If total_points is higher than RPC, per-account rewards will be lower, causing more zero_rewards
 	// If total_rewards is lower than RPC, same effect
 	mlog.Log.Infof("  COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
 	mlog.Log.Infof("  (Get RPC values via: getBlocksWithLimit on first slot of epoch, then getBlock with rewards)")
+	// THRESHOLD: minimum points needed for rewards > 0
+	// rewards = points * total_rewards / total_points > 0
+	// => points > total_points / total_rewards
+	// => min_points = ceil(total_points / total_rewards) = (total_points + total_rewards - 1) / total_rewards
+	if totalRewards > 0 && !totalPoints.Eq(wide.Uint128FromUint64(0)) {
+		totalRewards128 := wide.Uint128FromUint64(totalRewards)
+		minPointsForReward := totalPoints.Add(totalRewards128).Sub(wide.Uint128FromUint64(1)).Div(totalRewards128)
+		mlog.Log.Infof("  THRESHOLD: min_points_for_nonzero_reward = %s (accounts with points below this get zero_rewards)", minPointsForReward.String())
+	}
 
 	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
