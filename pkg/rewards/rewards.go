@@ -39,18 +39,14 @@ type PartitionMismatchError struct {
 }
 
 func (e *PartitionMismatchError) Error() string {
-	// Calculate what the partition count WOULD be if no_credits were properly excluded
-	// Guard against underflow if NoCreditsAcct > EligibleStakeAcct (shouldn't happen but be safe)
-	var eligibleAdjusted uint64
-	var expectedIfNoCreditsExcluded uint64
-	if e.NoCreditsAcct <= e.EligibleStakeAcct {
-		eligibleAdjusted = e.EligibleStakeAcct - e.NoCreditsAcct
-		expectedIfNoCreditsExcluded = (eligibleAdjusted + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
-	}
-	return fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible=%d total=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d. "+
-		"If no_credits excluded: eligible_adjusted=%d -> partitions=%d. Check filtering logic.",
-		e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct, e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct,
-		eligibleAdjusted, expectedIfNoCreditsExcluded)
+	// Eligibility now uses calculateStakePointsAndCredits (same as rewards distribution).
+	// Filter breakdown: below_min, no_vote, no_credits, zero_points are mutually exclusive.
+	// If mismatch persists, check stake cache freshness (delete stake_cache.json to force rescan).
+	return fmt.Sprintf("PARTITION COUNT MISMATCH: epoch=%d local=%d rpc=%d eligible=%d total=%d "+
+		"(excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d). "+
+		"Eligibility uses calculateStakePointsAndCredits for consistency with rewards distribution.",
+		e.Epoch, e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct,
+		e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct)
 }
 
 // Package-level validation settings for epoch boundary
@@ -367,19 +363,28 @@ func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stak
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
 // Use this for debugging partition count mismatches.
-// Eligibility requires: stake >= min AND has vote cache AND points > 0 for the rewarded epoch.
-// Points > 0 means: has new credits to earn AND effective stake > 0 for the specific rewarded epoch.
-// This matches Agave's "rewardable stake accounts" set used in partition calculation.
-// rewardedEpoch is the epoch being rewarded (typically prevEpoch at epoch boundary).
+// Eligibility requires: stake >= min AND has vote cache AND points > 0.
+// Points are calculated using the SAME logic as actual rewards distribution (calculateStakePointsAndCredits),
+// which sums points across ALL epochs in epochCredits, not just the rewarded epoch.
+// This ensures partition count matches accounts that will actually receive non-zero rewards.
+// rewardedEpoch parameter is kept for logging/debugging but eligibility is based on total points.
 func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
+	stakeCache := global.StakeCache()
 	stats := StakeAccountStats{
-		Total:            uint64(len(global.StakeCache())),
+		Total:            uint64(len(stakeCache)),
 		MinimumStake:     minimum,
 		MinEligibleStake: ^uint64(0), // Start with max value
 	}
 
-	for _, delegation := range global.StakeCache() {
+	mlog.Log.Infof("counting eligible stake accounts: total=%d rewarded_epoch=%d", stats.Total, rewardedEpoch)
+
+	var processed uint64
+	for pubkey, delegation := range stakeCache {
+		processed++
+		if processed%100000 == 0 {
+			mlog.Log.Infof("  progress: %d/%d accounts (%.1f%%)", processed, stats.Total, float64(processed)*100/float64(stats.Total))
+		}
 		stake := delegation.StakeLamports
 		voteState := global.VoteCacheItem(delegation.VoterPubkey)
 		hasVote := voteState != nil
@@ -446,9 +451,12 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 			continue
 		}
 
-		// Check if account has points > 0 for the rewarded epoch specifically
-		// This matches the logic in calculateStakePointsAndCredits but filtered to just the rewarded epoch
-		if !hasPositivePointsForEpoch(delegation, epochCredits, creditsInStake, rewardedEpoch, stakeHistory, newRateActivationEpoch) {
+		// Use the SAME logic as actual rewards calculation to determine eligibility.
+		// This ensures partition count matches accounts that will actually receive rewards.
+		// calculateStakePointsAndCredits sums points across ALL epochs in epochCredits, not just rewardedEpoch.
+		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+		zero128 := wide.Uint128FromUint64(0)
+		if calculatedPoints.Points.Eq(zero128) {
 			stats.ZeroPoints++
 			continue
 		}
@@ -514,46 +522,6 @@ func hasPositivePoints(
 			effectiveStake := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
 			if effectiveStake > 0 {
 				// Found at least one epoch with earnedCredits > 0 AND effectiveStake > 0
-				return true
-			}
-		}
-
-		newObserved = max(newObserved, final)
-	}
-
-	return false
-}
-
-// hasPositivePointsForEpoch checks if a delegation would earn any points for a SPECIFIC epoch.
-// This is used for partition counting where we only count accounts that earn rewards for the
-// rewarded epoch, not accounts that might have earned rewards in historical epochs.
-// Returns true if the rewarded epoch has earnedCredits > 0 AND effectiveStake > 0.
-func hasPositivePointsForEpoch(
-	delegation *sealevel.Delegation,
-	epochCredits []sealevel.EpochCredits,
-	creditsInStake uint64,
-	rewardedEpoch uint64,
-	stakeHistory *sealevel.SysvarStakeHistory,
-	newRateActivationEpoch *uint64,
-) bool {
-	newObserved := creditsInStake
-
-	for _, ec := range epochCredits {
-		final := ec.Credits
-		initial := ec.PrevCredits
-
-		var earnedCredits uint64
-		if creditsInStake < initial {
-			earnedCredits = final - initial
-		} else if creditsInStake < final {
-			earnedCredits = final - newObserved
-		}
-
-		// Only check the specific rewarded epoch
-		if ec.Epoch == rewardedEpoch && earnedCredits != 0 {
-			// Check effective stake for this epoch
-			effectiveStake := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
-			if effectiveStake > 0 {
 				return true
 			}
 		}
@@ -908,7 +876,16 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 		}
 	})
 
-	for pk, delegation := range global.StakeCache() {
+	stakeCache := global.StakeCache()
+	total := uint64(len(stakeCache))
+	mlog.Log.Infof("calculating stake rewards: processing %d stake accounts", total)
+
+	var dispatched uint64
+	for pk, delegation := range stakeCache {
+		dispatched++
+		if dispatched%100000 == 0 {
+			mlog.Log.Infof("  stake rewards progress: %d/%d (%.1f%%)", dispatched, total, float64(dispatched)*100/float64(total))
+		}
 		d := &delegationAndPubkey{delegation: delegation, pubkey: pk}
 		wg.Add(1)
 		workerPool.Invoke(d)
@@ -916,6 +893,8 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 	wg.Wait()
 	workerPool.Release()
 	ants.Release()
+
+	mlog.Log.Infof("stake rewards calculation complete: %d accounts with rewards", len(stakeInfoResults))
 
 	mlog.Log.Debugf("rewards: stake filter counts (rewards): slot=%d epoch=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
 		slot, rewardedEpoch, minimumStakeDelegation, len(global.StakeCache()),
