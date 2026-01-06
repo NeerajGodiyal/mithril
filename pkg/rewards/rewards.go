@@ -1398,8 +1398,16 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// update the delegation in the stake account state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			errVal := fmt.Errorf("unable to deserialize stake account %s in distributing partitioned rewards: %w", stakePk, err)
-			workerErr.CompareAndSwap(nil, &errVal)
+			// Stake account can't be deserialized - might be Uninitialized or corrupted.
+			// Skip it like Firedancer does (fd_rewards.c:880-884 returns 1 on decode failure).
+			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (slot=%d) - skipping: %v", stakePk, slot, err)
+			return
+		}
+
+		// Skip accounts that aren't in Stake state (e.g., Initialized, Uninitialized)
+		// Matches Firedancer's fd_stake_state_v2_is_stake check (fd_rewards.c:886-889)
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, slot=%d) - skipping", stakePk, stakeState.Status, slot)
 			return
 		}
 
