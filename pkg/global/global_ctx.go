@@ -430,12 +430,9 @@ func LoadStakeCache(accountsDbDir string, expectedSlot uint64, expectedBankhash 
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 
-	if instance.stakeCache == nil {
-		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
-	}
-	if instance.stakeCacheSlots == nil {
-		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
-	}
+	// Unconditionally clear before loading to avoid stale entries
+	instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
 
 	loadedCount := 0
 	skippedCount := 0

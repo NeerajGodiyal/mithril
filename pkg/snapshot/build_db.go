@@ -214,7 +214,7 @@ func BuildAccountsDb(
 	}
 
 	// Load stake cache from manifest (Firedancer approach - much faster than appendvec scanning)
-	// Try incremental first, fall back to full manifest if incremental lacks VersionedEpochStakes
+	// Try incremental first, fall back to full manifest ONLY if same epoch (avoids stale stake data)
 	var stakeCount int
 	var hasStakeData bool
 	finalManifest := manifest
@@ -222,10 +222,15 @@ func BuildAccountsDb(
 		stakeCount, hasStakeData = loadStakeCacheFromManifest(incrementalManifest)
 		if hasStakeData {
 			finalManifest = incrementalManifest
-		} else {
-			mlog.Log.Warnf("incremental manifest lacks VersionedEpochStakes for epoch %d, trying full manifest",
+		} else if manifest.Bank.Epoch == incrementalManifest.Bank.Epoch {
+			// Safe to fall back - same epoch means stake data is still valid
+			mlog.Log.Warnf("incremental manifest lacks VersionedEpochStakes for epoch %d, using full manifest (same epoch)",
 				incrementalManifest.Bank.Epoch)
 			stakeCount, hasStakeData = loadStakeCacheFromManifest(manifest)
+		} else {
+			// Different epochs - fallback would use stale stake data
+			return nil, nil, fmt.Errorf("incremental manifest (epoch %d) lacks VersionedEpochStakes and full manifest is epoch %d - cannot safely fall back",
+				incrementalManifest.Bank.Epoch, manifest.Bank.Epoch)
 		}
 	} else {
 		stakeCount, hasStakeData = loadStakeCacheFromManifest(manifest)
