@@ -1445,17 +1445,28 @@ func ReplayBlocks(
 			// Step 2b: Verify vote cache completeness for all non-zero stake vote accounts.
 			// Fail fast if any vote accounts are missing - computing with stale data causes divergence.
 			{
+				total := 0
+				totalStake := uint64(0)
+				rebuilt := 0
+				rebuiltStake := uint64(0)
 				missing := 0
 				missingStake := uint64(0)
 				for pk, stake := range block.VoteAccts {
 					if stake == 0 {
 						continue
 					}
+					total++
+					totalStake += stake
 					if global.VoteCacheItem(pk) == nil {
 						missing++
 						missingStake += stake
+					} else {
+						rebuilt++
+						rebuiltStake += stake
 					}
 				}
+				mlog.Log.Infof("vote cache rebuild: %d/%d vote accounts (%.2f%% by count, %.2f%% by stake)",
+					rebuilt, total, float64(rebuilt)*100/float64(total), float64(rebuiltStake)*100/float64(totalStake))
 				if missing > 0 {
 					mlog.Log.Errorf("FATAL: vote cache incomplete at boundary slot=%d missing=%d missing_stake=%d",
 						prevSlotCtxForEpochBoundary.Slot, missing, missingStake)
