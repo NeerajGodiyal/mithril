@@ -530,6 +530,11 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		activationWithCreditsLess, activationWithCreditsEqual, activationWithCreditsGreater)
 	mlog.Log.Infof("  RAW activation_epoch==rewarded (before ANY filters): %d (if 0, stake cache missing activation_epoch)",
 		totalActivationMatchRaw)
+	// CRITICAL: Log total_points and total_rewards for comparison with RPC
+	// If total_points is higher than RPC, per-account rewards will be lower, causing more zero_rewards
+	// If total_rewards is lower than RPC, same effect
+	mlog.Log.Infof("  COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
+	mlog.Log.Infof("  (Get RPC values via: getBlocksWithLimit on first slot of epoch, then getBlock with rewards)")
 
 	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
