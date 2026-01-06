@@ -93,7 +93,7 @@ func New(
 		voteStr := voteAcctPubkey.String()
 		if voteStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
 			voteStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
-			mlog.Log.Infof("DEBUG_SCHEDULE_INPUT: epoch=%d vote=%s node=%s stake=%d",
+			mlog.Log.FileOnlyf("DEBUG_SCHEDULE_INPUT: epoch=%d vote=%s node=%s stake=%d",
 				epoch, voteStr, nodePubkey.String(), stake)
 		}
 	}

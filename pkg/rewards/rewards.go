@@ -379,6 +379,10 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 
 	mlog.Log.Infof("counting eligible stake accounts: total=%d rewarded_epoch=%d", stats.Total, rewardedEpoch)
 
+	// DIAGNOSTIC: Track both eligibility predicates to determine which matches RPC
+	var eligibleAllEpochs uint64      // calculateStakePointsAndCredits (points > 0 across all epochs)
+	var eligibleRewardedEpochOnly uint64 // points > 0 for rewarded epoch only
+
 	var processed uint64
 	for pubkey, delegation := range stakeCache {
 		processed++
@@ -451,12 +455,25 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 			continue
 		}
 
-		// Use the SAME logic as actual rewards calculation to determine eligibility.
-		// This ensures partition count matches accounts that will actually receive rewards.
-		// calculateStakePointsAndCredits sums points across ALL epochs in epochCredits, not just rewardedEpoch.
+		// DIAGNOSTIC: Check BOTH eligibility predicates to determine which matches RPC
+		// Method 1: All epochs (calculateStakePointsAndCredits) - sums points across all epochCredits
 		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
 		zero128 := wide.Uint128FromUint64(0)
-		if calculatedPoints.Points.Eq(zero128) {
+		hasPointsAllEpochs := !calculatedPoints.Points.Eq(zero128)
+
+		// Method 2: Rewarded epoch only - check if THIS specific epoch has points > 0
+		hasPointsRewardedEpoch := hasPositivePointsForEpoch(delegation, epochCredits, creditsInStake, rewardedEpoch, stakeHistory, newRateActivationEpoch)
+
+		// Track both counts for diagnostic comparison
+		if hasPointsAllEpochs {
+			eligibleAllEpochs++
+		}
+		if hasPointsRewardedEpoch {
+			eligibleRewardedEpochOnly++
+		}
+
+		// Use all-epochs method for actual eligibility (current behavior)
+		if !hasPointsAllEpochs {
 			stats.ZeroPoints++
 			continue
 		}
@@ -491,6 +508,14 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 	mlog.Log.Infof("  partition calc: eligible=%d -> partitions=%d (if max_rewards_per_block=4096)",
 		stats.Eligible, (stats.Eligible+MaxRewardsPerBlock-1)/MaxRewardsPerBlock)
 
+	// DIAGNOSTIC: Compare both eligibility predicates to determine which matches RPC
+	// This removes cache/feature/timing confounds and tells us which predicate Agave uses
+	partitionsAllEpochs := (eligibleAllEpochs + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	partitionsRewardedOnly := (eligibleRewardedEpochOnly + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	mlog.Log.Infof("ELIGIBILITY DIAGNOSTIC: all_epochs=%d (partitions=%d) | rewarded_epoch_only=%d (partitions=%d) | delta=%d",
+		eligibleAllEpochs, partitionsAllEpochs, eligibleRewardedEpochOnly, partitionsRewardedOnly,
+		int64(eligibleAllEpochs)-int64(eligibleRewardedEpochOnly))
+
 	return stats
 }
 
@@ -522,6 +547,45 @@ func hasPositivePoints(
 			effectiveStake := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
 			if effectiveStake > 0 {
 				// Found at least one epoch with earnedCredits > 0 AND effectiveStake > 0
+				return true
+			}
+		}
+
+		newObserved = max(newObserved, final)
+	}
+
+	return false
+}
+
+// hasPositivePointsForEpoch checks if a delegation would earn any points for a SPECIFIC epoch.
+// This is used for diagnostic comparison - checking if the rewarded epoch filter matches RPC.
+// Returns true if the rewarded epoch has earnedCredits > 0 AND effectiveStake > 0.
+func hasPositivePointsForEpoch(
+	delegation *sealevel.Delegation,
+	epochCredits []sealevel.EpochCredits,
+	creditsInStake uint64,
+	rewardedEpoch uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newRateActivationEpoch *uint64,
+) bool {
+	newObserved := creditsInStake
+
+	for _, ec := range epochCredits {
+		final := ec.Credits
+		initial := ec.PrevCredits
+
+		var earnedCredits uint64
+		if creditsInStake < initial {
+			earnedCredits = final - initial
+		} else if creditsInStake < final {
+			earnedCredits = final - newObserved
+		}
+
+		// Only check the specific rewarded epoch
+		if ec.Epoch == rewardedEpoch && earnedCredits != 0 {
+			// Check effective stake for this epoch
+			effectiveStake := delegation.StakeActivatingAndDeactivating(ec.Epoch, stakeHistory, newRateActivationEpoch).Effective
+			if effectiveStake > 0 {
 				return true
 			}
 		}

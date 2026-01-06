@@ -624,7 +624,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 		for _, df := range debugFeatures {
 			if featureGate.Name == df {
 				if err != nil {
-					mlog.Log.Warnf("DEBUG_FEATURE: slot=%d %s NOT_FOUND err=%v", slot, df, err)
+					mlog.Log.FileOnlyf("DEBUG_FEATURE: slot=%d %s NOT_FOUND err=%v", slot, df, err)
 				} else {
 					featureAcct := features.UnmarshalFeatureAcct(acct.Data)
 					var activatedAt string
@@ -633,7 +633,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 					} else {
 						activatedAt = "nil"
 					}
-					mlog.Log.Infof("DEBUG_FEATURE: slot=%d %s FOUND activated_at=%s owner=%s",
+					mlog.Log.FileOnlyf("DEBUG_FEATURE: slot=%d %s FOUND activated_at=%s owner=%s",
 						slot, df, activatedAt, acct.Owner)
 				}
 			}
@@ -644,7 +644,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 				// Debug: log when owner check fails for critical features
 				for _, df := range debugFeatures {
 					if featureGate.Name == df {
-						mlog.Log.Warnf("DEBUG_FEATURE: slot=%d %s WRONG_OWNER expected=%s got=%s",
+						mlog.Log.FileOnlyf("DEBUG_FEATURE: slot=%d %s WRONG_OWNER expected=%s got=%s",
 							slot, df, a.FeatureAddr, acct.Owner)
 					}
 				}
@@ -679,7 +679,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 	// Debug: log summary of feature detection
 	minDelegationActive := f.IsActive(features.StakeMinimumDelegationForRewards)
 	raise1SolActive := f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol)
-	mlog.Log.Infof("DEBUG_FEATURE_SUMMARY: slot=%d enabled_features=%d StakeMinimumDelegationForRewards=%v StakeRaiseMinimumDelegationTo1Sol=%v",
+	mlog.Log.FileOnlyf("DEBUG_FEATURE_SUMMARY: slot=%d enabled_features=%d StakeMinimumDelegationForRewards=%v StakeRaiseMinimumDelegationTo1Sol=%v",
 		slot, enabledCount, minDelegationActive, raise1SolActive)
 
 	if len(newlyActivatedFeatureAccts) != 0 {

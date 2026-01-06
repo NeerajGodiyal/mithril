@@ -81,7 +81,16 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 		deactivating.Add(stakeHistoryEntry.Deactivating)
 	})
 
-	for _, delegation := range global.StakeCache() {
+	stakeCache := global.StakeCache()
+	total := uint64(len(stakeCache))
+	mlog.Log.Infof("updating stake history: processing %d stake accounts", total)
+
+	var dispatched uint64
+	for _, delegation := range stakeCache {
+		dispatched++
+		if dispatched%100000 == 0 {
+			mlog.Log.Infof("  stake history progress: %d/%d (%.1f%%)", dispatched, total, float64(dispatched)*100/float64(total))
+		}
 		wg.Add(1)
 		workerPool.Invoke(delegation)
 	}
@@ -89,6 +98,8 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	wg.Wait()
 	workerPool.Release()
 	ants.Release()
+
+	mlog.Log.Infof("stake history update complete")
 
 	var accumulatorStakeHistoryEntry sealevel.StakeHistoryEntry
 	accumulatorStakeHistoryEntry.Activating = activating.Load()
@@ -130,7 +141,7 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 		if voteStr == "6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc" ||
 			voteStr == "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ" {
 			entry := delegation.StakeActivatingAndDeactivating(newEpoch, stakeHistory, newRateActivationEpoch)
-			mlog.Log.Infof("DEBUG_STAKE_CALC: epoch=%d vote=%s raw_stake=%d effective=%d activating=%d deactivating=%d activation_epoch=%d deactivation_epoch=%d",
+			mlog.Log.FileOnlyf("DEBUG_STAKE_CALC: epoch=%d vote=%s raw_stake=%d effective=%d activating=%d deactivating=%d activation_epoch=%d deactivation_epoch=%d",
 				newEpoch, voteStr, delegation.StakeLamports, entry.Effective, entry.Activating, entry.Deactivating,
 				delegation.ActivationEpoch, delegation.DeactivationEpoch)
 		}
@@ -140,7 +151,16 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 		mu.Unlock()
 	})
 
-	for _, delegation := range global.StakeCache() {
+	stakeCache := global.StakeCache()
+	total := uint64(len(stakeCache))
+	mlog.Log.Infof("refreshing vote account stakes: processing %d stake accounts", total)
+
+	var dispatched uint64
+	for _, delegation := range stakeCache {
+		dispatched++
+		if dispatched%100000 == 0 {
+			mlog.Log.Infof("  vote stakes progress: %d/%d (%.1f%%)", dispatched, total, float64(dispatched)*100/float64(total))
+		}
 		wg.Add(1)
 		workerPool.Invoke(delegation)
 	}
@@ -149,15 +169,17 @@ func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.Ac
 	workerPool.Release()
 	ants.Release()
 
+	mlog.Log.Infof("vote account stakes refresh complete: %d unique vote accounts", len(voteAcctStakes))
+
 	// Debug: log final aggregated stakes for problematic validators
 	debugVotes := []string{"6jf9Hwx4ChqUpi8skCqmh7bnfTWXHXsqbfqAPHmSzPYc", "MS1kjUoVPfy4AgyJLiJ3eC6Gv34Cwr839MryJgNKdwJ"}
 	for _, voteStr := range debugVotes {
 		votePk := solana.MustPublicKeyFromBase58(voteStr)
 		if stake, ok := voteAcctStakes[votePk]; ok {
-			mlog.Log.Infof("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s total_effective_stake=%d",
+			mlog.Log.FileOnlyf("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s total_effective_stake=%d",
 				newEpoch, voteStr, stake)
 		} else {
-			mlog.Log.Warnf("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s NOT_FOUND in voteAcctStakes",
+			mlog.Log.FileOnlyf("DEBUG_AGGREGATED_STAKE: epoch=%d vote=%s NOT_FOUND in voteAcctStakes",
 				newEpoch, voteStr)
 		}
 	}
