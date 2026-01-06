@@ -1460,20 +1460,26 @@ func ReplayBlocks(
 					break
 				}
 
-				// Refresh global.EpochStakes now that VoteCache is complete
-				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
-
-				// Only build schedule if we don't already have one for this epoch.
+				// Only build schedule if we don't already have a complete one for this epoch.
 				// The snapshot schedule is authoritative - leader schedule for epoch N is fixed
 				// at the start of epoch N-1 using stakes from end of N-2. Rebuilding here would
 				// use newer stakes and diverge.
 				firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(block.Epoch)
-				if _, hasSchedule := global.LeaderForSlot(firstSlotInEpoch); hasSchedule {
-					mlog.Log.Infof("epoch boundary: schedule already present for epoch %d; skipping rebuild",
-						block.Epoch)
+				numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
+				lastSlotInEpoch := firstSlotInEpoch + numSlots - 1
+				_, hasFirstSlot := global.LeaderForSlot(firstSlotInEpoch)
+				_, hasLastSlot := global.LeaderForSlot(lastSlotInEpoch)
+
+				if hasFirstSlot && hasLastSlot {
+					// Schedule exists and appears complete - keep snapshot schedule
+					mlog.Log.Infof("epoch boundary: schedule already present for epoch %d (first=%d last=%d); skipping rebuild",
+						block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
 				} else {
-					mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule - not present from snapshot)",
-						block.Epoch)
+					// Need to build schedule - refresh EpochStakes for this
+					cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
+
+					mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule - not present from snapshot, hasFirst=%v hasLast=%v)",
+						block.Epoch, hasFirstSlot, hasLastSlot)
 
 					_, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
 					if err != nil {
@@ -1487,13 +1493,11 @@ func ReplayBlocks(
 				var exists bool
 				block.Leader, exists = global.LeaderForSlot(block.Slot)
 				if !exists {
-					numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-					lastSlot := firstSlotInEpoch + numSlots - 1
 					hash := scheduleFullHash(global.LeaderSchedule(), firstSlotInEpoch, numSlots)
 					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-						block.Slot, block.Epoch, firstSlotInEpoch, lastSlot, hash)
+						block.Slot, block.Epoch, firstSlotInEpoch, lastSlotInEpoch, hash)
 					result.Error = fmt.Errorf("unable to find leader for slot %d at epoch boundary (epoch=%d range=[%d,%d])",
-						block.Slot, block.Epoch, firstSlotInEpoch, lastSlot)
+						block.Slot, block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
 					break
 				}
 			}
