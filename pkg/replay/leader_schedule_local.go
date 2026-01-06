@@ -1589,8 +1589,8 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 			epoch, missingPercent, stats.SkippedMissingVoteAcct, missingStake)
 	}
 
-	// Set as source of truth
-	global.SetLeaderSchedule(schedule)
+	// Merge into existing schedule (don't overwrite - preserves current epoch's slots at epoch boundary)
+	global.MergeLeaderSchedule(schedule)
 
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)

@@ -1472,6 +1472,10 @@ func ReplayBlocks(
 				mlog.Log.Infof("epoch boundary: block.Epoch=%d leaderScheduleEpoch=%d (building schedule for epoch %d)",
 					block.Epoch, leaderScheduleEpoch, leaderScheduleEpoch)
 
+				// Cache epoch stakes for leaderScheduleEpoch so PrepareLeaderScheduleLocalFromVoteCache can find them.
+				// Schedule for N+1 uses stakes from N-1, which is what block.VoteAccts contains at this boundary.
+				cacheEpochStakesForValidation(leaderScheduleEpoch, block.VoteAccts, block.TotalEpochStake)
+
 				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(leaderScheduleEpoch, epochSchedule, logsDir)
 				if err != nil {
 					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)

@@ -339,3 +339,15 @@ func (ls *LeaderSchedule) LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 	leader, exists := ls.lsMap[slot]
 	return leader, exists
 }
+
+// Merge combines another schedule into this one. Slots from different epochs
+// don't overlap, so this safely adds all slots from the other schedule.
+// If there's a conflict (same slot in both), the other schedule wins.
+func (ls *LeaderSchedule) Merge(other *LeaderSchedule) {
+	if other == nil || other.lsMap == nil {
+		return
+	}
+	for slot, leader := range other.lsMap {
+		ls.lsMap[slot] = leader
+	}
+}

@@ -250,6 +250,17 @@ func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
 	instance.leaderSchedule = ls
 }
 
+// MergeLeaderSchedule merges the given schedule into the existing global schedule.
+// Used at epoch boundaries to add the next epoch's schedule without losing the current one.
+// If no existing schedule, this behaves like SetLeaderSchedule.
+func MergeLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
+	if instance.leaderSchedule == nil {
+		instance.leaderSchedule = ls
+		return
+	}
+	instance.leaderSchedule.Merge(ls)
+}
+
 func LeaderSchedule() *leaderschedule.LeaderSchedule {
 	return instance.leaderSchedule
 }

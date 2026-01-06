@@ -40,11 +40,17 @@ type PartitionMismatchError struct {
 
 func (e *PartitionMismatchError) Error() string {
 	// Calculate what the partition count WOULD be if no_credits were properly excluded
-	expectedIfNoCreditsExcluded := (e.EligibleStakeAcct - e.NoCreditsAcct + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	// Guard against underflow if NoCreditsAcct > EligibleStakeAcct (shouldn't happen but be safe)
+	var eligibleAdjusted uint64
+	var expectedIfNoCreditsExcluded uint64
+	if e.NoCreditsAcct <= e.EligibleStakeAcct {
+		eligibleAdjusted = e.EligibleStakeAcct - e.NoCreditsAcct
+		expectedIfNoCreditsExcluded = (eligibleAdjusted + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	}
 	return fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible=%d total=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d. "+
 		"If no_credits excluded: eligible_adjusted=%d -> partitions=%d. Check filtering logic.",
 		e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct, e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct,
-		e.EligibleStakeAcct-e.NoCreditsAcct, expectedIfNoCreditsExcluded)
+		eligibleAdjusted, expectedIfNoCreditsExcluded)
 }
 
 // Package-level validation settings for epoch boundary
