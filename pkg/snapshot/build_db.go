@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/fastcache"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -22,6 +23,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cockroachdb/pebble"
+	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -158,8 +161,8 @@ var (
 )
 
 // loadStakeCacheFromManifest populates the global stake cache directly from the
-// manifest's VersionedEpochStakes, which is more efficient than scanning appendvecs.
-// This mirrors Firedancer's approach of using the manifest's stake delegations.
+// manifest's VersionedEpochStakes. Note: credits_observed values from the manifest
+// may be stale and should be refreshed from AccountsDB at boundary/resume.
 // Returns (count, true) on success, (0, false) if manifest lacks stake data.
 func loadStakeCacheFromManifest(manifest *SnapshotManifest) (int, bool) {
 	bankEpoch := manifest.Bank.Epoch
@@ -213,8 +216,9 @@ func BuildAccountsDb(
 		mlog.Log.Infof("parsed manifest from incrementalSnapshotFile=%s", incrementalSnapshotFile)
 	}
 
-	// Load stake cache from manifest (Firedancer approach - much faster than appendvec scanning)
-	// Use whichever manifest we'll be replaying from - no fallback since stake data changes within epochs
+	// Load stake cache from manifest. Note: manifest credits_observed values may be stale.
+	// Use whichever manifest we'll be replaying from - no fallback since stake data changes within epochs.
+	// A refresh pass at boundary/resume corrects credits_observed from actual AccountsDB state.
 	var stakeCount int
 	var hasStakeData bool
 	finalManifest := manifest
@@ -234,6 +238,11 @@ func BuildAccountsDb(
 	}
 
 	start := time.Now()
+
+	// Clear stake cache before appendvec processing. The manifest load above validated stake
+	// data exists but used stale credits_observed. We'll repopulate from appendvecs with correct values.
+	global.ClearStakeCache()
+	mlog.Log.Infof("cleared stake cache from manifest, will repopulate from appendvecs")
 
 	appendVecsOutputDir := filepath.Join(accountsDbDir, "accounts")
 	if err = os.MkdirAll(appendVecsOutputDir, 0775); err != nil {
@@ -342,14 +351,17 @@ func BuildAccountsDb(
 		panic(err)
 	}
 
-	// Persist stake cache loaded from manifest
-	if stakeCount > 0 {
+	// Persist stake cache extracted from appendvecs (has correct credits_observed)
+	appendvecStakeCount := global.StakeCacheSize()
+	if appendvecStakeCount > 0 {
 		bankhashStr := base58.Encode(finalManifest.Bank.Hash[:])
 		if err := global.SaveStakeCache(accountsDbDir, finalManifest.Bank.Slot, bankhashStr); err != nil {
 			mlog.Log.Warnf("failed to persist stake cache: %v", err)
 		} else {
-			mlog.Log.Infof("stake cache persisted: %d accounts at slot %d", stakeCount, finalManifest.Bank.Slot)
+			mlog.Log.Infof("stake cache persisted: %d accounts from appendvecs at slot %d (manifest had %d)", appendvecStakeCount, finalManifest.Bank.Slot, stakeCount)
 		}
+	} else {
+		mlog.Log.Warnf("no stake accounts found in appendvecs (manifest had %d) - stake cache will be empty", stakeCount)
 	}
 
 	if incrementalManifest != nil {
@@ -499,7 +511,40 @@ func initWorkerPools(
 			return
 		}
 
-		// Note: Stake cache is loaded from manifest (Firedancer approach) - no appendvec scanning needed
+		// Extract stake accounts from appendvec and populate cache with correct credits_observed.
+		// This uses data we've already read (zero extra I/O) and gives us accurate stake state.
+		stakeProgramAddr := solana.PublicKeyFromBytes(a.StakeProgramAddr[:])
+		stakeEntries := accountsdb.ExtractStakeAccountsFromAppendVec(task.Data, task.FileSize, stakeProgramAddr)
+		if len(stakeEntries) > 0 {
+			batchEntries := make([]global.StakeCacheBatchEntry, 0, len(stakeEntries))
+			for _, entry := range stakeEntries {
+				// Decode stake state to get delegation info
+				decoder := bin.NewBinDecoder(entry.Data)
+				var stakeState sealevel.StakeStateV2
+				if err := stakeState.UnmarshalWithDecoder(decoder); err != nil {
+					continue // Skip malformed stake accounts
+				}
+				// Only process accounts in the "Stake" state (status == 2)
+				if stakeState.Status != sealevel.StakeStateV2StatusStake {
+					continue
+				}
+				batchEntries = append(batchEntries, global.StakeCacheBatchEntry{
+					Pubkey: entry.Pubkey,
+					Delegation: &sealevel.Delegation{
+						VoterPubkey:        stakeState.Stake.Stake.Delegation.VoterPubkey,
+						StakeLamports:      stakeState.Stake.Stake.Delegation.StakeLamports,
+						ActivationEpoch:    stakeState.Stake.Stake.Delegation.ActivationEpoch,
+						DeactivationEpoch:  stakeState.Stake.Stake.Delegation.DeactivationEpoch,
+						WarmupCooldownRate: stakeState.Stake.Stake.Delegation.WarmupCooldownRate,
+						CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
+					},
+					Slot: task.Slot,
+				})
+			}
+			if len(batchEntries) > 0 {
+				global.PutStakeCacheItemsBatch(batchEntries)
+			}
+		}
 
 		indexEntryBuilderInProgress.Add(-1)
 		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}

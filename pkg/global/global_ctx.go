@@ -115,6 +115,37 @@ func PutStakeCacheItemWithSlot(pubkey solana.PublicKey, delegation *sealevel.Del
 	}
 }
 
+// StakeCacheBatchEntry represents a single entry for batch insertion into the stake cache.
+type StakeCacheBatchEntry struct {
+	Pubkey     solana.PublicKey
+	Delegation *sealevel.Delegation
+	Slot       uint64
+}
+
+// PutStakeCacheItemsBatch inserts multiple stake cache entries under a single lock.
+// Use this during parallel appendvec processing to avoid per-entry locking overhead.
+// Only updates if slot >= existing slot (latest wins).
+func PutStakeCacheItemsBatch(entries []StakeCacheBatchEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+	for _, entry := range entries {
+		existingSlot, exists := instance.stakeCacheSlots[entry.Pubkey]
+		if !exists || entry.Slot >= existingSlot {
+			instance.stakeCache[entry.Pubkey] = entry.Delegation
+			instance.stakeCacheSlots[entry.Pubkey] = entry.Slot
+		}
+	}
+}
+
 func DeleteStakeCacheItem(pubkey solana.PublicKey) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
