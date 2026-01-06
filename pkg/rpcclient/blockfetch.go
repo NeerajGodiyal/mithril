@@ -277,6 +277,24 @@ func (fetcher *RpcClient) GetBlockTime(slot uint64) (int64, error) {
 	return int64(*ts), err
 }
 
+// GetEpochRewardsSysvar fetches the EpochRewards sysvar account data from RPC.
+// Returns the raw account data bytes which can be decoded using sealevel.SysvarEpochRewards.
+func (fetcher *RpcClient) GetEpochRewardsSysvar() ([]byte, error) {
+	// EpochRewards sysvar address
+	epochRewardsAddr := solana.MustPublicKeyFromBase58("SysvarEpochRewards1111111111111111111111111")
+
+	result, err := fetcher.client.GetAccountInfo(context.TODO(), epochRewardsAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch EpochRewards sysvar: %w", err)
+	}
+
+	if result == nil || result.Value == nil {
+		return nil, fmt.Errorf("EpochRewards sysvar account not found")
+	}
+
+	return result.Value.Data.GetBinary(), nil
+}
+
 func (fetcher *RpcClient) GetSlot() (uint64, error) {
 	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentConfirmed)
 	if err != nil {

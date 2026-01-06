@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
 	"github.com/dgryski/go-sip13"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
@@ -1132,6 +1133,26 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 		} else {
 			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
 			if numRewardPartitions != rpcNumPartitions {
+				// Fetch EpochRewards sysvar to compare total_points and total_rewards
+				epochRewardsData, err := validationRpcClient.GetEpochRewardsSysvar()
+				if err != nil {
+					mlog.Log.Warnf("partition validation: failed to fetch EpochRewards sysvar: %v", err)
+				} else {
+					var rpcEpochRewards sealevel.SysvarEpochRewards
+					decoder := bin.NewBinDecoder(epochRewardsData)
+					if err := rpcEpochRewards.UnmarshalWithDecoder(decoder); err != nil {
+						mlog.Log.Warnf("partition validation: failed to decode EpochRewards sysvar: %v", err)
+					} else {
+						mlog.Log.Infof("RPC EpochRewards sysvar: num_partitions=%d total_points=%s total_rewards=%d",
+							rpcEpochRewards.NumPartitions, rpcEpochRewards.TotalPoints.String(), rpcEpochRewards.TotalRewards)
+						mlog.Log.Infof("LOCAL computed values: total_rewards=%d", totalStakingRewards)
+						mlog.Log.Infof("COMPARISON: local_rewards=%d rpc_rewards=%d diff=%d",
+							totalStakingRewards, rpcEpochRewards.TotalRewards,
+							int64(totalStakingRewards)-int64(rpcEpochRewards.TotalRewards))
+						// Note: We don't have local total_points at this level, but it's logged in CountEligibleStakeAccountsWithRewardsFilter
+					}
+				}
+
 				// CRITICAL: Partition count mismatch will cause bankhash divergence.
 				// Return error to allow clean shutdown with state file writing.
 				return nil, &PartitionMismatchError{
