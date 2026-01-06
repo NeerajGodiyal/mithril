@@ -48,12 +48,20 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// Compute warmup/cooldown rate epoch first - needed for partition count calculation
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
+	// Calculate boundary slot = last slot of previous epoch = slot - 1
+	// (slot is the first slot of the new epoch)
+	// This is the slot from which stake account state should be read for rewards calculation.
+	boundarySlot := slot - 1
+
 	// IMPORTANT: Validate partition count BEFORE any account writes.
 	// If validation fails, we want to exit cleanly without having modified AccountsDB.
 	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f, stakeHistory, newWarmupCooldownRateEpoch)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	// Set the boundary slot for use during distribution
+	partitionedRewardsInfo.BoundarySlot = boundarySlot
 
 	// Now safe to distribute vote rewards since validation passed
 	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
@@ -62,18 +70,20 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
-	// CRITICAL: Refresh stake cache credits_observed from AccountsDB before computing points.
+	// CRITICAL: Refresh stake cache credits_observed from AccountsDB using the BOUNDARY slot.
 	// The manifest's epoch_stakes contains stake delegation entries, but credits_observed is NOT
 	// updated after rewards distribution - it only reflects the value when the stake was created
 	// or last modified. The actual stake accounts in AccountsDB have the correct values.
+	// Using boundary slot ensures we see the same state that Agave used for rewards calculation.
 	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
-	rewards.RefreshStakeCacheCreditsObserved(acctsDb, slot)
+	rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
 
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
 	// Pass nil for maxEpoch - fresh compute uses current vote credits (correct at epoch boundary)
-	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch, nil)
+	// Use boundarySlot for stake account reads
+	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, boundarySlot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch, nil)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
@@ -166,10 +176,15 @@ func recalculatePartitionedRewardsForResume(
 		return nil, nil
 	}
 
+	// Calculate boundary slot = last slot of previous epoch = firstSlotInEpoch - 1
+	// This is the slot from which stake account state should be read for rewards calculation.
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	boundarySlot := firstSlotInEpoch - 1
+
 	numStakeAccounts := uint64(len(global.StakeCache()))
 	mlog.Log.Infof("rewards resume: reconstructing partitionedRewardsInfo from stored state")
-	mlog.Log.Infof("  epoch=%d slot=%d active=%v distributed=%d/%d",
-		epoch, slot, epochRewards.Active, epochRewards.DistributedRewards, epochRewards.TotalRewards)
+	mlog.Log.Infof("  epoch=%d slot=%d boundarySlot=%d active=%v distributed=%d/%d",
+		epoch, slot, boundarySlot, epochRewards.Active, epochRewards.DistributedRewards, epochRewards.TotalRewards)
 	mlog.Log.Infof("  num_partitions=%d distribution_start_height=%d stake_accts=%d",
 		epochRewards.NumPartitions, epochRewards.DistributionStartingBlockHeight, numStakeAccounts)
 
@@ -181,12 +196,13 @@ func recalculatePartitionedRewardsForResume(
 		AccountsDb: acctsDb,
 	}
 
-	// CRITICAL: Refresh stake cache credits_observed from AccountsDB before computing points.
+	// CRITICAL: Refresh stake cache credits_observed from AccountsDB using the BOUNDARY slot.
 	// The manifest's epoch_stakes contains stake delegation entries, but credits_observed is NOT
 	// updated after rewards distribution - it only reflects the value when the stake was created
 	// or last modified. The actual stake accounts in AccountsDB have the correct values.
+	// Using boundary slot ensures we see the same state that Agave used for rewards calculation.
 	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
-	rewards.RefreshStakeCacheCreditsObserved(acctsDb, slot)
+	rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
 
 	// Rebuild partition assignments and calculate points
 	// Use rewardedEpoch (epoch-1) as maxEpoch to freeze vote credits at epoch boundary.
@@ -195,7 +211,7 @@ func recalculatePartitionedRewardsForResume(
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	rewardedEpoch := epoch - 1
 	pointsPerStakeAcct, points, partitions := rewards.CalculateTotalPointsAndPartitions(
-		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch, &rewardedEpoch)
+		acctsDb, mockSlotCtx, boundarySlot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch, &rewardedEpoch)
 
 	// When epoch_rewards.active == true, we're resuming mid-distribution.
 	// Like Firedancer, we should NOT recompute total_points - use sysvar values directly.
@@ -240,7 +256,7 @@ func recalculatePartitionedRewardsForResume(
 		pointValue, newWarmupCooldownRateEpoch, f)
 
 	// Build the partitioned rewards info struct
-	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	// Note: firstSlotInEpoch and boundarySlot were calculated earlier in this function
 
 	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d total_points=%s",
 		len(partitions), len(stakingRewards), epochRewards.TotalPoints.String())
@@ -249,6 +265,7 @@ func recalculatePartitionedRewardsForResume(
 		TotalStakingRewards:    epochRewards.TotalRewards,
 		FirstStakingRewardSlot: firstSlotInEpoch + 1,
 		LastStakingRewardSlot:  firstSlotInEpoch + epochRewards.NumPartitions,
+		BoundarySlot:           boundarySlot, // Used for reading stake accounts during distribution
 		NumRewardPartitions:    epochRewards.NumPartitions,
 		RewardPartitions:       partitions,
 		StakingRewards:         stakingRewards,
@@ -290,7 +307,15 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	}
 
 	partitionSize := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx).NumPubkeys()
-	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
+	// Use BoundarySlot for reading stake accounts (to get state used for rewards calculation)
+	// and currentSlot for writing updated accounts
+	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsForPartition(
+		acctsDb,
+		partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx),
+		partitionedEpochRewardsInfo.StakingRewards,
+		partitionedEpochRewardsInfo.BoundarySlot, // readSlot
+		currentSlot,                              // writeSlot
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("staking rewards distribution failed for partition %d: %w", partitionIdx, err)
 	}

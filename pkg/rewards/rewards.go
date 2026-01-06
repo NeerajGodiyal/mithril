@@ -225,6 +225,11 @@ type PartitionedRewardDistributionInfo struct {
 	TotalStakingRewards    uint64
 	FirstStakingRewardSlot uint64
 	LastStakingRewardSlot  uint64
+	// BoundarySlot is the last slot of the previous epoch (firstSlotInEpoch - 1).
+	// This is the slot from which stake account state should be read for rewards calculation.
+	// Accounts that exist at BoundarySlot should receive rewards, even if they were closed
+	// in subsequent slots during the distribution period.
+	BoundarySlot uint64
 	// EahStartOffsetSlot and EahStopOffsetSlot are legacy fields for Epoch Accounts Hash.
 	// EAH was deprecated after AccountsLtHash activation (~Nov 2024). These fields are only
 	// relevant for replaying historical pre-AccountsLtHash slots and are not used in current flow.
@@ -1363,7 +1368,14 @@ type idxAndPubkey struct {
 	pubkey solana.PublicKey
 }
 
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
+// DistributeStakingRewardsForPartition distributes staking rewards for a single partition.
+// readSlot: the slot to read stake account state from (should be boundary slot = firstSlotInEpoch - 1)
+// writeSlot: the slot to write updated accounts to (current slot being processed)
+//
+// Using the boundary slot for reads ensures we see the same stake account state that was used
+// to calculate rewards. Accounts that existed at the boundary but were closed afterward should
+// still receive their rewards.
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, readSlot uint64, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
 	var distributedLamports atomic.Uint64
 	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
@@ -1385,19 +1397,20 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			return
 		}
 
-		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
+		// Read stake account at boundary slot to get the state used for rewards calculation
+		stakeAcct, err := acctsDb.GetAccount(readSlot, stakePk)
 		if err != nil {
 			// Stake account doesn't exist in AccountsDB - likely closed after snapshot.
 			// Skip it - there's no account to credit rewards to. This matches Agave/FD behavior
 			// where closed accounts simply don't receive rewards (they're filtered by existence).
-			mlog.Log.Warnf("rewards distribution: stake account %s not found in AccountsDB (slot=%d) - skipping", stakePk, slot)
+			mlog.Log.Warnf("rewards distribution: stake account %s not found in AccountsDB (readSlot=%d) - skipping", stakePk, readSlot)
 			return
 		}
 
 		// Skip zero/empty accounts - GetAccount may return a zero-value struct instead of error
 		// for accounts that don't exist or have been closed
 		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
-			mlog.Log.Debugf("rewards distribution: stake account %s is empty (0 lamports, 0 data) - skipping", stakePk)
+			mlog.Log.Debugf("rewards distribution: stake account %s is empty (0 lamports, 0 data) at readSlot=%d - skipping", stakePk, readSlot)
 			return
 		}
 
@@ -1418,7 +1431,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 				}
 				hexPreview = fmt.Sprintf("%x", stakeAcct.Data[:previewLen])
 			}
-			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (slot=%d) - skipping", stakePk, slot)
+			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (readSlot=%d) - skipping", stakePk, readSlot)
 			mlog.Log.Warnf("  error: %v", err)
 			mlog.Log.Warnf("  owner: %s, lamports: %d, data_len: %d", stakeAcct.Owner, stakeAcct.Lamports, dataLen)
 			mlog.Log.Warnf("  data_hex (first 64 bytes): %s", hexPreview)
@@ -1428,7 +1441,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// Skip accounts that aren't in Stake state (e.g., Initialized, Uninitialized)
 		// Matches Firedancer's fd_stake_state_v2_is_stake check (fd_rewards.c:886-889)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, slot=%d) - skipping", stakePk, stakeState.Status, slot)
+			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, readSlot=%d) - skipping", stakePk, stakeState.Status, readSlot)
 			return
 		}
 
@@ -1446,7 +1459,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// update lamports in stake account
 		stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.StakerRewards))
 		if err != nil {
-			errVal := fmt.Errorf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %w", slot, stakePk, err)
+			errVal := fmt.Errorf("overflow in partitioned epoch rewards distribution in writeSlot %d to acct %s: %w", writeSlot, stakePk, err)
 			workerErr.CompareAndSwap(nil, &errVal)
 			return
 		}
@@ -1471,9 +1484,9 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		return nil, nil, 0, *errPtr
 	}
 
-	err := acctsDb.StoreAccounts(accts, slot)
+	err := acctsDb.StoreAccounts(accts, writeSlot)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in slot %d: %w", slot, err)
+		return nil, nil, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in writeSlot %d: %w", writeSlot, err)
 	}
 
 	return accts, parentAccts, distributedLamports.Load(), nil
