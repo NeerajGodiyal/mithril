@@ -364,16 +364,18 @@ func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stak
 // CountEligibleStakeAccountsWithRewardsFilter counts stake accounts using the FULL Firedancer/Agave filter:
 // 1. stake >= minimum
 // 2. has vote cache entry
-// 3. points > 0 (has credits to earn)
-// 4. rewards > 0 after integer division (points * total_rewards / total_points > 0)
-// 5. commission split yields non-zero for both voter AND staker (when commission is 1-99%)
+// 3. SPECIAL CASE: force_credits_update (credits < stake OR activation == rewarded) → count immediately
+// 4. If credits == stake: skip (no credits earned)
+// 5. points > 0 (has credits to earn)
+// 6. rewards > 0 after integer division (points * total_rewards / total_points > 0)
+// 7. commission split yields non-zero for both voter AND staker (when commission is 1-99%)
 //
 // This is a two-pass algorithm:
-// - Pass 1: Calculate total_points (sum of all accounts' points that pass basic filters)
+// - Pass 1: Calculate total_points, identify force_credits_update accounts (counted separately)
 // - Pass 2: Count accounts where rewards > 0 AND commission split is valid
 //
 // Returns: eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit
-// Also logs diagnostic buckets: points>0, rewards>0, rewards>0 AND split valid
+// Also logs diagnostic buckets for debugging
 func CountEligibleStakeAccountsWithRewardsFilter(
 	rewardedEpoch uint64,
 	f *features.Features,
@@ -397,7 +399,11 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	var accountsWithPoints []accountPoints
 	var totalPoints wide.Uint128
 
-	// PASS 1: Calculate total_points and collect accounts with points > 0
+	// Accounts counted via force_credits_update_with_skipped_reward (get 0 rewards but still counted)
+	var forceCreditsUpdateCount uint64
+
+	// PASS 1: Calculate total_points and collect accounts
+	// Also identify force_credits_update accounts (credits < stake OR activation == rewarded epoch)
 	var processed uint64
 	for pubkey, delegation := range stakeCache {
 		processed++
@@ -419,7 +425,7 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			continue
 		}
 
-		// Check if this account has new credits and get commission
+		// Get credits and commission from vote state
 		creditsInStake := delegation.CreditsObserved
 		var epochCredits []sealevel.EpochCredits
 		var commission uint8
@@ -440,11 +446,30 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			creditsInVote = epochCredits[len(epochCredits)-1].Credits
 		}
 
-		if creditsInVote <= creditsInStake || len(epochCredits) == 0 {
+		// FORCE_CREDITS_UPDATE CHECK #1: credits_in_vote < credits_in_stake
+		// In Firedancer, this sets force_credits_update_with_skipped_reward = true in calculate_stake_points_and_credits
+		// These accounts are COUNTED but get 0 rewards (return 0 from redeem_rewards)
+		if creditsInVote < creditsInStake {
+			forceCreditsUpdateCount++
+			continue // Counted separately, don't add to accountsWithPoints
+		}
+
+		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
+		// In Firedancer, this sets force_credits_update_with_skipped_reward = true in redeem_rewards
+		// These accounts are COUNTED but get 0 rewards
+		if delegation.ActivationEpoch == rewardedEpoch {
+			forceCreditsUpdateCount++
+			continue // Counted separately, don't add to accountsWithPoints
+		}
+
+		// If credits_in_vote == credits_in_stake (no new credits), skip
+		// This is NOT a force_credits_update case - it returns error in Firedancer
+		if creditsInVote == creditsInStake || len(epochCredits) == 0 {
 			noCredits++
 			continue
 		}
 
+		// Normal case: credits_in_vote > credits_in_stake
 		// Calculate points
 		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
 		zero128 := wide.Uint128FromUint64(0)
@@ -462,8 +487,8 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
 	}
 
-	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d total_points=%s",
-		len(accountsWithPoints), totalPoints.String())
+	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d force_credits_update=%d total_points=%s",
+		len(accountsWithPoints), forceCreditsUpdateCount, totalPoints.String())
 
 	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
@@ -471,15 +496,21 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	//                   staker_portion = rewards * (100 - commission) / 100
 	// is_split = commission > 0 && commission < 100
 	// Skip if: rewards == 0 OR (is_split AND (voter_portion == 0 OR staker_portion == 0))
+
+	// Start with force_credits_update accounts (they're counted but got 0 rewards)
+	eligible = forceCreditsUpdateCount
+
 	if totalPoints.Eq(wide.Uint128FromUint64(0)) {
-		// No points at all, no one is eligible
-		mlog.Log.Infof("  pass 2: total_points=0, no eligible accounts")
-		return 0, total, belowMin, noVote, noCredits, zeroPoints, uint64(len(accountsWithPoints)), 0
+		// No points at all from normal accounts
+		mlog.Log.Infof("  pass 2: total_points=0, only force_credits_update accounts eligible")
+		mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d (force_credits_update=%d + normal=0)",
+			eligible, forceCreditsUpdateCount)
+		return eligible, total, belowMin, noVote, noCredits, zeroPoints, uint64(len(accountsWithPoints)), 0
 	}
 
 	totalRewards128 := wide.Uint128FromUint64(totalRewards)
 
-	// Diagnostic counters for all three buckets
+	// Diagnostic counters
 	var rewardsGtZero uint64 // accounts where rewards > 0 (before split check)
 
 	for i, acct := range accountsWithPoints {
@@ -533,13 +564,17 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		eligible++
 	}
 
-	// Log all three diagnostic buckets
+	// Log diagnostic buckets
 	pointsGtZero := uint64(len(accountsWithPoints))
-	mlog.Log.Infof("  pass 2 complete: eligible=%d zero_rewards=%d zero_split=%d", eligible, zeroRewards, zeroSplit)
+	normalEligible := eligible - forceCreditsUpdateCount
+	mlog.Log.Infof("  pass 2 complete: eligible=%d (force_credits_update=%d + normal=%d)",
+		eligible, forceCreditsUpdateCount, normalEligible)
 	mlog.Log.Infof("DIAGNOSTIC BUCKETS:")
-	mlog.Log.Infof("  bucket 1 (points > 0):                    %d", pointsGtZero)
-	mlog.Log.Infof("  bucket 2 (rewards > 0):                   %d", rewardsGtZero)
-	mlog.Log.Infof("  bucket 3 (rewards > 0 AND split valid):   %d  <-- used for partition count", eligible)
+	mlog.Log.Infof("  force_credits_update (credits<stake OR activation==rewarded): %d", forceCreditsUpdateCount)
+	mlog.Log.Infof("  points > 0:                    %d", pointsGtZero)
+	mlog.Log.Infof("  rewards > 0:                   %d", rewardsGtZero)
+	mlog.Log.Infof("  rewards > 0 AND split valid:   %d", normalEligible)
+	mlog.Log.Infof("  TOTAL ELIGIBLE:                %d  <-- used for partition count", eligible)
 	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
 		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
 
