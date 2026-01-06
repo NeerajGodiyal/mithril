@@ -36,17 +36,16 @@ type PartitionMismatchError struct {
 	NoVoteAcct        uint64
 	NoCreditsAcct     uint64
 	ZeroPointsAcct    uint64
+	ZeroRewardsAcct   uint64
 }
 
 func (e *PartitionMismatchError) Error() string {
-	// Eligibility now uses calculateStakePointsAndCredits (same as rewards distribution).
-	// Filter breakdown: below_min, no_vote, no_credits, zero_points are mutually exclusive.
-	// If mismatch persists, check stake cache freshness (delete stake_cache.json to force rescan).
+	// Eligibility uses full Firedancer/Agave filter: points > 0 AND rewards > 0 after integer division.
+	// Filter breakdown: below_min, no_vote, no_credits, zero_points, zero_rewards are mutually exclusive.
 	return fmt.Sprintf("PARTITION COUNT MISMATCH: epoch=%d local=%d rpc=%d eligible=%d total=%d "+
-		"(excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d). "+
-		"Eligibility uses calculateStakePointsAndCredits for consistency with rewards distribution.",
+		"(excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d).",
 		e.Epoch, e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct,
-		e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct)
+		e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct, e.ZeroRewardsAcct)
 }
 
 // Package-level validation settings for epoch boundary
@@ -361,6 +360,135 @@ func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stak
 	return stats.Eligible, stats.Total, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroPoints
 }
 
+// CountEligibleStakeAccountsWithRewardsFilter counts stake accounts using the FULL Firedancer/Agave filter:
+// 1. stake >= minimum
+// 2. has vote cache entry
+// 3. points > 0 (has credits to earn)
+// 4. rewards > 0 after integer division (points * total_rewards / total_points > 0)
+//
+// This is a two-pass algorithm:
+// - Pass 1: Calculate total_points (sum of all accounts' points that pass basic filters)
+// - Pass 2: Count accounts where rewards > 0 after integer division
+//
+// Returns: eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards
+func CountEligibleStakeAccountsWithRewardsFilter(
+	rewardedEpoch uint64,
+	f *features.Features,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newRateActivationEpoch *uint64,
+	totalRewards uint64,
+) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64, zeroRewards uint64) {
+	minimum := minimumStakeDelegationFromFeatures(f)
+	stakeCache := global.StakeCache()
+	total = uint64(len(stakeCache))
+
+	mlog.Log.Infof("counting eligible stake accounts (with rewards filter): total=%d rewarded_epoch=%d total_rewards=%d",
+		total, rewardedEpoch, totalRewards)
+
+	// Structure to hold account info for second pass
+	type accountPoints struct {
+		pubkey solana.PublicKey
+		points wide.Uint128
+	}
+	var accountsWithPoints []accountPoints
+	var totalPoints wide.Uint128
+
+	// PASS 1: Calculate total_points and collect accounts with points > 0
+	var processed uint64
+	for pubkey, delegation := range stakeCache {
+		processed++
+		if processed%100000 == 0 {
+			mlog.Log.Infof("  pass 1 progress: %d/%d accounts (%.1f%%)", processed, total, float64(processed)*100/float64(total))
+		}
+
+		stake := delegation.StakeLamports
+		voteState := global.VoteCacheItem(delegation.VoterPubkey)
+		hasVote := voteState != nil
+
+		if stake < minimum {
+			belowMin++
+			continue
+		}
+
+		if !hasVote {
+			noVote++
+			continue
+		}
+
+		// Check if this account has new credits
+		creditsInStake := delegation.CreditsObserved
+		var epochCredits []sealevel.EpochCredits
+		switch voteState.Type {
+		case sealevel.VoteStateVersionCurrent:
+			epochCredits = voteState.Current.EpochCredits
+		case sealevel.VoteStateVersionV0_23_5:
+			epochCredits = voteState.V0_23_5.EpochCredits
+		case sealevel.VoteStateVersionV1_14_11:
+			epochCredits = voteState.V1_14_11.EpochCredits
+		}
+
+		var creditsInVote uint64
+		if len(epochCredits) > 0 {
+			creditsInVote = epochCredits[len(epochCredits)-1].Credits
+		}
+
+		if creditsInVote <= creditsInStake || len(epochCredits) == 0 {
+			noCredits++
+			continue
+		}
+
+		// Calculate points
+		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+		zero128 := wide.Uint128FromUint64(0)
+		if calculatedPoints.Points.Eq(zero128) {
+			zeroPoints++
+			continue
+		}
+
+		// This account has points > 0, add to our list
+		accountsWithPoints = append(accountsWithPoints, accountPoints{pubkey: pubkey, points: calculatedPoints.Points})
+		totalPoints = totalPoints.Add(calculatedPoints.Points)
+	}
+
+	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d total_points=%s",
+		len(accountsWithPoints), totalPoints.String())
+
+	// PASS 2: Count accounts where rewards > 0 after integer division
+	// Formula: rewards = points * total_rewards / total_points
+	// Skip if rewards == 0
+	if totalPoints.Eq(wide.Uint128FromUint64(0)) {
+		// No points at all, no one is eligible
+		mlog.Log.Infof("  pass 2: total_points=0, no eligible accounts")
+		return 0, total, belowMin, noVote, noCredits, zeroPoints, uint64(len(accountsWithPoints))
+	}
+
+	totalRewards128 := wide.Uint128FromUint64(totalRewards)
+
+	for i, acct := range accountsWithPoints {
+		if (i+1)%100000 == 0 {
+			mlog.Log.Infof("  pass 2 progress: %d/%d accounts (%.1f%%)", i+1, len(accountsWithPoints), float64(i+1)*100/float64(len(accountsWithPoints)))
+		}
+
+		// rewards = points * total_rewards / total_points
+		// Use 128-bit arithmetic to avoid overflow
+		numerator := acct.points.Mul(totalRewards128)
+		rewards := numerator.Div(totalPoints)
+
+		if rewards.Eq(wide.Uint128FromUint64(0)) {
+			zeroRewards++
+			continue
+		}
+
+		eligible++
+	}
+
+	mlog.Log.Infof("  pass 2 complete: eligible=%d zero_rewards=%d", eligible, zeroRewards)
+	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d)",
+		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards)
+
+	return eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards
+}
+
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
 // Use this for debugging partition count mismatches.
 // Eligibility requires: stake >= min AND has vote cache AND points > 0 (any epoch).
@@ -611,8 +739,8 @@ func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
 }
 
 // DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
-// Uses ELIGIBLE stake account count (filtered by points > 0) for partition calculation.
-// This matches Agave's behavior where only accounts that actually earn rewards are counted.
+// Uses ELIGIBLE stake account count (filtered by rewards > 0 after integer division) for partition calculation.
+// This matches Firedancer/Agave's behavior where only accounts that actually receive non-zero rewards are counted.
 // Returns PartitionMismatchError if validation is enabled and local partition count doesn't match RPC.
 func DeterminePartitionedStakingRewardsInfoLocal(
 	epochSchedule *sealevel.SysvarEpochSchedule,
@@ -627,10 +755,15 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 ) (*PartitionedRewardDistributionInfo, error) {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
-	// Count ELIGIBLE stake accounts (filtered like Agave does: points > 0 for the rewarded epoch)
-	// This is critical: Agave counts accounts that actually earn rewards, not total stake cache
+	// Calculate total_rewards FIRST (needed for rewards > 0 filter)
+	totalStakingRewards := CalculatePreviousEpochInflationRewards(
+		epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
+
+	// Count ELIGIBLE stake accounts using full Firedancer/Agave filter:
+	// 1. points > 0 (has credits to earn)
+	// 2. rewards > 0 after integer division (points * total_rewards / total_points > 0)
 	// prevEpoch is the epoch being rewarded (rewards for epoch N-1 are distributed at start of epoch N)
-	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts := CountEligibleStakeAccounts(prevEpoch, f, stakeHistory, newRateActivationEpoch)
+	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts := CountEligibleStakeAccountsWithRewardsFilter(prevEpoch, f, stakeHistory, newRateActivationEpoch, totalStakingRewards)
 	numStakeAccounts := eligibleAccounts
 
 	// Get slots per epoch for this epoch
@@ -646,9 +779,6 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	// This is used for IsWithinRewardsPeriod bounds check
 	lastStakingRewardSlot := firstSlotInEpoch + numRewardPartitions
 
-	totalStakingRewards := CalculatePreviousEpochInflationRewards(
-		epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
-
 	// EAH calculation slots (epoch accounts hash) - LEGACY, not used after AccountsLtHash (~Nov 2024)
 	// Hardcoded 432000 is mainnet slots-per-epoch; doesn't matter since EAH is deprecated
 	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
@@ -656,8 +786,8 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 
 	mlog.Log.Infof("local rewards partition: epoch=%d prev_epoch=%d first_slot=%d slots_per_epoch=%d",
 		epoch, prevEpoch, firstSlotInEpoch, slotsPerEpoch)
-	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d",
-		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts)
+	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d",
+		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts)
 	mlog.Log.Infof("  partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
 		numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
@@ -682,6 +812,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 					NoVoteAcct:        noVoteAccounts,
 					NoCreditsAcct:     noCreditsAccounts,
 					ZeroPointsAcct:    zeroPointsAccounts,
+					ZeroRewardsAcct:   zeroRewardsAccounts,
 				}
 			}
 		}
