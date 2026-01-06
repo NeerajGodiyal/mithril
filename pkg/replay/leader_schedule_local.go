@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -813,13 +814,27 @@ func logScheduleBuildSummary(
 	stats ValidationStats,
 	fullHash string,
 ) {
-	// File only: single line summary
-	mlog.Log.FileOnlyf("leader schedule: epoch=%d validators=%d stake=%d hash=%s",
-		epoch, stats.ValidatorCount, stats.TotalStake, fullHash)
+	// Source tag for clear identification in logs
+	var sourceTag string
+	switch source {
+	case "snapshot":
+		sourceTag = "[SNAPSHOT]"
+	case "vote_cache":
+		sourceTag = "[LOCAL-COMPUTED]"
+	case "rpc":
+		sourceTag = "[RPC]"
+	default:
+		sourceTag = "[" + strings.ToUpper(source) + "]"
+	}
+
+	// Console: clear source identification
+	mlog.Log.Infof("leader schedule %s: epoch=%d validators=%d stake=%d hash=%s",
+		sourceTag, epoch, stats.ValidatorCount, stats.TotalStake, fullHash)
 
 	// File only: detailed build info
-	mlog.Log.FileOnlyf("leader schedule build details: epoch=%d schedule_epoch=%d first_slot=%d slots=%d repeat=%d source=%s",
-		epoch, scheduleEpoch, firstSlot, slotsInEpoch, NumConsecutiveLeaderSlots, source)
+	mlog.Log.FileOnlyf("leader schedule build details %s:", sourceTag)
+	mlog.Log.FileOnlyf("  epoch=%d schedule_epoch=%d first_slot=%d slots=%d repeat=%d",
+		epoch, scheduleEpoch, firstSlot, slotsInEpoch, NumConsecutiveLeaderSlots)
 	mlog.Log.FileOnlyf("  validators=%d total_stake=%d min_stake=%d max_stake=%d zero_stake_count=%d",
 		stats.ValidatorCount, stats.TotalStake, stats.MinStake, stats.MaxStake, stats.SkippedZeroStake)
 	mlog.Log.FileOnlyf("  hash=%s", fullHash)
@@ -1922,17 +1937,17 @@ func ValidateLeaderScheduleAgainstRPC(
 	if rpcErr != nil {
 		rpcHash = "RPC_FETCH_FAILED"
 		matched = false
-		mlog.Log.Warnf("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s (error: %v)",
+		mlog.Log.Warnf("leader schedule validation: epoch=%d [LOCAL] hash=%s vs [RPC] hash=%s (error: %v)",
 			epoch, localHash, rpcHash, rpcErr)
 	} else {
 		rpcHash = scheduleFullHash(rpcSchedule, firstSlot, numSlots)
 		matched = localHash == rpcHash
 
 		if matched {
-			mlog.Log.Infof("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s MATCH",
+			mlog.Log.Infof("leader schedule validation: epoch=%d [LOCAL] hash=%s vs [RPC] hash=%s MATCH",
 				epoch, localHash, rpcHash)
 		} else {
-			mlog.Log.Warnf("leader schedule validation: epoch=%d local_hash=%s rpc_hash=%s MISMATCH",
+			mlog.Log.Warnf("leader schedule validation: epoch=%d [LOCAL] hash=%s vs [RPC] hash=%s MISMATCH",
 				epoch, localHash, rpcHash)
 			// Dump both schedules to CSV for detailed analysis
 			DumpScheduleMismatch(epoch, epochSchedule, localSchedule, rpcSchedule, logsDir)
@@ -1984,7 +1999,7 @@ func BackgroundValidateAgainstRPC(
 	writeValidationSummary(localSummary, matched, logsDir)
 
 	if matched {
-		mlog.Log.FileOnlyf("leader schedule RPC validation: epoch=%d MATCH hash=%s", epoch, localHash)
+		mlog.Log.FileOnlyf("leader schedule RPC validation: epoch=%d [LOCAL] vs [RPC] MATCH hash=%s", epoch, localHash)
 		return
 	}
 
@@ -1997,11 +2012,11 @@ func BackgroundValidateAgainstRPC(
 	mismatchLogMu.Lock()
 	if mismatchLogWriter != nil {
 		mismatchLogWriter.WriteString(fmt.Sprintf("\n[%s] RPC VALIDATION MISMATCH epoch=%d\n", time.Now().Format(time.RFC3339), epoch))
-		mismatchLogWriter.WriteString(fmt.Sprintf("  local_hash=%s rpc_hash=%s\n", localHash, rpcHash))
+		mismatchLogWriter.WriteString(fmt.Sprintf("  [LOCAL] hash=%s\n  [RPC]   hash=%s\n", localHash, rpcHash))
 	}
 	mismatchLogMu.Unlock()
 
-	mlog.Log.Warnf("leader schedule RPC validation: MISMATCH epoch=%d local_hash=%s rpc_hash=%s - see %s",
+	mlog.Log.Warnf("leader schedule RPC validation: MISMATCH epoch=%d [LOCAL] hash=%s vs [RPC] hash=%s - see %s",
 		epoch, localHash, rpcHash, getMismatchLogPath())
 
 	flushMismatchLog()

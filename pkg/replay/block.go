@@ -1467,18 +1467,18 @@ func ReplayBlocks(
 
 				if hasFirstSlot && hasLastSlot {
 					// Schedule exists and appears complete - keep snapshot schedule
-					mlog.Log.Infof("epoch boundary: schedule already present for epoch %d (first=%d last=%d); skipping rebuild",
+					mlog.Log.Infof("epoch boundary: using [SNAPSHOT] schedule for epoch %d (first=%d last=%d)",
 						block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
 				} else {
-					// Need to build schedule - refresh EpochStakes for this
+					// Need to build schedule locally - refresh EpochStakes for this
 					cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
-					mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule - not present from snapshot, hasFirst=%v hasLast=%v)",
+					mlog.Log.Infof("epoch boundary: building [LOCAL-COMPUTED] schedule for epoch %d (hasFirst=%v hasLast=%v)",
 						block.Epoch, hasFirstSlot, hasLastSlot)
 
 					_, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
 					if err != nil {
-						mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
+						mlog.Log.Errorf("FATAL: failed to build [LOCAL-COMPUTED] leader schedule at epoch boundary: %v", err)
 						result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
 						break
 					}
