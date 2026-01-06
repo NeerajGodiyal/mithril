@@ -387,8 +387,8 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	stakeCache := global.StakeCache()
 	total = uint64(len(stakeCache))
 
-	mlog.Log.Infof("counting eligible stake accounts (with rewards filter): total=%d rewarded_epoch=%d total_rewards=%d",
-		total, rewardedEpoch, totalRewards)
+	mlog.Log.Infof("counting eligible stake accounts (with rewards filter): total=%d rewarded_epoch=%d total_rewards=%d (looking for activation_epoch==%d)",
+		total, rewardedEpoch, totalRewards, rewardedEpoch)
 
 	// Structure to hold account info for second pass
 	type accountPoints struct {
@@ -401,6 +401,14 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	// Accounts counted via force_credits_update_with_skipped_reward (get 0 rewards but still counted)
 	var forceCreditsUpdateCount uint64
+	// Detailed breakdown for debugging
+	var creditsLessThanStakeCount uint64
+	var activationMatchCount uint64
+	var activationWithCreditsLess uint64
+	var activationWithCreditsEqual uint64
+	var activationWithCreditsGreater uint64
+	// Track ALL accounts with activation_epoch == rewarded_epoch (before any filters)
+	var totalActivationMatchRaw uint64
 
 	// PASS 1: Calculate total_points and collect accounts
 	// Also identify force_credits_update accounts (credits < stake OR activation == rewarded epoch)
@@ -409,6 +417,11 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		processed++
 		if processed%100000 == 0 {
 			mlog.Log.Infof("  pass 1 progress: %d/%d accounts (%.1f%%)", processed, total, float64(processed)*100/float64(total))
+		}
+
+		// RAW diagnostic: count ALL accounts with activation_epoch == rewarded before any filtering
+		if delegation.ActivationEpoch == rewardedEpoch {
+			totalActivationMatchRaw++
 		}
 
 		stake := delegation.StakeLamports
@@ -451,6 +464,7 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		// These accounts are COUNTED but get 0 rewards, and have 0 points (no contribution to total_points)
 		if creditsInVote < creditsInStake {
 			forceCreditsUpdateCount++
+			creditsLessThanStakeCount++
 			continue // Counted separately, 0 points so no contribution to total_points
 		}
 
@@ -461,6 +475,16 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		// but OVERRIDES the points=0 case when activation_epoch matches.
 		if delegation.ActivationEpoch == rewardedEpoch {
 			forceCreditsUpdateCount++
+			activationMatchCount++
+			// Track credits relationship for diagnostics
+			if creditsInVote < creditsInStake {
+				// Already counted above, shouldn't reach here (but track just in case)
+				activationWithCreditsLess++
+			} else if creditsInVote == creditsInStake {
+				activationWithCreditsEqual++
+			} else {
+				activationWithCreditsGreater++
+			}
 			// Calculate points (FD does this first), add to total if > 0
 			if creditsInVote > creditsInStake && len(epochCredits) > 0 {
 				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
@@ -500,6 +524,12 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d force_credits_update=%d total_points=%s",
 		len(accountsWithPoints), forceCreditsUpdateCount, totalPoints.String())
+	mlog.Log.Infof("  force_credits_update breakdown: credits_less_than_stake=%d activation_match=%d",
+		creditsLessThanStakeCount, activationMatchCount)
+	mlog.Log.Infof("  activation_match breakdown: credits<stake=%d credits==stake=%d credits>stake=%d",
+		activationWithCreditsLess, activationWithCreditsEqual, activationWithCreditsGreater)
+	mlog.Log.Infof("  RAW activation_epoch==rewarded (before ANY filters): %d (if 0, stake cache missing activation_epoch)",
+		totalActivationMatchRaw)
 
 	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
