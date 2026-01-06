@@ -131,13 +131,21 @@ const (
 //	manifest is partially incomplete: all of the expected keys are there, but the values are not.
 //	Notably, the credits_observed field is not available until all of the accounts are loaded
 //	into the database."
-func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint64) (refreshed int, errors int) {
+// RefreshStakeCacheCreditsObserved refreshes credits_observed from AccountsDB and returns
+// a snapshot of all valid stake accounts for use during distribution.
+// The returned map contains clones of stake accounts that can be used instead of re-reading
+// from AccountsDB, which is critical because GetAccount ignores the slot parameter.
+func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint64) (refreshed int, errors int, snapshots map[solana.PublicKey]*accounts.Account) {
 	stakeCache := global.StakeCache()
 	total := len(stakeCache)
-	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB: %d accounts", total)
+	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB (slot=%d): %d accounts", slot, total)
 
 	var refreshedCount, errorCount int
+	var tombstoneCount, notFoundCount, unmarshalErrCount, notStakeCount int
 	var processed int
+
+	// Pre-allocate the snapshots map
+	snapshots = make(map[solana.PublicKey]*accounts.Account, total)
 
 	for pubkey, delegation := range stakeCache {
 		processed++
@@ -146,10 +154,27 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 		}
 
 		// Read the actual stake account from AccountsDB
+		// NOTE: GetAccount currently ignores the slot parameter and returns current state.
+		// This means if an account was valid at boundarySlot but closed afterward,
+		// we'll incorrectly see it as closed/tombstone here.
 		stakeAcct, err := acctsDb.GetAccount(slot, pubkey)
 		if err != nil {
-			// Account might be missing (closed) - remove from cache
+			// Account not found in AccountsDB - remove from cache
+			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_found err=%v",
+				slot, pubkey.String(), err)
 			global.DeleteStakeCacheItem(pubkey)
+			notFoundCount++
+			errorCount++
+			continue
+		}
+
+		// Check for tombstone: account exists but has 0 lamports and empty/minimal data
+		// This indicates the account was closed (withdrawn to 0)
+		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=tombstone lamports=0 data_len=0",
+				slot, pubkey.String())
+			global.DeleteStakeCacheItem(pubkey)
+			tombstoneCount++
 			errorCount++
 			continue
 		}
@@ -157,6 +182,12 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 		// Decode the stake state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
+			// Unmarshal failed - could be corrupted data or wrong format
+			// Remove from cache to avoid issues during rewards
+			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=unmarshal_error lamports=%d data_len=%d err=%v",
+				slot, pubkey.String(), stakeAcct.Lamports, len(stakeAcct.Data), err)
+			global.DeleteStakeCacheItem(pubkey)
+			unmarshalErrCount++
 			errorCount++
 			continue
 		}
@@ -164,7 +195,10 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 		// Only update if it's a Stake state (not Initialized or Uninitialized)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
 			// Remove non-stake accounts from cache
+			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_stake_state status=%d lamports=%d",
+				slot, pubkey.String(), stakeState.Status, stakeAcct.Lamports)
 			global.DeleteStakeCacheItem(pubkey)
+			notStakeCount++
 			errorCount++
 			continue
 		}
@@ -177,10 +211,17 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 			delegation.CreditsObserved = newCredits
 			refreshedCount++
 		}
+
+		// Store a clone of the stake account for use during distribution
+		// This ensures we use the exact same state that was used for rewards calculation,
+		// avoiding issues with GetAccount returning different state later
+		snapshots[pubkey] = stakeAcct.Clone()
 	}
 
-	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed", refreshedCount, errorCount)
-	return refreshedCount, errorCount
+	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed, %d snapshots captured", refreshedCount, errorCount, len(snapshots))
+	mlog.Log.Infof("  breakdown: not_found=%d tombstone=%d unmarshal_err=%d not_stake=%d",
+		notFoundCount, tombstoneCount, unmarshalErrCount, notStakeCount)
+	return refreshedCount, errorCount, snapshots
 }
 
 // ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
@@ -239,6 +280,12 @@ type PartitionedRewardDistributionInfo struct {
 	Credits             map[solana.PublicKey]CalculatedStakePoints
 	RewardPartitions    Partitions
 	StakingRewards      map[solana.PublicKey]*CalculatedStakeRewards
+	// StakeAccountSnapshots stores stake account data captured during RefreshStakeCacheCreditsObserved.
+	// This allows distribution to use cached data instead of re-reading from AccountsDB,
+	// which is critical because GetAccount ignores the slot parameter and returns current state.
+	// Without this cache, accounts that existed at boundary but were closed afterward would
+	// fail to receive rewards, causing divergence from Agave/Firedancer.
+	StakeAccountSnapshots map[solana.PublicKey]*accounts.Account
 }
 
 type CalculatedStakePoints struct {
@@ -1369,13 +1416,14 @@ type idxAndPubkey struct {
 }
 
 // DistributeStakingRewardsForPartition distributes staking rewards for a single partition.
-// readSlot: the slot to read stake account state from (should be boundary slot = firstSlotInEpoch - 1)
+// stakeAccountSnapshots: cached stake accounts captured during RefreshStakeCacheCreditsObserved
 // writeSlot: the slot to write updated accounts to (current slot being processed)
 //
-// Using the boundary slot for reads ensures we see the same stake account state that was used
-// to calculate rewards. Accounts that existed at the boundary but were closed afterward should
-// still receive their rewards.
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, readSlot uint64, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
+// This function uses cached stake account data instead of re-reading from AccountsDB.
+// This is critical because GetAccount ignores the slot parameter and returns current state,
+// which can differ from boundary-slot state (accounts may have been closed, modified, etc.).
+// Using cached accounts ensures we apply rewards to the exact state that was used for calculation.
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, stakeAccountSnapshots map[solana.PublicKey]*accounts.Account, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
 	var distributedLamports atomic.Uint64
 	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
@@ -1397,51 +1445,35 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			return
 		}
 
-		// Read stake account at boundary slot to get the state used for rewards calculation
-		stakeAcct, err := acctsDb.GetAccount(readSlot, stakePk)
-		if err != nil {
-			// Stake account doesn't exist in AccountsDB - likely closed after snapshot.
-			// Skip it - there's no account to credit rewards to. This matches Agave/FD behavior
-			// where closed accounts simply don't receive rewards (they're filtered by existence).
-			mlog.Log.Warnf("rewards distribution: stake account %s not found in AccountsDB (readSlot=%d) - skipping", stakePk, readSlot)
+		// Use cached stake account from snapshots instead of reading from AccountsDB.
+		// This ensures we use the exact same state that was captured during refresh,
+		// avoiding issues with GetAccount returning different (current) state.
+		cachedAcct, hasCached := stakeAccountSnapshots[stakePk]
+		if !hasCached {
+			// Account not in snapshots - this means it was filtered out during refresh
+			// (not found, tombstone, unmarshal error, or not in Stake state).
+			// This is expected and matches the behavior during rewards calculation.
+			mlog.Log.Debugf("rewards distribution: stake account %s not in cached snapshots - skipping", stakePk)
 			return
 		}
 
-		// Skip zero/empty accounts - GetAccount may return a zero-value struct instead of error
-		// for accounts that don't exist or have been closed
-		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
-			mlog.Log.Debugf("rewards distribution: stake account %s is empty (0 lamports, 0 data) at readSlot=%d - skipping", stakePk, readSlot)
-			return
-		}
+		// Clone the cached account so we can modify it without affecting the cache
+		stakeAcct := cachedAcct.Clone()
 
-		parentAccts[idx] = stakeAcct.Clone()
+		parentAccts[idx] = cachedAcct.Clone()
 
-		// update the delegation in the stake account state
+		// Deserialize the stake state (we know it's valid from the refresh check)
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			// Stake account can't be deserialized - might be Uninitialized or corrupted.
-			// Skip it like Firedancer does (fd_rewards.c:880-884 returns 1 on decode failure).
-			// Log detailed diagnostic info to help debug
-			dataLen := len(stakeAcct.Data)
-			hexPreview := ""
-			if dataLen > 0 {
-				previewLen := 64
-				if dataLen < previewLen {
-					previewLen = dataLen
-				}
-				hexPreview = fmt.Sprintf("%x", stakeAcct.Data[:previewLen])
-			}
-			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (readSlot=%d) - skipping", stakePk, readSlot)
+			// This should not happen since we validated during refresh, but handle it gracefully
+			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (unexpected) - skipping", stakePk)
 			mlog.Log.Warnf("  error: %v", err)
-			mlog.Log.Warnf("  owner: %s, lamports: %d, data_len: %d", stakeAcct.Owner, stakeAcct.Lamports, dataLen)
-			mlog.Log.Warnf("  data_hex (first 64 bytes): %s", hexPreview)
 			return
 		}
 
-		// Skip accounts that aren't in Stake state (e.g., Initialized, Uninitialized)
-		// Matches Firedancer's fd_stake_state_v2_is_stake check (fd_rewards.c:886-889)
+		// Verify it's still in Stake state (should always be true from refresh check)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, readSlot=%d) - skipping", stakePk, stakeState.Status, readSlot)
+			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, unexpected) - skipping", stakePk, stakeState.Status)
 			return
 		}
 

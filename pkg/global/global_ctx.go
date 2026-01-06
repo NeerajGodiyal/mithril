@@ -3,8 +3,13 @@
 package global
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,7 +21,23 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-const StakeCacheFileName = "stake_cache.json"
+// Silence unused import warnings for planned binary cache implementation
+var (
+	_ = bufio.NewWriter
+	_ = sha256.New
+	_ = binary.LittleEndian
+	_ = io.EOF
+	_ = math.Float64bits
+)
+
+const (
+	StakeCacheFileName        = "stake_cache.bin"
+	StakeCacheLegacyFileName  = "stake_cache.json"
+	stakeCacheMagic           = "STC1"
+	stakeCacheVersion   uint32 = 1
+	stakeCacheHeaderSize       = 4 + 4 + 8 + 32 + 8 + 32
+	stakeCacheEntrySize        = 32 + 32 + 8 + 8 + 8 + 8 + 8
+)
 
 type GlobalCtx struct {
 	latestBlockhash            [32]byte
@@ -146,6 +167,13 @@ func SlotConfirmed(slot uint64) bool {
 
 func StakeCache() map[solana.PublicKey]*sealevel.Delegation {
 	return instance.stakeCache
+}
+
+func HasStakeCacheItem(pubkey solana.PublicKey) bool {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	_, exists := instance.stakeCache[pubkey]
+	return exists
 }
 
 func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
@@ -332,7 +360,7 @@ func (globctx *GlobalCtx) TransactionCount() uint64 {
 	return globctx.transactionCount
 }
 
-// StakeCacheEntry is the JSON-serializable form of a stake delegation
+// StakeCacheEntry is the JSON-serializable form of a stake delegation (legacy format).
 type StakeCacheEntry struct {
 	Pubkey             string  `json:"pubkey"`
 	VoterPubkey        string  `json:"voter_pubkey"`
@@ -343,7 +371,7 @@ type StakeCacheEntry struct {
 	CreditsObserved    uint64  `json:"credits_observed"`
 }
 
-// StakeCacheFile is the top-level structure for stake_cache.json with metadata
+// StakeCacheFile is the top-level structure for stake_cache.json with metadata (legacy format).
 type StakeCacheFile struct {
 	Slot       uint64            `json:"slot"`        // Slot when cache was saved
 	Bankhash   string            `json:"bankhash"`    // Bankhash for fork validation

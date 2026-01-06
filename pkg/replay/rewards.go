@@ -76,7 +76,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// or last modified. The actual stake accounts in AccountsDB have the correct values.
 	// Using boundary slot ensures we see the same state that Agave used for rewards calculation.
 	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
-	rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
+	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+	partitionedRewardsInfo.StakeAccountSnapshots = stakeAccountSnapshots
 
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
@@ -202,7 +204,8 @@ func recalculatePartitionedRewardsForResume(
 	// or last modified. The actual stake accounts in AccountsDB have the correct values.
 	// Using boundary slot ensures we see the same state that Agave used for rewards calculation.
 	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
-	rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
+	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
 
 	// Rebuild partition assignments and calculate points
 	// Use rewardedEpoch (epoch-1) as maxEpoch to freeze vote credits at epoch boundary.
@@ -258,17 +261,18 @@ func recalculatePartitionedRewardsForResume(
 	// Build the partitioned rewards info struct
 	// Note: firstSlotInEpoch and boundarySlot were calculated earlier in this function
 
-	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d total_points=%s",
-		len(partitions), len(stakingRewards), epochRewards.TotalPoints.String())
+	mlog.Log.Infof("rewards resume: reconstruction complete - partitions=%d stake_rewards=%d total_points=%s snapshots=%d",
+		len(partitions), len(stakingRewards), epochRewards.TotalPoints.String(), len(stakeAccountSnapshots))
 
 	return &rewards.PartitionedRewardDistributionInfo{
-		TotalStakingRewards:    epochRewards.TotalRewards,
-		FirstStakingRewardSlot: firstSlotInEpoch + 1,
-		LastStakingRewardSlot:  firstSlotInEpoch + epochRewards.NumPartitions,
-		BoundarySlot:           boundarySlot, // Used for reading stake accounts during distribution
-		NumRewardPartitions:    epochRewards.NumPartitions,
-		RewardPartitions:       partitions,
-		StakingRewards:         stakingRewards,
+		TotalStakingRewards:       epochRewards.TotalRewards,
+		FirstStakingRewardSlot:    firstSlotInEpoch + 1,
+		LastStakingRewardSlot:     firstSlotInEpoch + epochRewards.NumPartitions,
+		BoundarySlot:              boundarySlot, // Used for reading stake accounts during distribution
+		NumRewardPartitions:       epochRewards.NumPartitions,
+		RewardPartitions:          partitions,
+		StakingRewards:            stakingRewards,
+		StakeAccountSnapshots:     stakeAccountSnapshots, // Cached stake accounts for distribution
 	}, nil
 }
 
@@ -307,14 +311,15 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	}
 
 	partitionSize := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx).NumPubkeys()
-	// Use BoundarySlot for reading stake accounts (to get state used for rewards calculation)
-	// and currentSlot for writing updated accounts
+	// Use cached stake account snapshots instead of reading from AccountsDB.
+	// This ensures we use the exact state captured during refresh, avoiding issues
+	// with GetAccount returning current state instead of boundary-slot state.
 	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsForPartition(
 		acctsDb,
 		partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx),
 		partitionedEpochRewardsInfo.StakingRewards,
-		partitionedEpochRewardsInfo.BoundarySlot, // readSlot
-		currentSlot,                              // writeSlot
+		partitionedEpochRewardsInfo.StakeAccountSnapshots, // cached accounts from refresh
+		currentSlot,                                       // writeSlot
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("staking rewards distribution failed for partition %d: %w", partitionIdx, err)
