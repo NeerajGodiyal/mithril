@@ -1443,7 +1443,9 @@ func ReplayBlocks(
 			}
 
 			// Step 2b: Verify vote cache completeness for all non-zero stake vote accounts.
-			// Fail fast if any vote accounts are missing - computing with stale data causes divergence.
+			// Missing vote accounts are expected for closed/invalid accounts - stake delegated to them
+			// is simply not eligible for rewards (no vote credits = 0 points = ineligible).
+			// This matches Agave/Firedancer behavior where eligibility requires a valid vote account.
 			{
 				total := 0
 				totalStake := uint64(0)
@@ -1468,10 +1470,11 @@ func ReplayBlocks(
 				mlog.Log.Infof("vote cache rebuild: %d/%d vote accounts (%.2f%% by count, %.2f%% by stake)",
 					rebuilt, total, float64(rebuilt)*100/float64(total), float64(rebuiltStake)*100/float64(totalStake))
 				if missing > 0 {
-					mlog.Log.Errorf("FATAL: vote cache incomplete at boundary slot=%d missing=%d missing_stake=%d",
-						prevSlotCtxForEpochBoundary.Slot, missing, missingStake)
-					result.Error = fmt.Errorf("vote cache incomplete at epoch boundary (missing=%d stake=%d)", missing, missingStake)
-					break
+					// Log missing accounts but continue - stake delegated to missing vote accounts
+					// is simply ineligible (matches Agave/FD eligibility: "has corresponding vote account")
+					missingPct := float64(missingStake) * 100 / float64(totalStake)
+					mlog.Log.Warnf("vote cache: %d vote accounts missing (%.4f%% stake) - their stake is ineligible for rewards",
+						missing, missingPct)
 				}
 			}
 
