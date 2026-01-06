@@ -409,6 +409,10 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	var activationWithCreditsGreater uint64
 	// Track ALL accounts with activation_epoch == rewarded_epoch (before any filters)
 	var totalActivationMatchRaw uint64
+	// noCredits breakdown
+	var noCreditsEqual uint64    // creditsInVote == creditsInStake
+	var noCreditsEmpty uint64    // len(epochCredits) == 0
+	var noCreditsZeroVote uint64 // creditsInVote == 0
 
 	// PASS 1: Calculate total_points and collect accounts
 	// Also identify force_credits_update accounts (credits < stake OR activation == rewarded epoch)
@@ -500,6 +504,16 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		// (Unless activation_epoch == rewarded_epoch, which is handled above)
 		if creditsInVote == creditsInStake || len(epochCredits) == 0 {
 			noCredits++
+			// Detailed breakdown
+			if len(epochCredits) == 0 {
+				noCreditsEmpty++
+			}
+			if creditsInVote == creditsInStake {
+				noCreditsEqual++
+			}
+			if creditsInVote == 0 {
+				noCreditsZeroVote++
+			}
 			continue
 		}
 
@@ -530,6 +544,8 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		activationWithCreditsLess, activationWithCreditsEqual, activationWithCreditsGreater)
 	mlog.Log.Infof("  RAW activation_epoch==rewarded (before ANY filters): %d (if 0, stake cache missing activation_epoch)",
 		totalActivationMatchRaw)
+	mlog.Log.Infof("  noCredits breakdown: equal=%d empty_epochs=%d zero_vote=%d (may overlap)",
+		noCreditsEqual, noCreditsEmpty, noCreditsZeroVote)
 	// CRITICAL: Log total_points and total_rewards for comparison with RPC
 	// If total_points is higher than RPC, per-account rewards will be lower, causing more zero_rewards
 	// If total_rewards is lower than RPC, same effect
