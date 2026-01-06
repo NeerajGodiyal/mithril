@@ -1393,6 +1393,14 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			mlog.Log.Warnf("rewards distribution: stake account %s not found in AccountsDB (slot=%d) - skipping", stakePk, slot)
 			return
 		}
+
+		// Skip zero/empty accounts - GetAccount may return a zero-value struct instead of error
+		// for accounts that don't exist or have been closed
+		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+			mlog.Log.Debugf("rewards distribution: stake account %s is empty (0 lamports, 0 data) - skipping", stakePk)
+			return
+		}
+
 		parentAccts[idx] = stakeAcct.Clone()
 
 		// update the delegation in the stake account state
