@@ -198,6 +198,84 @@ If a validator crashes during the rewards period, it must reconstruct `partition
 
 **Stake cache persistence:** Since stake accounts can't change during rewards period (stake program rejects operations), the stake cache state is deterministic and can be reconstructed from AccountsDB if needed.
 
+## Vote Credit Source and Boundary Correctness
+
+**Critical invariant:** Boundary correctness depends on the **vote credit source**, not just replay progress.
+
+### Core Idea
+
+Snapshots are trustworthy for the slot they represent, but rewards are computed using **epoch-boundary data** (the last slot of the previous epoch). If the snapshot isn't at that boundary, its vote credits are not the correct source for rewards.
+
+### Why the Boundary Matters
+
+Rewards for epoch N-1 are computed at the first slot of epoch N, using vote credits as of the last slot of N-1. So:
+- If snapshot is **mid-epoch**, its vote credits are **stale** for the boundary
+- If using **"live" vote credits** (post-boundary), you can **overshoot** (credits keep accumulating)
+- Both are wrong unless you're using the boundary slot state or the recalc path
+
+### The Two Computation Paths
+
+#### 1) Resume During Rewards Distribution (`EpochRewards.Active == true`)
+
+You're inside the early-epoch distribution window (rewards still being paid out).
+
+**Correct behavior:**
+- Do NOT recompute `total_points` or `total_rewards`
+- Use EpochRewards sysvar totals directly
+- Use `maxEpoch` filtering on epoch credits to freeze view at rewarded epoch
+- Scale individual points proportionally if needed to match sysvar totals
+
+Firedancer also uses a `prev_vote_credits` snapshot for this path, which we approximate via `maxEpoch` filtering in `calculateStakePointsAndCredits`.
+
+#### 2) Fresh Boundary Distribution (`EpochRewards.Active == false`)
+
+You just crossed into the new epoch and distribution hasn't started yet.
+
+**Correct behavior:**
+- Compute using AccountsDB state at the boundary slot (prev slot)
+- Vote cache must reflect boundary-slot vote credits for ALL vote accounts used
+- "Replayed to boundary" is NOT sufficient unless vote cache was explicitly rebuilt from boundary-slot state
+
+**Common mistake:** Using global vote cache that contains snapshot-time or post-boundary credits. This causes `total_points` divergence.
+
+### Stake Cache Loading
+
+The stake cache is loaded from the decoded snapshot manifest (`VersionedEpochStakes`), **keyed by epoch**:
+
+```go
+// From build_db.go
+for _, epochStakes := range manifest.VersionedEpochStakes {
+    if epochStakes.Epoch == manifest.Bank.Epoch {  // Matches bank epoch, NOT fixed index
+        for stakePubkey, stakePair := range epochStakes.Val.Stakes.StakeDelegations {
+            global.PutStakeCacheItem(stakePubkey, &sealevel.Delegation{
+                VoterPubkey:        d.VoterPubkey,
+                StakeLamports:      d.Stake,
+                CreditsObserved:    stakePair.Stake.CreditsObserved,
+                // ...
+            })
+        }
+    }
+}
+```
+
+**Important:** There is no `epoch_stakes[0]/[1]` indexing. We iterate and match by epoch number.
+
+### Sanity Check
+
+To verify correctness:
+1. Read EpochRewards sysvar from AccountsDB at boundary slot
+2. Compare computed `total_points` against sysvar value
+3. If mismatch → vote credit source is wrong (not boundary-slot data)
+
+Logging the mismatch is useful for debugging; RPC fallback is a temporary aid, not a solution.
+
+### Summary Table
+
+| Condition | `EpochRewards.Active` | Data Source |
+|-----------|----------------------|-------------|
+| Fresh boundary | `false` | AccountsDB at prev_slot (boundary) |
+| Resume mid-distribution | `true` | EpochRewards sysvar totals (don't recompute) |
+
 ## Points Calculation
 
 Points determine each stake account's share of rewards:

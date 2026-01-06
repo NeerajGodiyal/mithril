@@ -564,7 +564,7 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			}
 			// Calculate points (FD does this first), add to total if > 0
 			if creditsInVote > creditsInStake && len(epochCredits) > 0 {
-				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 				if !calculatedPoints.Points.Eq(wide.Uint128FromUint64(0)) {
 					totalPoints = totalPoints.Add(calculatedPoints.Points)
 				}
@@ -592,7 +592,7 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		// Normal case: credits_in_vote > credits_in_stake and activation_epoch != rewarded_epoch
 		// Calculate points
-		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 		zero128 := wide.Uint128FromUint64(0)
 
 		if calculatedPoints.Points.Eq(zero128) {
@@ -915,7 +915,7 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 
 		// DIAGNOSTIC: Check BOTH eligibility predicates to determine which matches RPC
 		// Method 1: All epochs (calculateStakePointsAndCredits) - sums points across all epochCredits
-		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 		zero128 := wide.Uint128FromUint64(0)
 		hasPointsAllEpochs := !calculatedPoints.Points.Eq(zero128)
 
@@ -1571,6 +1571,9 @@ type delegationAndPubkey struct {
 	pubkey     solana.PublicKey
 }
 
+// CalculateTotalPointsAndPartitions computes total stake points and assigns stake accounts to partitions.
+// When maxEpoch is non-nil (recalc mode), epoch credits beyond maxEpoch are ignored to freeze
+// the view of vote credits at epoch boundary, matching Firedancer's prev_vote_credits behavior.
 func CalculateTotalPointsAndPartitions(
 	acctsDb *accountsdb.AccountsDb,
 	slotCtx *sealevel.SlotCtx,
@@ -1578,6 +1581,7 @@ func CalculateTotalPointsAndPartitions(
 	numPartitions uint64,
 	stakeHistory *sealevel.SysvarStakeHistory,
 	newWarmupCooldownRateEpoch *uint64,
+	maxEpoch *uint64,
 ) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128, Partitions) {
 	/*old := debug.SetGCPercent(200)
 	defer debug.SetGCPercent(old)*/
@@ -1633,7 +1637,7 @@ func CalculateTotalPointsAndPartitions(
 		}
 		eligibleCount.Add(1)
 
-		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch)
+		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch, maxEpoch)
 		pointsAccum.Add(t.pubkey, pcs)
 
 		if numPartitions != 0 {
@@ -1662,12 +1666,17 @@ func CalculateTotalPointsAndPartitions(
 	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints(), partitions
 }
 
+// calculateStakePointsAndCredits computes stake points for a single stake account.
+// When maxEpoch is non-nil, epoch credits entries beyond maxEpoch are ignored.
+// This is used in recalc mode to freeze the view of vote credits at epoch boundary,
+// matching Firedancer's prev_vote_credits behavior.
 func calculateStakePointsAndCredits(
 	pubkey solana.PublicKey,
 	stakeHistory *sealevel.SysvarStakeHistory,
 	delegation *sealevel.Delegation,
 	voteState *sealevel.VoteStateVersions,
 	newRateActivationEpoch *uint64,
+	maxEpoch *uint64,
 ) CalculatedStakePoints {
 	creditsInStake := delegation.CreditsObserved
 
@@ -1681,6 +1690,18 @@ func calculateStakePointsAndCredits(
 		epochCredits = voteState.V1_14_11.EpochCredits
 	default:
 		panic("invalid vote state - should be impossible")
+	}
+
+	// When maxEpoch is set (recalc mode), filter out epoch credits beyond maxEpoch.
+	// This ensures we use credits as they were at epoch boundary, not snapshot time.
+	if maxEpoch != nil {
+		filtered := make([]sealevel.EpochCredits, 0, len(epochCredits))
+		for _, ec := range epochCredits {
+			if ec.Epoch <= *maxEpoch {
+				filtered = append(filtered, ec)
+			}
+		}
+		epochCredits = filtered
 	}
 
 	var creditsInVote uint64

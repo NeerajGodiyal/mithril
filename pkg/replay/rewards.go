@@ -64,7 +64,8 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
-	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch)
+	// Pass nil for maxEpoch - fresh compute uses current vote credits (correct at epoch boundary)
+	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, slot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch, nil)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
@@ -173,9 +174,13 @@ func recalculatePartitionedRewardsForResume(
 	}
 
 	// Rebuild partition assignments and calculate points
+	// Use rewardedEpoch (epoch-1) as maxEpoch to freeze vote credits at epoch boundary.
+	// This matches Firedancer's prev_vote_credits behavior - we only consider credits
+	// earned up to the rewarded epoch, ignoring any credits earned during distribution.
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
+	rewardedEpoch := epoch - 1
 	pointsPerStakeAcct, points, partitions := rewards.CalculateTotalPointsAndPartitions(
-		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch)
+		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch, &rewardedEpoch)
 
 	// When epoch_rewards.active == true, we're resuming mid-distribution.
 	// Like Firedancer, we should NOT recompute total_points - use sysvar values directly.
