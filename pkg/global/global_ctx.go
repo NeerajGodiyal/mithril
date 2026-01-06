@@ -433,6 +433,9 @@ func LoadStakeCache(accountsDbDir string, expectedSlot uint64, expectedBankhash 
 	if instance.stakeCache == nil {
 		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
 	}
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
 
 	loadedCount := 0
 	skippedCount := 0
@@ -456,6 +459,8 @@ func LoadStakeCache(accountsDbDir string, expectedSlot uint64, expectedBankhash 
 			WarmupCooldownRate: entry.WarmupCooldownRate,
 			CreditsObserved:    entry.CreditsObserved,
 		}
+		// Seed slot tracking so PutStakeCacheItemWithSlot works correctly during replay
+		instance.stakeCacheSlots[pubkey] = expectedSlot
 		loadedCount++
 	}
 
@@ -463,6 +468,7 @@ func LoadStakeCache(accountsDbDir string, expectedSlot uint64, expectedBankhash 
 	if skippedCount > 0 {
 		// Clear partial load
 		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
 		return 0, fmt.Errorf("stake cache has %d corrupt entries out of %d (forcing scan)", skippedCount, len(cacheFile.Entries))
 	}
 

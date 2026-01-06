@@ -160,13 +160,14 @@ var (
 // loadStakeCacheFromManifest populates the global stake cache directly from the
 // manifest's VersionedEpochStakes, which is more efficient than scanning appendvecs.
 // This mirrors Firedancer's approach of using the manifest's stake delegations.
-func loadStakeCacheFromManifest(manifest *SnapshotManifest) int {
+// Returns (count, true) on success, (0, false) if manifest lacks stake data.
+func loadStakeCacheFromManifest(manifest *SnapshotManifest) (int, bool) {
 	bankEpoch := manifest.Bank.Epoch
-	loaded := 0
 
-	// First try VersionedEpochStakes (preferred - has CreditsObserved)
+	// Try VersionedEpochStakes (preferred - has CreditsObserved)
 	for _, epochStakes := range manifest.VersionedEpochStakes {
 		if epochStakes.Epoch == bankEpoch {
+			loaded := 0
 			for stakePubkey, stakePair := range epochStakes.Val.Stakes.StakeDelegations {
 				d := stakePair.Stake.Delegation
 				global.PutStakeCacheItem(stakePubkey, &sealevel.Delegation{
@@ -180,29 +181,11 @@ func loadStakeCacheFromManifest(manifest *SnapshotManifest) int {
 				loaded++
 			}
 			mlog.Log.Infof("loaded %d stake delegations from VersionedEpochStakes for epoch %d", loaded, bankEpoch)
-			return loaded
+			return loaded, true
 		}
 	}
 
-	// Fallback to Bank.Stakes.Delegations (no CreditsObserved - will need to fetch from accounts)
-	if len(manifest.Bank.Stakes.Delegations) > 0 {
-		mlog.Log.Warnf("VersionedEpochStakes not found for epoch %d, using Bank.Stakes.Delegations (missing CreditsObserved)", bankEpoch)
-		for _, delegationPair := range manifest.Bank.Stakes.Delegations {
-			d := delegationPair.Delegation
-			global.PutStakeCacheItem(delegationPair.Account, &sealevel.Delegation{
-				VoterPubkey:        d.VoterPubkey,
-				StakeLamports:      d.Stake,
-				ActivationEpoch:    d.ActivationEpoch,
-				DeactivationEpoch:  d.DeactivationEpoch,
-				WarmupCooldownRate: d.WarmupCooldownRate,
-				CreditsObserved:    0, // Not available in this format
-			})
-			loaded++
-		}
-		mlog.Log.Infof("loaded %d stake delegations from Bank.Stakes.Delegations", loaded)
-	}
-
-	return loaded
+	return 0, false
 }
 
 func BuildAccountsDb(
@@ -231,11 +214,26 @@ func BuildAccountsDb(
 	}
 
 	// Load stake cache from manifest (Firedancer approach - much faster than appendvec scanning)
+	// Try incremental first, fall back to full manifest if incremental lacks VersionedEpochStakes
+	var stakeCount int
+	var hasStakeData bool
 	finalManifest := manifest
 	if incrementalManifest != nil {
-		finalManifest = incrementalManifest
+		stakeCount, hasStakeData = loadStakeCacheFromManifest(incrementalManifest)
+		if hasStakeData {
+			finalManifest = incrementalManifest
+		} else {
+			mlog.Log.Warnf("incremental manifest lacks VersionedEpochStakes for epoch %d, trying full manifest",
+				incrementalManifest.Bank.Epoch)
+			stakeCount, hasStakeData = loadStakeCacheFromManifest(manifest)
+		}
+	} else {
+		stakeCount, hasStakeData = loadStakeCacheFromManifest(manifest)
 	}
-	stakeCount := loadStakeCacheFromManifest(finalManifest)
+	if !hasStakeData {
+		return nil, nil, fmt.Errorf("no VersionedEpochStakes found for epoch %d in any manifest - cannot compute rewards",
+			finalManifest.Bank.Epoch)
+	}
 
 	start := time.Now()
 
