@@ -1319,8 +1319,10 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		stakeAcct, err := acctsDb.GetAccount(slot, stakePk)
 		if err != nil {
-			errVal := fmt.Errorf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d: %w", stakePk, slot, err)
-			workerErr.CompareAndSwap(nil, &errVal)
+			// Stake account doesn't exist in AccountsDB - likely closed after snapshot.
+			// Skip it - there's no account to credit rewards to. This matches Agave/FD behavior
+			// where closed accounts simply don't receive rewards (they're filtered by existence).
+			mlog.Log.Warnf("rewards distribution: stake account %s not found in AccountsDB (slot=%d) - skipping", stakePk, slot)
 			return
 		}
 		parentAccts[idx] = stakeAcct.Clone()
