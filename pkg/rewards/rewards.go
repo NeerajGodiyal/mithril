@@ -115,6 +115,74 @@ const (
 	MaxRewardsPerBlock uint64 = 4096
 )
 
+// RefreshStakeCacheCreditsObserved updates CreditsObserved in the stake cache from AccountsDB.
+//
+// The snapshot manifest's epoch_stakes contains stake delegation entries, but the credits_observed
+// field is NOT updated after rewards distribution - it only reflects the value when the stake was
+// created or last modified (delegate/undelegate/merge operations).
+//
+// The actual stake accounts in AccountsDB have the correct credits_observed values (updated after
+// each epoch's rewards distribution). This function refreshes the stake cache to use those values.
+//
+// This matches Firedancer's fd_stake_delegations_refresh() which is called before rewards calculation.
+// See: src/flamenco/stakes/fd_stake_delegations.h lines 46-50:
+//
+//	"The reason we can't populate the stake accounts from the cache is because the cache in the
+//	manifest is partially incomplete: all of the expected keys are there, but the values are not.
+//	Notably, the credits_observed field is not available until all of the accounts are loaded
+//	into the database."
+func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint64) (refreshed int, errors int) {
+	stakeCache := global.StakeCache()
+	total := len(stakeCache)
+	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB: %d accounts", total)
+
+	var refreshedCount, errorCount int
+	var processed int
+
+	for pubkey, delegation := range stakeCache {
+		processed++
+		if processed%100000 == 0 {
+			mlog.Log.Infof("  refresh progress: %d/%d (%.1f%%)", processed, total, float64(processed)*100/float64(total))
+		}
+
+		// Read the actual stake account from AccountsDB
+		stakeAcct, err := acctsDb.GetAccount(slot, pubkey)
+		if err != nil {
+			// Account might be missing (closed) - remove from cache
+			global.DeleteStakeCacheItem(pubkey)
+			errorCount++
+			continue
+		}
+
+		// Decode the stake state
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			errorCount++
+			continue
+		}
+
+		// Only update if it's a Stake state (not Initialized or Uninitialized)
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			// Remove non-stake accounts from cache
+			global.DeleteStakeCacheItem(pubkey)
+			errorCount++
+			continue
+		}
+
+		// Update CreditsObserved from the actual stake account
+		oldCredits := delegation.CreditsObserved
+		newCredits := stakeState.Stake.Stake.CreditsObserved
+
+		if oldCredits != newCredits {
+			delegation.CreditsObserved = newCredits
+			refreshedCount++
+		}
+	}
+
+	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed", refreshedCount, errorCount)
+	return refreshedCount, errorCount
+}
+
 // ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
 // Matches Agave's get_rewards_num_partitions formula with warmup check and max blocks clamping.
 //

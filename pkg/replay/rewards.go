@@ -61,6 +61,14 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
 	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
+
+	// CRITICAL: Refresh stake cache credits_observed from AccountsDB before computing points.
+	// The manifest's epoch_stakes contains stake delegation entries, but credits_observed is NOT
+	// updated after rewards distribution - it only reflects the value when the stake was created
+	// or last modified. The actual stake accounts in AccountsDB have the correct values.
+	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
+	rewards.RefreshStakeCacheCreditsObserved(acctsDb, slot)
+
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
@@ -172,6 +180,13 @@ func recalculatePartitionedRewardsForResume(
 		Features:   f,
 		AccountsDb: acctsDb,
 	}
+
+	// CRITICAL: Refresh stake cache credits_observed from AccountsDB before computing points.
+	// The manifest's epoch_stakes contains stake delegation entries, but credits_observed is NOT
+	// updated after rewards distribution - it only reflects the value when the stake was created
+	// or last modified. The actual stake accounts in AccountsDB have the correct values.
+	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
+	rewards.RefreshStakeCacheCreditsObserved(acctsDb, slot)
 
 	// Rebuild partition assignments and calculate points
 	// Use rewardedEpoch (epoch-1) as maxEpoch to freeze vote credits at epoch boundary.
