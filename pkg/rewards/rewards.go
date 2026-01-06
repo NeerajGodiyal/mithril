@@ -590,6 +590,15 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		if calculatedPoints.Points.Eq(zero128) {
 			zeroPoints++
+			// Sample for debugging - why do these accounts have 0 points?
+			if len(samples) < maxSamples*8 { // extended for zero_points bucket
+				samples = append(samples, sampleAccount{
+					pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
+					creditsInStake: creditsInStake, creditsInVote: creditsInVote,
+					activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
+					stake: stake, bucket: "zero_points",
+				})
+			}
 			continue
 		}
 
