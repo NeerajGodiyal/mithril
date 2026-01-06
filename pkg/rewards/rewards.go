@@ -363,10 +363,9 @@ func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stak
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
 // Use this for debugging partition count mismatches.
-// Eligibility requires: stake >= min AND has vote cache AND points > 0 for rewarded epoch.
-// Uses rewarded-epoch-only filter (conservative, matches d0e3583).
-// Also logs a diagnostic comparing both predicates (all-epochs vs rewarded-epoch-only)
-// to determine which one matches RPC partition count.
+// Eligibility requires: stake >= min AND has vote cache AND points > 0 (any epoch).
+// Uses all-epochs filter (matches Firedancer/Agave: accounts catching up on credits are included).
+// Also logs a diagnostic comparing both predicates for verification.
 func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) StakeAccountStats {
 	minimum := minimumStakeDelegationFromFeatures(f)
 	stakeCache := global.StakeCache()
@@ -471,9 +470,10 @@ func CountEligibleStakeAccountsDetailed(rewardedEpoch uint64, f *features.Featur
 			eligibleRewardedEpochOnly++
 		}
 
-		// Use rewarded-epoch-only method for actual eligibility (conservative, matches d0e3583)
-		// The diagnostic log will show us if all-epochs would be more accurate
-		if !hasPointsRewardedEpoch {
+		// Use all-epochs method for actual eligibility (matches Firedancer/Agave behavior)
+		// Accounts with points > 0 across ANY epoch in epochCredits are included
+		// The diagnostic log shows both predicates for verification
+		if !hasPointsAllEpochs {
 			stats.ZeroPoints++
 			continue
 		}
