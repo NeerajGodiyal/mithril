@@ -1463,38 +1463,39 @@ func ReplayBlocks(
 				// Refresh global.EpochStakes now that VoteCache is complete
 				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 
-				// Build schedule for the CURRENT epoch (block.Epoch = N).
-				// At epoch boundary entering N, block.VoteAccts has stakes effective for N.
-				// Schedule for epoch E uses stakes effective for E (Agave's epoch_vote_accounts(E)).
-				// LeaderScheduleEpoch returns N+1 but we can't build that yet - no N+1 stakes.
-				mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule for current epoch)",
-					block.Epoch)
+				// Only build schedule if we don't already have one for this epoch.
+				// The snapshot schedule is authoritative - leader schedule for epoch N is fixed
+				// at the start of epoch N-1 using stakes from end of N-2. Rebuilding here would
+				// use newer stakes and diverge.
+				firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(block.Epoch)
+				if _, hasSchedule := global.LeaderForSlot(firstSlotInEpoch); hasSchedule {
+					mlog.Log.Infof("epoch boundary: schedule already present for epoch %d; skipping rebuild",
+						block.Epoch)
+				} else {
+					mlog.Log.Infof("epoch boundary: block.Epoch=%d (building schedule - not present from snapshot)",
+						block.Epoch)
 
-				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
-				if err != nil {
-					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
-					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
-					break
+					_, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
+					if err != nil {
+						mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
+						result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
+						break
+					}
 				}
 
 				// Set block.Leader for this block (was deferred in configureBlock)
 				var exists bool
 				block.Leader, exists = global.LeaderForSlot(block.Slot)
 				if !exists {
-					firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
 					numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-					lastSlot := firstSlot + numSlots - 1
-					hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
+					lastSlot := firstSlotInEpoch + numSlots - 1
+					hash := scheduleFullHash(global.LeaderSchedule(), firstSlotInEpoch, numSlots)
 					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-						block.Slot, block.Epoch, firstSlot, lastSlot, hash)
+						block.Slot, block.Epoch, firstSlotInEpoch, lastSlot, hash)
 					result.Error = fmt.Errorf("unable to find leader for slot %d at epoch boundary (epoch=%d range=[%d,%d])",
-						block.Slot, block.Epoch, firstSlot, lastSlot)
+						block.Slot, block.Epoch, firstSlotInEpoch, lastSlot)
 					break
 				}
-
-				// Synchronous RPC validation - always logs both hashes and writes validation file
-				localSchedule := global.LeaderSchedule()
-				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 			}
 
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
