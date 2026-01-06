@@ -448,18 +448,10 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		// FORCE_CREDITS_UPDATE CHECK #1: credits_in_vote < credits_in_stake
 		// In Firedancer, this sets force_credits_update_with_skipped_reward = true in calculate_stake_points_and_credits
-		// These accounts are COUNTED but get 0 rewards (return 0 from redeem_rewards)
+		// These accounts are COUNTED but get 0 rewards, and have 0 points (no contribution to total_points)
 		if creditsInVote < creditsInStake {
 			forceCreditsUpdateCount++
-			continue // Counted separately, don't add to accountsWithPoints
-		}
-
-		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
-		// In Firedancer, this sets force_credits_update_with_skipped_reward = true in redeem_rewards
-		// These accounts are COUNTED but get 0 rewards
-		if delegation.ActivationEpoch == rewardedEpoch {
-			forceCreditsUpdateCount++
-			continue // Counted separately, don't add to accountsWithPoints
+			continue // Counted separately, 0 points so no contribution to total_points
 		}
 
 		// If credits_in_vote == credits_in_stake (no new credits), skip
@@ -470,9 +462,23 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		}
 
 		// Normal case: credits_in_vote > credits_in_stake
-		// Calculate points
+		// Calculate points (needed for both normal accounts and activation_epoch == rewarded_epoch)
 		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
 		zero128 := wide.Uint128FromUint64(0)
+
+		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
+		// In Firedancer, this is checked AFTER points calculation in redeem_rewards (line 380-388)
+		// These accounts contribute to total_points but are COUNTED via force_credits_update (get 0 rewards)
+		// Key: FD calculates points first, THEN sets force_credits_update, so points are included
+		if delegation.ActivationEpoch == rewardedEpoch {
+			forceCreditsUpdateCount++
+			// Still add to total_points (FD calculates points before forcing credits update)
+			if !calculatedPoints.Points.Eq(zero128) {
+				totalPoints = totalPoints.Add(calculatedPoints.Points)
+			}
+			continue // Counted separately, don't go through rewards/split checks
+		}
+
 		if calculatedPoints.Points.Eq(zero128) {
 			zeroPoints++
 			continue
