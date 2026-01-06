@@ -34,12 +34,17 @@ type PartitionMismatchError struct {
 	TotalStakeAcct    uint64
 	BelowMinAcct      uint64
 	NoVoteAcct        uint64
+	NoCreditsAcct     uint64
+	ZeroPointsAcct    uint64
 }
 
 func (e *PartitionMismatchError) Error() string {
-	return fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible_stake_accts=%d total_stake_accts=%d below_min=%d no_vote=%d. "+
-		"This would cause epoch boundary divergence. Check stake account filtering logic.",
-		e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct, e.BelowMinAcct, e.NoVoteAcct)
+	// Calculate what the partition count WOULD be if no_credits were properly excluded
+	expectedIfNoCreditsExcluded := (e.EligibleStakeAcct - e.NoCreditsAcct + MaxRewardsPerBlock - 1) / MaxRewardsPerBlock
+	return fmt.Sprintf("PARTITION COUNT MISMATCH: local=%d rpc=%d eligible=%d total=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d. "+
+		"If no_credits excluded: eligible_adjusted=%d -> partitions=%d. Check filtering logic.",
+		e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct, e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct,
+		e.EligibleStakeAcct-e.NoCreditsAcct, expectedIfNoCreditsExcluded)
 }
 
 // Package-level validation settings for epoch boundary
@@ -348,9 +353,9 @@ type StakeAccountStats struct {
 // CountEligibleStakeAccounts counts stake accounts that will actually earn rewards.
 // This matches Agave's filtering logic: points > 0 (effective stake > 0 AND new credits to earn).
 // IMPORTANT: This count is used for partition calculation, not the raw stake cache size.
-func CountEligibleStakeAccounts(f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) (eligible uint64, total uint64, belowMin uint64, noVote uint64) {
+func CountEligibleStakeAccounts(f *features.Features, stakeHistory *sealevel.SysvarStakeHistory, newRateActivationEpoch *uint64) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64) {
 	stats := CountEligibleStakeAccountsDetailed(f, stakeHistory, newRateActivationEpoch)
-	return stats.Eligible, stats.Total, stats.BelowMin, stats.NoVote
+	return stats.Eligible, stats.Total, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroPoints
 }
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
@@ -452,6 +457,14 @@ func CountEligibleStakeAccountsDetailed(f *features.Features, stakeHistory *seal
 		stats.MinEligibleStake = 0
 	}
 
+	// VERIFICATION: Filter counts MUST add up to total.
+	// If they don't, there's a bug in the filtering logic.
+	filterSum := stats.Eligible + stats.BelowMin + stats.NoVote + stats.NoCredits + stats.ZeroPoints
+	if filterSum != stats.Total {
+		mlog.Log.Errorf("PARTITION FILTER BUG: filter counts don't add up! total=%d but sum=%d (eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d)",
+			stats.Total, filterSum, stats.Eligible, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroPoints)
+	}
+
 	// Log detailed stats for debugging partition mismatches
 	mlog.Log.Infof("stake account stats: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_stake=%d zero_with_vote=%d min_stake=%d",
 		stats.Total, stats.Eligible, stats.BelowMin, stats.NoVote, stats.NoCredits, stats.ZeroPoints, stats.ZeroStake, stats.ZeroWithVote, stats.MinimumStake)
@@ -459,6 +472,8 @@ func CountEligibleStakeAccountsDetailed(f *features.Features, stakeHistory *seal
 		stats.MinEligibleStake, stats.MaxIneligibleWithVote)
 	mlog.Log.Infof("  histogram (with vote): zero=%d 1-999=%d 1K-1M=%d 1M-1B=%d >=1B=%d",
 		stats.StakeZero, stats.Stake1To999, stats.Stake1KTo1M, stats.Stake1MTo1B, stats.StakeAbove1B)
+	mlog.Log.Infof("  partition calc: eligible=%d -> partitions=%d (if max_rewards_per_block=4096)",
+		stats.Eligible, (stats.Eligible+MaxRewardsPerBlock-1)/MaxRewardsPerBlock)
 
 	return stats
 }
@@ -534,7 +549,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 
 	// Count ELIGIBLE stake accounts (filtered like Agave does: points > 0)
 	// This is critical: Agave counts accounts that actually earn rewards, not total stake cache
-	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts := CountEligibleStakeAccounts(f, stakeHistory, newRateActivationEpoch)
+	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts := CountEligibleStakeAccounts(f, stakeHistory, newRateActivationEpoch)
 	numStakeAccounts := eligibleAccounts
 
 	// Get slots per epoch for this epoch
@@ -560,8 +575,8 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 
 	mlog.Log.Infof("local rewards partition: epoch=%d prev_epoch=%d first_slot=%d slots_per_epoch=%d",
 		epoch, prevEpoch, firstSlotInEpoch, slotsPerEpoch)
-	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d",
-		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts)
+	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d",
+		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts)
 	mlog.Log.Infof("  partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
 		numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
@@ -584,6 +599,8 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 					TotalStakeAcct:    totalAccounts,
 					BelowMinAcct:      belowMinAccounts,
 					NoVoteAcct:        noVoteAccounts,
+					NoCreditsAcct:     noCreditsAccounts,
+					ZeroPointsAcct:    zeroPointsAccounts,
 				}
 			}
 		}
