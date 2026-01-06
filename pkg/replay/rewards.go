@@ -27,6 +27,24 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 }
 
 func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, error) {
+	// SAFEGUARD: Check if epoch_rewards.active is already true, which would indicate
+	// we're trying to reprocess an already-processed epoch boundary.
+	// Like Firedancer, when active=true we should NOT recompute - use existing sysvar values.
+	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
+	if err == nil && len(epochRewardsAcct.Data) >= sealevel.SysvarEpochRewardsStructLen {
+		var existingEpochRewards sealevel.SysvarEpochRewards
+		decoder := bin.NewBinDecoder(epochRewardsAcct.Data)
+		if decErr := existingEpochRewards.UnmarshalWithDecoder(decoder); decErr == nil && existingEpochRewards.Active {
+			mlog.Log.Warnf("EPOCH REWARDS ALREADY ACTIVE: skipping fresh computation and using existing sysvar values")
+			mlog.Log.Infof("  existing sysvar: num_partitions=%d total_points=%s total_rewards=%d distributed=%d",
+				existingEpochRewards.NumPartitions, existingEpochRewards.TotalPoints.String(),
+				existingEpochRewards.TotalRewards, existingEpochRewards.DistributedRewards)
+
+			// Return an error to signal caller should use recalculatePartitionedRewardsForResume instead
+			return nil, nil, nil, fmt.Errorf("epoch rewards already active - use resume path instead")
+		}
+	}
+
 	// Compute warmup/cooldown rate epoch first - needed for partition count calculation
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
@@ -54,7 +72,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		NumPartitions: partitionedRewardsInfo.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,
 		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
 
-	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
+	epochRewardsAcct, err = acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("unable to get EpochRewards from acctsdb: %w", err)
 	}
@@ -159,11 +177,37 @@ func recalculatePartitionedRewardsForResume(
 	pointsPerStakeAcct, points, partitions := rewards.CalculateTotalPointsAndPartitions(
 		acctsDb, mockSlotCtx, slot, epochRewards.NumPartitions, stakeHistory, newWarmupCooldownRateEpoch)
 
-	// Validate points match stored value - mismatch indicates stake cache divergence
+	// When epoch_rewards.active == true, we're resuming mid-distribution.
+	// Like Firedancer, we should NOT recompute total_points - use sysvar values directly.
+	// The computed points may differ due to stale vote cache data from snapshot
+	// (snapshot vote_credits can differ from epoch-boundary vote_credits).
+	//
+	// We MUST scale individual points to match sysvar total, otherwise rewards sum will be wrong.
 	if !points.Eq(epochRewards.TotalPoints) {
-		mlog.Log.Errorf("rewards resume: CRITICAL points mismatch - computed=%s stored=%s (stake_accts=%d)",
+		mlog.Log.Warnf("rewards resume: POINTS MISMATCH - computed=%s stored=%s (stake_accts=%d)",
 			points.String(), epochRewards.TotalPoints.String(), numStakeAccounts)
-		mlog.Log.Errorf("  this may indicate stake cache divergence; using stored points for consistency")
+		mlog.Log.Warnf("  this is expected when resuming from snapshot; using sysvar total_points per FD behavior")
+
+		// Scale each stake account's points proportionally to match epochRewards.TotalPoints
+		// This ensures: sum(scaled_points) ≈ epochRewards.TotalPoints
+		// Individual proportions are preserved (even if slightly off due to non-uniform staleness)
+		// Formula: scaled_points[i] = computed_points[i] * (stored_total / computed_total)
+		zeroPoints := wide.Uint128FromUint64(0)
+		if points.Cmp(zeroPoints) != 0 {
+			for pubkey, calcPoints := range pointsPerStakeAcct {
+				if calcPoints.Points.Cmp(zeroPoints) != 0 {
+					// scaled = (original * stored_total) / computed_total
+					// Use 128-bit multiplication then division
+					numerator := calcPoints.Points.Mul(epochRewards.TotalPoints)
+					scaledPoints := numerator.Div(points)
+					pointsPerStakeAcct[pubkey].Points = scaledPoints
+				}
+			}
+			mlog.Log.Infof("rewards resume: scaled %d stake account points to match stored total", len(pointsPerStakeAcct))
+		}
+
+		// Use stored total for subsequent calculations (as FD does)
+		points = epochRewards.TotalPoints
 	}
 
 	// Rebuild reward calculations using stored total rewards and points

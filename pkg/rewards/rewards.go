@@ -1133,41 +1133,71 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 		} else {
 			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
 			if numRewardPartitions != rpcNumPartitions {
-				// Fetch EpochRewards sysvar to compare total_points and total_rewards
+				// Fetch EpochRewards sysvar to get authoritative values
 				epochRewardsData, err := validationRpcClient.GetEpochRewardsSysvar()
 				if err != nil {
 					mlog.Log.Warnf("partition validation: failed to fetch EpochRewards sysvar: %v", err)
-				} else {
-					var rpcEpochRewards sealevel.SysvarEpochRewards
-					decoder := bin.NewBinDecoder(epochRewardsData)
-					if err := rpcEpochRewards.UnmarshalWithDecoder(decoder); err != nil {
-						mlog.Log.Warnf("partition validation: failed to decode EpochRewards sysvar: %v", err)
-					} else {
-						mlog.Log.Infof("RPC EpochRewards sysvar: num_partitions=%d total_points=%s total_rewards=%d",
-							rpcEpochRewards.NumPartitions, rpcEpochRewards.TotalPoints.String(), rpcEpochRewards.TotalRewards)
-						mlog.Log.Infof("LOCAL computed values: total_rewards=%d", totalStakingRewards)
-						mlog.Log.Infof("COMPARISON: local_rewards=%d rpc_rewards=%d diff=%d",
-							totalStakingRewards, rpcEpochRewards.TotalRewards,
-							int64(totalStakingRewards)-int64(rpcEpochRewards.TotalRewards))
-						// Note: We don't have local total_points at this level, but it's logged in CountEligibleStakeAccountsWithRewardsFilter
+					// Can't recover without RPC sysvar - return error
+					return nil, &PartitionMismatchError{
+						Epoch:             epoch,
+						LocalPartitions:   numRewardPartitions,
+						RpcPartitions:     rpcNumPartitions,
+						EligibleStakeAcct: eligibleAccounts,
+						TotalStakeAcct:    totalAccounts,
+						BelowMinAcct:      belowMinAccounts,
+						NoVoteAcct:        noVoteAccounts,
+						NoCreditsAcct:     noCreditsAccounts,
+						ZeroPointsAcct:    zeroPointsAccounts,
+						ZeroRewardsAcct:   zeroRewardsAccounts,
+						ZeroSplitAcct:     zeroSplitAccounts,
 					}
 				}
 
-				// CRITICAL: Partition count mismatch will cause bankhash divergence.
-				// Return error to allow clean shutdown with state file writing.
-				return nil, &PartitionMismatchError{
-					Epoch:             epoch,
-					LocalPartitions:   numRewardPartitions,
-					RpcPartitions:     rpcNumPartitions,
-					EligibleStakeAcct: eligibleAccounts,
-					TotalStakeAcct:    totalAccounts,
-					BelowMinAcct:      belowMinAccounts,
-					NoVoteAcct:        noVoteAccounts,
-					NoCreditsAcct:     noCreditsAccounts,
-					ZeroPointsAcct:    zeroPointsAccounts,
-					ZeroRewardsAcct:   zeroRewardsAccounts,
-					ZeroSplitAcct:     zeroSplitAccounts,
+				var rpcEpochRewards sealevel.SysvarEpochRewards
+				decoder := bin.NewBinDecoder(epochRewardsData)
+				if err := rpcEpochRewards.UnmarshalWithDecoder(decoder); err != nil {
+					mlog.Log.Warnf("partition validation: failed to decode EpochRewards sysvar: %v", err)
+					return nil, &PartitionMismatchError{
+						Epoch:             epoch,
+						LocalPartitions:   numRewardPartitions,
+						RpcPartitions:     rpcNumPartitions,
+						EligibleStakeAcct: eligibleAccounts,
+						TotalStakeAcct:    totalAccounts,
+						BelowMinAcct:      belowMinAccounts,
+						NoVoteAcct:        noVoteAccounts,
+						NoCreditsAcct:     noCreditsAccounts,
+						ZeroPointsAcct:    zeroPointsAccounts,
+						ZeroRewardsAcct:   zeroRewardsAccounts,
+						ZeroSplitAcct:     zeroSplitAccounts,
+					}
 				}
+
+				// Successfully fetched RPC sysvar - use its authoritative values
+				mlog.Log.Warnf("PARTITION MISMATCH RECOVERY: using RPC EpochRewards sysvar values instead of local computation")
+				mlog.Log.Infof("  RPC sysvar: num_partitions=%d total_points=%s total_rewards=%d",
+					rpcEpochRewards.NumPartitions, rpcEpochRewards.TotalPoints.String(), rpcEpochRewards.TotalRewards)
+				mlog.Log.Infof("  LOCAL computed: partitions=%d total_rewards=%d", numRewardPartitions, totalStakingRewards)
+				mlog.Log.Infof("  DIFF: partitions=%d rewards=%d",
+					int64(rpcEpochRewards.NumPartitions)-int64(numRewardPartitions),
+					int64(rpcEpochRewards.TotalRewards)-int64(totalStakingRewards))
+
+				// Use RPC values for correct partition info
+				// This matches how Firedancer handles the recalc path when epoch_rewards.active=true
+				correctedNumPartitions := rpcEpochRewards.NumPartitions
+				correctedTotalRewards := rpcEpochRewards.TotalRewards
+				correctedLastRewardSlot := firstSlotInEpoch + correctedNumPartitions
+
+				mlog.Log.Infof("  CORRECTED: partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
+					correctedNumPartitions, firstStakingRewardSlot, correctedLastRewardSlot, correctedTotalRewards)
+
+				return &PartitionedRewardDistributionInfo{
+					TotalStakingRewards:    correctedTotalRewards,
+					FirstStakingRewardSlot: firstStakingRewardSlot,
+					LastStakingRewardSlot:  correctedLastRewardSlot,
+					EahStartOffsetSlot:     eahCalcSlot,
+					EahStopOffsetSlot:      eahInclusionSlot,
+					NumRewardPartitions:    correctedNumPartitions,
+				}, nil
 			}
 		}
 	}

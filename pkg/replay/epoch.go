@@ -246,6 +246,18 @@ func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards 
 	if partitionedEpochRewards {
 		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
 		if err != nil {
+			// Check if this is the "epoch rewards already active" error - if so, fall back to resume path
+			if err.Error() == "epoch rewards already active - use resume path instead" {
+				mlog.Log.Infof("epoch boundary: epoch rewards already active, falling back to resume path")
+				partitionedRewardsInfo, err = recalculatePartitionedRewardsForResume(
+					acctsDb, ctx.StakeHistory, epochSchedule, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
+				if err != nil {
+					return nil, fmt.Errorf("failed to use resume path for already-active rewards: %w", err)
+				}
+				// Skip stake history update since it was already done when rewards were first started
+				mlog.Log.Infof("epoch transition %d -> %d done (via resume path).", epoch, ctx.NewEpoch)
+				return partitionedRewardsInfo, nil
+			}
 			return nil, err
 		}
 	} else {
