@@ -581,22 +581,19 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		isSplit := commission > 0 && commission < 100
 		if isSplit {
-			rewardsU64 := rewards.IsUint64()
-			var rewardsVal uint64
-			if rewardsU64 {
-				rewardsVal = rewards.Uint64()
-			} else {
-				// Rewards is > uint64 max, which means both portions will be non-zero
-				// This is extremely unlikely but handle it gracefully
-				rewardsVal = ^uint64(0)
-			}
+			// Use 128-bit arithmetic to match Firedancer exactly (fd_rewards.c lines 334-337)
+			// This ensures identical rounding behavior for the commission split
+			commission128 := wide.Uint128FromUint64(uint64(commission))
+			complement128 := wide.Uint128FromUint64(uint64(100 - commission))
+			hundred128 := wide.Uint128FromUint64(100)
 
 			// voter_portion = rewards * commission / 100
-			voterPortion := rewardsVal * uint64(commission) / 100
+			voterPortion := rewards.Mul(commission128).Div(hundred128)
 			// staker_portion = rewards * (100 - commission) / 100
-			stakerPortion := rewardsVal * uint64(100-commission) / 100
+			stakerPortion := rewards.Mul(complement128).Div(hundred128)
 
-			if voterPortion == 0 || stakerPortion == 0 {
+			zero128 := wide.Uint128FromUint64(0)
+			if voterPortion.Eq(zero128) || stakerPortion.Eq(zero128) {
 				zeroSplit++
 				continue
 			}
