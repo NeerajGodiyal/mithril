@@ -1400,7 +1400,20 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		if err != nil {
 			// Stake account can't be deserialized - might be Uninitialized or corrupted.
 			// Skip it like Firedancer does (fd_rewards.c:880-884 returns 1 on decode failure).
-			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (slot=%d) - skipping: %v", stakePk, slot, err)
+			// Log detailed diagnostic info to help debug
+			dataLen := len(stakeAcct.Data)
+			hexPreview := ""
+			if dataLen > 0 {
+				previewLen := 64
+				if dataLen < previewLen {
+					previewLen = dataLen
+				}
+				hexPreview = fmt.Sprintf("%x", stakeAcct.Data[:previewLen])
+			}
+			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (slot=%d) - skipping", stakePk, slot)
+			mlog.Log.Warnf("  error: %v", err)
+			mlog.Log.Warnf("  owner: %s, lamports: %d, data_len: %d", stakeAcct.Owner, stakeAcct.Lamports, dataLen)
+			mlog.Log.Warnf("  data_hex (first 64 bytes): %s", hexPreview)
 			return
 		}
 
