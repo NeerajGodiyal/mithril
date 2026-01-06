@@ -427,6 +427,12 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	var creditsDelta101to1k uint64  // delta 101-1000
 	var creditsDeltaAbove1k uint64  // delta > 1000
 
+	// Micro-stake analysis (accounts < 1 SOL that have points > 0)
+	// If feature gate is off, these inflate total_points without getting rewards
+	const oneSol = uint64(1_000_000_000)
+	var microStakeCount uint64        // accounts with stake < 1 SOL and points > 0
+	var microStakePoints wide.Uint128 // sum of points from micro-stake accounts
+
 	// Sample accounts for debugging (collect first few from each bucket)
 	type sampleAccount struct {
 		pubkey          solana.PublicKey
@@ -614,6 +620,12 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			stake:           stake,
 		})
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
+
+		// Track micro-stake accounts (stake < 1 SOL) that contribute to total_points
+		if stake < oneSol {
+			microStakeCount++
+			microStakePoints = microStakePoints.Add(calculatedPoints.Points)
+		}
 	}
 
 	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d force_credits_update=%d total_points=%s",
@@ -645,6 +657,17 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	// If total_rewards is lower than RPC, same effect
 	mlog.Log.Infof("  COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
 	mlog.Log.Infof("  (Get RPC values via: getBlocksWithLimit on first slot of epoch, then getBlock with rewards)")
+
+	// MICRO-STAKE ANALYSIS: accounts with stake < 1 SOL that contribute to total_points
+	// If feature gate is off, these inflate total_points, raising threshold, causing more zero_rewards
+	mlog.Log.Infof("  MICRO-STAKE ANALYSIS (stake < 1 SOL with points > 0): count=%d points=%s",
+		microStakeCount, microStakePoints.String())
+	mlog.Log.Infof("  feature min_stake_delegation=%d (if 0, micro-stakes contribute to total_points)", minimum)
+	// If Agave has min_stake=1 SOL, their total_points would be: total_points - micro_stake_points
+	adjustedTotalPoints := totalPoints.Sub(microStakePoints)
+	mlog.Log.Infof("  if Agave has 1 SOL min: adjusted_total_points=%s (subtract micro-stake contribution)",
+		adjustedTotalPoints.String())
+
 	// THRESHOLD: minimum points needed for rewards > 0
 	// rewards = points * total_rewards / total_points > 0
 	// => points > total_points / total_rewards
