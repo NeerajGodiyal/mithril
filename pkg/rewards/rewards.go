@@ -392,9 +392,14 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	// Structure to hold account info for second pass
 	type accountPoints struct {
-		pubkey     solana.PublicKey
-		points     wide.Uint128
-		commission uint8 // vote account commission (0-100)
+		pubkey          solana.PublicKey
+		voterPubkey     solana.PublicKey
+		points          wide.Uint128
+		commission      uint8  // vote account commission (0-100)
+		creditsInStake  uint64 // for sampling
+		creditsInVote   uint64 // for sampling
+		activationEpoch uint64 // for sampling
+		stake           uint64 // for sampling
 	}
 	var accountsWithPoints []accountPoints
 	var totalPoints wide.Uint128
@@ -590,9 +595,14 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		// This account has points > 0, add to our list with commission
 		accountsWithPoints = append(accountsWithPoints, accountPoints{
-			pubkey:     pubkey,
-			points:     calculatedPoints.Points,
-			commission: commission,
+			pubkey:          pubkey,
+			voterPubkey:     delegation.VoterPubkey,
+			points:          calculatedPoints.Points,
+			commission:      commission,
+			creditsInStake:  creditsInStake,
+			creditsInVote:   creditsInVote,
+			activationEpoch: delegation.ActivationEpoch,
+			stake:           stake,
 		})
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
 	}
@@ -659,6 +669,11 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	// Diagnostic counters
 	var rewardsGtZero uint64 // accounts where rewards > 0 (before split check)
 
+	// Sample accounts from zero_rewards and zero_split for debugging
+	var zeroRewardsSamples []sampleAccount
+	var zeroSplitSamples []sampleAccount
+	const maxPass2Samples = 5 // samples from each bucket
+
 	for i, acct := range accountsWithPoints {
 		if (i+1)%100000 == 0 {
 			mlog.Log.Infof("  pass 2 progress: %d/%d accounts (%.1f%%)", i+1, len(accountsWithPoints), float64(i+1)*100/float64(len(accountsWithPoints)))
@@ -671,6 +686,21 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 		if rewards.Eq(wide.Uint128FromUint64(0)) {
 			zeroRewards++
+			// Sample for debugging
+			if len(zeroRewardsSamples) < maxPass2Samples {
+				zeroRewardsSamples = append(zeroRewardsSamples, sampleAccount{
+					pubkey:          acct.pubkey,
+					voterPubkey:     acct.voterPubkey,
+					creditsInStake:  acct.creditsInStake,
+					creditsInVote:   acct.creditsInVote,
+					activationEpoch: acct.activationEpoch,
+					stake:           acct.stake,
+					points:          acct.points.String(),
+					rewards:         "0",
+					commission:      acct.commission,
+					bucket:          "zero_rewards",
+				})
+			}
 			continue
 		}
 
@@ -700,6 +730,21 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			zero128 := wide.Uint128FromUint64(0)
 			if voterPortion.Eq(zero128) || stakerPortion.Eq(zero128) {
 				zeroSplit++
+				// Sample for debugging
+				if len(zeroSplitSamples) < maxPass2Samples {
+					zeroSplitSamples = append(zeroSplitSamples, sampleAccount{
+						pubkey:          acct.pubkey,
+						voterPubkey:     acct.voterPubkey,
+						creditsInStake:  acct.creditsInStake,
+						creditsInVote:   acct.creditsInVote,
+						activationEpoch: acct.activationEpoch,
+						stake:           acct.stake,
+						points:          acct.points.String(),
+						rewards:         rewards.String(),
+						commission:      acct.commission,
+						bucket:          "zero_split",
+					})
+				}
 				continue
 			}
 		}
@@ -718,6 +763,25 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	mlog.Log.Infof("  rewards > 0:                   %d", rewardsGtZero)
 	mlog.Log.Infof("  rewards > 0 AND split valid:   %d", normalEligible)
 	mlog.Log.Infof("  TOTAL ELIGIBLE:                %d  <-- used for partition count", eligible)
+
+	// Log sample accounts from zero_rewards and zero_split
+	if len(zeroRewardsSamples) > 0 {
+		mlog.Log.Infof("ZERO_REWARDS SAMPLES (first %d):", len(zeroRewardsSamples))
+		for _, s := range zeroRewardsSamples {
+			mlog.Log.Infof("  stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d stake_lamports=%d points=%s commission=%d",
+				s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
+				s.activationEpoch, s.stake, s.points, s.commission)
+		}
+	}
+	if len(zeroSplitSamples) > 0 {
+		mlog.Log.Infof("ZERO_SPLIT SAMPLES (first %d):", len(zeroSplitSamples))
+		for _, s := range zeroSplitSamples {
+			mlog.Log.Infof("  stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d stake_lamports=%d points=%s rewards=%s commission=%d",
+				s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
+				s.activationEpoch, s.stake, s.points, s.rewards, s.commission)
+		}
+	}
+
 	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
 		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
 
