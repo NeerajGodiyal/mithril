@@ -454,30 +454,35 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			continue // Counted separately, 0 points so no contribution to total_points
 		}
 
+		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
+		// CRITICAL: This must be checked BEFORE the noCredits check!
+		// An account with activation_epoch == rewarded AND credits == stake is still counted via force_credits_update.
+		// In FD, activation check (line 380-382 in redeem_rewards) happens after calculate_stake_points_and_credits,
+		// but OVERRIDES the points=0 case when activation_epoch matches.
+		if delegation.ActivationEpoch == rewardedEpoch {
+			forceCreditsUpdateCount++
+			// Calculate points (FD does this first), add to total if > 0
+			if creditsInVote > creditsInStake && len(epochCredits) > 0 {
+				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
+				if !calculatedPoints.Points.Eq(wide.Uint128FromUint64(0)) {
+					totalPoints = totalPoints.Add(calculatedPoints.Points)
+				}
+			}
+			continue // Counted separately, don't go through rewards/split checks
+		}
+
 		// If credits_in_vote == credits_in_stake (no new credits), skip
 		// This is NOT a force_credits_update case - it returns error in Firedancer
+		// (Unless activation_epoch == rewarded_epoch, which is handled above)
 		if creditsInVote == creditsInStake || len(epochCredits) == 0 {
 			noCredits++
 			continue
 		}
 
-		// Normal case: credits_in_vote > credits_in_stake
-		// Calculate points (needed for both normal accounts and activation_epoch == rewarded_epoch)
+		// Normal case: credits_in_vote > credits_in_stake and activation_epoch != rewarded_epoch
+		// Calculate points
 		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch)
 		zero128 := wide.Uint128FromUint64(0)
-
-		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
-		// In Firedancer, this is checked AFTER points calculation in redeem_rewards (line 380-388)
-		// These accounts contribute to total_points but are COUNTED via force_credits_update (get 0 rewards)
-		// Key: FD calculates points first, THEN sets force_credits_update, so points are included
-		if delegation.ActivationEpoch == rewardedEpoch {
-			forceCreditsUpdateCount++
-			// Still add to total_points (FD calculates points before forcing credits update)
-			if !calculatedPoints.Points.Eq(zero128) {
-				totalPoints = totalPoints.Add(calculatedPoints.Points)
-			}
-			continue // Counted separately, don't go through rewards/split checks
-		}
 
 		if calculatedPoints.Points.Eq(zero128) {
 			zeroPoints++
