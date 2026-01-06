@@ -3,13 +3,8 @@
 package global
 
 import (
-	"bufio"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,22 +16,11 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// Silence unused import warnings for planned binary cache implementation
-var (
-	_ = bufio.NewWriter
-	_ = sha256.New
-	_ = binary.LittleEndian
-	_ = io.EOF
-	_ = math.Float64bits
-)
-
 const (
-	StakeCacheFileName        = "stake_cache.bin"
-	StakeCacheLegacyFileName  = "stake_cache.json"
-	stakeCacheMagic           = "STC1"
-	stakeCacheVersion   uint32 = 1
-	stakeCacheHeaderSize       = 4 + 4 + 8 + 32 + 8 + 32
-	stakeCacheEntrySize        = 32 + 32 + 8 + 8 + 8 + 8 + 8
+	// StakeCacheFileName is the filename for persisted stake cache.
+	// Currently uses JSON for easier debugging. Consider binary format
+	// later for performance if cache size becomes a bottleneck.
+	StakeCacheFileName = "stake_cache.json"
 )
 
 type GlobalCtx struct {
