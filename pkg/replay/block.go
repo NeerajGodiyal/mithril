@@ -1431,7 +1431,40 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 
-			// Step 2: Build leader schedule BEFORE rewards distribution.
+			// Step 2a: Rebuild VoteCache from AccountsDB BEFORE leader schedule and rewards.
+			// This is critical for both leader schedule (needs NodePubkey) and rewards (needs vote credits).
+			// The rebuild must happen unconditionally since rewards always need boundary-slot vote credits.
+			// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
+			// This reads the canonical state at the end of the previous epoch (prevSlotCtxForEpochBoundary.Slot).
+			if err := RebuildVoteCacheFromAccountsDB(acctsDb, prevSlotCtxForEpochBoundary.Slot, block.VoteAccts, 0); err != nil {
+				mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
+				result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
+				break
+			}
+
+			// Step 2b: Verify vote cache completeness for all non-zero stake vote accounts.
+			// Fail fast if any vote accounts are missing - computing with stale data causes divergence.
+			{
+				missing := 0
+				missingStake := uint64(0)
+				for pk, stake := range block.VoteAccts {
+					if stake == 0 {
+						continue
+					}
+					if global.VoteCacheItem(pk) == nil {
+						missing++
+						missingStake += stake
+					}
+				}
+				if missing > 0 {
+					mlog.Log.Errorf("FATAL: vote cache incomplete at boundary slot=%d missing=%d missing_stake=%d",
+						prevSlotCtxForEpochBoundary.Slot, missing, missingStake)
+					result.Error = fmt.Errorf("vote cache incomplete at epoch boundary (missing=%d stake=%d)", missing, missingStake)
+					break
+				}
+			}
+
+			// Step 2c: Build leader schedule BEFORE rewards distribution.
 			// This ensures schedule verification works even if rewards distribution crashes.
 			if global.ManageLeaderSchedule() {
 				logsDir := config.GetString("log.dir")
@@ -1443,17 +1476,6 @@ func ReplayBlocks(
 				// at this slot (typically N+1 after warmup). But we're building the schedule for
 				// block.Epoch (the current epoch N) using stakes computed at end of epoch N-1.
 				// This is correct - Agave seeds ChaCha20 with the target epoch number directly.
-
-				// Rebuild VoteCache from AccountsDB to ensure correctness.
-				// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
-				// NOT global.EpochStakes which may be incomplete if VoteCache was stale.
-				// This reads the canonical state at the end of the previous epoch (prevSlotCtxForEpochBoundary.Slot)
-				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
-				if err := RebuildVoteCacheFromAccountsDB(acctsDb, prevSlotCtxForEpochBoundary.Slot, block.VoteAccts, 0); err != nil {
-					mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
-					result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
-					break
-				}
 
 				// Only build schedule if we don't already have a complete one for this epoch.
 				// The snapshot schedule is authoritative - leader schedule for epoch N is fixed
