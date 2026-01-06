@@ -37,15 +37,16 @@ type PartitionMismatchError struct {
 	NoCreditsAcct     uint64
 	ZeroPointsAcct    uint64
 	ZeroRewardsAcct   uint64
+	ZeroSplitAcct     uint64
 }
 
 func (e *PartitionMismatchError) Error() string {
-	// Eligibility uses full Firedancer/Agave filter: points > 0 AND rewards > 0 after integer division.
-	// Filter breakdown: below_min, no_vote, no_credits, zero_points, zero_rewards are mutually exclusive.
+	// Eligibility uses full Firedancer/Agave filter: points > 0 AND rewards > 0 AND split valid.
+	// Filter breakdown: below_min, no_vote, no_credits, zero_points, zero_rewards, zero_split are mutually exclusive.
 	return fmt.Sprintf("PARTITION COUNT MISMATCH: epoch=%d local=%d rpc=%d eligible=%d total=%d "+
-		"(excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d).",
+		"(excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d).",
 		e.Epoch, e.LocalPartitions, e.RpcPartitions, e.EligibleStakeAcct, e.TotalStakeAcct,
-		e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct, e.ZeroRewardsAcct)
+		e.BelowMinAcct, e.NoVoteAcct, e.NoCreditsAcct, e.ZeroPointsAcct, e.ZeroRewardsAcct, e.ZeroSplitAcct)
 }
 
 // Package-level validation settings for epoch boundary
@@ -365,19 +366,21 @@ func CountEligibleStakeAccounts(rewardedEpoch uint64, f *features.Features, stak
 // 2. has vote cache entry
 // 3. points > 0 (has credits to earn)
 // 4. rewards > 0 after integer division (points * total_rewards / total_points > 0)
+// 5. commission split yields non-zero for both voter AND staker (when commission is 1-99%)
 //
 // This is a two-pass algorithm:
 // - Pass 1: Calculate total_points (sum of all accounts' points that pass basic filters)
-// - Pass 2: Count accounts where rewards > 0 after integer division
+// - Pass 2: Count accounts where rewards > 0 AND commission split is valid
 //
-// Returns: eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards
+// Returns: eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit
+// Also logs diagnostic buckets: points>0, rewards>0, rewards>0 AND split valid
 func CountEligibleStakeAccountsWithRewardsFilter(
 	rewardedEpoch uint64,
 	f *features.Features,
 	stakeHistory *sealevel.SysvarStakeHistory,
 	newRateActivationEpoch *uint64,
 	totalRewards uint64,
-) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64, zeroRewards uint64) {
+) (eligible uint64, total uint64, belowMin uint64, noVote uint64, noCredits uint64, zeroPoints uint64, zeroRewards uint64, zeroSplit uint64) {
 	minimum := minimumStakeDelegationFromFeatures(f)
 	stakeCache := global.StakeCache()
 	total = uint64(len(stakeCache))
@@ -387,8 +390,9 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	// Structure to hold account info for second pass
 	type accountPoints struct {
-		pubkey solana.PublicKey
-		points wide.Uint128
+		pubkey     solana.PublicKey
+		points     wide.Uint128
+		commission uint8 // vote account commission (0-100)
 	}
 	var accountsWithPoints []accountPoints
 	var totalPoints wide.Uint128
@@ -415,16 +419,20 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			continue
 		}
 
-		// Check if this account has new credits
+		// Check if this account has new credits and get commission
 		creditsInStake := delegation.CreditsObserved
 		var epochCredits []sealevel.EpochCredits
+		var commission uint8
 		switch voteState.Type {
 		case sealevel.VoteStateVersionCurrent:
 			epochCredits = voteState.Current.EpochCredits
+			commission = voteState.Current.Commission
 		case sealevel.VoteStateVersionV0_23_5:
 			epochCredits = voteState.V0_23_5.EpochCredits
+			commission = voteState.V0_23_5.Commission
 		case sealevel.VoteStateVersionV1_14_11:
 			epochCredits = voteState.V1_14_11.EpochCredits
+			commission = voteState.V1_14_11.Commission
 		}
 
 		var creditsInVote uint64
@@ -445,24 +453,34 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			continue
 		}
 
-		// This account has points > 0, add to our list
-		accountsWithPoints = append(accountsWithPoints, accountPoints{pubkey: pubkey, points: calculatedPoints.Points})
+		// This account has points > 0, add to our list with commission
+		accountsWithPoints = append(accountsWithPoints, accountPoints{
+			pubkey:     pubkey,
+			points:     calculatedPoints.Points,
+			commission: commission,
+		})
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
 	}
 
 	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d total_points=%s",
 		len(accountsWithPoints), totalPoints.String())
 
-	// PASS 2: Count accounts where rewards > 0 after integer division
+	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
-	// Skip if rewards == 0
+	// Commission split: voter_portion = rewards * commission / 100
+	//                   staker_portion = rewards * (100 - commission) / 100
+	// is_split = commission > 0 && commission < 100
+	// Skip if: rewards == 0 OR (is_split AND (voter_portion == 0 OR staker_portion == 0))
 	if totalPoints.Eq(wide.Uint128FromUint64(0)) {
 		// No points at all, no one is eligible
 		mlog.Log.Infof("  pass 2: total_points=0, no eligible accounts")
-		return 0, total, belowMin, noVote, noCredits, zeroPoints, uint64(len(accountsWithPoints))
+		return 0, total, belowMin, noVote, noCredits, zeroPoints, uint64(len(accountsWithPoints)), 0
 	}
 
 	totalRewards128 := wide.Uint128FromUint64(totalRewards)
+
+	// Diagnostic counters for all three buckets
+	var rewardsGtZero uint64 // accounts where rewards > 0 (before split check)
 
 	for i, acct := range accountsWithPoints {
 		if (i+1)%100000 == 0 {
@@ -479,14 +497,53 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			continue
 		}
 
+		rewardsGtZero++ // Count for diagnostic bucket 2
+
+		// Commission split check (Firedancer fd_rewards.c lines 400-404)
+		// is_split = commission > 0 && commission < 100
+		// If is_split AND (voter_portion == 0 OR staker_portion == 0), skip
+		commission := acct.commission
+		if commission > 100 {
+			commission = 100 // Cap at 100 like Firedancer does
+		}
+
+		isSplit := commission > 0 && commission < 100
+		if isSplit {
+			rewardsU64 := rewards.IsUint64()
+			var rewardsVal uint64
+			if rewardsU64 {
+				rewardsVal = rewards.Uint64()
+			} else {
+				// Rewards is > uint64 max, which means both portions will be non-zero
+				// This is extremely unlikely but handle it gracefully
+				rewardsVal = ^uint64(0)
+			}
+
+			// voter_portion = rewards * commission / 100
+			voterPortion := rewardsVal * uint64(commission) / 100
+			// staker_portion = rewards * (100 - commission) / 100
+			stakerPortion := rewardsVal * uint64(100-commission) / 100
+
+			if voterPortion == 0 || stakerPortion == 0 {
+				zeroSplit++
+				continue
+			}
+		}
+
 		eligible++
 	}
 
-	mlog.Log.Infof("  pass 2 complete: eligible=%d zero_rewards=%d", eligible, zeroRewards)
-	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d)",
-		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards)
+	// Log all three diagnostic buckets
+	pointsGtZero := uint64(len(accountsWithPoints))
+	mlog.Log.Infof("  pass 2 complete: eligible=%d zero_rewards=%d zero_split=%d", eligible, zeroRewards, zeroSplit)
+	mlog.Log.Infof("DIAGNOSTIC BUCKETS:")
+	mlog.Log.Infof("  bucket 1 (points > 0):                    %d", pointsGtZero)
+	mlog.Log.Infof("  bucket 2 (rewards > 0):                   %d", rewardsGtZero)
+	mlog.Log.Infof("  bucket 3 (rewards > 0 AND split valid):   %d  <-- used for partition count", eligible)
+	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
+		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
 
-	return eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards
+	return eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit
 }
 
 // CountEligibleStakeAccountsDetailed returns detailed statistics about stake account filtering.
@@ -762,8 +819,9 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	// Count ELIGIBLE stake accounts using full Firedancer/Agave filter:
 	// 1. points > 0 (has credits to earn)
 	// 2. rewards > 0 after integer division (points * total_rewards / total_points > 0)
+	// 3. commission split yields non-zero for both voter AND staker (when commission 1-99%)
 	// prevEpoch is the epoch being rewarded (rewards for epoch N-1 are distributed at start of epoch N)
-	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts := CountEligibleStakeAccountsWithRewardsFilter(prevEpoch, f, stakeHistory, newRateActivationEpoch, totalStakingRewards)
+	eligibleAccounts, totalAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts, zeroSplitAccounts := CountEligibleStakeAccountsWithRewardsFilter(prevEpoch, f, stakeHistory, newRateActivationEpoch, totalStakingRewards)
 	numStakeAccounts := eligibleAccounts
 
 	// Get slots per epoch for this epoch
@@ -786,8 +844,8 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 
 	mlog.Log.Infof("local rewards partition: epoch=%d prev_epoch=%d first_slot=%d slots_per_epoch=%d",
 		epoch, prevEpoch, firstSlotInEpoch, slotsPerEpoch)
-	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d",
-		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts)
+	mlog.Log.Infof("  stake_accts: total=%d eligible=%d below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d",
+		totalAccounts, eligibleAccounts, belowMinAccounts, noVoteAccounts, noCreditsAccounts, zeroPointsAccounts, zeroRewardsAccounts, zeroSplitAccounts)
 	mlog.Log.Infof("  partitions=%d first_reward=%d last_reward=%d total_rewards=%d",
 		numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
@@ -813,6 +871,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 					NoCreditsAcct:     noCreditsAccounts,
 					ZeroPointsAcct:    zeroPointsAccounts,
 					ZeroRewardsAcct:   zeroRewardsAccounts,
+					ZeroSplitAcct:     zeroSplitAccounts,
 				}
 			}
 		}
