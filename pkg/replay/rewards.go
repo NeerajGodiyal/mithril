@@ -89,6 +89,21 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
+	// SANITY CHECK: Verify eligible count matches actual rewards count.
+	// A mismatch indicates the stake cache changed between partition count calculation and rewards calculation,
+	// which would cause bank hash divergence. This check catches regressions early.
+	actualRewardsCount := uint64(len(partitionedRewardsInfo.StakingRewards))
+	if partitionedRewardsInfo.EligibleCount != actualRewardsCount {
+		mlog.Log.Errorf("CRITICAL: eligible count mismatch! expected=%d actual=%d diff=%d",
+			partitionedRewardsInfo.EligibleCount, actualRewardsCount,
+			int64(partitionedRewardsInfo.EligibleCount)-int64(actualRewardsCount))
+		mlog.Log.Errorf("  This indicates the stake cache changed between partition count and rewards calculation.")
+		mlog.Log.Errorf("  epoch=%d slot=%d boundary_slot=%d stake_cache_size=%d",
+			epoch, slot, boundarySlot, global.StakeCacheSize())
+		return nil, nil, nil, fmt.Errorf("eligible count mismatch: expected %d, got %d (stake cache likely changed between passes)",
+			partitionedRewardsInfo.EligibleCount, actualRewardsCount)
+	}
+
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
 		NumPartitions: partitionedRewardsInfo.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,
 		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}

@@ -277,6 +277,10 @@ type PartitionedRewardDistributionInfo struct {
 	EahStartOffsetSlot  uint64
 	EahStopOffsetSlot   uint64
 	NumRewardPartitions uint64
+	// EligibleCount is the number of stake accounts expected to receive rewards (or have credits updated).
+	// This is computed during DeterminePartitionedStakingRewardsInfoLocal and should match len(StakingRewards)
+	// after CalculateStakeRewards. A mismatch indicates the stake cache changed between the two passes.
+	EligibleCount       uint64
 	Credits             map[solana.PublicKey]CalculatedStakePoints
 	RewardPartitions    Partitions
 	StakingRewards      map[solana.PublicKey]*CalculatedStakeRewards
@@ -1329,6 +1333,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 		EahStartOffsetSlot:     eahCalcSlot,
 		EahStopOffsetSlot:      eahInclusionSlot,
 		NumRewardPartitions:    numRewardPartitions,
+		EligibleCount:          eligibleAccounts,
 	}, nil
 }
 
@@ -1727,7 +1732,8 @@ func CalculateStakeRewardsAndPartitions(
 	workerPool2, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
 		stakePk := i.(solana.PublicKey)
-		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
+		// Use LastBlockhash (parent blockhash) for partition hashing, matching Firedancer
+		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.LastBlockhash, numPartitions)
 		assigns <- assign{idx: idx, pk: stakePk}
 	})
 
@@ -1909,7 +1915,8 @@ func CalculateTotalPointsAndPartitions(
 		pointsAccum.Add(t.pubkey, pcs)
 
 		if numPartitions != 0 {
-			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.Blockhash, numPartitions)
+			// Use LastBlockhash (parent blockhash) for partition hashing, matching Firedancer
+			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.LastBlockhash, numPartitions)
 			assigns <- assign{idx: idx, pk: t.pubkey}
 		}
 	})
