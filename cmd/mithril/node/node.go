@@ -2702,17 +2702,20 @@ func runReplayWithRecovery(
 			}
 		}
 
-		// Update state file immediately
-		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, slot, bankhash, resumeCtx); err != nil {
-			return err
-		}
-
-		// Flush any new stake pubkeys to the index file
-		// This is a no-op if no new stake accounts were created in this block
+		// IMPORTANT: Flush stake pubkey index BEFORE updating state file.
+		// If we crash after updating state but before flushing index, we'd skip
+		// replaying this slot on resume and permanently lose the new pubkeys.
+		// By flushing first, a crash before state update means we replay the slot.
 		if flushed, err := global.FlushPendingStakePubkeys(accountsDbPath); err != nil {
-			mlog.Log.Warnf("failed to flush stake pubkey index: %v", err)
+			// Index flush failed - don't advance LastSlot so we replay this slot
+			return fmt.Errorf("failed to flush stake pubkey index at slot %d: %w", slot, err)
 		} else if flushed > 0 {
 			mlog.Log.Debugf("flushed %d new stake pubkeys to index at slot %d", flushed, slot)
+		}
+
+		// Now safe to update state file - index is already persisted
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, slot, bankhash, resumeCtx); err != nil {
+			return err
 		}
 
 		return nil
