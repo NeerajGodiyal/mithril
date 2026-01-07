@@ -2491,7 +2491,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 		mlog.Log.Infof("  writableAccts:  %d accounts", len(writableAccts))
 		mlog.Log.Infof("  modifiedAccts:  %d accounts", len(modifiedAccts))
 		if slotCtx.AcctsLtHash != nil {
-			mlog.Log.Infof("  ltHash (pre):   %s", base58.Encode(slotCtx.AcctsLtHash.Hash()))
+			// ltHash is 2048 bytes - use hex encoding (first 64 chars for brevity)
+			ltHashHex := hex.EncodeToString(slotCtx.AcctsLtHash.Hash())
+			mlog.Log.Infof("  ltHash (pre):   %s... (%d bytes)", ltHashHex[:64], len(slotCtx.AcctsLtHash.Hash()))
 		}
 	}
 
@@ -2501,7 +2503,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 
 	// Debug: log final bank hash for epoch boundary slot
 	if isEpochBoundary {
-		mlog.Log.Infof("  ltHash (post):  %s", base58.Encode(slotCtx.AcctsLtHash.Hash()))
+		// ltHash is 2048 bytes - use hex encoding (first 64 chars for brevity)
+		ltHashHex := hex.EncodeToString(slotCtx.AcctsLtHash.Hash())
+		mlog.Log.Infof("  ltHash (post):  %s... (%d bytes)", ltHashHex[:64], len(slotCtx.AcctsLtHash.Hash()))
 		mlog.Log.Infof("  finalBankhash:  %s", base58.Encode(slotCtx.FinalBankhash))
 	}
 

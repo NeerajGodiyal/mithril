@@ -301,8 +301,7 @@ func Encode(buf []byte) string {
 		outLen := Encode32(&out, *(*[32]byte)(buf))
 		return string(out[:outLen])
 	default:
-		// For other lengths, use a general-purpose encoder
-		return EncodeGeneric(buf)
+		panic(fmt.Sprintf("base58.Encode: expected 32 bytes, got %d (use EncodeGeneric for arbitrary lengths)", len(buf)))
 	}
 }
 

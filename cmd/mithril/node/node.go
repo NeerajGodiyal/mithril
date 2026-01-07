@@ -29,6 +29,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -869,6 +870,30 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			}
 		} else {
 			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
+		}
+	} else {
+		// Fresh snapshot load: refresh stake cache to remove stale entries.
+		// This is critical because appendvec processing may have added stale entries:
+		// - If an account has an older valid version in one appendvec and a newer tombstone
+		//   in another, only the valid version gets added (tombstones are filtered).
+		// - The tombstone never removes the old entry, leaving stale data in the cache.
+		// This matches Firedancer's init_after_snapshot pattern (fd_replay_tile.c:1055).
+		appendvecStakeCount := global.StakeCacheSize()
+		if appendvecStakeCount > 0 {
+			mlog.Log.Infof("refreshing stake cache after snapshot load to remove stale entries (before: %d accounts)", appendvecStakeCount)
+			refreshed, errors, _ := rewards.RefreshStakeCacheCreditsObserved(accountsDb, manifest.Bank.Slot)
+			afterCount := global.StakeCacheSize()
+			removed := appendvecStakeCount - afterCount
+			mlog.Log.Infof("stake cache refresh complete: refreshed=%d errors=%d removed=%d (before=%d after=%d)",
+				refreshed, errors, removed, appendvecStakeCount, afterCount)
+
+			// Re-persist the cleaned stake cache
+			bankhashStr := base58.Encode(manifest.Bank.Hash[:])
+			if err := global.SaveStakeCache(accountsDbDir, manifest.Bank.Slot, bankhashStr); err != nil {
+				mlog.Log.Warnf("failed to persist cleaned stake cache: %v", err)
+			} else {
+				mlog.Log.Infof("cleaned stake cache persisted: %d accounts at slot %d", afterCount, manifest.Bank.Slot)
+			}
 		}
 	}
 
