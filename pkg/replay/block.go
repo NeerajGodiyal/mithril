@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -876,6 +877,99 @@ func BuildStakeCacheFromAccountsDB(acctsDb *accountsdb.AccountsDb) (int, error) 
 		loadedCount, skippedCount, parseFailedCount, elapsed)
 
 	return loadedCount, nil
+}
+
+// BuildStakeCacheFromHints builds the stake cache using a list of pubkey hints.
+// This is much faster than a full scan (~1M targeted lookups vs ~200M full scan).
+// The hints come from a stale cache file and/or snapshot manifest.
+// Returns (loaded_count, not_found_count, error).
+func BuildStakeCacheFromHints(acctsDb *accountsdb.AccountsDb, hints []solana.PublicKey, slot uint64) (int, int, error) {
+	mlog.Log.Infof("building stake cache from %d hints (targeted lookup)...", len(hints))
+	start := time.Now()
+
+	var loaded atomic.Uint64
+	var notFound atomic.Uint64
+	var notStake atomic.Uint64
+	var parseFailed atomic.Uint64
+
+	// Use worker pool for parallel lookups
+	var wg sync.WaitGroup
+	workerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+		defer wg.Done()
+		pubkey := i.(solana.PublicKey)
+
+		acct, err := acctsDb.GetAccount(slot, pubkey)
+		if err != nil {
+			notFound.Add(1)
+			return
+		}
+
+		// Check if still owned by stake program
+		if !bytes.Equal(acct.Owner[:], a.StakeProgramAddr[:]) {
+			notStake.Add(1)
+			return
+		}
+
+		// Skip empty accounts
+		if acct.Lamports == 0 {
+			notStake.Add(1)
+			return
+		}
+
+		// Skip uninitialized stake accounts
+		if len(acct.Data) >= 4 {
+			acctType := binary.LittleEndian.Uint32(acct.Data)
+			if acctType == sealevel.StakeStateV2StatusUninitialized {
+				notStake.Add(1)
+				return
+			}
+		}
+
+		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
+		if err != nil {
+			parseFailed.Add(1)
+			return
+		}
+
+		delegation := stakeState.Stake.Stake.Delegation
+		global.PutStakeCacheItem(pubkey, &sealevel.Delegation{
+			VoterPubkey:        delegation.VoterPubkey,
+			StakeLamports:      delegation.StakeLamports,
+			ActivationEpoch:    delegation.ActivationEpoch,
+			DeactivationEpoch:  delegation.DeactivationEpoch,
+			WarmupCooldownRate: delegation.WarmupCooldownRate,
+			CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
+		})
+		loaded.Add(1)
+	})
+	defer workerPool.Release()
+
+	// Progress logging
+	progressInterval := len(hints) / 10
+	if progressInterval < 1000 {
+		progressInterval = 1000
+	}
+
+	for i, pubkey := range hints {
+		if i > 0 && i%progressInterval == 0 {
+			mlog.Log.Infof("  stake cache hint progress: %d/%d (%.1f%%)", i, len(hints), float64(i)/float64(len(hints))*100)
+		}
+		wg.Add(1)
+		workerPool.Invoke(pubkey)
+	}
+
+	wg.Wait()
+
+	loadedCount := int(loaded.Load())
+	notFoundCount := int(notFound.Load())
+	notStakeCount := int(notStake.Load())
+	parseFailedCount := int(parseFailed.Load())
+	elapsed := time.Since(start)
+
+	mlog.Log.Infof("stake cache from hints complete: loaded=%d not_found=%d not_stake=%d parse_failed=%d elapsed=%v",
+		loadedCount, notFoundCount, notStakeCount, parseFailedCount, elapsed)
+
+	return loadedCount, notFoundCount, nil
 }
 
 func configureInitialBlock(acctsDb *accountsdb.AccountsDb,

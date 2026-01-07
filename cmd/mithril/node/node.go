@@ -857,16 +857,41 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	if mithrilState != nil && mithrilState.HasResumeContext() {
 		loadedEntries, loadErr := global.LoadStakeCache(accountsDbDir, mithrilState.LastSlot, mithrilState.LastBankhash)
 		if loadErr != nil {
-			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
+			mlog.Log.Warnf("failed to load stake cache from file: %v", loadErr)
 		}
 		if loadErr != nil || loadedEntries == 0 {
-			// Cache file missing, corrupt, stale, or empty - scan AccountsDB to build stake cache
-			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
-			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
-			if scanErr != nil {
-				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
-			} else {
-				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			// Cache file missing, corrupt, stale, or empty - try pubkey index first
+			if global.StakePubkeyIndexExists(accountsDbDir) {
+				mlog.Log.Infof("stake cache stale/missing - trying pubkey index for fast rebuild")
+				indexPubkeys, indexErr := global.LoadStakePubkeyIndex(accountsDbDir)
+				if indexErr != nil {
+					mlog.Log.Warnf("failed to load stake pubkey index: %v", indexErr)
+				} else if len(indexPubkeys) > 0 {
+					mlog.Log.Infof("loaded %d pubkeys from index, building cache via targeted lookups", len(indexPubkeys))
+					loadedFromIndex, notFound, buildErr := replay.BuildStakeCacheFromHints(accountsDb, indexPubkeys, mithrilState.LastSlot)
+					if buildErr != nil {
+						mlog.Log.Warnf("stake cache build from index failed: %v", buildErr)
+					} else {
+						mlog.Log.Infof("built stake cache from index: %d entries (%d not found)", loadedFromIndex, notFound)
+						loadedEntries = loadedFromIndex
+					}
+				}
+			}
+			// If still no cache, fall back to full scan
+			if loadedEntries == 0 {
+				mlog.Log.Infof("stake cache file and index not available - scanning AccountsDB (this may take 30+ minutes)")
+				scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+				if scanErr != nil {
+					mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+				} else {
+					mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+					// Save index after full scan so future restarts can use it
+					if err := global.SaveStakePubkeyIndex(accountsDbDir); err != nil {
+						mlog.Log.Warnf("failed to save stake pubkey index after scan: %v", err)
+					} else {
+						mlog.Log.Infof("stake pubkey index saved: %d entries", scannedEntries)
+					}
+				}
 			}
 		} else {
 			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
@@ -887,12 +912,15 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			mlog.Log.Infof("stake cache refresh complete: refreshed=%d errors=%d removed=%d (before=%d after=%d)",
 				refreshed, errors, removed, appendvecStakeCount, afterCount)
 
-			// Re-persist the cleaned stake cache
+			// Re-persist the cleaned stake cache and compact the pubkey index
 			bankhashStr := base58.Encode(manifest.Bank.Hash[:])
 			if err := global.SaveStakeCache(accountsDbDir, manifest.Bank.Slot, bankhashStr); err != nil {
 				mlog.Log.Warnf("failed to persist cleaned stake cache: %v", err)
 			} else {
 				mlog.Log.Infof("cleaned stake cache persisted: %d accounts at slot %d", afterCount, manifest.Bank.Slot)
+			}
+			if err := global.SaveStakePubkeyIndex(accountsDbDir); err != nil {
+				mlog.Log.Warnf("failed to save stake pubkey index: %v", err)
 			}
 		}
 	}
@@ -996,11 +1024,14 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
-		// Save stake cache alongside state file for resume
+		// Save stake cache and compact pubkey index alongside state file for resume
 		if err := global.SaveStakeCache(accountsDbDir, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash)); err != nil {
 			mlog.Log.Errorf("failed to save stake cache: %v", err)
 		} else {
 			mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
+		}
+		if err := global.SaveStakePubkeyIndex(accountsDbDir); err != nil {
+			mlog.Log.Warnf("failed to save stake pubkey index: %v", err)
 		}
 	}
 
@@ -1769,22 +1800,28 @@ postBootstrap:
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
 			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
-			// Save stake cache alongside state file for resume
+			// Save stake cache and compact pubkey index alongside state file for resume
 			if err := global.SaveStakeCache(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash)); err != nil {
 				mlog.Log.Errorf("failed to save stake cache: %v", err)
 			} else {
 				mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
+			}
+			if err := global.SaveStakePubkeyIndex(accountsPath); err != nil {
+				mlog.Log.Warnf("failed to save stake pubkey index: %v", err)
 			}
 		} else {
 			// No resume context - just update slot
 			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
-			// Save stake cache alongside state file for resume
+			// Save stake cache and compact pubkey index alongside state file for resume
 			if err := global.SaveStakeCache(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash)); err != nil {
 				mlog.Log.Errorf("failed to save stake cache: %v", err)
 			} else {
 				mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), result.LastPersistedSlot)
+			}
+			if err := global.SaveStakePubkeyIndex(accountsPath); err != nil {
+				mlog.Log.Warnf("failed to save stake pubkey index: %v", err)
 			}
 		}
 	}
@@ -2606,11 +2643,14 @@ func runReplayWithRecovery(
 			return err
 		}
 
-		// Save stake cache alongside state file for resume
+		// Save stake cache and compact pubkey index alongside state file for resume
 		if err := global.SaveStakeCache(accountsDbPath, r.LastPersistedSlot, base58.Encode(r.LastPersistedBankhash)); err != nil {
 			mlog.Log.Errorf("failed to save stake cache: %v", err)
 		} else {
 			mlog.Log.Infof("stake cache saved: %d entries at slot %d", global.StakeCacheSize(), r.LastPersistedSlot)
+		}
+		if err := global.SaveStakePubkeyIndex(accountsDbPath); err != nil {
+			mlog.Log.Warnf("failed to save stake pubkey index: %v", err)
 		}
 
 		// Record shutdown in history
@@ -2663,7 +2703,19 @@ func runReplayWithRecovery(
 		}
 
 		// Update state file immediately
-		return mithrilState.UpdateLastSlotWithContext(accountsDbPath, slot, bankhash, resumeCtx)
+		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, slot, bankhash, resumeCtx); err != nil {
+			return err
+		}
+
+		// Flush any new stake pubkeys to the index file
+		// This is a no-op if no new stake accounts were created in this block
+		if flushed, err := global.FlushPendingStakePubkeys(accountsDbPath); err != nil {
+			mlog.Log.Warnf("failed to flush stake pubkey index: %v", err)
+		} else if flushed > 0 {
+			mlog.Log.Debugf("flushed %d new stake pubkeys to index at slot %d", flushed, slot)
+		}
+
+		return nil
 	}
 
 	defer func() {
@@ -2705,7 +2757,7 @@ func runReplayWithRecovery(
 			mlog.Log.Errorf("[run:%s]   Bankhash log: %s/bankhash.log", runID, accountsDbPath)
 			mlog.Log.Errorf("[run:%s]   State file:   %s/mithril_state.json", runID, accountsDbPath)
 
-			// Save stake cache on panic to avoid expensive AccountsDB scan on restart
+			// Save stake cache and compact pubkey index on panic to avoid expensive AccountsDB scan on restart
 			// Only save if:
 			// 1. Not in commit window (AccountsDB would be inconsistent)
 			// 2. Not mid-block (stake cache would have partial updates from uncommitted txs)
@@ -2716,8 +2768,14 @@ func runReplayWithRecovery(
 				} else {
 					mlog.Log.Infof("[run:%s] Stake cache saved on panic: %d entries at slot %d", runID, global.StakeCacheSize(), mithrilState.LastSlot)
 				}
+				if err := global.SaveStakePubkeyIndex(accountsDbPath); err != nil {
+					mlog.Log.Warnf("[run:%s] Failed to save stake pubkey index on panic: %v", runID, err)
+				}
 			} else if replay.IsBlockReplayInProgress() {
 				mlog.Log.Warnf("[run:%s] Stake cache NOT saved on panic: mid-block replay, cache may have partial updates", runID)
+				// But we CAN still save pending new pubkeys to the index - they're not in the cache yet
+				// and won't cause inconsistency. This ensures we don't lose track of new stake accounts.
+				global.ClearPendingStakePubkeys() // Clear since we can't persist consistently
 			}
 
 			// Re-panic to propagate the error

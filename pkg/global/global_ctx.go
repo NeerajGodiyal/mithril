@@ -21,6 +21,12 @@ const (
 	// Currently uses JSON for easier debugging. Consider binary format
 	// later for performance if cache size becomes a bottleneck.
 	StakeCacheFileName = "stake_cache.json"
+
+	// StakePubkeyIndexFileName is the binary index of stake account pubkeys.
+	// Append-only during replay, rewritten at epoch boundaries.
+	// Each entry is 32 bytes (raw pubkey). Used for fast cache rebuild
+	// when stake_cache.json is stale.
+	StakePubkeyIndexFileName = "stake_pubkeys.idx"
 )
 
 type GlobalCtx struct {
@@ -31,6 +37,7 @@ type GlobalCtx struct {
 	transactionCount           uint64
 	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
 	stakeCacheSlots            map[solana.PublicKey]uint64 // Tracks which slot each stake cache entry came from
+	pendingNewStakePubkeys     []solana.PublicKey          // New stake pubkeys to append to index after block commit
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochStakes                *epochstakes.EpochStakesCache
 	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
@@ -82,6 +89,8 @@ func IncrTransactionCount(num uint64) {
 
 // PutStakeCacheItem adds or updates a stake cache entry without slot tracking.
 // Use this during replay where operations are strictly sequential.
+// If this is a new pubkey (not already in cache), it's added to pendingNewStakePubkeys
+// for later append to the index file.
 func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
@@ -90,6 +99,11 @@ func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation)
 	}
 	if instance.stakeCacheSlots == nil {
 		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+	// Track new pubkeys for index append
+	_, exists := instance.stakeCache[pubkey]
+	if !exists {
+		instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, pubkey)
 	}
 	instance.stakeCache[pubkey] = delegation
 	// During replay, always use max slot to indicate "most recent"
@@ -533,6 +547,37 @@ func StakeCacheExists(accountsDbDir string) bool {
 	return err == nil
 }
 
+// LoadStakeCachePubkeysOnly loads just the pubkeys from a stake cache file (ignoring slot validation).
+// Used as a hint for faster AccountsDB scanning when the cache is stale.
+// Returns the list of pubkeys and the slot the cache was saved at.
+func LoadStakeCachePubkeysOnly(accountsDbDir string) ([]solana.PublicKey, uint64, error) {
+	cacheFilePath := filepath.Join(accountsDbDir, StakeCacheFileName)
+
+	data, err := os.ReadFile(cacheFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil // File doesn't exist
+		}
+		return nil, 0, fmt.Errorf("failed to read stake cache file: %w", err)
+	}
+
+	var cacheFile StakeCacheFile
+	if err := json.Unmarshal(data, &cacheFile); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse stake cache file: %w", err)
+	}
+
+	pubkeys := make([]solana.PublicKey, 0, len(cacheFile.Entries))
+	for _, entry := range cacheFile.Entries {
+		pubkey, err := solana.PublicKeyFromBase58(entry.Pubkey)
+		if err != nil {
+			continue // Skip invalid pubkeys
+		}
+		pubkeys = append(pubkeys, pubkey)
+	}
+
+	return pubkeys, cacheFile.Slot, nil
+}
+
 // ClearStakeCache clears the in-memory stake cache.
 // Used before loading from file or scanning AccountsDB.
 func ClearStakeCache() {
@@ -547,4 +592,146 @@ func StakeCacheSize() int {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 	return len(instance.stakeCache)
+}
+
+// FlushPendingStakePubkeys appends any new stake pubkeys to the index file.
+// Call this after each block commit to persist new stake accounts.
+// Returns the number of pubkeys appended, or error if append failed.
+func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
+	instance.stakeCacheMutex.Lock()
+	pending := instance.pendingNewStakePubkeys
+	instance.pendingNewStakePubkeys = nil // Clear pending list
+	instance.stakeCacheMutex.Unlock()
+
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+
+	// Open file for append (create if not exists)
+	f, err := os.OpenFile(indexPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open stake pubkey index for append: %w", err)
+	}
+	defer f.Close()
+
+	// Write each pubkey as raw 32 bytes
+	for _, pubkey := range pending {
+		if _, err := f.Write(pubkey[:]); err != nil {
+			return 0, fmt.Errorf("failed to append pubkey to index: %w", err)
+		}
+	}
+
+	return len(pending), nil
+}
+
+// ClearPendingStakePubkeys discards any pending new stake pubkeys.
+// Call this when a block replay fails and we need to rollback.
+func ClearPendingStakePubkeys() {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	instance.pendingNewStakePubkeys = nil
+}
+
+// PendingStakePubkeysCount returns the number of new stake pubkeys pending append.
+func PendingStakePubkeysCount() int {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	return len(instance.pendingNewStakePubkeys)
+}
+
+// LoadStakePubkeyIndex reads the binary index file and returns all stake pubkeys.
+// Returns empty slice if file doesn't exist.
+func LoadStakePubkeyIndex(accountsDbDir string) ([]solana.PublicKey, error) {
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // File doesn't exist, not an error
+		}
+		return nil, fmt.Errorf("failed to read stake pubkey index: %w", err)
+	}
+
+	// Each pubkey is 32 bytes
+	if len(data)%32 != 0 {
+		return nil, fmt.Errorf("stake pubkey index has invalid size: %d bytes (not multiple of 32)", len(data))
+	}
+
+	numPubkeys := len(data) / 32
+	pubkeys := make([]solana.PublicKey, 0, numPubkeys)
+	seen := make(map[solana.PublicKey]struct{}, numPubkeys)
+
+	for i := 0; i < len(data); i += 32 {
+		var pubkey solana.PublicKey
+		copy(pubkey[:], data[i:i+32])
+		// Deduplicate (index is append-only, may have duplicates)
+		if _, exists := seen[pubkey]; !exists {
+			seen[pubkey] = struct{}{}
+			pubkeys = append(pubkeys, pubkey)
+		}
+	}
+
+	return pubkeys, nil
+}
+
+// SaveStakePubkeyIndex rewrites the index file with all current stake cache pubkeys.
+// Call this at epoch boundaries to compact the index and remove closed accounts.
+func SaveStakePubkeyIndex(accountsDbDir string) error {
+	instance.stakeCacheMutex.Lock()
+	// Collect all pubkeys from current cache
+	pubkeys := make([]solana.PublicKey, 0, len(instance.stakeCache))
+	for pubkey := range instance.stakeCache {
+		pubkeys = append(pubkeys, pubkey)
+	}
+	instance.stakeCacheMutex.Unlock()
+
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+
+	// Write to temp file first, then rename (atomic)
+	tempPath := indexPath + ".tmp"
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp stake pubkey index: %w", err)
+	}
+
+	// Write all pubkeys as raw 32 bytes
+	for _, pubkey := range pubkeys {
+		if _, err := f.Write(pubkey[:]); err != nil {
+			f.Close()
+			os.Remove(tempPath)
+			return fmt.Errorf("failed to write pubkey to index: %w", err)
+		}
+	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to close temp stake pubkey index: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempPath, indexPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename stake pubkey index: %w", err)
+	}
+
+	return nil
+}
+
+// StakePubkeyIndexExists checks if the stake pubkey index file exists.
+func StakePubkeyIndexExists(accountsDbDir string) bool {
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+	_, err := os.Stat(indexPath)
+	return err == nil
+}
+
+// DeleteStakePubkeyIndex removes the stake pubkey index file.
+func DeleteStakePubkeyIndex(accountsDbDir string) error {
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+	err := os.Remove(indexPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
