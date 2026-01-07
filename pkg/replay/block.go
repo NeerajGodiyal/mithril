@@ -1579,6 +1579,28 @@ func ReplayBlocks(
 				localSchedule := global.LeaderSchedule()
 				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 
+				// Fetch RPC vote accounts for comparison (current state - won't be historical)
+				// This helps verify we have the same validators visible
+				go func() {
+					rpcVoteAccts, err := rpcc.GetVoteAccounts()
+					if err != nil {
+						mlog.Log.FileOnlyf("  [RPC COMPARE] GetVoteAccounts failed: %v", err)
+						return
+					}
+					totalRpcVoteAccts := len(rpcVoteAccts.Current) + len(rpcVoteAccts.Delinquent)
+					var totalRpcStake uint64
+					for _, v := range rpcVoteAccts.Current {
+						totalRpcStake += v.ActivatedStake
+					}
+					for _, v := range rpcVoteAccts.Delinquent {
+						totalRpcStake += v.ActivatedStake
+					}
+					mlog.Log.Infof("  [RPC COMPARE] vote_accounts: rpc_current=%d rpc_delinquent=%d rpc_total=%d rpc_stake=%d",
+						len(rpcVoteAccts.Current), len(rpcVoteAccts.Delinquent), totalRpcVoteAccts, totalRpcStake)
+					mlog.Log.Infof("  [RPC COMPARE] vote_accounts: local_vote_accts=%d local_total_stake=%d",
+						len(block.VoteAccts), block.TotalEpochStake)
+				}()
+
 				// Set block.Leader for this block (was deferred in configureBlock)
 				var exists bool
 				block.Leader, exists = global.LeaderForSlot(block.Slot)

@@ -295,6 +295,87 @@ func (fetcher *RpcClient) GetEpochRewardsSysvar() ([]byte, error) {
 	return result.Value.Data.GetBinary(), nil
 }
 
+// VoteAccountInfo contains vote account data from RPC getVoteAccounts
+type VoteAccountInfo struct {
+	VotePubkey       solana.PublicKey
+	NodePubkey       solana.PublicKey
+	ActivatedStake   uint64
+	Commission       uint8
+	EpochVoteAccount bool
+	LastVote         uint64
+	RootSlot         uint64
+	EpochCredits     [][3]uint64 // [epoch, credits, prevCredits]
+}
+
+// GetVoteAccountsResult contains the result of getVoteAccounts RPC call
+type GetVoteAccountsResult struct {
+	Current    []VoteAccountInfo
+	Delinquent []VoteAccountInfo
+}
+
+// GetVoteAccounts fetches all vote accounts from RPC.
+// Returns current (voting) and delinquent vote accounts with their stakes and credits.
+func (fetcher *RpcClient) GetVoteAccounts() (*GetVoteAccountsResult, error) {
+	result, err := fetcher.client.GetVoteAccounts(context.TODO(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch vote accounts: %w", err)
+	}
+
+	parseAccounts := func(accounts []rpc.VoteAccountsResult) []VoteAccountInfo {
+		infos := make([]VoteAccountInfo, 0, len(accounts))
+		for _, a := range accounts {
+			info := VoteAccountInfo{
+				VotePubkey:       a.VotePubkey,
+				NodePubkey:       a.NodePubkey,
+				ActivatedStake:   a.ActivatedStake,
+				Commission:       a.Commission,
+				EpochVoteAccount: a.EpochVoteAccount,
+				LastVote:         a.LastVote,
+				RootSlot:         a.RootSlot,
+			}
+			// Parse epoch credits
+			for _, ec := range a.EpochCredits {
+				if len(ec) >= 3 {
+					info.EpochCredits = append(info.EpochCredits, [3]uint64{uint64(ec[0]), uint64(ec[1]), uint64(ec[2])})
+				}
+			}
+			infos = append(infos, info)
+		}
+		return infos
+	}
+
+	return &GetVoteAccountsResult{
+		Current:    parseAccounts(result.Current),
+		Delinquent: parseAccounts(result.Delinquent),
+	}, nil
+}
+
+// GetEpochInfo fetches current epoch info from RPC.
+type EpochInfo struct {
+	AbsoluteSlot     uint64
+	BlockHeight      uint64
+	Epoch            uint64
+	SlotIndex        uint64
+	SlotsInEpoch     uint64
+	TransactionCount *uint64
+}
+
+func (fetcher *RpcClient) GetEpochInfo() (*EpochInfo, error) {
+	result, err := fetcher.client.GetEpochInfo(context.TODO(), rpc.CommitmentConfirmed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch epoch info: %w", err)
+	}
+
+	return &EpochInfo{
+		AbsoluteSlot:     result.AbsoluteSlot,
+		BlockHeight:      result.BlockHeight,
+		Epoch:            result.Epoch,
+		SlotIndex:        result.SlotIndex,
+		SlotsInEpoch:     result.SlotsInEpoch,
+		TransactionCount: result.TransactionCount,
+	}, nil
+}
+
 func (fetcher *RpcClient) GetSlot() (uint64, error) {
 	slot, err := fetcher.client.GetSlot(context.TODO(), rpc.CommitmentConfirmed)
 	if err != nil {
