@@ -301,6 +301,62 @@ func Encode(buf []byte) string {
 		outLen := Encode32(&out, *(*[32]byte)(buf))
 		return string(out[:outLen])
 	default:
-		panic("unsupported base58 length")
+		// For other lengths, use a general-purpose encoder
+		return EncodeGeneric(buf)
 	}
+}
+
+// EncodeGeneric encodes arbitrary-length byte slices to base58.
+// This is slower than the optimized 32-byte encoder but works for any length.
+func EncodeGeneric(input []byte) string {
+	if len(input) == 0 {
+		return ""
+	}
+
+	// Count leading zeros
+	leadingZeros := 0
+	for _, b := range input {
+		if b != 0 {
+			break
+		}
+		leadingZeros++
+	}
+
+	// Allocate enough space for the result (base58 is roughly 137% of input length)
+	size := len(input)*138/100 + 1
+	output := make([]byte, size)
+	outputIdx := size - 1
+
+	// Process each byte
+	for _, b := range input {
+		carry := int(b)
+		for j := size - 1; j >= 0; j-- {
+			carry += 256 * int(output[j])
+			output[j] = byte(carry % 58)
+			carry /= 58
+			if carry == 0 && j <= outputIdx {
+				break
+			}
+		}
+		for outputIdx > 0 && output[outputIdx-1] != 0 {
+			outputIdx--
+		}
+	}
+
+	// Skip leading zeros in output and convert to alphabet
+	for outputIdx < size && output[outputIdx] == 0 {
+		outputIdx++
+	}
+
+	// Build result with leading '1's for each leading zero byte
+	result := make([]byte, leadingZeros+(size-outputIdx))
+	for i := 0; i < leadingZeros; i++ {
+		result[i] = '1'
+	}
+	for i := leadingZeros; outputIdx < size; i++ {
+		result[i] = alphabet[output[outputIdx]]
+		outputIdx++
+	}
+
+	return string(result)
 }

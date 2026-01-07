@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
+	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cockroachdb/pebble"
@@ -351,14 +352,28 @@ func BuildAccountsDb(
 		panic(err)
 	}
 
-	// Persist stake cache extracted from appendvecs (has correct credits_observed)
+	// Refresh stake cache from AccountsDB to remove stale entries.
+	// This is critical because appendvec processing may have added stale entries:
+	// - If an account has an older valid version in one appendvec and a newer tombstone
+	//   in another, only the valid version gets added (tombstones are filtered).
+	// - The tombstone never removes the old entry, leaving stale data in the cache.
+	// This matches Firedancer's init_after_snapshot pattern (fd_replay_tile.c:1055).
 	appendvecStakeCount := global.StakeCacheSize()
 	if appendvecStakeCount > 0 {
+		mlog.Log.Infof("refreshing stake cache after snapshot load to remove stale entries (before: %d accounts)", appendvecStakeCount)
+		refreshed, errors, _ := rewards.RefreshStakeCacheCreditsObserved(accountsDb, finalManifest.Bank.Slot)
+		afterCount := global.StakeCacheSize()
+		removed := appendvecStakeCount - afterCount
+		mlog.Log.Infof("stake cache refresh complete: refreshed=%d errors=%d removed=%d (before=%d after=%d)",
+			refreshed, errors, removed, appendvecStakeCount, afterCount)
+
+		// Persist the cleaned stake cache
 		bankhashStr := base58.Encode(finalManifest.Bank.Hash[:])
 		if err := global.SaveStakeCache(accountsDbDir, finalManifest.Bank.Slot, bankhashStr); err != nil {
 			mlog.Log.Warnf("failed to persist stake cache: %v", err)
 		} else {
-			mlog.Log.Infof("stake cache persisted: %d accounts from appendvecs at slot %d (manifest had %d)", appendvecStakeCount, finalManifest.Bank.Slot, stakeCount)
+			mlog.Log.Infof("stake cache persisted: %d accounts at slot %d (appendvecs had %d, manifest had %d)",
+				afterCount, finalManifest.Bank.Slot, appendvecStakeCount, stakeCount)
 		}
 	} else {
 		mlog.Log.Warnf("no stake accounts found in appendvecs (manifest had %d) - stake cache will be empty", stakeCount)

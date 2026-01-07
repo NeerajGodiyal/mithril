@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -136,7 +137,8 @@ func DumpLocalSysvarState(slot uint64, epoch uint64, bankHash []byte, parentHash
 	}
 
 	if ltHash != nil {
-		diag.LtHash = base58.Encode(ltHash)
+		// Use hex encoding for ltHash since it's 2048 bytes (base58 would be too long)
+		diag.LtHash = hex.EncodeToString(ltHash)
 	}
 
 	// Add optional params
