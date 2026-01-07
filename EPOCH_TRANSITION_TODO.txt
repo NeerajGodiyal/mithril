@@ -1,0 +1,101 @@
+Epoch Transition TODO / Active Issues (feature/local-rewards-partitions)
+
+This file captures active discrepancies and investigation notes. It is more
+volatile than CONTEXT.md and is intended for ongoing debugging.
+
+## A) Partition Count Mismatch (Local 250 vs RPC 252)
+
+Symptoms (recent logs):
+- eligible=1,023,378 -> partitions=250
+- RPC expects 252 (4096 per partition)
+- local total_points=0x713e16bb659b55c1e5a51
+- RPC sysvar total_points=0x26af60a4c2e303bda8f2d
+- total_rewards sometimes differs slightly (~6,120,918 lamports)
+
+Key finding:
+- Local total_points is ~3x RPC total_points.
+- This shifts the reward threshold and changes eligibility/partition count.
+- We now warn on mismatch and can fall back to RPC EpochRewards sysvar totals
+  (points/rewards/partitions) as a temporary recovery path.
+
+Likely causes:
+1) Points calculation input mismatch (credits_observed / vote credits history).
+2) Feature gate mismatch (min_stake_delegation reads as 0), though this alone
+   does not explain the 3x total_points gap.
+
+Next steps:
+- Verify the vote credits source matches the boundary slot or the sysvar path.
+- Confirm credits_observed refresh is applied before points computation.
+
+## B) Rewards Recalculation vs Fresh Distribution
+
+Firedancer behavior:
+- If epoch_rewards.active == true:
+  - Do not recompute total_points/total_rewards.
+  - Use EpochRewards sysvar totals and prev vote credits snapshot.
+- If epoch_rewards.active == false:
+  - Compute from boundary slot state (last slot of previous epoch).
+
+Mithril behavior:
+- Historically recomputed points even when rewards were active on resume.
+- Guard is needed to prefer sysvar totals in the active path.
+
+Relevant FD references:
+- firedancer/src/flamenco/rewards/fd_rewards.c:1088-1165
+- firedancer/src/discof/restore/utils/fd_ssload.c:201-223
+
+## C) Feature Gate Detection (Minimum Stake Delegation)
+
+Symptoms:
+- StakeMinimumDelegationForRewards NOT_FOUND
+- StakeRaiseMinimumDelegationTo1Sol NOT_FOUND
+- min_stake_delegation=0
+
+Note:
+- getStakeMinimumDelegation on mainnet returns 1 lamport.
+- Solana feature status shows the 1 SOL minimum features as inactive.
+
+## Diagnostics Already Added
+
+In pkg/rewards/rewards.go:
+- Two-pass eligibility with force_credits_update, points > 0, rewards > 0,
+  split-valid filtering.
+- Credits delta histograms (min_stake + vote).
+- Sample accounts for zero_points / zero_rewards / zero_split.
+- Micro-stake contribution and adjusted total_points print.
+- RPC EpochRewards sysvar fetch and comparison.
+
+## Firedancer Reference Summary
+
+Key FD behaviors relevant to Mithril parity:
+- redeem_rewards skips if points == 0, rewards == 0, or split yields zero.
+  (firedancer/src/flamenco/rewards/fd_rewards.c:340-409)
+- force_credits_update if activation_epoch == rewarded_epoch or total_rewards == 0.
+- For recalc path (epoch_rewards.active):
+  - Use sysvar totals (total_points, total_rewards, num_partitions).
+  - Use prev vote credits snapshot from manifest epoch_stakes[1].
+
+## Open Questions
+
+1) Why is local total_points ~3x RPC?
+   - Is vote credits history longer than boundary slot?
+   - Is credits_observed stale in stake cache?
+   - Are we recomputing in a path where FD would reuse sysvar totals?
+
+2) Which feature set should be trusted when feature accounts are absent?
+   - Snapshot feature set vs live accounts?
+
+3) Should the recalc path skip all eligibility recomputation and only rebuild
+   partitions from sysvar?
+
+## Repro / Observed Log Snapshot (recent)
+
+- local total_points = 0x713e16bb659b55c1e5a51
+- rpc total_points = 0x26af60a4c2e303bda8f2d
+- eligible=1,023,378 -> partitions=250 (RPC 252)
+- micro-stake (<1 SOL) points = 0x4d8cae25a779952ae2
+- total_rewards diff: local 137922702570991 vs RPC 137922696450073
+
+Suggested quick check:
+- If epoch_rewards.active == true, use sysvar totals and skip recomputation.
+  If partitions still mismatch, the vote credits source is wrong.

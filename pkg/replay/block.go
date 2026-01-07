@@ -1807,6 +1807,48 @@ func ReplayBlocks(
 			fmt.Fprintf(bankhashLogFile, "%d %s\n", block.Slot, base58.Encode(lastSlotCtx.FinalBankhash))
 		}
 
+		// Validate bank hash against RPC at epoch boundary (first slot of new epoch)
+		// This catches divergence immediately rather than waiting for vote tx failure
+		if justCrossedEpochBoundary && rpcc != nil {
+			// Validate both the current slot and the parent slot (the actual boundary slot)
+			// The parent slot (last slot of previous epoch) is where epoch transition modifies state
+			go func(slot uint64, parentSlot uint64, localBankhash []byte, parentBankhash [32]byte) {
+				// First validate parent slot (the actual epoch boundary where rewards were computed)
+				parentExpected, err := fetchBankhashForSlot(rpcc, parentSlot)
+				if err != nil {
+					mlog.Log.Warnf("epoch boundary bankhash validation: failed to fetch RPC bankhash for parent slot %d: %v", parentSlot, err)
+				} else {
+					parentLocalStr := base58.Encode(parentBankhash[:])
+					parentExpectedStr := base58.Encode(parentExpected)
+					if parentLocalStr != parentExpectedStr {
+						mlog.Log.Errorf("!!! EPOCH BOUNDARY BANKHASH MISMATCH at parent slot %d (boundary slot) !!!", parentSlot)
+						mlog.Log.Errorf("  local:    %s", parentLocalStr)
+						mlog.Log.Errorf("  expected: %s", parentExpectedStr)
+						mlog.Log.Errorf("  The epoch transition modified accounts differently than expected")
+					} else {
+						mlog.Log.Infof("epoch boundary parent slot %d bankhash MATCHED: %s", parentSlot, parentLocalStr)
+					}
+				}
+
+				// Then validate current slot (first slot of new epoch)
+				expectedBankhash, err := fetchBankhashForSlot(rpcc, slot)
+				if err != nil {
+					mlog.Log.Warnf("epoch boundary bankhash validation: failed to fetch RPC bankhash for slot %d: %v", slot, err)
+					return
+				}
+				localHashStr := base58.Encode(localBankhash)
+				expectedHashStr := base58.Encode(expectedBankhash)
+				if localHashStr != expectedHashStr {
+					mlog.Log.Errorf("!!! EPOCH BOUNDARY BANKHASH MISMATCH at slot %d (first slot of new epoch) !!!", slot)
+					mlog.Log.Errorf("  local:    %s", localHashStr)
+					mlog.Log.Errorf("  expected: %s", expectedHashStr)
+					mlog.Log.Errorf("  This will cause vote tx failures in subsequent slots")
+				} else {
+					mlog.Log.Infof("epoch boundary slot %d bankhash MATCHED: %s", slot, localHashStr)
+				}
+			}(block.Slot, block.ParentSlot, lastSlotCtx.FinalBankhash, block.ParentBankhash)
+		}
+
 		statsd.Count(statsd.SlotReplays, 1, nil)
 		statsd.Timing(statsd.SlotReplayDurationMs, uint64(slotReplayDuration.Nanoseconds())/1e6, nil)
 		statsd.Gauge(statsd.Epoch, float64(block.Epoch), nil)
