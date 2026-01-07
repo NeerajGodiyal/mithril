@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"slices"
+	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/weightedrand"
 	"github.com/gagliardetto/solana-go"
+	"github.com/nixberg/chacha-rng-go"
 )
 
 type LeaderSchedule struct {
@@ -42,6 +44,13 @@ type pubkeyAndStakePair struct {
 	stake  uint64
 }
 
+// voteAcctAndNodePair holds vote account info for vote-keyed scheduling
+type voteAcctAndNodePair struct {
+	voteAcct   solana.PublicKey
+	nodePubkey solana.PublicKey
+	stake      uint64
+}
+
 func New(
 	epochVoteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
 	epochVoteAcctStakes map[solana.PublicKey]uint64,
@@ -50,16 +59,59 @@ func New(
 	length uint64,
 	repeat uint64) *LeaderSchedule {
 
-	keyedStakes := make([]pubkeyAndStakePair, 0, len(epochVoteAcctStakes))
-	for pubkey, stake := range epochVoteAcctStakes {
-		if stake > 0 {
-			keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: pubkey, stake: stake})
+	// VOTE-KEYED SCHEDULE (matches Agave's VoteKeyedLeaderSchedule):
+	// 1. Sort by VOTE ACCOUNT pubkey (stake desc, vote pubkey desc)
+	// 2. Sample weighted by stake → returns vote account pubkeys
+	// 3. Convert each selected vote account → node identity
+	//
+	// This differs from identity-keyed which would aggregate and sort by node identity.
+	// The tie-break is on VOTE ACCOUNT pubkey, not node identity!
+
+	// Build vote account entries with their node mappings
+	var voteAccts []voteAcctAndNodePair
+	for voteAcctPubkey, stake := range epochVoteAcctStakes {
+		if stake == 0 {
+			continue
 		}
+		voteAcct := epochVoteAcctsMap[voteAcctPubkey]
+		if voteAcct == nil {
+			continue
+		}
+		nodePubkey := voteAcct.NodePubkey
+		var zeroPk solana.PublicKey
+		if nodePubkey == zeroPk {
+			continue
+		}
+		voteAccts = append(voteAccts, voteAcctAndNodePair{
+			voteAcct:   voteAcctPubkey,
+			nodePubkey: nodePubkey,
+			stake:      stake,
+		})
 	}
 
-	leaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, repeat)
+	// Build keyed stakes using VOTE ACCOUNT pubkeys (not node identities)
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(voteAccts))
+	for _, va := range voteAccts {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: va.voteAcct, stake: va.stake})
+	}
+
+	// Sample vote accounts (sorting happens inside stakeWeightedSlotLeaders)
+	voteAccountLeaders := stakeWeightedSlotLeaders(keyedStakes, epoch, length, repeat)
+
+	// Build vote account → node identity lookup
+	voteToNode := make(map[solana.PublicKey]solana.PublicKey, len(voteAccts))
+	for _, va := range voteAccts {
+		voteToNode[va.voteAcct] = va.nodePubkey
+	}
+
+	// Convert vote account leaders → node identity leaders
+	nodeLeaders := make([]solana.PublicKey, len(voteAccountLeaders))
+	for i, voteAcctPk := range voteAccountLeaders {
+		nodeLeaders[i] = voteToNode[voteAcctPk]
+	}
+
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	leaderSchedule := newFromLeaders(leaders, epochVoteAcctsMap, firstSlotInEpoch, length)
+	leaderSchedule := newFromLeadersDirect(nodeLeaders, firstSlotInEpoch)
 
 	return leaderSchedule
 }
@@ -68,29 +120,56 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	epoch uint64,
 	length uint64,
 	repeat uint64) []solana.PublicKey {
+	if repeat == 0 {
+		panic("stakeWeightedSlotLeaders: repeat cannot be 0")
+	}
+
 	keyedStakes = sortStakes(keyedStakes)
 
-	choices := make([]weightedrand.Choice[solana.PublicKey, uint64], 0)
-
-	for _, pair := range keyedStakes {
-		choice := weightedrand.NewChoice(pair.pubkey, pair.stake)
-		choices = append(choices, choice)
+	// Build cumulative weights, preserving input order (stake desc, pubkey desc)
+	// This matches Agave's WeightedU64Index which does NOT re-sort
+	cumulative := make([]uint64, len(keyedStakes))
+	var total uint64
+	for i, pair := range keyedStakes {
+		newTotal, err := safemath.CheckedAddU64(total, pair.stake)
+		if err != nil {
+			panic(fmt.Sprintf("stakeWeightedSlotLeaders: cumulative stake overflow at index %d", i))
+		}
+		total = newTotal
+		cumulative[i] = total
 	}
 
-	var seed [32]byte
-	binary.LittleEndian.PutUint64(seed[:], epoch)
-
-	chooser, err := weightedrand.NewChaCha20ChooserWithSeed(seed[:], choices...)
-	if err != nil {
-		panic(err)
+	if total == 0 {
+		panic("stakeWeightedSlotLeaders: total stake is zero")
 	}
 
-	leaders := make([]solana.PublicKey, 0)
+	// Create ChaCha20 RNG with epoch as seed, matching Agave's seeding:
+	// let mut seed = [0u8; 32];
+	// seed[0..8].copy_from_slice(&epoch.to_le_bytes());
+	// let rng = &mut ChaChaRng::from_seed(seed);
+	//
+	// The nixberg/chacha-rng-go library takes [8]uint32 which is the same 32 bytes
+	// interpreted as little-endian uint32s.
+	var seedBytes [32]byte
+	binary.LittleEndian.PutUint64(seedBytes[:], epoch)
+	var seed [8]uint32
+	for i := 0; i < 8; i++ {
+		seed[i] = binary.LittleEndian.Uint32(seedBytes[i*4:])
+	}
+	rng := chacha.Seeded20(seed, 0) // stream=0 matches default
+
+	leaders := make([]solana.PublicKey, 0, length)
 	var currentSlotLeader solana.PublicKey
 
 	for i := range length {
 		if i%repeat == 0 {
-			currentSlotLeader = chooser.PickWithChaCha20()
+			// Generate random in [0, total) using rejection sampling
+			// This matches Rust's gen_range behavior
+			r := uint64n(rng, total)
+			idx := sort.Search(len(cumulative), func(j int) bool {
+				return cumulative[j] > r
+			})
+			currentSlotLeader = keyedStakes[idx].pubkey
 		}
 		leaders = append(leaders, currentSlotLeader)
 	}
@@ -98,46 +177,153 @@ func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
 	return leaders
 }
 
-type slotLeaderInfo struct {
-	voteAcctAddr          solana.PublicKey
-	validatorIdentityAddr solana.PublicKey
-}
-
-func newFromLeaders(voteKeyedSlotLeaders []solana.PublicKey,
-	voteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
-	firstSlotInEpoch uint64,
-	length uint64) *LeaderSchedule {
-
-	var defaultPubkey solana.PublicKey
-	currentSlotLeaderInfo := slotLeaderInfo{voteAcctAddr: defaultPubkey, validatorIdentityAddr: defaultPubkey}
-
-	slotLeaders := make([]solana.PublicKey, 0)
-	for _, voteAcctAddr := range voteKeyedSlotLeaders {
-		if voteAcctAddr != currentSlotLeaderInfo.voteAcctAddr {
-			validatorIdentityAddr := voteAcctsMap[voteAcctAddr].NodePubkey
-			currentSlotLeaderInfo = slotLeaderInfo{voteAcctAddr: voteAcctAddr, validatorIdentityAddr: validatorIdentityAddr}
-		}
-		slotLeaders = append(slotLeaders, currentSlotLeaderInfo.validatorIdentityAddr)
+// uint64n generates a uniform random uint64 in [0,n) matching Agave's UniformU64Sampler.
+// This matches agave_random::weighted::UniformU64Sampler::new_like_instance_sample
+// which is used for leader schedule computation.
+//
+// The algorithm uses wide multiplication (128-bit product) with rejection sampling:
+// - zone = u64::MAX - ((u64::MAX - n + 1) % n)
+// - Accept when lo <= zone, reject when lo > zone
+func uint64n(rng *chacha.ChaCha, n uint64) uint64 {
+	if n == 0 {
+		panic("uint64n: n cannot be 0")
 	}
 
-	leaderScheduleMap := make(map[uint64]solana.PublicKey)
-	for i, leader := range slotLeaders {
+	// Calculate zone following Agave's new_like_instance_sample:
+	// ints_to_reject = (u64::MAX - range_end + 1) % range_end
+	// zone = u64::MAX - ints_to_reject
+	intsToReject := (^uint64(0) - n + 1) % n
+	zone := ^uint64(0) - intsToReject
+
+	for {
+		x := rng.Uint64()
+		// Compute 128-bit product: m = x * n
+		// mHi = high 64 bits (result), mLo = low 64 bits (for rejection test)
+		mHi, mLo := bits.Mul64(x, n)
+
+		// Accept if lo <= zone (Agave's acceptance condition)
+		if mLo <= zone {
+			return mHi
+		}
+		// Reject and retry
+	}
+}
+
+// newFromLeadersDirect creates a LeaderSchedule from node identity pubkeys directly.
+// Used when leaders are already node identities (after aggregating by node).
+func newFromLeadersDirect(nodeLeaders []solana.PublicKey, firstSlotInEpoch uint64) *LeaderSchedule {
+	leaderScheduleMap := make(map[uint64]solana.PublicKey, len(nodeLeaders))
+	for i, leader := range nodeLeaders {
 		slotNum := uint64(i) + firstSlotInEpoch
 		leaderScheduleMap[slotNum] = leader
 	}
-
 	return &LeaderSchedule{lsMap: leaderScheduleMap}
 }
 
 func sortStakes(stakes []pubkeyAndStakePair) []pubkeyAndStakePair {
 	slices.SortFunc(stakes, func(l, r pubkeyAndStakePair) int {
-		if r.stake == l.stake {
-			return bytes.Compare(r.pubkey[:], l.pubkey[:])
-		} else {
-			return int(r.stake - l.stake)
+		if r.stake != l.stake {
+			// Sort by stake descending (matches Agave's r_stake.cmp(l_stake))
+			if r.stake > l.stake {
+				return 1
+			}
+			return -1
 		}
+		// Tiebreak by pubkey descending (matches Agave's r_pubkey.cmp(l_pubkey))
+		return bytes.Compare(r.pubkey[:], l.pubkey[:])
 	})
 	return slices.Compact(stakes)
+}
+
+// TieBreakEntry represents an entry in a tie-break group for debugging
+type TieBreakEntry struct {
+	Rank      int
+	NodePk    solana.PublicKey
+	Stake     uint64
+	RawBytes  []byte // First 8 bytes of pubkey for comparison
+	BytesCmp  int    // Comparison result vs previous entry
+}
+
+// GetSortedStakesDebug returns sorted stakes with tie-break debugging info.
+// Used to verify tie-break ordering matches Agave's vote-keyed schedule.
+// NOTE: This now uses VOTE ACCOUNT pubkeys for sorting (not node identities)
+// to match the actual leader schedule computation.
+func GetSortedStakesDebug(
+	epochVoteAcctsMap map[solana.PublicKey]*epochstakes.VoteAccount,
+	epochVoteAcctStakes map[solana.PublicKey]uint64,
+) ([]TieBreakEntry, map[uint64][]TieBreakEntry) {
+	// Build vote account entries (matching New())
+	type voteEntry struct {
+		voteAcct   solana.PublicKey
+		nodePubkey solana.PublicKey
+		stake      uint64
+	}
+	var voteEntries []voteEntry
+	for voteAcctPubkey, stake := range epochVoteAcctStakes {
+		if stake == 0 {
+			continue
+		}
+		voteAcct := epochVoteAcctsMap[voteAcctPubkey]
+		if voteAcct == nil {
+			continue
+		}
+		nodePubkey := voteAcct.NodePubkey
+		var zeroPk solana.PublicKey
+		if nodePubkey == zeroPk {
+			continue
+		}
+		voteEntries = append(voteEntries, voteEntry{
+			voteAcct:   voteAcctPubkey,
+			nodePubkey: nodePubkey,
+			stake:      stake,
+		})
+	}
+
+	// Sort by VOTE ACCOUNT pubkey (stake desc, vote pubkey desc) - matches New()
+	keyedStakes := make([]pubkeyAndStakePair, 0, len(voteEntries))
+	for _, ve := range voteEntries {
+		keyedStakes = append(keyedStakes, pubkeyAndStakePair{pubkey: ve.voteAcct, stake: ve.stake})
+	}
+	keyedStakes = sortStakes(keyedStakes)
+
+	// Build lookup for vote → node
+	voteToNode := make(map[solana.PublicKey]solana.PublicKey, len(voteEntries))
+	for _, ve := range voteEntries {
+		voteToNode[ve.voteAcct] = ve.nodePubkey
+	}
+
+	// Build debug entries showing the actual schedule order
+	entries := make([]TieBreakEntry, len(keyedStakes))
+	for i, pair := range keyedStakes {
+		entry := TieBreakEntry{
+			Rank:     i + 1,
+			NodePk:   voteToNode[pair.pubkey], // Show node identity (the actual leader)
+			Stake:    pair.stake,
+			RawBytes: pair.pubkey[:8], // Show vote account bytes (the sort key)
+		}
+		if i > 0 {
+			// Compare VOTE ACCOUNT pubkeys (the actual sort key)
+			entry.BytesCmp = bytes.Compare(pair.pubkey[:], keyedStakes[i-1].pubkey[:])
+		}
+		entries[i] = entry
+	}
+
+	// Group ties by stake
+	tieGroups := make(map[uint64][]TieBreakEntry)
+	for i := 0; i < len(entries); i++ {
+		stake := entries[i].Stake
+		// Find all entries with same stake
+		j := i
+		for j < len(entries) && entries[j].Stake == stake {
+			j++
+		}
+		if j-i > 1 { // More than one entry = tie
+			tieGroups[stake] = entries[i:j]
+		}
+		i = j - 1
+	}
+
+	return entries, tieGroups
 }
 
 func (ls *LeaderSchedule) LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
