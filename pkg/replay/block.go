@@ -2439,9 +2439,29 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 
+	// Debug: log bank hash inputs for epoch boundary slot (epochSchedule already declared above)
+	isEpochBoundary := slotCtx.Slot == epochSchedule.FirstSlotInEpoch(slotCtx.Epoch)-1
+	if isEpochBoundary {
+		mlog.Log.Infof("BANKHASH INPUTS for epoch boundary slot %d:", slotCtx.Slot)
+		mlog.Log.Infof("  parentBankhash: %s", base58.Encode(block.ParentBankhash[:]))
+		mlog.Log.Infof("  numSignatures:  %d", block.NumSignatures)
+		mlog.Log.Infof("  blockhash:      %s", solana.HashFromBytes(block.Blockhash[:]).String())
+		mlog.Log.Infof("  writableAccts:  %d accounts", len(writableAccts))
+		mlog.Log.Infof("  modifiedAccts:  %d accounts", len(modifiedAccts))
+		if slotCtx.AcctsLtHash != nil {
+			mlog.Log.Infof("  ltHash (pre):   %s", base58.Encode(slotCtx.AcctsLtHash.Hash()))
+		}
+	}
+
 	start = time.Now()
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
+
+	// Debug: log final bank hash for epoch boundary slot
+	if isEpochBoundary {
+		mlog.Log.Infof("  ltHash (post):  %s", base58.Encode(slotCtx.AcctsLtHash.Hash()))
+		mlog.Log.Infof("  finalBankhash:  %s", base58.Encode(slotCtx.FinalBankhash))
+	}
 
 	/*confirmed := global.BankhashConfirmedForSlot(slotCtx.Slot, solana.HashFromBytes(slotCtx.FinalBankhash))
 	for confirmed == forkchoice.BankhashNeedWait {
