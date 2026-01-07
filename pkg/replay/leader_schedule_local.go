@@ -182,10 +182,14 @@ func logInputSnapshot(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64,
 
 // VoteCacheRebuildError holds info about a failed vote account for logging
 type VoteCacheRebuildError struct {
-	VoteAcct solana.PublicKey
-	Stake    uint64
-	Reason   string
-	Err      error
+	VoteAcct  solana.PublicKey
+	Stake     uint64
+	Reason    string
+	Err       error
+	Lamports  uint64 // Account lamports (0 if not found)
+	DataLen   int    // Account data length (0 if not found)
+	Owner     string // Account owner (empty if not found)
+	DataFirst []byte // First 64 bytes of data for debugging (nil if not found)
 }
 
 // RebuildVoteCacheFromAccountsDB rebuilds the VoteCache from AccountsDB for all vote accounts
@@ -232,8 +236,8 @@ func RebuildVoteCacheFromAccountsDB(
 	var unmarshalErrStake atomic.Uint64
 	var zeroNodePkStake atomic.Uint64
 
-	// Track first few errors for each category (with mutex for thread safety)
-	const maxErrorsPerCategory = 5
+	// Track ALL errors for each category (with mutex for thread safety)
+	// We collect all errors and dump them to a file for debugging
 	var errorsMu sync.Mutex
 	var missingErrors []VoteCacheRebuildError
 	var unmarshalErrors []VoteCacheRebuildError
@@ -255,16 +259,22 @@ func RebuildVoteCacheFromAccountsDB(
 			missingCount.Add(1)
 			missingStake.Add(item.stake)
 			errorsMu.Lock()
-			if len(missingErrors) < maxErrorsPerCategory {
-				missingErrors = append(missingErrors, VoteCacheRebuildError{
-					VoteAcct: item.pk,
-					Stake:    item.stake,
-					Reason:   "not_found_in_accountsdb",
-					Err:      err,
-				})
-			}
+			missingErrors = append(missingErrors, VoteCacheRebuildError{
+				VoteAcct: item.pk,
+				Stake:    item.stake,
+				Reason:   "not_found_in_accountsdb",
+				Err:      err,
+			})
 			errorsMu.Unlock()
 			return
+		}
+
+		// Helper to get first N bytes of data
+		getDataPrefix := func(data []byte, n int) []byte {
+			if len(data) <= n {
+				return data
+			}
+			return data[:n]
 		}
 
 		// Unmarshal vote state
@@ -273,14 +283,16 @@ func RebuildVoteCacheFromAccountsDB(
 			unmarshalErrCount.Add(1)
 			unmarshalErrStake.Add(item.stake)
 			errorsMu.Lock()
-			if len(unmarshalErrors) < maxErrorsPerCategory {
-				unmarshalErrors = append(unmarshalErrors, VoteCacheRebuildError{
-					VoteAcct: item.pk,
-					Stake:    item.stake,
-					Reason:   fmt.Sprintf("unmarshal_failed (data_len=%d)", len(voteAcct.Data)),
-					Err:      err,
-				})
-			}
+			unmarshalErrors = append(unmarshalErrors, VoteCacheRebuildError{
+				VoteAcct:  item.pk,
+				Stake:     item.stake,
+				Reason:    fmt.Sprintf("unmarshal_failed (data_len=%d)", len(voteAcct.Data)),
+				Err:       err,
+				Lamports:  voteAcct.Lamports,
+				DataLen:   len(voteAcct.Data),
+				Owner:     solana.PublicKeyFromBytes(voteAcct.Owner[:]).String(),
+				DataFirst: getDataPrefix(voteAcct.Data, 64),
+			})
 			errorsMu.Unlock()
 			return
 		}
@@ -292,13 +304,15 @@ func RebuildVoteCacheFromAccountsDB(
 			zeroNodePkCount.Add(1)
 			zeroNodePkStake.Add(item.stake)
 			errorsMu.Lock()
-			if len(zeroNodePkErrors) < maxErrorsPerCategory {
-				zeroNodePkErrors = append(zeroNodePkErrors, VoteCacheRebuildError{
-					VoteAcct: item.pk,
-					Stake:    item.stake,
-					Reason:   "zero_nodepubkey",
-				})
-			}
+			zeroNodePkErrors = append(zeroNodePkErrors, VoteCacheRebuildError{
+				VoteAcct:  item.pk,
+				Stake:     item.stake,
+				Reason:    "zero_nodepubkey",
+				Lamports:  voteAcct.Lamports,
+				DataLen:   len(voteAcct.Data),
+				Owner:     solana.PublicKeyFromBytes(voteAcct.Owner[:]).String(),
+				DataFirst: getDataPrefix(voteAcct.Data, 64),
+			})
 			errorsMu.Unlock()
 			return
 		}
@@ -369,36 +383,103 @@ func RebuildVoteCacheFromAccountsDB(
 		mlog.Log.FileOnlyf("  total_failed=%d total_failed_stake=%d (%.4f%% of total)",
 			totalFailed, totalFailedStake, failedPercent)
 
-		// File only: first few errors in each category
+		// File only: first 5 errors in each category (summary)
 		if len(missingErrors) > 0 {
-			mlog.Log.FileOnlyf("  missing_accounts (first %d):", len(missingErrors))
+			mlog.Log.FileOnlyf("  missing_accounts (showing first 5 of %d):", len(missingErrors))
 			for i, e := range missingErrors {
+				if i >= 5 {
+					break
+				}
 				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d err=%v", i+1, e.VoteAcct, e.Stake, e.Err)
 			}
 		}
 		if len(unmarshalErrors) > 0 {
-			mlog.Log.FileOnlyf("  unmarshal_errors (first %d):", len(unmarshalErrors))
+			mlog.Log.FileOnlyf("  unmarshal_errors (showing first 5 of %d):", len(unmarshalErrors))
 			for i, e := range unmarshalErrors {
-				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d reason=%s err=%v", i+1, e.VoteAcct, e.Stake, e.Reason, e.Err)
+				if i >= 5 {
+					break
+				}
+				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d lamports=%d data_len=%d owner=%s reason=%s err=%v",
+					i+1, e.VoteAcct, e.Stake, e.Lamports, e.DataLen, e.Owner, e.Reason, e.Err)
 			}
 		}
 		if len(zeroNodePkErrors) > 0 {
-			mlog.Log.FileOnlyf("  zero_nodepk_accounts (first %d):", len(zeroNodePkErrors))
+			mlog.Log.FileOnlyf("  zero_nodepk_accounts (showing first 5 of %d):", len(zeroNodePkErrors))
 			for i, e := range zeroNodePkErrors {
-				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d", i+1, e.VoteAcct, e.Stake)
+				if i >= 5 {
+					break
+				}
+				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d lamports=%d data_len=%d owner=%s",
+					i+1, e.VoteAcct, e.Stake, e.Lamports, e.DataLen, e.Owner)
 			}
 		}
+
+		// Dump ALL failed accounts to a CSV file for detailed analysis
+		dumpVoteCacheRebuildErrors(slot, missingErrors, unmarshalErrors, zeroNodePkErrors)
 
 		// Skip missing/closed vote accounts - matches Firedancer behavior (fd_stakes.c:73-77).
 		// Stake delegations can point to vote accounts that have since been closed (data_len=0).
 		// Firedancer silently skips these: if( FD_LIKELY( vote_state ) ) { ... }
 		// We do the same - the stake simply isn't counted in the epoch's active stake.
-		mlog.Log.Warnf("vote cache rebuild: skipped %d closed/invalid vote accounts (%.4f%% stake)",
-			totalFailed, failedPercent)
+		mlog.Log.Warnf("vote cache rebuild: skipped %d closed/invalid vote accounts (%.4f%% stake) - see vote_cache_rebuild_errors_slot%d.csv",
+			totalFailed, failedPercent, slot)
 	}
 
 	mlog.Log.FileOnlyf("  result: SUCCESS (all %d non-zero accounts rebuilt)", nonZeroAccounts)
 	return nil
+}
+
+// dumpVoteCacheRebuildErrors writes all failed vote accounts to a CSV file for debugging.
+// Includes full account data (lamports, data length, owner, first bytes of data).
+func dumpVoteCacheRebuildErrors(slot uint64, missingErrors, unmarshalErrors, zeroNodePkErrors []VoteCacheRebuildError) {
+	logsDir := config.GetString("log.dir")
+	if logsDir == "" {
+		logsDir = "/mnt/mithril-logs"
+	}
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		mlog.Log.Warnf("dumpVoteCacheRebuildErrors: failed to create logs dir: %v", err)
+		return
+	}
+
+	filePath := fmt.Sprintf("%s/vote_cache_rebuild_errors_slot%d.csv", logsDir, slot)
+	file, err := os.Create(filePath)
+	if err != nil {
+		mlog.Log.Warnf("dumpVoteCacheRebuildErrors: failed to create file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	// Write CSV header
+	fmt.Fprintf(file, "category,vote_account,stake,lamports,data_len,owner,reason,error,data_first_64_hex\n")
+
+	// Write all missing errors
+	for _, e := range missingErrors {
+		fmt.Fprintf(file, "missing,%s,%d,%d,%d,%s,%s,%v,\n",
+			e.VoteAcct, e.Stake, e.Lamports, e.DataLen, e.Owner, e.Reason, e.Err)
+	}
+
+	// Write all unmarshal errors (include hex of first bytes)
+	for _, e := range unmarshalErrors {
+		dataHex := ""
+		if len(e.DataFirst) > 0 {
+			dataHex = fmt.Sprintf("%x", e.DataFirst)
+		}
+		fmt.Fprintf(file, "unmarshal,%s,%d,%d,%d,%s,%s,%v,%s\n",
+			e.VoteAcct, e.Stake, e.Lamports, e.DataLen, e.Owner, e.Reason, e.Err, dataHex)
+	}
+
+	// Write all zero_nodepk errors
+	for _, e := range zeroNodePkErrors {
+		dataHex := ""
+		if len(e.DataFirst) > 0 {
+			dataHex = fmt.Sprintf("%x", e.DataFirst)
+		}
+		fmt.Fprintf(file, "zero_nodepk,%s,%d,%d,%d,%s,%s,,%s\n",
+			e.VoteAcct, e.Stake, e.Lamports, e.DataLen, e.Owner, e.Reason, dataHex)
+	}
+
+	totalErrors := len(missingErrors) + len(unmarshalErrors) + len(zeroNodePkErrors)
+	mlog.Log.Infof("vote cache rebuild errors dumped to %s (%d accounts)", filePath, totalErrors)
 }
 
 // StakeEntry holds a vote account and its stake for logging
