@@ -1724,6 +1724,17 @@ func ReplayBlocks(
 				}
 			}
 
+			// Cache stakes for FUTURE leader schedule (N+1).
+			// At boundary N-1 -> N, the stakes we just computed will be used for epoch N+1's schedule.
+			// This is the "N-2 rule": epoch N+1's schedule uses stakes from end of epoch N-1 (now).
+			// leaderScheduleEpoch = N+1 (computed above via epochSchedule.LeaderScheduleEpoch(block.Slot))
+			//
+			// Example: snapshot at epoch 905 has EpochStakes(906) for epoch 906 schedule.
+			// At 905->906 boundary: cache stakes as EpochStakes(907) for epoch 907 schedule.
+			// At 906->907 boundary: cache stakes as EpochStakes(908) for epoch 908 schedule.
+			mlog.Log.Infof("  [EPOCH STAKES] caching stakes for future epoch %d schedule (leader_schedule_epoch)", leaderScheduleEpoch)
+			cacheEpochStakesForValidation(leaderScheduleEpoch, block.VoteAccts, block.TotalEpochStake)
+
 			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
 			// If this crashes, we still have leader schedule logs for debugging.
 			var epochRewardsErr error
@@ -1840,7 +1851,8 @@ func ReplayBlocks(
 				// Critical: If we can't persist state (including stake index), we must stop.
 				// Continuing would advance replay without the index being updated, causing
 				// data loss on crash (we'd skip replaying this slot and lose new stake pubkeys).
-				return result, fmt.Errorf("failed to write state after slot %d: %w", lastPersistedSlot, err)
+				result.Error = fmt.Errorf("failed to write state after slot %d: %w", lastPersistedSlot, err)
+				break
 			}
 		}
 

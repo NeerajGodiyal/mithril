@@ -139,24 +139,46 @@ Next Steps:
 PRIORITY 3: MULTI-EPOCH REPLAY
 ================================================================================
 
-Issue: Beyond Snapshot+1 Schedule Building [CONFIDENCE: MEDIUM]
-----------------------------------------------------------------
-Context:
-  - Snapshot from epoch 905 includes schedule for epoch 906
-  - Epoch 907 schedule must be built from epoch 905 stakes (N-2 rule)
-  - These stakes are computed when crossing 905->906 boundary
+EpochStakes Caching for Future Schedules [CONFIDENCE: HIGH - FIX APPLIED]
+--------------------------------------------------------------------------
+Status: FIXED (January 2025)
 
-Current Implementation:
-  - cacheEpochStakesForValidation() stores stakes at epoch boundary
-  - Recent fix preserves snapshot EpochStakes instead of overwriting
+Issue:
+  - Stakes must be cached for FUTURE epoch schedules, not current epoch
+  - At boundary N-1 -> N, stakes computed are used for epoch N+1 schedule
+  - This is the "N-2 rule": epoch N+1's schedule uses stakes from end of N-1
 
-TBD:
-  [ ] Verify stakes cached at 905->906 boundary can build 907 schedule
+Previous Bug:
+  - Code was caching stakes to EpochStakes(block.Epoch) - wrong target
+  - Should cache to EpochStakes(leaderScheduleEpoch) where leaderScheduleEpoch = N+1
+
+Fix Applied:
+  - At each epoch boundary, cache stakes to leaderScheduleEpoch (N+1)
+  - leaderScheduleEpoch computed via epochSchedule.LeaderScheduleEpoch(block.Slot)
+
+Example Timeline (starting from snapshot in epoch 905):
+  | Schedule For | Stakes From | Source                              |
+  |--------------|-------------|-------------------------------------|
+  | Epoch 906    | End of 904  | Snapshot EpochStakes(906) - have it |
+  | Epoch 907    | End of 905  | Cached at 905->906 boundary as EpochStakes(907) |
+  | Epoch 908    | End of 906  | Cached at 906->907 boundary as EpochStakes(908) |
+  | Epoch 909    | End of 907  | Cached at 907->908 boundary as EpochStakes(909) |
+
+Code: pkg/replay/block.go:1727-1736
+
+Reference:
+  - Agave: bank.rs:2256-2289 (update_epoch_stakes stores to leader_schedule_epoch)
+  - Firedancer: fd_runtime.c:588-703 (vote_states rotation, uses prev_prev for schedule)
+
+Verification:
+  [x] Confirmed Agave stores to leader_schedule_epoch (N+1), not current epoch
+  [x] Confirmed Firedancer uses vote_states_prev_prev (T-2 stakes) for schedule
+  [x] Fix applied: cache to leaderScheduleEpoch at each boundary
+
+Testing Needed:
   [ ] Test multi-epoch replay (905 -> 906 -> 907 -> 908)
-  [ ] Add logging for which EpochStakes are used when building schedule
   [ ] Verify schedule for epoch 907 matches RPC
-
-Risk: If EpochStakes caching is wrong, epoch 907+ will have schedule mismatches
+  [ ] Verify schedule for epoch 908 matches RPC
 
 ================================================================================
 PRIORITY 4: AREAS NEEDING MORE UNDERSTANDING
