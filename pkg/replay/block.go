@@ -1231,6 +1231,7 @@ func ReplayBlocks(
 	var voteTxCounts []uint64    // vote txns per block
 	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
+	var slotsSinceEpochBoundary int = -1 // tracks slots since epoch boundary for diagnostics (-1 = not in diagnostic window)
 
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
@@ -1810,6 +1811,23 @@ func ReplayBlocks(
 		// Validate bank hash against RPC at epoch boundary (first slot of new epoch)
 		// This catches divergence immediately rather than waiting for vote tx failure
 		if justCrossedEpochBoundary && rpcc != nil {
+			// Dump local sysvar state for the first slot of new epoch
+			var ltHashBytes []byte
+			if lastSlotCtx.AcctsLtHash != nil {
+				ltHashBytes = lastSlotCtx.AcctsLtHash.Hash()
+			}
+			DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes)
+
+			// Also dump for parent slot (boundary slot) - use parent's bank hash
+			DumpLocalSysvarState(block.ParentSlot, block.Epoch-1, block.ParentBankhash[:], [32]byte{}, 0, [32]byte{}, nil)
+
+			// Fetch and dump RPC state (async)
+			go func(slot uint64, parentSlot uint64, epoch uint64) {
+				// Dump RPC state for boundary slot and first slot of new epoch
+				FetchAndDumpRPCSysvarState(rpcc, parentSlot, epoch-1)
+				FetchAndDumpRPCSysvarState(rpcc, slot, epoch)
+			}(block.Slot, block.ParentSlot, block.Epoch)
+
 			// Validate both the current slot and the parent slot (the actual boundary slot)
 			// The parent slot (last slot of previous epoch) is where epoch transition modifies state
 			go func(slot uint64, parentSlot uint64, localBankhash []byte, parentBankhash [32]byte) {
@@ -2059,6 +2077,26 @@ func ReplayBlocks(
 		} else {
 			justCrossedEpochBoundary = false
 		}
+
+		// Track slots since epoch boundary and dump diagnostics for first 5 slots of rewards period
+		if justCrossedEpochBoundary {
+			// Reset counter when we cross epoch boundary (first slot already dumped above)
+			slotsSinceEpochBoundary = 1
+		} else if slotsSinceEpochBoundary >= 1 && slotsSinceEpochBoundary < 6 {
+			slotsSinceEpochBoundary++
+			// Dump diagnostics for slots 2-6 after epoch boundary
+			if rpcc != nil {
+				var ltHashBytes []byte
+				if lastSlotCtx.AcctsLtHash != nil {
+					ltHashBytes = lastSlotCtx.AcctsLtHash.Hash()
+				}
+				DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes)
+				go func(slot uint64, epoch uint64) {
+					FetchAndDumpRPCSysvarState(rpcc, slot, epoch)
+				}(block.Slot, block.Epoch)
+			}
+		}
+
 		{
 			metrics.GlobalBlockReplay.Slot = block.Slot
 			if metricsWriter != nil {
