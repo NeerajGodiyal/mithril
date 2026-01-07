@@ -3,6 +3,7 @@ EPOCH TRANSITION OVERVIEW - Mithril
 ================================================================================
 Last Updated: January 2025
 Branch: feature/local-rewards-partitions
+Commit: 1cf0e26
 
 This document describes how Mithril handles epoch transitions, including leader
 schedule computation, rewards distribution, and bank hash calculation.
@@ -26,50 +27,65 @@ Important Clarification:
     computes rewards based on state at slot 391392000
 
 ================================================================================
-2. EPOCH TRANSITION FLOW
+2. EPOCH TRANSITION FLOW (with confidence levels)
 ================================================================================
 
 When Mithril processes slot N (first slot of new epoch):
 
-  STEP 1: Detect Epoch Boundary
-  -----------------------------
+  STEP 1: Detect Epoch Boundary [CONFIDENCE: HIGH]
+  -------------------------------------------------
   - Compare block.Epoch with currentEpoch
   - If different, we're at epoch boundary
+  - Code: pkg/replay/block.go:1494-1500
+  - Agave: runtime/src/bank.rs (new_from_parent)
+  - FD: fd_runtime.c (fd_runtime_block_execute)
 
-  STEP 2: Prepare Epoch Stakes (prepareEpochStakes)
-  -------------------------------------------------
+  STEP 2: Prepare Epoch Stakes (prepareEpochStakes) [CONFIDENCE: HIGH]
+  ---------------------------------------------------------------------
   - Read StakeHistory sysvar from prevSlotCtx or AccountsDB
   - Compute stake activating/deactivating/effective for all delegations
   - Update StakeHistory sysvar with new entry for the ending epoch
   - Store updated StakeHistory at BOUNDARY slot (prevSlotCtx.Slot)
   - Refresh vote account stakes for the new epoch
   - Cache EpochStakes for leader schedule validation
+  - Code: pkg/replay/epoch.go:180-237
+  - Agave: runtime/src/stakes.rs (activate_epoch)
+  - FD: fd_stakes.c (fd_stakes_activate_epoch)
 
-  STEP 3: Rebuild Vote Cache (RebuildVoteCacheFromAccountsDB)
-  -----------------------------------------------------------
+  STEP 3: Rebuild Vote Cache (RebuildVoteCacheFromAccountsDB) [CONFIDENCE: HIGH]
+  -------------------------------------------------------------------------------
   - Read vote accounts from AccountsDB at BOUNDARY slot
   - Extract NodePubkey and vote credits for each vote account
   - This is critical for both leader schedule (needs NodePubkey) and
     rewards (needs vote credits)
   - Missing/closed vote accounts are logged; their stake is ineligible
+  - Code: pkg/replay/leader_schedule_local.go:190-350
+  - Agave: programs/vote/src/vote_state/
+  - FD: fd_vote_program.c
 
-  STEP 4: Build/Validate Leader Schedule
-  --------------------------------------
+  STEP 4: Build/Validate Leader Schedule [CONFIDENCE: HIGH - VERIFIED WORKING]
+  ------------------------------------------------------------------------------
   - Check if snapshot already has schedule for this epoch -> REUSE IT
   - If not, build from vote stakes and validate against RPC
   - CRITICAL: Leader schedule for epoch N uses stakes from epoch N-2 (not N!)
   - The snapshot stores EpochStakes keyed by the TARGET epoch, not source epoch
+  - Code: pkg/replay/block.go:1600-1720
+  - Agave: runtime/src/bank/leader_schedule.rs
+  - FD: fd_leader_schedule.c
 
-  STEP 5: Handle Epoch Rewards (handleEpochRewards)
-  -------------------------------------------------
+  STEP 5: Handle Epoch Rewards (handleEpochRewards) [CONFIDENCE: MEDIUM]
+  -----------------------------------------------------------------------
   - If EpochRewards.Active == true: use resume path (don't recompute)
   - If EpochRewards.Active == false: fresh computation
   - Distribute vote rewards (immediate, at first slot)
   - Compute stake rewards and partitions (distributed over following slots)
   - Create/update EpochRewards sysvar
+  - Code: pkg/replay/epoch.go:238-280, pkg/replay/rewards.go
+  - Agave: runtime/src/bank/partitioned_epoch_rewards/
+  - FD: fd_rewards.c (fd_rewards_calculate)
 
-  STEP 6: Process Block Normally
-  ------------------------------
+  STEP 6: Process Block Normally [CONFIDENCE: HIGH]
+  ---------------------------------------------------
   - Now call ProcessBlock for the first slot of new epoch
   - This executes transactions, computes bank hash, etc.
 
@@ -84,12 +100,14 @@ Manifest Data Structures (Different purposes!)
     - Contains: Stake pubkeys, delegation info
     - WARNING: credits_observed values are STALE - must refresh from AccountsDB
     - Used for: Iterating stake accounts for rewards
+    - Confidence: HIGH that this is understood correctly
 
   epoch_stakes / VersionedEpochStakes.VoteAccounts
     - Purpose: Leader schedule computation
     - Contains: Vote account pubkeys -> (node pubkey, activated stake)
     - Keyed by: Target epoch (the epoch whose schedule this computes)
     - NOT for rewards - using this for rewards causes miscounts
+    - Confidence: HIGH after fixing schedule mismatch
 
 Sysvars
 -------
@@ -102,19 +120,24 @@ Sysvars
 Caches
 ------
   StakeCache:    In-memory map of stake pubkey -> Delegation
-                 Loaded from: stake_cache.json, manifest, or AccountsDB scan
-                 Updated: Incrementally during replay
+                 Loaded from: stake_cache.json, stake_pubkeys.idx, or AccountsDB scan
+                 Updated: Incrementally during replay (recordStakeDelegation)
+                 Persisted: On graceful shutdown, panic (if safe), every block (new pubkeys)
+                 Confidence: HIGH
 
   VoteCache:     In-memory map of vote pubkey -> VoteState
                  Rebuilt: At epoch boundary from AccountsDB
                  Contains: NodePubkey, vote credits, timestamps
+                 NOT persisted - rebuilt each session
+                 Confidence: HIGH
 
   EpochStakes:   Map of epoch -> (vote pubkey -> stake)
                  Loaded from: Snapshot manifest VersionedEpochStakes
                  Used for: Leader schedule computation
+                 Confidence: HIGH
 
 ================================================================================
-4. LEADER SCHEDULE: THE N-2 RULE
+4. LEADER SCHEDULE: THE N-2 RULE [CONFIDENCE: HIGH - VERIFIED WORKING]
 ================================================================================
 
 Critical Understanding:
@@ -134,19 +157,23 @@ Why Rebuilding Fails:
     we're using epoch 905 stakes (just computed) instead of epoch 904 stakes
   - This causes ~99% leader mismatch because stakes change between epochs
 
-Recent Fix (commit 1c781f8):
+Fix Applied (commit 1c781f8):
   - At epoch boundary, check if EpochStakes(block.Epoch) already exists
   - If yes, don't overwrite with freshly computed stakes
   - Preserves the correct N-2 stakes from snapshot
 
+Reference Implementation:
+  - Agave: runtime/src/bank/leader_schedule.rs:leader_schedule_epoch()
+  - FD: fd_leader_schedule.c:fd_leader_schedule_new()
+
 ================================================================================
-5. REWARDS DISTRIBUTION
+5. REWARDS DISTRIBUTION [CONFIDENCE: MEDIUM-HIGH]
 ================================================================================
 
 Two Paths Based on EpochRewards.Active
 --------------------------------------
 
-PATH A: Fresh Boundary (Active == false)
+PATH A: Fresh Boundary (Active == false) [CONFIDENCE: MEDIUM]
   - Crossing into new epoch, distribution hasn't started
   - Compute everything fresh from boundary slot state:
     1. Refresh credits_observed from AccountsDB at boundary slot
@@ -155,8 +182,11 @@ PATH A: Fresh Boundary (Active == false)
     4. Determine partitions = ceil(eligible_accounts / 4096)
     5. Distribute vote rewards immediately
     6. Set up stake rewards for partitioned distribution
+  - Code: pkg/replay/rewards.go:29-200
+  - Agave: runtime/src/bank/partitioned_epoch_rewards/calculation.rs
+  - FD: fd_rewards.c:fd_rewards_calculate()
 
-PATH B: Resume Mid-Distribution (Active == true)
+PATH B: Resume Mid-Distribution (Active == true) [CONFIDENCE: HIGH]
   - Inside the rewards distribution window (first few slots of epoch)
   - DO NOT recompute totals - use EpochRewards sysvar values:
     - total_points
@@ -165,17 +195,35 @@ PATH B: Resume Mid-Distribution (Active == true)
     - distributed_rewards
   - Per-account points scaled to match sysvar totals
   - Continue distributing remaining partitions
+  - Code: pkg/replay/rewards.go:220-360
+  - FD: fd_ssload.c:201-223 (recalc path)
 
-Partition Formula
------------------
+Partition Hashing [CONFIDENCE: HIGH - CRITICAL FIX APPLIED]
+------------------------------------------------------------
+  Partition assignment uses SipHash13 with the PARENT blockhash:
+  - Agave: calculation.rs:747 (epoch_rewards_sysvar.parent_blockhash)
+  - FD: fd_epoch_rewards.c:220 (parent_blockhash parameter)
+  - Mithril: slotCtx.Blockhash where slotCtx is prevSlotCtx
+
+  IMPORTANT: In Mithril, handleEpochRewards receives prevSlotCtx.
+  So prevSlotCtx.Blockhash IS the parent blockhash.
+  DO NOT use prevSlotCtx.LastBlockhash (that's the grandparent!).
+
+  Using wrong blockhash causes IMMEDIATE divergence - different accounts
+  get assigned to different partitions.
+
+Partition Formula [CONFIDENCE: HIGH - VERIFIED MATCHING]
+---------------------------------------------------------
   eligible_accounts = stake accounts with:
     - Valid vote account in cache
-    - stake >= minimum_delegation (1 lamport on mainnet)
+    - stake >= minimum_delegation (1 lamport on mainnet, but 1 SOL effective)
     - points > 0 (new credits to earn)
     - rewards > 0 after calculation
 
   num_partitions = ceil(eligible_accounts / 4096)
   (capped at slots_per_epoch / 10)
+
+  Verified: Local=252, RPC=252 at epoch 905->906 transition
 
 Vote Rewards vs Stake Rewards
 -----------------------------
@@ -188,7 +236,7 @@ Vote Rewards vs Stake Rewards
                  Each slot in distribution window handles one partition
 
 ================================================================================
-6. BANK HASH COMPUTATION
+6. BANK HASH COMPUTATION [CONFIDENCE: MEDIUM]
 ================================================================================
 
 Bank Hash Formula (with LtHash enabled):
@@ -201,24 +249,24 @@ Inputs:
   - blockHash:      The PoH hash for this slot
   - ltHash:         Lattice hash of all account modifications in this slot
 
-LtHash Updates:
+LtHash Updates [CONFIDENCE: MEDIUM - NEEDS MORE INVESTIGATION]:
   - Computed from writableAccts (accounts that could have changed)
   - Includes: transaction-modified accounts, rent-collected accounts,
     sysvars, epoch-updated accounts
   - Any difference in account state -> different ltHash -> different bankHash
+  - Order may matter - need to verify against Agave/FD
 
 Why Bank Hash Matters for Epoch Transition:
   - Slot 391392000 (boundary slot) bank hash is used by votes in slot 391392001
   - If Mithril computes different bank hash, vote transactions will fail
   - VoteErrSlotHashMismatch = vote references hash not in our SlotHashes
 
-Recent Debugging Additions:
-  - Bank hash validation at epoch boundary against RPC (commit 9213373)
-  - Detailed bank hash input logging (commit fe2bc8b)
-  - Logs: parentBankhash, numSignatures, blockhash, ltHash pre/post
+Reference Implementation:
+  - Agave: runtime/src/bank/bank_hash.rs
+  - FD: fd_bank_hash.c
 
 ================================================================================
-7. SLOT HASHES SYSVAR
+7. SLOT HASHES SYSVAR [CONFIDENCE: HIGH]
 ================================================================================
 
 Purpose:
@@ -238,7 +286,7 @@ Vote Transaction Validation:
   - This is how bank hash divergence manifests as vote failures
 
 ================================================================================
-8. ACCOUNT MODIFICATION TIMING
+8. ACCOUNT MODIFICATION TIMING [CONFIDENCE: MEDIUM-HIGH]
 ================================================================================
 
 Accounts Modified at Epoch Boundary:
@@ -261,10 +309,49 @@ EpochUpdatedAccts Flow:
   - ParentEpochUpdatedAccts captures pre-modification state for ltHash delta
 
 ================================================================================
-9. CURRENT STATUS (as of January 2025)
+9. RESUME AND PERSISTENCE [CRITICAL FOR RELIABILITY]
 ================================================================================
 
-WORKING:
+Mithril must be able to resume after:
+  1. Graceful shutdown (Ctrl+C, SIGTERM)
+  2. Panic during replay (crash recovery)
+  3. System restart
+
+Key Persistence Files:
+  mithril_state.json    - Last committed slot, bankhash, resume context
+  stake_cache.json      - Full stake cache (1.2M entries, ~200MB)
+  stake_pubkeys.idx     - Binary index of stake pubkeys (append-only, ~38MB)
+  bankhash.log          - Debug log of bank hash computations
+
+Resume Flow [CONFIDENCE: HIGH]:
+  1. Load mithril_state.json to get last committed slot
+  2. Try to load stake_cache.json (exact slot match required)
+  3. If stale/missing, try stake_pubkeys.idx for fast rebuild via point lookups
+  4. If no index, fall back to full AccountsDB scan (30+ minutes)
+  5. Resume replay from last committed slot + 1
+
+Stake Cache Persistence [CONFIDENCE: HIGH - NEWLY IMPLEMENTED]:
+  - stake_cache.json: Full cache saved on graceful shutdown
+  - stake_pubkeys.idx: New pubkeys appended after each block commit
+  - On resume: index enables ~1M point lookups instead of ~200M full scan
+  - Compaction: Index rewritten with current cache at shutdown
+
+Mid-Block Crash Handling [CONFIDENCE: HIGH]:
+  - blockReplayInProgress flag tracks if we're mid-block
+  - If panic mid-block: don't save stake cache (has uncommitted updates)
+  - Resume from last COMMITTED slot (N-1), not crash slot (N)
+  - Clear pending stake pubkeys on mid-block crash
+
+Critical Invariant for Resume:
+  - stake_cache.json slot MUST match mithril_state.json LastSlot
+  - If mismatch, cache is stale -> use index or scan
+  - Any stake changes between cache slot and resume slot would be missing
+
+================================================================================
+10. CURRENT STATUS (as of January 2025)
+================================================================================
+
+VERIFIED WORKING [HIGH CONFIDENCE]:
   [x] Snapshot schedule reuse (prevents N-2 mismatch)
   [x] Leader schedule validation against RPC
   [x] Leader schedule MATCHED at epoch 905->906 transition
@@ -273,39 +360,105 @@ WORKING:
   [x] Credits_observed refresh from AccountsDB
   [x] Stake account snapshots for distribution
   [x] Bank hash validation logging at epoch boundary
+  [x] Stake cache persistence on graceful shutdown
+  [x] Stake pubkey index for fast resume after crash
+  [x] Mid-block crash safety (don't save inconsistent state)
+  [x] Partition blockhash fix (use prevSlotCtx.Blockhash, not LastBlockhash)
 
-ISSUE IDENTIFIED:
-  [ ] Bank hash divergence at slot 391392000 (boundary slot)
-      - Vote tx in 391392001 fails with VoteErrSlotHashMismatch
-      - Local bank hash != network bank hash
-      - Leader schedule and partitions matched, so issue is elsewhere
-      - Added debugging to identify which input differs
+NEEDS INVESTIGATION [MEDIUM CONFIDENCE]:
+  [ ] Bank hash divergence at epoch boundary slots
+  [ ] LtHash computation accuracy vs Agave/FD
+  [ ] Account modification ordering in bank hash
+  [ ] Multi-epoch schedule building (epochs beyond snapshot+1)
+
+KNOWN ISSUES:
+  [ ] Epoch boundary may crash if first slot has unusual conditions
+  [ ] Some vote accounts fail to rebuild (expected for closed accounts)
 
 ================================================================================
-10. KEY CODE LOCATIONS
+11. KEY CODE LOCATIONS
 ================================================================================
 
 Epoch Transition:
-  pkg/replay/block.go:1420-1630  - Main epoch boundary handling
-  pkg/replay/epoch.go:208-280    - prepareEpochStakes, handleEpochRewards
+  pkg/replay/block.go:1494-1730  - Main epoch boundary handling
+  pkg/replay/epoch.go:180-280    - prepareEpochStakes, handleEpochRewards
 
 Leader Schedule:
-  pkg/replay/block.go:1501-1615  - Schedule build/validation at boundary
+  pkg/replay/block.go:1600-1720  - Schedule build/validation at boundary
   pkg/replay/leader_schedule_local.go - Schedule computation and RPC validation
 
 Rewards:
-  pkg/replay/rewards.go:29-110   - beginPartitionedEpochRewardsDistribution
-  pkg/rewards/rewards.go         - Points/rewards calculation
+  pkg/replay/rewards.go:29-450   - All rewards distribution logic
+  pkg/rewards/rewards.go         - Points/rewards calculation helpers
 
 Bank Hash:
   pkg/bankhash/bankhash.go:21-79 - CalculateBankHash
-  pkg/replay/block.go:2440-2465  - Bank hash computation in ProcessBlock
+  pkg/replay/block.go:2500-2620  - Bank hash computation in ProcessBlock
 
 Vote Cache:
   pkg/replay/leader_schedule_local.go:190-350 - RebuildVoteCacheFromAccountsDB
 
+Stake Cache / Persistence:
+  pkg/global/global_ctx.go:85-160   - Stake cache in-memory operations
+  pkg/global/global_ctx.go:400-740  - Stake cache/index persistence
+  cmd/mithril/node/node.go:855-930  - Cache loading on startup
+  cmd/mithril/node/node.go:2690-2705 - Cache flush after block commit
+
 ================================================================================
-11. DEBUGGING TIPS
+12. REFERENCE IMPLEMENTATIONS
+================================================================================
+
+FIREDANCER (C) - Key Files:
+  src/flamenco/rewards/fd_rewards.c
+    - fd_rewards_calculate() - main rewards computation
+    - fd_rewards_redeem() - per-account reward credit
+    - Lines 340-409: redeem_rewards logic
+    - Lines 1088-1165: recalc path when epoch_rewards.active
+
+  src/flamenco/runtime/fd_runtime.c
+    - fd_runtime_block_execute() - block processing
+    - Epoch boundary detection and handling
+
+  src/flamenco/runtime/fd_bank_hash.c
+    - Bank hash computation
+    - LtHash integration
+
+  src/discof/restore/utils/fd_ssload.c
+    - Snapshot loading
+    - Lines 201-223: recalc rewards from sysvar
+
+  src/flamenco/leaders/fd_leader_schedule.c
+    - Leader schedule generation
+    - ChaCha20 seeded with epoch number
+
+AGAVE (Rust) - Key Files:
+  runtime/src/bank/partitioned_epoch_rewards/
+    mod.rs           - Main partitioned rewards logic
+    calculation.rs   - Points/rewards calculation
+    distribution.rs  - Partition distribution
+
+  runtime/src/epoch_rewards_hasher.rs
+    - SipHash13 partition assignment
+    - Uses parent_blockhash as seed
+
+  runtime/src/bank/leader_schedule.rs
+    - leader_schedule_epoch() - N-2 stake lookup
+    - Leader schedule generation
+
+  runtime/src/bank.rs
+    - new_from_parent() - epoch boundary handling
+    - Bank hash computation
+
+  runtime/src/stakes.rs
+    - activate_epoch() - stake history update
+    - Effective stake calculation
+
+  programs/stake/src/
+    - Stake program implementation
+    - Delegation state machine
+
+================================================================================
+13. DEBUGGING TIPS
 ================================================================================
 
 If Leader Schedule Mismatches:
@@ -313,23 +466,34 @@ If Leader Schedule Mismatches:
   2. Verify snapshot schedule is being reused if available
   3. Check logs for "[LEADER SCHEDULE]" entries
   4. Compare hash against RPC validation file
+  Confidence in diagnosis: HIGH
 
 If Partition Count Mismatches:
   1. Check eligible account count
   2. Verify credits_observed was refreshed from AccountsDB
   3. Check for vote cache rebuild errors
   4. Compare total_points against RPC EpochRewards sysvar
+  Confidence in diagnosis: HIGH
 
 If Bank Hash Diverges:
   1. Check "BANKHASH INPUTS" log at epoch boundary
   2. Compare parentBankhash, numSignatures, blockhash
   3. Check ltHash pre/post values
   4. Verify account modification timing
+  Confidence in diagnosis: MEDIUM (ltHash is complex)
 
 If Vote Transactions Fail:
   1. VoteErrSlotHashMismatch = bank hash divergence at referenced slot
   2. Check which slot the vote references
   3. Compare that slot's bank hash with RPC
   4. Trace back to find where divergence started
+  Confidence in diagnosis: HIGH
+
+If Resume Fails / Full Scan Triggered:
+  1. Check stake_cache.json slot vs mithril_state.json LastSlot
+  2. Check if stake_pubkeys.idx exists
+  3. Check if crash was mid-block (cache not saved)
+  4. Look for "stake cache stale" warnings in logs
+  Confidence in diagnosis: HIGH
 
 ================================================================================

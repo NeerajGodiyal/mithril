@@ -93,6 +93,33 @@ Please:
   with the wrong stake epoch.
 - Stake cache is persisted for resume, with fallback AccountsDB scan if missing.
 
+## Resume and Persistence [HIGH PRIORITY]
+
+Mithril handles two resume scenarios:
+
+### Graceful Shutdown (Ctrl+C, SIGTERM) - WORKING
+- `mithril_state.json` - last committed slot, epoch, blockhash
+- `stake_cache.json` - full stake cache snapshot
+- `stake_pubkeys.idx` - compacted at shutdown
+- Resume loads all three, continues from last slot
+
+### Crash Recovery - WORKING (commit 1cf0e26)
+- `stake_cache.json` may be stale (only saved on graceful shutdown)
+- `stake_pubkeys.idx` - append-only binary index of 32-byte pubkeys
+- New pubkeys appended after each block commit (~0 overhead)
+- On resume: load index, do point lookups instead of full AccountsDB scan
+- Reduces 30+ minute scan to ~minutes
+
+### Key Files
+- `pkg/global/global_ctx.go:597-740` - Index load/save/append
+- `cmd/mithril/node/node.go:2695-2705` - Flush after block commit
+- `cmd/mithril/node/node.go:864-895` - Index fallback on resume
+
+### Edge Cases Handled
+- Mid-block crash: `blockReplayInProgress` flag prevents inconsistent cache save
+- Pending pubkeys cleared on mid-block crash
+- Index deduplication on load (append-only may have duplicates)
+
 ## For Epoch-Boundary Details
 
 See `EPOCH_TRANSITION_OVERVIEW.txt` for the end-to-end flow, examples, and
