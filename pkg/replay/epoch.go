@@ -172,9 +172,9 @@ func prepareEpochStakes(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.Sl
 	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
+	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
-	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
 	block.VoteAccts = refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
 	block.TotalEpochStake = 0
