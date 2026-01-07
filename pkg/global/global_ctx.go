@@ -613,16 +613,19 @@ func StakeCacheSize() int {
 // FlushPendingStakePubkeys appends any new stake pubkeys to the index file.
 // Call this after each block commit to persist new stake accounts.
 // Returns the number of pubkeys appended, or error if append failed.
-// IMPORTANT: Only clears the pending list after successful write to avoid data loss.
+// Makes a defensive copy to avoid races with concurrent PutStakeCacheItem calls
+// during parallel transaction processing.
 func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	instance.stakeCacheMutex.Lock()
-	pending := instance.pendingNewStakePubkeys
-	// Don't clear yet - only clear after successful write
-	instance.stakeCacheMutex.Unlock()
-
-	if len(pending) == 0 {
+	if len(instance.pendingNewStakePubkeys) == 0 {
+		instance.stakeCacheMutex.Unlock()
 		return 0, nil
 	}
+	// Defensive copy: transaction processing calls PutStakeCacheItem concurrently
+	pending := make([]solana.PublicKey, len(instance.pendingNewStakePubkeys))
+	copy(pending, instance.pendingNewStakePubkeys)
+	instance.pendingNewStakePubkeys = nil // Clear under lock
+	instance.stakeCacheMutex.Unlock()
 
 	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
 
@@ -648,11 +651,6 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	if err := f.Close(); err != nil {
 		return 0, fmt.Errorf("failed to close stake pubkey index: %w", err)
 	}
-
-	// Only clear pending list after successful write+close
-	instance.stakeCacheMutex.Lock()
-	instance.pendingNewStakePubkeys = nil
-	instance.stakeCacheMutex.Unlock()
 
 	return len(pending), nil
 }
