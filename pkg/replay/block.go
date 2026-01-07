@@ -1389,8 +1389,26 @@ func ReplayBlocks(
 		// epoch boundary
 		if block.Epoch != currentEpoch {
 			mlog.Log.Infof("")
-			mlog.Log.Infof("=== Epoch Boundary: %d -> %d ===", currentEpoch, currentEpoch+1)
-			mlog.Log.Infof("  first_slot_new_epoch=%d rpc_num_partitions=%d", block.Slot, block.NumRewardPartitions)
+			mlog.Log.Infof("╔══════════════════════════════════════════════════════════════════╗")
+			mlog.Log.Infof("║            EPOCH BOUNDARY: %d -> %d                              ║", currentEpoch, currentEpoch+1)
+			mlog.Log.Infof("╚══════════════════════════════════════════════════════════════════╝")
+
+			// State-of-world header: key slots and epochs
+			boundarySlot := currentSlot - 1 // last slot of previous epoch (where we read state)
+			rewardedEpoch := currentEpoch   // epoch whose rewards we're calculating
+			leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
+			firstSlotNewEpoch := block.Slot
+
+			mlog.Log.Infof("  [SLOTS] boundary=%d first_new_epoch=%d", boundarySlot, firstSlotNewEpoch)
+			mlog.Log.Infof("  [EPOCHS] rewarded=%d new=%d leader_schedule_epoch=%d", rewardedEpoch, block.Epoch, leaderScheduleEpoch)
+			mlog.Log.Infof("  [RPC] num_partitions=%d", block.NumRewardPartitions)
+
+			// Log EpochStakes availability from snapshot
+			snapshotStakesForNewEpoch := global.EpochStakes(block.Epoch)
+			snapshotStakesForRewardedEpoch := global.EpochStakes(rewardedEpoch)
+			mlog.Log.Infof("  [SNAPSHOT STAKES] epoch_%d=%d_validators epoch_%d=%d_validators",
+				block.Epoch, len(snapshotStakesForNewEpoch),
+				rewardedEpoch, len(snapshotStakesForRewardedEpoch))
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
@@ -1436,7 +1454,9 @@ func ReplayBlocks(
 			// The rebuild must happen unconditionally since rewards always need boundary-slot vote credits.
 			// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
 			// This reads the canonical state at the end of the previous epoch (prevSlotCtxForEpochBoundary.Slot).
-			if err := RebuildVoteCacheFromAccountsDB(acctsDb, prevSlotCtxForEpochBoundary.Slot, block.VoteAccts, 0); err != nil {
+			voteCacheSlot := prevSlotCtxForEpochBoundary.Slot
+			mlog.Log.Infof("  [VOTE CACHE] rebuilding from slot=%d (boundary slot)", voteCacheSlot)
+			if err := RebuildVoteCacheFromAccountsDB(acctsDb, voteCacheSlot, block.VoteAccts, 0); err != nil {
 				mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
 				result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
 				break
@@ -1467,13 +1487,13 @@ func ReplayBlocks(
 						rebuiltStake += stake
 					}
 				}
-				mlog.Log.Infof("vote cache rebuild: %d/%d vote accounts (%.2f%% by count, %.2f%% by stake)",
+				mlog.Log.Infof("  [VOTE CACHE] result: %d/%d accounts rebuilt (%.2f%% by count, %.2f%% by stake)",
 					rebuilt, total, float64(rebuilt)*100/float64(total), float64(rebuiltStake)*100/float64(totalStake))
 				if missing > 0 {
 					// Log missing accounts but continue - stake delegated to missing vote accounts
 					// is simply ineligible (matches Agave/FD eligibility: "has corresponding vote account")
 					missingPct := float64(missingStake) * 100 / float64(totalStake)
-					mlog.Log.Warnf("vote cache: %d vote accounts missing (%.4f%% stake) - their stake is ineligible for rewards",
+					mlog.Log.Warnf("  [VOTE CACHE] %d vote accounts missing (%.4f%% stake) - their stake is ineligible for rewards",
 						missing, missingPct)
 				}
 			}
@@ -1501,11 +1521,17 @@ func ReplayBlocks(
 				_, hasFirstSlot := global.LeaderForSlot(firstSlotInEpoch)
 				_, hasLastSlot := global.LeaderForSlot(lastSlotInEpoch)
 
+				// Log leader schedule inputs for debugging
+				mlog.Log.Infof("  [LEADER SCHEDULE] building for epoch=%d first_slot=%d last_slot=%d",
+					block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
+				mlog.Log.Infof("  [LEADER SCHEDULE] existing_schedule: has_first=%v has_last=%v", hasFirstSlot, hasLastSlot)
+
 				var localSummary *ScheduleSummary
+				var epochStakesSource string
 				if hasFirstSlot && hasLastSlot {
 					// Schedule exists and appears complete - keep snapshot schedule
-					mlog.Log.Infof("epoch boundary: using [SNAPSHOT] schedule for epoch %d (first=%d last=%d)",
-						block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
+					epochStakesSource = "snapshot_schedule"
+					mlog.Log.Infof("  [LEADER SCHEDULE] source=SNAPSHOT (schedule already cached)")
 					// Build summary for RPC validation (schedule already exists, just need metadata)
 					localSchedule := global.LeaderSchedule()
 					localHash := scheduleFullHash(localSchedule, firstSlotInEpoch, numSlots)
@@ -1527,15 +1553,17 @@ func ReplayBlocks(
 					existingStakes := global.EpochStakes(block.Epoch)
 					if existingStakes == nil || len(existingStakes) == 0 {
 						// No snapshot stakes - use freshly computed (this is a fallback for edge cases)
-						mlog.Log.Warnf("epoch boundary: no snapshot EpochStakes for epoch %d, using freshly computed stakes (may cause mismatch!)", block.Epoch)
+						epochStakesSource = "freshly_computed"
+						mlog.Log.Warnf("  [LEADER SCHEDULE] source=FRESHLY_COMPUTED (no snapshot EpochStakes for epoch %d - may cause mismatch!)", block.Epoch)
 						cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
 					} else {
-						mlog.Log.Infof("epoch boundary: using [SNAPSHOT] EpochStakes for epoch %d schedule (%d validators)",
+						epochStakesSource = "snapshot_epoch_stakes"
+						mlog.Log.Infof("  [LEADER SCHEDULE] source=SNAPSHOT_EPOCH_STAKES epoch=%d validators=%d",
 							block.Epoch, len(existingStakes))
 					}
 
-					mlog.Log.Infof("epoch boundary: building [LOCAL-COMPUTED] schedule for epoch %d (hasFirst=%v hasLast=%v)",
-						block.Epoch, hasFirstSlot, hasLastSlot)
+					mlog.Log.Infof("  [LEADER SCHEDULE] building LOCAL-COMPUTED schedule (epoch_stakes_source=%s)",
+						epochStakesSource)
 
 					var err error
 					localSummary, err = PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
@@ -1547,6 +1575,7 @@ func ReplayBlocks(
 				}
 
 				// RPC validation for the new epoch's schedule (writes validation file)
+				mlog.Log.Infof("  [LEADER SCHEDULE] validating against RPC...")
 				localSchedule := global.LeaderSchedule()
 				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 
