@@ -385,15 +385,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
-	// snapshotArchivePath is ONLY set from CLI --snapshot flag (explicit file path)
-	// It should NOT fall back to storage.snapshots (which is a directory for auto-discovery)
-	snapshotArchivePath = getString("snapshot", "")
+	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path, or storage.snapshots config
+	snapshotArchivePath = getString("snapshot", "storage.snapshots")
 	if snapshotArchivePath == "" {
-		// For VerifyRange command, also check the legacy flag name
-		snapshotArchivePath = getString("snapshot-archive-path", "")
-	}
-	if snapshotArchivePath == "" {
-		// Legacy config support for VerifyRange
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
 	incrementalSnapshotFilename = getString("incremental-snapshot", "storage.incremental_snapshot")
