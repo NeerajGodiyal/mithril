@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -25,11 +26,17 @@ type EpochBoundaryDiagnostics struct {
 	BlockHash   string `json:"block_hash,omitempty"`
 	LtHash      string `json:"lt_hash,omitempty"`
 
+	// Additional bank hash inputs
+	Capitalization uint64 `json:"capitalization,omitempty"`
+
 	// Sysvars
 	Clock        *ClockDiag        `json:"clock,omitempty"`
 	EpochRewards *EpochRewardsDiag `json:"epoch_rewards,omitempty"`
 	SlotHashes   *SlotHashesDiag   `json:"slot_hashes,omitempty"`
 	StakeHistory *StakeHistoryDiag `json:"stake_history,omitempty"`
+
+	// Modified accounts (for ltHash debugging)
+	ModifiedAccounts *ModifiedAccountsDiag `json:"modified_accounts,omitempty"`
 }
 
 type ClockDiag struct {
@@ -79,6 +86,24 @@ type StakeHistoryEntryDiag struct {
 	Deactivating uint64 `json:"deactivating"`
 }
 
+type ModifiedAccountsDiag struct {
+	TotalCount        int                   `json:"total_count"`
+	WritableCount     int                   `json:"writable_count"`
+	EpochUpdatedCount int                   `json:"epoch_updated_count"`
+	SysvarCount       int                   `json:"sysvar_count"`
+	Sysvars           []string              `json:"sysvars,omitempty"`           // List of modified sysvar addresses
+	EpochUpdated      []string              `json:"epoch_updated,omitempty"`     // First 50 epoch-updated accounts
+	TopModified       []ModifiedAccountInfo `json:"top_modified,omitempty"`      // Top 20 by lamport change
+}
+
+type ModifiedAccountInfo struct {
+	Address       string `json:"address"`
+	LamportsBefore uint64 `json:"lamports_before,omitempty"`
+	LamportsAfter  uint64 `json:"lamports_after,omitempty"`
+	LamportDelta   int64  `json:"lamport_delta,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+}
+
 // getDiagnosticsDir returns the diagnostics subdirectory within the run's log directory
 func getDiagnosticsDir() string {
 	baseDir := mlog.GetLogDir()
@@ -90,8 +115,16 @@ func getDiagnosticsDir() string {
 	return diagDir
 }
 
+// DiagnosticParams holds optional parameters for diagnostic dumps
+type DiagnosticParams struct {
+	Capitalization    uint64
+	WritableAccts     []string // pubkey strings
+	EpochUpdatedAccts []string // pubkey strings
+	ModifiedSysvars   []string // sysvar addresses that were modified
+}
+
 // DumpLocalSysvarState dumps the local sysvar state to a JSON file
-func DumpLocalSysvarState(slot uint64, epoch uint64, bankHash []byte, parentHash [32]byte, numSigs uint64, blockHash [32]byte, ltHash []byte) {
+func DumpLocalSysvarState(slot uint64, epoch uint64, bankHash []byte, parentHash [32]byte, numSigs uint64, blockHash [32]byte, ltHash []byte, params *DiagnosticParams) {
 	diag := &EpochBoundaryDiagnostics{
 		Slot:       slot,
 		Epoch:      epoch,
@@ -104,6 +137,31 @@ func DumpLocalSysvarState(slot uint64, epoch uint64, bankHash []byte, parentHash
 
 	if ltHash != nil {
 		diag.LtHash = base58.Encode(ltHash)
+	}
+
+	// Add optional params
+	if params != nil {
+		diag.Capitalization = params.Capitalization
+
+		// Build modified accounts summary
+		modAccts := &ModifiedAccountsDiag{
+			WritableCount:     len(params.WritableAccts),
+			EpochUpdatedCount: len(params.EpochUpdatedAccts),
+			SysvarCount:       len(params.ModifiedSysvars),
+			Sysvars:           params.ModifiedSysvars,
+		}
+
+		// Include first 50 epoch-updated accounts
+		maxEpochUpdated := 50
+		if len(params.EpochUpdatedAccts) < maxEpochUpdated {
+			maxEpochUpdated = len(params.EpochUpdatedAccts)
+		}
+		if maxEpochUpdated > 0 {
+			modAccts.EpochUpdated = params.EpochUpdatedAccts[:maxEpochUpdated]
+		}
+
+		modAccts.TotalCount = modAccts.WritableCount + modAccts.EpochUpdatedCount
+		diag.ModifiedAccounts = modAccts
 	}
 
 	// Clock sysvar
@@ -333,4 +391,144 @@ func fetchAccountData(rpcc *rpcclient.RpcClient, pubkey solana.PublicKey) ([]byt
 		return nil, fmt.Errorf("account not found")
 	}
 	return result.Value.Data.GetBinary(), nil
+}
+
+// GenerateDiagnosticComparison reads local and RPC dumps and creates a comparison summary
+func GenerateDiagnosticComparison(slot uint64) {
+	diagDir := getDiagnosticsDir()
+	localFile := filepath.Join(diagDir, fmt.Sprintf("local_slot_%d.json", slot))
+	rpcFile := filepath.Join(diagDir, fmt.Sprintf("rpc_slot_%d.json", slot))
+
+	// Read local dump
+	localData, err := os.ReadFile(localFile)
+	if err != nil {
+		mlog.Log.Warnf("comparison: failed to read local file for slot %d: %v", slot, err)
+		return
+	}
+	var localDiag EpochBoundaryDiagnostics
+	if err := json.Unmarshal(localData, &localDiag); err != nil {
+		mlog.Log.Warnf("comparison: failed to parse local file for slot %d: %v", slot, err)
+		return
+	}
+
+	// Read RPC dump
+	rpcData, err := os.ReadFile(rpcFile)
+	if err != nil {
+		mlog.Log.Warnf("comparison: failed to read RPC file for slot %d: %v", slot, err)
+		return
+	}
+	var rpcDiag EpochBoundaryDiagnostics
+	if err := json.Unmarshal(rpcData, &rpcDiag); err != nil {
+		mlog.Log.Warnf("comparison: failed to parse RPC file for slot %d: %v", slot, err)
+		return
+	}
+
+	// Build comparison
+	comparison := buildComparison(slot, &localDiag, &rpcDiag)
+
+	// Write comparison file
+	compFile := filepath.Join(diagDir, fmt.Sprintf("comparison_slot_%d.txt", slot))
+	if err := os.WriteFile(compFile, []byte(comparison), 0644); err != nil {
+		mlog.Log.Warnf("comparison: failed to write comparison for slot %d: %v", slot, err)
+		return
+	}
+
+	mlog.Log.Infof("wrote diagnostic comparison to %s", compFile)
+}
+
+func buildComparison(slot uint64, local, rpc *EpochBoundaryDiagnostics) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== DIAGNOSTIC COMPARISON FOR SLOT %d ===\n\n", slot))
+
+	// Bank Hash
+	sb.WriteString("BANK HASH:\n")
+	if local.BankHash == rpc.BankHash {
+		sb.WriteString(fmt.Sprintf("  [MATCH] %s\n", local.BankHash))
+	} else {
+		sb.WriteString(fmt.Sprintf("  [MISMATCH]\n"))
+		sb.WriteString(fmt.Sprintf("    local: %s\n", local.BankHash))
+		sb.WriteString(fmt.Sprintf("    rpc:   %s\n", rpc.BankHash))
+	}
+
+	// NumSigs
+	sb.WriteString("\nNUM SIGNATURES:\n")
+	if local.NumSigs == rpc.NumSigs {
+		sb.WriteString(fmt.Sprintf("  [MATCH] %d\n", local.NumSigs))
+	} else {
+		sb.WriteString(fmt.Sprintf("  [MISMATCH] local=%d, rpc=%d\n", local.NumSigs, rpc.NumSigs))
+	}
+
+	// Clock
+	sb.WriteString("\nCLOCK SYSVAR:\n")
+	if local.Clock != nil && rpc.Clock != nil {
+		if local.Clock.Slot == rpc.Clock.Slot &&
+			local.Clock.Epoch == rpc.Clock.Epoch &&
+			local.Clock.LeaderScheduleEpoch == rpc.Clock.LeaderScheduleEpoch {
+			sb.WriteString(fmt.Sprintf("  [MATCH] slot=%d, epoch=%d, leader_schedule_epoch=%d\n",
+				local.Clock.Slot, local.Clock.Epoch, local.Clock.LeaderScheduleEpoch))
+		} else {
+			sb.WriteString("  [MISMATCH]\n")
+			sb.WriteString(fmt.Sprintf("    local: slot=%d, epoch=%d, leader_schedule_epoch=%d\n",
+				local.Clock.Slot, local.Clock.Epoch, local.Clock.LeaderScheduleEpoch))
+			sb.WriteString(fmt.Sprintf("    rpc:   slot=%d, epoch=%d, leader_schedule_epoch=%d\n",
+				rpc.Clock.Slot, rpc.Clock.Epoch, rpc.Clock.LeaderScheduleEpoch))
+		}
+	} else {
+		sb.WriteString("  [INCOMPLETE] local or rpc clock is nil\n")
+	}
+
+	// EpochRewards
+	sb.WriteString("\nEPOCH REWARDS SYSVAR:\n")
+	if local.EpochRewards != nil && rpc.EpochRewards != nil {
+		allMatch := local.EpochRewards.NumPartitions == rpc.EpochRewards.NumPartitions &&
+			local.EpochRewards.TotalPoints == rpc.EpochRewards.TotalPoints &&
+			local.EpochRewards.TotalRewards == rpc.EpochRewards.TotalRewards &&
+			local.EpochRewards.Active == rpc.EpochRewards.Active
+		if allMatch {
+			sb.WriteString(fmt.Sprintf("  [MATCH] partitions=%d, total_points=%s, total_rewards=%d, active=%v\n",
+				local.EpochRewards.NumPartitions, local.EpochRewards.TotalPoints, local.EpochRewards.TotalRewards, local.EpochRewards.Active))
+		} else {
+			sb.WriteString("  [MISMATCH]\n")
+			sb.WriteString(fmt.Sprintf("    local: partitions=%d, total_points=%s, total_rewards=%d, active=%v\n",
+				local.EpochRewards.NumPartitions, local.EpochRewards.TotalPoints, local.EpochRewards.TotalRewards, local.EpochRewards.Active))
+			sb.WriteString(fmt.Sprintf("    rpc:   partitions=%d, total_points=%s, total_rewards=%d, active=%v\n",
+				rpc.EpochRewards.NumPartitions, rpc.EpochRewards.TotalPoints, rpc.EpochRewards.TotalRewards, rpc.EpochRewards.Active))
+		}
+	} else {
+		sb.WriteString("  [INCOMPLETE] local or rpc epoch_rewards is nil\n")
+	}
+
+	// SlotHashes
+	sb.WriteString("\nSLOT HASHES SYSVAR:\n")
+	if local.SlotHashes != nil && rpc.SlotHashes != nil {
+		sb.WriteString(fmt.Sprintf("  local: %d entries, newest=%d\n", local.SlotHashes.NumEntries, local.SlotHashes.NewestSlot))
+		sb.WriteString(fmt.Sprintf("  rpc:   %d entries, newest=%d\n", rpc.SlotHashes.NumEntries, rpc.SlotHashes.NewestSlot))
+
+		// Check if newest entries match
+		if len(local.SlotHashes.RecentEntries) > 0 && len(rpc.SlotHashes.RecentEntries) > 0 {
+			localNewest := local.SlotHashes.RecentEntries[0]
+			rpcNewest := rpc.SlotHashes.RecentEntries[0]
+			if localNewest.Slot == rpcNewest.Slot && localNewest.Hash == rpcNewest.Hash {
+				sb.WriteString(fmt.Sprintf("  newest entry: [MATCH] slot=%d hash=%s\n", localNewest.Slot, localNewest.Hash))
+			} else {
+				sb.WriteString(fmt.Sprintf("  newest entry: [MISMATCH]\n"))
+				sb.WriteString(fmt.Sprintf("    local: slot=%d hash=%s\n", localNewest.Slot, localNewest.Hash))
+				sb.WriteString(fmt.Sprintf("    rpc:   slot=%d hash=%s\n", rpcNewest.Slot, rpcNewest.Hash))
+			}
+		}
+	}
+
+	// Modified accounts summary
+	if local.ModifiedAccounts != nil {
+		sb.WriteString("\nMODIFIED ACCOUNTS (local):\n")
+		sb.WriteString(fmt.Sprintf("  writable_count: %d\n", local.ModifiedAccounts.WritableCount))
+		sb.WriteString(fmt.Sprintf("  epoch_updated_count: %d\n", local.ModifiedAccounts.EpochUpdatedCount))
+		sb.WriteString(fmt.Sprintf("  sysvar_count: %d\n", local.ModifiedAccounts.SysvarCount))
+		if len(local.ModifiedAccounts.Sysvars) > 0 {
+			sb.WriteString(fmt.Sprintf("  sysvars: %v\n", local.ModifiedAccounts.Sysvars))
+		}
+	}
+
+	sb.WriteString("\n=== END COMPARISON ===\n")
+	return sb.String()
 }

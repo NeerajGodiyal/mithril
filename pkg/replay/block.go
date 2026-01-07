@@ -1816,16 +1816,19 @@ func ReplayBlocks(
 			if lastSlotCtx.AcctsLtHash != nil {
 				ltHashBytes = lastSlotCtx.AcctsLtHash.Hash()
 			}
-			DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes)
+			DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes, nil)
 
 			// Also dump for parent slot (boundary slot) - use parent's bank hash
-			DumpLocalSysvarState(block.ParentSlot, block.Epoch-1, block.ParentBankhash[:], [32]byte{}, 0, [32]byte{}, nil)
+			DumpLocalSysvarState(block.ParentSlot, block.Epoch-1, block.ParentBankhash[:], [32]byte{}, 0, [32]byte{}, nil, nil)
 
-			// Fetch and dump RPC state (async)
+			// Fetch and dump RPC state (async), then generate comparison
 			go func(slot uint64, parentSlot uint64, epoch uint64) {
 				// Dump RPC state for boundary slot and first slot of new epoch
 				FetchAndDumpRPCSysvarState(rpcc, parentSlot, epoch-1)
 				FetchAndDumpRPCSysvarState(rpcc, slot, epoch)
+				// Generate comparison files after RPC data is available
+				GenerateDiagnosticComparison(parentSlot)
+				GenerateDiagnosticComparison(slot)
 			}(block.Slot, block.ParentSlot, block.Epoch)
 
 			// Validate both the current slot and the parent slot (the actual boundary slot)
@@ -2090,9 +2093,10 @@ func ReplayBlocks(
 				if lastSlotCtx.AcctsLtHash != nil {
 					ltHashBytes = lastSlotCtx.AcctsLtHash.Hash()
 				}
-				DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes)
+				DumpLocalSysvarState(block.Slot, block.Epoch, lastSlotCtx.FinalBankhash, block.ParentBankhash, block.NumSignatures, block.Blockhash, ltHashBytes, nil)
 				go func(slot uint64, epoch uint64) {
 					FetchAndDumpRPCSysvarState(rpcc, slot, epoch)
+					GenerateDiagnosticComparison(slot)
 				}(block.Slot, block.Epoch)
 			}
 		}
