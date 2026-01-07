@@ -385,8 +385,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
-	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path, or storage.snapshots config
-	snapshotArchivePath = getString("snapshot", "storage.snapshots")
+	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
+	// storage.snapshots config is handled via snapshotDlPath fallback below
+	snapshotArchivePath = getString("snapshot", "")
 	if snapshotArchivePath == "" {
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
@@ -487,10 +488,14 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		blockNearTipLookahead = 0
 	}
 
-	// Snapshot download path - defaults to storage.snapshots, can be overridden
+	// Snapshot download path - for auto-discovery/download of snapshots
+	// Priority: CLI --download-snapshot-path > snapshot.download_path > storage.snapshots
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 	if snapshotDlPath == "" {
-		snapshotDlPath = snapshotArchivePath // Use storage.snapshots as default
+		snapshotDlPath = config.GetString("storage.snapshots")
+	}
+	if snapshotDlPath == "" {
+		snapshotDlPath = snapshotArchivePath // Fallback to explicit path if set
 	}
 
 	// [tuning.pprof] section (with fallback to legacy [development.pprof])
