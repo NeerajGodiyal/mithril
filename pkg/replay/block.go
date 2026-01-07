@@ -1638,7 +1638,11 @@ func ReplayBlocks(
 
 				var localSummary *ScheduleSummary
 				var epochStakesSource string
-				if hasFirstSlot && hasLastSlot {
+				// At first epoch boundary after snapshot (e.g., 905->906 when snapshot is at 905),
+				// always rebuild the schedule locally to validate our computation matches.
+				// The snapshot has EpochStakes(906) with the correct stakes (from end of 904).
+				isFirstBoundaryAfterSnapshot := block.Epoch == replayCtx.SnapshotEpoch+1
+				if hasFirstSlot && hasLastSlot && !isFirstBoundaryAfterSnapshot {
 					// Schedule exists and appears complete - keep snapshot schedule
 					epochStakesSource = "snapshot_schedule"
 					mlog.Log.Infof("  [LEADER SCHEDULE] source=SNAPSHOT (schedule already cached)")
@@ -1655,6 +1659,9 @@ func ReplayBlocks(
 						Timestamp:     time.Now().UTC(),
 					}
 				} else {
+					if isFirstBoundaryAfterSnapshot {
+						mlog.Log.Infof("  [LEADER SCHEDULE] first boundary after snapshot - rebuilding locally to validate")
+					}
 					// Need to build schedule locally
 					// CRITICAL: Check if EpochStakes already exists from snapshot before overwriting!
 					// The snapshot's EpochStakes(N) contains stakes computed during epoch N-2, which is

@@ -29,6 +29,7 @@ type ReplayCtx struct {
 	SlotsPerYear      float64
 	EpochAcctsHash    []byte
 	HasEpochAcctsHash bool
+	SnapshotEpoch     uint64 // Epoch of the snapshot we started from
 }
 
 func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest) *ReplayCtx {
@@ -36,6 +37,7 @@ func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest) *ReplayCtx {
 	epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
 	epochCtx.Inflation = snapshotManifest.Bank.Inflation
 	epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+	epochCtx.SnapshotEpoch = snapshotManifest.Bank.Epoch
 
 	if snapshotManifest.EpochAccountHash != [32]byte{} {
 		epochCtx.HasEpochAcctsHash = true
