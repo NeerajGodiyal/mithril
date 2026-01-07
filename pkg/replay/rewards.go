@@ -281,11 +281,13 @@ func recalculatePartitionedRewardsForResume(
 
 	// Create a minimal SlotCtx with the stored ParentBlockhash
 	// This blockhash is used by CalculateRewardPartitionForPubkey for deterministic partition assignment
-	// NOTE: We set LastBlockhash (not Blockhash) because partition hashing uses LastBlockhash (parent)
+	// NOTE: We set Blockhash (not LastBlockhash) because the rewards code receives prevSlotCtx,
+	// and prevSlotCtx.Blockhash IS the parent blockhash of the first epoch slot.
+	// The EpochRewards.ParentBlockhash stores exactly this value.
 	mockSlotCtx := &sealevel.SlotCtx{
-		LastBlockhash: epochRewards.ParentBlockhash,
-		Features:      f,
-		AccountsDb:    acctsDb,
+		Blockhash:  epochRewards.ParentBlockhash,
+		Features:   f,
+		AccountsDb: acctsDb,
 	}
 
 	// CRITICAL: Refresh stake cache credits_observed from AccountsDB using the BOUNDARY slot.

@@ -1732,8 +1732,10 @@ func CalculateStakeRewardsAndPartitions(
 	workerPool2, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
 		stakePk := i.(solana.PublicKey)
-		// Use LastBlockhash (parent blockhash) for partition hashing, matching Firedancer
-		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.LastBlockhash, numPartitions)
+		// Use slotCtx.Blockhash for partition hashing. Since slotCtx is actually prevSlotCtx
+		// (the SlotCtx from the previous slot, passed from handleEpochRewards), slotCtx.Blockhash
+		// IS the parent blockhash of the first slot in the new epoch, matching Firedancer/Agave.
+		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
 		assigns <- assign{idx: idx, pk: stakePk}
 	})
 
@@ -1915,8 +1917,10 @@ func CalculateTotalPointsAndPartitions(
 		pointsAccum.Add(t.pubkey, pcs)
 
 		if numPartitions != 0 {
-			// Use LastBlockhash (parent blockhash) for partition hashing, matching Firedancer
-			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.LastBlockhash, numPartitions)
+			// Use slotCtx.Blockhash for partition hashing. Since slotCtx is actually prevSlotCtx
+			// (the SlotCtx from the previous slot, passed from handleEpochRewards), slotCtx.Blockhash
+			// IS the parent blockhash of the first slot in the new epoch, matching Firedancer/Agave.
+			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.Blockhash, numPartitions)
 			assigns <- assign{idx: idx, pk: t.pubkey}
 		}
 	})
