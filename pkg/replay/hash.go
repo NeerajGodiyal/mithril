@@ -343,5 +343,5 @@ func fetchBankhashForSlot(rpcc *rpcclient.RpcClient, slot uint64) ([]byte, error
 		}
 	}
 
-	panic("unable to find a vote for the relevant slot")
+	return nil, fmt.Errorf("unable to find a vote for slot %d in slot %d (checked %d votes)", slot, slot+1, count)
 }
