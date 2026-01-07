@@ -102,19 +102,16 @@ func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.Sy
 		return false
 	}
 }
+
 // DeterminePartitionedStakingRewardsInfo fetches reward partition info from RPC with failover support.
 // It tries the primary RPC first with retries, then falls back to backup endpoints.
 func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackups []string, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 
 	// Try to fetch reward partition info with failover
-	numRewardPartitions, rewardSlots, err := fetchRewardPartitionInfoWithBackups(rpcc, rpcBackups, firstSlotInEpoch)
+	_, rewardSlots, err := fetchRewardPartitionInfoWithBackups(rpcc, rpcBackups, firstSlotInEpoch)
 	if err != nil {
 		panic(fmt.Sprintf("failed to fetch reward partition info from all RPC endpoints: %v", err))
-	}
-
-	if numRewardPartitions > 500 {
-		panic(fmt.Sprintf("num_reward_partitions returned by RPC node too large: %d", numRewardPartitions))
 	}
 
 	if len(rewardSlots) == 0 {
@@ -128,7 +125,7 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackup
 	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
 
 	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1,
-		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot, NumRewardPartitions: numRewardPartitions}
+		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot}
 }
 
 // fetchRewardPartitionInfoWithBackups tries the primary RPC first with retries, then backup endpoints.
@@ -380,7 +377,7 @@ type CalculatedStakeRewards struct {
 	NewCreditsObserved uint64
 }
 
-func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
+func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) (map[solana.PublicKey]*CalculatedStakeRewards, Partitions) {
 	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
 	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
 
@@ -420,7 +417,29 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 	workerPool.Release()
 	ants.Release()
 
-	return stakeInfoResults
+	numRewardPartitions := CalculateNumRewardPartitions(uint64(len(stakeInfoResults)))
+	partitions := NewPartitions(numRewardPartitions)
+
+	fmt.Printf("calculated numRewardPartitions: %d\n", numRewardPartitions)
+
+	workerPool2, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
+		defer wg.Done()
+
+		stakePk := i.(solana.PublicKey)
+		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numRewardPartitions)
+		partitions.AddPubkey(idx, stakePk)
+	})
+
+	for stakePk := range stakeInfoResults {
+		wg.Add(1)
+		workerPool2.Invoke(stakePk)
+	}
+
+	wg.Wait()
+	workerPool2.Release()
+	ants.Release()
+
+	return stakeInfoResults, partitions
 }
 
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
@@ -512,17 +531,13 @@ type delegationAndPubkey struct {
 	pubkey     solana.PublicKey
 }
 
-func CalculateTotalPointsAndPartitions(
+func CalculateStakePoints(
 	acctsDb *accountsdb.AccountsDb,
 	slotCtx *sealevel.SlotCtx,
 	slot uint64,
-	numPartitions uint64,
 	stakeHistory *sealevel.SysvarStakeHistory,
 	newWarmupCooldownRateEpoch *uint64,
-) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128, Partitions) {
-	/*old := debug.SetGCPercent(200)
-	defer debug.SetGCPercent(old)*/
-
+) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128) {
 	minimum := minimumStakeDelegation(slotCtx)
 
 	n := len(global.StakeCache())
@@ -532,24 +547,6 @@ func CalculateTotalPointsAndPartitions(
 	}
 
 	pointsAccum := NewCalculatedStakePointsAccumulator(pks)
-	partitions := NewPartitions(numPartitions)
-
-	type assign struct {
-		idx uint64
-		pk  solana.PublicKey
-	}
-	var wgMerge sync.WaitGroup
-	assigns := make(chan assign, 1<<20)
-	if numPartitions != 0 {
-		wgMerge.Add(1)
-		go func() {
-			defer wgMerge.Done()
-			for a := range assigns {
-				partitions[a.idx].pubkeys = append(partitions[a.idx].pubkeys, a.pk)
-			}
-		}()
-	}
-
 	var wg sync.WaitGroup
 
 	size := runtime.GOMAXPROCS(0) * 8
@@ -570,11 +567,6 @@ func CalculateTotalPointsAndPartitions(
 
 		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch)
 		pointsAccum.Add(t.pubkey, pcs)
-
-		if numPartitions != 0 {
-			idx := CalculateRewardPartitionForPubkey(t.pubkey, slotCtx.Blockhash, numPartitions)
-			assigns <- assign{idx: idx, pk: t.pubkey}
-		}
 	})
 
 	for pk, delegation := range global.StakeCache() {
@@ -586,12 +578,7 @@ func CalculateTotalPointsAndPartitions(
 	workerPool.Release()
 	ants.Release()
 
-	if numPartitions != 0 {
-		close(assigns)
-		wgMerge.Wait()
-	}
-
-	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints(), partitions
+	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints()
 }
 
 func calculateStakePointsAndCredits(
@@ -666,4 +653,15 @@ func calculateStakePointsAndCredits(
 		Points:             points,
 		NewCreditsObserved: newObserved,
 	}
+}
+
+func CalculateNumRewardPartitions(numStakingRewards uint64) uint64 {
+	numEligible := numStakingRewards
+	target := uint64(4096)
+	slotsInEpoch := uint64(432000)
+	unclamped := (numEligible + (target - 1)) / target
+	cap := slotsInEpoch / 10
+	numRewardPartitions := min(unclamped, cap)
+
+	return numRewardPartitions
 }

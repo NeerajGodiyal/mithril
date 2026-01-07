@@ -158,10 +158,10 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
+	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
-	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
 	block.VoteAccts = refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
 	block.TotalEpochStake = 0
