@@ -2706,13 +2706,18 @@ func runReplayWithRecovery(
 			mlog.Log.Errorf("[run:%s]   State file:   %s/mithril_state.json", runID, accountsDbPath)
 
 			// Save stake cache on panic to avoid expensive AccountsDB scan on restart
-			// Only save if we have a valid last slot (outside commit window = safe state)
-			if !replay.IsCommitInProgress() && mithrilState != nil && mithrilState.LastSlot > 0 {
+			// Only save if:
+			// 1. Not in commit window (AccountsDB would be inconsistent)
+			// 2. Not mid-block (stake cache would have partial updates from uncommitted txs)
+			// 3. Have a valid last slot to save at
+			if !replay.IsCommitInProgress() && !replay.IsBlockReplayInProgress() && mithrilState != nil && mithrilState.LastSlot > 0 {
 				if err := global.SaveStakeCache(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash); err != nil {
 					mlog.Log.Errorf("[run:%s] Failed to save stake cache on panic: %v", runID, err)
 				} else {
 					mlog.Log.Infof("[run:%s] Stake cache saved on panic: %d entries at slot %d", runID, global.StakeCacheSize(), mithrilState.LastSlot)
 				}
+			} else if replay.IsBlockReplayInProgress() {
+				mlog.Log.Warnf("[run:%s] Stake cache NOT saved on panic: mid-block replay, cache may have partial updates", runID)
 			}
 
 			// Re-panic to propagate the error

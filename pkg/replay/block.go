@@ -70,6 +70,11 @@ var SerializedParameterArena *arena.Arena[byte]
 var commitInProgress atomic.Bool
 var commitSlot atomic.Uint64 // The slot currently being committed (for error messages)
 
+// blockReplayInProgress tracks whether we're mid-block (between start of ProcessBlock and commit).
+// Used to determine if stake cache is consistent with last committed slot.
+// If true, stake cache may have partial updates from the current block's transactions.
+var blockReplayInProgress atomic.Bool
+
 // CurrentRunID is a unique identifier for this replay session, used to correlate logs
 var CurrentRunID string
 
@@ -92,6 +97,12 @@ func IsCommitInProgress() bool {
 // GetCommitSlot returns the slot currently being committed (0 if not in commit)
 func GetCommitSlot() uint64 {
 	return commitSlot.Load()
+}
+
+// IsBlockReplayInProgress returns true if we're mid-block (processing transactions).
+// Used to determine if stake cache may have partial updates.
+func IsBlockReplayInProgress() bool {
+	return blockReplayInProgress.Load()
 }
 
 // ReplayResult contains the result of a replay operation, including shutdown state
@@ -2410,6 +2421,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	// Mark that we're mid-block - stake cache may have partial updates after this point
+	blockReplayInProgress.Store(true)
+
 	if SerializedParameterArena != nil {
 		SerializedParameterArena.Reset()
 	}
@@ -2533,6 +2547,7 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 		slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
 		commitInProgress.Store(false)
 		commitSlot.Store(0)
+		blockReplayInProgress.Store(false)
 		return slotCtx, err
 	}
 
@@ -2544,6 +2559,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	// Exit critical commit window - AccountsDB is now consistent
 	commitInProgress.Store(false)
 	commitSlot.Store(0)
+
+	// Block replay complete - stake cache is now consistent with committed state
+	blockReplayInProgress.Store(false)
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	return slotCtx, err
