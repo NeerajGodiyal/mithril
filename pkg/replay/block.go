@@ -1837,8 +1837,10 @@ func ReplayBlocks(
 		// If we crash after this point, state file will match bankhash_db
 		if onSlotComplete != nil {
 			if err := onSlotComplete(lastPersistedSlot, lastPersistedBankhash, lastSlotCtx); err != nil {
-				mlog.Log.Errorf("failed to write state after slot %d: %v", lastPersistedSlot, err)
-				// Continue anyway - the callback already logged the error
+				// Critical: If we can't persist state (including stake index), we must stop.
+				// Continuing would advance replay without the index being updated, causing
+				// data loss on crash (we'd skip replaying this slot and lose new stake pubkeys).
+				return result, fmt.Errorf("failed to write state after slot %d: %w", lastPersistedSlot, err)
 			}
 		}
 

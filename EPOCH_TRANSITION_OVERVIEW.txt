@@ -345,6 +345,19 @@ Stake Cache Persistence [CONFIDENCE: HIGH - NEWLY IMPLEMENTED]:
   - On resume: index enables ~1M point lookups instead of ~200M full scan
   - Compaction: Index rewritten with current cache at shutdown
 
+Durability Semantics (Important Caveat):
+  - Index/state are NOT fsynced for performance reasons
+  - Ordering (index before state) provides PROCESS CRASH safety:
+    * If process crashes, OS buffers are flushed, both files consistent
+    * On resume, LastSlot matches what's in index
+  - Ordering does NOT provide POWER LOSS safety:
+    * Power loss can lose both index AND state file writes
+    * Both files could be partially written or lost entirely
+    * Worst case: state file updated, index not -> would skip slot on resume
+  - Acceptable tradeoff: Power loss is rare, and recovery is just a full scan
+  - If power loss safety is needed, add f.Sync() before f.Close() in
+    FlushPendingStakePubkeys (costs ~1-2ms per block)
+
 Mid-Block Crash Handling [CONFIDENCE: HIGH]:
   - blockReplayInProgress flag tracks if we're mid-block
   - If panic mid-block: don't save stake cache (has uncommitted updates)
