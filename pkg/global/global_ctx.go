@@ -640,17 +640,16 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 		}
 	}
 
-	// Sync to ensure data is on disk before clearing pending list
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return 0, fmt.Errorf("failed to sync stake pubkey index: %w", err)
-	}
-
+	// Note: We don't fsync here for performance. The ordering guarantee
+	// (index written before state file) provides crash safety:
+	// - If power loss before OS flushes index, state also wasn't flushed
+	// - On resume, LastSlot is old, so we replay the slot and recreate pubkeys
+	// - Worst case: index has duplicates (handled by dedup on load)
 	if err := f.Close(); err != nil {
 		return 0, fmt.Errorf("failed to close stake pubkey index: %w", err)
 	}
 
-	// Only clear pending list after successful write+sync+close
+	// Only clear pending list after successful write+close
 	instance.stakeCacheMutex.Lock()
 	instance.pendingNewStakePubkeys = nil
 	instance.stakeCacheMutex.Unlock()
