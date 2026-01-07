@@ -120,10 +120,17 @@ Sysvars
 Caches
 ------
   StakeCache:    In-memory map of stake pubkey -> Delegation
-                 Loaded from: stake_cache.json, stake_pubkeys.idx, or AccountsDB scan
+                 Loaded from: stake_cache.json (preferred), or rebuilt via
+                              stake_pubkeys.idx (point lookups), or AccountsDB scan
                  Updated: Incrementally during replay (recordStakeDelegation)
-                 Persisted: On graceful shutdown, panic (if safe), every block (new pubkeys)
+                 Persisted: stake_cache.json on graceful shutdown/safe panic/cancel
                  Confidence: HIGH
+
+  StakePubkeyIndex: Append-only binary file of 32-byte pubkeys (stake_pubkeys.idx)
+                    Flushed: After each block commit, BEFORE state file update
+                    Purpose: Fast cache rebuild after crash (point lookups vs full scan)
+                    Note: Steady-state ~0 new pubkeys/block; after bulk rebuild
+                          first block may append entire cache (deduplicated on load)
 
   VoteCache:     In-memory map of vote pubkey -> VoteState
                  Rebuilt: At epoch boundary from AccountsDB
@@ -216,7 +223,9 @@ Partition Formula [CONFIDENCE: HIGH - VERIFIED MATCHING]
 ---------------------------------------------------------
   eligible_accounts = stake accounts with:
     - Valid vote account in cache
-    - stake >= minimum_delegation (1 lamport on mainnet, but 1 SOL effective)
+    - stake >= minimum_delegation
+      (Feature-gated: StakeMinimumDelegationForRewards, StakeRaiseMinimumDelegationTo1Sol)
+      (Mithril: NOT YET IMPLEMENTED - currently uses 1 lamport minimum)
     - points > 0 (new credits to earn)
     - rewards > 0 after calculation
 

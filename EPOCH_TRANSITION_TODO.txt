@@ -27,9 +27,11 @@ Status: WORKING (as of commit 1cf0e26)
 
 Implementation:
   - stake_pubkeys.idx: Append-only binary index of stake pubkeys
-  - New pubkeys appended after each block commit (32 bytes each)
-  - On crash: index has all stake pubkeys up to last committed block
+  - Index flushed BEFORE state file update (ordering provides crash safety)
+  - On crash: if index wasn't flushed, state wasn't updated either, slot replayed
   - On resume: load index, do point lookups (~1M) instead of full scan (~200M)
+  - Note: Steady-state adds ~0 pubkeys/block; after bulk rebuild, first block
+    may append entire cache (deduplicated on load)
 
 Key Code:
   - pkg/global/global_ctx.go:597-740 (index load/save/append)

@@ -101,14 +101,14 @@ Mithril handles two resume scenarios:
 - `mithril_state.json` - last committed slot, epoch, blockhash
 - `stake_cache.json` - full stake cache snapshot
 - `stake_pubkeys.idx` - compacted at shutdown
-- Resume loads all three, continues from last slot
+- Resume loads state + cache, continues from last slot
 
 ### Crash Recovery - WORKING (commit 1cf0e26)
-- `stake_cache.json` may be stale (only saved on graceful shutdown)
+- `stake_cache.json` saved on: graceful shutdown, safe panic, cancel (not mid-block)
 - `stake_pubkeys.idx` - append-only binary index of 32-byte pubkeys
-- New pubkeys appended after each block commit (~0 overhead)
-- On resume: load index, do point lookups instead of full AccountsDB scan
-- Reduces 30+ minute scan to ~minutes
+- Index flushed BEFORE state file (ordering provides crash safety)
+- On resume: if cache stale/missing, load index + do point lookups
+- Reduces 30+ minute full scan to ~minutes
 
 ### Key Files
 - `pkg/global/global_ctx.go:597-740` - Index load/save/append
