@@ -1506,8 +1506,20 @@ func ReplayBlocks(
 					mlog.Log.Infof("epoch boundary: using [SNAPSHOT] schedule for epoch %d (first=%d last=%d)",
 						block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
 				} else {
-					// Need to build schedule locally - refresh EpochStakes for this
-					cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
+					// Need to build schedule locally
+					// CRITICAL: Check if EpochStakes already exists from snapshot before overwriting!
+					// The snapshot's EpochStakes(N) contains stakes computed during epoch N-2, which is
+					// correct for building epoch N's schedule. Overwriting with freshly computed stakes
+					// would cause leader schedule mismatch (the "N-2 rule" violation).
+					existingStakes := global.EpochStakes(block.Epoch)
+					if existingStakes == nil || len(existingStakes) == 0 {
+						// No snapshot stakes - use freshly computed (this is a fallback for edge cases)
+						mlog.Log.Warnf("epoch boundary: no snapshot EpochStakes for epoch %d, using freshly computed stakes (may cause mismatch!)", block.Epoch)
+						cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
+					} else {
+						mlog.Log.Infof("epoch boundary: using [SNAPSHOT] EpochStakes for epoch %d schedule (%d validators)",
+							block.Epoch, len(existingStakes))
+					}
 
 					mlog.Log.Infof("epoch boundary: building [LOCAL-COMPUTED] schedule for epoch %d (hasFirst=%v hasLast=%v)",
 						block.Epoch, hasFirstSlot, hasLastSlot)
