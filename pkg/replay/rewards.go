@@ -94,14 +94,88 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// which would cause bank hash divergence. This check catches regressions early.
 	actualRewardsCount := uint64(len(partitionedRewardsInfo.StakingRewards))
 	if partitionedRewardsInfo.EligibleCount != actualRewardsCount {
-		mlog.Log.Errorf("CRITICAL: eligible count mismatch! expected=%d actual=%d diff=%d",
-			partitionedRewardsInfo.EligibleCount, actualRewardsCount,
-			int64(partitionedRewardsInfo.EligibleCount)-int64(actualRewardsCount))
-		mlog.Log.Errorf("  This indicates the stake cache changed between partition count and rewards calculation.")
-		mlog.Log.Errorf("  epoch=%d slot=%d boundary_slot=%d stake_cache_size=%d",
-			epoch, slot, boundarySlot, global.StakeCacheSize())
-		return nil, nil, nil, fmt.Errorf("eligible count mismatch: expected %d, got %d (stake cache likely changed between passes)",
-			partitionedRewardsInfo.EligibleCount, actualRewardsCount)
+		// Option C: Log detailed diagnostics BEFORE failing
+		diff := int64(partitionedRewardsInfo.EligibleCount) - int64(actualRewardsCount)
+		mlog.Log.Errorf("================================================================================")
+		mlog.Log.Errorf("CRITICAL: ELIGIBLE COUNT MISMATCH - DIVERGENCE IMMINENT")
+		mlog.Log.Errorf("================================================================================")
+		mlog.Log.Errorf("  expected (from partition count pass): %d", partitionedRewardsInfo.EligibleCount)
+		mlog.Log.Errorf("  actual (from rewards calculation):    %d", actualRewardsCount)
+		mlog.Log.Errorf("  difference:                           %d", diff)
+		mlog.Log.Errorf("")
+		mlog.Log.Errorf("Context:")
+		mlog.Log.Errorf("  epoch=%d slot=%d boundary_slot=%d", epoch, slot, boundarySlot)
+		mlog.Log.Errorf("  stake_cache_size=%d", global.StakeCacheSize())
+		mlog.Log.Errorf("  num_partitions=%d", partitionedRewardsInfo.NumRewardPartitions)
+		mlog.Log.Errorf("")
+
+		// Build sets for comparison
+		eligibleSet := make(map[solana.PublicKey]bool)
+		for pubkey := range pointsPerStakeAcct {
+			eligibleSet[pubkey] = true
+		}
+		rewardsSet := make(map[solana.PublicKey]bool)
+		for pubkey := range partitionedRewardsInfo.StakingRewards {
+			rewardsSet[pubkey] = true
+		}
+
+		// Find accounts in eligible (pass 1) but not in rewards (pass 2)
+		var inEligibleNotRewards []solana.PublicKey
+		for pubkey := range eligibleSet {
+			if !rewardsSet[pubkey] {
+				inEligibleNotRewards = append(inEligibleNotRewards, pubkey)
+			}
+		}
+
+		// Find accounts in rewards (pass 2) but not in eligible (pass 1)
+		var inRewardsNotEligible []solana.PublicKey
+		for pubkey := range rewardsSet {
+			if !eligibleSet[pubkey] {
+				inRewardsNotEligible = append(inRewardsNotEligible, pubkey)
+			}
+		}
+
+		// Get current stake cache for lookups
+		stakeCache := global.StakeCache()
+
+		mlog.Log.Errorf("Accounts in eligible set but NOT in rewards: %d", len(inEligibleNotRewards))
+		maxSample := 10
+		for i, pubkey := range inEligibleNotRewards {
+			if i >= maxSample {
+				mlog.Log.Errorf("  ... and %d more", len(inEligibleNotRewards)-maxSample)
+				break
+			}
+			// Try to get more info about this account
+			if delegation, exists := stakeCache[pubkey]; exists {
+				mlog.Log.Errorf("  [%d] %s (stake=%d voter=%s activation=%d credits=%d)",
+					i, pubkey, delegation.StakeLamports, delegation.VoterPubkey, delegation.ActivationEpoch, delegation.CreditsObserved)
+			} else {
+				mlog.Log.Errorf("  [%d] %s (NOT IN STAKE CACHE - was it removed?)", i, pubkey)
+			}
+		}
+
+		mlog.Log.Errorf("")
+		mlog.Log.Errorf("Accounts in rewards set but NOT in eligible: %d", len(inRewardsNotEligible))
+		for i, pubkey := range inRewardsNotEligible {
+			if i >= maxSample {
+				mlog.Log.Errorf("  ... and %d more", len(inRewardsNotEligible)-maxSample)
+				break
+			}
+			if delegation, exists := stakeCache[pubkey]; exists {
+				mlog.Log.Errorf("  [%d] %s (stake=%d voter=%s activation=%d credits=%d)",
+					i, pubkey, delegation.StakeLamports, delegation.VoterPubkey, delegation.ActivationEpoch, delegation.CreditsObserved)
+			} else {
+				mlog.Log.Errorf("  [%d] %s (NOT IN STAKE CACHE)", i, pubkey)
+			}
+		}
+
+		mlog.Log.Errorf("")
+		mlog.Log.Errorf("This mismatch indicates the stake cache changed between partition count and rewards")
+		mlog.Log.Errorf("calculation. This WILL cause bank hash divergence. Failing to prevent bad state.")
+		mlog.Log.Errorf("================================================================================")
+
+		return nil, nil, nil, fmt.Errorf("eligible count mismatch: expected %d, got %d (diff=%d) - see logs above for details",
+			partitionedRewardsInfo.EligibleCount, actualRewardsCount, diff)
 	}
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,

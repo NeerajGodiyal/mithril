@@ -3,6 +3,28 @@
 This file is a lightweight entry point to the repo and how to approach changes.
 For deeper epoch-boundary logic or active issues, use the linked docs below.
 
+---
+
+## ⚠️ CRITICAL INVARIANT - NEVER VIOLATE ⚠️
+
+**Mithril MUST produce EXACTLY the same state changes as mainnet for every single block.**
+
+This is non-negotiable. Mithril is a verifying full node - its entire purpose is to independently verify that blocks are correct by reproducing the exact same state transitions.
+
+**Divergence = Broken.** There is no such thing as "acceptable" divergence or "close enough":
+- Each block must produce byte-for-byte identical account state changes
+- Each block's bank hash must match mainnet exactly
+- If Block N diverges, every subsequent block will also fail
+
+**Common sources of divergence (all catastrophic):**
+- Wrong blockhash for partition hashing → wrong accounts in each reward block
+- Wrong slot for reading vote credits → wrong reward amounts
+- Wrong epoch for stake lookups → wrong leader schedule
+
+**Before ANY change, verify:** Does this produce identical state to Agave/Firedancer at the same slot?
+
+---
+
 ## AI Guidelines (Short)
 
 - Validate behavior against **Agave** and **Firedancer**; cite file:line.
