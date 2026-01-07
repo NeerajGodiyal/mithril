@@ -432,10 +432,8 @@ func RebuildVoteCacheFromAccountsDB(
 // dumpVoteCacheRebuildErrors writes all failed vote accounts to a CSV file for debugging.
 // Includes full account data (lamports, data length, owner, first bytes of data).
 func dumpVoteCacheRebuildErrors(slot uint64, missingErrors, unmarshalErrors, zeroNodePkErrors []VoteCacheRebuildError) {
-	logsDir := config.GetString("log.dir")
-	if logsDir == "" {
-		logsDir = "/mnt/mithril-logs"
-	}
+	// Use resolveLogsDir to get the run-specific leader_schedule subdirectory
+	logsDir := resolveLogsDir("")
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		mlog.Log.Warnf("dumpVoteCacheRebuildErrors: failed to create logs dir: %v", err)
 		return
