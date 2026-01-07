@@ -204,6 +204,12 @@ type idxAndReward struct {
 	reward rpc.BlockReward
 }
 
+type idxAndRewardNew struct {
+	idx     int
+	reward  uint64
+	voterPk solana.PublicKey
+}
+
 func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var totalVotingRewards atomic.Uint64
 
@@ -261,6 +267,65 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	}
 
 	return accts, parentUpdatedAccts, totalVotingRewards.Load()
+}
+
+func DistributeVotingRewardsNew(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+	fmt.Printf("in DistributeVotingRewardsNew\n")
+	var totalVotingRewards atomic.Uint64
+
+	updatedAccts := make([]*accounts.Account, len(validatorRewards))
+	parentUpdatedAccts := make([]*accounts.Account, len(validatorRewards))
+
+	var wg sync.WaitGroup
+
+	size := runtime.GOMAXPROCS(0) * 2
+	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
+		defer wg.Done()
+
+		r := i.(idxAndRewardNew)
+		reward := r.reward
+		voterPk := r.voterPk
+		idx := r.idx
+
+		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
+		if err != nil {
+			panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", voterPk, slot))
+		}
+		parentUpdatedAccts[idx] = voteAcct.Clone()
+
+		voteAcct.Lamports, err = safemath.CheckedAddU64(voteAcct.Lamports, uint64(reward))
+		if err != nil {
+			panic(fmt.Sprintf("overflow in voting rewards distribution in slot %d to acct %s: %s", slot, voterPk, err))
+		}
+
+		updatedAccts[idx] = voteAcct
+
+		new := totalVotingRewards.Add(uint64(reward))
+		if new < uint64(reward) {
+			panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
+		}
+	})
+
+	var idx int
+	for votePk, reward := range validatorRewards {
+		r := idxAndRewardNew{idx: idx, reward: reward, voterPk: votePk}
+		wg.Add(1)
+		workerPool.Invoke(r)
+		idx++
+	}
+
+	wg.Wait()
+	workerPool.Release()
+	ants.Release()
+
+	err := acctsDb.StoreAccounts(updatedAccts, slot)
+	if err != nil {
+		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
+	}
+
+	fmt.Printf("done DistributeVotingRewardsNew\n")
+
+	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
 }
 
 type idxAndPubkey struct {
@@ -374,14 +439,18 @@ type PointValue struct {
 type CalculatedStakeRewards struct {
 	StakerRewards      uint64
 	VoterRewards       uint64
+	VoterPubkey        solana.PublicKey
 	NewCreditsObserved uint64
 }
 
-func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) (map[solana.PublicKey]*CalculatedStakeRewards, Partitions) {
+func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) (map[solana.PublicKey]*CalculatedStakeRewards, map[solana.PublicKey]uint64, Partitions) {
 	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
+	validatorRewards := make(map[solana.PublicKey]uint64, 2000)
+
 	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
 
-	var mu sync.Mutex
+	var stakeMu sync.Mutex
+	var validatorMu sync.Mutex
 	var wg sync.WaitGroup
 
 	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
@@ -402,9 +471,13 @@ func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]
 		pointsForStakeAcct := pointsPerStakeAcct[delegation.pubkey]
 		calculatedStakeRewards := CalculateStakeRewardsForAcct(delegation.pubkey, pointsForStakeAcct, delegation.delegation, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
 		if calculatedStakeRewards != nil {
-			mu.Lock()
+			stakeMu.Lock()
 			stakeInfoResults[delegation.pubkey] = calculatedStakeRewards
-			mu.Unlock()
+			stakeMu.Unlock()
+
+			validatorMu.Lock()
+			validatorRewards[voterPk] += calculatedStakeRewards.VoterRewards
+			validatorMu.Unlock()
 		}
 	})
 
@@ -439,7 +512,7 @@ func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]
 	workerPool2.Release()
 	ants.Release()
 
-	return stakeInfoResults, partitions
+	return stakeInfoResults, validatorRewards, partitions
 }
 
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
@@ -477,7 +550,8 @@ func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *Ca
 	}
 
 	result := &CalculatedStakeRewards{StakerRewards: splitResult.StakerPortion,
-		VoterRewards: splitResult.VoterPortion, NewCreditsObserved: stakePointsResult.NewCreditsObserved}
+		VoterRewards: splitResult.VoterPortion, NewCreditsObserved: stakePointsResult.NewCreditsObserved,
+		VoterPubkey: delegation.VoterPubkey}
 
 	//mlog.Log.Debugf("returning CalculatedStakeRewards for %s. %+v", stakePubkey, result)
 
@@ -488,6 +562,13 @@ type CommissionSplit struct {
 	VoterPortion  uint64
 	StakerPortion uint64
 	IsSplit       bool
+}
+
+func mulDivPercent(on uint64, pct uint64) uint64 {
+	// pct must be 0..100
+	q := on / 100
+	r := on % 100
+	return q*pct + (r*pct)/100
 }
 
 func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) CommissionSplit {
@@ -513,10 +594,8 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 		// 100% commission, all rewards go to validator
 		result.VoterPortion = rewards
 	default:
-		// TODO: refactor to use 128-bit math here
-		on := rewards
-		mine := (on * commissionRate) / 100
-		theirs := (on * (100 - commissionRate)) / 100
+		mine := mulDivPercent(rewards, commissionRate)
+		theirs := mulDivPercent(rewards, 100-commissionRate)
 
 		result.VoterPortion = mine
 		result.StakerPortion = theirs

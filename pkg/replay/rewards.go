@@ -28,7 +28,6 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 }
 
 func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, rpcc *rpcclient.RpcClient, rpcBackups []string, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account) {
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(rpcc, rpcBackups, epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
@@ -39,7 +38,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	pointsPerStakeAcct, points = rewards.CalculateStakePoints(acctsDb, slotCtx, slot, stakeHistory, newWarmupCooldownRateEpoch)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 
-	partitionedRewardsInfo.StakingRewards, partitionedRewardsInfo.RewardPartitions = rewards.CalculateStakeRewardsAndPartitions(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
+	var validatorRewards map[solana.PublicKey]uint64
+	partitionedRewardsInfo.StakingRewards, validatorRewards, partitionedRewardsInfo.RewardPartitions = rewards.CalculateStakeRewardsAndPartitions(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewardsNew(acctsDb, validatorRewards, slot)
 	partitionedRewardsInfo.NumRewardPartitions = partitionedRewardsInfo.RewardPartitions.NumPartitions()
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
