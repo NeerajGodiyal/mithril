@@ -2704,6 +2704,17 @@ func runReplayWithRecovery(
 			mlog.Log.Errorf("[run:%s] Debug files:", runID)
 			mlog.Log.Errorf("[run:%s]   Bankhash log: %s/bankhash.log", runID, accountsDbPath)
 			mlog.Log.Errorf("[run:%s]   State file:   %s/mithril_state.json", runID, accountsDbPath)
+
+			// Save stake cache on panic to avoid expensive AccountsDB scan on restart
+			// Only save if we have a valid last slot (outside commit window = safe state)
+			if !replay.IsCommitInProgress() && mithrilState != nil && mithrilState.LastSlot > 0 {
+				if err := global.SaveStakeCache(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash); err != nil {
+					mlog.Log.Errorf("[run:%s] Failed to save stake cache on panic: %v", runID, err)
+				} else {
+					mlog.Log.Infof("[run:%s] Stake cache saved on panic: %d entries at slot %d", runID, global.StakeCacheSize(), mithrilState.LastSlot)
+				}
+			}
+
 			// Re-panic to propagate the error
 			panic(r)
 		}
