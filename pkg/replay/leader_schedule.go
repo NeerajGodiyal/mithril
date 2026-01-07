@@ -81,3 +81,31 @@ func fetchLeaderScheduleWithRetry(rpcClient *rpcclient.RpcClient, maxAttempts in
 
 	return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, err)
 }
+
+// fetchLeaderScheduleForEpochWithRetry fetches leader schedule for a specific epoch with retries.
+// This is needed when validating historical epochs during catchup, since the default
+// GetLeaderSchedule returns the RPC node's current epoch schedule.
+// RPC method: getLeaderSchedule with epoch parameter
+func fetchLeaderScheduleForEpochWithRetry(rpcClient *rpcclient.RpcClient, epoch uint64, maxAttempts int) (map[solana.PublicKey][]uint64, error) {
+	var leaderMap map[solana.PublicKey][]uint64
+	var err error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		leaderMap, err = rpcClient.GetLeaderScheduleForEpoch(epoch)
+		if err == nil {
+			return leaderMap, nil
+		}
+		// Retry with exponential backoff
+		if attempt < maxAttempts-1 {
+			waitTime := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s...
+			if waitTime > 30*time.Second {
+				waitTime = 30 * time.Second
+			}
+			mlog.Log.Debugf("leader schedule fetch for epoch %d from %s failed, retrying in %v (attempt %d/%d): %v",
+				epoch, rpcClient.Endpoint(), waitTime, attempt+1, maxAttempts, err)
+			time.Sleep(waitTime)
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, err)
+}

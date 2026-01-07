@@ -1377,6 +1377,32 @@ func (voteStateVersions *VoteStateVersions) LastTimestamp() *BlockTimestamp {
 	}
 }
 
+// unknownVoteStateVersionOnce ensures we only log unknown version warning once
+var unknownVoteStateVersionOnce sync.Once
+
+// NodePubkey returns the validator identity pubkey from the vote state.
+// Returns zero pubkey if the receiver is nil or has an unknown version type.
+// Callers should count zero returns as "missing" for divergence debugging.
+func (voteStateVersions *VoteStateVersions) NodePubkey() solana.PublicKey {
+	if voteStateVersions == nil {
+		return solana.PublicKey{}
+	}
+	switch voteStateVersions.Type {
+	case VoteStateVersionV0_23_5:
+		return voteStateVersions.V0_23_5.NodePubkey
+	case VoteStateVersionV1_14_11:
+		return voteStateVersions.V1_14_11.NodePubkey
+	case VoteStateVersionCurrent:
+		return voteStateVersions.Current.NodePubkey
+	default:
+		// Log unknown version once to avoid flooding hot paths
+		unknownVoteStateVersionOnce.Do(func() {
+			fmt.Printf("WARNING: NodePubkey() encountered unknown vote state version type %d\n", voteStateVersions.Type)
+		})
+		return solana.PublicKey{} // Unknown version - count as missing
+	}
+}
+
 func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	versioned := new(VoteStateVersions)
 	decoder := bin.NewBinDecoder(data)
