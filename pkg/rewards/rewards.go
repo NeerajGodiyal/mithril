@@ -1626,6 +1626,130 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 	return stakeInfoResults
 }
 
+// CalculateStakeRewardsAndPartitions calculates stake rewards and then computes partitions
+// based on the actual number of accounts that receive rewards (matching Firedancer's approach).
+// This is the correct flow: compute partition count AFTER rewards calculation, not before.
+func CalculateStakeRewardsAndPartitions(
+	pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints,
+	slotCtx *sealevel.SlotCtx,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	slot uint64,
+	rewardedEpoch uint64,
+	pointValue PointValue,
+	newRateActivationEpoch *uint64,
+	f *features.Features,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	epoch uint64,
+) (map[solana.PublicKey]*CalculatedStakeRewards, Partitions, uint64) {
+	// First calculate rewards (same as CalculateStakeRewards)
+	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
+	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
+	var belowMinCount atomic.Uint64
+	var noVoteCount atomic.Uint64
+	var eligibleCount atomic.Uint64
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
+		defer wg.Done()
+
+		delegation := i.(*delegationAndPubkey)
+
+		if delegation.delegation.StakeLamports < minimumStakeDelegation {
+			belowMinCount.Add(1)
+			return
+		}
+
+		voterPk := delegation.delegation.VoterPubkey
+		voteStateVersioned := global.VoteCacheItem(voterPk)
+		if voteStateVersioned == nil {
+			noVoteCount.Add(1)
+			return
+		}
+		eligibleCount.Add(1)
+
+		pointsForStakeAcct := pointsPerStakeAcct[delegation.pubkey]
+		calculatedStakeRewards := CalculateStakeRewardsForAcct(delegation.pubkey, pointsForStakeAcct, delegation.delegation, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
+		if calculatedStakeRewards != nil {
+			mu.Lock()
+			stakeInfoResults[delegation.pubkey] = calculatedStakeRewards
+			mu.Unlock()
+		}
+	})
+
+	stakeCache := global.StakeCache()
+	total := uint64(len(stakeCache))
+	mlog.Log.Infof("calculating stake rewards: processing %d stake accounts", total)
+
+	var dispatched uint64
+	for pk, delegation := range stakeCache {
+		dispatched++
+		if dispatched%100000 == 0 {
+			mlog.Log.Infof("  stake rewards progress: %d/%d (%.1f%%)", dispatched, total, float64(dispatched)*100/float64(total))
+		}
+		d := &delegationAndPubkey{delegation: delegation, pubkey: pk}
+		wg.Add(1)
+		workerPool.Invoke(d)
+	}
+	wg.Wait()
+	workerPool.Release()
+	ants.Release()
+
+	mlog.Log.Infof("stake rewards calculation complete: %d accounts with rewards", len(stakeInfoResults))
+
+	// Now compute partition count based on actual reward recipients (matching Firedancer)
+	numRewardRecipients := uint64(len(stakeInfoResults))
+	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
+	numPartitions := ComputeNumRewardPartitions(epoch, slotsPerEpoch, numRewardRecipients, epochSchedule.FirstNormalEpoch)
+
+	mlog.Log.Infof("computed partition count from reward recipients: recipients=%d partitions=%d (slots_per_epoch=%d)",
+		numRewardRecipients, numPartitions, slotsPerEpoch)
+
+	// Hash reward recipients into partitions
+	partitions := NewPartitions(numPartitions)
+	var wgPartition sync.WaitGroup
+
+	type assign struct {
+		idx uint64
+		pk  solana.PublicKey
+	}
+	assigns := make(chan assign, 1<<20)
+
+	wgPartition.Add(1)
+	go func() {
+		defer wgPartition.Done()
+		for a := range assigns {
+			partitions[a.idx].pubkeys = append(partitions[a.idx].pubkeys, a.pk)
+		}
+	}()
+
+	workerPool2, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
+		defer wg.Done()
+		stakePk := i.(solana.PublicKey)
+		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numPartitions)
+		assigns <- assign{idx: idx, pk: stakePk}
+	})
+
+	for stakePk := range stakeInfoResults {
+		wg.Add(1)
+		workerPool2.Invoke(stakePk)
+	}
+
+	wg.Wait()
+	workerPool2.Release()
+	ants.Release()
+
+	close(assigns)
+	wgPartition.Wait()
+
+	mlog.Log.Debugf("rewards: stake filter counts (rewards): slot=%d epoch=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
+		slot, rewardedEpoch, minimumStakeDelegation, len(global.StakeCache()),
+		eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())
+
+	return stakeInfoResults, partitions, numPartitions
+}
+
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
 	if pointValue.Rewards == 0 || delegation.ActivationEpoch == rewardedEpoch {
 		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
@@ -1808,6 +1932,69 @@ func CalculateTotalPointsAndPartitions(
 		slot, minimum, n, eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())
 
 	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints(), partitions
+}
+
+// CalculateTotalPoints computes total stake points WITHOUT partition assignment.
+// This is used in the new flow where partition count is computed AFTER rewards calculation.
+// When maxEpoch is non-nil (recalc mode), epoch credits beyond maxEpoch are ignored.
+func CalculateTotalPoints(
+	slotCtx *sealevel.SlotCtx,
+	slot uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newWarmupCooldownRateEpoch *uint64,
+	maxEpoch *uint64,
+) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128) {
+	minimum := minimumStakeDelegation(slotCtx)
+	var belowMinCount atomic.Uint64
+	var noVoteCount atomic.Uint64
+	var eligibleCount atomic.Uint64
+
+	n := len(global.StakeCache())
+	pks := make([]solana.PublicKey, 0, n)
+	for pk := range global.StakeCache() {
+		pks = append(pks, pk)
+	}
+
+	pointsAccum := NewCalculatedStakePointsAccumulator(pks)
+
+	var wg sync.WaitGroup
+
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
+		defer wg.Done()
+
+		t := i.(*delegationAndPubkey)
+		d := t.delegation
+		if d.StakeLamports < minimum {
+			belowMinCount.Add(1)
+			return
+		}
+
+		voterPk := d.VoterPubkey
+		voteState := global.VoteCacheItem(voterPk)
+		if voteState == nil {
+			noVoteCount.Add(1)
+			return
+		}
+		eligibleCount.Add(1)
+
+		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+		pointsAccum.Add(t.pubkey, pcs)
+	})
+
+	for pk, delegation := range global.StakeCache() {
+		wg.Add(1)
+		workerPool.Invoke(&delegationAndPubkey{delegation: delegation, pubkey: pk})
+	}
+
+	wg.Wait()
+	workerPool.Release()
+	ants.Release()
+
+	mlog.Log.Debugf("rewards: stake filter counts (points): slot=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
+		slot, minimum, n, eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())
+
+	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints()
 }
 
 // calculateStakePointsAndCredits computes stake points for a single stake account.

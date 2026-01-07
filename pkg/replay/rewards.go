@@ -53,15 +53,25 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// This is the slot from which stake account state should be read for rewards calculation.
 	boundarySlot := slot - 1
 
+	// CRITICAL: Refresh stake cache credits_observed from AccountsDB BEFORE partition count calculation.
+	// The refresh removes stale entries (tombstones, unmarshal errors, etc.) from the stake cache.
+	// This MUST happen before DeterminePartitionedStakingRewardsInfoLocal to ensure the partition count
+	// is computed on the same stake cache that will be used for actual rewards calculation.
+	// This matches Firedancer's fd_stake_delegations_refresh() call in init_after_snapshot.
+	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
+	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+
 	// IMPORTANT: Validate partition count BEFORE any account writes.
 	// If validation fails, we want to exit cleanly without having modified AccountsDB.
+	// NOTE: This now uses the refreshed stake cache, ensuring consistency with rewards calculation.
 	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f, stakeHistory, newWarmupCooldownRateEpoch)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	// Set the boundary slot for use during distribution
+	// Set the boundary slot and stake snapshots for use during distribution
 	partitionedRewardsInfo.BoundarySlot = boundarySlot
+	partitionedRewardsInfo.StakeAccountSnapshots = stakeAccountSnapshots
 
 	// Now safe to distribute vote rewards since validation passed
 	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
@@ -69,16 +79,6 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
 	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
-
-	// CRITICAL: Refresh stake cache credits_observed from AccountsDB using the BOUNDARY slot.
-	// The manifest's epoch_stakes contains stake delegation entries, but credits_observed is NOT
-	// updated after rewards distribution - it only reflects the value when the stake was created
-	// or last modified. The actual stake accounts in AccountsDB have the correct values.
-	// Using boundary slot ensures we see the same state that Agave used for rewards calculation.
-	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
-	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
-	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
-	partitionedRewardsInfo.StakeAccountSnapshots = stakeAccountSnapshots
 
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
