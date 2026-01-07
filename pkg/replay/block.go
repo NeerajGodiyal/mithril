@@ -759,8 +759,9 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		}
 
 		// Use delegation data from AccountsDB, not from snapshot manifest
+		// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
 		delegation := stakeState.Stake.Stake.Delegation
-		global.PutStakeCacheItem(sa.Account,
+		global.PutStakeCacheItemBulk(sa.Account,
 			&sealevel.Delegation{
 				VoterPubkey:        delegation.VoterPubkey,
 				StakeLamports:      delegation.StakeLamports,
@@ -851,8 +852,9 @@ func BuildStakeCacheFromAccountsDB(acctsDb *accountsdb.AccountsDb) (int, error) 
 			return true // Continue scanning
 		}
 
+		// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
 		delegation := stakeState.Stake.Stake.Delegation
-		global.PutStakeCacheItem(pubkey, &sealevel.Delegation{
+		global.PutStakeCacheItemBulk(pubkey, &sealevel.Delegation{
 			VoterPubkey:        delegation.VoterPubkey,
 			StakeLamports:      delegation.StakeLamports,
 			ActivationEpoch:    delegation.ActivationEpoch,
@@ -932,7 +934,9 @@ func BuildStakeCacheFromHints(acctsDb *accountsdb.AccountsDb, hints []solana.Pub
 		}
 
 		delegation := stakeState.Stake.Stake.Delegation
-		global.PutStakeCacheItem(pubkey, &sealevel.Delegation{
+		// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
+		// (which would cause massive I/O spike on first block commit)
+		global.PutStakeCacheItemBulk(pubkey, &sealevel.Delegation{
 			VoterPubkey:        delegation.VoterPubkey,
 			StakeLamports:      delegation.StakeLamports,
 			ActivationEpoch:    delegation.ActivationEpoch,

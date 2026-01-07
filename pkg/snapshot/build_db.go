@@ -173,7 +173,8 @@ func loadStakeCacheFromManifest(manifest *SnapshotManifest) (int, bool) {
 			loaded := 0
 			for stakePubkey, stakePair := range epochStakes.Val.Stakes.StakeDelegations {
 				d := stakePair.Stake.Delegation
-				global.PutStakeCacheItem(stakePubkey, &sealevel.Delegation{
+				// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
+				global.PutStakeCacheItemBulk(stakePubkey, &sealevel.Delegation{
 					VoterPubkey:        d.VoterPubkey,
 					StakeLamports:      d.Stake,
 					ActivationEpoch:    d.ActivationEpoch,

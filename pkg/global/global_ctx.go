@@ -110,6 +110,22 @@ func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation)
 	instance.stakeCacheSlots[pubkey] = ^uint64(0)
 }
 
+// PutStakeCacheItemBulk adds a stake cache entry during bulk population.
+// Does NOT track new pubkeys (avoids enqueuing entire cache on rebuild).
+// Use this when loading cache from hints, snapshot, or AccountsDB scan.
+func PutStakeCacheItemBulk(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+	instance.stakeCache[pubkey] = delegation
+	instance.stakeCacheSlots[pubkey] = ^uint64(0)
+}
+
 // PutStakeCacheItemWithSlot adds or updates a stake cache entry with slot tracking.
 // Only updates if slot >= existing slot (latest wins). Use during parallel snapshot loading.
 func PutStakeCacheItemWithSlot(pubkey solana.PublicKey, delegation *sealevel.Delegation, slot uint64) {
@@ -597,10 +613,11 @@ func StakeCacheSize() int {
 // FlushPendingStakePubkeys appends any new stake pubkeys to the index file.
 // Call this after each block commit to persist new stake accounts.
 // Returns the number of pubkeys appended, or error if append failed.
+// IMPORTANT: Only clears the pending list after successful write to avoid data loss.
 func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	instance.stakeCacheMutex.Lock()
 	pending := instance.pendingNewStakePubkeys
-	instance.pendingNewStakePubkeys = nil // Clear pending list
+	// Don't clear yet - only clear after successful write
 	instance.stakeCacheMutex.Unlock()
 
 	if len(pending) == 0 {
@@ -614,14 +631,29 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to open stake pubkey index for append: %w", err)
 	}
-	defer f.Close()
 
 	// Write each pubkey as raw 32 bytes
 	for _, pubkey := range pending {
 		if _, err := f.Write(pubkey[:]); err != nil {
+			f.Close()
 			return 0, fmt.Errorf("failed to append pubkey to index: %w", err)
 		}
 	}
+
+	// Sync to ensure data is on disk before clearing pending list
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return 0, fmt.Errorf("failed to sync stake pubkey index: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close stake pubkey index: %w", err)
+	}
+
+	// Only clear pending list after successful write+sync+close
+	instance.stakeCacheMutex.Lock()
+	instance.pendingNewStakePubkeys = nil
+	instance.stakeCacheMutex.Unlock()
 
 	return len(pending), nil
 }
