@@ -2010,6 +2010,7 @@ func ValidateLeaderScheduleAgainstRPC(
 	}
 
 	// Fetch RPC schedule synchronously
+	mlog.Log.FileOnlyf("  [RPC FETCH] epoch=%d endpoint=%s backups=%d", epoch, rpcClient.Endpoint(), len(backupEndpoints))
 	rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(epoch, epochSchedule, rpcClient, backupEndpoints)
 
 	var rpcHash string
@@ -2018,9 +2019,11 @@ func ValidateLeaderScheduleAgainstRPC(
 	if rpcErr != nil {
 		rpcHash = "RPC_FETCH_FAILED"
 		matched = false
+		mlog.Log.Warnf("  [RPC FETCH] FAILED: epoch=%d error=%v", epoch, rpcErr)
 		mlog.Log.Warnf("leader schedule validation: epoch=%d [LOCAL] hash=%s vs [RPC] hash=%s (error: %v)",
 			epoch, localHash, rpcHash, rpcErr)
 	} else {
+		mlog.Log.FileOnlyf("  [RPC FETCH] SUCCESS: epoch=%d", epoch)
 		rpcHash = scheduleFullHash(rpcSchedule, firstSlot, numSlots)
 		matched = localHash == rpcHash
 
