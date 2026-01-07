@@ -1501,10 +1501,23 @@ func ReplayBlocks(
 				_, hasFirstSlot := global.LeaderForSlot(firstSlotInEpoch)
 				_, hasLastSlot := global.LeaderForSlot(lastSlotInEpoch)
 
+				var localSummary *ScheduleSummary
 				if hasFirstSlot && hasLastSlot {
 					// Schedule exists and appears complete - keep snapshot schedule
 					mlog.Log.Infof("epoch boundary: using [SNAPSHOT] schedule for epoch %d (first=%d last=%d)",
 						block.Epoch, firstSlotInEpoch, lastSlotInEpoch)
+					// Build summary for RPC validation (schedule already exists, just need metadata)
+					localSchedule := global.LeaderSchedule()
+					localHash := scheduleFullHash(localSchedule, firstSlotInEpoch, numSlots)
+					localSummary = &ScheduleSummary{
+						BlockEpoch:    block.Epoch,
+						ScheduleEpoch: block.Epoch,
+						FirstSlot:     firstSlotInEpoch,
+						SlotsInEpoch:  numSlots,
+						LocalHash:     localHash,
+						Source:        "snapshot",
+						Timestamp:     time.Now().UTC(),
+					}
 				} else {
 					// Need to build schedule locally
 					// CRITICAL: Check if EpochStakes already exists from snapshot before overwriting!
@@ -1524,13 +1537,18 @@ func ReplayBlocks(
 					mlog.Log.Infof("epoch boundary: building [LOCAL-COMPUTED] schedule for epoch %d (hasFirst=%v hasLast=%v)",
 						block.Epoch, hasFirstSlot, hasLastSlot)
 
-					_, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
+					var err error
+					localSummary, err = PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
 					if err != nil {
 						mlog.Log.Errorf("FATAL: failed to build [LOCAL-COMPUTED] leader schedule at epoch boundary: %v", err)
 						result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
 						break
 					}
 				}
+
+				// RPC validation for the new epoch's schedule (writes validation file)
+				localSchedule := global.LeaderSchedule()
+				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 
 				// Set block.Leader for this block (was deferred in configureBlock)
 				var exists bool
