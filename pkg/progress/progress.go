@@ -323,9 +323,11 @@ func (d *DualProgress) Start() {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
 
-	// Print initial empty lines for progress bars (2 bars)
-	fmt.Fprintln(d.output)
-	fmt.Fprintln(d.output)
+	// Print initial progress bars (will be overwritten by updateLoop)
+	downloadLine := d.Download.Render(d.useColor)
+	extractLine := d.Extract.Render(d.useColor)
+	fmt.Fprintln(d.output, downloadLine)
+	fmt.Fprintln(d.output, extractLine)
 
 	go d.updateLoop()
 }
