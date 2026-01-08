@@ -1699,6 +1699,15 @@ func ReplayBlocks(
 				// Fetch RPC vote accounts for comparison (current state - won't be historical)
 				// This helps verify we have the same validators visible
 				go func() {
+					// Get RPC's current slot for context
+					epochInfo, epochErr := rpcc.GetEpochInfo()
+					var rpcSlot uint64
+					var rpcEpoch uint64
+					if epochErr == nil && epochInfo != nil {
+						rpcSlot = epochInfo.AbsoluteSlot
+						rpcEpoch = epochInfo.Epoch
+					}
+
 					rpcVoteAccts, err := rpcc.GetVoteAccounts()
 					if err != nil {
 						mlog.Log.FileOnlyf("  [RPC COMPARE] GetVoteAccounts failed: %v", err)
@@ -1712,9 +1721,11 @@ func ReplayBlocks(
 					for _, v := range rpcVoteAccts.Delinquent {
 						totalRpcStake += v.ActivatedStake
 					}
-					mlog.Log.Infof("  [RPC COMPARE] vote_accounts: rpc_current=%d rpc_delinquent=%d rpc_total=%d rpc_stake=%d",
+					mlog.Log.Infof("  [RPC COMPARE] vote_accounts (RPC at slot=%d epoch=%d, UNANCHORED):", rpcSlot, rpcEpoch)
+					mlog.Log.Infof("                rpc_current=%d rpc_delinquent=%d rpc_total=%d rpc_stake=%d",
 						len(rpcVoteAccts.Current), len(rpcVoteAccts.Delinquent), totalRpcVoteAccts, totalRpcStake)
-					mlog.Log.Infof("  [RPC COMPARE] vote_accounts: local_vote_accts=%d local_total_stake=%d",
+					mlog.Log.Infof("  [RPC COMPARE] local (boundary slot=%d epoch=%d):", block.Slot-1, block.Epoch-1)
+					mlog.Log.Infof("                local_vote_accts=%d local_total_stake=%d",
 						len(block.VoteAccts), block.TotalEpochStake)
 				}()
 
