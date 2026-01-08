@@ -215,11 +215,15 @@ func DeleteStakeCacheItemsBatch(entries []StakeCacheTombstoneEntry) int {
 	for _, entry := range entries {
 		existingSlot, exists := instance.stakeCacheSlots[entry.Pubkey]
 		if !exists || entry.Slot >= existingSlot {
+			// Check if entry actually exists in stakeCache before counting as deleted
+			_, wasInCache := instance.stakeCache[entry.Pubkey]
 			// Delete from stakeCache but KEEP the slot in stakeCacheSlots
 			// This blocks older entries from re-inserting after a tombstone
 			delete(instance.stakeCache, entry.Pubkey)
 			instance.stakeCacheSlots[entry.Pubkey] = entry.Slot
-			deleted++
+			if wasInCache {
+				deleted++
+			}
 		}
 	}
 	return deleted
