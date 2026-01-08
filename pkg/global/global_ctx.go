@@ -183,6 +183,36 @@ func DeleteStakeCacheItem(pubkey solana.PublicKey) {
 	delete(instance.stakeCacheSlots, pubkey)
 }
 
+// StakeCacheTombstoneEntry represents a stake account that was closed (lamports=0).
+// Used during incremental snapshot processing to remove stale entries from the stake cache.
+type StakeCacheTombstoneEntry struct {
+	Pubkey solana.PublicKey
+	Slot   uint64
+}
+
+// DeleteStakeCacheItemsBatch removes multiple stake cache entries under a single lock.
+// Only deletes if tombstone slot >= existing entry slot (latest wins).
+// This is used during incremental snapshot processing to handle closed stake accounts.
+// Returns the number of entries actually deleted.
+func DeleteStakeCacheItemsBatch(entries []StakeCacheTombstoneEntry) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+
+	deleted := 0
+	for _, entry := range entries {
+		existingSlot, exists := instance.stakeCacheSlots[entry.Pubkey]
+		if exists && entry.Slot >= existingSlot {
+			delete(instance.stakeCache, entry.Pubkey)
+			delete(instance.stakeCacheSlots, entry.Pubkey)
+			deleted++
+		}
+	}
+	return deleted
+}
+
 func PutEpochAuthorizedVoter(voteAcct solana.PublicKey, authorizedVoter solana.PublicKey) {
 	if instance.epochAuthorizedVoters == nil {
 		instance.epochAuthorizedVoters = epochstakes.NewEpochAuthorizedVotersCache()

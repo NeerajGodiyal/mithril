@@ -149,15 +149,22 @@ func unmarshalAcctFromAppendVecAcctHeader(buf io.Reader) (*accounts.Account, err
 }
 
 // StakeAccountEntry holds the extracted stake account data for cache population.
+// IsTombstone is true when the account exists in the appendvec but has lamports=0,
+// indicating the account was closed and should be removed from the stake cache.
 type StakeAccountEntry struct {
-	Pubkey  solana.PublicKey
-	Data    []byte
-	Lamports uint64
+	Pubkey      solana.PublicKey
+	Data        []byte
+	Lamports    uint64
+	IsTombstone bool
 }
 
 // ExtractStakeAccountsFromAppendVec extracts all stake accounts from an appendvec buffer.
 // It checks the owner field (offset 64-96) against the stake program address and
 // returns only accounts owned by the stake program.
+//
+// Returns both active stake accounts (lamports > 0) and tombstones (lamports == 0).
+// Tombstones are needed to properly handle incremental snapshots where a stake account
+// was closed - without tombstones, the stake cache would retain stale entries.
 func ExtractStakeAccountsFromAppendVec(data []byte, fileSize uint64, stakeProgram solana.PublicKey) []StakeAccountEntry {
 	var result []StakeAccountEntry
 	offset := uint64(0)
@@ -169,13 +176,14 @@ func ExtractStakeAccountsFromAppendVec(data []byte, fileSize uint64, stakeProgra
 		owner := solana.PublicKeyFromBytes(data[offset+ownerOffset : offset+ownerOffset+32])
 
 		if owner == stakeProgram {
-			// Extract lamports and check if non-zero
-			lamports := binary.LittleEndian.Uint64(data[offset+lamportsOffset : offset+lamportsOffset+8])
-			if lamports > 0 {
-				// Extract pubkey
-				pubkey := solana.PublicKeyFromBytes(data[offset+pubkeyOffset : offset+pubkeyOffset+32])
+			// Extract pubkey first (needed for both active accounts and tombstones)
+			pubkey := solana.PublicKeyFromBytes(data[offset+pubkeyOffset : offset+pubkeyOffset+32])
 
-				// Calculate data start position (after header)
+			// Extract lamports to determine if this is an active account or tombstone
+			lamports := binary.LittleEndian.Uint64(data[offset+lamportsOffset : offset+lamportsOffset+8])
+
+			if lamports > 0 {
+				// Active stake account - extract full data
 				dataStart := offset + hdrLen
 				dataEnd := dataStart + dataLen
 
@@ -185,11 +193,21 @@ func ExtractStakeAccountsFromAppendVec(data []byte, fileSize uint64, stakeProgra
 					copy(accountData, data[dataStart:dataEnd])
 
 					result = append(result, StakeAccountEntry{
-						Pubkey:   pubkey,
-						Data:     accountData,
-						Lamports: lamports,
+						Pubkey:      pubkey,
+						Data:        accountData,
+						Lamports:    lamports,
+						IsTombstone: false,
 					})
 				}
+			} else {
+				// Tombstone - stake account was closed (lamports == 0)
+				// No data needed, just the pubkey to remove from cache
+				result = append(result, StakeAccountEntry{
+					Pubkey:      pubkey,
+					Data:        nil,
+					Lamports:    0,
+					IsTombstone: true,
+				})
 			}
 		}
 

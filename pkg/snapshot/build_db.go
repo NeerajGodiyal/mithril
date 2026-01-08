@@ -516,11 +516,23 @@ func initWorkerPools(
 
 		// Extract stake accounts from appendvec and populate cache with correct credits_observed.
 		// This uses data we've already read (zero extra I/O) and gives us accurate stake state.
+		// Also handles tombstones (lamports=0) to remove closed stake accounts from cache.
 		stakeProgramAddr := solana.PublicKeyFromBytes(a.StakeProgramAddr[:])
 		stakeEntries := accountsdb.ExtractStakeAccountsFromAppendVec(task.Data, task.FileSize, stakeProgramAddr)
 		if len(stakeEntries) > 0 {
 			batchEntries := make([]global.StakeCacheBatchEntry, 0, len(stakeEntries))
+			var tombstoneEntries []global.StakeCacheTombstoneEntry
+
 			for _, entry := range stakeEntries {
+				// Handle tombstones (closed stake accounts)
+				if entry.IsTombstone {
+					tombstoneEntries = append(tombstoneEntries, global.StakeCacheTombstoneEntry{
+						Pubkey: entry.Pubkey,
+						Slot:   task.Slot,
+					})
+					continue
+				}
+
 				// Decode stake state to get delegation info
 				decoder := bin.NewBinDecoder(entry.Data)
 				var stakeState sealevel.StakeStateV2
@@ -546,6 +558,9 @@ func initWorkerPools(
 			}
 			if len(batchEntries) > 0 {
 				global.PutStakeCacheItemsBatch(batchEntries)
+			}
+			if len(tombstoneEntries) > 0 {
+				global.DeleteStakeCacheItemsBatch(tombstoneEntries)
 			}
 		}
 
