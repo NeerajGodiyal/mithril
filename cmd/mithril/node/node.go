@@ -1148,11 +1148,11 @@ func runLive(c *cobra.Command, args []string) {
 		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
 	}
 
-	// Handle explicit --snapshot flag (bypasses all auto-discovery)
+	// Handle explicit --snapshot flag (bypasses all auto-discovery, does NOT delete snapshot files)
 	if snapshotArchivePath != "" {
 		mlog.Log.Infof("using explicit snapshot file: %s", snapshotArchivePath)
 
-		// Parse full snapshot slot from filename
+		// Parse full snapshot slot from filename for validation
 		fullSnapshotSlot := parseSlotFromSnapshotName(filepath.Base(snapshotArchivePath))
 		if fullSnapshotSlot == 0 {
 			klog.Fatalf("could not parse slot from snapshot filename: %s", snapshotArchivePath)
@@ -1173,15 +1173,13 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Infof("incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
 		}
 
-		if accountsPath != "" {
-			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
-			snapshot.CleanAccountsDbDir(accountsPath)
-		}
-		// Build directly from the specified files
+		// Build directly from the specified files (BuildAccountsDb handles AccountsDB cleanup internally)
+		// NOTE: We do NOT clean snapshot files in explicit mode - user wants to keep their explicit snapshots
 		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
+
 		// Write state file
 		var snapshotEpoch uint64
 		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
@@ -2170,6 +2168,46 @@ func findMatchingIncremental(snapshotDir string, baseSlot uint64) *snapshotInfo 
 		}
 	}
 	return best
+}
+
+// parseSlotsFromIncrementalName extracts both base and end slots from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
+func parseSlotsFromIncrementalName(name string) (baseSlot, endSlot uint64) {
+	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
+	if len(name) <= 29 {
+		return 0, 0
+	}
+	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
+
+	// Find first dash (after baseSlot)
+	firstDash := -1
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '-' {
+			firstDash = i
+			break
+		}
+	}
+	if firstDash == -1 {
+		return 0, 0
+	}
+
+	// Parse base slot
+	base, err := strconv.ParseUint(trimmed[:firstDash], 10, 64)
+	if err != nil {
+		return 0, 0
+	}
+
+	// Find second dash (after endSlot)
+	remaining := trimmed[firstDash+1:]
+	for i := 0; i < len(remaining); i++ {
+		if remaining[i] == '-' {
+			end, err := strconv.ParseUint(remaining[:i], 10, 64)
+			if err != nil {
+				return base, 0
+			}
+			return base, end
+		}
+	}
+	return base, 0
 }
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
