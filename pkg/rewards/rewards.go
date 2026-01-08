@@ -131,14 +131,22 @@ const (
 //	manifest is partially incomplete: all of the expected keys are there, but the values are not.
 //	Notably, the credits_observed field is not available until all of the accounts are loaded
 //	into the database."
+// refreshTask holds data for a single stake cache refresh worker task
+type refreshTask struct {
+	pubkey     solana.PublicKey
+	delegation *sealevel.Delegation
+}
+
 // RefreshStakeCacheCreditsObserved refreshes credits_observed from AccountsDB and returns
 // a snapshot of all valid stake accounts for use during distribution.
 // The returned map contains clones of stake accounts that can be used instead of re-reading
 // from AccountsDB, which is critical because GetAccount ignores the slot parameter.
+//
+// This function is parallelized to improve performance on large stake caches (~1M accounts).
 func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint64) (refreshed int, errors int, snapshots map[solana.PublicKey]*accounts.Account) {
 	stakeCache := global.StakeCache()
 	total := len(stakeCache)
-	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB (slot=%d): %d accounts", slot, total)
+	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB (slot=%d): %d accounts (parallelized)", slot, total)
 
 	// Calculate BEFORE totals
 	var beforeTotalStake uint64
@@ -154,87 +162,112 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 	mlog.Log.Infof("  BEFORE refresh: stake=%.2f SOL, total_credits=%d, vote_accounts=%d",
 		float64(beforeTotalStake)/1e9, beforeTotalCredits, len(beforeVoteAccts))
 
-	var refreshedCount, errorCount int
-	var tombstoneCount, notFoundCount, unmarshalErrCount, notStakeCount int
-	var processed int
+	// Atomic counters for thread-safe stats
+	var refreshedCount atomic.Uint64
+	var errorCount atomic.Uint64
+	var tombstoneCount atomic.Uint64
+	var notFoundCount atomic.Uint64
+	var unmarshalErrCount atomic.Uint64
+	var notStakeCount atomic.Uint64
+	var processed atomic.Uint64
 
-	// Pre-allocate the snapshots map
+	// Pre-allocate the snapshots map with mutex protection
 	snapshots = make(map[solana.PublicKey]*accounts.Account, total)
+	var snapshotsMu sync.Mutex
 
-	for pubkey, delegation := range stakeCache {
-		processed++
-		if processed%100000 == 0 {
-			mlog.Log.Infof("  refresh progress: %d/%d (%.1f%%)", processed, total, float64(processed)*100/float64(total))
+	var wg sync.WaitGroup
+
+	// Use same worker pool sizing as other parallelized functions
+	poolSize := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(poolSize, func(i interface{}) {
+		defer wg.Done()
+
+		task := i.(*refreshTask)
+		pubkey := task.pubkey
+		delegation := task.delegation
+
+		// Progress logging (safe with atomic)
+		p := processed.Add(1)
+		if p%100000 == 0 {
+			mlog.Log.Infof("  refresh progress: %d/%d (%.1f%%)", p, total, float64(p)*100/float64(total))
 		}
 
 		// Read the actual stake account from AccountsDB
 		// NOTE: GetAccount currently ignores the slot parameter and returns current state.
-		// This means if an account was valid at boundarySlot but closed afterward,
-		// we'll incorrectly see it as closed/tombstone here.
 		stakeAcct, err := acctsDb.GetAccount(slot, pubkey)
 		if err != nil {
 			// Account not found in AccountsDB - remove from cache
 			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_found err=%v",
 				slot, pubkey.String(), err)
 			global.DeleteStakeCacheItem(pubkey)
-			notFoundCount++
-			errorCount++
-			continue
+			notFoundCount.Add(1)
+			errorCount.Add(1)
+			return
 		}
 
 		// Check for tombstone: account exists but has 0 lamports and empty/minimal data
-		// This indicates the account was closed (withdrawn to 0)
 		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
 			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=tombstone lamports=0 data_len=0",
 				slot, pubkey.String())
 			global.DeleteStakeCacheItem(pubkey)
-			tombstoneCount++
-			errorCount++
-			continue
+			tombstoneCount.Add(1)
+			errorCount.Add(1)
+			return
 		}
 
 		// Decode the stake state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			// Unmarshal failed - could be corrupted data or wrong format
-			// Remove from cache to avoid issues during rewards
 			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=unmarshal_error lamports=%d data_len=%d err=%v",
 				slot, pubkey.String(), stakeAcct.Lamports, len(stakeAcct.Data), err)
 			global.DeleteStakeCacheItem(pubkey)
-			unmarshalErrCount++
-			errorCount++
-			continue
+			unmarshalErrCount.Add(1)
+			errorCount.Add(1)
+			return
 		}
 
 		// Only update if it's a Stake state (not Initialized or Uninitialized)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			// Remove non-stake accounts from cache
 			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_stake_state status=%d lamports=%d",
 				slot, pubkey.String(), stakeState.Status, stakeAcct.Lamports)
 			global.DeleteStakeCacheItem(pubkey)
-			notStakeCount++
-			errorCount++
-			continue
+			notStakeCount.Add(1)
+			errorCount.Add(1)
+			return
 		}
 
 		// Update CreditsObserved from the actual stake account
+		// Safe: each worker handles a unique pubkey, so no contention on delegation
 		oldCredits := delegation.CreditsObserved
 		newCredits := stakeState.Stake.Stake.CreditsObserved
 
 		if oldCredits != newCredits {
 			delegation.CreditsObserved = newCredits
-			refreshedCount++
+			refreshedCount.Add(1)
 		}
 
 		// Store a clone of the stake account for use during distribution
-		// This ensures we use the exact same state that was used for rewards calculation,
-		// avoiding issues with GetAccount returning different state later
+		// Must use mutex since multiple workers write to the same map
+		snapshotsMu.Lock()
 		snapshots[pubkey] = stakeAcct.Clone()
+		snapshotsMu.Unlock()
+	})
+	defer workerPool.Release()
+
+	// Submit all tasks to the worker pool
+	for pubkey, delegation := range stakeCache {
+		wg.Add(1)
+		task := &refreshTask{pubkey: pubkey, delegation: delegation}
+		_ = workerPool.Invoke(task)
 	}
 
-	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed, %d snapshots captured", refreshedCount, errorCount, len(snapshots))
+	// Wait for all workers to complete
+	wg.Wait()
+
+	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed, %d snapshots captured",
+		refreshedCount.Load(), errorCount.Load(), len(snapshots))
 	mlog.Log.Infof("  breakdown: not_found=%d tombstone=%d unmarshal_err=%d not_stake=%d",
-		notFoundCount, tombstoneCount, unmarshalErrCount, notStakeCount)
+		notFoundCount.Load(), tombstoneCount.Load(), unmarshalErrCount.Load(), notStakeCount.Load())
 
 	// Calculate AFTER totals
 	afterStakeCache := global.StakeCache()
@@ -255,7 +288,7 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 		int64(afterTotalCredits)-int64(beforeTotalCredits),
 		len(afterVoteAccts)-len(beforeVoteAccts))
 
-	return refreshedCount, errorCount, snapshots
+	return int(refreshedCount.Load()), int(errorCount.Load()), snapshots
 }
 
 // ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
