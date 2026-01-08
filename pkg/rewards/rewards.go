@@ -1452,31 +1452,73 @@ func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]
 // If stakingRewards is provided and there's a mismatch, logs per-vote-pubkey summary
 // with commission, voter_rewards_sum, staker_rewards_sum, and stake_accounts_count.
 func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpcRewards []rpc.BlockReward, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards) {
-	// Build RPC vote rewards map
+	// Build RPC vote rewards map and staking rewards total
 	rpcVoteRewards := make(map[solana.PublicKey]uint64)
-	var rpcTotal uint64
+	var rpcVoteTotal uint64
 	var rpcVoteCount int
+	var rpcStakingTotal uint64
+	var rpcStakingCount int
 	for _, reward := range rpcRewards {
-		if string(reward.RewardType) == RewardTypeVoting && reward.Lamports > 0 {
-			rpcVoteRewards[reward.Pubkey] = uint64(reward.Lamports)
-			rpcTotal += uint64(reward.Lamports)
-			rpcVoteCount++
+		if reward.Lamports > 0 {
+			if string(reward.RewardType) == RewardTypeVoting {
+				rpcVoteRewards[reward.Pubkey] = uint64(reward.Lamports)
+				rpcVoteTotal += uint64(reward.Lamports)
+				rpcVoteCount++
+			} else if string(reward.RewardType) == RewardTypeStaking {
+				rpcStakingTotal += uint64(reward.Lamports)
+				rpcStakingCount++
+			}
 		}
 	}
 
-	// Calculate local total
-	var localTotal uint64
+	// Calculate local vote total
+	var localVoteTotal uint64
 	for _, reward := range localVoteRewards {
-		localTotal += reward
+		localVoteTotal += reward
 	}
 
-	// Header
+	// Calculate local staking totals (voter portion + staker portion from stakingRewards)
+	var localStakerTotal uint64
+	var localVoterFromStaking uint64
+	if stakingRewards != nil {
+		for _, sr := range stakingRewards {
+			if sr != nil {
+				localStakerTotal += sr.StakerRewards
+				localVoterFromStaking += sr.VoterRewards
+			}
+		}
+	}
+
+	// Header with both Vote and Staking totals
 	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("VOTE REWARDS COMPARISON: [LOCAL] vs [RPC]")
+	mlog.Log.Infof("EPOCH REWARDS TOTALS COMPARISON: [LOCAL] vs [RPC]")
 	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("  [LOCAL] Total: %d lamports across %d vote accounts", localTotal, len(localVoteRewards))
-	mlog.Log.Infof("  [RPC]   Total: %d lamports across %d vote accounts", rpcTotal, rpcVoteCount)
-	mlog.Log.Infof("  DIFF (LOCAL - RPC): %d lamports", int64(localTotal)-int64(rpcTotal))
+	mlog.Log.Infof("")
+	mlog.Log.Infof("VOTE REWARDS (commission portion to validators):")
+	mlog.Log.Infof("  [LOCAL] Vote Total: %d lamports across %d vote accounts", localVoteTotal, len(localVoteRewards))
+	mlog.Log.Infof("  [RPC]   Vote Total: %d lamports across %d vote accounts", rpcVoteTotal, rpcVoteCount)
+	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localVoteTotal)-int64(rpcVoteTotal))
+	mlog.Log.Infof("")
+	mlog.Log.Infof("STAKING REWARDS (delegator portion to stake accounts):")
+	mlog.Log.Infof("  [LOCAL] Staking Total: %d lamports across %d stake accounts", localStakerTotal, len(stakingRewards))
+	mlog.Log.Infof("  [RPC]   Staking Total: %d lamports across %d stake accounts", rpcStakingTotal, rpcStakingCount)
+	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localStakerTotal)-int64(rpcStakingTotal))
+	mlog.Log.Infof("")
+	mlog.Log.Infof("COMBINED TOTALS (vote + staking):")
+	localCombined := localVoteTotal + localStakerTotal
+	rpcCombined := rpcVoteTotal + rpcStakingTotal
+	mlog.Log.Infof("  [LOCAL] Combined: %d lamports", localCombined)
+	mlog.Log.Infof("  [RPC]   Combined: %d lamports", rpcCombined)
+	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localCombined)-int64(rpcCombined))
+	mlog.Log.Infof("")
+	mlog.Log.Infof("SANITY CHECK (local voter from staking vs local vote rewards):")
+	mlog.Log.Infof("  Voter rewards from stakingRewards map: %d lamports", localVoterFromStaking)
+	mlog.Log.Infof("  Voter rewards from localVoteRewards map: %d lamports", localVoteTotal)
+	if localVoterFromStaking != localVoteTotal {
+		mlog.Log.Warnf("  MISMATCH: These should be equal! Diff=%+d", int64(localVoterFromStaking)-int64(localVoteTotal))
+	} else {
+		mlog.Log.Infof("  OK: Values match")
+	}
 	mlog.Log.Infof("")
 
 	// Find accounts only in local
@@ -1646,11 +1688,11 @@ func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpc
 	mlog.Log.Infof("")
 
 	// Summary
-	hasMismatch := localTotal != rpcTotal || len(localOnlyAccounts) > 0 || len(rpcOnlyAccounts) > 0 || len(mismatches) > 0
+	hasMismatch := localVoteTotal != rpcVoteTotal || len(localOnlyAccounts) > 0 || len(rpcOnlyAccounts) > 0 || len(mismatches) > 0
 	if !hasMismatch {
 		mlog.Log.Infof("RESULT: MATCH - [LOCAL] vote rewards identical to [RPC]")
 	} else {
-		mlog.Log.Warnf("RESULT: MISMATCH - [LOCAL] differs from [RPC] by %d lamports", int64(localTotal)-int64(rpcTotal))
+		mlog.Log.Warnf("RESULT: MISMATCH - [LOCAL] differs from [RPC] by %d lamports", int64(localVoteTotal)-int64(rpcVoteTotal))
 
 		// On mismatch, log per-vote-pubkey commission summary if stakingRewards provided
 		if stakingRewards != nil && len(stakingRewards) > 0 {
