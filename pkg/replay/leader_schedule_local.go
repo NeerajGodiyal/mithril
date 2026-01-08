@@ -724,9 +724,9 @@ type ScheduleSummary struct {
 	Repeat        uint64
 
 	// Stake info
-	TotalInputStake    uint64 // Total stake from EpochStakes (before filtering)
-	FilteredStake      uint64 // Stake used in schedule (after filtering)
-	MissingStake       uint64 // Stake skipped due to missing data
+	TotalInputStake     uint64 // Total stake from EpochStakes (before filtering)
+	FilteredStake       uint64 // Stake used in schedule (after filtering)
+	MissingStake        uint64 // Stake skipped due to missing data
 	MissingStakePercent float64
 
 	// Validator counts
@@ -810,12 +810,12 @@ type ValidationStats struct {
 	MinStake                    uint64
 	MaxStake                    uint64
 	ValidatorCount              int // Validators with non-zero stake and valid NodePubkey
-	MismatchCount int
-	Capped        bool
-	TopStakes     []StakeEntry // Top 10 by stake
-	BottomStakes                []StakeEntry    // Bottom 10 by stake
-	MissingVoteAccts            []StakeEntry    // First few missing vote accounts (for debugging)
-	ZeroNodePkAccts             []StakeEntry    // First few zero NodePubkey accounts
+	MismatchCount               int
+	Capped                      bool
+	TopStakes                   []StakeEntry // Top 10 by stake
+	BottomStakes                []StakeEntry // Bottom 10 by stake
+	MissingVoteAccts            []StakeEntry // First few missing vote accounts (for debugging)
+	ZeroNodePkAccts             []StakeEntry // First few zero NodePubkey accounts
 }
 
 // logScheduleBuildSummary logs a comprehensive summary of the schedule build.

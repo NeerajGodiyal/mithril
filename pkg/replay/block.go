@@ -22,7 +22,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
-	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
@@ -722,40 +721,15 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		logsDir := config.GetString("log.dir")
-		if logsDir == "" {
-			logsDir = "/mnt/mithril-logs"
-		}
-
-		// Build leader schedule from local state (source of truth)
-		localSummary, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir)
+		_, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, "")
 		if err != nil {
-			return fmt.Errorf("failed to build leader schedule: %w", err)
+			panic(err)
 		}
-
-		// Background RPC validation - always runs for debugging
-		localSchedule := global.LeaderSchedule()
-		go func() {
-			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-			if rpcErr != nil {
-				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-				return
-			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-		}()
 
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			// Log schedule context for debugging
-			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
-			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-			lastSlot := firstSlot + numSlots - 1
-			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
-			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
-				block.Slot, block.Epoch, firstSlot, lastSlot)
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -800,27 +774,17 @@ func configureBlock(block *b.Block,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		// NOTE: At epoch boundary, schedule building is deferred to AFTER handleEpochTransition
-		// runs in the main loop. This ensures we have the correct stakes for the new epoch.
-		// The schedule is built and block.Leader is set in the epoch boundary handling code.
+		// if we've crossed an epoch boundary, fetch the new leader schedule
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			// Epoch boundary - schedule will be built after handleEpochTransition
-			// Don't look up leader here; it will be set after schedule is built
-			return nil
+			_, err := PrepareLeaderScheduleLocalFromVoteCache(epochSchedule.GetEpoch(block.Slot), epochSchedule, "")
+			if err != nil {
+				panic(err)
+			}
 		}
-		// Same epoch - use existing schedule
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			// Log schedule context for debugging
-			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
-			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-			lastSlot := firstSlot + numSlots - 1
-			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
-			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
-				block.Slot, block.Epoch, firstSlot, lastSlot)
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -863,40 +827,14 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Handle leader schedule
 	if global.ManageLeaderSchedule() {
-		logsDir := config.GetString("log.dir")
-		if logsDir == "" {
-			logsDir = "/mnt/mithril-logs"
-		}
-
-		// Build leader schedule from local state (source of truth)
-		localSummary, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, logsDir)
+		_, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, "")
 		if err != nil {
-			return fmt.Errorf("failed to build leader schedule: %w", err)
+			panic(err)
 		}
-
-		// Background RPC validation - always runs for debugging
-		localSchedule := global.LeaderSchedule()
-		go func() {
-			rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints)
-			if rpcErr != nil {
-				mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-				return
-			}
-			BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-		}()
-
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
-			// Log schedule context for debugging
-			firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
-			numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-			lastSlot := firstSlot + numSlots - 1
-			hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
-			mlog.Log.Errorf("LeaderForSlot failed: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-				block.Slot, block.Epoch, firstSlot, lastSlot, hash)
-			return fmt.Errorf("unable to find leader for slot %d (epoch=%d range=[%d,%d])",
-				block.Slot, block.Epoch, firstSlot, lastSlot)
+			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
 		}
 	}
 
@@ -1030,10 +968,7 @@ func ReplayBlocks(
 
 	global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageBlockHeight(true)
-
-	if isLive {
-		global.SetManageLeaderSchedule(true)
-	}
+	global.SetManageLeaderSchedule(true)
 
 	var err error
 	var currentSlot uint64
@@ -1057,7 +992,6 @@ func ReplayBlocks(
 	//global.SetForkChoice(forkChoice)
 
 	var statsCounter int
-	var totalSlotsReplayed int   // cumulative slots replayed this run (for summary display)
 	var execTimes []float64      // seconds per block
 	var waitTimes []float64      // seconds per block
 	var cuValues []uint64        // CU per block
@@ -1118,10 +1052,6 @@ func ReplayBlocks(
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 
-	// Print replay start marker for clear log separation
-	mlog.Log.InfofPrecise("")
-	mlog.Log.InfofPrecise("=== Replay Start ===")
-
 	for {
 		// Start stall monitor goroutine (only after first block to avoid startup false positives)
 		// Logs to file every second while waiting for a block
@@ -1177,7 +1107,6 @@ func ReplayBlocks(
 			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
 				block.Slot, leaderStr, waitTime.Seconds())
 			skippedSlotsCount++
-			totalSlotsReplayed++
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -1218,18 +1147,12 @@ func ReplayBlocks(
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
-			mlog.Log.Infof("")
-			mlog.Log.Infof("=== Epoch Boundary: %d -> %d ===", currentEpoch, currentEpoch+1)
-			mlog.Log.Infof("  first_slot_new_epoch=%d num_reward_partitions=%d", block.Slot, block.NumRewardPartitions)
+			mlog.Log.Infof("epoch boundary, %d -> %d", currentEpoch, currentEpoch+1)
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-
-			// Step 1: Compute stakes for the new epoch (BEFORE leader schedule and rewards)
-			epochTransitionCtx := prepareEpochStakes(acctsDb, lastSlotCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
-			mlog.Log.Infof("  stake_computation: vote_accts=%d total_stake=%d", len(block.VoteAccts), block.TotalEpochStake)
-
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
@@ -1241,82 +1164,6 @@ func ReplayBlocks(
 				block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentFeaturesActivatedInFirstSlot...)
 				featuresActivatedInFirstSlot = nil
 				parentFeaturesActivatedInFirstSlot = nil
-			}
-
-			// Step 2: Build leader schedule BEFORE rewards distribution.
-			// This ensures schedule verification works even if rewards distribution crashes.
-			if global.ManageLeaderSchedule() {
-				logsDir := config.GetString("log.dir")
-				if logsDir == "" {
-					logsDir = "/mnt/mithril-logs"
-				}
-
-				// NOTE: LeaderScheduleEpoch(slot) returns the epoch whose STAKES are used for the schedule,
-				// which is typically epoch+1 due to LeaderScheduleSlotOffset. But the RNG SEED should be
-				// the TARGET epoch (block.Epoch) - Agave seeds ChaCha20 with the epoch number directly.
-				// We use block.Epoch for both stake lookup and RNG seed, which matches network behavior.
-				scheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
-				if scheduleEpoch != block.Epoch {
-					mlog.Log.Warnf("schedule epoch mismatch: LeaderScheduleEpoch(%d)=%d but block.Epoch=%d (warmup/non-mainnet?)",
-						block.Slot, scheduleEpoch, block.Epoch)
-				}
-
-				// Rebuild VoteCache from AccountsDB to ensure correctness.
-				// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
-				// NOT global.EpochStakes which may be incomplete if VoteCache was stale.
-				// This reads the canonical state at the end of the previous epoch (lastSlotCtx.Slot)
-				// and guarantees that all vote accounts in the stake map have valid NodePubkeys.
-				if err := RebuildVoteCacheFromAccountsDB(acctsDb, lastSlotCtx.Slot, block.VoteAccts, 0); err != nil {
-					mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
-					result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
-					break
-				}
-
-				// Refresh global.EpochStakes now that VoteCache is complete
-				cacheEpochStakesForValidation(block.Epoch, block.VoteAccts, block.TotalEpochStake)
-
-				// Build schedule from VoteCache (now guaranteed complete from AccountsDB rebuild)
-				localSummary, err := PrepareLeaderScheduleLocalFromVoteCache(block.Epoch, epochSchedule, logsDir)
-				if err != nil {
-					mlog.Log.Errorf("FATAL: failed to build leader schedule at epoch boundary: %v", err)
-					result.Error = fmt.Errorf("failed to build leader schedule: %w", err)
-					break
-				}
-
-				// Set block.Leader for this block (was deferred in configureBlock)
-				var exists bool
-				block.Leader, exists = global.LeaderForSlot(block.Slot)
-				if !exists {
-					firstSlot := epochSchedule.FirstSlotInEpoch(block.Epoch)
-					numSlots := epochSchedule.SlotsInEpoch(block.Epoch)
-					lastSlot := firstSlot + numSlots - 1
-					hash := scheduleFullHash(global.LeaderSchedule(), firstSlot, numSlots)
-					mlog.Log.Errorf("LeaderForSlot failed at epoch boundary: slot=%d epoch=%d first_slot=%d last_slot=%d hash=%s",
-						block.Slot, block.Epoch, firstSlot, lastSlot, hash)
-					result.Error = fmt.Errorf("unable to find leader for slot %d at epoch boundary (epoch=%d range=[%d,%d])",
-						block.Slot, block.Epoch, firstSlot, lastSlot)
-					break
-				}
-
-				// Background RPC validation - always runs for debugging
-				localSchedule := global.LeaderSchedule()
-				go func() {
-					rpcSchedule, rpcErr := fetchLeaderScheduleFromRPC(block.Epoch, epochSchedule, rpcc, rpcBackups)
-					if rpcErr != nil {
-						mlog.Log.Debugf("RPC leader schedule fetch failed (for validation only): %v", rpcErr)
-						return
-					}
-					BackgroundValidateAgainstRPC(block.Epoch, epochSchedule, localSchedule, rpcSchedule, localSummary, logsDir)
-				}()
-			}
-
-			// Step 3: Distribute rewards and update stake history AFTER leader schedule.
-			// If this crashes, we still have leader schedule logs for debugging.
-			partitionedRewardsInfo = handleEpochRewards(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch-1, epochTransitionCtx)
-
-			// Set block height (was deferred in configureBlock's early return at epoch boundary)
-			if global.ManageBlockHeight() {
-				block.BlockHeight = global.BlockHeight()
 			}
 		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
 			// First block being processed - check if we're in rewards period
@@ -1454,9 +1301,6 @@ func ReplayBlocks(
 
 		// Track last executed slot for accurate tip distance calculation and mode switching
 		blockStream.SetLastExecutedSlot(block.Slot)
-
-		// Increment cumulative slot counter (for all slots, including epoch boundaries)
-		totalSlotsReplayed++
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
@@ -1603,7 +1447,7 @@ func ReplayBlocks(
 
 				// Print summary in reorganized format
 				mlog.Log.InfofPrecise("")
-				mlog.Log.InfofPrecise("=== 100 Slot Summary (%d slots replayed) ===", totalSlotsReplayed)
+				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
 
 				// Line 1: Mode, blocks/sec, skipped slots, tip distance
 				modeStr := "catchup"
