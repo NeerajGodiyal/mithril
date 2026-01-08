@@ -25,8 +25,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rent"
@@ -1174,8 +1174,9 @@ func ReplayBlocks(
 
 		block.Features = replayCtx.CurrentFeatures
 
-		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && currentSlot <= partitionedRewardsInfo.LastStakingRewardSlot {
-			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight, partitionedRewardsInfo.LastStakingRewardSlot)
+		// post-epoch boundary rewards distribution
+		if partitionedEpochRewardsEnabled && partitionedRewardsInfo != nil && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && partitionedRewardsInfo.NumRewardPartitionsRemaining > 0 {
+			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
@@ -1193,19 +1194,19 @@ func ReplayBlocks(
 		// in this case (see ProcessBlock's early return when HasEahWorkaround is true).
 		// Uncomment if you need to replay pre-AccountsLtHash historical slots.
 		/*
-		if !block.Features.IsActive(features.AccountsLtHash) {
-			if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
-				if replayCtx.HasEpochAcctsHash {
-					block.EpochAcctsHash = replayCtx.EpochAcctsHash
-				} else {
-					block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
-					if err != nil {
-						panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+			if !block.Features.IsActive(features.AccountsLtHash) {
+				if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
+					if replayCtx.HasEpochAcctsHash {
+						block.EpochAcctsHash = replayCtx.EpochAcctsHash
+					} else {
+						block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
+						if err != nil {
+							panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
+						}
+						block.HasEahWorkaround = true
 					}
-					block.HasEahWorkaround = true
 				}
 			}
-		}
 		*/
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 

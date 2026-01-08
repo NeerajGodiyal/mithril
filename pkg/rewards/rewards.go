@@ -7,13 +7,11 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -32,15 +30,12 @@ const (
 )
 
 type PartitionedRewardDistributionInfo struct {
-	TotalStakingRewards    uint64
-	FirstStakingRewardSlot uint64
-	LastStakingRewardSlot  uint64
-	EahStartOffsetSlot     uint64
-	EahStopOffsetSlot      uint64
-	NumRewardPartitions    uint64
-	Credits                map[solana.PublicKey]CalculatedStakePoints
-	RewardPartitions       Partitions
-	StakingRewards         map[solana.PublicKey]*CalculatedStakeRewards
+	TotalStakingRewards          uint64
+	FirstStakingRewardSlot       uint64
+	NumRewardPartitionsRemaining uint64
+	Credits                      map[solana.PublicKey]CalculatedStakePoints
+	RewardPartitions             Partitions
+	StakingRewards               map[solana.PublicKey]*CalculatedStakeRewards
 }
 
 type CalculatedStakePoints struct {
@@ -107,96 +102,8 @@ func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.Sy
 // It tries the primary RPC first with retries, then falls back to backup endpoints.
 func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackups []string, epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-
-	// Try to fetch reward partition info with failover
-	_, rewardSlots, err := fetchRewardPartitionInfoWithBackups(rpcc, rpcBackups, firstSlotInEpoch)
-	if err != nil {
-		panic(fmt.Sprintf("failed to fetch reward partition info from all RPC endpoints: %v", err))
-	}
-
-	if len(rewardSlots) == 0 {
-		panic("RPC node returned empty reward blocks response")
-	}
-
-	finalStakingRewardSlot := rewardSlots[len(rewardSlots)-1]
 	totalStakingRewards := CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
-
-	eahCalcSlot := firstSlotInEpoch + (432000 / 4)
-	eahInclusionSlot := firstSlotInEpoch + ((432000 / 4) * 3)
-
-	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1,
-		LastStakingRewardSlot: finalStakingRewardSlot, EahStartOffsetSlot: eahCalcSlot, EahStopOffsetSlot: eahInclusionSlot}
-}
-
-// fetchRewardPartitionInfoWithBackups tries the primary RPC first with retries, then backup endpoints.
-func fetchRewardPartitionInfoWithBackups(rpcc *rpcclient.RpcClient, rpcBackups []string, firstSlotInEpoch uint64) (uint64, []uint64, error) {
-	// Try primary first with retries
-	numPartitions, slots, err := fetchRewardPartitionInfoWithRetry(rpcc, firstSlotInEpoch, 5)
-	if err == nil {
-		return numPartitions, slots, nil
-	}
-
-	lastErr := err
-	mlog.Log.Errorf("reward partition fetch failed on primary %s: %v", rpcc.Endpoint(), err)
-
-	// Try backup endpoints
-	for i, endpoint := range rpcBackups {
-		mlog.Log.Infof("trying backup RPC endpoint #%d for reward partitions: %s", i+1, endpoint)
-		backupClient := rpcclient.NewRpcClient(endpoint)
-		numPartitions, slots, err := fetchRewardPartitionInfoWithRetry(backupClient, firstSlotInEpoch, 3)
-		if err == nil {
-			mlog.Log.Infof("reward partition info fetched from backup endpoint %s", endpoint)
-			return numPartitions, slots, nil
-		}
-		lastErr = err
-		mlog.Log.Errorf("reward partition fetch failed on backup %s: %v", endpoint, err)
-	}
-
-	return 0, nil, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
-}
-
-// fetchRewardPartitionInfoWithRetry attempts to fetch reward partition info with exponential backoff.
-func fetchRewardPartitionInfoWithRetry(rpcc *rpcclient.RpcClient, firstSlotInEpoch uint64, maxAttempts int) (uint64, []uint64, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		// First get num partitions
-		numRewardPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
-		if err != nil {
-			lastErr = err
-			if attempt < maxAttempts-1 {
-				waitTime := time.Duration(1<<attempt) * time.Second
-				if waitTime > 30*time.Second {
-					waitTime = 30 * time.Second
-				}
-				mlog.Log.Infof("GetNumRewardPartitions from %s failed, retrying in %v (attempt %d/%d): %v",
-					rpcc.Endpoint(), waitTime, attempt+1, maxAttempts, err)
-				time.Sleep(waitTime)
-			}
-			continue
-		}
-
-		// Then get reward slots
-		rewardSlots, err := rpcc.GetStakingRewardSlots(firstSlotInEpoch, numRewardPartitions)
-		if err != nil {
-			lastErr = err
-			if attempt < maxAttempts-1 {
-				waitTime := time.Duration(1<<attempt) * time.Second
-				if waitTime > 30*time.Second {
-					waitTime = 30 * time.Second
-				}
-				mlog.Log.Infof("GetStakingRewardSlots from %s failed, retrying in %v (attempt %d/%d): %v",
-					rpcc.Endpoint(), waitTime, attempt+1, maxAttempts, err)
-				time.Sleep(waitTime)
-			}
-			continue
-		}
-
-		// Both succeeded
-		return numRewardPartitions, rewardSlots, nil
-	}
-
-	return 0, nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
+	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1}
 }
 
 type idxAndReward struct {
@@ -210,67 +117,7 @@ type idxAndRewardNew struct {
 	voterPk solana.PublicKey
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.BlockReward, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
-	var totalVotingRewards atomic.Uint64
-
-	accts := make([]*accounts.Account, len(rewards))
-	parentUpdatedAccts := make([]*accounts.Account, len(rewards))
-
-	var wg sync.WaitGroup
-
-	size := runtime.GOMAXPROCS(0) * 8
-	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
-		defer wg.Done()
-
-		r := i.(idxAndReward)
-		reward := r.reward
-		idx := r.idx
-
-		if string(reward.RewardType) == RewardTypeVoting /*&& reward.Lamports != 0*/ {
-			stakeAcct, err := acctsDb.GetAccount(slot, reward.Pubkey)
-			if err != nil {
-				panic(fmt.Sprintf("unable to get acct %s from acctsdb for voting rewards distribution in slot %d", reward.Pubkey, slot))
-			}
-			parentUpdatedAccts[idx] = stakeAcct.Clone()
-
-			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
-			if err != nil {
-				panic(fmt.Sprintf("overflow in voting rewards distribution in slot %d to acct %s: %s", slot, reward.Pubkey, err))
-			}
-
-			if stakeAcct.Lamports != reward.PostBalance {
-				panic(fmt.Sprintf("post-balance for acct %s in distributing voting rewards in slot %d did not match expected %d (actual %d)", reward.Pubkey, slot, reward.PostBalance, stakeAcct.Lamports))
-			}
-
-			accts[idx] = stakeAcct
-
-			new := totalVotingRewards.Add(uint64(reward.Lamports))
-			if new < uint64(reward.Lamports) {
-				panic(fmt.Sprintf("overflow in accumulating voting rewards in slot %d", slot))
-			}
-		}
-	})
-
-	for idx, reward := range rewards {
-		r := idxAndReward{idx: idx, reward: reward}
-		wg.Add(1)
-		workerPool.Invoke(r)
-	}
-
-	wg.Wait()
-	workerPool.Release()
-	ants.Release()
-
-	err := acctsDb.StoreAccounts(accts, slot)
-	if err != nil {
-		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
-	}
-
-	return accts, parentUpdatedAccts, totalVotingRewards.Load()
-}
-
-func DistributeVotingRewardsNew(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
-	fmt.Printf("in DistributeVotingRewardsNew\n")
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var totalVotingRewards atomic.Uint64
 
 	updatedAccts := make([]*accounts.Account, len(validatorRewards))
@@ -322,8 +169,6 @@ func DistributeVotingRewardsNew(acctsDb *accountsdb.AccountsDb, validatorRewards
 	if err != nil {
 		panic(fmt.Sprintf("error updating accounts for voting rewards in slot %d: %s", slot, err))
 	}
-
-	fmt.Printf("done DistributeVotingRewardsNew\n")
 
 	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
 }
@@ -492,8 +337,6 @@ func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]
 
 	numRewardPartitions := CalculateNumRewardPartitions(uint64(len(stakeInfoResults)))
 	partitions := NewPartitions(numRewardPartitions)
-
-	fmt.Printf("calculated numRewardPartitions: %d\n", numRewardPartitions)
 
 	workerPool2, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
 		defer wg.Done()
