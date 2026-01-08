@@ -376,166 +376,240 @@ func debugCompareVoteCacheBeforeAfterRebuild(
 	}
 }
 
-// debugCompareStakeWithRPC compares local stake per vote account vs RPC's GetVoteAccounts().
-// Note: RPC returns CURRENT state which may differ from boundary slot state.
-// This comparison helps identify if stake amounts are a source of divergence.
-func debugCompareStakeWithRPC(
-	rpcc *rpcclient.RpcClient,
-	localVoteStakes map[solana.PublicKey]uint64,
-	boundarySlot uint64,
-	boundaryEpoch uint64,
-) {
-	mlog.Log.Infof("")
-	mlog.Log.Infof("  [STAKE COMPARE] Comparing local stake vs RPC GetVoteAccounts()...")
-	mlog.Log.Infof("                  (NOTE: RPC returns CURRENT state, not boundary slot state)")
+// DeriveVotePubkeysFromStakeCache extracts all unique vote pubkeys from the stake cache,
+// aggregating the total stake delegated to each vote account.
+// This is used to seed the vote cache from stake-derived pubkeys (more accurate than manifest).
+func DeriveVotePubkeysFromStakeCache() map[solana.PublicKey]uint64 {
+	stakeCache := global.StakeCache()
+	voteStakes := make(map[solana.PublicKey]uint64)
 
-	// Fetch RPC vote accounts
-	rpcVoteAccts, err := rpcc.GetVoteAccounts()
-	if err != nil {
-		mlog.Log.Warnf("  [STAKE COMPARE] GetVoteAccounts failed: %v", err)
-		return
-	}
-
-	// Build RPC stake map
-	rpcStakes := make(map[solana.PublicKey]uint64)
-	rpcCommission := make(map[solana.PublicKey]uint8)
-	for _, v := range rpcVoteAccts.Current {
-		rpcStakes[v.VotePubkey] = v.ActivatedStake
-		rpcCommission[v.VotePubkey] = v.Commission
-	}
-	for _, v := range rpcVoteAccts.Delinquent {
-		rpcStakes[v.VotePubkey] = v.ActivatedStake
-		rpcCommission[v.VotePubkey] = v.Commission
-	}
-
-	// Compare
-	type stakeDiff struct {
-		votePk     solana.PublicKey
-		localStake uint64
-		rpcStake   uint64
-		diff       int64
-		localComm  uint8
-		rpcComm    uint8
-	}
-
-	var differences []stakeDiff
-	var totalLocalStake, totalRpcStake uint64
-	var matchCount, diffCount, onlyLocal, onlyRpc int
-
-	// Check all local vote accounts
-	for votePk, localStake := range localVoteStakes {
-		if localStake == 0 {
+	for _, delegation := range stakeCache {
+		if delegation == nil || delegation.StakeLamports == 0 {
 			continue
 		}
-		totalLocalStake += localStake
+		voteStakes[delegation.VoterPubkey] += delegation.StakeLamports
+	}
 
-		rpcStake, inRpc := rpcStakes[votePk]
-		if !inRpc {
-			onlyLocal++
-			differences = append(differences, stakeDiff{votePk, localStake, 0, int64(localStake), 0, 0})
-			continue
+	return voteStakes
+}
+
+// VoteCacheValidationResult contains the results of vote cache validation and selective update.
+type VoteCacheValidationResult struct {
+	TotalChecked     int    // Total vote accounts with non-zero stake checked
+	Match            int    // Already in cache with matching credits
+	Added            int    // Added to cache (was missing)
+	Updated          int    // Updated in cache (credits differed)
+	MissingInAcctsDb int    // Not found in AccountsDB
+	UnmarshalErr     int    // Found but failed to unmarshal
+	ZeroNodePk       int    // Found but has zero NodePubkey
+	TotalStake       uint64 // Total stake of all checked accounts
+	AddedStake       uint64 // Stake of accounts added to cache
+	UpdatedStake     uint64 // Stake of accounts updated in cache
+	ErrorStake       uint64 // Stake of accounts with errors
+}
+
+// ValidateAndUpdateVoteCache performs a single-pass validation of the VoteCache against AccountsDB,
+// selectively updating only entries that are missing or have different credits.
+// This is more efficient than a full rebuild as it:
+// 1. Reads each account from AccountsDB exactly once
+// 2. Only writes to cache when necessary (missing or different)
+// 3. Preserves correct cache entries (no unnecessary overwrites)
+//
+// Parameters:
+//   - acctsDb: the AccountsDB instance
+//   - slot: the slot at which to read account state (typically boundary slot)
+//   - voteAcctStakes: map of vote pubkey -> stake (determines which accounts to check)
+//   - rewardedEpoch: the epoch whose credits we're validating
+//   - maxConcurrency: number of concurrent workers (0 = use default)
+//
+// Returns validation results including counts and stake amounts for each category.
+func ValidateAndUpdateVoteCache(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	rewardedEpoch uint64,
+	maxConcurrency int,
+) VoteCacheValidationResult {
+	if maxConcurrency <= 0 {
+		maxConcurrency = DefaultVoteCacheRebuildConcurrency
+	}
+
+	startTime := time.Now()
+
+	// Result counters (atomic for thread safety)
+	var totalChecked atomic.Int64
+	var matchCount atomic.Int64
+	var addedCount atomic.Int64
+	var updatedCount atomic.Int64
+	var missingInAcctsDbCount atomic.Int64
+	var unmarshalErrCount atomic.Int64
+	var zeroNodePkCount atomic.Int64
+
+	var totalStake atomic.Uint64
+	var addedStake atomic.Uint64
+	var updatedStake atomic.Uint64
+	var errorStake atomic.Uint64
+
+	// Helper to extract epoch credits from VoteStateVersions
+	getEpochCredits := func(vs *sealevel.VoteStateVersions) []sealevel.EpochCredits {
+		if vs == nil {
+			return nil
 		}
-		totalRpcStake += rpcStake
-
-		// Get local commission from VoteCache
-		var localComm uint8
-		if vs := global.VoteCacheItem(votePk); vs != nil {
-			switch vs.Type {
-			case sealevel.VoteStateVersionCurrent:
-				localComm = vs.Current.Commission
-			case sealevel.VoteStateVersionV0_23_5:
-				localComm = vs.V0_23_5.Commission
-			case sealevel.VoteStateVersionV1_14_11:
-				localComm = vs.V1_14_11.Commission
-			}
-		}
-
-		if localStake != rpcStake {
-			diffCount++
-			diff := int64(localStake) - int64(rpcStake)
-			differences = append(differences, stakeDiff{votePk, localStake, rpcStake, diff, localComm, rpcCommission[votePk]})
-		} else {
-			matchCount++
+		switch vs.Type {
+		case sealevel.VoteStateVersionCurrent:
+			return vs.Current.EpochCredits
+		case sealevel.VoteStateVersionV0_23_5:
+			return vs.V0_23_5.EpochCredits
+		case sealevel.VoteStateVersionV1_14_11:
+			return vs.V1_14_11.EpochCredits
+		default:
+			return nil
 		}
 	}
 
-	// Check for RPC-only vote accounts
-	for votePk, rpcStake := range rpcStakes {
-		if rpcStake == 0 {
-			continue
+	// Helper to compare epoch credits for equality
+	creditsEqual := func(a, b []sealevel.EpochCredits) bool {
+		if len(a) != len(b) {
+			return false
 		}
-		if _, inLocal := localVoteStakes[votePk]; !inLocal {
-			onlyRpc++
-			totalRpcStake += rpcStake
+		for i := range a {
+			if a[i].Epoch != b[i].Epoch || a[i].Credits != b[i].Credits || a[i].PrevCredits != b[i].PrevCredits {
+				return false
+			}
 		}
+		return true
 	}
 
-	// Summary
-	mlog.Log.Infof("  [STAKE COMPARE] Summary (local boundary slot=%d, epoch=%d):", boundarySlot, boundaryEpoch)
-	mlog.Log.Infof("    Vote accounts: local=%d rpc=%d (current=%d delinquent=%d)",
-		len(localVoteStakes), len(rpcStakes), len(rpcVoteAccts.Current), len(rpcVoteAccts.Delinquent))
-	mlog.Log.Infof("    Stake match:   %d accounts (%.2f%%)", matchCount, float64(matchCount)*100/float64(matchCount+diffCount+onlyLocal))
-	mlog.Log.Infof("    Stake differ:  %d accounts", diffCount)
-	mlog.Log.Infof("    Only in local: %d accounts", onlyLocal)
-	mlog.Log.Infof("    Only in RPC:   %d accounts", onlyRpc)
-	mlog.Log.Infof("    Total stake:   local=%d (%.2f SOL) rpc=%d (%.2f SOL) diff=%+d",
-		totalLocalStake, float64(totalLocalStake)/1e9, totalRpcStake, float64(totalRpcStake)/1e9,
-		int64(totalLocalStake)-int64(totalRpcStake))
+	// Create worker pool
+	var wg sync.WaitGroup
+	pool, err := ants.NewPoolWithFunc(maxConcurrency, func(i interface{}) {
+		defer wg.Done()
 
-	// Sort by absolute diff and show top differences
-	if len(differences) > 0 {
-		sort.Slice(differences, func(i, j int) bool {
-			absI := differences[i].diff
-			if absI < 0 {
-				absI = -absI
-			}
-			absJ := differences[j].diff
-			if absJ < 0 {
-				absJ = -absJ
-			}
-			return absI > absJ
+		item := i.(struct {
+			pk    solana.PublicKey
+			stake uint64
 		})
 
-		mlog.Log.Infof("  [STAKE COMPARE] Top 15 stake differences:")
-		mlog.Log.Infof("    %-44s %15s %15s %+15s %6s %6s", "vote_pubkey", "local_stake", "rpc_stake", "diff", "l_com%", "r_com%")
-		mlog.Log.Infof("    %s", strings.Repeat("-", 110))
-		for i, d := range differences {
-			if i >= 15 {
-				mlog.Log.Infof("    ... and %d more differences", len(differences)-15)
-				break
-			}
-			mlog.Log.Infof("    %-44s %15d %15d %+15d %5d%% %5d%%",
-				d.votePk.String(), d.localStake, d.rpcStake, d.diff, d.localComm, d.rpcComm)
+		totalChecked.Add(1)
+		totalStake.Add(item.stake)
+
+		// Read from AccountsDB
+		voteAcct, err := acctsDb.GetAccount(slot, item.pk)
+		if err != nil {
+			missingInAcctsDbCount.Add(1)
+			errorStake.Add(item.stake)
+			return
+		}
+
+		// Unmarshal vote state from AccountsDB
+		acctDbVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+		if err != nil {
+			unmarshalErrCount.Add(1)
+			errorStake.Add(item.stake)
+			return
+		}
+
+		// Validate NodePubkey is non-zero
+		nodePk := acctDbVoteState.NodePubkey()
+		var zeroPk solana.PublicKey
+		if nodePk == zeroPk {
+			zeroNodePkCount.Add(1)
+			errorStake.Add(item.stake)
+			return
+		}
+
+		// Get current cache entry
+		cacheVoteState := global.VoteCacheItem(item.pk)
+
+		if cacheVoteState == nil {
+			// Missing in cache - add it
+			global.PutVoteCacheItem(item.pk, acctDbVoteState)
+			addedCount.Add(1)
+			addedStake.Add(item.stake)
+			return
+		}
+
+		// Compare credits - if different, update cache
+		cacheCredits := getEpochCredits(cacheVoteState)
+		acctDbCredits := getEpochCredits(acctDbVoteState)
+
+		if !creditsEqual(cacheCredits, acctDbCredits) {
+			// Credits differ - update cache with AccountsDB state
+			global.PutVoteCacheItem(item.pk, acctDbVoteState)
+			updatedCount.Add(1)
+			updatedStake.Add(item.stake)
+			return
+		}
+
+		// Match - no update needed
+		matchCount.Add(1)
+	})
+	if err != nil {
+		mlog.Log.Errorf("ValidateAndUpdateVoteCache: failed to create worker pool: %v", err)
+		return VoteCacheValidationResult{}
+	}
+	defer pool.Release()
+
+	// Submit all vote accounts to the pool
+	for pk, stake := range voteAcctStakes {
+		if stake == 0 {
+			continue
+		}
+		wg.Add(1)
+		item := struct {
+			pk    solana.PublicKey
+			stake uint64
+		}{pk: pk, stake: stake}
+		if err := pool.Invoke(item); err != nil {
+			wg.Done()
+			mlog.Log.Errorf("ValidateAndUpdateVoteCache: failed to submit work: %v", err)
 		}
 	}
 
-	// Commission comparison
-	var commMatch, commDiff int
-	for votePk := range localVoteStakes {
-		rpcComm, inRpc := rpcCommission[votePk]
-		if !inRpc {
-			continue
-		}
-		var localComm uint8
-		if vs := global.VoteCacheItem(votePk); vs != nil {
-			switch vs.Type {
-			case sealevel.VoteStateVersionCurrent:
-				localComm = vs.Current.Commission
-			case sealevel.VoteStateVersionV0_23_5:
-				localComm = vs.V0_23_5.Commission
-			case sealevel.VoteStateVersionV1_14_11:
-				localComm = vs.V1_14_11.Commission
-			}
-		}
-		if localComm == rpcComm {
-			commMatch++
-		} else {
-			commDiff++
-		}
+	wg.Wait()
+	duration := time.Since(startTime)
+
+	result := VoteCacheValidationResult{
+		TotalChecked:     int(totalChecked.Load()),
+		Match:            int(matchCount.Load()),
+		Added:            int(addedCount.Load()),
+		Updated:          int(updatedCount.Load()),
+		MissingInAcctsDb: int(missingInAcctsDbCount.Load()),
+		UnmarshalErr:     int(unmarshalErrCount.Load()),
+		ZeroNodePk:       int(zeroNodePkCount.Load()),
+		TotalStake:       totalStake.Load(),
+		AddedStake:       addedStake.Load(),
+		UpdatedStake:     updatedStake.Load(),
+		ErrorStake:       errorStake.Load(),
 	}
-	mlog.Log.Infof("  [STAKE COMPARE] Commission: match=%d differ=%d", commMatch, commDiff)
-	mlog.Log.Infof("")
+
+	// Log summary
+	mlog.Log.Infof("vote cache validated: slot=%d checked=%d match=%d added=%d updated=%d errors=%d duration=%v",
+		slot, result.TotalChecked, result.Match, result.Added, result.Updated,
+		result.MissingInAcctsDb+result.UnmarshalErr+result.ZeroNodePk, duration)
+
+	// File-only detailed log
+	mlog.Log.FileOnlyf("vote cache validation details for epoch %d (slot=%d):", rewardedEpoch, slot)
+	mlog.Log.FileOnlyf("  checked:          %d", result.TotalChecked)
+	mlog.Log.FileOnlyf("  match:            %d (%.2f%%)", result.Match, float64(result.Match)*100/float64(result.TotalChecked))
+	mlog.Log.FileOnlyf("  added:            %d (stake=%d)", result.Added, result.AddedStake)
+	mlog.Log.FileOnlyf("  updated:          %d (stake=%d)", result.Updated, result.UpdatedStake)
+	mlog.Log.FileOnlyf("  missing_acctdb:   %d", result.MissingInAcctsDb)
+	mlog.Log.FileOnlyf("  unmarshal_err:    %d", result.UnmarshalErr)
+	mlog.Log.FileOnlyf("  zero_nodepk:      %d", result.ZeroNodePk)
+	mlog.Log.FileOnlyf("  total_stake:      %d", result.TotalStake)
+	mlog.Log.FileOnlyf("  error_stake:      %d (%.4f%%)", result.ErrorStake, float64(result.ErrorStake)*100/float64(result.TotalStake))
+
+	return result
 }
+
+// NOTE: RPC stake comparison was removed. The Solana RPC API (GetVoteAccounts) only returns
+// CURRENT stake state - there is no API parameter to query historical stake at a specific slot.
+// This is a fundamental API limitation, not a temporary issue. Any comparison between our
+// boundary-slot stake and RPC's current-slot stake would be misleading since the slots differ
+// by potentially thousands of blocks. For stake validation, use:
+//   - Partition count match (local vs RPC numPartitions) - derived from eligible stake accounts
+//   - Leader schedule match (local vs RPC schedule hash) - derived from epoch stakes
 
 // VoteCacheRebuildError holds info about a failed vote account for logging
 type VoteCacheRebuildError struct {

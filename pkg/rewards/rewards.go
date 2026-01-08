@@ -5,7 +5,6 @@ import (
 	"math"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1206,6 +1205,15 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 				workerErr.CompareAndSwap(nil, &errVal)
 				return
 			}
+
+			// IDEMPOTENCY CHECK: If balance already matches PostBalance,
+			// this reward was already applied in a previous partial run (crash recovery)
+			if stakeAcct.Lamports == reward.PostBalance {
+				// Already credited - include in result but don't modify or count again
+				accts[idx] = stakeAcct
+				return
+			}
+
 			parentUpdatedAccts[idx] = stakeAcct.Clone()
 
 			stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.Lamports))
@@ -1240,7 +1248,6 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	// Check for worker errors
 	if errPtr := workerErr.Load(); errPtr != nil {
@@ -1281,519 +1288,15 @@ func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]
 	return voteRewards
 }
 
-// CompareVoteRewardsWithRPC compares locally computed vote rewards against RPC block rewards.
-// Logs detailed breakdown including:
-// - Total comparison
-// - Per-account differences
-// - Top/bottom vote accounts by reward
-// - Accounts only in local or only in RPC
-// - Per-vote-pubkey commission summary (only on mismatch)
-//
-// If stakingRewards is provided and there's a mismatch, logs per-vote-pubkey summary
-// with commission, voter_rewards_sum, staker_rewards_sum, and stake_accounts_count.
-func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpcRewards []rpc.BlockReward, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards) {
-	// Build RPC vote rewards map and staking rewards total
-	rpcVoteRewards := make(map[solana.PublicKey]uint64)
-	var rpcVoteTotal uint64
-	var rpcVoteCount int
-	var rpcStakingTotal uint64
-	var rpcStakingCount int
-	for _, reward := range rpcRewards {
-		if reward.Lamports > 0 {
-			if string(reward.RewardType) == RewardTypeVoting {
-				rpcVoteRewards[reward.Pubkey] = uint64(reward.Lamports)
-				rpcVoteTotal += uint64(reward.Lamports)
-				rpcVoteCount++
-			} else if string(reward.RewardType) == RewardTypeStaking {
-				rpcStakingTotal += uint64(reward.Lamports)
-				rpcStakingCount++
-			}
-		}
-	}
-
-	// Calculate local vote total
-	var localVoteTotal uint64
-	for _, reward := range localVoteRewards {
-		localVoteTotal += reward
-	}
-
-	// Calculate local staking totals (voter portion + staker portion from stakingRewards)
-	var localStakerTotal uint64
-	var localVoterFromStaking uint64
-	if stakingRewards != nil {
-		for _, sr := range stakingRewards {
-			if sr != nil {
-				localStakerTotal += sr.StakerRewards
-				localVoterFromStaking += sr.VoterRewards
-			}
-		}
-	}
-
-	// Header with both Vote and Staking totals
-	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("EPOCH REWARDS TOTALS COMPARISON: [LOCAL] vs [RPC]")
-	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("")
-	mlog.Log.Infof("VOTE REWARDS (commission portion to validators):")
-	mlog.Log.Infof("  [LOCAL] Vote Total: %d lamports across %d vote accounts", localVoteTotal, len(localVoteRewards))
-	mlog.Log.Infof("  [RPC]   Vote Total: %d lamports across %d vote accounts", rpcVoteTotal, rpcVoteCount)
-	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localVoteTotal)-int64(rpcVoteTotal))
-	mlog.Log.Infof("")
-	mlog.Log.Infof("STAKING REWARDS (delegator portion to stake accounts):")
-	mlog.Log.Infof("  [LOCAL] Staking Total: %d lamports across %d stake accounts", localStakerTotal, len(stakingRewards))
-	mlog.Log.Infof("  [RPC]   Staking Total: %d lamports across %d stake accounts", rpcStakingTotal, rpcStakingCount)
-	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localStakerTotal)-int64(rpcStakingTotal))
-	mlog.Log.Infof("")
-	mlog.Log.Infof("COMBINED TOTALS (vote + staking):")
-	localCombined := localVoteTotal + localStakerTotal
-	rpcCombined := rpcVoteTotal + rpcStakingTotal
-	mlog.Log.Infof("  [LOCAL] Combined: %d lamports", localCombined)
-	mlog.Log.Infof("  [RPC]   Combined: %d lamports", rpcCombined)
-	mlog.Log.Infof("  DIFF (LOCAL - RPC): %+d lamports", int64(localCombined)-int64(rpcCombined))
-	mlog.Log.Infof("")
-	mlog.Log.Infof("SANITY CHECK (local voter from staking vs local vote rewards):")
-	mlog.Log.Infof("  Voter rewards from stakingRewards map: %d lamports", localVoterFromStaking)
-	mlog.Log.Infof("  Voter rewards from localVoteRewards map: %d lamports", localVoteTotal)
-	if localVoterFromStaking != localVoteTotal {
-		mlog.Log.Warnf("  MISMATCH: These should be equal! Diff=%+d", int64(localVoterFromStaking)-int64(localVoteTotal))
-	} else {
-		mlog.Log.Infof("  OK: Values match")
-	}
-	mlog.Log.Infof("")
-
-	// Find accounts only in local
-	var localOnlyAccounts []solana.PublicKey
-	var localOnlyTotal uint64
-	for pk := range localVoteRewards {
-		if _, exists := rpcVoteRewards[pk]; !exists {
-			localOnlyAccounts = append(localOnlyAccounts, pk)
-			localOnlyTotal += localVoteRewards[pk]
-		}
-	}
-
-	// Find accounts only in RPC
-	var rpcOnlyAccounts []solana.PublicKey
-	var rpcOnlyTotal uint64
-	for pk := range rpcVoteRewards {
-		if _, exists := localVoteRewards[pk]; !exists {
-			rpcOnlyAccounts = append(rpcOnlyAccounts, pk)
-			rpcOnlyTotal += rpcVoteRewards[pk]
-		}
-	}
-
-	// Find accounts in both with different values
-	type mismatchEntry struct {
-		pubkey    solana.PublicKey
-		local     uint64
-		rpc       uint64
-		diff      int64
-	}
-	var mismatches []mismatchEntry
-	var mismatchTotal int64
-	for pk, localReward := range localVoteRewards {
-		if rpcReward, exists := rpcVoteRewards[pk]; exists && localReward != rpcReward {
-			diff := int64(localReward) - int64(rpcReward)
-			mismatches = append(mismatches, mismatchEntry{pk, localReward, rpcReward, diff})
-			mismatchTotal += diff
-		}
-	}
-
-	// Log local-only accounts
-	if len(localOnlyAccounts) > 0 {
-		mlog.Log.Infof("[LOCAL-ONLY] Vote accounts in LOCAL but NOT in RPC (%d accounts, %d lamports):", len(localOnlyAccounts), localOnlyTotal)
-		for i, pk := range localOnlyAccounts {
-			if i >= 10 {
-				mlog.Log.Infof("  ... and %d more", len(localOnlyAccounts)-10)
-				break
-			}
-			mlog.Log.Infof("  %s: [LOCAL]=%d lamports", pk.String(), localVoteRewards[pk])
-		}
-		mlog.Log.Infof("")
-	}
-
-	// Log RPC-only accounts
-	if len(rpcOnlyAccounts) > 0 {
-		mlog.Log.Infof("[RPC-ONLY] Vote accounts in RPC but NOT in LOCAL (%d accounts, %d lamports):", len(rpcOnlyAccounts), rpcOnlyTotal)
-		for i, pk := range rpcOnlyAccounts {
-			if i >= 10 {
-				mlog.Log.Infof("  ... and %d more", len(rpcOnlyAccounts)-10)
-				break
-			}
-			mlog.Log.Infof("  %s: [RPC]=%d lamports", pk.String(), rpcVoteRewards[pk])
-		}
-		mlog.Log.Infof("")
-	}
-
-	// Log mismatched amounts (accounts in both but with different values)
-	if len(mismatches) > 0 {
-		mlog.Log.Infof("MISMATCHED: Accounts in BOTH but with different amounts (%d accounts, net diff=%d lamports):", len(mismatches), mismatchTotal)
-		// Sort by absolute difference (largest first)
-		for i := 0; i < len(mismatches)-1; i++ {
-			for j := i + 1; j < len(mismatches); j++ {
-				if abs(mismatches[j].diff) > abs(mismatches[i].diff) {
-					mismatches[i], mismatches[j] = mismatches[j], mismatches[i]
-				}
-			}
-		}
-		for i, m := range mismatches {
-			if i >= 20 {
-				mlog.Log.Infof("  ... and %d more", len(mismatches)-20)
-				break
-			}
-			mlog.Log.Infof("  %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", m.pubkey.String(), m.local, m.rpc, m.diff)
-		}
-		mlog.Log.Infof("")
-	}
-
-	// Log top 10 vote accounts by local reward
-	type rewardEntry struct {
-		pubkey solana.PublicKey
-		reward uint64
-	}
-	var sortedLocal []rewardEntry
-	for pk, reward := range localVoteRewards {
-		sortedLocal = append(sortedLocal, rewardEntry{pk, reward})
-	}
-	// Sort descending by reward
-	for i := 0; i < len(sortedLocal)-1; i++ {
-		for j := i + 1; j < len(sortedLocal); j++ {
-			if sortedLocal[j].reward > sortedLocal[i].reward {
-				sortedLocal[i], sortedLocal[j] = sortedLocal[j], sortedLocal[i]
-			}
-		}
-	}
-	mlog.Log.Infof("TOP 10 vote accounts by [LOCAL] reward:")
-	for i := 0; i < 10 && i < len(sortedLocal); i++ {
-		e := sortedLocal[i]
-		rpcVal := rpcVoteRewards[e.pubkey]
-		diff := int64(e.reward) - int64(rpcVal)
-		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", i+1, e.pubkey.String(), e.reward, rpcVal, diff)
-	}
-	mlog.Log.Infof("")
-
-	// Log top 10 vote accounts by RPC reward
-	var sortedRPC []rewardEntry
-	for pk, reward := range rpcVoteRewards {
-		sortedRPC = append(sortedRPC, rewardEntry{pk, reward})
-	}
-	// Sort descending by reward
-	for i := 0; i < len(sortedRPC)-1; i++ {
-		for j := i + 1; j < len(sortedRPC); j++ {
-			if sortedRPC[j].reward > sortedRPC[i].reward {
-				sortedRPC[i], sortedRPC[j] = sortedRPC[j], sortedRPC[i]
-			}
-		}
-	}
-	mlog.Log.Infof("TOP 10 vote accounts by [RPC] reward:")
-	for i := 0; i < 10 && i < len(sortedRPC); i++ {
-		e := sortedRPC[i]
-		localVal := localVoteRewards[e.pubkey]
-		diff := int64(localVal) - int64(e.reward)
-		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", i+1, e.pubkey.String(), localVal, e.reward, diff)
-	}
-	mlog.Log.Infof("")
-
-	// Log bottom 10 vote accounts by local reward (non-zero)
-	mlog.Log.Infof("BOTTOM 10 vote accounts by [LOCAL] reward:")
-	start := len(sortedLocal) - 10
-	if start < 0 {
-		start = 0
-	}
-	for i := len(sortedLocal) - 1; i >= start && i >= 0; i-- {
-		e := sortedLocal[i]
-		if e.reward == 0 {
-			continue
-		}
-		rpcVal := rpcVoteRewards[e.pubkey]
-		diff := int64(e.reward) - int64(rpcVal)
-		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", len(sortedLocal)-i, e.pubkey.String(), e.reward, rpcVal, diff)
-	}
-	mlog.Log.Infof("")
-
-	// Log bottom 10 vote accounts by RPC reward (non-zero)
-	mlog.Log.Infof("BOTTOM 10 vote accounts by [RPC] reward:")
-	startRPC := len(sortedRPC) - 10
-	if startRPC < 0 {
-		startRPC = 0
-	}
-	for i := len(sortedRPC) - 1; i >= startRPC && i >= 0; i-- {
-		e := sortedRPC[i]
-		if e.reward == 0 {
-			continue
-		}
-		localVal := localVoteRewards[e.pubkey]
-		diff := int64(localVal) - int64(e.reward)
-		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", len(sortedRPC)-i, e.pubkey.String(), localVal, e.reward, diff)
-	}
-	mlog.Log.Infof("")
-
-	// Summary
-	hasMismatch := localVoteTotal != rpcVoteTotal || len(localOnlyAccounts) > 0 || len(rpcOnlyAccounts) > 0 || len(mismatches) > 0
-	if !hasMismatch {
-		mlog.Log.Infof("RESULT: MATCH - [LOCAL] vote rewards identical to [RPC]")
-	} else {
-		mlog.Log.Warnf("RESULT: MISMATCH - [LOCAL] differs from [RPC] by %d lamports", int64(localVoteTotal)-int64(rpcVoteTotal))
-
-		// On mismatch, log per-vote-pubkey commission summary if stakingRewards provided
-		if stakingRewards != nil && len(stakingRewards) > 0 {
-			mlog.Log.Infof("")
-			mlog.Log.Infof("PER-VOTE-PUBKEY COMMISSION SUMMARY (for mismatched vote accounts):")
-			mlog.Log.Infof("  Commission source: current vote account state (delay_commission_updates NOT active)")
-			mlog.Log.Infof("")
-
-			// Build per-vote-pubkey aggregation
-			type voteAggregation struct {
-				votePubkey       solana.PublicKey
-				commission       uint8
-				voterRewardsSum  uint64
-				stakerRewardsSum uint64
-				stakeAcctCount   int
-			}
-			voteAggregations := make(map[solana.PublicKey]*voteAggregation)
-
-			for _, sr := range stakingRewards {
-				if sr == nil {
-					continue
-				}
-				agg, exists := voteAggregations[sr.VotePubkey]
-				if !exists {
-					agg = &voteAggregation{
-						votePubkey: sr.VotePubkey,
-						commission: sr.Commission,
-					}
-					voteAggregations[sr.VotePubkey] = agg
-				}
-				agg.voterRewardsSum += sr.VoterRewards
-				agg.stakerRewardsSum += sr.StakerRewards
-				agg.stakeAcctCount++
-			}
-
-			// Only log vote pubkeys that have a mismatch
-			mismatchedVotes := make(map[solana.PublicKey]bool)
-			for _, m := range mismatches {
-				mismatchedVotes[m.pubkey] = true
-			}
-			for _, pk := range localOnlyAccounts {
-				mismatchedVotes[pk] = true
-			}
-			for _, pk := range rpcOnlyAccounts {
-				mismatchedVotes[pk] = true
-			}
-
-			// Sort by voter rewards sum descending
-			type sortableAgg struct {
-				agg     *voteAggregation
-				rpcVal  uint64
-				diff    int64
-			}
-			var sortedAggs []sortableAgg
-			for votePubkey, agg := range voteAggregations {
-				if mismatchedVotes[votePubkey] {
-					rpcVal := rpcVoteRewards[votePubkey]
-					diff := int64(agg.voterRewardsSum) - int64(rpcVal)
-					sortedAggs = append(sortedAggs, sortableAgg{agg, rpcVal, diff})
-				}
-			}
-
-			// Sort by absolute diff descending
-			for i := 0; i < len(sortedAggs)-1; i++ {
-				for j := i + 1; j < len(sortedAggs); j++ {
-					if abs(sortedAggs[j].diff) > abs(sortedAggs[i].diff) {
-						sortedAggs[i], sortedAggs[j] = sortedAggs[j], sortedAggs[i]
-					}
-				}
-			}
-
-			// Log top 20 mismatched vote pubkeys
-			mlog.Log.Infof("  vote_pubkey                                       comm%%  voter_sum      staker_sum     stake_accts  [RPC]          DIFF")
-			mlog.Log.Infof("  ------------------------------------------------  -----  -------------  -------------  -----------  -------------  -------------")
-			for i, sa := range sortedAggs {
-				if i >= 20 {
-					mlog.Log.Infof("  ... and %d more mismatched vote pubkeys", len(sortedAggs)-20)
-					break
-				}
-				mlog.Log.Infof("  %s  %3d%%   %-13d  %-13d  %-11d  %-13d  %+d",
-					sa.agg.votePubkey.String(), sa.agg.commission, sa.agg.voterRewardsSum, sa.agg.stakerRewardsSum, sa.agg.stakeAcctCount, sa.rpcVal, sa.diff)
-			}
-			mlog.Log.Infof("")
-		}
-	}
-	mlog.Log.Infof("================================================================================")
-}
-
-func abs(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-// DebugDumpPerVoteAccountBreakdown logs detailed per-vote-account breakdown of stake, points, and rewards.
-// This helps identify if divergence is coming from stake calculation, credits, or commission.
-// pointsPerStake: map from stake pubkey -> CalculatedStakePoints
-// stakingRewards: map from stake pubkey -> CalculatedStakeRewards
-// rpcVoteRewards: vote rewards from RPC (for comparison)
-func DebugDumpPerVoteAccountBreakdown(
-	pointsPerStake map[solana.PublicKey]*CalculatedStakePoints,
-	stakingRewards map[solana.PublicKey]*CalculatedStakeRewards,
-	rpcVoteRewards map[solana.PublicKey]uint64,
-	totalPoints wide.Uint128,
-	totalRewards uint64,
-) {
-	mlog.Log.Infof("")
-	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("PER-VOTE-ACCOUNT BREAKDOWN (stake, points, rewards)")
-	mlog.Log.Infof("================================================================================")
-
-	// Aggregate per vote account
-	type voteAcctStats struct {
-		votePubkey      solana.PublicKey
-		totalStake      uint64   // sum of effective stake delegated to this vote account
-		totalPoints     wide.Uint128 // sum of points from all delegations
-		voterRewards    uint64   // commission portion (from stakingRewards)
-		stakerRewards   uint64   // delegator portion (from stakingRewards)
-		numDelegations  int      // number of stake accounts
-		commission      uint8    // commission rate
-		avgCredits      uint64   // average new_credits_observed across delegations
-	}
-
-	voteStats := make(map[solana.PublicKey]*voteAcctStats)
-
-	// First pass: aggregate from pointsPerStake (stake and points)
-	stakeCache := global.StakeCache()
-	for stakePk, pts := range pointsPerStake {
-		if pts == nil {
-			continue
-		}
-		delegation := stakeCache[stakePk]
-		if delegation == nil {
-			continue
-		}
-		votePk := delegation.VoterPubkey
-
-		stats, exists := voteStats[votePk]
-		if !exists {
-			stats = &voteAcctStats{votePubkey: votePk}
-			voteStats[votePk] = stats
-		}
-		stats.totalStake += delegation.StakeLamports
-		stats.totalPoints = stats.totalPoints.Add(pts.Points)
-		stats.avgCredits += pts.NewCreditsObserved
-		stats.numDelegations++
-	}
-
-	// Second pass: add rewards from stakingRewards
-	for _, sr := range stakingRewards {
-		if sr == nil {
-			continue
-		}
-		stats, exists := voteStats[sr.VotePubkey]
-		if exists {
-			stats.voterRewards += sr.VoterRewards
-			stats.stakerRewards += sr.StakerRewards
-			stats.commission = sr.Commission
-		}
-	}
-
-	// Compute average credits
-	for _, stats := range voteStats {
-		if stats.numDelegations > 0 {
-			stats.avgCredits /= uint64(stats.numDelegations)
-		}
-	}
-
-	// Sort by total stake descending
-	type sortableStats struct {
-		stats    *voteAcctStats
-		rpcVoter uint64
-		diff     int64
-	}
-	var sorted []sortableStats
-	for _, stats := range voteStats {
-		rpcVoter := rpcVoteRewards[stats.votePubkey]
-		diff := int64(stats.voterRewards) - int64(rpcVoter)
-		sorted = append(sorted, sortableStats{stats, rpcVoter, diff})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].stats.totalStake > sorted[j].stats.totalStake
-	})
-
-	// Summary stats
-	var totalLocalStake uint64
-	var totalLocalPoints wide.Uint128
-	var totalLocalVoter, totalLocalStaker uint64
-	var totalRpcVoter uint64
-	for _, ss := range sorted {
-		totalLocalStake += ss.stats.totalStake
-		totalLocalPoints = totalLocalPoints.Add(ss.stats.totalPoints)
-		totalLocalVoter += ss.stats.voterRewards
-		totalLocalStaker += ss.stats.stakerRewards
-		totalRpcVoter += ss.rpcVoter
-	}
-
-	mlog.Log.Infof("TOTALS:")
-	mlog.Log.Infof("  Vote accounts:    %d", len(sorted))
-	mlog.Log.Infof("  Total stake:      %d lamports (%.2f SOL)", totalLocalStake, float64(totalLocalStake)/1e9)
-	mlog.Log.Infof("  Total points:     %s (from aggregation)", totalLocalPoints.String())
-	mlog.Log.Infof("  Total points:     %s (from calculation)", totalPoints.String())
-	mlog.Log.Infof("  Total rewards:    %d (inflation pool)", totalRewards)
-	mlog.Log.Infof("  Voter rewards:    LOCAL=%d RPC=%d DIFF=%+d", totalLocalVoter, totalRpcVoter, int64(totalLocalVoter)-int64(totalRpcVoter))
-	mlog.Log.Infof("  Staker rewards:   %d", totalLocalStaker)
-	mlog.Log.Infof("  Combined:         %d (voter+staker)", totalLocalVoter+totalLocalStaker)
-	mlog.Log.Infof("")
-
-	// Top 20 by stake
-	mlog.Log.Infof("TOP 20 VOTE ACCOUNTS BY STAKE:")
-	mlog.Log.Infof("  %-44s %6s %15s %20s %12s %12s %12s %+12s", "vote_pubkey", "comm%", "stake(SOL)", "points", "voter_local", "voter_rpc", "staker", "diff")
-	mlog.Log.Infof("  %s", strings.Repeat("-", 160))
-	for i, ss := range sorted {
-		if i >= 20 {
-			break
-		}
-		s := ss.stats
-		mlog.Log.Infof("  %-44s %5d%% %15.2f %20s %12d %12d %12d %+12d",
-			s.votePubkey.String(), s.commission, float64(s.totalStake)/1e9, s.totalPoints.String(),
-			s.voterRewards, ss.rpcVoter, s.stakerRewards, ss.diff)
-	}
-	mlog.Log.Infof("")
-
-	// Top 20 mismatches by absolute diff
-	var mismatches []sortableStats
-	for _, ss := range sorted {
-		if ss.diff != 0 {
-			mismatches = append(mismatches, ss)
-		}
-	}
-	sort.Slice(mismatches, func(i, j int) bool {
-		absI := mismatches[i].diff
-		if absI < 0 { absI = -absI }
-		absJ := mismatches[j].diff
-		if absJ < 0 { absJ = -absJ }
-		return absI > absJ
-	})
-
-	if len(mismatches) > 0 {
-		mlog.Log.Infof("TOP 20 MISMATCHES BY ABSOLUTE DIFF:")
-		mlog.Log.Infof("  %-44s %6s %15s %12s %12s %+12s %8s", "vote_pubkey", "comm%", "stake(SOL)", "voter_local", "voter_rpc", "diff", "delegs")
-		mlog.Log.Infof("  %s", strings.Repeat("-", 120))
-		for i, ss := range mismatches {
-			if i >= 20 {
-				mlog.Log.Infof("  ... and %d more mismatched vote accounts", len(mismatches)-20)
-				break
-			}
-			s := ss.stats
-			mlog.Log.Infof("  %-44s %5d%% %15.2f %12d %12d %+12d %8d",
-				s.votePubkey.String(), s.commission, float64(s.totalStake)/1e9,
-				s.voterRewards, ss.rpcVoter, ss.diff, s.numDelegations)
-		}
-	}
-	mlog.Log.Infof("================================================================================")
-}
+// NOTE: CompareVoteRewardsWithRPC and DebugDumpPerVoteAccountBreakdown have been removed.
+// Detailed diagnostics are now written to a file by WriteEpochBoundaryDiagnostics in epoch_diag.go.
+// Terminal output shows only a brief summary via LogEpochBoundarySummary.
 
 type idxAndPubkey struct {
 	idx    int
 	pubkey solana.PublicKey
 }
+
 
 // DistributeStakingRewardsForPartition distributes staking rewards for a single partition.
 // stakeAccountSnapshots: cached stake accounts captured during RefreshStakeCacheCreditsObserved
@@ -1889,7 +1392,6 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	wg.Wait()
 
 	workerPool.Release()
-	ants.Release()
 
 	// Check for worker errors
 	if errPtr := workerErr.Load(); errPtr != nil {
@@ -1997,7 +1499,6 @@ func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedSt
 	}
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	mlog.Log.Infof("stake rewards calculation complete: %d accounts with rewards", len(stakeInfoResults))
 
@@ -2076,7 +1577,6 @@ func CalculateStakeRewardsAndPartitions(
 	}
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	mlog.Log.Infof("stake rewards calculation complete: %d accounts with rewards", len(stakeInfoResults))
 
@@ -2123,7 +1623,6 @@ func CalculateStakeRewardsAndPartitions(
 
 	wg.Wait()
 	workerPool2.Release()
-	ants.Release()
 
 	close(assigns)
 	wgPartition.Wait()
@@ -2325,7 +1824,6 @@ func CalculateTotalPointsAndPartitions(
 
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	if numPartitions != 0 {
 		close(assigns)
@@ -2393,7 +1891,6 @@ func CalculateTotalPoints(
 
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	mlog.Log.Debugf("rewards: stake filter counts (points): slot=%d min_stake=%d total=%d eligible=%d below_min=%d no_vote=%d",
 		slot, minimum, n, eligibleCount.Load(), belowMinCount.Load(), noVoteCount.Load())

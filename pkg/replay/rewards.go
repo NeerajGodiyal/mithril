@@ -3,7 +3,6 @@ package replay
 import (
 	"bytes"
 	"fmt"
-	"os"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -90,14 +89,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
-	// DEBUG: Log comprehensive epoch rewards diagnostics
-	// This includes points, total rewards, and vote rewards comparison
-	mlog.Log.Infof("")
-	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("EPOCH REWARDS DIAGNOSTICS - Epoch %d -> %d (slot %d)", epoch-1, epoch, slot)
-	mlog.Log.Infof("================================================================================")
-
-	// Calculate local totals from staking rewards
+	// Build diagnostics data
 	var localStakerTotal, localVoterTotal uint64
 	for _, sr := range partitionedRewardsInfo.StakingRewards {
 		if sr != nil {
@@ -106,7 +98,6 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		}
 	}
 
-	// Count RPC vote rewards
 	var rpcVoteTotal uint64
 	var rpcVoteCount int
 	for _, r := range block.Rewards {
@@ -116,125 +107,61 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		}
 	}
 
-	// Aggregate local vote rewards by vote account (for accurate count comparison)
-	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
-	localVoteAccountCount := len(localVoteRewards)
-
-	// Derive RPC eligible count from partitions (partitions = ceil(eligible / 4096))
-	// If partitions match, eligible counts are implicitly the same
-	// Note: block.NumRewardPartitions may be MaxUint64 if RPC didn't provide it
-	var rpcEligibleEstimate string
-	if block.NumRewardPartitions != ^uint64(0) { // not MaxUint64
-		// Estimate: eligible is between (partitions-1)*4096+1 and partitions*4096
-		minEligible := (block.NumRewardPartitions-1)*4096 + 1
-		maxEligible := block.NumRewardPartitions * 4096
-		rpcEligibleEstimate = fmt.Sprintf("%d-%d", minEligible, maxEligible)
-	} else {
-		rpcEligibleEstimate = "(not available)"
-	}
-
-	// Calculate local total stake from stake cache with breakdown by activation status
-	var localTotalStake uint64
+	// Calculate stake cache breakdown
 	var activeStake, activatingStake, deactivatingStake, deactivatedStake uint64
-	var activeCount, activatingCount, deactivatingCount, deactivatedCount int
-	stakeByVote := make(map[solana.PublicKey]uint64) // stake per vote account
 	prevEpoch := epoch - 1
 	for _, delegation := range global.StakeCache() {
 		if delegation != nil {
-			localTotalStake += delegation.StakeLamports
-			stakeByVote[delegation.VoterPubkey] += delegation.StakeLamports
-
-			// Classify by activation/deactivation status relative to rewarded epoch
 			isActivating := delegation.ActivationEpoch >= prevEpoch
 			isDeactivating := delegation.DeactivationEpoch != ^uint64(0) && delegation.DeactivationEpoch <= prevEpoch
 			isDeactivated := delegation.DeactivationEpoch != ^uint64(0) && delegation.DeactivationEpoch < prevEpoch
 
 			if isDeactivated {
 				deactivatedStake += delegation.StakeLamports
-				deactivatedCount++
 			} else if isDeactivating {
 				deactivatingStake += delegation.StakeLamports
-				deactivatingCount++
 			} else if isActivating {
 				activatingStake += delegation.StakeLamports
-				activatingCount++
 			} else {
 				activeStake += delegation.StakeLamports
-				activeCount++
 			}
 		}
 	}
 
-	// Log stake sources with clear labels explaining what each represents
-	mlog.Log.Infof("")
-	mlog.Log.Infof("STAKE SOURCES (these are EXPECTED to differ - different epochs/purposes):")
-	mlog.Log.Infof("  ┌─────────────────────────────────────────────────────────────────────────────")
-	mlog.Log.Infof("  │ STAKE_CACHE (boundary slot %d, for rewards epoch %d):", slot-1, prevEpoch)
-	mlog.Log.Infof("  │   Total: %d lamports (%.2f SOL) across %d delegations to %d vote accounts",
-		localTotalStake, float64(localTotalStake)/1e9, global.StakeCacheSize(), len(stakeByVote))
-	mlog.Log.Infof("  │   Breakdown:")
-	mlog.Log.Infof("  │     Active:       %.2f SOL (%d accounts)", float64(activeStake)/1e9, activeCount)
-	mlog.Log.Infof("  │     Activating:   %.2f SOL (%d accounts) - activation_epoch >= %d", float64(activatingStake)/1e9, activatingCount, prevEpoch)
-	mlog.Log.Infof("  │     Deactivating: %.2f SOL (%d accounts) - deactivation_epoch <= %d", float64(deactivatingStake)/1e9, deactivatingCount, prevEpoch)
-	mlog.Log.Infof("  │     Deactivated:  %.2f SOL (%d accounts) - deactivation_epoch < %d", float64(deactivatedStake)/1e9, deactivatedCount, prevEpoch)
-	mlog.Log.Infof("  │")
-	mlog.Log.Infof("  │ SNAPSHOT_EPOCH_STAKES (N-2 rule, for leader schedule epoch %d):", epoch)
-	mlog.Log.Infof("  │   Used for leader schedule, from end of epoch %d (two epochs before %d)", epoch-2, epoch)
-	mlog.Log.Infof("  │   (see 'leader schedule [LOCAL]' log line for stake total)")
-	mlog.Log.Infof("  │")
-	mlog.Log.Infof("  │ RPC_VOTE_ACCOUNTS (current state, UNANCHORED):")
-	mlog.Log.Infof("  │   From getVoteAccounts RPC call - reflects current epoch, not boundary slot")
-	mlog.Log.Infof("  │   (see '[RPC COMPARE] vote_accounts' log line for stake total)")
-	mlog.Log.Infof("  └─────────────────────────────────────────────────────────────────────────────")
-	mlog.Log.Infof("")
-	mlog.Log.Infof("  [LOCAL] Total points:       %s", points.String())
-	mlog.Log.Infof("  [LOCAL] Inflation pool:     %d (from CalculatePreviousEpochInflationRewards)", partitionedRewardsInfo.TotalStakingRewards)
-	mlog.Log.Infof("  [LOCAL] Distributed sum:    %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
-	mlog.Log.Infof("  [LOCAL] Rounding loss:      %d (inflation pool - distributed sum)", int64(partitionedRewardsInfo.TotalStakingRewards)-int64(localStakerTotal+localVoterTotal))
+	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
 
-	mlog.Log.Infof("")
-	mlog.Log.Infof("                              [LOCAL]              [RPC]                 DIFF")
-	mlog.Log.Infof("                              -------              -----                 ----")
-
-	// Num partitions comparison (from getBlock - anchored)
-	if block.NumRewardPartitions != ^uint64(0) {
-		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d", partitionedRewardsInfo.NumRewardPartitions, block.NumRewardPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(block.NumRewardPartitions))
-	} else {
-		mlog.Log.Infof("  Num partitions:             %-20d (not in getBlock response)", partitionedRewardsInfo.NumRewardPartitions)
-	}
-	mlog.Log.Infof("  Eligible stake accounts:    %-20d %-20s", partitionedRewardsInfo.EligibleCount, rpcEligibleEstimate)
-	mlog.Log.Infof("  Vote accounts:              %-20d %-20d %+d", localVoteAccountCount, rpcVoteCount, localVoteAccountCount-rpcVoteCount)
-	mlog.Log.Infof("  Vote rewards (lamports):    %-20d %-20d %+d", localVoterTotal, rpcVoteTotal, int64(localVoterTotal)-int64(rpcVoteTotal))
-	mlog.Log.Infof("  Staker rewards (lamports):  %-20d (not available from RPC)", localStakerTotal)
-	mlog.Log.Infof("  Combined (lamports):        %-20d (not available from RPC)", localStakerTotal+localVoterTotal)
-	mlog.Log.Infof("")
-	mlog.Log.Infof("  Eligibility: valid vote account, points > 0")
-	mlog.Log.Infof("  Partition formula: ceil(eligible / 4096) = partitions")
-	mlog.Log.Infof("")
-
-	// Compare vote rewards with RPC (pass staking rewards for commission summary on mismatch)
-	if len(block.Rewards) > 0 {
-		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards, partitionedRewardsInfo.StakingRewards)
+	// Build and write diagnostics
+	diag := &rewards.EpochBoundaryDiagnostics{
+		PrevEpoch:           epoch - 1,
+		NewEpoch:            epoch,
+		Slot:                slot,
+		LocalPartitions:     partitionedRewardsInfo.NumRewardPartitions,
+		RpcPartitions:       block.NumRewardPartitions,
+		EligibleCount:       partitionedRewardsInfo.EligibleCount,
+		TotalPoints:         points,
+		TotalStakingRewards: partitionedRewardsInfo.TotalStakingRewards,
+		LocalStakerTotal:    localStakerTotal,
+		LocalVoterTotal:     localVoterTotal,
+		RpcVoteTotal:        rpcVoteTotal,
+		StakeCacheSize:      global.StakeCacheSize(),
+		ActiveStake:         activeStake,
+		ActivatingStake:     activatingStake,
+		DeactivatingStake:   deactivatingStake,
+		DeactivatedStake:    deactivatedStake,
+		LocalVoteAccounts:   len(localVoteRewards),
+		RpcVoteAccounts:     rpcVoteCount,
+		PointsPerStake:      pointsPerStakeAcct,
+		StakingRewards:      partitionedRewardsInfo.StakingRewards,
+		RpcRewards:          block.Rewards,
 	}
 
-	// Build RPC vote rewards map for detailed breakdown
-	rpcVoteRewardsMap := make(map[solana.PublicKey]uint64)
-	for _, r := range block.Rewards {
-		if string(r.RewardType) == "Voting" && r.Lamports > 0 {
-			rpcVoteRewardsMap[r.Pubkey] = uint64(r.Lamports)
-		}
+	// Fix RpcPartitions if it's MaxUint64 (means not available)
+	if diag.RpcPartitions == ^uint64(0) {
+		diag.RpcPartitions = 0
 	}
 
-	// Detailed per-vote-account breakdown showing stake, points, and rewards
-	rewards.DebugDumpPerVoteAccountBreakdown(pointsPerStakeAcct, partitionedRewardsInfo.StakingRewards, rpcVoteRewardsMap, points, totalRewards)
-
-	// DEBUG EXIT: Exit after diagnostics but before committing state changes.
-	// This allows re-running from the boundary slot to iterate on debugging.
-	mlog.Log.Infof("")
-	mlog.Log.Infof("================================================================================")
-	mlog.Log.Infof("DEBUG EXIT: Exiting after epoch boundary diagnostics (state NOT committed)")
-	mlog.Log.Infof("================================================================================")
-	os.Exit(0)
+	diagPath := rewards.WriteEpochBoundaryDiagnostics(diag)
+	rewards.LogEpochBoundarySummary(diag, diagPath)
 
 	// SANITY CHECK: Verify eligible count matches actual rewards count.
 	// A mismatch indicates the stake cache changed between partition count calculation and rewards calculation,

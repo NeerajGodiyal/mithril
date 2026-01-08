@@ -705,106 +705,72 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 }
 
 func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
-	mlog.Log.Infof("loading vote and stake accounts from AccountsDB...")
+	mlog.Log.Infof("loading stake and vote accounts...")
+
+	// Initialize block metadata
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.VoteAccts = make(map[solana.PublicKey]uint64)
 
-	var wg sync.WaitGroup
-	voteAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
-		defer wg.Done()
+	// ==========================================
+	// PHASE 1: Load stake cache first (source of truth)
+	// ==========================================
+	// Stake cache is loaded BEFORE vote cache because:
+	// 1. Stake cache is the source of truth for which vote accounts have stake
+	// 2. Vote cache pubkeys are derived from stake cache (not manifest)
+	// 3. This ensures all vote accounts with active stake are in cache
 
-		pk := i.(solana.PublicKey)
-		voteAcct, err := acctsDb.GetAccount(block.Slot, pk)
-		if err == nil {
-			versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
-			if err == nil {
-				global.PutVoteCacheItem(pk, versionedVoteState)
-			}
-		}
-	})
-
-	// Check if stake cache was already populated (from persisted file on resume)
-	// If so, skip loading from snapshot manifest - persisted cache is more accurate
 	existingStakeCacheSize := len(global.StakeCache())
 	if existingStakeCacheSize > 0 {
-		mlog.Log.Infof("stake cache already populated from persisted file: %d entries, skipping snapshot load", existingStakeCacheSize)
-	}
+		mlog.Log.Infof("stake cache already populated from persisted file: %d entries", existingStakeCacheSize)
+	} else {
+		// Load stake cache from snapshot manifest delegations
+		var stakeLoaded atomic.Uint64
+		var stakeNotFound atomic.Uint64
+		var stakeUnmarshalFailed atomic.Uint64
 
-	// Counters for stake cache loading diagnostics
-	var stakeLoaded atomic.Uint64
-	var stakeNotFound atomic.Uint64
-	var stakeUnmarshalFailed atomic.Uint64
+		var stakeWg sync.WaitGroup
+		stakeAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+			defer stakeWg.Done()
 
-	stakeAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
-		defer wg.Done()
+			sa := i.(snapshot.DelegationPair)
 
-		sa := i.(snapshot.DelegationPair)
-
-		// Read the actual stake account from AccountsDB (not snapshot data)
-		// This is critical for resume: AccountsDB has the current state, snapshot is stale
-		stakeAcct, err := acctsDb.GetAccount(block.Slot, sa.Account)
-		if err != nil {
-			// Account doesn't exist in AccountsDB - skip it
-			// This can happen if stake account was closed after snapshot
-			stakeNotFound.Add(1)
-			return
-		}
-
-		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-		if err != nil {
-			// Can't parse stake state - log and skip
-			stakeUnmarshalFailed.Add(1)
-			mlog.Log.Warnf("stake cache: failed to unmarshal stake account %s: %v", sa.Account, err)
-			return
-		}
-
-		// Use delegation data from AccountsDB, not from snapshot manifest
-		// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
-		delegation := stakeState.Stake.Stake.Delegation
-		global.PutStakeCacheItemBulk(sa.Account,
-			&sealevel.Delegation{
-				VoterPubkey:        delegation.VoterPubkey,
-				StakeLamports:      delegation.StakeLamports,
-				ActivationEpoch:    delegation.ActivationEpoch,
-				DeactivationEpoch:  delegation.DeactivationEpoch,
-				WarmupCooldownRate: delegation.WarmupCooldownRate,
-				CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
-			})
-		stakeLoaded.Add(1)
-	})
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
-			ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
-			block.VoteTimestamps[va.Key] = ts
-			block.VoteAccts[va.Key] = va.Stake
-			block.TotalEpochStake += va.Stake
-
-			wg.Add(1)
-			voteAcctWorkerPool.Invoke(va.Key)
-		}
-	}()
-
-	// Only load stake cache from snapshot if not already populated from persisted file
-	if existingStakeCacheSize == 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
-				wg.Add(1)
-				stakeAcctWorkerPool.Invoke(sa)
+			// Read the actual stake account from AccountsDB (not snapshot data)
+			// This is critical for resume: AccountsDB has the current state, snapshot is stale
+			stakeAcct, err := acctsDb.GetAccount(block.Slot, sa.Account)
+			if err != nil {
+				stakeNotFound.Add(1)
+				return
 			}
-		}()
-	}
 
-	wg.Wait()
-	stakeAcctWorkerPool.Release()
-	ants.Release()
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				stakeUnmarshalFailed.Add(1)
+				return
+			}
 
-	// Log stake cache loading summary
-	if existingStakeCacheSize == 0 {
+			// Use delegation data from AccountsDB, not from snapshot manifest
+			// Use PutStakeCacheItemBulk to avoid enqueuing all pubkeys as "new"
+			delegation := stakeState.Stake.Stake.Delegation
+			global.PutStakeCacheItemBulk(sa.Account,
+				&sealevel.Delegation{
+					VoterPubkey:        delegation.VoterPubkey,
+					StakeLamports:      delegation.StakeLamports,
+					ActivationEpoch:    delegation.ActivationEpoch,
+					DeactivationEpoch:  delegation.DeactivationEpoch,
+					WarmupCooldownRate: delegation.WarmupCooldownRate,
+					CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
+				})
+			stakeLoaded.Add(1)
+		})
+
+		for _, sa := range snapshotManifest.Bank.Stakes.Delegations {
+			stakeWg.Add(1)
+			stakeAcctWorkerPool.Invoke(sa)
+		}
+
+		stakeWg.Wait()
+		stakeAcctWorkerPool.Release()
+
 		loaded := stakeLoaded.Load()
 		notFound := stakeNotFound.Load()
 		unmarshalFailed := stakeUnmarshalFailed.Load()
@@ -816,6 +782,73 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 				notFound+unmarshalFailed, notFound, unmarshalFailed)
 		}
 	}
+
+	// ==========================================
+	// PHASE 2: Seed vote cache from stake-derived pubkeys
+	// ==========================================
+	// Vote cache pubkeys come from stake cache (not manifest) because:
+	// 1. Manifest vote accounts list may be stale (missing accounts created after snapshot)
+	// 2. Stake cache reflects the actual delegations in AccountsDB
+	// 3. Only vote accounts with stake delegations need to be in cache
+
+	stakeVotePubkeys := DeriveVotePubkeysFromStakeCache()
+	mlog.Log.Infof("seeding vote cache from %d stake-derived vote pubkeys", len(stakeVotePubkeys))
+
+	var voteLoaded atomic.Uint64
+	var voteFailed atomic.Uint64
+	var voteMu sync.Mutex
+
+	var voteWg sync.WaitGroup
+	voteAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
+		defer voteWg.Done()
+
+		item := i.(struct {
+			pk    solana.PublicKey
+			stake uint64
+		})
+
+		voteAcct, err := acctsDb.GetAccount(block.Slot, item.pk)
+		if err != nil {
+			voteFailed.Add(1)
+			return
+		}
+
+		versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+		if err != nil {
+			voteFailed.Add(1)
+			return
+		}
+
+		global.PutVoteCacheItem(item.pk, versionedVoteState)
+		voteLoaded.Add(1)
+
+		// Also populate block metadata (VoteTimestamps, VoteAccts, TotalEpochStake)
+		voteMu.Lock()
+		if ts := versionedVoteState.LastTimestamp(); ts != nil {
+			block.VoteTimestamps[item.pk] = *ts
+		}
+		block.VoteAccts[item.pk] = item.stake
+		block.TotalEpochStake += item.stake
+		voteMu.Unlock()
+	})
+
+	for pk, stake := range stakeVotePubkeys {
+		if stake == 0 {
+			continue
+		}
+		voteWg.Add(1)
+		item := struct {
+			pk    solana.PublicKey
+			stake uint64
+		}{pk: pk, stake: stake}
+		voteAcctWorkerPool.Invoke(item)
+	}
+
+	voteWg.Wait()
+	voteAcctWorkerPool.Release()
+
+	mlog.Log.Infof("vote cache seeded: loaded=%d failed=%d total_stake=%.2f SOL",
+		voteLoaded.Load(), voteFailed.Load(), float64(block.TotalEpochStake)/1e9)
 }
 
 // BuildStakeCacheFromAccountsDB scans AccountsDB for all stake accounts and populates the stake cache.
@@ -1559,60 +1592,28 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 
-			// Step 2a: VoteCache handling at epoch boundary.
-			// EXPERIMENT: Skip rebuild and use the replay-accumulated VoteCache instead.
-			// The debug comparison will show if/how they differ.
+			// Step 2a: VoteCache validation and selective update at epoch boundary.
+			// Uses a single-pass approach: compare to AccountsDB and update only if missing or different.
+			// This is more efficient than a full rebuild and preserves correct cache entries.
 			voteCacheSlot := prevSlotCtxForEpochBoundary.Slot
-			mlog.Log.Infof("  [VOTE CACHE] SKIPPING REBUILD - using replay-accumulated cache (boundary slot=%d)", voteCacheSlot)
+			mlog.Log.Infof("  [VOTE CACHE] validating and updating cache (boundary slot=%d)", voteCacheSlot)
 
-			// DEBUG: Compare VoteCache (from replay) vs AccountsDB to see differences
-			debugCompareVoteCacheBeforeAfterRebuild(acctsDb, voteCacheSlot, block.VoteAccts, currentEpoch)
+			// Validate and selectively update vote cache
+			vcResult := ValidateAndUpdateVoteCache(acctsDb, voteCacheSlot, block.VoteAccts, currentEpoch, 0)
 
-			// DEBUG: Compare local stake vs RPC stake per vote account
-			debugCompareStakeWithRPC(rpcc, block.VoteAccts, voteCacheSlot, currentEpoch-1)
-
-			// DISABLED: Rebuild from AccountsDB
-			// if err := RebuildVoteCacheFromAccountsDB(acctsDb, voteCacheSlot, block.VoteAccts, 0); err != nil {
-			// 	mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
-			// 	result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
-			// 	break
-			// }
-
-			// Step 2b: Verify vote cache completeness for all non-zero stake vote accounts.
-			// Missing vote accounts are expected for closed/invalid accounts - stake delegated to them
-			// is simply not eligible for rewards (no vote credits = 0 points = ineligible).
-			// This matches Agave/Firedancer behavior where eligibility requires a valid vote account.
-			{
-				total := 0
-				totalStake := uint64(0)
-				rebuilt := 0
-				rebuiltStake := uint64(0)
-				missing := 0
-				missingStake := uint64(0)
-				for pk, stake := range block.VoteAccts {
-					if stake == 0 {
-						continue
-					}
-					total++
-					totalStake += stake
-					if global.VoteCacheItem(pk) == nil {
-						missing++
-						missingStake += stake
-					} else {
-						rebuilt++
-						rebuiltStake += stake
-					}
-				}
-				mlog.Log.Infof("  [VOTE CACHE] result: %d/%d accounts rebuilt (%.2f%% by count, %.2f%% by stake)",
-					rebuilt, total, float64(rebuilt)*100/float64(total), float64(rebuiltStake)*100/float64(totalStake))
-				if missing > 0 {
-					// Log missing accounts but continue - stake delegated to missing vote accounts
-					// is simply ineligible (matches Agave/FD eligibility: "has corresponding vote account")
-					missingPct := float64(missingStake) * 100 / float64(totalStake)
-					mlog.Log.Warnf("  [VOTE CACHE] %d vote accounts missing (%.4f%% stake) - their stake is ineligible for rewards",
-						missing, missingPct)
-				}
+			// Step 2b: Log summary of validation results
+			validCount := vcResult.Match + vcResult.Added + vcResult.Updated
+			errorCount := vcResult.MissingInAcctsDb + vcResult.UnmarshalErr + vcResult.ZeroNodePk
+			if errorCount > 0 {
+				// Missing vote accounts are expected for closed/invalid accounts - stake delegated to them
+				// is simply not eligible for rewards (no vote credits = 0 points = ineligible).
+				// This matches Agave/Firedancer behavior where eligibility requires a valid vote account.
+				errorPct := float64(vcResult.ErrorStake) * 100 / float64(vcResult.TotalStake)
+				mlog.Log.Warnf("  [VOTE CACHE] %d vote accounts invalid/missing (%.4f%% stake) - their stake is ineligible",
+					errorCount, errorPct)
 			}
+			mlog.Log.Infof("  [VOTE CACHE] result: valid=%d (match=%d added=%d updated=%d) invalid=%d",
+				validCount, vcResult.Match, vcResult.Added, vcResult.Updated, errorCount)
 
 			// Step 2c: Build leader schedule BEFORE rewards distribution.
 			// This ensures schedule verification works even if rewards distribution crashes.
@@ -1702,38 +1703,9 @@ func ReplayBlocks(
 				localSchedule := global.LeaderSchedule()
 				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
 
-				// Fetch RPC vote accounts for comparison (current state - won't be historical)
-				// This helps verify we have the same validators visible
-				go func() {
-					// Get RPC's current slot for context
-					epochInfo, epochErr := rpcc.GetEpochInfo()
-					var rpcSlot uint64
-					var rpcEpoch uint64
-					if epochErr == nil && epochInfo != nil {
-						rpcSlot = epochInfo.AbsoluteSlot
-						rpcEpoch = epochInfo.Epoch
-					}
-
-					rpcVoteAccts, err := rpcc.GetVoteAccounts()
-					if err != nil {
-						mlog.Log.FileOnlyf("  [RPC COMPARE] GetVoteAccounts failed: %v", err)
-						return
-					}
-					totalRpcVoteAccts := len(rpcVoteAccts.Current) + len(rpcVoteAccts.Delinquent)
-					var totalRpcStake uint64
-					for _, v := range rpcVoteAccts.Current {
-						totalRpcStake += v.ActivatedStake
-					}
-					for _, v := range rpcVoteAccts.Delinquent {
-						totalRpcStake += v.ActivatedStake
-					}
-					mlog.Log.Infof("  [RPC COMPARE] vote_accounts (RPC at slot=%d epoch=%d, UNANCHORED):", rpcSlot, rpcEpoch)
-					mlog.Log.Infof("                rpc_current=%d rpc_delinquent=%d rpc_total=%d rpc_stake=%d",
-						len(rpcVoteAccts.Current), len(rpcVoteAccts.Delinquent), totalRpcVoteAccts, totalRpcStake)
-					mlog.Log.Infof("  [RPC COMPARE] local (boundary slot=%d epoch=%d):", block.Slot-1, block.Epoch-1)
-					mlog.Log.Infof("                local_vote_accts=%d local_total_stake=%d",
-						len(block.VoteAccts), block.TotalEpochStake)
-				}()
+				// NOTE: RPC vote account comparison removed. GetVoteAccounts only returns CURRENT state
+				// (not historical boundary slot state), so any comparison would be misleading.
+				// Stake validation is better done via partition count match and leader schedule match.
 
 				// Set block.Leader for this block (was deferred in configureBlock)
 				var exists bool
