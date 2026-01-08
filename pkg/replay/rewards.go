@@ -133,13 +133,35 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		rpcEligibleEstimate = "(not available)"
 	}
 
-	// Calculate local total stake from stake cache (sum of all delegations)
+	// Calculate local total stake from stake cache with breakdown by activation status
 	var localTotalStake uint64
+	var activeStake, activatingStake, deactivatingStake, deactivatedStake uint64
+	var activeCount, activatingCount, deactivatingCount, deactivatedCount int
 	stakeByVote := make(map[solana.PublicKey]uint64) // stake per vote account
+	prevEpoch := epoch - 1
 	for _, delegation := range global.StakeCache() {
 		if delegation != nil {
 			localTotalStake += delegation.StakeLamports
 			stakeByVote[delegation.VoterPubkey] += delegation.StakeLamports
+
+			// Classify by activation/deactivation status relative to rewarded epoch
+			isActivating := delegation.ActivationEpoch >= prevEpoch
+			isDeactivating := delegation.DeactivationEpoch != ^uint64(0) && delegation.DeactivationEpoch <= prevEpoch
+			isDeactivated := delegation.DeactivationEpoch != ^uint64(0) && delegation.DeactivationEpoch < prevEpoch
+
+			if isDeactivated {
+				deactivatedStake += delegation.StakeLamports
+				deactivatedCount++
+			} else if isDeactivating {
+				deactivatingStake += delegation.StakeLamports
+				deactivatingCount++
+			} else if isActivating {
+				activatingStake += delegation.StakeLamports
+				activatingCount++
+			} else {
+				activeStake += delegation.StakeLamports
+				activeCount++
+			}
 		}
 	}
 
@@ -148,6 +170,11 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	mlog.Log.Infof("  [LOCAL] Total points:       %s", points.String())
 	mlog.Log.Infof("  [LOCAL] Total stake:        %d lamports (%.2f SOL) across %d delegations to %d vote accounts",
 		localTotalStake, float64(localTotalStake)/1e9, global.StakeCacheSize(), len(stakeByVote))
+	mlog.Log.Infof("  [LOCAL] Stake breakdown (epoch %d):", prevEpoch)
+	mlog.Log.Infof("          Active:       %d lamports (%.2f SOL) - %d accounts", activeStake, float64(activeStake)/1e9, activeCount)
+	mlog.Log.Infof("          Activating:   %d lamports (%.2f SOL) - %d accounts (activation_epoch >= %d)", activatingStake, float64(activatingStake)/1e9, activatingCount, prevEpoch)
+	mlog.Log.Infof("          Deactivating: %d lamports (%.2f SOL) - %d accounts (deactivation_epoch <= %d)", deactivatingStake, float64(deactivatingStake)/1e9, deactivatingCount, prevEpoch)
+	mlog.Log.Infof("          Deactivated:  %d lamports (%.2f SOL) - %d accounts (deactivation_epoch < %d)", deactivatedStake, float64(deactivatedStake)/1e9, deactivatedCount, prevEpoch)
 	mlog.Log.Infof("  [LOCAL] Inflation pool:     %d (from CalculatePreviousEpochInflationRewards)", partitionedRewardsInfo.TotalStakingRewards)
 	mlog.Log.Infof("  [LOCAL] Distributed sum:    %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
 	mlog.Log.Infof("  [LOCAL] Rounding loss:      %d (inflation pool - distributed sum)", int64(partitionedRewardsInfo.TotalStakingRewards)-int64(localStakerTotal+localVoterTotal))
