@@ -2171,13 +2171,15 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 		// 100% commission, all rewards go to validator
 		result.VoterPortion = rewards
 	default:
-		// TODO: refactor to use 128-bit math here
-		on := rewards
-		mine := (on * commissionRate) / 100
-		theirs := (on * (100 - commissionRate)) / 100
+		// Calculate voter portion, then subtract to get staker portion.
+		// This ensures voter + staker == rewards (no lamports lost to rounding).
+		// Matches Agave: validator_portion = (reward * commission) / 100
+		//                staker_portion = reward - validator_portion
+		voterPortion := (rewards * commissionRate) / 100
+		stakerPortion := rewards - voterPortion
 
-		result.VoterPortion = mine
-		result.StakerPortion = theirs
+		result.VoterPortion = voterPortion
+		result.StakerPortion = stakerPortion
 		result.IsSplit = true
 	}
 
