@@ -1447,7 +1447,11 @@ func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]
 // - Per-account differences
 // - Top/bottom vote accounts by reward
 // - Accounts only in local or only in RPC
-func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpcRewards []rpc.BlockReward) {
+// - Per-vote-pubkey commission summary (only on mismatch)
+//
+// If stakingRewards is provided and there's a mismatch, logs per-vote-pubkey summary
+// with commission, voter_rewards_sum, staker_rewards_sum, and stake_accounts_count.
+func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpcRewards []rpc.BlockReward, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards) {
 	// Build RPC vote rewards map
 	rpcVoteRewards := make(map[solana.PublicKey]uint64)
 	var rpcTotal uint64
@@ -1642,10 +1646,95 @@ func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpc
 	mlog.Log.Infof("")
 
 	// Summary
-	if localTotal == rpcTotal && len(localOnlyAccounts) == 0 && len(rpcOnlyAccounts) == 0 && len(mismatches) == 0 {
+	hasMismatch := localTotal != rpcTotal || len(localOnlyAccounts) > 0 || len(rpcOnlyAccounts) > 0 || len(mismatches) > 0
+	if !hasMismatch {
 		mlog.Log.Infof("RESULT: MATCH - [LOCAL] vote rewards identical to [RPC]")
 	} else {
 		mlog.Log.Warnf("RESULT: MISMATCH - [LOCAL] differs from [RPC] by %d lamports", int64(localTotal)-int64(rpcTotal))
+
+		// On mismatch, log per-vote-pubkey commission summary if stakingRewards provided
+		if stakingRewards != nil && len(stakingRewards) > 0 {
+			mlog.Log.Infof("")
+			mlog.Log.Infof("PER-VOTE-PUBKEY COMMISSION SUMMARY (for mismatched vote accounts):")
+			mlog.Log.Infof("  Commission source: current vote account state (delay_commission_updates NOT active)")
+			mlog.Log.Infof("")
+
+			// Build per-vote-pubkey aggregation
+			type voteAggregation struct {
+				votePubkey       solana.PublicKey
+				commission       uint8
+				voterRewardsSum  uint64
+				stakerRewardsSum uint64
+				stakeAcctCount   int
+			}
+			voteAggregations := make(map[solana.PublicKey]*voteAggregation)
+
+			for _, sr := range stakingRewards {
+				if sr == nil {
+					continue
+				}
+				agg, exists := voteAggregations[sr.VotePubkey]
+				if !exists {
+					agg = &voteAggregation{
+						votePubkey: sr.VotePubkey,
+						commission: sr.Commission,
+					}
+					voteAggregations[sr.VotePubkey] = agg
+				}
+				agg.voterRewardsSum += sr.VoterRewards
+				agg.stakerRewardsSum += sr.StakerRewards
+				agg.stakeAcctCount++
+			}
+
+			// Only log vote pubkeys that have a mismatch
+			mismatchedVotes := make(map[solana.PublicKey]bool)
+			for _, m := range mismatches {
+				mismatchedVotes[m.pubkey] = true
+			}
+			for _, pk := range localOnlyAccounts {
+				mismatchedVotes[pk] = true
+			}
+			for _, pk := range rpcOnlyAccounts {
+				mismatchedVotes[pk] = true
+			}
+
+			// Sort by voter rewards sum descending
+			type sortableAgg struct {
+				agg     *voteAggregation
+				rpcVal  uint64
+				diff    int64
+			}
+			var sortedAggs []sortableAgg
+			for votePubkey, agg := range voteAggregations {
+				if mismatchedVotes[votePubkey] {
+					rpcVal := rpcVoteRewards[votePubkey]
+					diff := int64(agg.voterRewardsSum) - int64(rpcVal)
+					sortedAggs = append(sortedAggs, sortableAgg{agg, rpcVal, diff})
+				}
+			}
+
+			// Sort by absolute diff descending
+			for i := 0; i < len(sortedAggs)-1; i++ {
+				for j := i + 1; j < len(sortedAggs); j++ {
+					if abs(sortedAggs[j].diff) > abs(sortedAggs[i].diff) {
+						sortedAggs[i], sortedAggs[j] = sortedAggs[j], sortedAggs[i]
+					}
+				}
+			}
+
+			// Log top 20 mismatched vote pubkeys
+			mlog.Log.Infof("  vote_pubkey                                       comm%%  voter_sum      staker_sum     stake_accts  [RPC]          DIFF")
+			mlog.Log.Infof("  ------------------------------------------------  -----  -------------  -------------  -----------  -------------  -------------")
+			for i, sa := range sortedAggs {
+				if i >= 20 {
+					mlog.Log.Infof("  ... and %d more mismatched vote pubkeys", len(sortedAggs)-20)
+					break
+				}
+				mlog.Log.Infof("  %s  %3d%%   %-13d  %-13d  %-11d  %-13d  %+d",
+					sa.agg.votePubkey.String(), sa.agg.commission, sa.agg.voterRewardsSum, sa.agg.stakerRewardsSum, sa.agg.stakeAcctCount, sa.rpcVal, sa.diff)
+			}
+			mlog.Log.Infof("")
+		}
 	}
 	mlog.Log.Infof("================================================================================")
 }
@@ -1807,6 +1896,8 @@ type CalculatedStakeRewards struct {
 	StakerRewards      uint64
 	VoterRewards       uint64
 	NewCreditsObserved uint64
+	Commission         uint8            // Commission rate used (0-100)
+	VotePubkey         solana.PublicKey // Vote account this stake delegates to
 }
 
 func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
@@ -2006,7 +2097,10 @@ func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *Ca
 	}
 
 	if stakePointsResult.ForceCreditsUpdateWithSkippedReward {
-		result := &CalculatedStakeRewards{NewCreditsObserved: stakePointsResult.NewCreditsObserved}
+		result := &CalculatedStakeRewards{
+			NewCreditsObserved: stakePointsResult.NewCreditsObserved,
+			VotePubkey:         delegation.VoterPubkey,
+		}
 		return result
 	}
 
@@ -2034,8 +2128,13 @@ func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *Ca
 		return nil
 	}
 
-	result := &CalculatedStakeRewards{StakerRewards: splitResult.StakerPortion,
-		VoterRewards: splitResult.VoterPortion, NewCreditsObserved: stakePointsResult.NewCreditsObserved}
+	result := &CalculatedStakeRewards{
+		StakerRewards:      splitResult.StakerPortion,
+		VoterRewards:       splitResult.VoterPortion,
+		NewCreditsObserved: stakePointsResult.NewCreditsObserved,
+		Commission:         splitResult.Commission,
+		VotePubkey:         delegation.VoterPubkey,
+	}
 
 	//mlog.Log.Debugf("returning CalculatedStakeRewards for %s. %+v", stakePubkey, result)
 
@@ -2046,6 +2145,7 @@ type CommissionSplit struct {
 	VoterPortion  uint64
 	StakerPortion uint64
 	IsSplit       bool
+	Commission    uint8 // Commission rate used (0-100)
 }
 
 func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) CommissionSplit {
@@ -2061,7 +2161,7 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 	}
 
 	commissionRate := uint64(min(commission, 100))
-	result := CommissionSplit{}
+	result := CommissionSplit{Commission: uint8(commissionRate)}
 
 	switch commissionRate {
 	case 0:

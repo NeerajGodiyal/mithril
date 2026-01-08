@@ -157,9 +157,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	mlog.Log.Infof("  Partition formula: ceil(eligible / 4096) = partitions")
 	mlog.Log.Infof("")
 
-	// Compare vote rewards with RPC
+	// Compare vote rewards with RPC (pass staking rewards for commission summary on mismatch)
 	if len(block.Rewards) > 0 {
-		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards)
+		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards, partitionedRewardsInfo.StakingRewards)
 	}
 
 	// SANITY CHECK: Verify eligible count matches actual rewards count.
