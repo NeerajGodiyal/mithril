@@ -104,6 +104,28 @@ func fetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []stri
 	return 0, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
 }
 
+// FetchRpcEpochRewardsSysvar fetches the EpochRewards sysvar from RPC.
+// Returns the sysvar containing TotalPoints, TotalRewards, NumPartitions, etc.
+// This is used for diagnostic comparison with locally computed values.
+func FetchRpcEpochRewardsSysvar() (*sealevel.SysvarEpochRewards, error) {
+	if validationRpcClient == nil {
+		return nil, fmt.Errorf("no RPC client configured")
+	}
+
+	epochRewardsData, err := validationRpcClient.GetEpochRewardsSysvar()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch EpochRewards sysvar: %w", err)
+	}
+
+	var epochRewards sealevel.SysvarEpochRewards
+	decoder := bin.NewBinDecoder(epochRewardsData)
+	if err := epochRewards.UnmarshalWithDecoder(decoder); err != nil {
+		return nil, fmt.Errorf("failed to decode EpochRewards sysvar: %w", err)
+	}
+
+	return &epochRewards, nil
+}
+
 const (
 	RewardTypeFee     string = "Fee"
 	RewardTypeRent    string = "Rent"
@@ -1413,6 +1435,248 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	}
 
 	return accts, parentUpdatedAccts, totalVotingRewards.Load(), nil
+}
+
+// AggregateVoteRewardsFromStakingRewards aggregates the VoterRewards portion from stake rewards
+// by vote account. This sums the voter (commission) portion from all stake accounts delegated
+// to each vote account.
+func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]*CalculatedStakeRewards) map[solana.PublicKey]uint64 {
+	voteRewards := make(map[solana.PublicKey]uint64)
+	stakeCache := global.StakeCache()
+
+	for stakePubkey, reward := range stakingRewards {
+		if reward == nil || reward.VoterRewards == 0 {
+			continue
+		}
+
+		// Get the vote account this stake is delegated to
+		delegation := stakeCache[stakePubkey]
+		if delegation == nil {
+			mlog.Log.Debugf("AggregateVoteRewards: stake %s not in cache, skipping voter reward %d",
+				stakePubkey, reward.VoterRewards)
+			continue
+		}
+
+		voteRewards[delegation.VoterPubkey] += reward.VoterRewards
+	}
+
+	return voteRewards
+}
+
+// CompareVoteRewardsWithRPC compares locally computed vote rewards against RPC block rewards.
+// Logs detailed breakdown including:
+// - Total comparison
+// - Per-account differences
+// - Top/bottom vote accounts by reward
+// - Accounts only in local or only in RPC
+func CompareVoteRewardsWithRPC(localVoteRewards map[solana.PublicKey]uint64, rpcRewards []rpc.BlockReward) {
+	// Build RPC vote rewards map
+	rpcVoteRewards := make(map[solana.PublicKey]uint64)
+	var rpcTotal uint64
+	var rpcVoteCount int
+	for _, reward := range rpcRewards {
+		if string(reward.RewardType) == RewardTypeVoting && reward.Lamports > 0 {
+			rpcVoteRewards[reward.Pubkey] = uint64(reward.Lamports)
+			rpcTotal += uint64(reward.Lamports)
+			rpcVoteCount++
+		}
+	}
+
+	// Calculate local total
+	var localTotal uint64
+	for _, reward := range localVoteRewards {
+		localTotal += reward
+	}
+
+	// Header
+	mlog.Log.Infof("================================================================================")
+	mlog.Log.Infof("VOTE REWARDS COMPARISON: [LOCAL] vs [RPC]")
+	mlog.Log.Infof("================================================================================")
+	mlog.Log.Infof("  [LOCAL] Total: %d lamports across %d vote accounts", localTotal, len(localVoteRewards))
+	mlog.Log.Infof("  [RPC]   Total: %d lamports across %d vote accounts", rpcTotal, rpcVoteCount)
+	mlog.Log.Infof("  DIFF (LOCAL - RPC): %d lamports", int64(localTotal)-int64(rpcTotal))
+	mlog.Log.Infof("")
+
+	// Find accounts only in local
+	var localOnlyAccounts []solana.PublicKey
+	var localOnlyTotal uint64
+	for pk := range localVoteRewards {
+		if _, exists := rpcVoteRewards[pk]; !exists {
+			localOnlyAccounts = append(localOnlyAccounts, pk)
+			localOnlyTotal += localVoteRewards[pk]
+		}
+	}
+
+	// Find accounts only in RPC
+	var rpcOnlyAccounts []solana.PublicKey
+	var rpcOnlyTotal uint64
+	for pk := range rpcVoteRewards {
+		if _, exists := localVoteRewards[pk]; !exists {
+			rpcOnlyAccounts = append(rpcOnlyAccounts, pk)
+			rpcOnlyTotal += rpcVoteRewards[pk]
+		}
+	}
+
+	// Find accounts in both with different values
+	type mismatchEntry struct {
+		pubkey    solana.PublicKey
+		local     uint64
+		rpc       uint64
+		diff      int64
+	}
+	var mismatches []mismatchEntry
+	var mismatchTotal int64
+	for pk, localReward := range localVoteRewards {
+		if rpcReward, exists := rpcVoteRewards[pk]; exists && localReward != rpcReward {
+			diff := int64(localReward) - int64(rpcReward)
+			mismatches = append(mismatches, mismatchEntry{pk, localReward, rpcReward, diff})
+			mismatchTotal += diff
+		}
+	}
+
+	// Log local-only accounts
+	if len(localOnlyAccounts) > 0 {
+		mlog.Log.Infof("[LOCAL-ONLY] Vote accounts in LOCAL but NOT in RPC (%d accounts, %d lamports):", len(localOnlyAccounts), localOnlyTotal)
+		for i, pk := range localOnlyAccounts {
+			if i >= 10 {
+				mlog.Log.Infof("  ... and %d more", len(localOnlyAccounts)-10)
+				break
+			}
+			mlog.Log.Infof("  %s: [LOCAL]=%d lamports", pk.String(), localVoteRewards[pk])
+		}
+		mlog.Log.Infof("")
+	}
+
+	// Log RPC-only accounts
+	if len(rpcOnlyAccounts) > 0 {
+		mlog.Log.Infof("[RPC-ONLY] Vote accounts in RPC but NOT in LOCAL (%d accounts, %d lamports):", len(rpcOnlyAccounts), rpcOnlyTotal)
+		for i, pk := range rpcOnlyAccounts {
+			if i >= 10 {
+				mlog.Log.Infof("  ... and %d more", len(rpcOnlyAccounts)-10)
+				break
+			}
+			mlog.Log.Infof("  %s: [RPC]=%d lamports", pk.String(), rpcVoteRewards[pk])
+		}
+		mlog.Log.Infof("")
+	}
+
+	// Log mismatched amounts (accounts in both but with different values)
+	if len(mismatches) > 0 {
+		mlog.Log.Infof("MISMATCHED: Accounts in BOTH but with different amounts (%d accounts, net diff=%d lamports):", len(mismatches), mismatchTotal)
+		// Sort by absolute difference (largest first)
+		for i := 0; i < len(mismatches)-1; i++ {
+			for j := i + 1; j < len(mismatches); j++ {
+				if abs(mismatches[j].diff) > abs(mismatches[i].diff) {
+					mismatches[i], mismatches[j] = mismatches[j], mismatches[i]
+				}
+			}
+		}
+		for i, m := range mismatches {
+			if i >= 20 {
+				mlog.Log.Infof("  ... and %d more", len(mismatches)-20)
+				break
+			}
+			mlog.Log.Infof("  %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", m.pubkey.String(), m.local, m.rpc, m.diff)
+		}
+		mlog.Log.Infof("")
+	}
+
+	// Log top 10 vote accounts by local reward
+	type rewardEntry struct {
+		pubkey solana.PublicKey
+		reward uint64
+	}
+	var sortedLocal []rewardEntry
+	for pk, reward := range localVoteRewards {
+		sortedLocal = append(sortedLocal, rewardEntry{pk, reward})
+	}
+	// Sort descending by reward
+	for i := 0; i < len(sortedLocal)-1; i++ {
+		for j := i + 1; j < len(sortedLocal); j++ {
+			if sortedLocal[j].reward > sortedLocal[i].reward {
+				sortedLocal[i], sortedLocal[j] = sortedLocal[j], sortedLocal[i]
+			}
+		}
+	}
+	mlog.Log.Infof("TOP 10 vote accounts by [LOCAL] reward:")
+	for i := 0; i < 10 && i < len(sortedLocal); i++ {
+		e := sortedLocal[i]
+		rpcVal := rpcVoteRewards[e.pubkey]
+		diff := int64(e.reward) - int64(rpcVal)
+		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", i+1, e.pubkey.String(), e.reward, rpcVal, diff)
+	}
+	mlog.Log.Infof("")
+
+	// Log top 10 vote accounts by RPC reward
+	var sortedRPC []rewardEntry
+	for pk, reward := range rpcVoteRewards {
+		sortedRPC = append(sortedRPC, rewardEntry{pk, reward})
+	}
+	// Sort descending by reward
+	for i := 0; i < len(sortedRPC)-1; i++ {
+		for j := i + 1; j < len(sortedRPC); j++ {
+			if sortedRPC[j].reward > sortedRPC[i].reward {
+				sortedRPC[i], sortedRPC[j] = sortedRPC[j], sortedRPC[i]
+			}
+		}
+	}
+	mlog.Log.Infof("TOP 10 vote accounts by [RPC] reward:")
+	for i := 0; i < 10 && i < len(sortedRPC); i++ {
+		e := sortedRPC[i]
+		localVal := localVoteRewards[e.pubkey]
+		diff := int64(localVal) - int64(e.reward)
+		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", i+1, e.pubkey.String(), localVal, e.reward, diff)
+	}
+	mlog.Log.Infof("")
+
+	// Log bottom 10 vote accounts by local reward (non-zero)
+	mlog.Log.Infof("BOTTOM 10 vote accounts by [LOCAL] reward:")
+	start := len(sortedLocal) - 10
+	if start < 0 {
+		start = 0
+	}
+	for i := len(sortedLocal) - 1; i >= start && i >= 0; i-- {
+		e := sortedLocal[i]
+		if e.reward == 0 {
+			continue
+		}
+		rpcVal := rpcVoteRewards[e.pubkey]
+		diff := int64(e.reward) - int64(rpcVal)
+		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", len(sortedLocal)-i, e.pubkey.String(), e.reward, rpcVal, diff)
+	}
+	mlog.Log.Infof("")
+
+	// Log bottom 10 vote accounts by RPC reward (non-zero)
+	mlog.Log.Infof("BOTTOM 10 vote accounts by [RPC] reward:")
+	startRPC := len(sortedRPC) - 10
+	if startRPC < 0 {
+		startRPC = 0
+	}
+	for i := len(sortedRPC) - 1; i >= startRPC && i >= 0; i-- {
+		e := sortedRPC[i]
+		if e.reward == 0 {
+			continue
+		}
+		localVal := localVoteRewards[e.pubkey]
+		diff := int64(localVal) - int64(e.reward)
+		mlog.Log.Infof("  %d. %s: [LOCAL]=%d [RPC]=%d DIFF=%+d", len(sortedRPC)-i, e.pubkey.String(), localVal, e.reward, diff)
+	}
+	mlog.Log.Infof("")
+
+	// Summary
+	if localTotal == rpcTotal && len(localOnlyAccounts) == 0 && len(rpcOnlyAccounts) == 0 && len(mismatches) == 0 {
+		mlog.Log.Infof("RESULT: MATCH - [LOCAL] vote rewards identical to [RPC]")
+	} else {
+		mlog.Log.Warnf("RESULT: MISMATCH - [LOCAL] differs from [RPC] by %d lamports", int64(localTotal)-int64(rpcTotal))
+	}
+	mlog.Log.Infof("================================================================================")
+}
+
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 type idxAndPubkey struct {

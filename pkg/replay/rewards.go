@@ -89,6 +89,103 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
+	// DEBUG: Log comprehensive epoch rewards diagnostics
+	// This includes points, total rewards, and vote rewards comparison
+	mlog.Log.Infof("")
+	mlog.Log.Infof("================================================================================")
+	mlog.Log.Infof("EPOCH REWARDS DIAGNOSTICS - Epoch %d -> %d (slot %d)", epoch-1, epoch, slot)
+	mlog.Log.Infof("================================================================================")
+
+	// Calculate local totals from staking rewards
+	var localStakerTotal, localVoterTotal uint64
+	for _, sr := range partitionedRewardsInfo.StakingRewards {
+		if sr != nil {
+			localStakerTotal += sr.StakerRewards
+			localVoterTotal += sr.VoterRewards
+		}
+	}
+
+	// Count RPC vote rewards
+	var rpcVoteTotal uint64
+	var rpcVoteCount int
+	for _, r := range block.Rewards {
+		if string(r.RewardType) == "Voting" && r.Lamports > 0 {
+			rpcVoteTotal += uint64(r.Lamports)
+			rpcVoteCount++
+		}
+	}
+
+	// Derive RPC eligible count from partitions (partitions = ceil(eligible / 4096))
+	// If partitions match, eligible counts are implicitly the same
+	// Note: block.NumRewardPartitions may be MaxUint64 if RPC didn't provide it
+	var rpcEligibleEstimate string
+	if block.NumRewardPartitions != ^uint64(0) { // not MaxUint64
+		// Estimate: eligible is between (partitions-1)*4096+1 and partitions*4096
+		minEligible := (block.NumRewardPartitions-1)*4096 + 1
+		maxEligible := block.NumRewardPartitions * 4096
+		rpcEligibleEstimate = fmt.Sprintf("%d-%d", minEligible, maxEligible)
+	} else {
+		rpcEligibleEstimate = "(not available)"
+	}
+
+	// Fetch RPC EpochRewards sysvar for total_points and total_rewards comparison
+	rpcEpochRewards, rpcSysvarErr := rewards.FetchRpcEpochRewardsSysvar()
+
+	mlog.Log.Infof("")
+	mlog.Log.Infof("                              [LOCAL]              [RPC]                 DIFF")
+	mlog.Log.Infof("                              -------              -----                 ----")
+
+	// Total points comparison
+	if rpcSysvarErr == nil && rpcEpochRewards != nil {
+		// Compute diff: LOCAL points - RPC points
+		// Both are Uint128, so we need to handle this carefully
+		localPointsStr := points.String()
+		rpcPointsStr := rpcEpochRewards.TotalPoints.String()
+		// For display, we show both values; diff requires bigint math
+		if points.Eq(rpcEpochRewards.TotalPoints) {
+			mlog.Log.Infof("  Total points:               %-20s %-20s MATCH", localPointsStr, rpcPointsStr)
+		} else if points.Gt(rpcEpochRewards.TotalPoints) {
+			diff := points.Sub(rpcEpochRewards.TotalPoints)
+			mlog.Log.Infof("  Total points:               %-20s %-20s +%s", localPointsStr, rpcPointsStr, diff.String())
+		} else {
+			diff := rpcEpochRewards.TotalPoints.Sub(points)
+			mlog.Log.Infof("  Total points:               %-20s %-20s -%s", localPointsStr, rpcPointsStr, diff.String())
+		}
+	} else {
+		mlog.Log.Infof("  Total points:               %-20s (RPC error: %v)", points.String(), rpcSysvarErr)
+	}
+
+	// Total rewards comparison from sysvar
+	if rpcSysvarErr == nil && rpcEpochRewards != nil {
+		localTotal := localStakerTotal + localVoterTotal
+		rpcTotal := rpcEpochRewards.TotalRewards
+		mlog.Log.Infof("  Total rewards (sysvar):     %-20d %-20d %+d", localTotal, rpcTotal, int64(localTotal)-int64(rpcTotal))
+	}
+
+	// Num partitions comparison
+	if block.NumRewardPartitions != ^uint64(0) {
+		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d", partitionedRewardsInfo.NumRewardPartitions, block.NumRewardPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(block.NumRewardPartitions))
+	} else if rpcSysvarErr == nil && rpcEpochRewards != nil {
+		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d (from sysvar)", partitionedRewardsInfo.NumRewardPartitions, rpcEpochRewards.NumPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(rpcEpochRewards.NumPartitions))
+	} else {
+		mlog.Log.Infof("  Num partitions:             %-20d (not available from RPC)", partitionedRewardsInfo.NumRewardPartitions)
+	}
+	mlog.Log.Infof("  Eligible stake accounts:    %-20d %-20s", partitionedRewardsInfo.EligibleCount, rpcEligibleEstimate)
+	mlog.Log.Infof("  Vote accounts:              %-20d %-20d %+d", len(partitionedRewardsInfo.StakingRewards), rpcVoteCount, len(partitionedRewardsInfo.StakingRewards)-rpcVoteCount)
+	mlog.Log.Infof("  Vote rewards (lamports):    %-20d %-20d %+d", localVoterTotal, rpcVoteTotal, int64(localVoterTotal)-int64(rpcVoteTotal))
+	mlog.Log.Infof("  Staker rewards (lamports):  %-20d (not available from RPC)", localStakerTotal)
+	mlog.Log.Infof("  Combined (lamports):        %-20d (not available from RPC)", localStakerTotal+localVoterTotal)
+	mlog.Log.Infof("")
+	mlog.Log.Infof("  Eligibility criteria: stake >= 1 SOL, valid vote account, points > 0")
+	mlog.Log.Infof("  Partition formula: ceil(eligible / 4096) = partitions")
+	mlog.Log.Infof("")
+
+	// Compare vote rewards with RPC
+	if len(block.Rewards) > 0 {
+		localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
+		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards)
+	}
+
 	// SANITY CHECK: Verify eligible count matches actual rewards count.
 	// A mismatch indicates the stake cache changed between partition count calculation and rewards calculation,
 	// which would cause bank hash divergence. This check catches regressions early.
