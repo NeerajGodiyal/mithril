@@ -73,13 +73,10 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	partitionedRewardsInfo.BoundarySlot = boundarySlot
 	partitionedRewardsInfo.StakeAccountSnapshots = stakeAccountSnapshots
 
-	// Now safe to distribute vote rewards since validation passed
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewards(acctsDb, block.Rewards, slot)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
-	}
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
+	// IMPORTANT: Calculate staking rewards FIRST to get local vote rewards.
+	// This removes the RPC dependency for vote reward distribution.
 	var points wide.Uint128
 	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
 	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
@@ -88,6 +85,15 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, boundarySlot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch, nil)
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
+
+	// Aggregate vote rewards from locally computed staking rewards (removes RPC dependency)
+	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
+
+	// Distribute vote rewards using locally computed values
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewardsLocal(acctsDb, localVoteRewards, slot)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
+	}
 
 	// Build diagnostics data
 	var localStakerTotal, localVoterTotal uint64
@@ -128,9 +134,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		}
 	}
 
-	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
-
-	// Build and write diagnostics
+	// Build and write diagnostics (RPC data kept only for comparison/debugging)
 	diag := &rewards.EpochBoundaryDiagnostics{
 		PrevEpoch:           epoch - 1,
 		NewEpoch:            epoch,

@@ -1262,6 +1262,104 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, rewards []rpc.Block
 	return accts, parentUpdatedAccts, totalVotingRewards.Load(), nil
 }
 
+// DistributeVotingRewardsLocal distributes vote rewards using locally computed values
+// instead of RPC-provided block rewards. This removes the RPC dependency for vote reward distribution.
+//
+// Parameters:
+//   - acctsDb: the accounts database
+//   - voteRewards: map of vote account pubkey -> lamports to distribute (from AggregateVoteRewardsFromStakingRewards)
+//   - slot: the slot to write updates to
+//
+// Returns: (updatedAccts, parentUpdatedAccts, totalDistributed, error)
+func DistributeVotingRewardsLocal(acctsDb *accountsdb.AccountsDb, voteRewards map[solana.PublicKey]uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
+	if len(voteRewards) == 0 {
+		return nil, nil, 0, nil
+	}
+
+	var totalVotingRewards atomic.Uint64
+	var workerErr atomic.Pointer[error]
+
+	// Convert map to slice for parallel processing
+	type voteRewardEntry struct {
+		pubkey  solana.PublicKey
+		lamports uint64
+		idx     int
+	}
+	entries := make([]voteRewardEntry, 0, len(voteRewards))
+	i := 0
+	for pubkey, lamports := range voteRewards {
+		if lamports > 0 {
+			entries = append(entries, voteRewardEntry{pubkey: pubkey, lamports: lamports, idx: i})
+			i++
+		}
+	}
+
+	accts := make([]*accounts.Account, len(entries))
+	parentUpdatedAccts := make([]*accounts.Account, len(entries))
+
+	var wg sync.WaitGroup
+
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, _ := ants.NewPoolWithFunc(size, func(task interface{}) {
+		defer wg.Done()
+
+		entry := task.(voteRewardEntry)
+
+		voteAcct, err := acctsDb.GetAccount(slot, entry.pubkey)
+		if err != nil {
+			errVal := fmt.Errorf("unable to get vote acct %s from acctsdb for voting rewards distribution in slot %d: %w", entry.pubkey, slot, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
+		}
+
+		parentUpdatedAccts[entry.idx] = voteAcct.Clone()
+
+		voteAcct.Lamports, err = safemath.CheckedAddU64(voteAcct.Lamports, entry.lamports)
+		if err != nil {
+			errVal := fmt.Errorf("overflow in voting rewards distribution in slot %d to acct %s: %w", slot, entry.pubkey, err)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
+		}
+
+		accts[entry.idx] = voteAcct
+
+		new := totalVotingRewards.Add(entry.lamports)
+		if new < entry.lamports {
+			errVal := fmt.Errorf("overflow in accumulating voting rewards in slot %d", slot)
+			workerErr.CompareAndSwap(nil, &errVal)
+			return
+		}
+	})
+
+	for _, entry := range entries {
+		wg.Add(1)
+		workerPool.Invoke(entry)
+	}
+
+	wg.Wait()
+	workerPool.Release()
+
+	// Check for worker errors
+	if errPtr := workerErr.Load(); errPtr != nil {
+		return nil, nil, 0, *errPtr
+	}
+
+	// Filter out nil entries (shouldn't happen, but defensive)
+	var nonNilAccts []*accounts.Account
+	for _, acct := range accts {
+		if acct != nil {
+			nonNilAccts = append(nonNilAccts, acct)
+		}
+	}
+
+	err := acctsDb.StoreAccounts(nonNilAccts, slot)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("error updating accounts for voting rewards in slot %d: %w", slot, err)
+	}
+
+	return accts, parentUpdatedAccts, totalVotingRewards.Load(), nil
+}
+
 // AggregateVoteRewardsFromStakingRewards aggregates the VoterRewards portion from stake rewards
 // by vote account. This sums the voter (commission) portion from all stake accounts delegated
 // to each vote account.
