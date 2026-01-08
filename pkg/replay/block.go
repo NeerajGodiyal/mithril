@@ -1559,18 +1559,24 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 
-			// Step 2a: Rebuild VoteCache from AccountsDB BEFORE leader schedule and rewards.
-			// This is critical for both leader schedule (needs NodePubkey) and rewards (needs vote credits).
-			// The rebuild must happen unconditionally since rewards always need boundary-slot vote credits.
-			// Use block.VoteAccts (the complete stake map from prepareEpochStakes)
-			// This reads the canonical state at the end of the previous epoch (prevSlotCtxForEpochBoundary.Slot).
+			// Step 2a: VoteCache handling at epoch boundary.
+			// EXPERIMENT: Skip rebuild and use the replay-accumulated VoteCache instead.
+			// The debug comparison will show if/how they differ.
 			voteCacheSlot := prevSlotCtxForEpochBoundary.Slot
-			mlog.Log.Infof("  [VOTE CACHE] rebuilding from slot=%d (boundary slot)", voteCacheSlot)
-			if err := RebuildVoteCacheFromAccountsDB(acctsDb, voteCacheSlot, block.VoteAccts, 0); err != nil {
-				mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
-				result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
-				break
-			}
+			mlog.Log.Infof("  [VOTE CACHE] SKIPPING REBUILD - using replay-accumulated cache (boundary slot=%d)", voteCacheSlot)
+
+			// DEBUG: Compare VoteCache (from replay) vs AccountsDB to see differences
+			debugCompareVoteCacheBeforeAfterRebuild(acctsDb, voteCacheSlot, block.VoteAccts, currentEpoch)
+
+			// DEBUG: Compare local stake vs RPC stake per vote account
+			debugCompareStakeWithRPC(rpcc, block.VoteAccts, voteCacheSlot, currentEpoch-1)
+
+			// DISABLED: Rebuild from AccountsDB
+			// if err := RebuildVoteCacheFromAccountsDB(acctsDb, voteCacheSlot, block.VoteAccts, 0); err != nil {
+			// 	mlog.Log.Errorf("FATAL: vote cache rebuild failed at epoch boundary: %v", err)
+			// 	result.Error = fmt.Errorf("vote cache rebuild failed: %w", err)
+			// 	break
+			// }
 
 			// Step 2b: Verify vote cache completeness for all non-zero stake vote accounts.
 			// Missing vote accounts are expected for closed/invalid accounts - stake delegated to them

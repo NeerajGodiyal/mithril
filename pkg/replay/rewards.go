@@ -217,6 +217,17 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards, partitionedRewardsInfo.StakingRewards)
 	}
 
+	// Build RPC vote rewards map for detailed breakdown
+	rpcVoteRewardsMap := make(map[solana.PublicKey]uint64)
+	for _, r := range block.Rewards {
+		if string(r.RewardType) == "Voting" && r.Lamports > 0 {
+			rpcVoteRewardsMap[r.Pubkey] = uint64(r.Lamports)
+		}
+	}
+
+	// Detailed per-vote-account breakdown showing stake, points, and rewards
+	rewards.DebugDumpPerVoteAccountBreakdown(pointsPerStakeAcct, partitionedRewardsInfo.StakingRewards, rpcVoteRewardsMap, points, totalRewards)
+
 	// DEBUG EXIT: Exit after diagnostics but before committing state changes.
 	// This allows re-running from the boundary slot to iterate on debugging.
 	mlog.Log.Infof("")

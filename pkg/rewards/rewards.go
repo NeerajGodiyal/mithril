@@ -5,6 +5,7 @@ import (
 	"math"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1625,6 +1626,168 @@ func abs(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// DebugDumpPerVoteAccountBreakdown logs detailed per-vote-account breakdown of stake, points, and rewards.
+// This helps identify if divergence is coming from stake calculation, credits, or commission.
+// pointsPerStake: map from stake pubkey -> CalculatedStakePoints
+// stakingRewards: map from stake pubkey -> CalculatedStakeRewards
+// rpcVoteRewards: vote rewards from RPC (for comparison)
+func DebugDumpPerVoteAccountBreakdown(
+	pointsPerStake map[solana.PublicKey]*CalculatedStakePoints,
+	stakingRewards map[solana.PublicKey]*CalculatedStakeRewards,
+	rpcVoteRewards map[solana.PublicKey]uint64,
+	totalPoints wide.Uint128,
+	totalRewards uint64,
+) {
+	mlog.Log.Infof("")
+	mlog.Log.Infof("================================================================================")
+	mlog.Log.Infof("PER-VOTE-ACCOUNT BREAKDOWN (stake, points, rewards)")
+	mlog.Log.Infof("================================================================================")
+
+	// Aggregate per vote account
+	type voteAcctStats struct {
+		votePubkey      solana.PublicKey
+		totalStake      uint64   // sum of effective stake delegated to this vote account
+		totalPoints     wide.Uint128 // sum of points from all delegations
+		voterRewards    uint64   // commission portion (from stakingRewards)
+		stakerRewards   uint64   // delegator portion (from stakingRewards)
+		numDelegations  int      // number of stake accounts
+		commission      uint8    // commission rate
+		avgCredits      uint64   // average new_credits_observed across delegations
+	}
+
+	voteStats := make(map[solana.PublicKey]*voteAcctStats)
+
+	// First pass: aggregate from pointsPerStake (stake and points)
+	stakeCache := global.StakeCache()
+	for stakePk, pts := range pointsPerStake {
+		if pts == nil {
+			continue
+		}
+		delegation := stakeCache[stakePk]
+		if delegation == nil {
+			continue
+		}
+		votePk := delegation.VoterPubkey
+
+		stats, exists := voteStats[votePk]
+		if !exists {
+			stats = &voteAcctStats{votePubkey: votePk}
+			voteStats[votePk] = stats
+		}
+		stats.totalStake += delegation.StakeLamports
+		stats.totalPoints = stats.totalPoints.Add(pts.Points)
+		stats.avgCredits += pts.NewCreditsObserved
+		stats.numDelegations++
+	}
+
+	// Second pass: add rewards from stakingRewards
+	for _, sr := range stakingRewards {
+		if sr == nil {
+			continue
+		}
+		stats, exists := voteStats[sr.VotePubkey]
+		if exists {
+			stats.voterRewards += sr.VoterRewards
+			stats.stakerRewards += sr.StakerRewards
+			stats.commission = sr.Commission
+		}
+	}
+
+	// Compute average credits
+	for _, stats := range voteStats {
+		if stats.numDelegations > 0 {
+			stats.avgCredits /= uint64(stats.numDelegations)
+		}
+	}
+
+	// Sort by total stake descending
+	type sortableStats struct {
+		stats    *voteAcctStats
+		rpcVoter uint64
+		diff     int64
+	}
+	var sorted []sortableStats
+	for _, stats := range voteStats {
+		rpcVoter := rpcVoteRewards[stats.votePubkey]
+		diff := int64(stats.voterRewards) - int64(rpcVoter)
+		sorted = append(sorted, sortableStats{stats, rpcVoter, diff})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].stats.totalStake > sorted[j].stats.totalStake
+	})
+
+	// Summary stats
+	var totalLocalStake uint64
+	var totalLocalPoints wide.Uint128
+	var totalLocalVoter, totalLocalStaker uint64
+	var totalRpcVoter uint64
+	for _, ss := range sorted {
+		totalLocalStake += ss.stats.totalStake
+		totalLocalPoints = totalLocalPoints.Add(ss.stats.totalPoints)
+		totalLocalVoter += ss.stats.voterRewards
+		totalLocalStaker += ss.stats.stakerRewards
+		totalRpcVoter += ss.rpcVoter
+	}
+
+	mlog.Log.Infof("TOTALS:")
+	mlog.Log.Infof("  Vote accounts:    %d", len(sorted))
+	mlog.Log.Infof("  Total stake:      %d lamports (%.2f SOL)", totalLocalStake, float64(totalLocalStake)/1e9)
+	mlog.Log.Infof("  Total points:     %s (from aggregation)", totalLocalPoints.String())
+	mlog.Log.Infof("  Total points:     %s (from calculation)", totalPoints.String())
+	mlog.Log.Infof("  Total rewards:    %d (inflation pool)", totalRewards)
+	mlog.Log.Infof("  Voter rewards:    LOCAL=%d RPC=%d DIFF=%+d", totalLocalVoter, totalRpcVoter, int64(totalLocalVoter)-int64(totalRpcVoter))
+	mlog.Log.Infof("  Staker rewards:   %d", totalLocalStaker)
+	mlog.Log.Infof("  Combined:         %d (voter+staker)", totalLocalVoter+totalLocalStaker)
+	mlog.Log.Infof("")
+
+	// Top 20 by stake
+	mlog.Log.Infof("TOP 20 VOTE ACCOUNTS BY STAKE:")
+	mlog.Log.Infof("  %-44s %6s %15s %20s %12s %12s %12s %+12s", "vote_pubkey", "comm%", "stake(SOL)", "points", "voter_local", "voter_rpc", "staker", "diff")
+	mlog.Log.Infof("  %s", strings.Repeat("-", 160))
+	for i, ss := range sorted {
+		if i >= 20 {
+			break
+		}
+		s := ss.stats
+		mlog.Log.Infof("  %-44s %5d%% %15.2f %20s %12d %12d %12d %+12d",
+			s.votePubkey.String(), s.commission, float64(s.totalStake)/1e9, s.totalPoints.String(),
+			s.voterRewards, ss.rpcVoter, s.stakerRewards, ss.diff)
+	}
+	mlog.Log.Infof("")
+
+	// Top 20 mismatches by absolute diff
+	var mismatches []sortableStats
+	for _, ss := range sorted {
+		if ss.diff != 0 {
+			mismatches = append(mismatches, ss)
+		}
+	}
+	sort.Slice(mismatches, func(i, j int) bool {
+		absI := mismatches[i].diff
+		if absI < 0 { absI = -absI }
+		absJ := mismatches[j].diff
+		if absJ < 0 { absJ = -absJ }
+		return absI > absJ
+	})
+
+	if len(mismatches) > 0 {
+		mlog.Log.Infof("TOP 20 MISMATCHES BY ABSOLUTE DIFF:")
+		mlog.Log.Infof("  %-44s %6s %15s %12s %12s %+12s %8s", "vote_pubkey", "comm%", "stake(SOL)", "voter_local", "voter_rpc", "diff", "delegs")
+		mlog.Log.Infof("  %s", strings.Repeat("-", 120))
+		for i, ss := range mismatches {
+			if i >= 20 {
+				mlog.Log.Infof("  ... and %d more mismatched vote accounts", len(mismatches)-20)
+				break
+			}
+			s := ss.stats
+			mlog.Log.Infof("  %-44s %5d%% %15.2f %12d %12d %+12d %8d",
+				s.votePubkey.String(), s.commission, float64(s.totalStake)/1e9,
+				s.voterRewards, ss.rpcVoter, ss.diff, s.numDelegations)
+		}
+	}
+	mlog.Log.Infof("================================================================================")
 }
 
 type idxAndPubkey struct {

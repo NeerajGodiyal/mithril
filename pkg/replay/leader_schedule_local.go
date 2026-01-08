@@ -180,6 +180,363 @@ func logInputSnapshot(epoch uint64, voteAcctStakes map[solana.PublicKey]uint64,
 	}
 }
 
+// debugCompareVoteCacheBeforeAfterRebuild compares the epoch credits in the current VoteCache
+// (populated during replay) vs what AccountsDB has. This helps identify if the rebuild
+// is overwriting correct data with stale/different data.
+func debugCompareVoteCacheBeforeAfterRebuild(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	rewardedEpoch uint64,
+) {
+	mlog.Log.Infof("  [VOTE CACHE DEBUG] Comparing VoteCache vs AccountsDB for epoch %d boundary", rewardedEpoch)
+
+	// Helper to extract epoch credits from VoteStateVersions
+	getEpochCredits := func(vs *sealevel.VoteStateVersions) []sealevel.EpochCredits {
+		if vs == nil {
+			return nil
+		}
+		switch vs.Type {
+		case sealevel.VoteStateVersionCurrent:
+			return vs.Current.EpochCredits
+		case sealevel.VoteStateVersionV0_23_5:
+			return vs.V0_23_5.EpochCredits
+		case sealevel.VoteStateVersionV1_14_11:
+			return vs.V1_14_11.EpochCredits
+		default:
+			return nil
+		}
+	}
+
+	// Helper to get last N epoch credits as string for logging
+	formatLastCredits := func(credits []sealevel.EpochCredits, n int) string {
+		if len(credits) == 0 {
+			return "[]"
+		}
+		start := 0
+		if len(credits) > n {
+			start = len(credits) - n
+		}
+		var parts []string
+		for _, ec := range credits[start:] {
+			parts = append(parts, fmt.Sprintf("e%d:%d", ec.Epoch, ec.Credits))
+		}
+		return fmt.Sprintf("[%s]", strings.Join(parts, ", "))
+	}
+
+	// Helper to get final credits for rewarded epoch
+	getFinalCreditsForEpoch := func(credits []sealevel.EpochCredits, epoch uint64) (uint64, bool) {
+		for i := len(credits) - 1; i >= 0; i-- {
+			if credits[i].Epoch == epoch {
+				return credits[i].Credits, true
+			}
+			if credits[i].Epoch < epoch {
+				// Epoch not found, return prev epoch's final credits
+				return credits[i].Credits, false
+			}
+		}
+		return 0, false
+	}
+
+	var (
+		totalChecked      int
+		missingInCache    int
+		missingInAcctsDb  int
+		creditsDiffer     int
+		creditsMatch      int
+		totalCacheCreds   uint64
+		totalAcctsDbCreds uint64
+	)
+
+	// Sample some accounts with highest stake for detailed logging
+	type stakePk struct {
+		pk    solana.PublicKey
+		stake uint64
+	}
+	var topStakeAccts []stakePk
+	for pk, stake := range voteAcctStakes {
+		if stake > 0 {
+			topStakeAccts = append(topStakeAccts, stakePk{pk, stake})
+		}
+	}
+	sort.Slice(topStakeAccts, func(i, j int) bool {
+		return topStakeAccts[i].stake > topStakeAccts[j].stake
+	})
+	if len(topStakeAccts) > 20 {
+		topStakeAccts = topStakeAccts[:20]
+	}
+	topStakeSet := make(map[solana.PublicKey]bool)
+	for _, sp := range topStakeAccts {
+		topStakeSet[sp.pk] = true
+	}
+
+	// Track differences for summary
+	type creditDiff struct {
+		pk           solana.PublicKey
+		stake        uint64
+		cacheCredits uint64
+		acctDbCredits uint64
+		diff         int64
+	}
+	var differences []creditDiff
+
+	for pk, stake := range voteAcctStakes {
+		if stake == 0 {
+			continue
+		}
+		totalChecked++
+
+		// Get from VoteCache (current in-memory state)
+		cacheVoteState := global.VoteCacheItem(pk)
+		cacheCredits := getEpochCredits(cacheVoteState)
+
+		// Get from AccountsDB
+		voteAcct, err := acctsDb.GetAccount(slot, pk)
+		var acctDbCredits []sealevel.EpochCredits
+		if err == nil {
+			acctDbVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+			if err == nil {
+				acctDbCredits = getEpochCredits(acctDbVoteState)
+			}
+		}
+
+		// Compare
+		if cacheVoteState == nil {
+			missingInCache++
+			if topStakeSet[pk] {
+				mlog.Log.Infof("    [TOP20] %s (stake=%d): MISSING in VoteCache, AcctsDB has %s",
+					pk.String()[:12], stake, formatLastCredits(acctDbCredits, 3))
+			}
+			continue
+		}
+		if err != nil {
+			missingInAcctsDb++
+			if topStakeSet[pk] {
+				mlog.Log.Infof("    [TOP20] %s (stake=%d): VoteCache has %s, MISSING in AcctsDB",
+					pk.String()[:12], stake, formatLastCredits(cacheCredits, 3))
+			}
+			continue
+		}
+
+		// Get final credits for the rewarded epoch
+		cacheFinal, cacheHasEpoch := getFinalCreditsForEpoch(cacheCredits, rewardedEpoch)
+		acctDbFinal, acctDbHasEpoch := getFinalCreditsForEpoch(acctDbCredits, rewardedEpoch)
+
+		totalCacheCreds += cacheFinal
+		totalAcctsDbCreds += acctDbFinal
+
+		if cacheFinal != acctDbFinal {
+			creditsDiffer++
+			diff := int64(cacheFinal) - int64(acctDbFinal)
+			differences = append(differences, creditDiff{pk, stake, cacheFinal, acctDbFinal, diff})
+
+			if topStakeSet[pk] || len(differences) <= 10 {
+				mlog.Log.Infof("    [DIFF] %s (stake=%d): cache=%d acctdb=%d diff=%+d epoch_in_cache=%v epoch_in_acctdb=%v",
+					pk.String()[:12], stake, cacheFinal, acctDbFinal, diff, cacheHasEpoch, acctDbHasEpoch)
+				mlog.Log.Infof("           cache_last3=%s acctdb_last3=%s",
+					formatLastCredits(cacheCredits, 3), formatLastCredits(acctDbCredits, 3))
+			}
+		} else {
+			creditsMatch++
+		}
+	}
+
+	// Summary
+	mlog.Log.Infof("  [VOTE CACHE DEBUG] Summary for epoch %d:", rewardedEpoch)
+	mlog.Log.Infof("    Total checked:       %d", totalChecked)
+	mlog.Log.Infof("    Credits match:       %d (%.2f%%)", creditsMatch, float64(creditsMatch)*100/float64(totalChecked))
+	mlog.Log.Infof("    Credits differ:      %d (%.2f%%)", creditsDiffer, float64(creditsDiffer)*100/float64(totalChecked))
+	mlog.Log.Infof("    Missing in cache:    %d", missingInCache)
+	mlog.Log.Infof("    Missing in AcctsDB:  %d", missingInAcctsDb)
+	mlog.Log.Infof("    Total credits cache: %d", totalCacheCreds)
+	mlog.Log.Infof("    Total credits acctdb:%d", totalAcctsDbCreds)
+	mlog.Log.Infof("    Credits diff total:  %+d", int64(totalCacheCreds)-int64(totalAcctsDbCreds))
+
+	// Sort differences by absolute diff and show top 10
+	if len(differences) > 0 {
+		sort.Slice(differences, func(i, j int) bool {
+			absI := differences[i].diff
+			if absI < 0 {
+				absI = -absI
+			}
+			absJ := differences[j].diff
+			if absJ < 0 {
+				absJ = -absJ
+			}
+			return absI > absJ
+		})
+		mlog.Log.Infof("  [VOTE CACHE DEBUG] Top differences by magnitude:")
+		for i, d := range differences {
+			if i >= 10 {
+				break
+			}
+			mlog.Log.Infof("    [%d] %s stake=%d cache=%d acctdb=%d diff=%+d",
+				i+1, d.pk.String()[:12], d.stake, d.cacheCredits, d.acctDbCredits, d.diff)
+		}
+	}
+}
+
+// debugCompareStakeWithRPC compares local stake per vote account vs RPC's GetVoteAccounts().
+// Note: RPC returns CURRENT state which may differ from boundary slot state.
+// This comparison helps identify if stake amounts are a source of divergence.
+func debugCompareStakeWithRPC(
+	rpcc *rpcclient.RpcClient,
+	localVoteStakes map[solana.PublicKey]uint64,
+	boundarySlot uint64,
+	boundaryEpoch uint64,
+) {
+	mlog.Log.Infof("")
+	mlog.Log.Infof("  [STAKE COMPARE] Comparing local stake vs RPC GetVoteAccounts()...")
+	mlog.Log.Infof("                  (NOTE: RPC returns CURRENT state, not boundary slot state)")
+
+	// Fetch RPC vote accounts
+	rpcVoteAccts, err := rpcc.GetVoteAccounts()
+	if err != nil {
+		mlog.Log.Warnf("  [STAKE COMPARE] GetVoteAccounts failed: %v", err)
+		return
+	}
+
+	// Build RPC stake map
+	rpcStakes := make(map[solana.PublicKey]uint64)
+	rpcCommission := make(map[solana.PublicKey]uint8)
+	for _, v := range rpcVoteAccts.Current {
+		rpcStakes[v.VotePubkey] = v.ActivatedStake
+		rpcCommission[v.VotePubkey] = v.Commission
+	}
+	for _, v := range rpcVoteAccts.Delinquent {
+		rpcStakes[v.VotePubkey] = v.ActivatedStake
+		rpcCommission[v.VotePubkey] = v.Commission
+	}
+
+	// Compare
+	type stakeDiff struct {
+		votePk     solana.PublicKey
+		localStake uint64
+		rpcStake   uint64
+		diff       int64
+		localComm  uint8
+		rpcComm    uint8
+	}
+
+	var differences []stakeDiff
+	var totalLocalStake, totalRpcStake uint64
+	var matchCount, diffCount, onlyLocal, onlyRpc int
+
+	// Check all local vote accounts
+	for votePk, localStake := range localVoteStakes {
+		if localStake == 0 {
+			continue
+		}
+		totalLocalStake += localStake
+
+		rpcStake, inRpc := rpcStakes[votePk]
+		if !inRpc {
+			onlyLocal++
+			differences = append(differences, stakeDiff{votePk, localStake, 0, int64(localStake), 0, 0})
+			continue
+		}
+		totalRpcStake += rpcStake
+
+		// Get local commission from VoteCache
+		var localComm uint8
+		if vs := global.VoteCacheItem(votePk); vs != nil {
+			switch vs.Type {
+			case sealevel.VoteStateVersionCurrent:
+				localComm = vs.Current.Commission
+			case sealevel.VoteStateVersionV0_23_5:
+				localComm = vs.V0_23_5.Commission
+			case sealevel.VoteStateVersionV1_14_11:
+				localComm = vs.V1_14_11.Commission
+			}
+		}
+
+		if localStake != rpcStake {
+			diffCount++
+			diff := int64(localStake) - int64(rpcStake)
+			differences = append(differences, stakeDiff{votePk, localStake, rpcStake, diff, localComm, rpcCommission[votePk]})
+		} else {
+			matchCount++
+		}
+	}
+
+	// Check for RPC-only vote accounts
+	for votePk, rpcStake := range rpcStakes {
+		if rpcStake == 0 {
+			continue
+		}
+		if _, inLocal := localVoteStakes[votePk]; !inLocal {
+			onlyRpc++
+			totalRpcStake += rpcStake
+		}
+	}
+
+	// Summary
+	mlog.Log.Infof("  [STAKE COMPARE] Summary (local boundary slot=%d, epoch=%d):", boundarySlot, boundaryEpoch)
+	mlog.Log.Infof("    Vote accounts: local=%d rpc=%d (current=%d delinquent=%d)",
+		len(localVoteStakes), len(rpcStakes), len(rpcVoteAccts.Current), len(rpcVoteAccts.Delinquent))
+	mlog.Log.Infof("    Stake match:   %d accounts (%.2f%%)", matchCount, float64(matchCount)*100/float64(matchCount+diffCount+onlyLocal))
+	mlog.Log.Infof("    Stake differ:  %d accounts", diffCount)
+	mlog.Log.Infof("    Only in local: %d accounts", onlyLocal)
+	mlog.Log.Infof("    Only in RPC:   %d accounts", onlyRpc)
+	mlog.Log.Infof("    Total stake:   local=%d (%.2f SOL) rpc=%d (%.2f SOL) diff=%+d",
+		totalLocalStake, float64(totalLocalStake)/1e9, totalRpcStake, float64(totalRpcStake)/1e9,
+		int64(totalLocalStake)-int64(totalRpcStake))
+
+	// Sort by absolute diff and show top differences
+	if len(differences) > 0 {
+		sort.Slice(differences, func(i, j int) bool {
+			absI := differences[i].diff
+			if absI < 0 {
+				absI = -absI
+			}
+			absJ := differences[j].diff
+			if absJ < 0 {
+				absJ = -absJ
+			}
+			return absI > absJ
+		})
+
+		mlog.Log.Infof("  [STAKE COMPARE] Top 15 stake differences:")
+		mlog.Log.Infof("    %-44s %15s %15s %+15s %6s %6s", "vote_pubkey", "local_stake", "rpc_stake", "diff", "l_com%", "r_com%")
+		mlog.Log.Infof("    %s", strings.Repeat("-", 110))
+		for i, d := range differences {
+			if i >= 15 {
+				mlog.Log.Infof("    ... and %d more differences", len(differences)-15)
+				break
+			}
+			mlog.Log.Infof("    %-44s %15d %15d %+15d %5d%% %5d%%",
+				d.votePk.String(), d.localStake, d.rpcStake, d.diff, d.localComm, d.rpcComm)
+		}
+	}
+
+	// Commission comparison
+	var commMatch, commDiff int
+	for votePk := range localVoteStakes {
+		rpcComm, inRpc := rpcCommission[votePk]
+		if !inRpc {
+			continue
+		}
+		var localComm uint8
+		if vs := global.VoteCacheItem(votePk); vs != nil {
+			switch vs.Type {
+			case sealevel.VoteStateVersionCurrent:
+				localComm = vs.Current.Commission
+			case sealevel.VoteStateVersionV0_23_5:
+				localComm = vs.V0_23_5.Commission
+			case sealevel.VoteStateVersionV1_14_11:
+				localComm = vs.V1_14_11.Commission
+			}
+		}
+		if localComm == rpcComm {
+			commMatch++
+		} else {
+			commDiff++
+		}
+	}
+	mlog.Log.Infof("  [STAKE COMPARE] Commission: match=%d differ=%d", commMatch, commDiff)
+	mlog.Log.Infof("")
+}
+
 // VoteCacheRebuildError holds info about a failed vote account for logging
 type VoteCacheRebuildError struct {
 	VoteAcct  solana.PublicKey
