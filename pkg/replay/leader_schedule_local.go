@@ -496,6 +496,8 @@ func ValidateAndUpdateVoteCache(
 		// Read from AccountsDB
 		voteAcct, err := acctsDb.GetAccount(slot, item.pk)
 		if err != nil {
+			// Account missing in AccountsDB - delete stale cache entry if present
+			global.DeleteVoteCacheItem(item.pk)
 			missingInAcctsDbCount.Add(1)
 			errorStake.Add(item.stake)
 			return
@@ -504,6 +506,8 @@ func ValidateAndUpdateVoteCache(
 		// Unmarshal vote state from AccountsDB
 		acctDbVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
+			// Unmarshal failed - delete stale cache entry if present
+			global.DeleteVoteCacheItem(item.pk)
 			unmarshalErrCount.Add(1)
 			errorStake.Add(item.stake)
 			return
@@ -513,6 +517,8 @@ func ValidateAndUpdateVoteCache(
 		nodePk := acctDbVoteState.NodePubkey()
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
+			// Zero node pubkey - delete stale cache entry if present
+			global.DeleteVoteCacheItem(item.pk)
 			zeroNodePkCount.Add(1)
 			errorStake.Add(item.stake)
 			return
@@ -529,19 +535,24 @@ func ValidateAndUpdateVoteCache(
 			return
 		}
 
-		// Compare credits - if different, update cache
+		// Compare credits, commission, and node pubkey - update cache if ANY differ.
+		// IMPORTANT: Checking only credits would leave stale commission (affects reward splits)
+		// or stale node pubkey (affects leader schedule mapping).
 		cacheCredits := getEpochCredits(cacheVoteState)
 		acctDbCredits := getEpochCredits(acctDbVoteState)
+		needsUpdate := !creditsEqual(cacheCredits, acctDbCredits) ||
+			cacheVoteState.Commission() != acctDbVoteState.Commission() ||
+			cacheVoteState.NodePubkey() != acctDbVoteState.NodePubkey()
 
-		if !creditsEqual(cacheCredits, acctDbCredits) {
-			// Credits differ - update cache with AccountsDB state
+		if needsUpdate {
+			// State differs - update cache with AccountsDB state
 			global.PutVoteCacheItem(item.pk, acctDbVoteState)
 			updatedCount.Add(1)
 			updatedStake.Add(item.stake)
 			return
 		}
 
-		// Match - no update needed
+		// Full match - no update needed
 		matchCount.Add(1)
 	})
 	if err != nil {

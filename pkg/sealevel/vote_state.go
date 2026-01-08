@@ -1403,6 +1403,24 @@ func (voteStateVersions *VoteStateVersions) NodePubkey() solana.PublicKey {
 	}
 }
 
+// Commission returns the validator commission rate from the vote state.
+// Returns 0 if the receiver is nil or has an unknown version type.
+func (voteStateVersions *VoteStateVersions) Commission() uint8 {
+	if voteStateVersions == nil {
+		return 0
+	}
+	switch voteStateVersions.Type {
+	case VoteStateVersionV0_23_5:
+		return voteStateVersions.V0_23_5.Commission
+	case VoteStateVersionV1_14_11:
+		return voteStateVersions.V1_14_11.Commission
+	case VoteStateVersionCurrent:
+		return voteStateVersions.Current.Commission
+	default:
+		return 0
+	}
+}
+
 func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	versioned := new(VoteStateVersions)
 	decoder := bin.NewBinDecoder(data)
