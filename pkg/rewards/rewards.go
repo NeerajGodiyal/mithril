@@ -671,8 +671,10 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		}
 	}
 
+	// Key comparison values for RPC validation
+	mlog.Log.Infof("COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
+
 	// EFFECTIVE STAKE SUMMARY: These totals help identify if we have different eligible accounts than RPC
-	// points ≈ stake * new_credits (approximately), so effective_stake * average_credits ≈ total_points
 	totalEffectiveStake := effectiveStake + activationMatchStake
 	totalEffectiveCredits := totalNewCredits + activationMatchCredits
 	totalAccountsWithPoints := uint64(len(accountsWithPoints)) + activationMatchWithPoints
@@ -771,8 +773,13 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		eligible++
 	}
 
-	mlog.Log.Infof("ELIGIBILITY: %d eligible (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
-		eligible, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
+	// Diagnostic buckets summary
+	pointsGtZero := uint64(len(accountsWithPoints))
+	normalEligible := eligible - forceCreditsUpdateCount
+	mlog.Log.Infof("FILTER PIPELINE: total=%d -> below_min=%d -> no_vote=%d -> force_credits=%d -> no_credits=%d -> zero_points=%d -> points>0=%d",
+		total, belowMin, noVote, forceCreditsUpdateCount, noCredits, zeroPoints, pointsGtZero)
+	mlog.Log.Infof("ELIGIBILITY: %d (force_credits=%d + normal=%d) | zero_rewards=%d zero_split=%d filtered in pass2",
+		eligible, forceCreditsUpdateCount, normalEligible, zeroRewards, zeroSplit)
 
 	return eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit
 }
