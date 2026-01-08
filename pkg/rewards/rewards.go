@@ -2171,19 +2171,24 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 		// 100% commission, all rewards go to validator
 		result.VoterPortion = rewards
 	default:
-		// Calculate voter portion, then subtract to get staker portion.
-		// This ensures voter + staker == rewards (no lamports lost to rounding).
-		// Matches Agave: validator_portion = (reward * commission) / 100
-		//                staker_portion = reward - validator_portion
-		voterPortion := (rewards * commissionRate) / 100
-		stakerPortion := rewards - voterPortion
-
-		result.VoterPortion = voterPortion
-		result.StakerPortion = stakerPortion
+		// Use mulDivPercent to match Agave's calculation exactly.
+		// This splits the division to avoid overflow and computes both portions
+		// independently using the same formula.
+		result.VoterPortion = mulDivPercent(rewards, commissionRate)
+		result.StakerPortion = mulDivPercent(rewards, 100-commissionRate)
 		result.IsSplit = true
 	}
 
 	return result
+}
+
+// mulDivPercent computes (on * pct) / 100 using a split approach to avoid overflow.
+// This matches Agave's commission split calculation exactly.
+func mulDivPercent(on uint64, pct uint64) uint64 {
+	// pct must be 0..100
+	q := on / 100
+	r := on % 100
+	return q*pct + (r*pct)/100
 }
 
 type delegationAndPubkey struct {
