@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"fmt"
+	"os"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -161,6 +162,14 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	if len(block.Rewards) > 0 {
 		rewards.CompareVoteRewardsWithRPC(localVoteRewards, block.Rewards, partitionedRewardsInfo.StakingRewards)
 	}
+
+	// DEBUG EXIT: Exit after diagnostics but before committing state changes.
+	// This allows re-running from the boundary slot to iterate on debugging.
+	mlog.Log.Infof("")
+	mlog.Log.Infof("================================================================================")
+	mlog.Log.Infof("DEBUG EXIT: Exiting after epoch boundary diagnostics (state NOT committed)")
+	mlog.Log.Infof("================================================================================")
+	os.Exit(0)
 
 	// SANITY CHECK: Verify eligible count matches actual rewards count.
 	// A mismatch indicates the stake cache changed between partition count calculation and rewards calculation,
