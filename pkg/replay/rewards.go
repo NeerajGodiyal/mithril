@@ -136,7 +136,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// Log local-only values (no RPC comparison available for these)
 	mlog.Log.Infof("")
 	mlog.Log.Infof("  [LOCAL] Total points:       %s", points.String())
-	mlog.Log.Infof("  [LOCAL] Total rewards:      %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
+	mlog.Log.Infof("  [LOCAL] Inflation pool:     %d (from CalculatePreviousEpochInflationRewards)", partitionedRewardsInfo.TotalStakingRewards)
+	mlog.Log.Infof("  [LOCAL] Distributed sum:    %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
+	mlog.Log.Infof("  [LOCAL] Rounding loss:      %d (inflation pool - distributed sum)", int64(partitionedRewardsInfo.TotalStakingRewards)-int64(localStakerTotal+localVoterTotal))
 
 	mlog.Log.Infof("")
 	mlog.Log.Infof("                              [LOCAL]              [RPC]                 DIFF")
