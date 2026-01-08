@@ -1684,16 +1684,41 @@ postBootstrap:
 	if mithrilState != nil && mithrilState.HasResumeContext() {
 		loadedEntries, loadErr := global.LoadStakeCache(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash)
 		if loadErr != nil {
-			mlog.Log.Warnf("failed to load stake cache from file: %v - will scan AccountsDB", loadErr)
+			mlog.Log.Warnf("failed to load stake cache from file: %v", loadErr)
 		}
 		if loadErr != nil || loadedEntries == 0 {
-			// Cache file missing, corrupt, stale, or empty - scan AccountsDB to build stake cache
-			mlog.Log.Infof("stake cache file not found or invalid - scanning AccountsDB")
-			scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
-			if scanErr != nil {
-				mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
-			} else {
-				mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+			// Cache file missing, corrupt, stale, or empty - try pubkey index first
+			if global.StakePubkeyIndexExists(accountsPath) {
+				mlog.Log.Infof("stake cache stale/missing - trying pubkey index for fast rebuild")
+				indexPubkeys, indexErr := global.LoadStakePubkeyIndex(accountsPath)
+				if indexErr != nil {
+					mlog.Log.Warnf("failed to load stake pubkey index: %v", indexErr)
+				} else if len(indexPubkeys) > 0 {
+					mlog.Log.Infof("loaded %d pubkeys from index, building cache via targeted lookups", len(indexPubkeys))
+					loadedFromIndex, notFound, buildErr := replay.BuildStakeCacheFromHints(accountsDb, indexPubkeys, mithrilState.LastSlot)
+					if buildErr != nil {
+						mlog.Log.Warnf("stake cache build from index failed: %v", buildErr)
+					} else {
+						mlog.Log.Infof("built stake cache from index: %d entries (%d not found)", loadedFromIndex, notFound)
+						loadedEntries = loadedFromIndex
+					}
+				}
+			}
+			// If still no cache, fall back to full scan
+			if loadedEntries == 0 {
+				mlog.Log.Infof("stake cache file and index not available - scanning AccountsDB (this may take 30+ minutes)")
+				scannedEntries, scanErr := replay.BuildStakeCacheFromAccountsDB(accountsDb)
+				if scanErr != nil {
+					mlog.Log.Warnf("stake cache scan failed: %v (will use snapshot manifest data)", scanErr)
+				} else {
+					mlog.Log.Infof("built stake cache from AccountsDB scan: %d entries", scannedEntries)
+					// Save index after full scan so future restarts can use it
+					if err := global.SaveStakePubkeyIndex(accountsPath); err != nil {
+						mlog.Log.Warnf("failed to save stake pubkey index after scan: %v", err)
+					} else {
+						mlog.Log.Infof("stake pubkey index saved: %d entries", scannedEntries)
+					}
+				}
 			}
 		} else {
 			mlog.Log.Infof("loaded stake cache from file: %d entries", loadedEntries)
