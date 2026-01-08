@@ -140,6 +140,20 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 	total := len(stakeCache)
 	mlog.Log.Infof("refreshing stake cache credits_observed from AccountsDB (slot=%d): %d accounts", slot, total)
 
+	// Calculate BEFORE totals
+	var beforeTotalStake uint64
+	var beforeTotalCredits uint64
+	beforeVoteAccts := make(map[solana.PublicKey]bool)
+	for _, delegation := range stakeCache {
+		if delegation != nil {
+			beforeTotalStake += delegation.StakeLamports
+			beforeTotalCredits += delegation.CreditsObserved
+			beforeVoteAccts[delegation.VoterPubkey] = true
+		}
+	}
+	mlog.Log.Infof("  BEFORE refresh: stake=%.2f SOL, total_credits=%d, vote_accounts=%d",
+		float64(beforeTotalStake)/1e9, beforeTotalCredits, len(beforeVoteAccts))
+
 	var refreshedCount, errorCount int
 	var tombstoneCount, notFoundCount, unmarshalErrCount, notStakeCount int
 	var processed int
@@ -221,6 +235,26 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed, %d snapshots captured", refreshedCount, errorCount, len(snapshots))
 	mlog.Log.Infof("  breakdown: not_found=%d tombstone=%d unmarshal_err=%d not_stake=%d",
 		notFoundCount, tombstoneCount, unmarshalErrCount, notStakeCount)
+
+	// Calculate AFTER totals
+	afterStakeCache := global.StakeCache()
+	var afterTotalStake uint64
+	var afterTotalCredits uint64
+	afterVoteAccts := make(map[solana.PublicKey]bool)
+	for _, delegation := range afterStakeCache {
+		if delegation != nil {
+			afterTotalStake += delegation.StakeLamports
+			afterTotalCredits += delegation.CreditsObserved
+			afterVoteAccts[delegation.VoterPubkey] = true
+		}
+	}
+	mlog.Log.Infof("  AFTER refresh:  stake=%.2f SOL, total_credits=%d, vote_accounts=%d",
+		float64(afterTotalStake)/1e9, afterTotalCredits, len(afterVoteAccts))
+	mlog.Log.Infof("  DIFF:           stake=%.2f SOL, credits=%+d, vote_accounts=%+d",
+		float64(afterTotalStake-beforeTotalStake)/1e9,
+		int64(afterTotalCredits)-int64(beforeTotalCredits),
+		len(afterVoteAccts)-len(beforeVoteAccts))
+
 	return refreshedCount, errorCount, snapshots
 }
 
