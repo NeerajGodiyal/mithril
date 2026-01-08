@@ -193,6 +193,12 @@ type StakeCacheTombstoneEntry struct {
 // DeleteStakeCacheItemsBatch removes multiple stake cache entries under a single lock.
 // Only deletes if tombstone slot >= existing entry slot (latest wins).
 // This is used during incremental snapshot processing to handle closed stake accounts.
+//
+// IMPORTANT: We keep the tombstone slot in stakeCacheSlots even after deleting from stakeCache.
+// This prevents older entries (processed later due to parallel appendvec processing) from
+// re-inserting stale data. The slot acts as a "high water mark" - any entry with a lower
+// slot will be rejected by PutStakeCacheItemsBatch.
+//
 // Returns the number of entries actually deleted.
 func DeleteStakeCacheItemsBatch(entries []StakeCacheTombstoneEntry) int {
 	if len(entries) == 0 {
@@ -201,12 +207,18 @@ func DeleteStakeCacheItemsBatch(entries []StakeCacheTombstoneEntry) int {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
 
+	if instance.stakeCacheSlots == nil {
+		instance.stakeCacheSlots = make(map[solana.PublicKey]uint64)
+	}
+
 	deleted := 0
 	for _, entry := range entries {
 		existingSlot, exists := instance.stakeCacheSlots[entry.Pubkey]
-		if exists && entry.Slot >= existingSlot {
+		if !exists || entry.Slot >= existingSlot {
+			// Delete from stakeCache but KEEP the slot in stakeCacheSlots
+			// This blocks older entries from re-inserting after a tombstone
 			delete(instance.stakeCache, entry.Pubkey)
-			delete(instance.stakeCacheSlots, entry.Pubkey)
+			instance.stakeCacheSlots[entry.Pubkey] = entry.Slot
 			deleted++
 		}
 	}
