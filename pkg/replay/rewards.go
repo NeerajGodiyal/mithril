@@ -135,51 +135,76 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// Fetch RPC EpochRewards sysvar for total_points and total_rewards comparison
 	// NOTE: RPC returns the sysvar at whatever slot/epoch the RPC node is currently at.
 	// When replaying historical data, the RPC sysvar may be from a different epoch entirely.
-	// We log the RPC DistributionStartingBlockHeight to help identify mismatches.
-	rpcEpochRewards, rpcSysvarErr := rewards.FetchRpcEpochRewardsSysvar()
+	// We fetch the RPC's current slot to anchor the comparison.
+	rpcContext, rpcSysvarErr := rewards.FetchRpcEpochRewardsSysvar()
+
+	mlog.Log.Infof("")
+
+	// Determine if sysvar comparison is anchored (same epoch boundary)
+	var sysvarAnchored bool
+	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
+		sysvarAnchored = rpcContext.Sysvar.DistributionStartingBlockHeight == slot
+		mlog.Log.Infof("  RPC context: slot=%d, sysvar.starting_slot=%d",
+			rpcContext.RpcSlot, rpcContext.Sysvar.DistributionStartingBlockHeight)
+		if !sysvarAnchored {
+			mlog.Log.Warnf("  ⚠️  UNANCHORED: RPC sysvar is from different epoch (RPC starting_slot=%d, LOCAL slot=%d)",
+				rpcContext.Sysvar.DistributionStartingBlockHeight, slot)
+			mlog.Log.Warnf("      Sysvar comparisons below are NOT meaningful - RPC is replaying a different epoch")
+		}
+	}
 
 	mlog.Log.Infof("")
 	mlog.Log.Infof("                              [LOCAL]              [RPC]                 DIFF")
 	mlog.Log.Infof("                              -------              -----                 ----")
 
 	// Total points comparison
-	if rpcSysvarErr == nil && rpcEpochRewards != nil {
-		// Warn if RPC sysvar is from a different epoch (different starting block)
-		// This comparison is only valid when replaying the same epoch the RPC is in
-		if rpcEpochRewards.DistributionStartingBlockHeight != slot {
-			mlog.Log.Warnf("  ⚠️  RPC sysvar may be from different epoch (RPC starting_slot=%d, LOCAL slot=%d)",
-				rpcEpochRewards.DistributionStartingBlockHeight, slot)
-		}
+	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
+		rpcEpochRewards := rpcContext.Sysvar
 		// Compute diff: LOCAL points - RPC points
 		// Both are Uint128, so we need to handle this carefully
 		localPointsStr := points.String()
 		rpcPointsStr := rpcEpochRewards.TotalPoints.String()
+		anchorNote := ""
+		if !sysvarAnchored {
+			anchorNote = " [UNANCHORED]"
+		}
 		// For display, we show both values; diff requires bigint math
 		if points.Eq(rpcEpochRewards.TotalPoints) {
-			mlog.Log.Infof("  Total points:               %-20s %-20s MATCH", localPointsStr, rpcPointsStr)
+			mlog.Log.Infof("  Total points:               %-20s %-20s MATCH%s", localPointsStr, rpcPointsStr, anchorNote)
 		} else if points.Gt(rpcEpochRewards.TotalPoints) {
 			diff := points.Sub(rpcEpochRewards.TotalPoints)
-			mlog.Log.Infof("  Total points:               %-20s %-20s +%s", localPointsStr, rpcPointsStr, diff.String())
+			mlog.Log.Infof("  Total points:               %-20s %-20s +%s%s", localPointsStr, rpcPointsStr, diff.String(), anchorNote)
 		} else {
 			diff := rpcEpochRewards.TotalPoints.Sub(points)
-			mlog.Log.Infof("  Total points:               %-20s %-20s -%s", localPointsStr, rpcPointsStr, diff.String())
+			mlog.Log.Infof("  Total points:               %-20s %-20s -%s%s", localPointsStr, rpcPointsStr, diff.String(), anchorNote)
 		}
 	} else {
 		mlog.Log.Infof("  Total points:               %-20s (RPC error: %v)", points.String(), rpcSysvarErr)
 	}
 
 	// Total rewards comparison from sysvar
-	if rpcSysvarErr == nil && rpcEpochRewards != nil {
+	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
+		rpcEpochRewards := rpcContext.Sysvar
 		localTotal := localStakerTotal + localVoterTotal
 		rpcTotal := rpcEpochRewards.TotalRewards
-		mlog.Log.Infof("  Total rewards (sysvar):     %-20d %-20d %+d", localTotal, rpcTotal, int64(localTotal)-int64(rpcTotal))
+		anchorNote := ""
+		if !sysvarAnchored {
+			anchorNote = " [UNANCHORED]"
+		}
+		mlog.Log.Infof("  Total rewards (sysvar):     %-20d %-20d %+d%s", localTotal, rpcTotal, int64(localTotal)-int64(rpcTotal), anchorNote)
 	}
 
 	// Num partitions comparison
+	// Note: block.NumRewardPartitions comes from getBlock RPC (anchored to the boundary slot)
+	// rpcContext.Sysvar.NumPartitions comes from current RPC state (may be unanchored)
 	if block.NumRewardPartitions != ^uint64(0) {
 		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d", partitionedRewardsInfo.NumRewardPartitions, block.NumRewardPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(block.NumRewardPartitions))
-	} else if rpcSysvarErr == nil && rpcEpochRewards != nil {
-		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d (from sysvar)", partitionedRewardsInfo.NumRewardPartitions, rpcEpochRewards.NumPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(rpcEpochRewards.NumPartitions))
+	} else if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
+		anchorNote := ""
+		if !sysvarAnchored {
+			anchorNote = " [UNANCHORED]"
+		}
+		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d (from sysvar)%s", partitionedRewardsInfo.NumRewardPartitions, rpcContext.Sysvar.NumPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(rpcContext.Sysvar.NumPartitions), anchorNote)
 	} else {
 		mlog.Log.Infof("  Num partitions:             %-20d (not available from RPC)", partitionedRewardsInfo.NumRewardPartitions)
 	}

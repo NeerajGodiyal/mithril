@@ -104,12 +104,26 @@ func fetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []stri
 	return 0, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
 }
 
+// RpcEpochRewardsContext contains the EpochRewards sysvar along with RPC context
+// (the slot at which this data was fetched) for anchoring comparisons.
+type RpcEpochRewardsContext struct {
+	Sysvar  *sealevel.SysvarEpochRewards
+	RpcSlot uint64 // The RPC node's current slot when this was fetched
+}
+
 // FetchRpcEpochRewardsSysvar fetches the EpochRewards sysvar from RPC.
-// Returns the sysvar containing TotalPoints, TotalRewards, NumPartitions, etc.
+// Returns the sysvar containing TotalPoints, TotalRewards, NumPartitions, etc.,
+// along with the RPC node's current slot for anchoring the comparison.
 // This is used for diagnostic comparison with locally computed values.
-func FetchRpcEpochRewardsSysvar() (*sealevel.SysvarEpochRewards, error) {
+func FetchRpcEpochRewardsSysvar() (*RpcEpochRewardsContext, error) {
 	if validationRpcClient == nil {
 		return nil, fmt.Errorf("no RPC client configured")
+	}
+
+	// Fetch RPC's current slot first for anchoring
+	rpcSlot, err := validationRpcClient.GetSlot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch RPC slot: %w", err)
 	}
 
 	epochRewardsData, err := validationRpcClient.GetEpochRewardsSysvar()
@@ -123,7 +137,10 @@ func FetchRpcEpochRewardsSysvar() (*sealevel.SysvarEpochRewards, error) {
 		return nil, fmt.Errorf("failed to decode EpochRewards sysvar: %w", err)
 	}
 
-	return &epochRewards, nil
+	return &RpcEpochRewardsContext{
+		Sysvar:  &epochRewards,
+		RpcSlot: rpcSlot,
+	}, nil
 }
 
 const (
