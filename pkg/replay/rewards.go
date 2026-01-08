@@ -89,13 +89,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// Aggregate vote rewards from locally computed staking rewards (removes RPC dependency)
 	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
 
-	// Distribute vote rewards using locally computed values
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewardsLocal(acctsDb, localVoteRewards, slot)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
-	}
-
-	// Build diagnostics data
+	// Build diagnostics data BEFORE vote distribution so we always get the file even if distribution fails
 	var localStakerTotal, localVoterTotal uint64
 	for _, sr := range partitionedRewardsInfo.StakingRewards {
 		if sr != nil {
@@ -166,6 +160,39 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 
 	diagPath := rewards.WriteEpochBoundaryDiagnostics(diag)
 	rewards.LogEpochBoundarySummary(diag, diagPath)
+
+	// DEBUG MODE: Exit after diagnostics without committing any changes.
+	// This allows inspecting the diagnostic file and restarting from a clean state.
+	// Set to false when ready to actually process the epoch boundary.
+	const epochBoundaryDebugMode = true
+	if epochBoundaryDebugMode {
+		mlog.Log.Infof("")
+		mlog.Log.Infof("================================================================================")
+		mlog.Log.Infof("EPOCH BOUNDARY DEBUG MODE - EXITING WITHOUT COMMITTING CHANGES")
+		mlog.Log.Infof("================================================================================")
+		mlog.Log.Infof("  Diagnostics written to: %s", diagPath)
+		mlog.Log.Infof("  Local partitions:       %d", partitionedRewardsInfo.NumRewardPartitions)
+		mlog.Log.Infof("  RPC partitions:         %d", block.NumRewardPartitions)
+		mlog.Log.Infof("  Eligible stake accts:   %d", partitionedRewardsInfo.EligibleCount)
+		mlog.Log.Infof("  Total points:           %s", points.String())
+		mlog.Log.Infof("  Total staking rewards:  %d lamports (%.4f SOL)", totalRewards, float64(totalRewards)/1e9)
+		mlog.Log.Infof("  Local staker rewards:   %d lamports", localStakerTotal)
+		mlog.Log.Infof("  Local voter rewards:    %d lamports", localVoterTotal)
+		mlog.Log.Infof("  Vote accounts to pay:   %d", len(localVoteRewards))
+		mlog.Log.Infof("")
+		mlog.Log.Infof("  NO CHANGES COMMITTED TO ACCOUNTSDB")
+		mlog.Log.Infof("  You can safely restart from the same snapshot slot.")
+		mlog.Log.Infof("  Set epochBoundaryDebugMode=false to proceed with actual processing.")
+		mlog.Log.Infof("================================================================================")
+		return nil, nil, nil, fmt.Errorf("epoch boundary debug mode: exiting after diagnostics (no changes committed)")
+	}
+
+	// Distribute vote rewards using locally computed values
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed, err := rewards.DistributeVotingRewardsLocal(acctsDb, localVoteRewards, slot)
+	if err != nil {
+		mlog.Log.Errorf("vote rewards distribution failed after diagnostics written to: %s", diagPath)
+		return nil, nil, nil, fmt.Errorf("vote rewards distribution failed: %w", err)
+	}
 
 	// SANITY CHECK: Verify eligible count matches actual rewards count.
 	// A mismatch indicates the stake cache changed between partition count calculation and rewards calculation,
