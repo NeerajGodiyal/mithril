@@ -565,74 +565,18 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	// Accounts counted via force_credits_update_with_skipped_reward (get 0 rewards but still counted)
 	var forceCreditsUpdateCount uint64
-	// Detailed breakdown for debugging
-	var creditsLessThanStakeCount uint64
 	var activationMatchCount uint64
-	var activationWithCreditsLess uint64
-	var activationWithCreditsEqual uint64
-	var activationWithCreditsGreater uint64
-	// Track ALL accounts with activation_epoch == rewarded_epoch (before any filters)
-	var totalActivationMatchRaw uint64
-	// noCredits breakdown
-	var noCreditsEqual uint64    // creditsInVote == creditsInStake
-	var noCreditsEmpty uint64    // len(epochCredits) == 0
-	var noCreditsZeroVote uint64 // creditsInVote == 0
-
-	// Credits delta histogram (for accounts that pass min stake and have vote)
-	var creditsDeltaNeg uint64      // creditsInVote < creditsInStake (negative delta)
-	var creditsDeltaZero uint64     // creditsInVote == creditsInStake
-	var creditsDelta1to10 uint64    // delta 1-10
-	var creditsDelta11to100 uint64  // delta 11-100
-	var creditsDelta101to1k uint64  // delta 101-1000
-	var creditsDeltaAbove1k uint64  // delta > 1000
-
-	// Micro-stake analysis (accounts < 1 SOL that have points > 0)
-	// If feature gate is off, these inflate total_points without getting rewards
-	const oneSol = uint64(1_000_000_000)
-	var microStakeCount uint64        // accounts with stake < 1 SOL and points > 0
-	var microStakePoints wide.Uint128 // sum of points from micro-stake accounts
 
 	// EFFECTIVE STAKE TRACKING: sum of stake for all accounts contributing to total_points
-	// If this differs from RPC, we have different accounts in the eligible set
 	var effectiveStake uint64          // sum of stake for accounts with points > 0
-	var effectiveStakeCredits uint64   // sum of new_credits (creditsInVote - creditsInStake) for these accounts
 	var totalNewCredits uint64         // sum of all new credits from accounts with points > 0
 	var activationMatchWithPoints uint64    // count of activation_epoch==rewarded accounts with points > 0
 	var activationMatchStake uint64    // stake from activation_epoch==rewarded accounts with points > 0
 	var activationMatchCredits uint64  // new credits from activation_epoch==rewarded accounts with points > 0
 	var activationMatchPoints wide.Uint128 // points from activation_epoch==rewarded accounts
 
-	// Sample accounts for debugging (collect first few from each bucket)
-	type sampleAccount struct {
-		pubkey          solana.PublicKey
-		voterPubkey     solana.PublicKey
-		creditsInStake  uint64
-		creditsInVote   uint64
-		activationEpoch uint64
-		epochCreditsLen int
-		stake           uint64
-		points          string
-		rewards         string
-		commission      uint8
-		bucket          string
-	}
-	var samples []sampleAccount
-	const maxSamples = 3 // per bucket
-
 	// PASS 1: Calculate total_points and collect accounts
-	// Also identify force_credits_update accounts (credits < stake OR activation == rewarded epoch)
-	var processed uint64
 	for pubkey, delegation := range stakeCache {
-		processed++
-		if processed%100000 == 0 {
-			mlog.Log.Infof("  pass 1 progress: %d/%d accounts (%.1f%%)", processed, total, float64(processed)*100/float64(total))
-		}
-
-		// RAW diagnostic: count ALL accounts with activation_epoch == rewarded before any filtering
-		if delegation.ActivationEpoch == rewardedEpoch {
-			totalActivationMatchRaw++
-		}
-
 		stake := delegation.StakeLamports
 		voteState := global.VoteCacheItem(delegation.VoterPubkey)
 		hasVote := voteState != nil
@@ -668,117 +612,42 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			creditsInVote = epochCredits[len(epochCredits)-1].Credits
 		}
 
-		// CREDITS DELTA HISTOGRAM: Track raw delta for all accounts with min stake + vote
-		// This helps identify where the eligibility cutoff differs from RPC
-		if creditsInVote < creditsInStake {
-			creditsDeltaNeg++
-			if len(samples) < maxSamples*6 { // 6 buckets
-				samples = append(samples, sampleAccount{
-					pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
-					creditsInStake: creditsInStake, creditsInVote: creditsInVote,
-					activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
-					stake: stake, bucket: "credits_delta_neg",
-				})
-			}
-		} else {
-			delta := creditsInVote - creditsInStake
-			switch {
-			case delta == 0:
-				creditsDeltaZero++
-				if len(samples) < maxSamples*6 {
-					samples = append(samples, sampleAccount{
-						pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
-						creditsInStake: creditsInStake, creditsInVote: creditsInVote,
-						activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
-						stake: stake, bucket: "credits_delta_zero",
-					})
-				}
-			case delta <= 10:
-				creditsDelta1to10++
-			case delta <= 100:
-				creditsDelta11to100++
-			case delta <= 1000:
-				creditsDelta101to1k++
-			default:
-				creditsDeltaAbove1k++
-			}
-		}
-
 		// FORCE_CREDITS_UPDATE CHECK #1: credits_in_vote < credits_in_stake
-		// In Firedancer, this sets force_credits_update_with_skipped_reward = true in calculate_stake_points_and_credits
-		// These accounts are COUNTED but get 0 rewards, and have 0 points (no contribution to total_points)
 		if creditsInVote < creditsInStake {
 			forceCreditsUpdateCount++
-			creditsLessThanStakeCount++
-			continue // Counted separately, 0 points so no contribution to total_points
+			continue
 		}
 
 		// FORCE_CREDITS_UPDATE CHECK #2: activation_epoch == rewarded_epoch
-		// CRITICAL: This must be checked BEFORE the noCredits check!
-		// An account with activation_epoch == rewarded AND credits == stake is still counted via force_credits_update.
-		// In FD, activation check (line 380-382 in redeem_rewards) happens after calculate_stake_points_and_credits,
-		// but OVERRIDES the points=0 case when activation_epoch matches.
 		if delegation.ActivationEpoch == rewardedEpoch {
 			forceCreditsUpdateCount++
 			activationMatchCount++
-			// Track credits relationship for diagnostics
-			if creditsInVote < creditsInStake {
-				// Already counted above, shouldn't reach here (but track just in case)
-				activationWithCreditsLess++
-			} else if creditsInVote == creditsInStake {
-				activationWithCreditsEqual++
-			} else {
-				activationWithCreditsGreater++
-			}
-			// Calculate points (FD does this first), add to total if > 0
+			// Calculate points if applicable
 			if creditsInVote > creditsInStake && len(epochCredits) > 0 {
 				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 				if !calculatedPoints.Points.Eq(wide.Uint128FromUint64(0)) {
 					totalPoints = totalPoints.Add(calculatedPoints.Points)
-					// Track activation_epoch==rewarded contributions separately
 					activationMatchWithPoints++
 					activationMatchStake += stake
 					activationMatchCredits += creditsInVote - creditsInStake
 					activationMatchPoints = activationMatchPoints.Add(calculatedPoints.Points)
 				}
 			}
-			continue // Counted separately, don't go through rewards/split checks
-		}
-
-		// If credits_in_vote == credits_in_stake (no new credits), skip
-		// This is NOT a force_credits_update case - it returns error in Firedancer
-		// (Unless activation_epoch == rewarded_epoch, which is handled above)
-		if creditsInVote == creditsInStake || len(epochCredits) == 0 {
-			noCredits++
-			// Detailed breakdown
-			if len(epochCredits) == 0 {
-				noCreditsEmpty++
-			}
-			if creditsInVote == creditsInStake {
-				noCreditsEqual++
-			}
-			if creditsInVote == 0 {
-				noCreditsZeroVote++
-			}
 			continue
 		}
 
-		// Normal case: credits_in_vote > credits_in_stake and activation_epoch != rewarded_epoch
-		// Calculate points
+		// No new credits - skip
+		if creditsInVote == creditsInStake || len(epochCredits) == 0 {
+			noCredits++
+			continue
+		}
+
+		// Normal case: calculate points
 		calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 		zero128 := wide.Uint128FromUint64(0)
 
 		if calculatedPoints.Points.Eq(zero128) {
 			zeroPoints++
-			// Sample for debugging - why do these accounts have 0 points?
-			if len(samples) < maxSamples*8 { // extended for zero_points bucket
-				samples = append(samples, sampleAccount{
-					pubkey: pubkey, voterPubkey: delegation.VoterPubkey,
-					creditsInStake: creditsInStake, creditsInVote: creditsInVote,
-					activationEpoch: delegation.ActivationEpoch, epochCreditsLen: len(epochCredits),
-					stake: stake, bucket: "zero_points",
-				})
-			}
 			continue
 		}
 
@@ -795,50 +664,12 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		})
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
 
-		// Track effective stake and credits for accounts with points > 0
+		// Track effective stake and credits
 		effectiveStake += stake
 		if creditsInVote > creditsInStake {
-			newCredits := creditsInVote - creditsInStake
-			effectiveStakeCredits += newCredits
-			totalNewCredits += newCredits
-		}
-
-		// Track micro-stake accounts (stake < 1 SOL) that contribute to total_points
-		if stake < oneSol {
-			microStakeCount++
-			microStakePoints = microStakePoints.Add(calculatedPoints.Points)
+			totalNewCredits += creditsInVote - creditsInStake
 		}
 	}
-
-	mlog.Log.Infof("  pass 1 complete: accounts_with_points=%d force_credits_update=%d total_points=%s",
-		len(accountsWithPoints), forceCreditsUpdateCount, totalPoints.String())
-	mlog.Log.Infof("  force_credits_update breakdown: credits_less_than_stake=%d activation_match=%d",
-		creditsLessThanStakeCount, activationMatchCount)
-	mlog.Log.Infof("  activation_match breakdown: credits<stake=%d credits==stake=%d credits>stake=%d",
-		activationWithCreditsLess, activationWithCreditsEqual, activationWithCreditsGreater)
-	mlog.Log.Infof("  RAW activation_epoch==rewarded (before ANY filters): %d (if 0, stake cache missing activation_epoch)",
-		totalActivationMatchRaw)
-	mlog.Log.Infof("  noCredits breakdown: equal=%d empty_epochs=%d zero_vote=%d (may overlap)",
-		noCreditsEqual, noCreditsEmpty, noCreditsZeroVote)
-	// CREDITS DELTA HISTOGRAM (accounts with min_stake + vote, before other filters)
-	mlog.Log.Infof("  CREDITS DELTA HISTOGRAM (min_stake + vote): neg=%d zero=%d 1-10=%d 11-100=%d 101-1k=%d >1k=%d",
-		creditsDeltaNeg, creditsDeltaZero, creditsDelta1to10, creditsDelta11to100, creditsDelta101to1k, creditsDeltaAbove1k)
-	histogramTotal := creditsDeltaNeg + creditsDeltaZero + creditsDelta1to10 + creditsDelta11to100 + creditsDelta101to1k + creditsDeltaAbove1k
-	mlog.Log.Infof("  histogram total=%d (should equal total - below_min - no_vote = %d)", histogramTotal, total-belowMin-noVote)
-	// Sample accounts for debugging
-	if len(samples) > 0 {
-		mlog.Log.Infof("  SAMPLE ACCOUNTS (first %d from each bucket):", maxSamples)
-		for _, s := range samples {
-			mlog.Log.Infof("    %s: stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d epoch_credits_len=%d stake_lamports=%d",
-				s.bucket, s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
-				s.activationEpoch, s.epochCreditsLen, s.stake)
-		}
-	}
-	// CRITICAL: Log total_points and total_rewards for comparison with RPC
-	// If total_points is higher than RPC, per-account rewards will be lower, causing more zero_rewards
-	// If total_rewards is lower than RPC, same effect
-	mlog.Log.Infof("  COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
-	mlog.Log.Infof("  (Get RPC values via: getBlocksWithLimit on first slot of epoch, then getBlock with rewards)")
 
 	// EFFECTIVE STAKE SUMMARY: These totals help identify if we have different eligible accounts than RPC
 	// points ≈ stake * new_credits (approximately), so effective_stake * average_credits ≈ total_points
@@ -879,26 +710,6 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	mlog.Log.Infof("│   → ~%d accounts excluded OR ~%d credits missing", totalAccountsWithPoints*4/100000, totalEffectiveCredits*4/100000)
 	mlog.Log.Infof("└─────────────────────────────────────────────────────────────────────────────┘")
 
-	// MICRO-STAKE ANALYSIS: accounts with stake < 1 SOL that contribute to total_points
-	// If feature gate is off, these inflate total_points, raising threshold, causing more zero_rewards
-	mlog.Log.Infof("  MICRO-STAKE ANALYSIS (stake < 1 SOL with points > 0): count=%d points=%s",
-		microStakeCount, microStakePoints.String())
-	mlog.Log.Infof("  feature min_stake_delegation=%d (if 0, micro-stakes contribute to total_points)", minimum)
-	// If Agave has min_stake=1 SOL, their total_points would be: total_points - micro_stake_points
-	adjustedTotalPoints := totalPoints.Sub(microStakePoints)
-	mlog.Log.Infof("  if Agave has 1 SOL min: adjusted_total_points=%s (subtract micro-stake contribution)",
-		adjustedTotalPoints.String())
-
-	// THRESHOLD: minimum points needed for rewards > 0
-	// rewards = points * total_rewards / total_points > 0
-	// => points > total_points / total_rewards
-	// => min_points = ceil(total_points / total_rewards) = (total_points + total_rewards - 1) / total_rewards
-	if totalRewards > 0 && !totalPoints.Eq(wide.Uint128FromUint64(0)) {
-		totalRewards128 := wide.Uint128FromUint64(totalRewards)
-		minPointsForReward := totalPoints.Add(totalRewards128).Sub(wide.Uint128FromUint64(1)).Div(totalRewards128)
-		mlog.Log.Infof("  THRESHOLD: min_points_for_nonzero_reward = %s (accounts with points below this get zero_rewards)", minPointsForReward.String())
-	}
-
 	// PASS 2: Count accounts where rewards > 0 AND commission split is valid
 	// Formula: rewards = points * total_rewards / total_points
 	// Commission split: voter_portion = rewards * commission / 100
@@ -919,45 +730,15 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 
 	totalRewards128 := wide.Uint128FromUint64(totalRewards)
 
-	// Diagnostic counters
-	var rewardsGtZero uint64 // accounts where rewards > 0 (before split check)
-
-	// Sample accounts from zero_rewards and zero_split for debugging
-	var zeroRewardsSamples []sampleAccount
-	var zeroSplitSamples []sampleAccount
-	const maxPass2Samples = 5 // samples from each bucket
-
-	for i, acct := range accountsWithPoints {
-		if (i+1)%100000 == 0 {
-			mlog.Log.Infof("  pass 2 progress: %d/%d accounts (%.1f%%)", i+1, len(accountsWithPoints), float64(i+1)*100/float64(len(accountsWithPoints)))
-		}
-
+	for _, acct := range accountsWithPoints {
 		// rewards = points * total_rewards / total_points
-		// Use 128-bit arithmetic to avoid overflow
 		numerator := acct.points.Mul(totalRewards128)
 		rewards := numerator.Div(totalPoints)
 
 		if rewards.Eq(wide.Uint128FromUint64(0)) {
 			zeroRewards++
-			// Sample for debugging
-			if len(zeroRewardsSamples) < maxPass2Samples {
-				zeroRewardsSamples = append(zeroRewardsSamples, sampleAccount{
-					pubkey:          acct.pubkey,
-					voterPubkey:     acct.voterPubkey,
-					creditsInStake:  acct.creditsInStake,
-					creditsInVote:   acct.creditsInVote,
-					activationEpoch: acct.activationEpoch,
-					stake:           acct.stake,
-					points:          acct.points.String(),
-					rewards:         "0",
-					commission:      acct.commission,
-					bucket:          "zero_rewards",
-				})
-			}
 			continue
 		}
-
-		rewardsGtZero++ // Count for diagnostic bucket 2
 
 		// Commission split check (Firedancer fd_rewards.c lines 400-404)
 		// is_split = commission > 0 && commission < 100
@@ -983,21 +764,6 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 			zero128 := wide.Uint128FromUint64(0)
 			if voterPortion.Eq(zero128) || stakerPortion.Eq(zero128) {
 				zeroSplit++
-				// Sample for debugging
-				if len(zeroSplitSamples) < maxPass2Samples {
-					zeroSplitSamples = append(zeroSplitSamples, sampleAccount{
-						pubkey:          acct.pubkey,
-						voterPubkey:     acct.voterPubkey,
-						creditsInStake:  acct.creditsInStake,
-						creditsInVote:   acct.creditsInVote,
-						activationEpoch: acct.activationEpoch,
-						stake:           acct.stake,
-						points:          acct.points.String(),
-						rewards:         rewards.String(),
-						commission:      acct.commission,
-						bucket:          "zero_split",
-					})
-				}
 				continue
 			}
 		}
@@ -1005,38 +771,8 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		eligible++
 	}
 
-	// Log diagnostic buckets
-	pointsGtZero := uint64(len(accountsWithPoints))
-	normalEligible := eligible - forceCreditsUpdateCount
-	mlog.Log.Infof("  pass 2 complete: eligible=%d (force_credits_update=%d + normal=%d)",
-		eligible, forceCreditsUpdateCount, normalEligible)
-	mlog.Log.Infof("DIAGNOSTIC BUCKETS:")
-	mlog.Log.Infof("  force_credits_update (credits<stake OR activation==rewarded): %d", forceCreditsUpdateCount)
-	mlog.Log.Infof("  points > 0:                    %d", pointsGtZero)
-	mlog.Log.Infof("  rewards > 0:                   %d", rewardsGtZero)
-	mlog.Log.Infof("  rewards > 0 AND split valid:   %d", normalEligible)
-	mlog.Log.Infof("  TOTAL ELIGIBLE:                %d  <-- used for partition count", eligible)
-
-	// Log sample accounts from zero_rewards and zero_split
-	if len(zeroRewardsSamples) > 0 {
-		mlog.Log.Infof("ZERO_REWARDS SAMPLES (first %d):", len(zeroRewardsSamples))
-		for _, s := range zeroRewardsSamples {
-			mlog.Log.Infof("  stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d stake_lamports=%d points=%s commission=%d",
-				s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
-				s.activationEpoch, s.stake, s.points, s.commission)
-		}
-	}
-	if len(zeroSplitSamples) > 0 {
-		mlog.Log.Infof("ZERO_SPLIT SAMPLES (first %d):", len(zeroSplitSamples))
-		for _, s := range zeroSplitSamples {
-			mlog.Log.Infof("  stake=%s vote=%s credits_stake=%d credits_vote=%d activation=%d stake_lamports=%d points=%s rewards=%s commission=%d",
-				s.pubkey.String()[:16], s.voterPubkey.String()[:16], s.creditsInStake, s.creditsInVote,
-				s.activationEpoch, s.stake, s.points, s.rewards, s.commission)
-		}
-	}
-
-	mlog.Log.Infof("ELIGIBILITY FILTER RESULT: eligible=%d total=%d (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
-		eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
+	mlog.Log.Infof("ELIGIBILITY: %d eligible (excluded: below_min=%d no_vote=%d no_credits=%d zero_points=%d zero_rewards=%d zero_split=%d)",
+		eligible, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit)
 
 	return eligible, total, belowMin, noVote, noCredits, zeroPoints, zeroRewards, zeroSplit
 }
