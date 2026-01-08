@@ -721,9 +721,11 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		_, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, "")
+		if err != nil {
+			panic(err)
 		}
+
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
 		if !exists {
@@ -774,8 +776,9 @@ func configureBlock(block *b.Block,
 	if global.ManageLeaderSchedule() {
 		// if we've crossed an epoch boundary, fetch the new leader schedule
 		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-				return fmt.Errorf("failed to fetch leader schedule: %w", err)
+			_, err := PrepareLeaderScheduleLocalFromVoteCache(epochSchedule.GetEpoch(block.Slot), epochSchedule, "")
+			if err != nil {
+				panic(err)
 			}
 		}
 		var exists bool
@@ -824,8 +827,9 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Handle leader schedule
 	if global.ManageLeaderSchedule() {
-		if err := prepareLeaderScheduleWithBackups(block.Epoch, epochSchedule, rpcClient, auxBackupEndpoints); err != nil {
-			return fmt.Errorf("failed to fetch leader schedule: %w", err)
+		_, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, "")
+		if err != nil {
+			panic(err)
 		}
 		var exists bool
 		block.Leader, exists = global.LeaderForSlot(block.Slot)
@@ -964,10 +968,7 @@ func ReplayBlocks(
 
 	global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageBlockHeight(true)
-
-	if isLive {
-		global.SetManageLeaderSchedule(true)
-	}
+	global.SetManageLeaderSchedule(true)
 
 	var err error
 	var currentSlot uint64
