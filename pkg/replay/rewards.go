@@ -133,9 +133,21 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		rpcEligibleEstimate = "(not available)"
 	}
 
+	// Calculate local total stake from stake cache (sum of all delegations)
+	var localTotalStake uint64
+	stakeByVote := make(map[solana.PublicKey]uint64) // stake per vote account
+	for _, delegation := range global.StakeCache() {
+		if delegation != nil {
+			localTotalStake += delegation.StakeLamports
+			stakeByVote[delegation.VoterPubkey] += delegation.StakeLamports
+		}
+	}
+
 	// Log local-only values (no RPC comparison available for these)
 	mlog.Log.Infof("")
 	mlog.Log.Infof("  [LOCAL] Total points:       %s", points.String())
+	mlog.Log.Infof("  [LOCAL] Total stake:        %d lamports (%.2f SOL) across %d delegations to %d vote accounts",
+		localTotalStake, float64(localTotalStake)/1e9, global.StakeCacheSize(), len(stakeByVote))
 	mlog.Log.Infof("  [LOCAL] Inflation pool:     %d (from CalculatePreviousEpochInflationRewards)", partitionedRewardsInfo.TotalStakingRewards)
 	mlog.Log.Infof("  [LOCAL] Distributed sum:    %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
 	mlog.Log.Infof("  [LOCAL] Rounding loss:      %d (inflation pool - distributed sum)", int64(partitionedRewardsInfo.TotalStakingRewards)-int64(localStakerTotal+localVoterTotal))
