@@ -131,10 +131,23 @@ const (
 //	manifest is partially incomplete: all of the expected keys are there, but the values are not.
 //	Notably, the credits_observed field is not available until all of the accounts are loaded
 //	into the database."
-// refreshTask holds data for a single stake cache refresh worker task
+// refreshTask holds input data for a stake cache refresh worker
 type refreshTask struct {
+	idx        int
 	pubkey     solana.PublicKey
 	delegation *sealevel.Delegation
+}
+
+// refreshResult holds output data from a stake cache refresh worker
+type refreshResult struct {
+	idx            int
+	pubkey         solana.PublicKey
+	delegation     *sealevel.Delegation
+	shouldDelete   bool
+	deleteReason   string // for debug logging
+	newCredits     uint64
+	creditsUpdated bool
+	snapshot       *accounts.Account // nil if should delete
 }
 
 // RefreshStakeCacheCreditsObserved refreshes credits_observed from AccountsDB and returns
@@ -143,6 +156,10 @@ type refreshTask struct {
 // from AccountsDB, which is critical because GetAccount ignores the slot parameter.
 //
 // This function is parallelized to improve performance on large stake caches (~1M accounts).
+// Uses a 3-phase approach to avoid concurrent map read/write:
+//   Phase 1: Snapshot stake cache into slice (single-threaded)
+//   Phase 2: Workers read AccountsDB, compute results (no mutations)
+//   Phase 3: Apply mutations after all workers finish (single-threaded)
 func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint64) (refreshed int, errors int, snapshots map[solana.PublicKey]*accounts.Account) {
 	stakeCache := global.StakeCache()
 	total := len(stakeCache)
@@ -162,112 +179,143 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 	mlog.Log.Infof("  BEFORE refresh: stake=%.2f SOL, total_credits=%d, vote_accounts=%d",
 		float64(beforeTotalStake)/1e9, beforeTotalCredits, len(beforeVoteAccts))
 
-	// Atomic counters for thread-safe stats
-	var refreshedCount atomic.Uint64
-	var errorCount atomic.Uint64
-	var tombstoneCount atomic.Uint64
-	var notFoundCount atomic.Uint64
-	var unmarshalErrCount atomic.Uint64
-	var notStakeCount atomic.Uint64
-	var processed atomic.Uint64
+	// PHASE 1: Snapshot stake cache into slice (no concurrent iteration issues)
+	tasks := make([]refreshTask, 0, total)
+	for pubkey, delegation := range stakeCache {
+		tasks = append(tasks, refreshTask{
+			idx:        len(tasks),
+			pubkey:     pubkey,
+			delegation: delegation,
+		})
+	}
 
-	// Pre-allocate the snapshots map with mutex protection
-	snapshots = make(map[solana.PublicKey]*accounts.Account, total)
-	var snapshotsMu sync.Mutex
+	// Pre-allocate results slice (indexed by task.idx for lock-free writes)
+	results := make([]refreshResult, len(tasks))
+
+	// Atomic counter for progress logging
+	var processed atomic.Uint64
 
 	var wg sync.WaitGroup
 
-	// Use same worker pool sizing as other parallelized functions
+	// PHASE 2: Workers read AccountsDB, compute results (no mutations to global state)
 	poolSize := runtime.GOMAXPROCS(0) * 8
-	workerPool, _ := ants.NewPoolWithFunc(poolSize, func(i interface{}) {
+	workerPool, poolErr := ants.NewPoolWithFunc(poolSize, func(i interface{}) {
 		defer wg.Done()
 
 		task := i.(*refreshTask)
-		pubkey := task.pubkey
-		delegation := task.delegation
+		result := &results[task.idx]
+		result.idx = task.idx
+		result.pubkey = task.pubkey
+		result.delegation = task.delegation
 
-		// Progress logging (safe with atomic)
+		// Progress logging
 		p := processed.Add(1)
 		if p%100000 == 0 {
 			mlog.Log.Infof("  refresh progress: %d/%d (%.1f%%)", p, total, float64(p)*100/float64(total))
 		}
 
 		// Read the actual stake account from AccountsDB
-		// NOTE: GetAccount currently ignores the slot parameter and returns current state.
-		stakeAcct, err := acctsDb.GetAccount(slot, pubkey)
+		stakeAcct, err := acctsDb.GetAccount(slot, task.pubkey)
 		if err != nil {
-			// Account not found in AccountsDB - remove from cache
-			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_found err=%v",
-				slot, pubkey.String(), err)
-			global.DeleteStakeCacheItem(pubkey)
-			notFoundCount.Add(1)
-			errorCount.Add(1)
+			result.shouldDelete = true
+			result.deleteReason = "not_found"
 			return
 		}
 
-		// Check for tombstone: account exists but has 0 lamports and empty/minimal data
+		// Check for tombstone
 		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
-			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=tombstone lamports=0 data_len=0",
-				slot, pubkey.String())
-			global.DeleteStakeCacheItem(pubkey)
-			tombstoneCount.Add(1)
-			errorCount.Add(1)
+			result.shouldDelete = true
+			result.deleteReason = "tombstone"
 			return
 		}
 
 		// Decode the stake state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=unmarshal_error lamports=%d data_len=%d err=%v",
-				slot, pubkey.String(), stakeAcct.Lamports, len(stakeAcct.Data), err)
-			global.DeleteStakeCacheItem(pubkey)
-			unmarshalErrCount.Add(1)
-			errorCount.Add(1)
+			result.shouldDelete = true
+			result.deleteReason = "unmarshal_error"
 			return
 		}
 
-		// Only update if it's a Stake state (not Initialized or Uninitialized)
+		// Only keep if it's a Stake state (not Initialized or Uninitialized)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=not_stake_state status=%d lamports=%d",
-				slot, pubkey.String(), stakeState.Status, stakeAcct.Lamports)
-			global.DeleteStakeCacheItem(pubkey)
-			notStakeCount.Add(1)
-			errorCount.Add(1)
+			result.shouldDelete = true
+			result.deleteReason = "not_stake_state"
 			return
 		}
 
-		// Update CreditsObserved from the actual stake account
-		// Safe: each worker handles a unique pubkey, so no contention on delegation
-		oldCredits := delegation.CreditsObserved
-		newCredits := stakeState.Stake.Stake.CreditsObserved
-
-		if oldCredits != newCredits {
-			delegation.CreditsObserved = newCredits
-			refreshedCount.Add(1)
-		}
-
-		// Store a clone of the stake account for use during distribution
-		// Must use mutex since multiple workers write to the same map
-		snapshotsMu.Lock()
-		snapshots[pubkey] = stakeAcct.Clone()
-		snapshotsMu.Unlock()
+		// Record new credits (will be applied in phase 3)
+		result.newCredits = stakeState.Stake.Stake.CreditsObserved
+		result.creditsUpdated = task.delegation.CreditsObserved != result.newCredits
+		result.snapshot = stakeAcct.Clone()
 	})
+
+	// Fallback to sequential if pool creation fails
+	if poolErr != nil {
+		mlog.Log.Warnf("failed to create worker pool, falling back to sequential: %v", poolErr)
+		return refreshStakeCacheSequential(acctsDb, slot, tasks, beforeTotalStake, beforeTotalCredits, len(beforeVoteAccts))
+	}
 	defer workerPool.Release()
 
 	// Submit all tasks to the worker pool
-	for pubkey, delegation := range stakeCache {
+	for i := range tasks {
 		wg.Add(1)
-		task := &refreshTask{pubkey: pubkey, delegation: delegation}
-		_ = workerPool.Invoke(task)
+		if err := workerPool.Invoke(&tasks[i]); err != nil {
+			// Invoke failed - decrement wg to avoid deadlock
+			wg.Done()
+			mlog.Log.Warnf("worker pool invoke failed for pubkey %s: %v", tasks[i].pubkey.String(), err)
+		}
 	}
 
 	// Wait for all workers to complete
 	wg.Wait()
 
+	// PHASE 3: Apply mutations (single-threaded, no race conditions)
+	var refreshedCount, errorCount int
+	var tombstoneCount, notFoundCount, unmarshalErrCount, notStakeCount int
+
+	snapshots = make(map[solana.PublicKey]*accounts.Account, total)
+	var toDelete []solana.PublicKey
+
+	for i := range results {
+		result := &results[i]
+		if result.shouldDelete {
+			toDelete = append(toDelete, result.pubkey)
+			errorCount++
+			switch result.deleteReason {
+			case "not_found":
+				notFoundCount++
+			case "tombstone":
+				tombstoneCount++
+			case "unmarshal_error":
+				unmarshalErrCount++
+			case "not_stake_state":
+				notStakeCount++
+			}
+			mlog.Log.Debugf("STAKE_CACHE_REFRESH_REMOVE: slot=%d pubkey=%s reason=%s",
+				slot, result.pubkey.String(), result.deleteReason)
+		} else {
+			// Apply credits update
+			if result.creditsUpdated {
+				result.delegation.CreditsObserved = result.newCredits
+				refreshedCount++
+			}
+			// Store snapshot
+			if result.snapshot != nil {
+				snapshots[result.pubkey] = result.snapshot
+			}
+		}
+	}
+
+	// Batch delete all entries that need removal
+	for _, pk := range toDelete {
+		global.DeleteStakeCacheItem(pk)
+	}
+
 	mlog.Log.Infof("stake cache refresh complete: %d updated, %d errors/removed, %d snapshots captured",
-		refreshedCount.Load(), errorCount.Load(), len(snapshots))
+		refreshedCount, errorCount, len(snapshots))
 	mlog.Log.Infof("  breakdown: not_found=%d tombstone=%d unmarshal_err=%d not_stake=%d",
-		notFoundCount.Load(), tombstoneCount.Load(), unmarshalErrCount.Load(), notStakeCount.Load())
+		notFoundCount, tombstoneCount, unmarshalErrCount, notStakeCount)
 
 	// Calculate AFTER totals
 	afterStakeCache := global.StakeCache()
@@ -288,7 +336,85 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 		int64(afterTotalCredits)-int64(beforeTotalCredits),
 		len(afterVoteAccts)-len(beforeVoteAccts))
 
-	return int(refreshedCount.Load()), int(errorCount.Load()), snapshots
+	return refreshedCount, errorCount, snapshots
+}
+
+// refreshStakeCacheSequential is the fallback when worker pool creation fails
+func refreshStakeCacheSequential(acctsDb *accountsdb.AccountsDb, slot uint64, tasks []refreshTask, beforeTotalStake, beforeTotalCredits uint64, beforeVoteAcctCount int) (refreshed int, errors int, snapshots map[solana.PublicKey]*accounts.Account) {
+	total := len(tasks)
+	snapshots = make(map[solana.PublicKey]*accounts.Account, total)
+
+	var refreshedCount, errorCount int
+	var tombstoneCount, notFoundCount, unmarshalErrCount, notStakeCount int
+
+	for i, task := range tasks {
+		if (i+1)%100000 == 0 {
+			mlog.Log.Infof("  refresh progress: %d/%d (%.1f%%)", i+1, total, float64(i+1)*100/float64(total))
+		}
+
+		stakeAcct, err := acctsDb.GetAccount(slot, task.pubkey)
+		if err != nil {
+			global.DeleteStakeCacheItem(task.pubkey)
+			notFoundCount++
+			errorCount++
+			continue
+		}
+
+		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+			global.DeleteStakeCacheItem(task.pubkey)
+			tombstoneCount++
+			errorCount++
+			continue
+		}
+
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			global.DeleteStakeCacheItem(task.pubkey)
+			unmarshalErrCount++
+			errorCount++
+			continue
+		}
+
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			global.DeleteStakeCacheItem(task.pubkey)
+			notStakeCount++
+			errorCount++
+			continue
+		}
+
+		newCredits := stakeState.Stake.Stake.CreditsObserved
+		if task.delegation.CreditsObserved != newCredits {
+			task.delegation.CreditsObserved = newCredits
+			refreshedCount++
+		}
+		snapshots[task.pubkey] = stakeAcct.Clone()
+	}
+
+	mlog.Log.Infof("stake cache refresh complete (sequential): %d updated, %d errors/removed, %d snapshots",
+		refreshedCount, errorCount, len(snapshots))
+	mlog.Log.Infof("  breakdown: not_found=%d tombstone=%d unmarshal_err=%d not_stake=%d",
+		notFoundCount, tombstoneCount, unmarshalErrCount, notStakeCount)
+
+	// Calculate AFTER totals
+	afterStakeCache := global.StakeCache()
+	var afterTotalStake uint64
+	var afterTotalCredits uint64
+	afterVoteAccts := make(map[solana.PublicKey]bool)
+	for _, delegation := range afterStakeCache {
+		if delegation != nil {
+			afterTotalStake += delegation.StakeLamports
+			afterTotalCredits += delegation.CreditsObserved
+			afterVoteAccts[delegation.VoterPubkey] = true
+		}
+	}
+	mlog.Log.Infof("  AFTER refresh:  stake=%.2f SOL, total_credits=%d, vote_accounts=%d",
+		float64(afterTotalStake)/1e9, afterTotalCredits, len(afterVoteAccts))
+	mlog.Log.Infof("  DIFF:           stake=%.2f SOL, credits=%+d, vote_accounts=%+d",
+		float64(afterTotalStake-beforeTotalStake)/1e9,
+		int64(afterTotalCredits)-int64(beforeTotalCredits),
+		len(afterVoteAccts)-beforeVoteAcctCount)
+
+	return refreshedCount, errorCount, snapshots
 }
 
 // ComputeNumRewardPartitions calculates the number of reward partitions based on stake account count.
