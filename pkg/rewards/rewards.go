@@ -77,9 +77,24 @@ func SetValidatePartitionCount(enabled bool) {
 	validatePartitionCount = enabled
 }
 
-// fetchRpcPartitionCountWithBackups fetches numRewardPartitions from RPC with failover.
+// IsValidationEnabled returns whether partition count validation is enabled.
+func IsValidationEnabled() bool {
+	return validatePartitionCount
+}
+
+// GetValidationRpcClient returns the RPC client configured for validation.
+func GetValidationRpcClient() *rpcclient.RpcClient {
+	return validationRpcClient
+}
+
+// GetValidationRpcBackups returns the backup RPC endpoints for validation failover.
+func GetValidationRpcBackups() []string {
+	return validationRpcBackups
+}
+
+// FetchRpcPartitionCountWithBackups fetches numRewardPartitions from RPC with failover.
 // Used for pre-commit validation at epoch boundary.
-func fetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []string, firstSlotInEpoch uint64) (uint64, error) {
+func FetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []string, firstSlotInEpoch uint64) (uint64, error) {
 	// Try primary first
 	numPartitions, err := rpcc.GetNumRewardPartitions(firstSlotInEpoch)
 	if err == nil {
@@ -1249,7 +1264,7 @@ func DeterminePartitionedStakingRewardsInfoLocal(
 	// PRE-COMMIT VALIDATION: Validate partition count against RPC before processing epoch boundary.
 	// This prevents committing corrupted state that would cause vote failures on subsequent blocks.
 	if validatePartitionCount && validationRpcClient != nil {
-		rpcNumPartitions, err := fetchRpcPartitionCountWithBackups(validationRpcClient, validationRpcBackups, firstSlotInEpoch)
+		rpcNumPartitions, err := FetchRpcPartitionCountWithBackups(validationRpcClient, validationRpcBackups, firstSlotInEpoch)
 		if err != nil {
 			mlog.Log.Warnf("partition validation: RPC fetch failed (continuing anyway): %v", err)
 		} else {
@@ -2244,4 +2259,469 @@ func calculateStakePointsAndCredits(
 		Points:             points,
 		NewCreditsObserved: newObserved,
 	}
+}
+
+// CombinedRefreshPointsAndPartitions performs stake cache refresh, points calculation, and partition
+// assignment in a single pass, optimizing I/O by only reading from AccountsDB for accounts that
+// pass initial eligibility checks (stake >= minimum AND has vote account in vote cache).
+//
+// This combines:
+// - RefreshStakeCacheCreditsObserved (updates credits_observed, removes invalid entries)
+// - CalculateTotalPointsAndPartitions (calculates points, assigns to partitions)
+// - Snapshot capture (for use during distribution)
+//
+// The optimization is significant:
+// - Old flow: Read ALL ~1M stake accounts from AccountsDB (even ineligible ones)
+// - New flow: Only read ~500K accounts that pass initial eligibility checks
+//
+// Returns:
+// - pointsPerStake: Points for each eligible stake account
+// - totalPoints: Sum of all points
+// - partitions: Partition assignment for each eligible stake account
+// - snapshots: Captured stake account data for use during distribution
+// - eligibleCount: Number of eligible stake accounts (used for partition count computation)
+// - statsOut: Breakdown of why accounts were filtered out (for diagnostics)
+type CombinedStats struct {
+	TotalAccounts    int
+	BelowMinimum     int
+	NoVoteInCache    int
+	NotFoundInDB     int
+	Tombstones       int
+	UnmarshalErrors  int
+	NotStakeState    int
+	ZeroPoints       int
+	Eligible         int
+	CreditsUpdated   int
+}
+
+func CombinedRefreshPointsAndPartitions(
+	acctsDb *accountsdb.AccountsDb,
+	slotCtx *sealevel.SlotCtx,
+	slot uint64,
+	numPartitions uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newWarmupCooldownRateEpoch *uint64,
+	maxEpoch *uint64,
+) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128, Partitions, map[solana.PublicKey]*accounts.Account, uint64, CombinedStats) {
+	minimum := minimumStakeDelegation(slotCtx)
+	stakeCache := global.StakeCache()
+	total := len(stakeCache)
+
+	mlog.Log.Infof("combined refresh+points+partitions: slot=%d accounts=%d min_stake=%d", slot, total, minimum)
+
+	// PHASE 1: Snapshot stake cache into slice (avoid concurrent map iteration issues)
+	type combinedTask struct {
+		idx        int
+		pubkey     solana.PublicKey
+		delegation *sealevel.Delegation
+	}
+	tasks := make([]combinedTask, 0, total)
+	for pk, delegation := range stakeCache {
+		tasks = append(tasks, combinedTask{
+			idx:        len(tasks),
+			pubkey:     pk,
+			delegation: delegation,
+		})
+	}
+
+	// Result struct for each task
+	type combinedResult struct {
+		pubkey         solana.PublicKey
+		delegation     *sealevel.Delegation
+		points         *CalculatedStakePoints // nil if not eligible for points
+		snapshot       *accounts.Account      // nil if not captured
+		shouldDelete   bool                   // should be removed from stake cache
+		filterReason   string                 // why filtered (for stats)
+		creditsUpdated bool
+		partitionIdx   uint64
+		processed      bool // true if worker processed this task (false if Invoke failed)
+	}
+	results := make([]combinedResult, len(tasks))
+
+	// Track failed invocations for sequential retry
+	var invokeFailures []int
+	var invokeFailuresMu sync.Mutex
+
+	// Atomic counters
+	var belowMinCount, noVoteCount, notFoundCount, tombstoneCount atomic.Uint64
+	var unmarshalErrCount, notStakeCount, zeroPointsCount, eligibleCount, creditsUpdatedCount atomic.Uint64
+	var processed atomic.Uint64
+
+	var wg sync.WaitGroup
+	poolSize := runtime.GOMAXPROCS(0) * 8
+	workerPool, poolErr := ants.NewPoolWithFunc(poolSize, func(i interface{}) {
+		defer wg.Done()
+		task := i.(*combinedTask)
+		result := &results[task.idx]
+		result.pubkey = task.pubkey
+		result.delegation = task.delegation
+
+		// Progress logging
+		p := processed.Add(1)
+		if p%100000 == 0 {
+			mlog.Log.Infof("  combined progress: %d/%d (%.1f%%)", p, total, float64(p)*100/float64(total))
+		}
+
+		// Check #1: Minimum stake (from cache, no I/O)
+		if task.delegation.StakeLamports < minimum {
+			belowMinCount.Add(1)
+			result.filterReason = "below_minimum"
+			result.processed = true
+			return
+		}
+
+		// Check #2: Vote account in cache (from cache, no I/O)
+		voteState := global.VoteCacheItem(task.delegation.VoterPubkey)
+		if voteState == nil {
+			noVoteCount.Add(1)
+			result.filterReason = "no_vote_in_cache"
+			result.processed = true
+			return
+		}
+
+		// At this point, account is POTENTIALLY eligible. Now read from AccountsDB.
+		stakeAcct, err := acctsDb.GetAccount(slot, task.pubkey)
+		if err != nil {
+			notFoundCount.Add(1)
+			result.shouldDelete = true
+			result.filterReason = "not_found"
+			result.processed = true
+			return
+		}
+
+		// Check for tombstone
+		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+			tombstoneCount.Add(1)
+			result.shouldDelete = true
+			result.filterReason = "tombstone"
+			result.processed = true
+			return
+		}
+
+		// Decode stake state
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			unmarshalErrCount.Add(1)
+			result.shouldDelete = true
+			result.filterReason = "unmarshal_error"
+			result.processed = true
+			return
+		}
+
+		// Must be in Stake state
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			notStakeCount.Add(1)
+			result.shouldDelete = true
+			result.filterReason = "not_stake_state"
+			result.processed = true
+			return
+		}
+
+		// Update credits_observed if different
+		dbCredits := stakeState.Stake.Stake.CreditsObserved
+		if task.delegation.CreditsObserved != dbCredits {
+			result.creditsUpdated = true
+			creditsUpdatedCount.Add(1)
+		}
+
+		// Calculate points using the delegation from cache (already has correct credits_observed from appendvecs)
+		pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, task.delegation, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+
+		// Check if points are actually > 0 (required for eligibility)
+		if pts.Points.Eq(wide.Uint128FromUint64(0)) && !pts.ForceCreditsUpdateWithSkippedReward {
+			zeroPointsCount.Add(1)
+			result.filterReason = "zero_points"
+			// Still capture snapshot for potential credits update during distribution
+			result.snapshot = stakeAcct.Clone()
+			result.points = &pts
+			result.processed = true
+			return
+		}
+
+		eligibleCount.Add(1)
+		result.points = &pts
+		result.snapshot = stakeAcct.Clone()
+		result.processed = true
+
+		// Calculate partition assignment
+		if numPartitions != 0 {
+			result.partitionIdx = CalculateRewardPartitionForPubkey(task.pubkey, slotCtx.Blockhash, numPartitions)
+		}
+	})
+
+	if poolErr != nil {
+		mlog.Log.Warnf("combined: failed to create worker pool, using sequential fallback: %v", poolErr)
+		// Fall back to fully sequential processing
+		return combinedRefreshPointsSequentialFull(acctsDb, slotCtx, slot, numPartitions, stakeHistory, newWarmupCooldownRateEpoch, maxEpoch, minimum)
+	}
+	defer workerPool.Release()
+
+	// Submit all tasks
+	for i := range tasks {
+		wg.Add(1)
+		if err := workerPool.Invoke(&tasks[i]); err != nil {
+			wg.Done()
+			// Track failed invocations for sequential retry
+			invokeFailuresMu.Lock()
+			invokeFailures = append(invokeFailures, i)
+			invokeFailuresMu.Unlock()
+			mlog.Log.Warnf("combined: invoke failed for %s: %v", tasks[i].pubkey.String(), err)
+		}
+	}
+	wg.Wait()
+
+	// Process any failed invocations sequentially
+	if len(invokeFailures) > 0 {
+		mlog.Log.Infof("combined: processing %d failed invocations sequentially", len(invokeFailures))
+		for _, idx := range invokeFailures {
+			task := &tasks[idx]
+			result := &results[idx]
+			result.pubkey = task.pubkey
+			result.delegation = task.delegation
+
+			// Same logic as worker, but sequential
+			if task.delegation.StakeLamports < minimum {
+				belowMinCount.Add(1)
+				result.filterReason = "below_minimum"
+				result.processed = true
+				continue
+			}
+
+			voteState := global.VoteCacheItem(task.delegation.VoterPubkey)
+			if voteState == nil {
+				noVoteCount.Add(1)
+				result.filterReason = "no_vote_in_cache"
+				result.processed = true
+				continue
+			}
+
+			stakeAcct, err := acctsDb.GetAccount(slot, task.pubkey)
+			if err != nil {
+				notFoundCount.Add(1)
+				result.shouldDelete = true
+				result.filterReason = "not_found"
+				result.processed = true
+				continue
+			}
+
+			if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+				tombstoneCount.Add(1)
+				result.shouldDelete = true
+				result.filterReason = "tombstone"
+				result.processed = true
+				continue
+			}
+
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				unmarshalErrCount.Add(1)
+				result.shouldDelete = true
+				result.filterReason = "unmarshal_error"
+				result.processed = true
+				continue
+			}
+
+			if stakeState.Status != sealevel.StakeStateV2StatusStake {
+				notStakeCount.Add(1)
+				result.shouldDelete = true
+				result.filterReason = "not_stake_state"
+				result.processed = true
+				continue
+			}
+
+			dbCredits := stakeState.Stake.Stake.CreditsObserved
+			if task.delegation.CreditsObserved != dbCredits {
+				result.creditsUpdated = true
+				creditsUpdatedCount.Add(1)
+			}
+
+			pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, task.delegation, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+
+			if pts.Points.Eq(wide.Uint128FromUint64(0)) && !pts.ForceCreditsUpdateWithSkippedReward {
+				zeroPointsCount.Add(1)
+				result.filterReason = "zero_points"
+				result.snapshot = stakeAcct.Clone()
+				result.points = &pts
+				result.processed = true
+				continue
+			}
+
+			eligibleCount.Add(1)
+			result.points = &pts
+			result.snapshot = stakeAcct.Clone()
+			result.processed = true
+
+			if numPartitions != 0 {
+				result.partitionIdx = CalculateRewardPartitionForPubkey(task.pubkey, slotCtx.Blockhash, numPartitions)
+			}
+		}
+	}
+
+	// PHASE 3: Collect results and apply mutations (single-threaded)
+	pointsMap := make(map[solana.PublicKey]*CalculatedStakePoints, eligibleCount.Load())
+	snapshots := make(map[solana.PublicKey]*accounts.Account, eligibleCount.Load())
+	partitions := NewPartitions(numPartitions)
+	var toDelete []solana.PublicKey
+	var totalPoints wide.Uint128
+
+	for i := range results {
+		result := &results[i]
+
+		if result.shouldDelete {
+			toDelete = append(toDelete, result.pubkey)
+			continue
+		}
+
+		if result.points != nil {
+			pointsMap[result.pubkey] = result.points
+			totalPoints = totalPoints.Add(result.points.Points)
+		}
+
+		if result.snapshot != nil {
+			snapshots[result.pubkey] = result.snapshot
+		}
+
+		// Update credits in stake cache if changed
+		if result.creditsUpdated && result.points != nil {
+			result.delegation.CreditsObserved = result.points.NewCreditsObserved
+		}
+
+		// Add to partition if eligible and has points
+		if result.points != nil && !result.points.Points.Eq(wide.Uint128FromUint64(0)) && numPartitions != 0 {
+			partitions[result.partitionIdx].pubkeys = append(partitions[result.partitionIdx].pubkeys, result.pubkey)
+		}
+	}
+
+	// Apply deletions
+	for _, pk := range toDelete {
+		global.DeleteStakeCacheItem(pk)
+	}
+
+	stats := CombinedStats{
+		TotalAccounts:   total,
+		BelowMinimum:    int(belowMinCount.Load()),
+		NoVoteInCache:   int(noVoteCount.Load()),
+		NotFoundInDB:    int(notFoundCount.Load()),
+		Tombstones:      int(tombstoneCount.Load()),
+		UnmarshalErrors: int(unmarshalErrCount.Load()),
+		NotStakeState:   int(notStakeCount.Load()),
+		ZeroPoints:      int(zeroPointsCount.Load()),
+		Eligible:        int(eligibleCount.Load()),
+		CreditsUpdated:  int(creditsUpdatedCount.Load()),
+	}
+
+	mlog.Log.Infof("combined complete: total=%d eligible=%d snapshots=%d partitions=%d deleted=%d",
+		total, stats.Eligible, len(snapshots), numPartitions, len(toDelete))
+	mlog.Log.Infof("  filter breakdown: below_min=%d no_vote=%d not_found=%d tombstone=%d unmarshal=%d not_stake=%d zero_pts=%d",
+		stats.BelowMinimum, stats.NoVoteInCache, stats.NotFoundInDB, stats.Tombstones, stats.UnmarshalErrors, stats.NotStakeState, stats.ZeroPoints)
+	mlog.Log.Infof("  credits updated: %d (%.1f%%)", stats.CreditsUpdated, float64(stats.CreditsUpdated)*100/float64(total))
+
+	return pointsMap, totalPoints, partitions, snapshots, uint64(stats.Eligible), stats
+}
+
+// combinedRefreshPointsSequentialFull is the fallback when worker pool creation fails.
+// It processes the stake cache directly (not a pre-built tasks slice).
+func combinedRefreshPointsSequentialFull(
+	acctsDb *accountsdb.AccountsDb,
+	slotCtx *sealevel.SlotCtx,
+	slot uint64,
+	numPartitions uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newWarmupCooldownRateEpoch *uint64,
+	maxEpoch *uint64,
+	minimum uint64,
+) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128, Partitions, map[solana.PublicKey]*accounts.Account, uint64, CombinedStats) {
+	stakeCache := global.StakeCache()
+	total := len(stakeCache)
+
+	pointsMap := make(map[solana.PublicKey]*CalculatedStakePoints, total)
+	snapshots := make(map[solana.PublicKey]*accounts.Account, total)
+	partitions := NewPartitions(numPartitions)
+	var totalPoints wide.Uint128
+	var stats CombinedStats
+	stats.TotalAccounts = total
+
+	var toDelete []solana.PublicKey
+	i := 0
+	for pubkey, delegation := range stakeCache {
+		i++
+		if i%100000 == 0 {
+			mlog.Log.Infof("  combined (seq) progress: %d/%d", i, total)
+		}
+
+		// Check minimum stake
+		if delegation.StakeLamports < minimum {
+			stats.BelowMinimum++
+			continue
+		}
+
+		// Check vote cache
+		voteState := global.VoteCacheItem(delegation.VoterPubkey)
+		if voteState == nil {
+			stats.NoVoteInCache++
+			continue
+		}
+
+		// Read from AccountsDB
+		stakeAcct, err := acctsDb.GetAccount(slot, pubkey)
+		if err != nil {
+			toDelete = append(toDelete, pubkey)
+			stats.NotFoundInDB++
+			continue
+		}
+
+		if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+			toDelete = append(toDelete, pubkey)
+			stats.Tombstones++
+			continue
+		}
+
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			toDelete = append(toDelete, pubkey)
+			stats.UnmarshalErrors++
+			continue
+		}
+
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			toDelete = append(toDelete, pubkey)
+			stats.NotStakeState++
+			continue
+		}
+
+		// Update credits if needed
+		dbCredits := stakeState.Stake.Stake.CreditsObserved
+		if delegation.CreditsObserved != dbCredits {
+			delegation.CreditsObserved = dbCredits
+			stats.CreditsUpdated++
+		}
+
+		// Calculate points
+		pts := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+
+		if pts.Points.Eq(wide.Uint128FromUint64(0)) && !pts.ForceCreditsUpdateWithSkippedReward {
+			stats.ZeroPoints++
+			snapshots[pubkey] = stakeAcct.Clone()
+			pointsMap[pubkey] = &pts
+			continue
+		}
+
+		stats.Eligible++
+		pointsMap[pubkey] = &pts
+		snapshots[pubkey] = stakeAcct.Clone()
+		totalPoints = totalPoints.Add(pts.Points)
+
+		if numPartitions != 0 {
+			idx := CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numPartitions)
+			partitions[idx].pubkeys = append(partitions[idx].pubkeys, pubkey)
+		}
+	}
+
+	// Apply deletions
+	for _, pk := range toDelete {
+		global.DeleteStakeCacheItem(pk)
+	}
+
+	mlog.Log.Infof("combined (seq) complete: eligible=%d deleted=%d", stats.Eligible, len(toDelete))
+	return pointsMap, totalPoints, partitions, snapshots, uint64(stats.Eligible), stats
 }

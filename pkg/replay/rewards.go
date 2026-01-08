@@ -53,37 +53,81 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// This is the slot from which stake account state should be read for rewards calculation.
 	boundarySlot := slot - 1
 
-	// CRITICAL: Refresh stake cache credits_observed from AccountsDB BEFORE partition count calculation.
-	// The refresh removes stale entries (tombstones, unmarshal errors, etc.) from the stake cache.
-	// This MUST happen before DeterminePartitionedStakingRewardsInfoLocal to ensure the partition count
-	// is computed on the same stake cache that will be used for actual rewards calculation.
-	// This matches Firedancer's fd_stake_delegations_refresh() call in init_after_snapshot.
-	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
-	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+	// Calculate total staking rewards from inflation (doesn't need stake cache)
+	totalStakingRewards := rewards.CalculatePreviousEpochInflationRewards(
+		epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f)
 
-	// IMPORTANT: Validate partition count BEFORE any account writes.
-	// If validation fails, we want to exit cleanly without having modified AccountsDB.
-	// NOTE: This now uses the refreshed stake cache, ensuring consistency with rewards calculation.
-	partitionedRewardsInfo, err := rewards.DeterminePartitionedStakingRewardsInfoLocal(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, epochCtx.SlotsPerYear, f, stakeHistory, newWarmupCooldownRateEpoch)
-	if err != nil {
-		return nil, nil, nil, err
+	// OPTIMIZED: Combined pass for refresh + points + snapshots.
+	// This reduces I/O by only reading from AccountsDB for accounts that pass initial eligibility checks
+	// (stake >= minimum AND has vote account in cache). Ineligible accounts are skipped entirely.
+	//
+	// First pass with numPartitions=0 to get eligible count and points map (no partition assignment yet).
+	// This replaces the old flow of:
+	// 1. RefreshStakeCacheCreditsObserved (read ALL accounts)
+	// 2. CountEligibleStakeAccountsWithRewardsFilter (iterate stake cache)
+	// 3. CalculateTotalPointsAndPartitions (iterate stake cache again)
+	pointsPerStakeAcct, points, _, stakeAccountSnapshots, eligibleCount, combinedStats := rewards.CombinedRefreshPointsAndPartitions(
+		acctsDb, slotCtx, boundarySlot, 0, stakeHistory, newWarmupCooldownRateEpoch, nil)
+
+	// Compute partition count from eligible count
+	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
+	numRewardPartitions := rewards.ComputeNumRewardPartitions(epoch, slotsPerEpoch, eligibleCount, epochSchedule.FirstNormalEpoch)
+
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
+	firstStakingRewardSlot := firstSlotInEpoch + 1
+	lastStakingRewardSlot := firstSlotInEpoch + numRewardPartitions
+
+	mlog.Log.Infof("rewards partition: epoch=%d eligible=%d partitions=%d first=%d last=%d total_rewards=%d",
+		epoch, eligibleCount, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
+
+	// Build partitions from the already-computed points map (no second pass needed)
+	partitions := rewards.NewPartitions(numRewardPartitions)
+	for pubkey, pts := range pointsPerStakeAcct {
+		if pts != nil && !pts.Points.Eq(wide.Uint128FromUint64(0)) && numRewardPartitions != 0 {
+			partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
+			partitions.AddPubkey(partitionIdx, pubkey)
+		}
 	}
 
-	// Set the boundary slot and stake snapshots for use during distribution
-	partitionedRewardsInfo.BoundarySlot = boundarySlot
-	partitionedRewardsInfo.StakeAccountSnapshots = stakeAccountSnapshots
+	// PRE-COMMIT VALIDATION: Validate partition count against RPC before processing epoch boundary.
+	if rewards.IsValidationEnabled() && rewards.GetValidationRpcClient() != nil {
+		rpcNumPartitions, err := rewards.FetchRpcPartitionCountWithBackups(rewards.GetValidationRpcClient(), rewards.GetValidationRpcBackups(), firstSlotInEpoch)
+		if err != nil {
+			mlog.Log.Warnf("partition validation: RPC fetch failed (continuing anyway): %v", err)
+		} else {
+			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
+			if numRewardPartitions != rpcNumPartitions {
+				return nil, nil, nil, &rewards.PartitionMismatchError{
+					Epoch:             epoch,
+					LocalPartitions:   numRewardPartitions,
+					RpcPartitions:     rpcNumPartitions,
+					EligibleStakeAcct: eligibleCount,
+					TotalStakeAcct:    uint64(combinedStats.TotalAccounts),
+					BelowMinAcct:      uint64(combinedStats.BelowMinimum),
+					NoVoteAcct:        uint64(combinedStats.NoVoteInCache),
+					NoCreditsAcct:     0, // Not tracked separately in combined stats
+					ZeroPointsAcct:    uint64(combinedStats.ZeroPoints),
+					ZeroRewardsAcct:   0, // Checked later during CalculateStakeRewards
+					ZeroSplitAcct:     0, // Checked later during CalculateStakeRewards
+				}
+			}
+		}
+	}
 
-	totalRewards := partitionedRewardsInfo.TotalStakingRewards
+	// Build partitioned rewards info
+	partitionedRewardsInfo := &rewards.PartitionedRewardDistributionInfo{
+		TotalStakingRewards:    totalStakingRewards,
+		FirstStakingRewardSlot: firstStakingRewardSlot,
+		LastStakingRewardSlot:  lastStakingRewardSlot,
+		BoundarySlot:           boundarySlot,
+		NumRewardPartitions:    numRewardPartitions,
+		EligibleCount:          eligibleCount,
+		RewardPartitions:       partitions,
+		StakeAccountSnapshots:  stakeAccountSnapshots,
+	}
 
-	// IMPORTANT: Calculate staking rewards FIRST to get local vote rewards.
-	// This removes the RPC dependency for vote reward distribution.
-	var points wide.Uint128
-	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
-	// Use locally computed NumRewardPartitions, NOT block.NumRewardPartitions (which comes from RPC and may be MaxUint64 if missing)
-	// Pass nil for maxEpoch - fresh compute uses current vote credits (correct at epoch boundary)
-	// Use boundarySlot for stake account reads
-	pointsPerStakeAcct, points, partitionedRewardsInfo.RewardPartitions = rewards.CalculateTotalPointsAndPartitions(acctsDb, slotCtx, boundarySlot, partitionedRewardsInfo.NumRewardPartitions, stakeHistory, newWarmupCooldownRateEpoch, nil)
-	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
+	// Calculate individual stake rewards
+	pointValue := rewards.PointValue{Rewards: totalStakingRewards, Points: points}
 	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
 	// Aggregate vote rewards from locally computed staking rewards (removes RPC dependency)
@@ -175,7 +219,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		mlog.Log.Infof("  RPC partitions:         %d", block.NumRewardPartitions)
 		mlog.Log.Infof("  Eligible stake accts:   %d", partitionedRewardsInfo.EligibleCount)
 		mlog.Log.Infof("  Total points:           %s", points.String())
-		mlog.Log.Infof("  Total staking rewards:  %d lamports (%.4f SOL)", totalRewards, float64(totalRewards)/1e9)
+		mlog.Log.Infof("  Total staking rewards:  %d lamports (%.4f SOL)", totalStakingRewards, float64(totalStakingRewards)/1e9)
 		mlog.Log.Infof("  Local staker rewards:   %d lamports", localStakerTotal)
 		mlog.Log.Infof("  Local voter rewards:    %d lamports", localVoterTotal)
 		mlog.Log.Infof("  Vote accounts to pay:   %d", len(localVoteRewards))
@@ -285,7 +329,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
 		NumPartitions: partitionedRewardsInfo.NumRewardPartitions, ParentBlockhash: block.LastBlockhash,
-		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
+		TotalRewards: totalStakingRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
 
 	epochRewardsAcct, err = acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
@@ -306,7 +350,6 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
 
 	numStakeAccounts := uint64(len(global.StakeCache()))
-	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 	slotsInEpoch := epochSchedule.SlotsInEpoch(epoch)
 
 	mlog.Log.Infof("rewards distribution start: epoch=%d slot=%d block_height=%d",
