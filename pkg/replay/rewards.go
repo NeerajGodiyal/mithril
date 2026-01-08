@@ -132,81 +132,20 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		rpcEligibleEstimate = "(not available)"
 	}
 
-	// Fetch RPC EpochRewards sysvar for total_points and total_rewards comparison
-	// NOTE: RPC returns the sysvar at whatever slot/epoch the RPC node is currently at.
-	// When replaying historical data, the RPC sysvar may be from a different epoch entirely.
-	// We fetch the RPC's current slot to anchor the comparison.
-	rpcContext, rpcSysvarErr := rewards.FetchRpcEpochRewardsSysvar()
-
+	// Log local-only values (no RPC comparison available for these)
 	mlog.Log.Infof("")
-
-	// Determine if sysvar comparison is anchored (same epoch boundary)
-	var sysvarAnchored bool
-	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
-		sysvarAnchored = rpcContext.Sysvar.DistributionStartingBlockHeight == slot
-		mlog.Log.Infof("  RPC context: slot=%d, sysvar.starting_slot=%d",
-			rpcContext.RpcSlot, rpcContext.Sysvar.DistributionStartingBlockHeight)
-		if !sysvarAnchored {
-			mlog.Log.Warnf("  ⚠️  UNANCHORED: RPC sysvar is from different epoch (RPC starting_slot=%d, LOCAL slot=%d)",
-				rpcContext.Sysvar.DistributionStartingBlockHeight, slot)
-			mlog.Log.Warnf("      Sysvar comparisons below are NOT meaningful - RPC is replaying a different epoch")
-		}
-	}
+	mlog.Log.Infof("  [LOCAL] Total points:       %s", points.String())
+	mlog.Log.Infof("  [LOCAL] Total rewards:      %d (staker: %d, voter: %d)", localStakerTotal+localVoterTotal, localStakerTotal, localVoterTotal)
 
 	mlog.Log.Infof("")
 	mlog.Log.Infof("                              [LOCAL]              [RPC]                 DIFF")
 	mlog.Log.Infof("                              -------              -----                 ----")
 
-	// Total points comparison
-	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
-		rpcEpochRewards := rpcContext.Sysvar
-		// Compute diff: LOCAL points - RPC points
-		// Both are Uint128, so we need to handle this carefully
-		localPointsStr := points.String()
-		rpcPointsStr := rpcEpochRewards.TotalPoints.String()
-		anchorNote := ""
-		if !sysvarAnchored {
-			anchorNote = " [UNANCHORED]"
-		}
-		// For display, we show both values; diff requires bigint math
-		if points.Eq(rpcEpochRewards.TotalPoints) {
-			mlog.Log.Infof("  Total points:               %-20s %-20s MATCH%s", localPointsStr, rpcPointsStr, anchorNote)
-		} else if points.Gt(rpcEpochRewards.TotalPoints) {
-			diff := points.Sub(rpcEpochRewards.TotalPoints)
-			mlog.Log.Infof("  Total points:               %-20s %-20s +%s%s", localPointsStr, rpcPointsStr, diff.String(), anchorNote)
-		} else {
-			diff := rpcEpochRewards.TotalPoints.Sub(points)
-			mlog.Log.Infof("  Total points:               %-20s %-20s -%s%s", localPointsStr, rpcPointsStr, diff.String(), anchorNote)
-		}
-	} else {
-		mlog.Log.Infof("  Total points:               %-20s (RPC error: %v)", points.String(), rpcSysvarErr)
-	}
-
-	// Total rewards comparison from sysvar
-	if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
-		rpcEpochRewards := rpcContext.Sysvar
-		localTotal := localStakerTotal + localVoterTotal
-		rpcTotal := rpcEpochRewards.TotalRewards
-		anchorNote := ""
-		if !sysvarAnchored {
-			anchorNote = " [UNANCHORED]"
-		}
-		mlog.Log.Infof("  Total rewards (sysvar):     %-20d %-20d %+d%s", localTotal, rpcTotal, int64(localTotal)-int64(rpcTotal), anchorNote)
-	}
-
-	// Num partitions comparison
-	// Note: block.NumRewardPartitions comes from getBlock RPC (anchored to the boundary slot)
-	// rpcContext.Sysvar.NumPartitions comes from current RPC state (may be unanchored)
+	// Num partitions comparison (from getBlock - anchored)
 	if block.NumRewardPartitions != ^uint64(0) {
 		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d", partitionedRewardsInfo.NumRewardPartitions, block.NumRewardPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(block.NumRewardPartitions))
-	} else if rpcSysvarErr == nil && rpcContext != nil && rpcContext.Sysvar != nil {
-		anchorNote := ""
-		if !sysvarAnchored {
-			anchorNote = " [UNANCHORED]"
-		}
-		mlog.Log.Infof("  Num partitions:             %-20d %-20d %+d (from sysvar)%s", partitionedRewardsInfo.NumRewardPartitions, rpcContext.Sysvar.NumPartitions, int64(partitionedRewardsInfo.NumRewardPartitions)-int64(rpcContext.Sysvar.NumPartitions), anchorNote)
 	} else {
-		mlog.Log.Infof("  Num partitions:             %-20d (not available from RPC)", partitionedRewardsInfo.NumRewardPartitions)
+		mlog.Log.Infof("  Num partitions:             %-20d (not in getBlock response)", partitionedRewardsInfo.NumRewardPartitions)
 	}
 	mlog.Log.Infof("  Eligible stake accounts:    %-20d %-20s", partitionedRewardsInfo.EligibleCount, rpcEligibleEstimate)
 	mlog.Log.Infof("  Vote accounts:              %-20d %-20d %+d", localVoteAccountCount, rpcVoteCount, localVoteAccountCount-rpcVoteCount)
