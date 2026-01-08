@@ -592,6 +592,16 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	var microStakeCount uint64        // accounts with stake < 1 SOL and points > 0
 	var microStakePoints wide.Uint128 // sum of points from micro-stake accounts
 
+	// EFFECTIVE STAKE TRACKING: sum of stake for all accounts contributing to total_points
+	// If this differs from RPC, we have different accounts in the eligible set
+	var effectiveStake uint64          // sum of stake for accounts with points > 0
+	var effectiveStakeCredits uint64   // sum of new_credits (creditsInVote - creditsInStake) for these accounts
+	var totalNewCredits uint64         // sum of all new credits from accounts with points > 0
+	var activationMatchWithPoints uint64    // count of activation_epoch==rewarded accounts with points > 0
+	var activationMatchStake uint64    // stake from activation_epoch==rewarded accounts with points > 0
+	var activationMatchCredits uint64  // new credits from activation_epoch==rewarded accounts with points > 0
+	var activationMatchPoints wide.Uint128 // points from activation_epoch==rewarded accounts
+
 	// Sample accounts for debugging (collect first few from each bucket)
 	type sampleAccount struct {
 		pubkey          solana.PublicKey
@@ -725,6 +735,11 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 				calculatedPoints := calculateStakePointsAndCredits(pubkey, stakeHistory, delegation, voteState, newRateActivationEpoch, nil)
 				if !calculatedPoints.Points.Eq(wide.Uint128FromUint64(0)) {
 					totalPoints = totalPoints.Add(calculatedPoints.Points)
+					// Track activation_epoch==rewarded contributions separately
+					activationMatchWithPoints++
+					activationMatchStake += stake
+					activationMatchCredits += creditsInVote - creditsInStake
+					activationMatchPoints = activationMatchPoints.Add(calculatedPoints.Points)
 				}
 			}
 			continue // Counted separately, don't go through rewards/split checks
@@ -780,6 +795,14 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 		})
 		totalPoints = totalPoints.Add(calculatedPoints.Points)
 
+		// Track effective stake and credits for accounts with points > 0
+		effectiveStake += stake
+		if creditsInVote > creditsInStake {
+			newCredits := creditsInVote - creditsInStake
+			effectiveStakeCredits += newCredits
+			totalNewCredits += newCredits
+		}
+
 		// Track micro-stake accounts (stake < 1 SOL) that contribute to total_points
 		if stake < oneSol {
 			microStakeCount++
@@ -816,6 +839,45 @@ func CountEligibleStakeAccountsWithRewardsFilter(
 	// If total_rewards is lower than RPC, same effect
 	mlog.Log.Infof("  COMPARE WITH RPC: total_points=%s total_rewards=%d", totalPoints.String(), totalRewards)
 	mlog.Log.Infof("  (Get RPC values via: getBlocksWithLimit on first slot of epoch, then getBlock with rewards)")
+
+	// EFFECTIVE STAKE SUMMARY: These totals help identify if we have different eligible accounts than RPC
+	// points ≈ stake * new_credits (approximately), so effective_stake * average_credits ≈ total_points
+	totalEffectiveStake := effectiveStake + activationMatchStake
+	totalEffectiveCredits := totalNewCredits + activationMatchCredits
+	totalAccountsWithPoints := uint64(len(accountsWithPoints)) + activationMatchWithPoints
+	mlog.Log.Infof("┌─────────────────────────────────────────────────────────────────────────────┐")
+	mlog.Log.Infof("│ ELIGIBLE ACCOUNT SUMMARY (ALL accounts contributing to total_points)       │")
+	mlog.Log.Infof("├─────────────────────────────────────────────────────────────────────────────┤")
+	mlog.Log.Infof("│ NORMAL accounts (points > 0):                                              │")
+	mlog.Log.Infof("│   count:               %d", len(accountsWithPoints))
+	mlog.Log.Infof("│   effective_stake:     %d lamports (%.2f SOL)", effectiveStake, float64(effectiveStake)/1e9)
+	mlog.Log.Infof("│   new_credits:         %d", totalNewCredits)
+	mlog.Log.Infof("│                                                                             │")
+	mlog.Log.Infof("│ ACTIVATION_EPOCH==REWARDED accounts (with points > 0):                      │")
+	mlog.Log.Infof("│   count:               %d (of %d total activation matches)", activationMatchWithPoints, activationMatchCount)
+	mlog.Log.Infof("│   effective_stake:     %d lamports (%.2f SOL)", activationMatchStake, float64(activationMatchStake)/1e9)
+	mlog.Log.Infof("│   new_credits:         %d", activationMatchCredits)
+	mlog.Log.Infof("│   points:              %s", activationMatchPoints.String())
+	mlog.Log.Infof("│                                                                             │")
+	mlog.Log.Infof("│ COMBINED TOTALS:                                                            │")
+	mlog.Log.Infof("│   total_accounts:      %d", totalAccountsWithPoints)
+	mlog.Log.Infof("│   total_stake:         %d lamports (%.2f SOL)", totalEffectiveStake, float64(totalEffectiveStake)/1e9)
+	mlog.Log.Infof("│   total_new_credits:   %d", totalEffectiveCredits)
+	mlog.Log.Infof("│   total_points:        %s", totalPoints.String())
+	if totalAccountsWithPoints > 0 {
+		avgStake := totalEffectiveStake / totalAccountsWithPoints
+		avgCredits := totalEffectiveCredits / totalAccountsWithPoints
+		mlog.Log.Infof("│   avg_stake:           %d lamports (%.4f SOL)", avgStake, float64(avgStake)/1e9)
+		mlog.Log.Infof("│   avg_new_credits:     %d", avgCredits)
+	}
+	mlog.Log.Infof("│                                                                             │")
+	mlog.Log.Infof("│ If LOCAL total_points < RPC total_points:                                   │")
+	mlog.Log.Infof("│   → LOCAL has fewer eligible accounts OR lower credits_observed             │")
+	mlog.Log.Infof("│   → This makes LOCAL rewards_per_point HIGHER → all rewards inflate         │")
+	mlog.Log.Infof("│                                                                             │")
+	mlog.Log.Infof("│ Root cause hypothesis: If LOCAL total_points is ~0.004%% lower:             │")
+	mlog.Log.Infof("│   → ~%d accounts excluded OR ~%d credits missing", totalAccountsWithPoints*4/100000, totalEffectiveCredits*4/100000)
+	mlog.Log.Infof("└─────────────────────────────────────────────────────────────────────────────┘")
 
 	// MICRO-STAKE ANALYSIS: accounts with stake < 1 SOL that contribute to total_points
 	// If feature gate is off, these inflate total_points, raising threshold, causing more zero_rewards
