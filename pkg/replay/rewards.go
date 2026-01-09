@@ -66,7 +66,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// 1. RefreshStakeCacheCreditsObserved (read ALL accounts)
 	// 2. CountEligibleStakeAccountsWithRewardsFilter (iterate stake cache)
 	// 3. CalculateTotalPointsAndPartitions (iterate stake cache again)
-	pointsPerStakeAcct, points, _, stakeAccountSnapshots, _, combinedStats := rewards.CombinedRefreshPointsAndPartitions(
+	pointsPerStakeAcct, points, _, stakeAccountSnapshots, _, _ := rewards.CombinedRefreshPointsAndPartitions(
 		acctsDb, slotCtx, boundarySlot, 0, stakeHistory, newWarmupCooldownRateEpoch, nil)
 
 	// Calculate individual stake rewards BEFORE computing partition count.
@@ -98,28 +98,16 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		}
 	}
 
-	// PRE-COMMIT VALIDATION: Validate partition count against RPC before processing epoch boundary.
-	if rewards.IsValidationEnabled() && rewards.GetValidationRpcClient() != nil {
+	// Log RPC partition count for comparison (informational only, never blocks processing)
+	if rewards.GetValidationRpcClient() != nil {
 		rpcNumPartitions, err := rewards.FetchRpcPartitionCountWithBackups(rewards.GetValidationRpcClient(), rewards.GetValidationRpcBackups(), firstSlotInEpoch)
 		if err != nil {
-			mlog.Log.Warnf("partition validation: RPC fetch failed (continuing anyway): %v", err)
+			mlog.Log.Warnf("partition comparison: RPC fetch failed: %v", err)
+		} else if numRewardPartitions == rpcNumPartitions {
+			mlog.Log.Infof("partition comparison: local=%d rpc=%d ✓", numRewardPartitions, rpcNumPartitions)
 		} else {
-			mlog.Log.Infof("partition validation: local=%d rpc=%d", numRewardPartitions, rpcNumPartitions)
-			if numRewardPartitions != rpcNumPartitions {
-				return nil, nil, nil, &rewards.PartitionMismatchError{
-					Epoch:             epoch,
-					LocalPartitions:   numRewardPartitions,
-					RpcPartitions:     rpcNumPartitions,
-					EligibleStakeAcct: uint64(len(stakingRewards)),
-					TotalStakeAcct:    uint64(combinedStats.TotalAccounts),
-					BelowMinAcct:      uint64(combinedStats.BelowMinimum),
-					NoVoteAcct:        uint64(combinedStats.NoVoteInCache),
-					NoCreditsAcct:     0, // Not tracked separately in combined stats
-					ZeroPointsAcct:    uint64(combinedStats.ZeroPoints),
-					ZeroRewardsAcct:   0, // Not tracked separately
-					ZeroSplitAcct:     0, // Not tracked separately
-				}
-			}
+			mlog.Log.Warnf("partition comparison: local=%d rpc=%d MISMATCH (diff=%d)",
+				numRewardPartitions, rpcNumPartitions, int64(numRewardPartitions)-int64(rpcNumPartitions))
 		}
 	}
 

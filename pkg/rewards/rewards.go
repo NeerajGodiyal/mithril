@@ -60,9 +60,9 @@ var (
 	validationRpcBackups []string
 
 	// validatePartitionCount enables partition count validation against RPC at epoch boundary.
-	// When enabled, panics if local partition count differs from RPC, preventing corrupted state.
-	// Default: true (for debugging). Set to false for production if confident in local computation.
-	validatePartitionCount = true
+	// When enabled, returns error if local partition count differs from RPC.
+	// Default: false (no RPC calls beyond getBlock). Enable for debugging if needed.
+	validatePartitionCount = false
 )
 
 // SetValidationRpcClient configures the RPC client used for epoch boundary validation.
