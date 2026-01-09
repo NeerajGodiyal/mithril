@@ -35,6 +35,14 @@ type EpochBoundaryDiagnostics struct {
 	LocalVoterTotal     uint64
 	RpcVoteTotal        uint64
 
+	// Reward pool inputs (for debugging total rewards mismatch)
+	Capitalization           uint64  // Total SOL supply (lamports)
+	SlotInYear               float64 // Slot position in year for inflation curve
+	ValidatorRate            float64 // Emission rate for validators
+	PrevEpochDurationInYears float64 // Duration of prev epoch in years
+	SlotsPerYear             float64 // Slots per year for inflation calculation
+	RpcTotalStakingRewards   uint64  // Total staking rewards from RPC EpochRewards sysvar
+
 	// Stake cache stats
 	StakeCacheSize    int
 	ActiveStake       uint64
@@ -147,6 +155,25 @@ func WriteEpochBoundaryDiagnostics(diag *EpochBoundaryDiagnostics) string {
 	w("  Combined:             %d lamports", diag.LocalStakerTotal+diag.LocalVoterTotal)
 	roundingLoss := int64(diag.TotalStakingRewards) - int64(diag.LocalStakerTotal+diag.LocalVoterTotal)
 	w("  Rounding loss:        %d lamports", roundingLoss)
+	w("")
+
+	// Reward pool inputs (for debugging total rewards mismatch)
+	w("REWARD POOL INPUTS")
+	w("-" + strings.Repeat("-", 79))
+	w("  Total SOL supply:        %d lamports (%.4f SOL)", diag.Capitalization, float64(diag.Capitalization)/1e9)
+	w("  Slot in year:            %.10f", diag.SlotInYear)
+	w("  Emission rate:           %.10f", diag.ValidatorRate)
+	w("  Prev epoch duration:     %.15f years", diag.PrevEpochDurationInYears)
+	w("  Slots per year:          %.2f", diag.SlotsPerYear)
+	w("  Formula: total_supply * emission_rate * epoch_duration")
+	expectedPool := float64(diag.Capitalization) * diag.ValidatorRate * diag.PrevEpochDurationInYears
+	w("  Calculated pool:         %.4f lamports", expectedPool)
+	w("  Local pool:              %d lamports", diag.TotalStakingRewards)
+	if diag.RpcTotalStakingRewards != 0 {
+		w("  RPC pool:                %d lamports", diag.RpcTotalStakingRewards)
+		poolDiff := int64(diag.TotalStakingRewards) - int64(diag.RpcTotalStakingRewards)
+		w("  Pool diff (local-rpc):   %+d lamports", poolDiff)
+	}
 	w("")
 
 	// Vote rewards comparison

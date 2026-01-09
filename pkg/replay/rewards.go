@@ -171,6 +171,20 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		}
 	}
 
+	// Get reward pool inputs for debugging total rewards mismatch
+	rewardPoolInputs := rewards.GetRewardPoolInputs(epochSchedule, &epochCtx.Inflation, epoch, epoch-1, epochCtx.SlotsPerYear, f)
+
+	// Try to get RPC total staking rewards from EpochRewards sysvar in block
+	var rpcTotalStakingRewards uint64
+	if block.NumRewardPartitions != ^uint64(0) && block.NumRewardPartitions != 0 {
+		// If we have RPC partition count, try to fetch full EpochRewards sysvar for total_rewards
+		if rewards.GetValidationRpcClient() != nil {
+			if rpcEpochRewards, err := rewards.FetchRpcEpochRewardsWithBackups(rewards.GetValidationRpcClient(), rewards.GetValidationRpcBackups(), slot); err == nil && rpcEpochRewards != nil {
+				rpcTotalStakingRewards = rpcEpochRewards.TotalRewards
+			}
+		}
+	}
+
 	// Build and write diagnostics (RPC data kept only for comparison/debugging)
 	diag := &rewards.EpochBoundaryDiagnostics{
 		PrevEpoch:           epoch - 1,
@@ -184,6 +198,14 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		LocalStakerTotal:    localStakerTotal,
 		LocalVoterTotal:     localVoterTotal,
 		RpcVoteTotal:        rpcVoteTotal,
+		// Reward pool inputs
+		Capitalization:           epochCtx.Capitalization,
+		SlotInYear:               rewardPoolInputs.SlotInYear,
+		ValidatorRate:            rewardPoolInputs.ValidatorRate,
+		PrevEpochDurationInYears: rewardPoolInputs.PrevEpochDurationInYears,
+		SlotsPerYear:             rewardPoolInputs.SlotsPerYear,
+		RpcTotalStakingRewards:   rpcTotalStakingRewards,
+		// Stake cache stats
 		StakeCacheSize:      global.StakeCacheSize(),
 		ActiveStake:         activeStake,
 		ActivatingStake:     activatingStake,

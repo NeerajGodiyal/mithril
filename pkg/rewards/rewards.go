@@ -119,6 +119,49 @@ func FetchRpcPartitionCountWithBackups(rpcc *rpcclient.RpcClient, backups []stri
 	return 0, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
 }
 
+// FetchRpcEpochRewardsWithBackups fetches the EpochRewards sysvar from RPC with failover.
+// Used for debugging/comparison at epoch boundary.
+func FetchRpcEpochRewardsWithBackups(rpcc *rpcclient.RpcClient, backups []string, slot uint64) (*sealevel.SysvarEpochRewards, error) {
+	// Try primary first
+	epochRewards, err := fetchEpochRewardsFromClient(rpcc)
+	if err == nil {
+		return epochRewards, nil
+	}
+
+	lastErr := err
+	mlog.Log.Debugf("epoch rewards fetch: primary RPC failed: %v", err)
+
+	// Try backup endpoints
+	for i, endpoint := range backups {
+		backupClient := rpcclient.NewRpcClient(endpoint)
+		epochRewards, err := fetchEpochRewardsFromClient(backupClient)
+		if err == nil {
+			return epochRewards, nil
+		}
+		lastErr = err
+		mlog.Log.Debugf("epoch rewards fetch: backup #%d failed: %v", i+1, err)
+	}
+
+	return nil, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
+}
+
+// fetchEpochRewardsFromClient fetches and decodes EpochRewards sysvar from a single RPC client.
+func fetchEpochRewardsFromClient(rpcc *rpcclient.RpcClient) (*sealevel.SysvarEpochRewards, error) {
+	data, err := rpcc.GetEpochRewardsSysvar()
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < sealevel.SysvarEpochRewardsStructLen {
+		return nil, fmt.Errorf("EpochRewards data too short: %d < %d", len(data), sealevel.SysvarEpochRewardsStructLen)
+	}
+	var epochRewards sealevel.SysvarEpochRewards
+	decoder := bin.NewBinDecoder(data)
+	if err := epochRewards.UnmarshalWithDecoder(decoder); err != nil {
+		return nil, fmt.Errorf("failed to decode EpochRewards: %w", err)
+	}
+	return &epochRewards, nil
+}
+
 const (
 	RewardTypeFee     string = "Fee"
 	RewardTypeRent    string = "Rent"
@@ -549,6 +592,30 @@ func CalculatePreviousEpochInflationRewards(epochSchedule *sealevel.SysvarEpochS
 
 	validatorRewards := validatorRate * float64(prevEpochCapitalization) * prevEpochDurationInYears
 	return uint64(validatorRewards)
+}
+
+// RewardPoolInputs contains the intermediate values used in reward pool calculation.
+// This is useful for debugging reward discrepancies.
+type RewardPoolInputs struct {
+	SlotInYear               float64
+	ValidatorRate            float64
+	PrevEpochDurationInYears float64
+	SlotsPerYear             float64
+}
+
+// GetRewardPoolInputs returns the intermediate values used in the reward pool calculation.
+// These values can be compared with reference implementations to identify discrepancies.
+func GetRewardPoolInputs(epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, epoch, prevEpoch uint64, slotsPerYear float64, f *features.Features) RewardPoolInputs {
+	slotInYear := SlotInYearForInflation(epochSchedule, slotsPerYear, epoch, f)
+	validatorRate := inflation.Validator(slotInYear)
+	prevEpochDurationInYears := float64(epochSchedule.SlotsInEpoch(prevEpoch)) / slotsPerYear
+
+	return RewardPoolInputs{
+		SlotInYear:               slotInYear,
+		ValidatorRate:            validatorRate,
+		PrevEpochDurationInYears: prevEpochDurationInYears,
+		SlotsPerYear:             slotsPerYear,
+	}
 }
 
 func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.SysvarEpochSchedule) bool {
