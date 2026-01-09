@@ -2333,6 +2333,7 @@ func CombinedRefreshPointsAndPartitions(
 		shouldDelete   bool                   // should be removed from stake cache
 		filterReason   string                 // why filtered (for stats)
 		creditsUpdated bool
+		dbCredits      uint64 // credits_observed from AccountsDB (authoritative for cache update)
 		partitionIdx   uint64
 		processed      bool // true if worker processed this task (false if Invoke failed)
 	}
@@ -2417,17 +2418,22 @@ func CombinedRefreshPointsAndPartitions(
 			return
 		}
 
-		// Update credits_observed if different
+		// Get credits_observed from AccountsDB (authoritative source for cache refresh)
 		dbCredits := stakeState.Stake.Stake.CreditsObserved
+		result.dbCredits = dbCredits
 		if task.delegation.CreditsObserved != dbCredits {
 			result.creditsUpdated = true
 			creditsUpdatedCount.Add(1)
 		}
 
-		// Calculate points using the delegation from cache (already has correct credits_observed from appendvecs)
-		pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, task.delegation, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+		// Calculate points using dbCredits (authoritative), not the potentially stale cache value.
+		// Create a local copy with the correct credits_observed from AccountsDB.
+		delegationWithDbCredits := *task.delegation
+		delegationWithDbCredits.CreditsObserved = dbCredits
+		pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, &delegationWithDbCredits, voteState, newWarmupCooldownRateEpoch, maxEpoch)
 
 		// Check if points are actually > 0 (required for eligibility)
+		// Also count ForceCreditsUpdateWithSkippedReward accounts as eligible
 		if pts.Points.Eq(wide.Uint128FromUint64(0)) && !pts.ForceCreditsUpdateWithSkippedReward {
 			zeroPointsCount.Add(1)
 			result.filterReason = "zero_points"
@@ -2443,7 +2449,8 @@ func CombinedRefreshPointsAndPartitions(
 		result.snapshot = stakeAcct.Clone()
 		result.processed = true
 
-		// Calculate partition assignment
+		// Calculate partition assignment for accounts with points > 0 OR ForceCreditsUpdateWithSkippedReward
+		// (ForceCreditsUpdateWithSkippedReward accounts need to be in partitions so credits can be updated)
 		if numPartitions != 0 {
 			result.partitionIdx = CalculateRewardPartitionForPubkey(task.pubkey, slotCtx.Blockhash, numPartitions)
 		}
@@ -2530,12 +2537,16 @@ func CombinedRefreshPointsAndPartitions(
 			}
 
 			dbCredits := stakeState.Stake.Stake.CreditsObserved
+			result.dbCredits = dbCredits
 			if task.delegation.CreditsObserved != dbCredits {
 				result.creditsUpdated = true
 				creditsUpdatedCount.Add(1)
 			}
 
-			pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, task.delegation, voteState, newWarmupCooldownRateEpoch, maxEpoch)
+			// Use dbCredits for points calculation (authoritative, not stale cache)
+			delegationWithDbCredits := *task.delegation
+			delegationWithDbCredits.CreditsObserved = dbCredits
+			pts := calculateStakePointsAndCredits(task.pubkey, stakeHistory, &delegationWithDbCredits, voteState, newWarmupCooldownRateEpoch, maxEpoch)
 
 			if pts.Points.Eq(wide.Uint128FromUint64(0)) && !pts.ForceCreditsUpdateWithSkippedReward {
 				zeroPointsCount.Add(1)
@@ -2581,14 +2592,19 @@ func CombinedRefreshPointsAndPartitions(
 			snapshots[result.pubkey] = result.snapshot
 		}
 
-		// Update credits in stake cache if changed
-		if result.creditsUpdated && result.points != nil {
-			result.delegation.CreditsObserved = result.points.NewCreditsObserved
+		// Update credits in stake cache with dbCredits (authoritative from AccountsDB)
+		// This is the refresh step - use dbCredits, not NewCreditsObserved which is for reward application
+		if result.creditsUpdated {
+			result.delegation.CreditsObserved = result.dbCredits
 		}
 
-		// Add to partition if eligible and has points
-		if result.points != nil && !result.points.Points.Eq(wide.Uint128FromUint64(0)) && numPartitions != 0 {
-			partitions[result.partitionIdx].pubkeys = append(partitions[result.partitionIdx].pubkeys, result.pubkey)
+		// Add to partition if eligible (has points > 0 OR needs credits update via ForceCreditsUpdateWithSkippedReward)
+		if result.points != nil && numPartitions != 0 {
+			hasPoints := !result.points.Points.Eq(wide.Uint128FromUint64(0))
+			needsCreditsUpdate := result.points.ForceCreditsUpdateWithSkippedReward
+			if hasPoints || needsCreditsUpdate {
+				partitions[result.partitionIdx].pubkeys = append(partitions[result.partitionIdx].pubkeys, result.pubkey)
+			}
 		}
 	}
 
@@ -2711,9 +2727,14 @@ func combinedRefreshPointsSequentialFull(
 		snapshots[pubkey] = stakeAcct.Clone()
 		totalPoints = totalPoints.Add(pts.Points)
 
+		// Add to partition if has points > 0 OR needs credits update
 		if numPartitions != 0 {
-			idx := CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numPartitions)
-			partitions[idx].pubkeys = append(partitions[idx].pubkeys, pubkey)
+			hasPoints := !pts.Points.Eq(wide.Uint128FromUint64(0))
+			needsCreditsUpdate := pts.ForceCreditsUpdateWithSkippedReward
+			if hasPoints || needsCreditsUpdate {
+				idx := CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numPartitions)
+				partitions[idx].pubkeys = append(partitions[idx].pubkeys, pubkey)
+			}
 		}
 	}
 

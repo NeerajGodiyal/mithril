@@ -81,11 +81,18 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		epoch, eligibleCount, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
 	// Build partitions from the already-computed points map (no second pass needed)
+	// Include accounts with ForceCreditsUpdateWithSkippedReward=true even if points=0,
+	// since they need their credits_observed updated during distribution.
 	partitions := rewards.NewPartitions(numRewardPartitions)
 	for pubkey, pts := range pointsPerStakeAcct {
-		if pts != nil && !pts.Points.Eq(wide.Uint128FromUint64(0)) && numRewardPartitions != 0 {
-			partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
-			partitions.AddPubkey(partitionIdx, pubkey)
+		if pts != nil && numRewardPartitions != 0 {
+			// Account is eligible for partition if it has points > 0 OR needs credits update
+			hasPoints := !pts.Points.Eq(wide.Uint128FromUint64(0))
+			needsCreditsUpdate := pts.ForceCreditsUpdateWithSkippedReward
+			if hasPoints || needsCreditsUpdate {
+				partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
+				partitions.AddPubkey(partitionIdx, pubkey)
+			}
 		}
 	}
 
