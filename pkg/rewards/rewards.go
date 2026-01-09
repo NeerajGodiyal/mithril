@@ -1,6 +1,9 @@
 package rewards
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"runtime"
@@ -1708,6 +1711,7 @@ type idxAndPubkey struct {
 
 // DistributeStakingRewardsForPartition distributes staking rewards for a single partition.
 // writeSlot: the slot to write updated accounts to (current slot being processed)
+// partitionIdx: the 0-indexed partition number (for logging purposes)
 //
 // This function reads CURRENT account state from AccountsDB at distribution time, matching
 // Firedancer's approach. This is critical for LtHash correctness: the "before" hash must
@@ -1716,9 +1720,11 @@ type idxAndPubkey struct {
 // account), using stale boundary snapshots would cause LtHash/bank hash divergence.
 //
 // Reference: firedancer/src/flamenco/rewards/fd_rewards.c:860-875
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, writeSlot uint64, partitionIdx uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
 	var distributedLamports atomic.Uint64
 	var burnedLamports atomic.Uint64 // Track lamports that would have been distributed but account failed
+	var modifiedCount atomic.Uint64  // Track count of successfully modified accounts
+	var noRewardCount atomic.Uint64  // Track count of accounts in partition but not in stakingRewards
 	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
 	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
@@ -1735,7 +1741,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		reward, ok := stakingRewards[stakePk]
 		if !ok {
-			//mlog.Log.Debugf("no staking rewards present in map for %s", stakePk)
+			noRewardCount.Add(1)
 			return
 		}
 
@@ -1803,7 +1809,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		accts[idx] = stakeAcct
 		distributedLamports.Add(reward.StakerRewards)
-		//mlog.Log.Debugf("distributed partitioned rewards to %s, %d lamports", stakePk, reward.StakerRewards)
+		modifiedCount.Add(1)
 	})
 
 	for idx, stakePk := range partition.Pubkeys() {
@@ -1818,6 +1824,59 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	// Check for worker errors
 	if errPtr := workerErr.Load(); errPtr != nil {
 		return nil, nil, 0, 0, *errPtr
+	}
+
+	// Log detailed distribution stats for first 15 partitions (to catch divergence point)
+	if partitionIdx < 15 {
+		// Count non-nil entries in result arrays
+		nonNilAccts := 0
+		nonNilParents := 0
+		for i := range accts {
+			if accts[i] != nil {
+				nonNilAccts++
+			}
+			if parentAccts[i] != nil {
+				nonNilParents++
+			}
+		}
+		mlog.Log.Infof("P%d_DIST_STATS: partition_size=%d with_rewards=%d no_reward=%d modified=%d burned_accts=%d nonnil_accts=%d nonnil_parents=%d",
+			partitionIdx+1, partition.NumPubkeys(), uint64(partition.NumPubkeys())-noRewardCount.Load(),
+			modifiedCount.Load(), burnedLamports.Load()/1000000000, // rough count assuming ~1 SOL per account
+			nonNilAccts, nonNilParents)
+
+		// Compute reward output checksum for partition comparison
+		// Hash: sorted list of (stakePk, stakerRewards, newCreditsObserved)
+		type rewardEntry struct {
+			pk              solana.PublicKey
+			stakerRewards   uint64
+			creditsObserved uint64
+		}
+		var rewardEntries []rewardEntry
+		for _, stakePk := range partition.Pubkeys() {
+			if reward, ok := stakingRewards[stakePk]; ok {
+				rewardEntries = append(rewardEntries, rewardEntry{
+					pk:              stakePk,
+					stakerRewards:   reward.StakerRewards,
+					creditsObserved: reward.NewCreditsObserved,
+				})
+			}
+		}
+		// Sort by pubkey for deterministic checksum
+		sort.Slice(rewardEntries, func(i, j int) bool {
+			return bytes.Compare(rewardEntries[i].pk[:], rewardEntries[j].pk[:]) < 0
+		})
+		// Compute SHA256 checksum
+		checksumHasher := sha256.New()
+		for _, entry := range rewardEntries {
+			checksumHasher.Write(entry.pk[:])
+			var buf [8]byte
+			binary.LittleEndian.PutUint64(buf[:], entry.stakerRewards)
+			checksumHasher.Write(buf[:])
+			binary.LittleEndian.PutUint64(buf[:], entry.creditsObserved)
+			checksumHasher.Write(buf[:])
+		}
+		checksum := checksumHasher.Sum(nil)
+		mlog.Log.Infof("P%d_REWARD_CHECKSUM: entries=%d checksum=%x", partitionIdx+1, len(rewardEntries), checksum[:8])
 	}
 
 	err := acctsDb.StoreAccounts(accts, writeSlot)
@@ -1945,6 +2004,12 @@ func CalculateStakeRewardsAndPartitions(
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	epoch uint64,
 ) (map[solana.PublicKey]*CalculatedStakeRewards, Partitions, uint64) {
+	// Log the parent blockhash used for partition assignment.
+	// This MUST match the RPC previousBlockhash of the first slot in the epoch.
+	// If this is wrong, accounts will be assigned to wrong partitions causing bank hash divergence.
+	mlog.Log.Infof("PARTITION_BLOCKHASH: slot=%d epoch=%d blockhash=%s (used for SipHash13 partitioning)",
+		slotCtx.Slot, epoch, solana.HashFromBytes(slotCtx.Blockhash[:]).String())
+
 	// First calculate rewards (same as CalculateStakeRewards)
 	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
 	minimumStakeDelegation := minimumStakeDelegation(slotCtx)

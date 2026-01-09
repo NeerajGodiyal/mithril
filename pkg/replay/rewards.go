@@ -676,6 +676,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx),
 		partitionedEpochRewardsInfo.StakingRewards,
 		currentSlot, // writeSlot
+		partitionIdx,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("staking rewards distribution failed for partition %d: %w", partitionIdx, err)
@@ -733,6 +734,24 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	distributedAccts = append(distributedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += distributedLamports
+
+	// Log final array sizes for first 15 partitions (to verify alignment)
+	if partitionIdx < 15 {
+		nonNilDistributed := 0
+		nonNilParent := 0
+		for _, a := range distributedAccts {
+			if a != nil {
+				nonNilDistributed++
+			}
+		}
+		for _, a := range parentDistributedAccts {
+			if a != nil {
+				nonNilParent++
+			}
+		}
+		mlog.Log.Infof("P%d_FINAL_ARRAYS: distributed_len=%d parent_len=%d nonnil_distributed=%d nonnil_parent=%d",
+			partitionIdx+1, len(distributedAccts), len(parentDistributedAccts), nonNilDistributed, nonNilParent)
+	}
 
 	return distributedAccts, parentDistributedAccts, nil
 }
