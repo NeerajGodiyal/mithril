@@ -279,12 +279,21 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		}
 	}
 
+	// Build commission map from staking rewards (aggregate by vote account)
+	voteCommission := make(map[solana.PublicKey]uint8)
+	for _, sr := range diag.StakingRewards {
+		if sr != nil {
+			voteCommission[sr.VotePubkey] = sr.Commission
+		}
+	}
+
 	// Find mismatches
 	type mismatch struct {
-		pubkey solana.PublicKey
-		local  uint64
-		rpc    uint64
-		diff   int64
+		pubkey     solana.PublicKey
+		local      uint64
+		rpc        uint64
+		diff       int64
+		commission uint8
 	}
 	var mismatches []mismatch
 	var localOnly []solana.PublicKey
@@ -295,7 +304,7 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		if !exists {
 			localOnly = append(localOnly, pk)
 		} else if local != rpc {
-			mismatches = append(mismatches, mismatch{pk, local, rpc, int64(local) - int64(rpc)})
+			mismatches = append(mismatches, mismatch{pk, local, rpc, int64(local) - int64(rpc), voteCommission[pk]})
 		}
 	}
 	for pk := range rpcVoteRewards {
@@ -303,18 +312,6 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 			rpcOnly = append(rpcOnly, pk)
 		}
 	}
-
-	// Sort mismatches by absolute diff
-	sort.Slice(mismatches, func(i, j int) bool {
-		absI, absJ := mismatches[i].diff, mismatches[j].diff
-		if absI < 0 {
-			absI = -absI
-		}
-		if absJ < 0 {
-			absJ = -absJ
-		}
-		return absI > absJ
-	})
 
 	// Find exact matches
 	var exactMatches []solana.PublicKey
@@ -334,41 +331,80 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		if len(exactMatches) > 0 {
 			w("EXACT MATCHES (local == rpc): %d accounts", len(exactMatches))
 			for _, pk := range exactMatches {
-				w("  %s: %d lamports", pk.String(), localVoteRewards[pk])
+				comm := voteCommission[pk]
+				w("  %s: %d lamports (commission=%d%%)", pk.String(), localVoteRewards[pk], comm)
 			}
 			w("")
 		}
 
 		if len(mismatches) > 0 {
-			// TOP 20 by largest absolute diff
-			w("TOP 20 LARGEST DIFFS:")
-			w("%-44s %15s %15s %15s", "vote_pubkey", "local", "rpc", "diff")
-			w(strings.Repeat("-", 95))
-			for i, m := range mismatches {
-				if i >= 20 {
-					break
+			// Split by commission rate
+			var comm0, comm100, commMid []mismatch
+			for _, m := range mismatches {
+				switch {
+				case m.commission == 0:
+					comm0 = append(comm0, m)
+				case m.commission == 100:
+					comm100 = append(comm100, m)
+				default:
+					commMid = append(commMid, m)
 				}
-				w("%-44s %15d %15d %+15d", m.pubkey.String(), m.local, m.rpc, m.diff)
 			}
-			w("")
 
-			// BOTTOM 20 by smallest absolute diff
-			if len(mismatches) > 20 {
-				w("BOTTOM 20 SMALLEST DIFFS:")
-				w("%-44s %15s %15s %15s", "vote_pubkey", "local", "rpc", "diff")
-				w(strings.Repeat("-", 95))
-				start := len(mismatches) - 20
-				if start < 20 {
-					start = 20 // Don't overlap with top 20
+			// Sort each group by absolute diff
+			sortByAbsDiff := func(slice []mismatch) {
+				sort.Slice(slice, func(i, j int) bool {
+					absI, absJ := slice[i].diff, slice[j].diff
+					if absI < 0 {
+						absI = -absI
+					}
+					if absJ < 0 {
+						absJ = -absJ
+					}
+					return absI > absJ
+				})
+			}
+			sortByAbsDiff(comm0)
+			sortByAbsDiff(comm100)
+			sortByAbsDiff(commMid)
+
+			// Helper to write top/bottom N
+			writeTopBottom := func(label string, slice []mismatch, n int) {
+				if len(slice) == 0 {
+					return
 				}
-				for i := start; i < len(mismatches); i++ {
-					m := mismatches[i]
-					w("%-44s %15d %15d %+15d", m.pubkey.String(), m.local, m.rpc, m.diff)
+				w("%s (%d total):", label, len(slice))
+				w("%-44s %5s %15s %15s %15s", "vote_pubkey", "comm%", "local", "rpc", "diff")
+				w(strings.Repeat("-", 100))
+
+				// Top N
+				w("  TOP %d (largest diffs):", n)
+				for i := 0; i < n && i < len(slice); i++ {
+					m := slice[i]
+					w("  %-44s %4d%% %15d %15d %+15d", m.pubkey.String(), m.commission, m.local, m.rpc, m.diff)
+				}
+
+				// Bottom N (only if we have enough to not overlap)
+				if len(slice) > n {
+					w("")
+					w("  BOTTOM %d (smallest diffs):", n)
+					start := len(slice) - n
+					if start < n {
+						start = n
+					}
+					for i := start; i < len(slice); i++ {
+						m := slice[i]
+						w("  %-44s %4d%% %15d %15d %+15d", m.pubkey.String(), m.commission, m.local, m.rpc, m.diff)
+					}
 				}
 				w("")
 			}
 
-			w("TOTAL MISMATCHES: %d (showing top 20 and bottom 20)", len(mismatches))
+			writeTopBottom("0% COMMISSION VALIDATORS", comm0, 10)
+			writeTopBottom("100% COMMISSION VALIDATORS", comm100, 10)
+			writeTopBottom("1-99% COMMISSION VALIDATORS", commMid, 10)
+
+			w("TOTAL MISMATCHES: %d (0%%=%d, 100%%=%d, 1-99%%=%d)", len(mismatches), len(comm0), len(comm100), len(commMid))
 			w("")
 		}
 
