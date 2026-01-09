@@ -1788,8 +1788,20 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			return
 		}
 
+		// DIAGNOSTIC: Capture before values for partition 11 logging
+		beforeCreditsObserved := stakeState.Stake.Stake.CreditsObserved
+		beforeStakeLamports := stakeState.Stake.Stake.Delegation.StakeLamports
+		beforeAcctLamports := stakeAcct.Lamports
+
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
 		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.StakerRewards))
+
+		// Log partition 11 details (partitionIdx 10) - helps identify divergence root cause
+		if partitionIdx == 10 {
+			mlog.Log.Infof("P11_ACCT: pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
+				stakePk, reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
+				beforeStakeLamports, stakeState.Stake.Stake.Delegation.StakeLamports, beforeAcctLamports)
+		}
 
 		newStakeStateBytes, err := sealevel.MarshalStakeStake(stakeState)
 		if err != nil {

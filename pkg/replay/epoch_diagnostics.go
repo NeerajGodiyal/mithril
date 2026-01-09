@@ -923,16 +923,25 @@ type StakingRewardEntry struct {
 }
 
 type StakingRewardAmountMismatch struct {
-	Pubkey       string `json:"pubkey"`
-	LocalLamports uint64 `json:"local_lamports"`
-	RpcLamports   uint64 `json:"rpc_lamports"`
-	Diff         int64  `json:"diff"`
+	Pubkey          string `json:"pubkey"`
+	LocalLamports   uint64 `json:"local_lamports"`
+	RpcLamports     uint64 `json:"rpc_lamports"`
+	Diff            int64  `json:"diff"`
+	LocalCommission uint8  `json:"local_commission,omitempty"`
+	RpcCommission   uint8  `json:"rpc_commission,omitempty"`
+}
+
+// LocalStakingReward holds local reward info including commission for comparison
+type LocalStakingReward struct {
+	Lamports   uint64
+	Commission uint8
+	VotePubkey solana.PublicKey
 }
 
 // CompareStakingRewardsToRpc compares local staking rewards distribution to RPC rewards for a slot.
-// localRewards maps pubkey -> lamports distributed locally.
+// localRewards maps pubkey -> LocalStakingReward with lamports and commission info.
 // block.Rewards contains RPC rewards including Staking type.
-func CompareStakingRewardsToRpc(block *b.Block, localRewards map[solana.PublicKey]uint64, partitionIdx uint64) *StakingRewardComparison {
+func CompareStakingRewardsToRpc(block *b.Block, localRewards map[solana.PublicKey]LocalStakingReward, partitionIdx uint64) *StakingRewardComparison {
 	if block == nil {
 		return nil
 	}
@@ -974,29 +983,35 @@ func CompareStakingRewardsToRpc(block *b.Block, localRewards map[solana.PublicKe
 	}
 
 	// Calculate local total
-	for _, lamports := range localRewards {
-		comp.LocalTotal += lamports
+	for _, localReward := range localRewards {
+		comp.LocalTotal += localReward.Lamports
 	}
 
 	// Compare: find matches, mismatches, missing, and extra
-	for pk, localLamports := range localRewards {
+	for pk, localReward := range localRewards {
 		if rpcEntry, exists := rpcRewards[pk]; exists {
-			if localLamports == rpcEntry.Lamports {
+			lamportsMatch := localReward.Lamports == rpcEntry.Lamports
+			commissionMatch := localReward.Commission == rpcEntry.Commission
+
+			if lamportsMatch && commissionMatch {
 				comp.MatchCount++
 			} else {
 				comp.AmountMismatch = append(comp.AmountMismatch, StakingRewardAmountMismatch{
-					Pubkey:        pk.String(),
-					LocalLamports: localLamports,
-					RpcLamports:   rpcEntry.Lamports,
-					Diff:          int64(localLamports) - int64(rpcEntry.Lamports),
+					Pubkey:          pk.String(),
+					LocalLamports:   localReward.Lamports,
+					RpcLamports:     rpcEntry.Lamports,
+					Diff:            int64(localReward.Lamports) - int64(rpcEntry.Lamports),
+					LocalCommission: localReward.Commission,
+					RpcCommission:   rpcEntry.Commission,
 				})
 			}
 			delete(rpcRewards, pk) // Mark as processed
 		} else {
-			// In local but not in RPC
+			// In local but not in RPC (includes ForceCreditsUpdate accounts with 0 lamports)
 			comp.ExtraInLocal = append(comp.ExtraInLocal, StakingRewardEntry{
-				Pubkey:   pk.String(),
-				Lamports: localLamports,
+				Pubkey:     pk.String(),
+				Lamports:   localReward.Lamports,
+				Commission: localReward.Commission,
 			})
 		}
 	}

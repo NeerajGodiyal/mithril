@@ -1953,12 +1953,27 @@ func ReplayBlocks(
 			if sealevel.SysvarCache.EpochRewards.Sysvar != nil && len(block.Rewards) > 0 {
 				partitionIdx := block.BlockHeight - sealevel.SysvarCache.EpochRewards.Sysvar.DistributionStartingBlockHeight
 				if partitionIdx < 15 {
-					// Build local rewards map for this partition
+					// Build local rewards map for this partition (includes commission lookup)
 					partition := partitionedRewardsInfo.RewardPartitions.Partition(partitionIdx)
-					localRewards := make(map[solana.PublicKey]uint64, partition.NumPubkeys())
+					localRewards := make(map[solana.PublicKey]LocalStakingReward, partition.NumPubkeys())
 					for _, pk := range partition.Pubkeys() {
 						if reward, ok := partitionedRewardsInfo.StakingRewards[pk]; ok {
-							localRewards[pk] = reward.StakerRewards
+							var commission uint8
+							if voteState := global.VoteCacheItem(reward.VotePubkey); voteState != nil {
+								switch voteState.Type {
+								case sealevel.VoteStateVersionCurrent:
+									commission = voteState.Current.Commission
+								case sealevel.VoteStateVersionV0_23_5:
+									commission = voteState.V0_23_5.Commission
+								case sealevel.VoteStateVersionV1_14_11:
+									commission = voteState.V1_14_11.Commission
+								}
+							}
+							localRewards[pk] = LocalStakingReward{
+								Lamports:   reward.StakerRewards,
+								Commission: commission,
+								VotePubkey: reward.VotePubkey,
+							}
 						}
 					}
 					// Compare to RPC rewards
