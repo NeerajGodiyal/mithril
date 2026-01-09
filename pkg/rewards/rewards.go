@@ -1707,14 +1707,16 @@ type idxAndPubkey struct {
 
 
 // DistributeStakingRewardsForPartition distributes staking rewards for a single partition.
-// stakeAccountSnapshots: cached stake accounts captured during RefreshStakeCacheCreditsObserved
 // writeSlot: the slot to write updated accounts to (current slot being processed)
 //
-// This function uses cached stake account data instead of re-reading from AccountsDB.
-// This is critical because GetAccount ignores the slot parameter and returns current state,
-// which can differ from boundary-slot state (accounts may have been closed, modified, etc.).
-// Using cached accounts ensures we apply rewards to the exact state that was used for calculation.
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, stakeAccountSnapshots map[solana.PublicKey]*accounts.Account, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
+// This function reads CURRENT account state from AccountsDB at distribution time, matching
+// Firedancer's approach. This is critical for LtHash correctness: the "before" hash must
+// reflect the account state at the START of this slot, not the epoch boundary state.
+// If accounts were modified between boundary and distribution (e.g., SOL transfer to stake
+// account), using stale boundary snapshots would cause LtHash/bank hash divergence.
+//
+// Reference: firedancer/src/flamenco/rewards/fd_rewards.c:860-875
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
 	var distributedLamports atomic.Uint64
 	var burnedLamports atomic.Uint64 // Track lamports that would have been distributed but account failed
 	var workerErr atomic.Pointer[error]
@@ -1737,22 +1739,29 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			return
 		}
 
-		// Use cached stake account from snapshots instead of reading from AccountsDB.
-		// This ensures we use the exact same state that was captured during refresh,
-		// avoiding issues with GetAccount returning different (current) state.
-		cachedAcct, hasCached := stakeAccountSnapshots[stakePk]
-		if !hasCached {
-			// Account not in snapshots - track as burned to match Firedancer/Agave behavior.
+		// Read CURRENT account state from AccountsDB (matching Firedancer's approach).
+		// Firedancer reads from accdb at distribution time, NOT from boundary snapshots.
+		// This is critical for LtHash: we need the account state at the START of this slot,
+		// not the state at epoch boundary. If lamports changed (e.g., SOL transfer to stake
+		// account), using stale boundary snapshot would cause LtHash divergence.
+		//
+		// Reference: firedancer/src/flamenco/rewards/fd_rewards.c:860-875
+		//   fd_txn_account_init_from_funk_mutable(stake_acc_rec, stake_pubkey, accdb, ...)
+		//   fd_hashes_account_lthash(stake_pubkey, fd_txn_account_get_meta(stake_acc_rec), ...)
+		currentAcct, err := acctsDb.GetAccount(writeSlot, stakePk)
+		if err != nil || currentAcct == nil {
+			// Account not found in AccountsDB - track as burned to match Firedancer/Agave behavior.
 			// These lamports count toward DistributedRewards even though they're not distributed.
 			burnedLamports.Add(reward.StakerRewards)
-			mlog.Log.Debugf("rewards distribution: stake account %s not in cached snapshots - burning %d lamports", stakePk, reward.StakerRewards)
+			mlog.Log.Debugf("rewards distribution: stake account %s not found in AccountsDB - burning %d lamports", stakePk, reward.StakerRewards)
 			return
 		}
 
-		// Clone the cached account so we can modify it without affecting the cache
-		stakeAcct := cachedAcct.Clone()
+		// Clone for modification
+		stakeAcct := currentAcct.Clone()
 
-		parentAccts[idx] = cachedAcct.Clone()
+		// Use CURRENT account state for LtHash "before" hash (matching Firedancer)
+		parentAccts[idx] = currentAcct.Clone()
 
 		// Deserialize the stake state (we know it's valid from the refresh check)
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)

@@ -669,15 +669,13 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		mlog.Log.Infof("%s_DIAGNOSTIC: Completed - found %d differences out of %d accounts", partitionLabel, diffCount, partitionSize)
 	}
 
-	// Use cached stake account snapshots instead of reading from AccountsDB.
-	// This ensures we use the exact state captured during refresh, avoiding issues
-	// with GetAccount returning current state instead of boundary-slot state.
+	// Distribute rewards for this partition. Reads CURRENT account state from AccountsDB
+	// at distribution time (matching Firedancer's approach) for correct LtHash computation.
 	distributedAccts, parentDistributedAccts, distributedLamports, burnedLamports, err := rewards.DistributeStakingRewardsForPartition(
 		acctsDb,
 		partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx),
 		partitionedEpochRewardsInfo.StakingRewards,
-		partitionedEpochRewardsInfo.StakeAccountSnapshots, // cached accounts from refresh
-		currentSlot,                                       // writeSlot
+		currentSlot, // writeSlot
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("staking rewards distribution failed for partition %d: %w", partitionIdx, err)
