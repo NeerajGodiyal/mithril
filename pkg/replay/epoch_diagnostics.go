@@ -899,3 +899,172 @@ func writeDivergenceSummary(slot uint64, dump *DivergenceDump) {
 
 	mlog.Log.Infof("wrote divergence summary to %s", filename)
 }
+
+// StakingRewardComparison holds the comparison between local and RPC staking rewards
+type StakingRewardComparison struct {
+	Slot             uint64                       `json:"slot"`
+	Epoch            uint64                       `json:"epoch"`
+	PartitionIdx     uint64                       `json:"partition_idx"`
+	LocalCount       int                          `json:"local_count"`
+	RpcCount         int                          `json:"rpc_count"`
+	LocalTotal       uint64                       `json:"local_total_lamports"`
+	RpcTotal         uint64                       `json:"rpc_total_lamports"`
+	MatchCount       int                          `json:"match_count"`
+	MissingFromLocal []StakingRewardEntry         `json:"missing_from_local,omitempty"`
+	ExtraInLocal     []StakingRewardEntry         `json:"extra_in_local,omitempty"`
+	AmountMismatch   []StakingRewardAmountMismatch `json:"amount_mismatch,omitempty"`
+}
+
+type StakingRewardEntry struct {
+	Pubkey      string `json:"pubkey"`
+	Lamports    uint64 `json:"lamports"`
+	PostBalance uint64 `json:"post_balance,omitempty"`
+	Commission  uint8  `json:"commission,omitempty"`
+}
+
+type StakingRewardAmountMismatch struct {
+	Pubkey       string `json:"pubkey"`
+	LocalLamports uint64 `json:"local_lamports"`
+	RpcLamports   uint64 `json:"rpc_lamports"`
+	Diff         int64  `json:"diff"`
+}
+
+// CompareStakingRewardsToRpc compares local staking rewards distribution to RPC rewards for a slot.
+// localRewards maps pubkey -> lamports distributed locally.
+// block.Rewards contains RPC rewards including Staking type.
+func CompareStakingRewardsToRpc(block *b.Block, localRewards map[solana.PublicKey]uint64, partitionIdx uint64) *StakingRewardComparison {
+	if block == nil {
+		return nil
+	}
+
+	comp := &StakingRewardComparison{
+		Slot:         block.Slot,
+		Epoch:        block.Epoch,
+		PartitionIdx: partitionIdx,
+		LocalCount:   len(localRewards),
+	}
+
+	// Build map of RPC staking rewards (pubkey -> reward info)
+	rpcRewards := make(map[solana.PublicKey]StakingRewardEntry)
+	for _, reward := range block.Rewards {
+		if string(reward.RewardType) != "Staking" {
+			continue
+		}
+		pk := reward.Pubkey
+		lamports := uint64(reward.Lamports)
+		if reward.Lamports < 0 {
+			// Negative rewards shouldn't happen for staking, but handle defensively
+			lamports = 0
+		}
+		rpcRewards[pk] = StakingRewardEntry{
+			Pubkey:      pk.String(),
+			Lamports:    lamports,
+			PostBalance: reward.PostBalance,
+		}
+		if reward.Commission != nil {
+			rpcRewards[pk] = StakingRewardEntry{
+				Pubkey:      pk.String(),
+				Lamports:    lamports,
+				PostBalance: reward.PostBalance,
+				Commission:  *reward.Commission,
+			}
+		}
+		comp.RpcCount++
+		comp.RpcTotal += lamports
+	}
+
+	// Calculate local total
+	for _, lamports := range localRewards {
+		comp.LocalTotal += lamports
+	}
+
+	// Compare: find matches, mismatches, missing, and extra
+	for pk, localLamports := range localRewards {
+		if rpcEntry, exists := rpcRewards[pk]; exists {
+			if localLamports == rpcEntry.Lamports {
+				comp.MatchCount++
+			} else {
+				comp.AmountMismatch = append(comp.AmountMismatch, StakingRewardAmountMismatch{
+					Pubkey:        pk.String(),
+					LocalLamports: localLamports,
+					RpcLamports:   rpcEntry.Lamports,
+					Diff:          int64(localLamports) - int64(rpcEntry.Lamports),
+				})
+			}
+			delete(rpcRewards, pk) // Mark as processed
+		} else {
+			// In local but not in RPC
+			comp.ExtraInLocal = append(comp.ExtraInLocal, StakingRewardEntry{
+				Pubkey:   pk.String(),
+				Lamports: localLamports,
+			})
+		}
+	}
+
+	// Remaining RPC rewards are missing from local
+	for _, entry := range rpcRewards {
+		comp.MissingFromLocal = append(comp.MissingFromLocal, entry)
+	}
+
+	return comp
+}
+
+// WriteStakingRewardsComparison writes the comparison to a JSON file and logs summary
+func WriteStakingRewardsComparison(comp *StakingRewardComparison) {
+	if comp == nil {
+		return
+	}
+
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("staking_rewards_slot_%d_p%d.json", comp.Slot, comp.PartitionIdx+1))
+
+	data, err := json.MarshalIndent(comp, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal staking rewards comparison: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write staking rewards comparison: %v", err)
+		return
+	}
+
+	// Log summary
+	mlog.Log.Infof("STAKING_REWARDS_CMP slot=%d partition=%d: local=%d rpc=%d match=%d missing=%d extra=%d mismatch=%d local_total=%d rpc_total=%d diff=%d",
+		comp.Slot, comp.PartitionIdx+1,
+		comp.LocalCount, comp.RpcCount, comp.MatchCount,
+		len(comp.MissingFromLocal), len(comp.ExtraInLocal), len(comp.AmountMismatch),
+		comp.LocalTotal, comp.RpcTotal, int64(comp.LocalTotal)-int64(comp.RpcTotal))
+
+	if len(comp.MissingFromLocal) > 0 {
+		mlog.Log.Warnf("STAKING_REWARDS_CMP slot=%d: %d accounts in RPC but not in local distribution",
+			comp.Slot, len(comp.MissingFromLocal))
+		for i, entry := range comp.MissingFromLocal {
+			if i < 10 { // Log first 10
+				mlog.Log.Warnf("  MISSING: %s lamports=%d", entry.Pubkey, entry.Lamports)
+			}
+		}
+	}
+
+	if len(comp.ExtraInLocal) > 0 {
+		mlog.Log.Warnf("STAKING_REWARDS_CMP slot=%d: %d accounts in local but not in RPC",
+			comp.Slot, len(comp.ExtraInLocal))
+		for i, entry := range comp.ExtraInLocal {
+			if i < 10 { // Log first 10
+				mlog.Log.Warnf("  EXTRA: %s lamports=%d", entry.Pubkey, entry.Lamports)
+			}
+		}
+	}
+
+	if len(comp.AmountMismatch) > 0 {
+		mlog.Log.Warnf("STAKING_REWARDS_CMP slot=%d: %d accounts have different reward amounts",
+			comp.Slot, len(comp.AmountMismatch))
+		for i, m := range comp.AmountMismatch {
+			if i < 10 { // Log first 10
+				mlog.Log.Warnf("  MISMATCH: %s local=%d rpc=%d diff=%+d", m.Pubkey, m.LocalLamports, m.RpcLamports, m.Diff)
+			}
+		}
+	}
+
+	mlog.Log.Infof("wrote staking rewards comparison to %s", filename)
+}

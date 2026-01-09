@@ -1866,6 +1866,25 @@ func ReplayBlocks(
 			}
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
+
+			// DIAGNOSTIC: Compare local staking rewards to RPC rewards for first 15 partitions
+			// This helps identify partition assignment or reward calculation bugs.
+			if sealevel.SysvarCache.EpochRewards.Sysvar != nil && len(block.Rewards) > 0 {
+				partitionIdx := block.BlockHeight - sealevel.SysvarCache.EpochRewards.Sysvar.DistributionStartingBlockHeight
+				if partitionIdx < 15 {
+					// Build local rewards map for this partition
+					partition := partitionedRewardsInfo.RewardPartitions.Partition(partitionIdx)
+					localRewards := make(map[solana.PublicKey]uint64, partition.NumPubkeys())
+					for _, pk := range partition.Pubkeys() {
+						if reward, ok := partitionedRewardsInfo.StakingRewards[pk]; ok {
+							localRewards[pk] = reward.StakerRewards
+						}
+					}
+					// Compare to RPC rewards
+					comp := CompareStakingRewardsToRpc(block, localRewards, partitionIdx)
+					WriteStakingRewardsComparison(comp)
+				}
+			}
 		}
 
 		// EAH (Epoch Accounts Hash) Workaround - DISABLED
