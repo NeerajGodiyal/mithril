@@ -1136,18 +1136,18 @@ func WritePartitionAccountDetails(details *PartitionAccountDetails) {
 type StakeAccountComparison struct {
 	Pubkey               string `json:"pubkey"`
 	// Local state (after distribution)
-	LocalLamports        uint64 `json:"local_lamports"`
-	LocalCreditsObserved uint64 `json:"local_credits_observed"`
-	LocalStakeLamports   uint64 `json:"local_stake_lamports"`
-	LocalReward          uint64 `json:"local_reward"`
-	LocalCommission      uint8  `json:"local_commission"`
-	// RPC state
-	RpcRewardLamports    uint64 `json:"rpc_reward_lamports"`
-	RpcPostBalance       uint64 `json:"rpc_post_balance"`
-	RpcCommission        uint8  `json:"rpc_commission"`
+	LocalPostBalance     uint64 `json:"local_post_balance"`     // Account lamports after distribution
+	LocalCreditsObserved uint64 `json:"local_credits_observed"` // CreditsObserved from stake state
+	LocalStakeLamports   uint64 `json:"local_stake_lamports"`   // stake.delegation.stake
+	LocalReward          uint64 `json:"local_reward"`           // Reward we calculated
+	LocalCommission      uint8  `json:"local_commission"`       // Commission rate used
+	// RPC state (from block.Rewards)
+	RpcPostBalance       uint64 `json:"rpc_post_balance"`       // postBalance from RPC
+	RpcReward            uint64 `json:"rpc_reward"`             // lamports from RPC reward
+	RpcCommission        uint8  `json:"rpc_commission"`         // commission from RPC
 	// Comparison
-	LamportsDiff         int64  `json:"lamports_diff,omitempty"`
-	PostBalanceDiff      int64  `json:"post_balance_diff,omitempty"`
+	RewardDiff           int64  `json:"reward_diff,omitempty"`       // local_reward - rpc_reward
+	PostBalanceDiff      int64  `json:"post_balance_diff,omitempty"` // local_post_balance - rpc_post_balance
 	CommissionMatch      bool   `json:"commission_match"`
 	InLocalOnly          bool   `json:"in_local_only,omitempty"`
 	InRpcOnly            bool   `json:"in_rpc_only,omitempty"`
@@ -1239,7 +1239,7 @@ func ComparePartitionStakeToRpc(
 
 		// Get local account state
 		if localAcct, ok := localAcctMap[pk]; ok {
-			acctComp.LocalLamports = localAcct.Lamports
+			acctComp.LocalPostBalance = localAcct.Lamports
 			// Try to deserialize to get CreditsObserved
 			if stakeState, err := sealevel.UnmarshalStakeState(localAcct.Data); err == nil && stakeState.Status == sealevel.StakeStateV2StatusStake {
 				acctComp.LocalCreditsObserved = stakeState.Stake.Stake.CreditsObserved
@@ -1249,18 +1249,18 @@ func ComparePartitionStakeToRpc(
 
 		// Get RPC data
 		if rpcData, ok := rpcRewards[pk]; ok {
-			acctComp.RpcRewardLamports = rpcData.lamports
+			acctComp.RpcReward = rpcData.lamports
 			acctComp.RpcPostBalance = rpcData.postBalance
 			acctComp.RpcCommission = rpcData.commission
 			delete(rpcRewards, pk) // Mark as processed
 
 			// Compare
-			acctComp.LamportsDiff = int64(acctComp.LocalReward) - int64(acctComp.RpcRewardLamports)
-			acctComp.PostBalanceDiff = int64(acctComp.LocalLamports) - int64(acctComp.RpcPostBalance)
+			acctComp.RewardDiff = int64(acctComp.LocalReward) - int64(acctComp.RpcReward)
+			acctComp.PostBalanceDiff = int64(acctComp.LocalPostBalance) - int64(acctComp.RpcPostBalance)
 			acctComp.CommissionMatch = acctComp.LocalCommission == acctComp.RpcCommission
 
 			// Count mismatches
-			if acctComp.LamportsDiff != 0 {
+			if acctComp.RewardDiff != 0 {
 				comp.LamportsMismatch++
 			}
 			if acctComp.PostBalanceDiff != 0 {
@@ -1271,7 +1271,7 @@ func ComparePartitionStakeToRpc(
 			}
 
 			// Is it a match?
-			if acctComp.LamportsDiff == 0 && acctComp.PostBalanceDiff == 0 && acctComp.CommissionMatch {
+			if acctComp.RewardDiff == 0 && acctComp.PostBalanceDiff == 0 && acctComp.CommissionMatch {
 				comp.MatchCount++
 			} else {
 				comp.DivergentAccounts = append(comp.DivergentAccounts, acctComp)
@@ -1288,11 +1288,11 @@ func ComparePartitionStakeToRpc(
 	for pk, rpcData := range rpcRewards {
 		comp.InRpcOnlyCount++
 		comp.DivergentAccounts = append(comp.DivergentAccounts, StakeAccountComparison{
-			Pubkey:            pk.String(),
-			RpcRewardLamports: rpcData.lamports,
-			RpcPostBalance:    rpcData.postBalance,
-			RpcCommission:     rpcData.commission,
-			InRpcOnly:         true,
+			Pubkey:         pk.String(),
+			RpcReward:      rpcData.lamports,
+			RpcPostBalance: rpcData.postBalance,
+			RpcCommission:  rpcData.commission,
+			InRpcOnly:      true,
 		})
 	}
 
