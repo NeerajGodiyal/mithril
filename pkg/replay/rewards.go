@@ -610,6 +610,65 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	}
 
 	partitionSize := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx).NumPubkeys()
+
+	// DIAGNOSTIC: For partitions 9, 10, and 11, compare snapshot vs current AccountsDB
+	// to detect if accounts were modified between boundary and distribution.
+	// Partitions 9 and 10 serve as controls - if they show no diffs but 11 does, we know where divergence starts.
+	if partitionIdx == 8 || partitionIdx == 9 || partitionIdx == 10 {
+		partitionLabel := fmt.Sprintf("P%d", partitionIdx+1)
+		mlog.Log.Infof("%s_DIAGNOSTIC: Starting comparison for %d accounts", partitionLabel, partitionSize)
+		diffCount := 0
+		partition := partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx)
+		for _, stakePk := range partition.Pubkeys() {
+			snapshot, hasSnapshot := partitionedEpochRewardsInfo.StakeAccountSnapshots[stakePk]
+			currentAcct, err := acctsDb.GetAccount(currentSlot, stakePk)
+
+			if err != nil {
+				mlog.Log.Warnf("%s_DIAG: pk=%s NO_CURRENT_ACCT snapshot_exists=%v", partitionLabel, stakePk, hasSnapshot)
+				diffCount++
+				continue
+			}
+
+			if !hasSnapshot {
+				mlog.Log.Warnf("%s_DIAG: pk=%s NO_SNAPSHOT current_lamports=%d", partitionLabel, stakePk, currentAcct.Lamports)
+				diffCount++
+				continue
+			}
+
+			// Compare lamports
+			if snapshot.Lamports != currentAcct.Lamports {
+				mlog.Log.Errorf("%s_DIAG: pk=%s LAMPORTS_CHANGED snapshot=%d current=%d diff=%d",
+					partitionLabel, stakePk, snapshot.Lamports, currentAcct.Lamports, int64(currentAcct.Lamports)-int64(snapshot.Lamports))
+				diffCount++
+			}
+
+			// Compare data length
+			if len(snapshot.Data) != len(currentAcct.Data) {
+				mlog.Log.Errorf("%s_DIAG: pk=%s DATA_LEN_CHANGED snapshot=%d current=%d",
+					partitionLabel, stakePk, len(snapshot.Data), len(currentAcct.Data))
+				diffCount++
+			} else if !bytes.Equal(snapshot.Data, currentAcct.Data) {
+				// Data length same but content differs - find which field changed
+				mlog.Log.Errorf("%s_DIAG: pk=%s DATA_CONTENT_CHANGED snapshot_len=%d", partitionLabel, stakePk, len(snapshot.Data))
+				// Try to decode both and compare CreditsObserved
+				snapState, snapErr := sealevel.UnmarshalStakeState(snapshot.Data)
+				currState, currErr := sealevel.UnmarshalStakeState(currentAcct.Data)
+				if snapErr == nil && currErr == nil && snapState.Status == sealevel.StakeStateV2StatusStake && currState.Status == sealevel.StakeStateV2StatusStake {
+					if snapState.Stake.Stake.CreditsObserved != currState.Stake.Stake.CreditsObserved {
+						mlog.Log.Errorf("%s_DIAG:   pk=%s CREDITS_OBSERVED_CHANGED snapshot=%d current=%d",
+							partitionLabel, stakePk, snapState.Stake.Stake.CreditsObserved, currState.Stake.Stake.CreditsObserved)
+					}
+					if snapState.Stake.Stake.Delegation.StakeLamports != currState.Stake.Stake.Delegation.StakeLamports {
+						mlog.Log.Errorf("%s_DIAG:   pk=%s STAKE_LAMPORTS_CHANGED snapshot=%d current=%d",
+							partitionLabel, stakePk, snapState.Stake.Stake.Delegation.StakeLamports, currState.Stake.Stake.Delegation.StakeLamports)
+					}
+				}
+				diffCount++
+			}
+		}
+		mlog.Log.Infof("%s_DIAGNOSTIC: Completed - found %d differences out of %d accounts", partitionLabel, diffCount, partitionSize)
+	}
+
 	// Use cached stake account snapshots instead of reading from AccountsDB.
 	// This ensures we use the exact state captured during refresh, avoiding issues
 	// with GetAccount returning current state instead of boundary-slot state.

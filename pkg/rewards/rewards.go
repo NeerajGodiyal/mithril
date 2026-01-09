@@ -315,18 +315,73 @@ func RefreshStakeCacheCreditsObserved(acctsDb *accountsdb.AccountsDb, slot uint6
 	}
 	defer workerPool.Release()
 
+	// Track failed invocations for sequential retry
+	var invokeFailures []int
+	var invokeFailuresMu sync.Mutex
+
 	// Submit all tasks to the worker pool
 	for i := range tasks {
 		wg.Add(1)
 		if err := workerPool.Invoke(&tasks[i]); err != nil {
 			// Invoke failed - decrement wg to avoid deadlock
 			wg.Done()
+			// Track for sequential retry
+			invokeFailuresMu.Lock()
+			invokeFailures = append(invokeFailures, i)
+			invokeFailuresMu.Unlock()
 			mlog.Log.Warnf("worker pool invoke failed for pubkey %s: %v", tasks[i].pubkey.String(), err)
 		}
 	}
 
 	// Wait for all workers to complete
 	wg.Wait()
+
+	// Process any failed invocations sequentially (same logic as worker)
+	if len(invokeFailures) > 0 {
+		mlog.Log.Infof("refresh: processing %d failed invocations sequentially", len(invokeFailures))
+		for _, idx := range invokeFailures {
+			task := &tasks[idx]
+			result := &results[idx]
+			result.idx = task.idx
+			result.pubkey = task.pubkey
+			result.delegation = task.delegation
+
+			// Read the actual stake account from AccountsDB
+			stakeAcct, err := acctsDb.GetAccount(slot, task.pubkey)
+			if err != nil {
+				result.shouldDelete = true
+				result.deleteReason = "not_found"
+				continue
+			}
+
+			// Check for tombstone
+			if stakeAcct.Lamports == 0 && len(stakeAcct.Data) == 0 {
+				result.shouldDelete = true
+				result.deleteReason = "tombstone"
+				continue
+			}
+
+			// Decode the stake state
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				result.shouldDelete = true
+				result.deleteReason = "unmarshal_error"
+				continue
+			}
+
+			// Only keep if it's a Stake state (not Initialized or Uninitialized)
+			if stakeState.Status != sealevel.StakeStateV2StatusStake {
+				result.shouldDelete = true
+				result.deleteReason = "not_stake_state"
+				continue
+			}
+
+			// Record new credits (will be applied in phase 3)
+			result.newCredits = stakeState.Stake.Stake.CreditsObserved
+			result.creditsUpdated = task.delegation.CreditsObserved != result.newCredits
+			result.snapshot = stakeAcct.Clone()
+		}
+	}
 
 	// PHASE 3: Apply mutations (single-threaded, no race conditions)
 	var refreshedCount, errorCount int
