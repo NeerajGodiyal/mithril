@@ -48,7 +48,7 @@ type GlobalCtx struct {
 	manageLeaderSchedule       bool
 	manageBlockHeight          bool
 	stakeCacheMutex            sync.Mutex
-	voteCacheMutex             sync.Mutex
+	voteCacheMutex             sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
 	mu                         sync.Mutex
 }
@@ -277,6 +277,8 @@ func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVers
 }
 
 func VoteCacheItem(pubkey solana.PublicKey) *sealevel.VoteStateVersions {
+	instance.voteCacheMutex.RLock()
+	defer instance.voteCacheMutex.RUnlock()
 	return instance.voteCache[pubkey]
 }
 
