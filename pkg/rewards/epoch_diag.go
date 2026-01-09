@@ -280,16 +280,25 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 	}
 
 	// Build commission and stake maps from staking rewards (aggregate by vote account)
+	// Also check for VotePubkey mismatches between StakingRewards and stake cache
 	voteCommission := make(map[solana.PublicKey]uint8)
 	voteStake := make(map[solana.PublicKey]uint64)
 	stakeCache := global.StakeCache()
+	var votePubkeyMismatches int
 	for stakePk, sr := range diag.StakingRewards {
 		if sr != nil {
 			voteCommission[sr.VotePubkey] = sr.Commission
 			if delegation := stakeCache[stakePk]; delegation != nil {
 				voteStake[sr.VotePubkey] += delegation.StakeLamports
+				// Check if the vote pubkey in StakingRewards matches stake cache
+				if delegation.VoterPubkey != sr.VotePubkey {
+					votePubkeyMismatches++
+				}
 			}
 		}
+	}
+	if votePubkeyMismatches > 0 {
+		mlog.Log.Warnf("diagnostics: %d vote pubkey mismatches between StakingRewards and stake cache!", votePubkeyMismatches)
 	}
 
 	// Find mismatches
@@ -416,6 +425,43 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 
 			w("TOTAL MISMATCHES: %d (0%%=%d, 100%%=%d, 1-99%%=%d)", len(mismatches), len(comm0), len(comm100), len(commMid))
 			w("")
+
+			// Calculate and show diff/reward ratio statistics to verify uniform scaling
+			var totalDiff, totalReward int64
+			var ratios []float64
+			for _, m := range mismatches {
+				if m.local > 0 {
+					totalDiff += m.diff
+					totalReward += int64(m.local)
+					ratios = append(ratios, float64(m.diff)/float64(m.local))
+				}
+			}
+			if len(ratios) > 0 {
+				avgRatio := float64(totalDiff) / float64(totalReward)
+				// Calculate min/max ratio
+				minRatio, maxRatio := ratios[0], ratios[0]
+				for _, r := range ratios {
+					if r < minRatio {
+						minRatio = r
+					}
+					if r > maxRatio {
+						maxRatio = r
+					}
+				}
+				w("SCALING ANALYSIS:")
+				w("  Total diff:        %+d lamports", totalDiff)
+				w("  Total local:       %d lamports", totalReward)
+				w("  Avg diff/reward:   %.10f", avgRatio)
+				w("  Min diff/reward:   %.10f", minRatio)
+				w("  Max diff/reward:   %.10f", maxRatio)
+				w("  Ratio spread:      %.10f", maxRatio-minRatio)
+				if maxRatio-minRatio < avgRatio*0.1 {
+					w("  CONCLUSION: Uniform scaling (spread < 10%% of avg) - likely total_points mismatch")
+				} else {
+					w("  CONCLUSION: Non-uniform - per-account calculation differences")
+				}
+				w("")
+			}
 		}
 
 		if len(localOnly) > 0 {
