@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"fmt"
+	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -100,6 +101,52 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		if numRewardPartitions != 0 {
 			partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
 			partitions.AddPubkey(partitionIdx, pubkey)
+		}
+	}
+
+	// DIAGNOSTIC: Verify no duplicate pubkeys across partitions
+	// If the same pubkey appears in multiple partitions, that's a critical bug
+	seenPubkeys := make(map[solana.PublicKey]uint64)
+	duplicateCount := 0
+	for partIdx := uint64(0); partIdx < numRewardPartitions; partIdx++ {
+		for _, pk := range partitions.Partition(partIdx).Pubkeys() {
+			if prevPartIdx, exists := seenPubkeys[pk]; exists {
+				if duplicateCount < 10 { // Log first 10 duplicates
+					mlog.Log.Errorf("DUPLICATE_PUBKEY: %s in partitions %d and %d", pk, prevPartIdx+1, partIdx+1)
+				}
+				duplicateCount++
+			}
+			seenPubkeys[pk] = partIdx
+		}
+	}
+	if duplicateCount > 0 {
+		mlog.Log.Errorf("PARTITION_BUG: Found %d duplicate pubkeys across partitions!", duplicateCount)
+	} else {
+		mlog.Log.Infof("partition_sanity_check: no duplicate pubkeys across %d partitions ✓", numRewardPartitions)
+	}
+
+	// DIAGNOSTIC: Log partition 11 (index 10) details for comparison
+	// Since failure happens at partition 11, log its pubkeys sorted for deterministic comparison
+	if numRewardPartitions > 10 {
+		p11 := partitions.Partition(10)
+		p11Pubkeys := p11.Pubkeys()
+		mlog.Log.Infof("P11_PUBKEY_COUNT: %d accounts in partition 11", len(p11Pubkeys))
+
+		// Sort pubkeys for deterministic comparison
+		sortedPubkeys := make([]solana.PublicKey, len(p11Pubkeys))
+		copy(sortedPubkeys, p11Pubkeys)
+		sort.Slice(sortedPubkeys, func(i, j int) bool {
+			return bytes.Compare(sortedPubkeys[i][:], sortedPubkeys[j][:]) < 0
+		})
+
+		// Log first 5 and last 5 pubkeys for quick comparison
+		if len(sortedPubkeys) >= 10 {
+			mlog.Log.Infof("P11_FIRST_5: %s %s %s %s %s",
+				sortedPubkeys[0], sortedPubkeys[1], sortedPubkeys[2], sortedPubkeys[3], sortedPubkeys[4])
+			mlog.Log.Infof("P11_LAST_5: %s %s %s %s %s",
+				sortedPubkeys[len(sortedPubkeys)-5], sortedPubkeys[len(sortedPubkeys)-4],
+				sortedPubkeys[len(sortedPubkeys)-3], sortedPubkeys[len(sortedPubkeys)-2],
+				sortedPubkeys[len(sortedPubkeys)-1])
 		}
 	}
 
