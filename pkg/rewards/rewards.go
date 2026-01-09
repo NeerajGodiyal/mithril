@@ -1796,10 +1796,10 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
 		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.StakerRewards))
 
-		// Log partition 11 details (partitionIdx 10) - helps identify divergence root cause
-		if partitionIdx == 10 {
-			mlog.Log.Infof("P11_ACCT pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
-				stakePk.String(), reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
+		// Log partition 10 and 11 details - compare success (P10) vs divergence (P11)
+		if partitionIdx == 9 || partitionIdx == 10 {
+			mlog.Log.Infof("P%d_ACCT pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
+				partitionIdx+1, stakePk.String(), reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
 				beforeStakeLamports, stakeState.Stake.Stake.Delegation.StakeLamports, beforeAcctLamports)
 		}
 
