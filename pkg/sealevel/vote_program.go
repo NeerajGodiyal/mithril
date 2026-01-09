@@ -1553,7 +1553,9 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	//mlog.Log.Debugf("SlotHashes.Hash = %s, SlotHashes.Slot = %d", solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]), slotHashes[slotHashesIndex].Slot)
 
 	if slotHashes[slotHashesIndex].Hash != proposedHash {
-		mlog.Log.Infof("%s dropped vote. failed to match hash %s vs. %s", voteState.NodePubkey, solana.HashFromBytes(proposedHash[:]), solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]))
+		mlog.Log.Infof("%s dropped vote. failed to match hash at slot %d: expected=%s local=%s",
+			voteState.NodePubkey, slotHashes[slotHashesIndex].Slot,
+			solana.HashFromBytes(proposedHash[:]), solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]))
 		return VoteErrSlotHashMismatch
 	}
 

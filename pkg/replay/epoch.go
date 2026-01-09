@@ -253,7 +253,12 @@ func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards 
 	var err error
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch, ctx)
+		// IMPORTANT: Use local variables and APPEND to preserve any accounts already in the lists
+		// (e.g., feature accounts activated at epoch boundary). Overwriting would cause LtHash mismatch.
+		var rewardsUpdatedAccts, rewardsParentUpdatedAccts []*accounts.Account
+		partitionedRewardsInfo, rewardsUpdatedAccts, rewardsParentUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch, ctx)
+		block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, rewardsUpdatedAccts...)
+		block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, rewardsParentUpdatedAccts...)
 		if err != nil {
 			// Check if this is the "epoch rewards already active" error - if so, fall back to resume path
 			if err.Error() == "epoch rewards already active - use resume path instead" {
