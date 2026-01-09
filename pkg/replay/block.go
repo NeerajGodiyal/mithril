@@ -1381,15 +1381,14 @@ func ReplayBlocks(
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-	// Only build EpochStakes from manifest on fresh start (not resume)
-	// On resume, the manifest data may be stale if we've crossed epoch boundaries.
-	// The stake cache (rebuilt from AccountsDB) has current data, and epoch boundary
-	// handling will cache stakes for future leader schedules as needed.
-	// TODO: Persist EpochStakes to disk for proper resume support, or rebuild from stake cache.
-	if resumeState == nil {
-		buildInitialEpochStakesCache(snapshotManifest)
-	} else {
-		mlog.Log.Infof("skipping buildInitialEpochStakesCache on resume (stake cache has current data)")
+	// Build EpochStakes from manifest - needed for leader schedule on both fresh start and resume.
+	// Note: "stake cache" (stake accounts) is different from "EpochStakesCache" (per-epoch leader schedule data).
+	// The snapshot manifest has VersionedEpochStakes which is still valid for leader schedule calculation.
+	// If we've crossed epoch boundaries since snapshot, epoch boundary handling will have cached
+	// the new stakes, and we merge those with the manifest data.
+	buildInitialEpochStakesCache(snapshotManifest)
+	if resumeState != nil {
+		mlog.Log.Infof("built EpochStakesCache from manifest on resume (required for leader schedule)")
 	}
 	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
 	//forkChoice.Start()
