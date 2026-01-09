@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,20 +30,12 @@ type shardRequest struct {
 	v accountsdb.AccountIndexEntry
 }
 
-// ShardProgressCallback is called with (bytesDone, totalBytes) to report shard flush progress
-type ShardProgressCallback func(bytesDone, totalBytes int64)
-
 // ShardLogger manages multiple sharded log files
 type ShardLogger struct {
 	shards     []*shard
 	filePrefix string
 	wg         *sync.WaitGroup
 	flushSem   *semaphore.Weighted
-
-	// Progress tracking
-	totalBytes atomic.Int64 // total bytes written to shard logs
-	bytesDone  atomic.Int64 // bytes flushed to cache
-	onProgress ShardProgressCallback
 
 	// closed flag to prevent sends after Close is called (defensive)
 	closed atomic.Bool
@@ -84,22 +75,6 @@ func NewShardLogger(numShards int, filePrefix string) *ShardLogger {
 	return sl
 }
 
-// SetProgressCallback sets a callback to receive progress updates during shard flushes.
-// The callback receives (bytesDone, totalBytes) and is called as bytes are flushed to cache.
-func (sl *ShardLogger) SetProgressCallback(cb ShardProgressCallback) {
-	sl.onProgress = cb
-}
-
-// TotalBytes returns the total bytes written to shard logs
-func (sl *ShardLogger) TotalBytes() int64 {
-	return sl.totalBytes.Load()
-}
-
-// BytesDone returns the bytes that have been flushed to cache
-func (sl *ShardLogger) BytesDone() int64 {
-	return sl.bytesDone.Load()
-}
-
 // newShard creates a new shard with the given ID
 func newShard(id int, filePrefix string, flushSem *semaphore.Weighted, parent *ShardLogger) *shard {
 	filename := filepath.Join(filePrefix, fmt.Sprintf("%03d", id))
@@ -135,16 +110,6 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 
 		bytesWritten := int64(len(req.k) + vlen)
 		s.logSize += int(bytesWritten)
-
-		// Track total bytes for progress reporting and notify callback
-		if s.parent != nil {
-			total := s.parent.totalBytes.Add(bytesWritten)
-			if s.parent.onProgress != nil {
-				// Notify with bytesDone=0 during streaming (before flush)
-				// The callback can use totalBytes to show indexing progress
-				s.parent.onProgress(0, total)
-			}
-		}
 	}
 }
 
@@ -163,56 +128,38 @@ func (s *shard) logToSST(ctx context.Context) error {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
 
+	const recordSize = 32 + vlen
 	// Read contents from log
-	file, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("failed to reopen file for reading: %w", err)
-	}
-	defer file.Close()
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", filename, err)
-	}
-	size := fileInfo.Size()
-
-	const recordSize = int64(32 + vlen)
-	if rem := size % recordSize; rem != 0 {
-		return fmt.Errorf("filename=%s had (size=%d) %% (recordSize=%d) = %d", filename, size, recordSize, rem)
-	}
-	i := 0
-	pairs := make([]shardRequest, size/recordSize)
-
-	reader := bufio.NewReader(file)
-	var buf [32 + vlen]byte
-	for {
-		_, err := io.ReadFull(reader, buf[:32+vlen])
-		if err == io.EOF {
-			break
-		}
+	var size int
+	var pairs []shardRequest
+	{
+		logBytes, err := os.ReadFile(filename)
 		if err != nil {
-			return fmt.Errorf("logToSST read loop: %v", err)
+			return fmt.Errorf("failed to reopen file for reading: %w", err)
 		}
-		pairs[i].k = solana.PublicKey(buf[:32])
-		pairs[i].v.Unmarshal((*[24]byte)(buf[32:56]))
-		i++
+		size = len(logBytes)
 
-		// Track progress
-		if s.parent != nil {
-			done := s.parent.bytesDone.Add(recordSize)
-			if s.parent.onProgress != nil {
-				s.parent.onProgress(done, s.parent.totalBytes.Load())
-			}
+		if rem := size % recordSize; rem != 0 {
+			return fmt.Errorf("filename=%s had (size=%d) %% (recordSize=%d) = %d", filename, size, recordSize, rem)
+		}
+		pairs = make([]shardRequest, size/recordSize)
+
+		for i := 0; i < size; i += recordSize {
+			pairs[i/recordSize].k = solana.PublicKey(logBytes[i : i+32])
+			pairs[i/recordSize].v.Unmarshal((*[24]byte)(logBytes[i+32 : i+recordSize]))
 		}
 	}
 
 	// Truncate file and replace file/writer pointers
-	newFile, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to truncate file: %w", err)
+	{
+		newFile, err := os.Create(filename)
+		if err != nil {
+			return fmt.Errorf("failed to truncate file: %w", err)
+		}
+		s.file = newFile
+		s.writer = bufio.NewWriter(newFile)
+		s.logSize = 0
 	}
-	s.file = newFile
-	s.writer = bufio.NewWriter(newFile)
-	s.logSize = 0
 
 	// Sort
 	slices.SortFunc(pairs, func(a, b shardRequest) int {
