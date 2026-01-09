@@ -1199,7 +1199,10 @@ func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
 	if !f.IsActive(features.StakeMinimumDelegationForRewards) {
 		return 0
 	}
-	return 1 // 1 lamport
+	if f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
+		return 1000000000 // 1 SOL
+	}
+	return 1
 }
 
 // DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
@@ -1678,7 +1681,10 @@ func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
 	if !slotCtx.Features.IsActive(features.StakeMinimumDelegationForRewards) {
 		return 0
 	}
-	return 1 // 1 lamport
+	if slotCtx.Features.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
+		return 1000000000 // 1 SOL
+	}
+	return 1
 }
 
 func CalculateRewardPartitionForPubkey(pubkey solana.PublicKey, blockhash [32]byte, numPartitions uint64) uint64 {

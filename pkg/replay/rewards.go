@@ -61,38 +61,40 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// This reduces I/O by only reading from AccountsDB for accounts that pass initial eligibility checks
 	// (stake >= minimum AND has vote account in cache). Ineligible accounts are skipped entirely.
 	//
-	// First pass with numPartitions=0 to get eligible count and points map (no partition assignment yet).
+	// First pass with numPartitions=0 to get points map (no partition assignment yet).
 	// This replaces the old flow of:
 	// 1. RefreshStakeCacheCreditsObserved (read ALL accounts)
 	// 2. CountEligibleStakeAccountsWithRewardsFilter (iterate stake cache)
 	// 3. CalculateTotalPointsAndPartitions (iterate stake cache again)
-	pointsPerStakeAcct, points, _, stakeAccountSnapshots, eligibleCount, combinedStats := rewards.CombinedRefreshPointsAndPartitions(
+	pointsPerStakeAcct, points, _, stakeAccountSnapshots, _, combinedStats := rewards.CombinedRefreshPointsAndPartitions(
 		acctsDb, slotCtx, boundarySlot, 0, stakeHistory, newWarmupCooldownRateEpoch, nil)
 
-	// Compute partition count from eligible count
+	// Calculate individual stake rewards BEFORE computing partition count.
+	// This matches dev-calc behavior: partition count is based on len(stakingRewards),
+	// which is the POST-reward count of accounts that will actually receive rewards
+	// (or need ForceCreditsUpdate).
+	pointValue := rewards.PointValue{Rewards: totalStakingRewards, Points: points}
+	stakingRewards := rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
+
+	// Compute partition count from stakingRewards count (POST-reward recipient count)
+	// This matches dev-calc which uses len(stakeInfoResults) after reward calculation
 	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
-	numRewardPartitions := rewards.ComputeNumRewardPartitions(epoch, slotsPerEpoch, eligibleCount, epochSchedule.FirstNormalEpoch)
+	numRewardPartitions := rewards.ComputeNumRewardPartitions(epoch, slotsPerEpoch, uint64(len(stakingRewards)), epochSchedule.FirstNormalEpoch)
 
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 	firstStakingRewardSlot := firstSlotInEpoch + 1
 	lastStakingRewardSlot := firstSlotInEpoch + numRewardPartitions
 
-	mlog.Log.Infof("rewards partition: epoch=%d eligible=%d partitions=%d first=%d last=%d total_rewards=%d",
-		epoch, eligibleCount, numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
+	mlog.Log.Infof("rewards partition: epoch=%d recipients=%d partitions=%d first=%d last=%d total_rewards=%d",
+		epoch, len(stakingRewards), numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
-	// Build partitions from the already-computed points map (no second pass needed)
-	// Include accounts with ForceCreditsUpdateWithSkippedReward=true even if points=0,
-	// since they need their credits_observed updated during distribution.
+	// Build partitions from stakingRewards keys (accounts that will receive rewards or need credits update)
+	// This matches dev-calc behavior where partitions are built from stakeInfoResults keys.
 	partitions := rewards.NewPartitions(numRewardPartitions)
-	for pubkey, pts := range pointsPerStakeAcct {
-		if pts != nil && numRewardPartitions != 0 {
-			// Account is eligible for partition if it has points > 0 OR needs credits update
-			hasPoints := !pts.Points.Eq(wide.Uint128FromUint64(0))
-			needsCreditsUpdate := pts.ForceCreditsUpdateWithSkippedReward
-			if hasPoints || needsCreditsUpdate {
-				partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
-				partitions.AddPubkey(partitionIdx, pubkey)
-			}
+	for pubkey := range stakingRewards {
+		if numRewardPartitions != 0 {
+			partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
+			partitions.AddPubkey(partitionIdx, pubkey)
 		}
 	}
 
@@ -108,14 +110,14 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 					Epoch:             epoch,
 					LocalPartitions:   numRewardPartitions,
 					RpcPartitions:     rpcNumPartitions,
-					EligibleStakeAcct: eligibleCount,
+					EligibleStakeAcct: uint64(len(stakingRewards)),
 					TotalStakeAcct:    uint64(combinedStats.TotalAccounts),
 					BelowMinAcct:      uint64(combinedStats.BelowMinimum),
 					NoVoteAcct:        uint64(combinedStats.NoVoteInCache),
 					NoCreditsAcct:     0, // Not tracked separately in combined stats
 					ZeroPointsAcct:    uint64(combinedStats.ZeroPoints),
-					ZeroRewardsAcct:   0, // Checked later during CalculateStakeRewards
-					ZeroSplitAcct:     0, // Checked later during CalculateStakeRewards
+					ZeroRewardsAcct:   0, // Not tracked separately
+					ZeroSplitAcct:     0, // Not tracked separately
 				}
 			}
 		}
@@ -128,14 +130,11 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		LastStakingRewardSlot:  lastStakingRewardSlot,
 		BoundarySlot:           boundarySlot,
 		NumRewardPartitions:    numRewardPartitions,
-		EligibleCount:          eligibleCount,
+		EligibleCount:          uint64(len(stakingRewards)),
 		RewardPartitions:       partitions,
 		StakeAccountSnapshots:  stakeAccountSnapshots,
+		StakingRewards:         stakingRewards,
 	}
-
-	// Calculate individual stake rewards
-	pointValue := rewards.PointValue{Rewards: totalStakingRewards, Points: points}
-	partitionedRewardsInfo.StakingRewards = rewards.CalculateStakeRewards(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features)
 
 	// Aggregate vote rewards from locally computed staking rewards (removes RPC dependency)
 	localVoteRewards := rewards.AggregateVoteRewardsFromStakingRewards(partitionedRewardsInfo.StakingRewards)
