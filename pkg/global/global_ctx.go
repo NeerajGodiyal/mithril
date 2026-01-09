@@ -970,8 +970,14 @@ func LoadBoundaryVoteCache(accountsDbDir string, expectedBoundarySlot uint64) (i
 	instance.voteCacheMutex.Lock()
 	defer instance.voteCacheMutex.Unlock()
 
-	// Clear and rebuild vote cache from boundary snapshot
-	instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
+	// MERGE boundary cache into existing vote cache instead of replacing.
+	// This preserves LastTimestamp (needed for clock sysvar) and NodePubkey (needed for leader schedule)
+	// while updating Commission and EpochCredits to boundary-slot values (needed for rewards).
+	// See: https://github.com/... - LoadBoundaryVoteCache was causing clock sysvar panic on resume.
+
+	if instance.voteCache == nil {
+		instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
+	}
 
 	loadedCount := 0
 	for _, entry := range cacheFile.Entries {
@@ -990,17 +996,35 @@ func LoadBoundaryVoteCache(accountsDbDir string, expectedBoundarySlot uint64) (i
 			}
 		}
 
-		// Create a minimal VoteStateVersions with just commission and epoch credits
-		// Using Current version as it's the most common on mainnet
-		voteState := &sealevel.VoteStateVersions{
-			Type: sealevel.VoteStateVersionCurrent,
-			Current: sealevel.VoteState{
-				Commission:   entry.Commission,
-				EpochCredits: epochCredits,
-			},
+		// Check if vote account already exists in cache
+		existingState := instance.voteCache[pubkey]
+		if existingState != nil {
+			// MERGE: Update Commission and EpochCredits from boundary cache,
+			// but preserve LastTimestamp, NodePubkey, and other fields from existing entry.
+			switch existingState.Type {
+			case sealevel.VoteStateVersionCurrent:
+				existingState.Current.Commission = entry.Commission
+				existingState.Current.EpochCredits = epochCredits
+			case sealevel.VoteStateVersionV0_23_5:
+				existingState.V0_23_5.Commission = entry.Commission
+				existingState.V0_23_5.EpochCredits = epochCredits
+			case sealevel.VoteStateVersionV1_14_11:
+				existingState.V1_14_11.Commission = entry.Commission
+				existingState.V1_14_11.EpochCredits = epochCredits
+			}
+		} else {
+			// Vote account not in current cache - create minimal entry.
+			// This is a fallback; ideally all vote accounts should already be in cache.
+			// Note: This entry will have zero LastTimestamp which may affect clock estimation.
+			voteState := &sealevel.VoteStateVersions{
+				Type: sealevel.VoteStateVersionCurrent,
+				Current: sealevel.VoteState{
+					Commission:   entry.Commission,
+					EpochCredits: epochCredits,
+				},
+			}
+			instance.voteCache[pubkey] = voteState
 		}
-
-		instance.voteCache[pubkey] = voteState
 		loadedCount++
 	}
 

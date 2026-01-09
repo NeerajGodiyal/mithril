@@ -613,7 +613,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	// Use cached stake account snapshots instead of reading from AccountsDB.
 	// This ensures we use the exact state captured during refresh, avoiding issues
 	// with GetAccount returning current state instead of boundary-slot state.
-	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsForPartition(
+	distributedAccts, parentDistributedAccts, distributedLamports, burnedLamports, err := rewards.DistributeStakingRewardsForPartition(
 		acctsDb,
 		partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx),
 		partitionedEpochRewardsInfo.StakingRewards,
@@ -625,7 +625,14 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	}
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
-	epochRewards.Distribute(distributedLamports)
+	// Log burned lamports for diagnostics (matches Firedancer/Agave behavior)
+	if burnedLamports > 0 {
+		mlog.Log.Warnf("partition %d: burned %d lamports from failed distributions", partitionIdx+1, burnedLamports)
+	}
+
+	// Update EpochRewards with BOTH distributed and burned lamports.
+	// This matches Firedancer/Agave behavior where failed distributions still count toward progress.
+	epochRewards.Distribute(distributedLamports + burnedLamports)
 
 	// Log partition progress at INFO level for diagnostics
 	mlog.Log.Infof("rewards partition %d/%d: slot=%d stake_accts=%d lamports=%d cumulative=%d",

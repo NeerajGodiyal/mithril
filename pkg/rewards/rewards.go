@@ -1659,8 +1659,9 @@ type idxAndPubkey struct {
 // This is critical because GetAccount ignores the slot parameter and returns current state,
 // which can differ from boundary-slot state (accounts may have been closed, modified, etc.).
 // Using cached accounts ensures we apply rewards to the exact state that was used for calculation.
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, stakeAccountSnapshots map[solana.PublicKey]*accounts.Account, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, error) {
+func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, stakeAccountSnapshots map[solana.PublicKey]*accounts.Account, writeSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
 	var distributedLamports atomic.Uint64
+	var burnedLamports atomic.Uint64 // Track lamports that would have been distributed but account failed
 	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
 	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
@@ -1686,10 +1687,10 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// avoiding issues with GetAccount returning different (current) state.
 		cachedAcct, hasCached := stakeAccountSnapshots[stakePk]
 		if !hasCached {
-			// Account not in snapshots - this means it was filtered out during refresh
-			// (not found, tombstone, unmarshal error, or not in Stake state).
-			// This is expected and matches the behavior during rewards calculation.
-			mlog.Log.Debugf("rewards distribution: stake account %s not in cached snapshots - skipping", stakePk)
+			// Account not in snapshots - track as burned to match Firedancer/Agave behavior.
+			// These lamports count toward DistributedRewards even though they're not distributed.
+			burnedLamports.Add(reward.StakerRewards)
+			mlog.Log.Debugf("rewards distribution: stake account %s not in cached snapshots - burning %d lamports", stakePk, reward.StakerRewards)
 			return
 		}
 
@@ -1701,15 +1702,19 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// Deserialize the stake state (we know it's valid from the refresh check)
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			// This should not happen since we validated during refresh, but handle it gracefully
-			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized (unexpected) - skipping", stakePk)
+			// This should not happen since we validated during refresh, but handle it gracefully.
+			// Track as burned to match Firedancer/Agave behavior.
+			burnedLamports.Add(reward.StakerRewards)
+			mlog.Log.Warnf("rewards distribution: stake account %s cannot be deserialized - burning %d lamports", stakePk, reward.StakerRewards)
 			mlog.Log.Warnf("  error: %v", err)
 			return
 		}
 
 		// Verify it's still in Stake state (should always be true from refresh check)
 		if stakeState.Status != sealevel.StakeStateV2StatusStake {
-			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d, unexpected) - skipping", stakePk, stakeState.Status)
+			// Track as burned to match Firedancer/Agave behavior.
+			burnedLamports.Add(reward.StakerRewards)
+			mlog.Log.Warnf("rewards distribution: stake account %s is not in Stake state (status=%d) - burning %d lamports", stakePk, stakeState.Status, reward.StakerRewards)
 			return
 		}
 
@@ -1748,15 +1753,15 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 	// Check for worker errors
 	if errPtr := workerErr.Load(); errPtr != nil {
-		return nil, nil, 0, *errPtr
+		return nil, nil, 0, 0, *errPtr
 	}
 
 	err := acctsDb.StoreAccounts(accts, writeSlot)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in writeSlot %d: %w", writeSlot, err)
+		return nil, nil, 0, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in writeSlot %d: %w", writeSlot, err)
 	}
 
-	return accts, parentAccts, distributedLamports.Load(), nil
+	return accts, parentAccts, distributedLamports.Load(), burnedLamports.Load(), nil
 }
 
 // minimumStakeDelegation returns the minimum stake for REWARDS eligibility.
