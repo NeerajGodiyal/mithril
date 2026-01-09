@@ -316,23 +316,59 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		return absI > absJ
 	})
 
-	if len(mismatches) > 0 || len(localOnly) > 0 || len(rpcOnly) > 0 {
+	// Find exact matches
+	var exactMatches []solana.PublicKey
+	for pk, local := range localVoteRewards {
+		if rpc, exists := rpcVoteRewards[pk]; exists && local == rpc {
+			exactMatches = append(exactMatches, pk)
+		}
+	}
+
+	if len(mismatches) > 0 || len(localOnly) > 0 || len(rpcOnly) > 0 || len(exactMatches) > 0 {
 		w("=" + strings.Repeat("=", 79))
 		w("VOTE REWARDS MISMATCHES")
 		w("=" + strings.Repeat("=", 79))
 		w("")
 
+		// Show exact matches first
+		if len(exactMatches) > 0 {
+			w("EXACT MATCHES (local == rpc): %d accounts", len(exactMatches))
+			for _, pk := range exactMatches {
+				w("  %s: %d lamports", pk.String(), localVoteRewards[pk])
+			}
+			w("")
+		}
+
 		if len(mismatches) > 0 {
-			w("DIFFERENT AMOUNTS (in both local and RPC but different values):")
+			// TOP 20 by largest absolute diff
+			w("TOP 20 LARGEST DIFFS:")
 			w("%-44s %15s %15s %15s", "vote_pubkey", "local", "rpc", "diff")
 			w(strings.Repeat("-", 95))
 			for i, m := range mismatches {
-				if i >= 30 {
-					w("... and %d more", len(mismatches)-30)
+				if i >= 20 {
 					break
 				}
 				w("%-44s %15d %15d %+15d", m.pubkey.String(), m.local, m.rpc, m.diff)
 			}
+			w("")
+
+			// BOTTOM 20 by smallest absolute diff
+			if len(mismatches) > 20 {
+				w("BOTTOM 20 SMALLEST DIFFS:")
+				w("%-44s %15s %15s %15s", "vote_pubkey", "local", "rpc", "diff")
+				w(strings.Repeat("-", 95))
+				start := len(mismatches) - 20
+				if start < 20 {
+					start = 20 // Don't overlap with top 20
+				}
+				for i := start; i < len(mismatches); i++ {
+					m := mismatches[i]
+					w("%-44s %15d %15d %+15d", m.pubkey.String(), m.local, m.rpc, m.diff)
+				}
+				w("")
+			}
+
+			w("TOTAL MISMATCHES: %d (showing top 20 and bottom 20)", len(mismatches))
 			w("")
 		}
 
