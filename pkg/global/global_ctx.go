@@ -27,6 +27,12 @@ const (
 	// Each entry is 32 bytes (raw pubkey). Used for fast cache rebuild
 	// when stake_cache.json is stale.
 	StakePubkeyIndexFileName = "stake_pubkeys.idx"
+
+	// BoundaryVoteCacheFileName stores vote cache snapshot at epoch boundary.
+	// Saved when partitioned epoch rewards distribution starts, loaded on resume
+	// to ensure commission rates from boundary slot are used (not post-boundary values).
+	// Deleted when rewards distribution completes.
+	BoundaryVoteCacheFileName = "boundary_vote_cache.json"
 )
 
 type GlobalCtx struct {
@@ -292,6 +298,12 @@ func DeleteVoteCacheItem(pubkey solana.PublicKey) {
 	delete(instance.voteCache, pubkey)
 }
 
+// VoteCache returns the vote cache map directly.
+// WARNING: This has a potential race condition - callers iterate over the map while
+// PutVoteCacheItem() may modify it concurrently. However, copying the map on every
+// call would slow down normal block replay (called once per block for clock sysvar).
+// See TODO in EPOCH_TRANSITION_TODO.txt for potential fixes.
+// For single-key lookups, prefer VoteCacheItem() which is thread-safe.
 func VoteCache() map[solana.PublicKey]*sealevel.VoteStateVersions {
 	return instance.voteCache
 }
@@ -821,4 +833,194 @@ func DeleteStakePubkeyIndex(accountsDbDir string) error {
 		return err
 	}
 	return nil
+}
+
+// ============================================================================
+// Boundary Vote Cache - for partitioned epoch rewards resume
+// ============================================================================
+
+// BoundaryVoteCacheEpochCredits is JSON-serializable epoch credits.
+type BoundaryVoteCacheEpochCredits struct {
+	Epoch       uint64 `json:"epoch"`
+	Credits     uint64 `json:"credits"`
+	PrevCredits uint64 `json:"prev_credits"`
+}
+
+// BoundaryVoteCacheEntry is JSON-serializable vote account data at boundary.
+type BoundaryVoteCacheEntry struct {
+	Pubkey       string                          `json:"pubkey"`
+	Commission   uint8                           `json:"commission"`
+	EpochCredits []BoundaryVoteCacheEpochCredits `json:"epoch_credits"`
+}
+
+// BoundaryVoteCacheFile is the top-level structure for boundary_vote_cache.json.
+type BoundaryVoteCacheFile struct {
+	Slot       uint64                   `json:"slot"`        // Boundary slot when cache was saved
+	Epoch      uint64                   `json:"epoch"`       // Epoch for rewards being distributed
+	EntryCount int                      `json:"entry_count"` // Expected number of entries
+	Entries    []BoundaryVoteCacheEntry `json:"entries"`
+}
+
+// SaveBoundaryVoteCache persists the vote cache at epoch boundary for resume.
+// Call this when partitioned epoch rewards distribution starts.
+// Uses atomic write (temp file + rename) to prevent corruption.
+func SaveBoundaryVoteCache(accountsDbDir string, boundarySlot uint64, epoch uint64) error {
+	instance.voteCacheMutex.RLock()
+	defer instance.voteCacheMutex.RUnlock()
+
+	if instance.voteCache == nil || len(instance.voteCache) == 0 {
+		return nil // Nothing to save
+	}
+
+	entries := make([]BoundaryVoteCacheEntry, 0, len(instance.voteCache))
+	for pubkey, voteState := range instance.voteCache {
+		if voteState == nil {
+			continue
+		}
+
+		// Extract commission and epoch credits based on vote state version
+		var commission uint8
+		var epochCredits []sealevel.EpochCredits
+
+		switch voteState.Type {
+		case sealevel.VoteStateVersionCurrent:
+			commission = voteState.Current.Commission
+			epochCredits = voteState.Current.EpochCredits
+		case sealevel.VoteStateVersionV0_23_5:
+			commission = voteState.V0_23_5.Commission
+			epochCredits = voteState.V0_23_5.EpochCredits
+		case sealevel.VoteStateVersionV1_14_11:
+			commission = voteState.V1_14_11.Commission
+			epochCredits = voteState.V1_14_11.EpochCredits
+		}
+
+		// Convert epoch credits to JSON-serializable form
+		jsonCredits := make([]BoundaryVoteCacheEpochCredits, len(epochCredits))
+		for i, ec := range epochCredits {
+			jsonCredits[i] = BoundaryVoteCacheEpochCredits{
+				Epoch:       ec.Epoch,
+				Credits:     ec.Credits,
+				PrevCredits: ec.PrevCredits,
+			}
+		}
+
+		entries = append(entries, BoundaryVoteCacheEntry{
+			Pubkey:       pubkey.String(),
+			Commission:   commission,
+			EpochCredits: jsonCredits,
+		})
+	}
+
+	cacheFile := BoundaryVoteCacheFile{
+		Slot:       boundarySlot,
+		Epoch:      epoch,
+		EntryCount: len(entries),
+		Entries:    entries,
+	}
+
+	data, err := json.Marshal(cacheFile)
+	if err != nil {
+		return fmt.Errorf("failed to marshal boundary vote cache: %w", err)
+	}
+
+	cacheFilePath := filepath.Join(accountsDbDir, BoundaryVoteCacheFileName)
+	tmpFile := cacheFilePath + ".tmp"
+
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write boundary vote cache file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, cacheFilePath); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename boundary vote cache file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadBoundaryVoteCache loads the boundary vote cache and replaces the current vote cache.
+// Call this during resume when EpochRewards.Active is true.
+// Returns (loaded_count, epoch, nil) on success, (0, 0, nil) if file doesn't exist.
+func LoadBoundaryVoteCache(accountsDbDir string, expectedBoundarySlot uint64) (int, uint64, error) {
+	cacheFilePath := filepath.Join(accountsDbDir, BoundaryVoteCacheFileName)
+
+	data, err := os.ReadFile(cacheFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil // File doesn't exist
+		}
+		return 0, 0, fmt.Errorf("failed to read boundary vote cache file: %w", err)
+	}
+
+	var cacheFile BoundaryVoteCacheFile
+	if err := json.Unmarshal(data, &cacheFile); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse boundary vote cache file: %w", err)
+	}
+
+	// Validate slot matches expected boundary
+	if cacheFile.Slot != expectedBoundarySlot {
+		return 0, 0, fmt.Errorf("boundary vote cache slot mismatch: file=%d expected=%d (stale cache?)", cacheFile.Slot, expectedBoundarySlot)
+	}
+
+	// Validate entry count
+	if cacheFile.EntryCount != len(cacheFile.Entries) {
+		return 0, 0, fmt.Errorf("boundary vote cache entry count mismatch: header=%d actual=%d (corrupt file?)", cacheFile.EntryCount, len(cacheFile.Entries))
+	}
+
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
+
+	// Clear and rebuild vote cache from boundary snapshot
+	instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
+
+	loadedCount := 0
+	for _, entry := range cacheFile.Entries {
+		pubkey, err := solana.PublicKeyFromBase58(entry.Pubkey)
+		if err != nil {
+			continue // Skip invalid pubkeys
+		}
+
+		// Convert epoch credits back from JSON form
+		epochCredits := make([]sealevel.EpochCredits, len(entry.EpochCredits))
+		for i, ec := range entry.EpochCredits {
+			epochCredits[i] = sealevel.EpochCredits{
+				Epoch:       ec.Epoch,
+				Credits:     ec.Credits,
+				PrevCredits: ec.PrevCredits,
+			}
+		}
+
+		// Create a minimal VoteStateVersions with just commission and epoch credits
+		// Using Current version as it's the most common on mainnet
+		voteState := &sealevel.VoteStateVersions{
+			Type: sealevel.VoteStateVersionCurrent,
+			Current: sealevel.VoteState{
+				Commission:   entry.Commission,
+				EpochCredits: epochCredits,
+			},
+		}
+
+		instance.voteCache[pubkey] = voteState
+		loadedCount++
+	}
+
+	return loadedCount, cacheFile.Epoch, nil
+}
+
+// DeleteBoundaryVoteCache removes the boundary vote cache file.
+// Call this when rewards distribution completes.
+func DeleteBoundaryVoteCache(accountsDbDir string) error {
+	cacheFilePath := filepath.Join(accountsDbDir, BoundaryVoteCacheFileName)
+	err := os.Remove(cacheFilePath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// BoundaryVoteCacheExists checks if the boundary vote cache file exists.
+func BoundaryVoteCacheExists(accountsDbDir string) bool {
+	cacheFilePath := filepath.Join(accountsDbDir, BoundaryVoteCacheFileName)
+	_, err := os.Stat(cacheFilePath)
+	return err == nil
 }

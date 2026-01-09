@@ -275,6 +275,73 @@ Commit: 5f13ceb
 Confidence: HIGH
 
 ================================================================================
+KNOWN ISSUES - DEFERRED
+================================================================================
+
+VoteCache Race Condition [DEFERRED - PERFORMANCE CONCERN]
+----------------------------------------------------------
+Status: KNOWN ISSUE, not yet fixed
+
+Issue:
+  - VoteCache() returns raw map without holding lock (global_ctx.go:295-302)
+  - PutVoteCacheItem() uses mutex to modify map (global_ctx.go:274-280)
+  - Race condition when iterating VoteCache() while PutVoteCacheItem() modifies
+
+Severity: MEDIUM - could cause crashes or incorrect reads during concurrent access
+
+Why Deferred:
+  - VoteCache() is called on EVERY block for clock sysvar timestamp (sysvar.go:58)
+  - Returning a copy of the ~2,000-5,000 entry map would slow normal replay
+  - Current workaround: accept the race risk
+
+Potential Fixes (future):
+  1. Use sync.Map instead of regular map (different API, requires refactor)
+  2. Reader-friendly RCU pattern (copy-on-write for writes)
+  3. Separate fast path (VoteCacheItem) from bulk iteration (VoteCacheSnapshot)
+  4. Only copy during epoch boundary operations (detect context)
+
+Files:
+  - pkg/global/global_ctx.go:295-302 (VoteCache function)
+  - pkg/replay/sysvar.go:58 (clock sysvar - called every block)
+  - pkg/replay/leader_schedule_local.go:1598 (leader schedule - epoch boundary only)
+  - pkg/replay/epoch.go:301 (validator caching - epoch boundary only)
+
+AccountsDB Non-Historical Reads [FIXED - BOUNDARY VOTE CACHE]
+--------------------------------------------------------------
+Status: FIXED via boundary vote cache persistence
+
+Issue:
+  - acctsDb.GetAccount(slot, pubkey) IGNORES the slot parameter (accountsdb.go:168)
+  - Always returns the latest indexed version, not historical state
+  - This affects ALL slot-parameterized reads throughout the codebase
+
+Impact on Rewards Resume:
+  - Fresh replay: "latest" IS the boundary state, so effectively correct
+  - Resume at first slot of new epoch: if AccountsDB has post-boundary state,
+    vote cache reads would get post-boundary commission values
+
+Solution (implemented):
+  1. maxEpoch filter in calculateStakePointsAndCredits() (rewards.go:2281-2289)
+     - Filters epoch_credits to only include entries for epochs <= rewardedEpoch
+     - Each epoch's credits entry is frozen once epoch ends, so filter is reliable
+
+  2. Boundary vote cache persistence (global_ctx.go + replay/rewards.go)
+     - SaveBoundaryVoteCache: Called when rewards start, persists commission + credits
+     - LoadBoundaryVoteCache: Called on resume, restores boundary-slot values
+     - DeleteBoundaryVoteCache: Called when rewards complete
+     - File: boundary_vote_cache.json (same dir as stake_cache.json)
+
+  This ensures commission changes between boundary and resume don't affect calculations.
+
+Files:
+  - pkg/accountsdb/accountsdb.go:168-214 (GetAccount ignores slot - limitation)
+  - pkg/global/global_ctx.go:838-1026 (boundary vote cache save/load/delete)
+  - pkg/replay/rewards.go:371-380 (save at epoch boundary)
+  - pkg/replay/rewards.go:480-497 (load on resume)
+  - pkg/replay/rewards.go:644-650, 604-607 (delete on completion)
+  - pkg/rewards/rewards.go:2281-2289 (maxEpoch filter for credits)
+
+================================================================================
 REFERENCE IMPLEMENTATION NOTES
 ================================================================================
 

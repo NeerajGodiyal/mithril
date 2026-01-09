@@ -1844,8 +1844,8 @@ func ReplayBlocks(
 				mlog.Log.Errorf("CRITICAL: distributedAccts/parentDistributedAccts length mismatch: %d vs %d",
 					len(distributedAccts), len(parentDistributedAccts))
 			}
-			// Check for nil entries and lamports differences
-			var nilCurrentCount, nilParentCount, lamportsMismatchCount int
+			// Check for nil entries and key alignment
+			var nilCurrentCount, nilParentCount int
 			for i := 0; i < len(distributedAccts) && i < len(parentDistributedAccts); i++ {
 				if distributedAccts[i] == nil {
 					nilCurrentCount++

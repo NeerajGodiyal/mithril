@@ -368,6 +368,17 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 	sealevel.SysvarCache.EpochRewards.Sysvar = &newEpochRewards
 
+	// Save boundary vote cache for resume support.
+	// If Mithril crashes during rewards distribution and resumes later, the vote cache
+	// may have post-boundary commission values. This persisted cache ensures we use
+	// the exact commission rates from the boundary slot for correct reward calculations.
+	if err := global.SaveBoundaryVoteCache(acctsDb.AcctsDir, boundarySlot, epoch); err != nil {
+		mlog.Log.Warnf("failed to save boundary vote cache: %v (continuing anyway)", err)
+	} else {
+		mlog.Log.Infof("saved boundary vote cache: slot=%d epoch=%d entries=%d",
+			boundarySlot, epoch, len(global.VoteCache()))
+	}
+
 	numStakeAccounts := uint64(len(global.StakeCache()))
 	slotsInEpoch := epochSchedule.SlotsInEpoch(epoch)
 
@@ -465,6 +476,25 @@ func recalculatePartitionedRewardsForResume(
 	// This matches Firedancer's fd_stake_delegations_refresh() call before rewards calculation.
 	// Also capture stake account snapshots for use during distribution (avoids re-reading from AccountsDB).
 	_, _, stakeAccountSnapshots := rewards.RefreshStakeCacheCreditsObserved(acctsDb, boundarySlot)
+
+	// VOTE CACHE RESTORATION:
+	// Load the boundary vote cache saved when rewards distribution started.
+	// This ensures we use the exact commission rates from the boundary slot,
+	// not post-boundary values that may have changed during the crash/resume window.
+	//
+	// The maxEpoch filter handles epoch_credits correctly (filters to epochs <= rewardedEpoch),
+	// but commission has no such filter - it's read directly from the vote state.
+	// Loading the boundary cache ensures commission values are correct.
+	loadedVotes, loadedEpoch, err := global.LoadBoundaryVoteCache(acctsDb.AcctsDir, boundarySlot)
+	if err != nil {
+		mlog.Log.Warnf("rewards resume: failed to load boundary vote cache: %v (using current vote cache with maxEpoch filter)", err)
+		mlog.Log.Infof("rewards resume: using existing vote cache with maxEpoch=%d filter (non-historical read protection)", epoch-1)
+	} else if loadedVotes == 0 {
+		// No boundary vote cache file exists - this is expected for old state or first time
+		mlog.Log.Infof("rewards resume: no boundary vote cache found (using current vote cache with maxEpoch=%d filter)", epoch-1)
+	} else {
+		mlog.Log.Infof("rewards resume: loaded boundary vote cache with %d entries from epoch %d", loadedVotes, loadedEpoch)
+	}
 
 	// Rebuild partition assignments and calculate points
 	// Use rewardedEpoch (epoch-1) as maxEpoch to freeze vote credits at epoch boundary.
@@ -571,6 +601,11 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		sealevel.SysvarCache.EpochRewards.Acct = epochRewardsAcct
 		sealevel.SysvarCache.EpochRewards.Sysvar = &epochRewards
 
+		// Clean up boundary vote cache (rewards distribution complete via early exit)
+		if err := global.DeleteBoundaryVoteCache(acctsDb.AcctsDir); err != nil {
+			mlog.Log.Warnf("failed to delete boundary vote cache: %v", err)
+		}
+
 		return nil, nil, nil
 	}
 
@@ -610,6 +645,14 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		mlog.Log.Infof("  partition_idx=%d num_partitions=%d total_distributed=%d total_rewards=%d",
 			partitionIdx+1, partitionedEpochRewardsInfo.NumRewardPartitions,
 			epochRewards.DistributedRewards, partitionedEpochRewardsInfo.TotalStakingRewards)
+
+		// Clean up boundary vote cache now that rewards distribution is complete.
+		// This file is only needed during the rewards period for resume support.
+		if err := global.DeleteBoundaryVoteCache(acctsDb.AcctsDir); err != nil {
+			mlog.Log.Warnf("failed to delete boundary vote cache: %v", err)
+		} else {
+			mlog.Log.Infof("deleted boundary vote cache (rewards distribution complete)")
+		}
 	}
 
 	writer := new(bytes.Buffer)
