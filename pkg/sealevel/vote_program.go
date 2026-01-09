@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
@@ -17,6 +18,41 @@ import (
 	"github.com/gammazero/deque"
 	"k8s.io/klog/v2"
 )
+
+// Rate limiting for slot hash mismatch errors to reduce terminal spam
+var (
+	slotHashMismatchCount atomic.Uint64
+	slotHashMismatchSlot  atomic.Uint64
+	slotHashMismatchLimit = uint64(15) // Only show first 15 per slot in terminal
+)
+
+// logSlotHashMismatch logs vote hash mismatch errors with rate limiting for terminal output.
+// Always logs to file, but limits terminal output to avoid spam.
+func logSlotHashMismatch(slot uint64, format string, args ...interface{}) {
+	// Always log to file
+	mlog.Log.FileOnlyf(format, args...)
+
+	// Rate limit terminal output per slot
+	currentSlot := slotHashMismatchSlot.Load()
+	if slot != currentSlot {
+		// New slot - reset counter
+		slotHashMismatchSlot.Store(slot)
+		slotHashMismatchCount.Store(1)
+		// Also print to terminal for first one
+		mlog.Log.Infof(format, args...)
+		return
+	}
+
+	count := slotHashMismatchCount.Add(1)
+	if count <= slotHashMismatchLimit {
+		// Under limit - print to terminal
+		mlog.Log.Infof(format, args...)
+	} else if count == slotHashMismatchLimit+1 {
+		// Just hit limit - print summary message
+		mlog.Log.Infof("... additional VoteErrSlotHashMismatch errors for slot %d logged to file only", slot)
+	}
+	// Above limit - already logged to file, skip terminal
+}
 
 const (
 	VoteProgramInstrTypeInitializeAccount = iota
@@ -1331,7 +1367,7 @@ func checkSlotsAreValid(voteState *VoteState, voteSlots []uint64, voteHash [32]b
 
 	//mlog.Log.Debugf("Slothashes.Hash = %v", slotHashes[j].Hash)
 	if slotHashes[j].Hash != voteHash {
-		mlog.Log.Infof("%s dropped vote slots. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteHash, slotHashes[j].Hash[:])
+		logSlotHashMismatch(slotHashes[j].Slot, "%s dropped vote slots. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteHash, slotHashes[j].Hash[:])
 		return VoteErrSlotHashMismatch
 	}
 
@@ -1553,7 +1589,7 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	//mlog.Log.Debugf("SlotHashes.Hash = %s, SlotHashes.Slot = %d", solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]), slotHashes[slotHashesIndex].Slot)
 
 	if slotHashes[slotHashesIndex].Hash != proposedHash {
-		mlog.Log.Infof("%s dropped vote. failed to match hash at slot %d: expected=%s local=%s",
+		logSlotHashMismatch(slotHashes[slotHashesIndex].Slot, "%s dropped vote. failed to match hash at slot %d: expected=%s local=%s",
 			voteState.NodePubkey, slotHashes[slotHashesIndex].Slot,
 			solana.HashFromBytes(proposedHash[:]), solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]))
 		return VoteErrSlotHashMismatch
