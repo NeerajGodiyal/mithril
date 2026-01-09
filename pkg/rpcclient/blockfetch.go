@@ -295,6 +295,30 @@ func (fetcher *RpcClient) GetEpochRewardsSysvar() ([]byte, error) {
 	return result.Value.Data.GetBinary(), nil
 }
 
+// TODO: Enable when archive node support is needed
+// GetEpochRewardsSysvarAtSlot fetches the EpochRewards sysvar account data at a specific slot.
+// Requires an archive node to query historical state.
+// Returns the raw account data bytes which can be decoded using sealevel.SysvarEpochRewards.
+// func (fetcher *RpcClient) GetEpochRewardsSysvarAtSlot(slot uint64) ([]byte, error) {
+// 	epochRewardsAddr := solana.MustPublicKeyFromBase58("SysvarEpochRewards1111111111111111111111111")
+//
+// 	opts := &rpc.GetAccountInfoOpts{
+// 		Commitment: rpc.CommitmentConfirmed,
+// 	}
+// 	opts.MinContextSlot = &slot
+//
+// 	result, err := fetcher.client.GetAccountInfoWithOpts(context.TODO(), epochRewardsAddr, opts)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to fetch EpochRewards sysvar at slot %d: %w", slot, err)
+// 	}
+//
+// 	if result == nil || result.Value == nil {
+// 		return nil, fmt.Errorf("EpochRewards sysvar account not found at slot %d", slot)
+// 	}
+//
+// 	return result.Value.Data.GetBinary(), nil
+// }
+
 // VoteAccountInfo contains vote account data from RPC getVoteAccounts
 type VoteAccountInfo struct {
 	VotePubkey       solana.PublicKey

@@ -41,7 +41,6 @@ type EpochBoundaryDiagnostics struct {
 	ValidatorRate            float64 // Emission rate for validators
 	PrevEpochDurationInYears float64 // Duration of prev epoch in years
 	SlotsPerYear             float64 // Slots per year for inflation calculation
-	RpcTotalStakingRewards   uint64  // Total staking rewards from RPC EpochRewards sysvar
 
 	// Stake cache stats
 	StakeCacheSize    int
@@ -158,33 +157,27 @@ func WriteEpochBoundaryDiagnostics(diag *EpochBoundaryDiagnostics) string {
 	w("")
 
 	// Reward pool inputs (for debugging total rewards mismatch)
-	w("REWARD POOL INPUTS")
+	w("INFLATION POOL CALCULATION (all values computed locally)")
 	w("-" + strings.Repeat("-", 79))
-	w("  Total SOL supply:        %d lamports (%.4f SOL)", diag.Capitalization, float64(diag.Capitalization)/1e9)
-	w("  Slot in year:            %.10f", diag.SlotInYear)
-	w("  Emission rate:           %.10f", diag.ValidatorRate)
-	w("  Prev epoch duration:     %.15f years", diag.PrevEpochDurationInYears)
-	w("  Slots per year:          %.2f", diag.SlotsPerYear)
-	w("  Formula: total_supply * emission_rate * epoch_duration")
-	expectedPool := float64(diag.Capitalization) * diag.ValidatorRate * diag.PrevEpochDurationInYears
-	w("  Calculated pool:         %.4f lamports", expectedPool)
-	w("  Local pool:              %d lamports", diag.TotalStakingRewards)
-	if diag.RpcTotalStakingRewards != 0 {
-		w("  RPC pool:                %d lamports", diag.RpcTotalStakingRewards)
-		poolDiff := int64(diag.TotalStakingRewards) - int64(diag.RpcTotalStakingRewards)
-		w("  Pool diff (local-rpc):   %+d lamports", poolDiff)
-	}
+	w("  Inputs:")
+	w("    capitalization:        %d lamports (%.4f SOL)", diag.Capitalization, float64(diag.Capitalization)/1e9)
+	w("    slot_in_year:          %.10f", diag.SlotInYear)
+	w("    emission_rate:         %.10f", diag.ValidatorRate)
+	w("    epoch_duration:        %.15f years", diag.PrevEpochDurationInYears)
+	w("    slots_per_year:        %.2f", diag.SlotsPerYear)
+	w("")
+	w("  Outputs:")
+	w("    total_staking_rewards: %d lamports (%.4f SOL)", diag.TotalStakingRewards, float64(diag.TotalStakingRewards)/1e9)
+	w("    total_points:          %s", diag.TotalPoints.String())
 	w("")
 
 	// Vote rewards comparison
-	w("VOTE REWARDS COMPARISON")
+	w("VOTE REWARDS COMPARISON (local vs RPC block data)")
 	w("-" + strings.Repeat("-", 79))
-	w("  Local vote accounts:  %d", diag.LocalVoteAccounts)
-	w("  RPC vote accounts:    %d", diag.RpcVoteAccounts)
-	w("  Local vote total:     %d lamports", diag.LocalVoterTotal)
-	w("  RPC vote total:       %d lamports", diag.RpcVoteTotal)
+	w("  Local (computed):     %d accounts, %d lamports", diag.LocalVoteAccounts, diag.LocalVoterTotal)
+	w("  RPC (from block):     %d accounts, %d lamports", diag.RpcVoteAccounts, diag.RpcVoteTotal)
 	voteDiff := int64(diag.LocalVoterTotal) - int64(diag.RpcVoteTotal)
-	w("  Diff (local - rpc):   %+d lamports", voteDiff)
+	w("  Diff (local - RPC):   %+d lamports", voteDiff)
 	w("")
 
 	// Stake cache breakdown
