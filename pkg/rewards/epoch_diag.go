@@ -53,6 +53,13 @@ type EpochBoundaryDiagnostics struct {
 	LocalVoteAccounts int
 	RpcVoteAccounts   int
 
+	// Leader schedule validation
+	LeaderScheduleMatched bool   // true if local hash matches RPC hash
+	LocalScheduleHash     string // hash of locally computed schedule
+	RpcScheduleHash       string // hash from RPC (or "RPC_FETCH_FAILED" or empty)
+	LocalValidatorCount   int    // number of validators in local schedule
+	LocalScheduleStake    uint64 // total stake in local schedule
+
 	// Detailed data for file output
 	PointsPerStake map[solana.PublicKey]*CalculatedStakePoints
 	StakingRewards map[solana.PublicKey]*CalculatedStakeRewards
@@ -178,6 +185,27 @@ func WriteEpochBoundaryDiagnostics(diag *EpochBoundaryDiagnostics) string {
 	w("  RPC (from block):     %d accounts, %d lamports", diag.RpcVoteAccounts, diag.RpcVoteTotal)
 	voteDiff := int64(diag.LocalVoterTotal) - int64(diag.RpcVoteTotal)
 	w("  Diff (local - RPC):   %+d lamports", voteDiff)
+	w("")
+
+	// Leader schedule validation
+	w("LEADER SCHEDULE VALIDATION")
+	w("-" + strings.Repeat("-", 79))
+	if diag.LocalScheduleHash != "" {
+		w("  Epoch:                %d", diag.NewEpoch)
+		w("  Local validators:     %d", diag.LocalValidatorCount)
+		w("  Local stake:          %d (%.2f SOL)", diag.LocalScheduleStake, float64(diag.LocalScheduleStake)/1e9)
+		w("  Local hash:           %s", diag.LocalScheduleHash)
+		w("  RPC hash:             %s", diag.RpcScheduleHash)
+		if diag.LeaderScheduleMatched {
+			w("  Status:               MATCH ✓")
+		} else if diag.RpcScheduleHash == "RPC_FETCH_FAILED" {
+			w("  Status:               RPC UNAVAILABLE")
+		} else {
+			w("  Status:               MISMATCH ✗")
+		}
+	} else {
+		w("  (not available - resume path or early exit)")
+	}
 	w("")
 
 	// Stake cache breakdown
@@ -534,6 +562,19 @@ func LogEpochBoundarySummary(diag *EpochBoundaryDiagnostics, diagPath string) {
 		mlog.Log.Infof("  vote rewards: local=%d rpc=%d ✓", diag.LocalVoterTotal, diag.RpcVoteTotal)
 	} else {
 		mlog.Log.Warnf("  vote rewards: local=%d rpc=%d diff=%+d", diag.LocalVoterTotal, diag.RpcVoteTotal, voteDiff)
+	}
+
+	// Leader schedule validation (if available)
+	if diag.LocalScheduleHash != "" {
+		if diag.LeaderScheduleMatched {
+			mlog.Log.Infof("  leader schedule: validators=%d stake=%.2f SOL hash=%s ✓",
+				diag.LocalValidatorCount, float64(diag.LocalScheduleStake)/1e9, diag.LocalScheduleHash)
+		} else if diag.RpcScheduleHash == "RPC_FETCH_FAILED" {
+			mlog.Log.Infof("  leader schedule: validators=%d stake=%.2f SOL hash=%s (rpc unavailable)",
+				diag.LocalValidatorCount, float64(diag.LocalScheduleStake)/1e9, diag.LocalScheduleHash)
+		} else {
+			mlog.Log.Warnf("  leader schedule: MISMATCH local=%s rpc=%s", diag.LocalScheduleHash, diag.RpcScheduleHash)
+		}
 	}
 
 	// Diagnostics file path

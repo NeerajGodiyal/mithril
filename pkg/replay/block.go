@@ -1731,7 +1731,14 @@ func ReplayBlocks(
 				// RPC validation for the new epoch's schedule (writes validation file)
 				mlog.Log.Infof("  [LEADER SCHEDULE] validating against RPC...")
 				localSchedule := global.LeaderSchedule()
-				ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
+				matched, rpcHash := ValidateLeaderScheduleAgainstRPC(block.Epoch, epochSchedule, localSchedule, localSummary, rpcc, rpcBackups, logsDir)
+
+				// Store validation results in context for diagnostics
+				epochTransitionCtx.LeaderScheduleMatched = matched
+				epochTransitionCtx.LocalScheduleHash = localSummary.LocalHash
+				epochTransitionCtx.RpcScheduleHash = rpcHash
+				epochTransitionCtx.LocalValidatorCount = localSummary.ValidatorsUsed
+				epochTransitionCtx.LocalTotalStake = localSummary.FilteredStake
 
 				// NOTE: RPC vote account comparison removed. GetVoteAccounts only returns CURRENT state
 				// (not historical boundary slot state), so any comparison would be misleading.

@@ -26,7 +26,7 @@ func newWarmupCooldownRateEpoch(epochSchedule *sealevel.SysvarEpochSchedule, f *
 	return &epoch
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, error) {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, transitionCtx *EpochTransitionContext) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, error) {
 	// SAFEGUARD: Check if epoch_rewards.active is already true, which would indicate
 	// we're trying to reprocess an already-processed epoch boundary.
 	// Like Firedancer, when active=true we should NOT recompute - use existing sysvar values.
@@ -205,6 +205,15 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		PointsPerStake:      pointsPerStakeAcct,
 		StakingRewards:      partitionedRewardsInfo.StakingRewards,
 		RpcRewards:          block.Rewards,
+	}
+
+	// Add leader schedule validation info if available
+	if transitionCtx != nil {
+		diag.LeaderScheduleMatched = transitionCtx.LeaderScheduleMatched
+		diag.LocalScheduleHash = transitionCtx.LocalScheduleHash
+		diag.RpcScheduleHash = transitionCtx.RpcScheduleHash
+		diag.LocalValidatorCount = transitionCtx.LocalValidatorCount
+		diag.LocalScheduleStake = transitionCtx.LocalTotalStake
 	}
 
 	// Fix RpcPartitions if it's MaxUint64 (means not available)

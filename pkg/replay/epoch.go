@@ -202,6 +202,13 @@ type EpochTransitionContext struct {
 	NewEpoch                   uint64
 	FirstSlotInEpoch           uint64
 	NewWarmupCooldownRateEpoch *uint64
+
+	// Leader schedule validation results (populated after ValidateLeaderScheduleAgainstRPC)
+	LeaderScheduleMatched bool   // true if local hash matches RPC hash
+	LocalScheduleHash     string // hash of locally computed schedule
+	RpcScheduleHash       string // hash from RPC (or "RPC_FETCH_FAILED")
+	LocalValidatorCount   int    // number of validators in local schedule
+	LocalTotalStake       uint64 // total stake in local schedule
 }
 
 // prepareEpochStakes computes the stake distribution for the new epoch.
@@ -246,7 +253,7 @@ func handleEpochRewards(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards 
 	var err error
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts, err = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, ctx.StakeHistory, replayCtx, epochSchedule, block, f, ctx.NewEpoch, ctx.FirstSlotInEpoch, ctx)
 		if err != nil {
 			// Check if this is the "epoch rewards already active" error - if so, fall back to resume path
 			if err.Error() == "epoch rewards already active - use resume path instead" {
