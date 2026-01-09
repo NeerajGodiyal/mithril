@@ -1798,8 +1798,8 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		// Log partition 11 details (partitionIdx 10) - helps identify divergence root cause
 		if partitionIdx == 10 {
-			mlog.Log.Infof("P11_ACCT: pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
-				stakePk, reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
+			mlog.Log.Infof("P11_ACCT pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
+				stakePk.String(), reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
 				beforeStakeLamports, stakeState.Stake.Stake.Delegation.StakeLamports, beforeAcctLamports)
 		}
 
