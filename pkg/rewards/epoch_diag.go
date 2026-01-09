@@ -279,11 +279,16 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		}
 	}
 
-	// Build commission map from staking rewards (aggregate by vote account)
+	// Build commission and stake maps from staking rewards (aggregate by vote account)
 	voteCommission := make(map[solana.PublicKey]uint8)
-	for _, sr := range diag.StakingRewards {
+	voteStake := make(map[solana.PublicKey]uint64)
+	stakeCache := global.StakeCache()
+	for stakePk, sr := range diag.StakingRewards {
 		if sr != nil {
 			voteCommission[sr.VotePubkey] = sr.Commission
+			if delegation := stakeCache[stakePk]; delegation != nil {
+				voteStake[sr.VotePubkey] += delegation.StakeLamports
+			}
 		}
 	}
 
@@ -294,6 +299,7 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		rpc        uint64
 		diff       int64
 		commission uint8
+		stake      uint64 // total stake delegated to this vote account
 	}
 	var mismatches []mismatch
 	var localOnly []solana.PublicKey
@@ -304,7 +310,7 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 		if !exists {
 			localOnly = append(localOnly, pk)
 		} else if local != rpc {
-			mismatches = append(mismatches, mismatch{pk, local, rpc, int64(local) - int64(rpc), voteCommission[pk]})
+			mismatches = append(mismatches, mismatch{pk, local, rpc, int64(local) - int64(rpc), voteCommission[pk], voteStake[pk]})
 		}
 	}
 	for pk := range rpcVoteRewards {
@@ -351,58 +357,62 @@ func writeMismatchDetails(f *os.File, diag *EpochBoundaryDiagnostics) {
 				}
 			}
 
-			// Sort each group by absolute diff
-			sortByAbsDiff := func(slice []mismatch) {
+			// Sort by stake descending (for proportionality analysis)
+			sortByStake := func(slice []mismatch) {
 				sort.Slice(slice, func(i, j int) bool {
-					absI, absJ := slice[i].diff, slice[j].diff
-					if absI < 0 {
-						absI = -absI
-					}
-					if absJ < 0 {
-						absJ = -absJ
-					}
-					return absI > absJ
+					return slice[i].stake > slice[j].stake
 				})
 			}
-			sortByAbsDiff(comm0)
-			sortByAbsDiff(comm100)
-			sortByAbsDiff(commMid)
 
-			// Helper to write top/bottom N
-			writeTopBottom := func(label string, slice []mismatch, n int) {
+			// Helper to write stake-ordered view with diff/stake ratio
+			writeStakeOrdered := func(label string, slice []mismatch, n int) {
 				if len(slice) == 0 {
 					return
 				}
-				w("%s (%d total):", label, len(slice))
-				w("%-44s %5s %15s %15s %15s", "vote_pubkey", "comm%", "local", "rpc", "diff")
-				w(strings.Repeat("-", 100))
+				// Sort by stake for this section
+				sortByStake(slice)
 
-				// Top N
-				w("  TOP %d (largest diffs):", n)
+				w("%s (%d total) - ORDERED BY STAKE:", label, len(slice))
+				w("%-44s %5s %12s %15s %15s %12s", "vote_pubkey", "comm%", "stake(SOL)", "local", "diff", "diff/stake")
+				w(strings.Repeat("-", 110))
+
+				// Top N by stake
+				w("  TOP %d BY STAKE (highest stake):", n)
 				for i := 0; i < n && i < len(slice); i++ {
 					m := slice[i]
-					w("  %-44s %4d%% %15d %15d %+15d", m.pubkey.String(), m.commission, m.local, m.rpc, m.diff)
+					// Calculate diff per SOL of stake (lamports diff per SOL)
+					var diffPerSol float64
+					if m.stake > 0 {
+						diffPerSol = float64(m.diff) / (float64(m.stake) / 1e9)
+					}
+					w("  %-44s %4d%% %12.2f %15d %+15d %12.6f",
+						m.pubkey.String(), m.commission, float64(m.stake)/1e9, m.local, m.diff, diffPerSol)
 				}
 
-				// Bottom N (only if we have enough to not overlap)
+				// Bottom N by stake (only if we have enough to not overlap)
 				if len(slice) > n {
 					w("")
-					w("  BOTTOM %d (smallest diffs):", n)
+					w("  BOTTOM %d BY STAKE (lowest stake):", n)
 					start := len(slice) - n
 					if start < n {
 						start = n
 					}
 					for i := start; i < len(slice); i++ {
 						m := slice[i]
-						w("  %-44s %4d%% %15d %15d %+15d", m.pubkey.String(), m.commission, m.local, m.rpc, m.diff)
+						var diffPerSol float64
+						if m.stake > 0 {
+							diffPerSol = float64(m.diff) / (float64(m.stake) / 1e9)
+						}
+						w("  %-44s %4d%% %12.2f %15d %+15d %12.6f",
+							m.pubkey.String(), m.commission, float64(m.stake)/1e9, m.local, m.diff, diffPerSol)
 					}
 				}
 				w("")
 			}
 
-			writeTopBottom("0% COMMISSION VALIDATORS", comm0, 10)
-			writeTopBottom("100% COMMISSION VALIDATORS", comm100, 10)
-			writeTopBottom("1-99% COMMISSION VALIDATORS", commMid, 10)
+			writeStakeOrdered("100% COMMISSION VALIDATORS", comm100, 10)
+			writeStakeOrdered("0% COMMISSION VALIDATORS", comm0, 10)
+			writeStakeOrdered("1-99% COMMISSION VALIDATORS", commMid, 10)
 
 			w("TOTAL MISMATCHES: %d (0%%=%d, 100%%=%d, 1-99%%=%d)", len(mismatches), len(comm0), len(comm100), len(commMid))
 			w("")
