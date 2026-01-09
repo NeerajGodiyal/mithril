@@ -66,8 +66,13 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// 1. RefreshStakeCacheCreditsObserved (read ALL accounts)
 	// 2. CountEligibleStakeAccountsWithRewardsFilter (iterate stake cache)
 	// 3. CalculateTotalPointsAndPartitions (iterate stake cache again)
+	//
+	// CRITICAL: Pass rewardedEpoch as maxEpoch to clamp vote credits to the epoch being rewarded.
+	// This prevents "post-boundary credits leak" where credits from the new epoch (906) would
+	// incorrectly inflate rewards for the previous epoch (905).
+	rewardedEpoch := epoch - 1
 	pointsPerStakeAcct, points, _, stakeAccountSnapshots, _, _ := rewards.CombinedRefreshPointsAndPartitions(
-		acctsDb, slotCtx, boundarySlot, 0, stakeHistory, newWarmupCooldownRateEpoch, nil)
+		acctsDb, slotCtx, boundarySlot, 0, stakeHistory, newWarmupCooldownRateEpoch, &rewardedEpoch)
 
 	// Calculate individual stake rewards BEFORE computing partition count.
 	// This matches dev-calc behavior: partition count is based on len(stakingRewards),
