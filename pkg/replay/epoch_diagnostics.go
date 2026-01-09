@@ -1083,3 +1083,49 @@ func WriteStakingRewardsComparison(comp *StakingRewardComparison) {
 
 	mlog.Log.Infof("wrote staking rewards comparison to %s", filename)
 }
+
+// PartitionAccountDetail holds before/after details for an account during distribution
+type PartitionAccountDetail struct {
+	Pubkey              string `json:"pubkey"`
+	Reward              uint64 `json:"reward"`
+	BeforeCredits       uint64 `json:"before_credits"`
+	AfterCredits        uint64 `json:"after_credits"`
+	BeforeStakeLamports uint64 `json:"before_stake_lamports"`
+	AfterStakeLamports  uint64 `json:"after_stake_lamports"`
+	BeforeAcctLamports  uint64 `json:"before_acct_lamports"`
+	IsForceCreditsUpdate bool   `json:"is_force_credits_update"` // true if reward=0 but credits changed
+}
+
+// PartitionAccountDetails holds all account details for a partition
+type PartitionAccountDetails struct {
+	Slot           uint64                   `json:"slot"`
+	PartitionIdx   uint64                   `json:"partition_idx"`
+	AccountCount   int                      `json:"account_count"`
+	TotalRewards   uint64                   `json:"total_rewards"`
+	ForceCreditsCount int                   `json:"force_credits_update_count"`
+	Accounts       []PartitionAccountDetail `json:"accounts"`
+}
+
+// WritePartitionAccountDetails writes partition account before/after details to a JSON file
+func WritePartitionAccountDetails(details *PartitionAccountDetails) {
+	if details == nil {
+		return
+	}
+
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("partition_details_slot_%d_p%d.json", details.Slot, details.PartitionIdx+1))
+
+	data, err := json.MarshalIndent(details, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal partition account details: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write partition account details: %v", err)
+		return
+	}
+
+	mlog.Log.Infof("wrote partition account details to %s (accounts=%d force_credits=%d)",
+		filename, details.AccountCount, details.ForceCreditsCount)
+}

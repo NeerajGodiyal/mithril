@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
@@ -1719,6 +1722,17 @@ type idxAndPubkey struct {
 // If accounts were modified between boundary and distribution (e.g., SOL transfer to stake
 // account), using stale boundary snapshots would cause LtHash/bank hash divergence.
 //
+// partitionDetail holds before/after data for P10/P11 diagnostic dumps
+type partitionDetail struct {
+	pubkey              solana.PublicKey
+	reward              uint64
+	beforeCredits       uint64
+	afterCredits        uint64
+	beforeStakeLamports uint64
+	afterStakeLamports  uint64
+	beforeAcctLamports  uint64
+}
+
 // Reference: firedancer/src/flamenco/rewards/fd_rewards.c:860-875
 func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, writeSlot uint64, partitionIdx uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64, error) {
 	var distributedLamports atomic.Uint64
@@ -1728,6 +1742,11 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	var workerErr atomic.Pointer[error]
 	accts := make([]*accounts.Account, partition.NumPubkeys())
 	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
+
+	// For P10/P11 diagnostics: collect before/after details to write to a file
+	collectDetails := partitionIdx == 9 || partitionIdx == 10
+	var detailsMu sync.Mutex
+	var partitionDetails []partitionDetail
 
 	var wg sync.WaitGroup
 
@@ -1796,11 +1815,19 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
 		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.StakerRewards))
 
-		// Log partition 10 and 11 details - compare success (P10) vs divergence (P11)
-		if partitionIdx == 9 || partitionIdx == 10 {
-			mlog.Log.Infof("P%d_ACCT pk=%s reward=%d before_credits=%d after_credits=%d before_stake=%d after_stake=%d before_lamports=%d",
-				partitionIdx+1, stakePk.String(), reward.StakerRewards, beforeCreditsObserved, reward.NewCreditsObserved,
-				beforeStakeLamports, stakeState.Stake.Stake.Delegation.StakeLamports, beforeAcctLamports)
+		// Collect partition 10 and 11 details for diagnostic file (not terminal)
+		if collectDetails {
+			detailsMu.Lock()
+			partitionDetails = append(partitionDetails, partitionDetail{
+				pubkey:              stakePk,
+				reward:              reward.StakerRewards,
+				beforeCredits:       beforeCreditsObserved,
+				afterCredits:        reward.NewCreditsObserved,
+				beforeStakeLamports: beforeStakeLamports,
+				afterStakeLamports:  stakeState.Stake.Stake.Delegation.StakeLamports,
+				beforeAcctLamports:  beforeAcctLamports,
+			})
+			detailsMu.Unlock()
 		}
 
 		newStakeStateBytes, err := sealevel.MarshalStakeStake(stakeState)
@@ -1910,7 +1937,87 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		return nil, nil, 0, 0, fmt.Errorf("error updating accounts for partitioned epoch rewards in writeSlot %d: %w", writeSlot, err)
 	}
 
+	// Write P10/P11 partition details to a JSON file in epoch_diagnostics
+	if collectDetails && len(partitionDetails) > 0 {
+		writePartitionDetailsToFile(writeSlot, partitionIdx, partitionDetails)
+	}
+
 	return accts, parentAccts, distributedLamports.Load(), burnedLamports.Load(), nil
+}
+
+// writePartitionDetailsToFile writes partition account details to a JSON file for debugging
+func writePartitionDetailsToFile(slot, partitionIdx uint64, details []partitionDetail) {
+	baseDir := mlog.GetLogDir()
+	if baseDir == "" {
+		baseDir = "/mnt/mithril-logs"
+	}
+	diagDir := filepath.Join(baseDir, "epoch_diagnostics")
+	os.MkdirAll(diagDir, 0755)
+
+	filename := filepath.Join(diagDir, fmt.Sprintf("partition_details_slot_%d_p%d.json", slot, partitionIdx+1))
+
+	// Sort by pubkey for consistent output
+	sort.Slice(details, func(i, j int) bool {
+		return bytes.Compare(details[i].pubkey[:], details[j].pubkey[:]) < 0
+	})
+
+	// Build JSON structure
+	type jsonDetail struct {
+		Pubkey              string `json:"pubkey"`
+		Reward              uint64 `json:"reward"`
+		BeforeCredits       uint64 `json:"before_credits"`
+		AfterCredits        uint64 `json:"after_credits"`
+		BeforeStakeLamports uint64 `json:"before_stake_lamports"`
+		AfterStakeLamports  uint64 `json:"after_stake_lamports"`
+		BeforeAcctLamports  uint64 `json:"before_acct_lamports"`
+		IsForceCreditsUpdate bool  `json:"is_force_credits_update"`
+	}
+
+	type jsonOutput struct {
+		Slot              uint64       `json:"slot"`
+		PartitionIdx      uint64       `json:"partition_idx"`
+		AccountCount      int          `json:"account_count"`
+		TotalRewards      uint64       `json:"total_rewards"`
+		ForceCreditsCount int          `json:"force_credits_update_count"`
+		Accounts          []jsonDetail `json:"accounts"`
+	}
+
+	output := jsonOutput{
+		Slot:         slot,
+		PartitionIdx: partitionIdx,
+		AccountCount: len(details),
+	}
+
+	for _, d := range details {
+		isForceCredits := d.reward == 0 && d.beforeCredits != d.afterCredits
+		if isForceCredits {
+			output.ForceCreditsCount++
+		}
+		output.TotalRewards += d.reward
+		output.Accounts = append(output.Accounts, jsonDetail{
+			Pubkey:              d.pubkey.String(),
+			Reward:              d.reward,
+			BeforeCredits:       d.beforeCredits,
+			AfterCredits:        d.afterCredits,
+			BeforeStakeLamports: d.beforeStakeLamports,
+			AfterStakeLamports:  d.afterStakeLamports,
+			BeforeAcctLamports:  d.beforeAcctLamports,
+			IsForceCreditsUpdate: isForceCredits,
+		})
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal partition details: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write partition details: %v", err)
+		return
+	}
+
+	mlog.Log.Infof("wrote partition details to %s (accounts=%d force_credits=%d)", filename, output.AccountCount, output.ForceCreditsCount)
 }
 
 // minimumStakeDelegation returns the minimum stake for REWARDS eligibility.
