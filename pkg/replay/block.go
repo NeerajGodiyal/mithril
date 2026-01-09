@@ -1276,6 +1276,89 @@ func buildInitialEpochStakesCache(snapshotManifest *snapshot.SnapshotManifest) {
 	}
 }
 
+// buildEpochStakesFromLocalData builds EpochStakes for the given epoch from local stake and vote caches.
+// This is used on resume when the snapshot manifest data may be stale (we've crossed epoch boundaries).
+// It aggregates stake by vote account and populates the EpochStakesCache.
+func buildEpochStakesFromLocalData(epoch uint64) {
+	stakeCache := global.StakeCache()
+	voteCache := global.VoteCache()
+
+	if stakeCache == nil || len(stakeCache) == 0 {
+		mlog.Log.Warnf("buildEpochStakesFromLocalData: stake cache is empty, cannot build EpochStakes(%d)", epoch)
+		return
+	}
+
+	// Aggregate stake by vote account
+	voteStakes := make(map[solana.PublicKey]uint64)
+	for _, delegation := range stakeCache {
+		if delegation == nil {
+			continue
+		}
+		// Skip deactivated stakes (deactivation epoch <= current epoch means stake is inactive)
+		if delegation.DeactivationEpoch != math.MaxUint64 && delegation.DeactivationEpoch <= epoch {
+			continue
+		}
+		// Skip stakes not yet activated
+		if delegation.ActivationEpoch > epoch {
+			continue
+		}
+		voteStakes[delegation.VoterPubkey] += delegation.StakeLamports
+	}
+
+	// Calculate total stake
+	var totalStake uint64
+	for _, stake := range voteStakes {
+		totalStake += stake
+	}
+
+	// Store total stake for epoch
+	global.PutEpochTotalStake(epoch, totalStake)
+
+	// Store each vote account's stake with metadata from vote cache
+	for voterPubkey, stake := range voteStakes {
+		var voteAcct *epochstakes.VoteAccount
+
+		// Try to get vote account metadata from vote cache
+		if voteState := voteCache[voterPubkey]; voteState != nil {
+			var nodePubkey solana.PublicKey
+			var lastTimestampTs int64
+			var lastTimestampSlot uint64
+
+			switch voteState.Type {
+			case sealevel.VoteStateVersionCurrent:
+				nodePubkey = voteState.Current.NodePubkey
+				lastTimestampTs = voteState.Current.LastTimestamp.Timestamp
+				lastTimestampSlot = voteState.Current.LastTimestamp.Slot
+			case sealevel.VoteStateVersionV0_23_5:
+				nodePubkey = voteState.V0_23_5.NodePubkey
+				lastTimestampTs = voteState.V0_23_5.LastTimestamp.Timestamp
+				lastTimestampSlot = voteState.V0_23_5.LastTimestamp.Slot
+			case sealevel.VoteStateVersionV1_14_11:
+				nodePubkey = voteState.V1_14_11.NodePubkey
+				lastTimestampTs = voteState.V1_14_11.LastTimestamp.Timestamp
+				lastTimestampSlot = voteState.V1_14_11.LastTimestamp.Slot
+			}
+
+			voteAcct = &epochstakes.VoteAccount{
+				NodePubkey:        nodePubkey,
+				LastTimestampTs:   lastTimestampTs,
+				LastTimestampSlot: lastTimestampSlot,
+				Owner:             a.VoteProgramAddr,
+			}
+		} else {
+			// No vote cache entry - create minimal entry
+			voteAcct = &epochstakes.VoteAccount{
+				Owner: a.VoteProgramAddr,
+			}
+		}
+
+		global.PutEpochStakesEntry(epoch, voterPubkey, stake, voteAcct)
+	}
+
+	mlog.Log.Infof("buildEpochStakesFromLocalData: built EpochStakes(%d) from local data: %d vote accounts, total_stake=%d",
+		epoch, len(voteStakes), totalStake)
+}
+
 func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
@@ -1381,14 +1464,19 @@ func ReplayBlocks(
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-	// Build EpochStakes from manifest - needed for leader schedule on both fresh start and resume.
+	// Build EpochStakes cache - needed for leader schedule calculation.
 	// Note: "stake cache" (stake accounts) is different from "EpochStakesCache" (per-epoch leader schedule data).
-	// The snapshot manifest has VersionedEpochStakes which is still valid for leader schedule calculation.
-	// If we've crossed epoch boundaries since snapshot, epoch boundary handling will have cached
-	// the new stakes, and we merge those with the manifest data.
-	buildInitialEpochStakesCache(snapshotManifest)
-	if resumeState != nil {
-		mlog.Log.Infof("built EpochStakesCache from manifest on resume (required for leader schedule)")
+	if resumeState == nil {
+		// Fresh start: use snapshot manifest's VersionedEpochStakes
+		buildInitialEpochStakesCache(snapshotManifest)
+	} else {
+		// Resume: first load from manifest (for epochs it covers), then build current epoch from local data.
+		// The manifest data may be stale if we've crossed epoch boundaries since the snapshot.
+		buildInitialEpochStakesCache(snapshotManifest)
+		// Now build current epoch's stakes from local stake/vote caches (which are up-to-date).
+		// This ensures we have valid data even if we've crossed into a new epoch since the snapshot.
+		buildEpochStakesFromLocalData(currentEpoch)
+		mlog.Log.Infof("built EpochStakesCache from manifest + local data for epoch %d on resume", currentEpoch)
 	}
 	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
 	//forkChoice.Start()
