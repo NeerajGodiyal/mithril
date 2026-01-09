@@ -218,7 +218,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	// DEBUG MODE: Exit after diagnostics without committing any changes.
 	// This allows inspecting the diagnostic file and restarting from a clean state.
 	// Set to false when ready to actually process the epoch boundary.
-	const epochBoundaryDebugMode = true
+	const epochBoundaryDebugMode = false
 	if epochBoundaryDebugMode {
 		mlog.Log.Infof("")
 		mlog.Log.Infof("================================================================================")

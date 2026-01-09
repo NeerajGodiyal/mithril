@@ -53,6 +53,8 @@ type MithrilState struct {
 	LastLamportsPerSignature uint64 `json:"last_lamports_per_sig,omitempty"`        // FeeRateGovernor.LamportsPerSignature
 	LastPrevLamportsPerSig   uint64 `json:"last_prev_lamports_per_sig,omitempty"`   // FeeRateGovernor.PrevLamportsPerSignature
 	LastNumSignatures        uint64 `json:"last_num_signatures,omitempty"`          // SlotCtx.NumSignatures
+	LastCapitalization       uint64 `json:"last_capitalization,omitempty"`          // Total lamports in circulation (for reward pool)
+	LastTransactionCount     uint64 `json:"last_transaction_count,omitempty"`       // Cumulative transaction count
 
 	// Blockhash context - required because appendvec file writes are not fsynced,
 	// so RecentBlockhashes sysvar data in AccountsDB may be stale after restart.
@@ -193,6 +195,8 @@ type ResumeContext struct {
 	PrevLamportsPerSig   uint64
 	NumSignatures        uint64
 	Epoch                uint64 // epoch of the last replayed slot
+	Capitalization       uint64 // total lamports in circulation (for reward pool calculation)
+	TransactionCount     uint64 // cumulative transaction count
 
 	// Blockhash context
 	RecentBlockhashes []BlockhashEntry // 150 entries, newest first
@@ -233,6 +237,8 @@ func (s *MithrilState) UpdateLastSlotWithContext(accountsDbDir string, slot uint
 		s.LastPrevLamportsPerSig = ctx.PrevLamportsPerSig
 		s.LastNumSignatures = ctx.NumSignatures
 		s.LastEpoch = ctx.Epoch
+		s.LastCapitalization = ctx.Capitalization
+		s.LastTransactionCount = ctx.TransactionCount
 
 		// Blockhash context - required because appendvec writes are not fsynced
 		s.LastRecentBlockhashes = ctx.RecentBlockhashes
@@ -282,6 +288,8 @@ func (s *MithrilState) GetResumeContext() *ResumeContext {
 		PrevLamportsPerSig:   s.LastPrevLamportsPerSig,
 		NumSignatures:        s.LastNumSignatures,
 		Epoch:                s.LastEpoch,
+		Capitalization:       s.LastCapitalization,
+		TransactionCount:     s.LastTransactionCount,
 
 		// Blockhash context
 		RecentBlockhashes: s.LastRecentBlockhashes,

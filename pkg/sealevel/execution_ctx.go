@@ -62,6 +62,7 @@ type SlotCtx struct {
 	EahWorkaroundBankhash  []byte
 	HasEahWorkaround       bool
 	LatestEvictedBlockhash [32]byte
+	Capitalization         uint64 // Total lamports in circulation (for reward pool calculation)
 
 	SerializedParameterArena *arena.Arena[byte]
 }

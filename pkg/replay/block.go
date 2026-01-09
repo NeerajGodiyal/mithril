@@ -122,6 +122,8 @@ type ReplayResult struct {
 	LastLamportsPerSignature uint64         // FeeRateGovernor.LamportsPerSignature
 	LastPrevLamportsPerSig   uint64         // FeeRateGovernor.PrevLamportsPerSignature
 	LastNumSignatures        uint64         // SlotCtx.NumSignatures
+	LastCapitalization       uint64         // ReplayCtx.Capitalization (total lamports in circulation)
+	LastTransactionCount     uint64         // Cumulative transaction count
 
 	// Blockhash context - required because appendvec writes are not fsynced
 	LastRecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
@@ -161,6 +163,10 @@ type ResumeState struct {
 	PrevLamportsPerSignature uint64
 	// NumSignatures is the total signature count at end of parent slot
 	NumSignatures uint64
+	// Capitalization is the total lamports in circulation (for reward pool calculation)
+	Capitalization uint64
+	// TransactionCount is the cumulative transaction count
+	TransactionCount uint64
 
 	// Blockhash context - required because appendvec writes are not fsynced
 	RecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
@@ -1355,12 +1361,36 @@ func ReplayBlocks(
 
 	replayCtx := newReplayCtx(snapshotManifest)
 
-	global.IncrTransactionCount(snapshotManifest.Bank.TransactionCount)
+	// Override capitalization with persisted value on resume (snapshot manifest has stale value)
+	if resumeState != nil && resumeState.Capitalization != 0 {
+		mlog.Log.Infof("overriding capitalization from state file: %d (snapshot had: %d)",
+			resumeState.Capitalization, replayCtx.Capitalization)
+		replayCtx.Capitalization = resumeState.Capitalization
+	}
+
+	// Override transaction count with persisted value on resume (snapshot manifest has stale value)
+	if resumeState != nil && resumeState.TransactionCount != 0 {
+		mlog.Log.Infof("overriding transaction count from state file: %d (snapshot had: %d)",
+			resumeState.TransactionCount, snapshotManifest.Bank.TransactionCount)
+		global.SetTransactionCount(resumeState.TransactionCount)
+	} else {
+		global.IncrTransactionCount(snapshotManifest.Bank.TransactionCount)
+	}
+
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-	buildInitialEpochStakesCache(snapshotManifest)
+	// Only build EpochStakes from manifest on fresh start (not resume)
+	// On resume, the manifest data may be stale if we've crossed epoch boundaries.
+	// The stake cache (rebuilt from AccountsDB) has current data, and epoch boundary
+	// handling will cache stakes for future leader schedules as needed.
+	// TODO: Persist EpochStakes to disk for proper resume support, or rebuild from stake cache.
+	if resumeState == nil {
+		buildInitialEpochStakesCache(snapshotManifest)
+	} else {
+		mlog.Log.Infof("skipping buildInitialEpochStakesCache on resume (stake cache has current data)")
+	}
 	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
 	//forkChoice.Start()
 	//global.SetForkChoice(forkChoice)
@@ -1840,6 +1870,9 @@ func ReplayBlocks(
 		lastPersistedSlot = block.Slot
 		lastPersistedBankhash = lastSlotCtx.FinalBankhash
 
+		// Copy capitalization to slotCtx for state persistence
+		lastSlotCtx.Capitalization = replayCtx.Capitalization
+
 		// Write state immediately after commit - this makes bankhash + state file atomic
 		// If we crash after this point, state file will match bankhash_db
 		if onSlotComplete != nil {
@@ -1871,6 +1904,8 @@ func ReplayBlocks(
 					result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 				}
 				result.LastNumSignatures = lastSlotCtx.NumSignatures
+				result.LastCapitalization = replayCtx.Capitalization
+				result.LastTransactionCount = global.TransactionCount()
 				result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar
 				result.LastEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 				result.LastBlockhash = lastSlotCtx.Blockhash
@@ -2252,6 +2287,8 @@ func ReplayBlocks(
 			result.LastPrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 		}
 		result.LastNumSignatures = lastSlotCtx.NumSignatures
+		result.LastCapitalization = replayCtx.Capitalization
+		result.LastTransactionCount = global.TransactionCount()
 
 		// Capture blockhash context from SysvarCache (required because appendvec writes are not fsynced)
 		result.LastRecentBlockhashes = sealevel.SysvarCache.RecentBlockHashes.Sysvar

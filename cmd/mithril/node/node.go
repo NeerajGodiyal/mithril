@@ -785,6 +785,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
 					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
 					NumSignatures:            resumeCtx.NumSignatures,
+					Capitalization:           resumeCtx.Capitalization,
+					TransactionCount:         resumeCtx.TransactionCount,
 				}
 
 				// Decode blockhash context
@@ -998,6 +1000,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+				Capitalization:       result.LastCapitalization,
+				TransactionCount:     result.LastTransactionCount,
 				Epoch:                lastEpoch,
 
 				// Blockhash context - required because appendvec writes are not fsynced
@@ -1629,6 +1633,8 @@ postBootstrap:
 					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
 					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
 					NumSignatures:            resumeCtx.NumSignatures,
+					Capitalization:           resumeCtx.Capitalization,
+					TransactionCount:         resumeCtx.TransactionCount,
 				}
 
 				// Decode blockhash context
@@ -1798,6 +1804,8 @@ postBootstrap:
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
+				Capitalization:       result.LastCapitalization,
+				TransactionCount:     result.LastTransactionCount,
 				Epoch:                lastEpoch,
 
 				// Blockhash context - required because appendvec writes are not fsynced
@@ -2639,6 +2647,8 @@ func runReplayWithRecovery(
 				LamportsPerSignature: r.LastLamportsPerSignature,
 				PrevLamportsPerSig:   r.LastPrevLamportsPerSig,
 				NumSignatures:        r.LastNumSignatures,
+				Capitalization:       r.LastCapitalization,
+				TransactionCount:     r.LastTransactionCount,
 				Epoch:                lastEpoch,
 
 				// Blockhash context
@@ -2706,6 +2716,8 @@ func runReplayWithRecovery(
 				LamportsPerSignature: slotCtx.FeeRateGovernor.LamportsPerSignature,
 				PrevLamportsPerSig:   slotCtx.FeeRateGovernor.PrevLamportsPerSignature,
 				NumSignatures:        slotCtx.NumSignatures,
+				Capitalization:       slotCtx.Capitalization,
+				TransactionCount:     global.TransactionCount(),
 				Epoch:                epoch,
 
 				// Blockhash context

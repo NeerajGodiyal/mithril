@@ -87,6 +87,10 @@ func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
 }
 
+func SetTransactionCount(count uint64) {
+	instance.SetTransactionCount(count)
+}
+
 // PutStakeCacheItem adds or updates a stake cache entry without slot tracking.
 // Use this during replay where operations are strictly sequential.
 // If this is a new pubkey (not already in cache), it's added to pendingNewStakePubkeys
@@ -421,6 +425,12 @@ func (globctx *GlobalCtx) IncrTransactionCount(num uint64) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.transactionCount += num
+}
+
+func (globctx *GlobalCtx) SetTransactionCount(count uint64) {
+	globctx.mu.Lock()
+	defer globctx.mu.Unlock()
+	globctx.transactionCount = count
 }
 
 func (globctx *GlobalCtx) LatestBlockhash() [32]byte {
