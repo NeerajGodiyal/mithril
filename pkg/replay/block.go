@@ -1837,6 +1837,33 @@ func ReplayBlocks(
 				result.Error = rewardsErr
 				break
 			}
+			// DEBUG: Log distribution account counts and alignment
+			mlog.Log.Debugf("rewards distribution slot=%d: distributedAccts=%d parentDistributedAccts=%d",
+				currentSlot, len(distributedAccts), len(parentDistributedAccts))
+			if len(distributedAccts) != len(parentDistributedAccts) {
+				mlog.Log.Errorf("CRITICAL: distributedAccts/parentDistributedAccts length mismatch: %d vs %d",
+					len(distributedAccts), len(parentDistributedAccts))
+			}
+			// Check for nil entries and lamports differences
+			var nilCurrentCount, nilParentCount, lamportsMismatchCount int
+			for i := 0; i < len(distributedAccts) && i < len(parentDistributedAccts); i++ {
+				if distributedAccts[i] == nil {
+					nilCurrentCount++
+				}
+				if parentDistributedAccts[i] == nil {
+					nilParentCount++
+				}
+				if distributedAccts[i] != nil && parentDistributedAccts[i] != nil {
+					if distributedAccts[i].Key != parentDistributedAccts[i].Key {
+						mlog.Log.Errorf("KEY MISMATCH at idx %d: current=%s parent=%s",
+							i, distributedAccts[i].Key, parentDistributedAccts[i].Key)
+					}
+				}
+			}
+			if nilCurrentCount > 0 || nilParentCount > 0 {
+				mlog.Log.Warnf("rewards distribution slot=%d: nil entries - current=%d parent=%d",
+					currentSlot, nilCurrentCount, nilParentCount)
+			}
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}

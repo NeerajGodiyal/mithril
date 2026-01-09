@@ -545,6 +545,11 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	decoder := bin.NewBinDecoder(epochRewardsAcct.Data)
 	epochRewards.MustUnmarshalWithDecoder(decoder)
 
+	// DEBUG: Log EpochRewards state as read from AccountsDB
+	mlog.Log.Debugf("distribution slot=%d: read EpochRewards - start_height=%d distributed=%d total=%d active=%v",
+		currentSlot, epochRewards.DistributionStartingBlockHeight, epochRewards.DistributedRewards,
+		epochRewards.TotalRewards, epochRewards.Active)
+
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
 
 	// Bounds check: if partitionIdx is out of range, set inactive and return early.
@@ -591,6 +596,11 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	mlog.Log.Infof("rewards partition %d/%d: slot=%d stake_accts=%d lamports=%d cumulative=%d",
 		partitionIdx+1, partitionedEpochRewardsInfo.NumRewardPartitions,
 		currentSlot, partitionSize, distributedLamports, epochRewards.DistributedRewards)
+
+	// DEBUG: Log EpochRewards sysvar state for comparison with RPC
+	mlog.Log.Debugf("  EpochRewards: start_height=%d num_partitions=%d total_rewards=%d distributed=%d active=%v",
+		epochRewards.DistributionStartingBlockHeight, epochRewards.NumPartitions,
+		epochRewards.TotalRewards, epochRewards.DistributedRewards, epochRewards.Active)
 
 	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
 	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions-1 {
