@@ -75,7 +75,7 @@ func ComputeNumRewardPartitions(epoch, slotsPerEpoch, numStakeAccounts, firstNor
 This is the most common source of partition count mismatches. Not all stake accounts in the cache earn rewards:
 
 **An account is eligible if ALL of these are true:**
-1. `stake >= minimum_stake_delegation` (typically 1 SOL on mainnet)
+1. `stake >= minimum_stake_delegation` (1 lamport after StakeMinimumDelegationForRewards feature)
 2. Has a corresponding vote account in the vote cache
 3. `points > 0` - meaning:
    - Has new credits to earn (`creditsInVote > creditsInStake`)

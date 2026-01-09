@@ -163,23 +163,23 @@ On resume:
 2. If missing/corrupt, scan AccountsDB (expensive but recoverable)
 3. Continue incremental updates from resume point
 
-## Minimum Stake Delegation
+## Minimum Stake for Rewards Eligibility
 
-Mainnet requires minimum 1 SOL delegation for rewards:
+**IMPORTANT:** `StakeRaiseMinimumDelegationTo1Sol` is for the STAKE PROGRAM's delegation
+minimum (preventing delegations < 1 SOL), NOT for rewards eligibility filtering.
+
+For rewards eligibility, the minimum is 1 lamport:
 
 ```go
 func minimumStakeDelegation(features *Features) uint64 {
     if !features.IsActive(StakeMinimumDelegationForRewards) {
-        return 0
+        return 0  // No minimum before feature
     }
-    if features.IsActive(StakeRaiseMinimumDelegationTo1Sol) {
-        return 1_000_000_000  // 1 SOL
-    }
-    return 1  // 1 lamport (testnet)
+    return 1  // 1 lamport minimum for rewards eligibility
 }
 ```
 
-Accounts below minimum delegation exist but don't earn rewards.
+Accounts with 0 stake exist but don't earn rewards.
 
 ## Credits Observed
 

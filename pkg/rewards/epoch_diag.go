@@ -92,7 +92,7 @@ func WriteEpochBoundaryDiagnostics(diag *EpochBoundaryDiagnostics) string {
 	w("                   is read from this slot for rewards calculation.")
 	w("")
 	w("  Eligible:        Stake accounts that qualify for rewards. Must have:")
-	w("                   - stake >= 1 SOL (minimum delegation)")
+	w("                   - stake >= 1 lamport (after StakeMinimumDelegationForRewards feature)")
 	w("                   - valid vote account in cache")
 	w("                   - points > 0 (earned new vote credits this epoch)")
 	w("                   - rewards > 0 after integer division")

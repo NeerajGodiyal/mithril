@@ -223,9 +223,9 @@ Partition Formula [CONFIDENCE: HIGH - VERIFIED MATCHING]
 ---------------------------------------------------------
   eligible_accounts = stake accounts with:
     - Valid vote account in cache
-    - stake >= minimum_delegation
-      (Feature-gated: StakeMinimumDelegationForRewards, StakeRaiseMinimumDelegationTo1Sol)
-      (Mithril: NOT YET IMPLEMENTED - currently uses 1 lamport minimum)
+    - stake >= 1 lamport (after StakeMinimumDelegationForRewards feature)
+      NOTE: StakeRaiseMinimumDelegationTo1Sol is for stake PROGRAM delegation,
+            NOT for rewards eligibility. Rewards uses 1 lamport minimum.
     - points > 0 (new credits to earn)
     - rewards > 0 after calculation
 

@@ -1193,18 +1193,17 @@ func hasPositivePointsForEpoch(
 	return false
 }
 
-// minimumStakeDelegationFromFeatures returns the minimum stake delegation based on features.
+// minimumStakeDelegationFromFeatures returns the minimum stake delegation for REWARDS eligibility.
 // This is a feature-only version that doesn't require SlotCtx.
+//
+// NOTE: StakeRaiseMinimumDelegationTo1Sol is for the STAKE PROGRAM's delegation minimum,
+// NOT for rewards eligibility. Rewards eligibility uses 1 lamport minimum after
+// StakeMinimumDelegationForRewards is active.
 func minimumStakeDelegationFromFeatures(f *features.Features) uint64 {
 	if !f.IsActive(features.StakeMinimumDelegationForRewards) {
 		return 0
 	}
-
-	if f.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
-		return 1000000000
-	}
-
-	return 1
+	return 1 // 1 lamport minimum for rewards eligibility
 }
 
 // DeterminePartitionedStakingRewardsInfoLocal computes reward partition info locally without RPC.
@@ -1678,16 +1677,16 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	return accts, parentAccts, distributedLamports.Load(), nil
 }
 
+// minimumStakeDelegation returns the minimum stake for REWARDS eligibility.
+//
+// NOTE: StakeRaiseMinimumDelegationTo1Sol is for the STAKE PROGRAM's delegation minimum,
+// NOT for rewards eligibility. Rewards eligibility uses 1 lamport minimum after
+// StakeMinimumDelegationForRewards is active.
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
 	if !slotCtx.Features.IsActive(features.StakeMinimumDelegationForRewards) {
 		return 0
 	}
-
-	if slotCtx.Features.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
-		return 1000000000
-	}
-
-	return 1
+	return 1 // 1 lamport minimum for rewards eligibility
 }
 
 func CalculateRewardPartitionForPubkey(pubkey solana.PublicKey, blockhash [32]byte, numPartitions uint64) uint64 {
