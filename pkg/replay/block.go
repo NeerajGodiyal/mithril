@@ -1466,18 +1466,12 @@ func ReplayBlocks(
 
 	// Build EpochStakes cache - needed for leader schedule calculation.
 	// Note: "stake cache" (stake accounts) is different from "EpochStakesCache" (per-epoch leader schedule data).
-	if resumeState == nil {
-		// Fresh start: use snapshot manifest's VersionedEpochStakes
-		buildInitialEpochStakesCache(snapshotManifest)
-	} else {
-		// Resume: first load from manifest (for epochs it covers), then build current epoch from local data.
-		// The manifest data may be stale if we've crossed epoch boundaries since the snapshot.
-		buildInitialEpochStakesCache(snapshotManifest)
-		// Now build current epoch's stakes from local stake/vote caches (which are up-to-date).
-		// This ensures we have valid data even if we've crossed into a new epoch since the snapshot.
-		buildEpochStakesFromLocalData(currentEpoch)
-		mlog.Log.Infof("built EpochStakesCache from manifest + local data for epoch %d on resume", currentEpoch)
-	}
+	//
+	// IMPORTANT: Always use snapshot manifest's EpochStakes, even on resume.
+	// Epoch N's leader schedule uses stakes from epoch N-2 (the "leader schedule epoch" rule).
+	// The snapshot already contains the correct historical EpochStakes for this.
+	// DO NOT overwrite with current-epoch stakes - that would break the leader schedule.
+	buildInitialEpochStakesCache(snapshotManifest)
 	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
 	//forkChoice.Start()
 	//global.SetForkChoice(forkChoice)
