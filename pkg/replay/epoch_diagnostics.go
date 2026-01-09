@@ -9,12 +9,40 @@ import (
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
+
+// TxRpcMeta contains RPC metadata for a single transaction (used in divergence dumps)
+type TxRpcMeta struct {
+	Index       int      `json:"index"`
+	Signature   string   `json:"signature"`
+	IsVote      bool     `json:"is_vote"`
+	RpcSuccess  bool     `json:"rpc_success"`
+	RpcError    string   `json:"rpc_error,omitempty"`
+	RpcCU       uint64   `json:"rpc_cu"`
+	RpcFee      uint64   `json:"rpc_fee"`
+	PreBalance  []uint64 `json:"pre_balances,omitempty"`
+	PostBalance []uint64 `json:"post_balances,omitempty"`
+}
+
+// DivergenceDump contains all transaction metadata for a slot where divergence occurred
+type DivergenceDump struct {
+	Slot               uint64      `json:"slot"`
+	Epoch              uint64      `json:"epoch"`
+	DivergentTxSig     string      `json:"divergent_tx_sig"`
+	DivergentTxError   string      `json:"divergent_tx_error,omitempty"`
+	DivergentOnchainOk bool        `json:"divergent_onchain_ok"`
+	TotalTransactions  int         `json:"total_transactions"`
+	TotalVotes         int         `json:"total_votes"`
+	TotalRpcCU         uint64      `json:"total_rpc_cu"`
+	TotalRpcFee        uint64      `json:"total_rpc_fee"`
+	Transactions       []TxRpcMeta `json:"transactions"`
+}
 
 // EpochBoundaryDiagnostics contains state info for debugging epoch transitions
 type EpochBoundaryDiagnostics struct {
@@ -533,4 +561,341 @@ func buildComparison(slot uint64, local, rpc *EpochBoundaryDiagnostics) string {
 
 	sb.WriteString("\n=== END COMPARISON ===\n")
 	return sb.String()
+}
+
+// ============================================================================
+// Transaction Comparison Dump for Divergent Slots
+// ============================================================================
+
+// TxDumpEntry holds comparison data for a single transaction
+type TxDumpEntry struct {
+	Index      int    `json:"index"`
+	Signature  string `json:"signature"`
+	IsVote     bool   `json:"is_vote"`
+	NumSigners int    `json:"num_signers"`
+
+	// Local execution results
+	LocalSuccess bool   `json:"local_success"`
+	LocalError   string `json:"local_error,omitempty"`
+	LocalCU      uint64 `json:"local_cu"`
+	LocalFee     uint64 `json:"local_fee"`
+
+	// RPC (on-chain) results
+	RpcSuccess bool   `json:"rpc_success"`
+	RpcError   string `json:"rpc_error,omitempty"`
+	RpcCU      uint64 `json:"rpc_cu"`
+	RpcFee     uint64 `json:"rpc_fee"`
+
+	// Diff flags
+	StatusMismatch bool `json:"status_mismatch,omitempty"`
+	CUMismatch     bool `json:"cu_mismatch,omitempty"`
+	FeeMismatch    bool `json:"fee_mismatch,omitempty"`
+}
+
+// TxDumpSummary holds the full transaction comparison for a slot
+type TxDumpSummary struct {
+	Slot             uint64        `json:"slot"`
+	Epoch            uint64        `json:"epoch"`
+	TotalTransactions int          `json:"total_transactions"`
+	StatusMismatches  int          `json:"status_mismatches"`
+	CUMismatches      int          `json:"cu_mismatches"`
+	FeeMismatches     int          `json:"fee_mismatches"`
+	TotalLocalCU      uint64       `json:"total_local_cu"`
+	TotalRpcCU        uint64       `json:"total_rpc_cu"`
+	TotalLocalFee     uint64       `json:"total_local_fee"`
+	TotalRpcFee       uint64       `json:"total_rpc_fee"`
+	Transactions      []TxDumpEntry `json:"transactions"`
+	MismatchedTxs     []TxDumpEntry `json:"mismatched_txs,omitempty"` // Only those with differences
+}
+
+// TxLocalResult holds local execution results for a transaction
+type TxLocalResult struct {
+	Success bool
+	Error   error
+	CU      uint64
+	Fee     uint64
+}
+
+// WriteTxComparisonDump creates a comprehensive transaction comparison file
+// Call this when divergence is detected to capture detailed tx-level data
+func WriteTxComparisonDump(slot uint64, epoch uint64, block *b.Block, localResults []TxLocalResult) {
+	if block == nil || len(block.Transactions) == 0 {
+		return
+	}
+
+	summary := TxDumpSummary{
+		Slot:              slot,
+		Epoch:             epoch,
+		TotalTransactions: len(block.Transactions),
+		Transactions:      make([]TxDumpEntry, 0, len(block.Transactions)),
+	}
+
+	for i, tx := range block.Transactions {
+		if tx == nil {
+			continue
+		}
+
+		entry := TxDumpEntry{
+			Index:      i,
+			NumSigners: len(tx.Signatures),
+			IsVote:     tx.IsVote(),
+		}
+
+		// Signature
+		if len(tx.Signatures) > 0 {
+			entry.Signature = tx.Signatures[0].String()
+		}
+
+		// Local results
+		if i < len(localResults) {
+			entry.LocalSuccess = localResults[i].Success
+			if localResults[i].Error != nil {
+				entry.LocalError = localResults[i].Error.Error()
+			}
+			entry.LocalCU = localResults[i].CU
+			entry.LocalFee = localResults[i].Fee
+			summary.TotalLocalCU += localResults[i].CU
+			summary.TotalLocalFee += localResults[i].Fee
+		}
+
+		// RPC results from TxMeta
+		if i < len(block.TxMetas) && block.TxMetas[i] != nil {
+			meta := block.TxMetas[i]
+			entry.RpcSuccess = meta.Err == nil
+			if meta.Err != nil {
+				entry.RpcError = fmt.Sprintf("%+v", meta.Err)
+			}
+			if meta.ComputeUnitsConsumed != nil {
+				entry.RpcCU = *meta.ComputeUnitsConsumed
+				summary.TotalRpcCU += *meta.ComputeUnitsConsumed
+			}
+			entry.RpcFee = meta.Fee
+			summary.TotalRpcFee += meta.Fee
+		}
+
+		// Check for mismatches
+		if entry.LocalSuccess != entry.RpcSuccess {
+			entry.StatusMismatch = true
+			summary.StatusMismatches++
+		}
+		if entry.LocalCU != entry.RpcCU {
+			entry.CUMismatch = true
+			summary.CUMismatches++
+		}
+		if entry.LocalFee != entry.RpcFee {
+			entry.FeeMismatch = true
+			summary.FeeMismatches++
+		}
+
+		summary.Transactions = append(summary.Transactions, entry)
+
+		// Also collect mismatched transactions separately for easy viewing
+		if entry.StatusMismatch || entry.CUMismatch || entry.FeeMismatch {
+			summary.MismatchedTxs = append(summary.MismatchedTxs, entry)
+		}
+	}
+
+	// Write full dump
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("tx_comparison_slot_%d.json", slot))
+
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal tx comparison for slot %d: %v", slot, err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write tx comparison for slot %d: %v", slot, err)
+		return
+	}
+
+	mlog.Log.Infof("wrote tx comparison dump to %s (txs=%d status_mismatch=%d cu_mismatch=%d fee_mismatch=%d)",
+		filename, summary.TotalTransactions, summary.StatusMismatches, summary.CUMismatches, summary.FeeMismatches)
+
+	// Also write a human-readable diff summary
+	writeTxDiffSummary(slot, &summary)
+}
+
+// writeTxDiffSummary writes a human-readable summary of transaction differences
+func writeTxDiffSummary(slot uint64, summary *TxDumpSummary) {
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("tx_diff_slot_%d.txt", slot))
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== TRANSACTION COMPARISON FOR SLOT %d ===\n\n", slot))
+	sb.WriteString(fmt.Sprintf("Total transactions: %d\n", summary.TotalTransactions))
+	sb.WriteString(fmt.Sprintf("Status mismatches:  %d\n", summary.StatusMismatches))
+	sb.WriteString(fmt.Sprintf("CU mismatches:      %d\n", summary.CUMismatches))
+	sb.WriteString(fmt.Sprintf("Fee mismatches:     %d\n", summary.FeeMismatches))
+	sb.WriteString(fmt.Sprintf("\nTotal Local CU:  %d\n", summary.TotalLocalCU))
+	sb.WriteString(fmt.Sprintf("Total RPC CU:    %d\n", summary.TotalRpcCU))
+	sb.WriteString(fmt.Sprintf("CU Difference:   %d\n", int64(summary.TotalLocalCU)-int64(summary.TotalRpcCU)))
+	sb.WriteString(fmt.Sprintf("\nTotal Local Fee: %d\n", summary.TotalLocalFee))
+	sb.WriteString(fmt.Sprintf("Total RPC Fee:   %d\n", summary.TotalRpcFee))
+	sb.WriteString(fmt.Sprintf("Fee Difference:  %d\n", int64(summary.TotalLocalFee)-int64(summary.TotalRpcFee)))
+
+	if len(summary.MismatchedTxs) > 0 {
+		sb.WriteString(fmt.Sprintf("\n=== MISMATCHED TRANSACTIONS (%d) ===\n", len(summary.MismatchedTxs)))
+		for _, tx := range summary.MismatchedTxs {
+			sb.WriteString(fmt.Sprintf("\n[%d] %s\n", tx.Index, tx.Signature))
+			if tx.IsVote {
+				sb.WriteString("  Type: VOTE\n")
+			}
+			if tx.StatusMismatch {
+				sb.WriteString(fmt.Sprintf("  STATUS MISMATCH: local=%v (err: %s) rpc=%v (err: %s)\n",
+					tx.LocalSuccess, tx.LocalError, tx.RpcSuccess, tx.RpcError))
+			}
+			if tx.CUMismatch {
+				diff := int64(tx.LocalCU) - int64(tx.RpcCU)
+				sb.WriteString(fmt.Sprintf("  CU MISMATCH: local=%d rpc=%d (diff=%+d)\n", tx.LocalCU, tx.RpcCU, diff))
+			}
+			if tx.FeeMismatch {
+				diff := int64(tx.LocalFee) - int64(tx.RpcFee)
+				sb.WriteString(fmt.Sprintf("  FEE MISMATCH: local=%d rpc=%d (diff=%+d)\n", tx.LocalFee, tx.RpcFee, diff))
+			}
+		}
+	} else {
+		sb.WriteString("\n=== NO MISMATCHED TRANSACTIONS ===\n")
+	}
+
+	sb.WriteString("\n=== END COMPARISON ===\n")
+
+	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+		mlog.Log.Warnf("failed to write tx diff summary for slot %d: %v", slot, err)
+		return
+	}
+
+	mlog.Log.Infof("wrote tx diff summary to %s", filename)
+}
+
+// DumpDivergentSlotTransactions dumps all transaction metadata for a slot where divergence occurred.
+// This is called automatically when a DivergenceError is detected.
+func DumpDivergentSlotTransactions(block *b.Block, divErr *DivergenceError) {
+	if block == nil {
+		return
+	}
+
+	dump := DivergenceDump{
+		Slot:               block.Slot,
+		Epoch:              block.Epoch,
+		DivergentTxSig:     divErr.TxSig,
+		DivergentOnchainOk: divErr.OnchainOk,
+		TotalTransactions:  len(block.Transactions),
+	}
+	if divErr.LocalErr != nil {
+		dump.DivergentTxError = divErr.LocalErr.Error()
+	}
+
+	for i, tx := range block.Transactions {
+		if tx == nil {
+			continue
+		}
+
+		meta := TxRpcMeta{
+			Index:  i,
+			IsVote: tx.IsVote(),
+		}
+
+		if len(tx.Signatures) > 0 {
+			meta.Signature = tx.Signatures[0].String()
+		}
+
+		if i < len(block.TxMetas) && block.TxMetas[i] != nil {
+			rpcMeta := block.TxMetas[i]
+			meta.RpcSuccess = rpcMeta.Err == nil
+			if rpcMeta.Err != nil {
+				meta.RpcError = fmt.Sprintf("%+v", rpcMeta.Err)
+			}
+			if rpcMeta.ComputeUnitsConsumed != nil {
+				meta.RpcCU = *rpcMeta.ComputeUnitsConsumed
+				dump.TotalRpcCU += *rpcMeta.ComputeUnitsConsumed
+			}
+			meta.RpcFee = rpcMeta.Fee
+			dump.TotalRpcFee += rpcMeta.Fee
+
+			// Include balance changes for first few accounts (useful for debugging)
+			if len(rpcMeta.PreBalances) > 0 && len(rpcMeta.PreBalances) <= 10 {
+				meta.PreBalance = rpcMeta.PreBalances
+			}
+			if len(rpcMeta.PostBalances) > 0 && len(rpcMeta.PostBalances) <= 10 {
+				meta.PostBalance = rpcMeta.PostBalances
+			}
+		}
+
+		if meta.IsVote {
+			dump.TotalVotes++
+		}
+
+		dump.Transactions = append(dump.Transactions, meta)
+	}
+
+	// Write JSON dump
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("divergence_slot_%d.json", block.Slot))
+
+	data, err := json.MarshalIndent(dump, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal divergence dump for slot %d: %v", block.Slot, err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write divergence dump for slot %d: %v", block.Slot, err)
+		return
+	}
+
+	mlog.Log.Infof("wrote divergence dump to %s (txs=%d votes=%d total_cu=%d divergent_tx=%s)",
+		filename, dump.TotalTransactions, dump.TotalVotes, dump.TotalRpcCU, dump.DivergentTxSig)
+
+	// Write human-readable summary
+	writeDivergenceSummary(block.Slot, &dump)
+}
+
+// writeDivergenceSummary writes a human-readable summary of the divergent slot
+func writeDivergenceSummary(slot uint64, dump *DivergenceDump) {
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("divergence_slot_%d.txt", slot))
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== DIVERGENCE IN SLOT %d ===\n\n", slot))
+	sb.WriteString(fmt.Sprintf("Epoch: %d\n", dump.Epoch))
+	sb.WriteString(fmt.Sprintf("Total transactions: %d\n", dump.TotalTransactions))
+	sb.WriteString(fmt.Sprintf("Total votes: %d\n", dump.TotalVotes))
+	sb.WriteString(fmt.Sprintf("Total RPC CU: %d\n", dump.TotalRpcCU))
+	sb.WriteString(fmt.Sprintf("Total RPC Fee: %d\n", dump.TotalRpcFee))
+	sb.WriteString(fmt.Sprintf("\n=== DIVERGENT TRANSACTION ===\n"))
+	sb.WriteString(fmt.Sprintf("Signature: %s\n", dump.DivergentTxSig))
+	sb.WriteString(fmt.Sprintf("Onchain success: %v\n", dump.DivergentOnchainOk))
+	if dump.DivergentTxError != "" {
+		sb.WriteString(fmt.Sprintf("Local error: %s\n", dump.DivergentTxError))
+	}
+
+	// Find and highlight the divergent transaction
+	sb.WriteString(fmt.Sprintf("\n=== ALL TRANSACTIONS ===\n"))
+	for _, tx := range dump.Transactions {
+		marker := ""
+		if tx.Signature == dump.DivergentTxSig {
+			marker = " <<< DIVERGENT"
+		}
+		voteMarker := ""
+		if tx.IsVote {
+			voteMarker = "[VOTE] "
+		}
+		statusStr := "SUCCESS"
+		if !tx.RpcSuccess {
+			statusStr = fmt.Sprintf("FAILED(%s)", tx.RpcError)
+		}
+		sb.WriteString(fmt.Sprintf("[%d] %s%s cu=%d fee=%d status=%s%s\n",
+			tx.Index, voteMarker, tx.Signature[:16]+"...", tx.RpcCU, tx.RpcFee, statusStr, marker))
+	}
+
+	sb.WriteString("\n=== END DIVERGENCE DUMP ===\n")
+
+	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+		mlog.Log.Warnf("failed to write divergence summary for slot %d: %v", slot, err)
+		return
+	}
+
+	mlog.Log.Infof("wrote divergence summary to %s", filename)
 }

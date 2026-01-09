@@ -1900,6 +1900,10 @@ func ReplayBlocks(
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, txParallelism, dbgOpts)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
+			// If this is a divergence error, dump transaction comparison data
+			if divErr, ok := err.(*DivergenceError); ok {
+				DumpDivergentSlotTransactions(block, divErr)
+			}
 			result.Error = err
 			break
 		}

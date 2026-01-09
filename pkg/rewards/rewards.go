@@ -1844,14 +1844,16 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 			modifiedCount.Load(), burnedLamports.Load()/1000000000, // rough count assuming ~1 SOL per account
 			nonNilAccts, nonNilParents)
 
-		// Compute reward output checksum for partition comparison
-		// Hash: sorted list of (stakePk, stakerRewards, newCreditsObserved)
+		// Compute expected lamports and reward output checksum for partition comparison
+		// Expected = sum of stakingRewards[pk].StakerRewards for all accounts in partition
+		// If distributed + burned != expected, that's a bug
 		type rewardEntry struct {
 			pk              solana.PublicKey
 			stakerRewards   uint64
 			creditsObserved uint64
 		}
 		var rewardEntries []rewardEntry
+		var expectedLamports uint64
 		for _, stakePk := range partition.Pubkeys() {
 			if reward, ok := stakingRewards[stakePk]; ok {
 				rewardEntries = append(rewardEntries, rewardEntry{
@@ -1859,13 +1861,25 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 					stakerRewards:   reward.StakerRewards,
 					creditsObserved: reward.NewCreditsObserved,
 				})
+				expectedLamports += reward.StakerRewards
 			}
 		}
+
+		// Verify expected == distributed + burned
+		actualLamports := distributedLamports.Load() + burnedLamports.Load()
+		if expectedLamports != actualLamports {
+			mlog.Log.Errorf("P%d_LAMPORTS_BUG: expected=%d actual(dist+burn)=%d diff=%d",
+				partitionIdx+1, expectedLamports, actualLamports, int64(expectedLamports)-int64(actualLamports))
+		} else {
+			mlog.Log.Infof("P%d_LAMPORTS_OK: expected=%d distributed=%d burned=%d",
+				partitionIdx+1, expectedLamports, distributedLamports.Load(), burnedLamports.Load())
+		}
+
 		// Sort by pubkey for deterministic checksum
 		sort.Slice(rewardEntries, func(i, j int) bool {
 			return bytes.Compare(rewardEntries[i].pk[:], rewardEntries[j].pk[:]) < 0
 		})
-		// Compute SHA256 checksum
+		// Compute SHA256 checksum of sorted (pk, stakerRewards, creditsObserved) tuples
 		checksumHasher := sha256.New()
 		for _, entry := range rewardEntries {
 			checksumHasher.Write(entry.pk[:])
