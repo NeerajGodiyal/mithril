@@ -1820,11 +1820,17 @@ func ReplayBlocks(
 		// Gate rewards distribution using epochRewards.Active instead of slot upper bound.
 		// This handles skipped slots correctly since Active is set false when last partition is processed.
 		// partitionedRewardsInfo is nil if rewards period already complete (resume case with Active=false)
-		if len(block.Rewards) > 1 && partitionedEpochRewardsEnabled &&
+		// NOTE: Removed len(block.Rewards) > 1 check - RPC doesn't return stake rewards in block data,
+		// only vote rewards at boundary. Distribution is gated by EpochRewards.Active, not RPC data.
+		if partitionedEpochRewardsEnabled &&
 			partitionedRewardsInfo != nil &&
 			currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot &&
 			sealevel.SysvarCache.EpochRewards.Sysvar != nil &&
 			sealevel.SysvarCache.EpochRewards.Sysvar.Active {
+			// Log block.Rewards count to confirm the old check would have failed
+			if len(block.Rewards) <= 1 {
+				mlog.Log.Infof("rewards distribution: slot=%d block.Rewards=%d (old check would have skipped)", currentSlot, len(block.Rewards))
+			}
 			distributedAccts, parentDistributedAccts, rewardsErr := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
 			if rewardsErr != nil {
 				mlog.Log.Errorf("staking rewards distribution error at slot %d: %v", currentSlot, rewardsErr)

@@ -587,10 +587,10 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	epochRewards.Distribute(distributedLamports)
 
-	// Log partition progress at debug level (every partition)
-	mlog.Log.Debugf("rewards partition %d/%d: slot=%d height=%d stake_accts=%d lamports=%d cumulative=%d",
+	// Log partition progress at INFO level for diagnostics
+	mlog.Log.Infof("rewards partition %d/%d: slot=%d stake_accts=%d lamports=%d cumulative=%d",
 		partitionIdx+1, partitionedEpochRewardsInfo.NumRewardPartitions,
-		currentSlot, currentBlockHeight, partitionSize, distributedLamports, epochRewards.DistributedRewards)
+		currentSlot, partitionSize, distributedLamports, epochRewards.DistributedRewards)
 
 	// Stop distribution when we've processed the last partition (partition-based, not slot-based)
 	if partitionIdx >= partitionedEpochRewardsInfo.NumRewardPartitions-1 {

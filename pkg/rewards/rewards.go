@@ -1606,6 +1606,8 @@ func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]
 	voteRewards := make(map[solana.PublicKey]uint64)
 	stakeCache := global.StakeCache()
 
+	var mismatchCount, notInCacheCount int
+
 	for stakePubkey, reward := range stakingRewards {
 		if reward == nil || reward.VoterRewards == 0 {
 			continue
@@ -1614,12 +1616,26 @@ func AggregateVoteRewardsFromStakingRewards(stakingRewards map[solana.PublicKey]
 		// Get the vote account this stake is delegated to
 		delegation := stakeCache[stakePubkey]
 		if delegation == nil {
-			mlog.Log.Debugf("AggregateVoteRewards: stake %s not in cache, skipping voter reward %d",
-				stakePubkey, reward.VoterRewards)
+			notInCacheCount++
+			// Use reward.VotePubkey as fallback when not in cache
+			voteRewards[reward.VotePubkey] += reward.VoterRewards
 			continue
 		}
 
-		voteRewards[delegation.VoterPubkey] += reward.VoterRewards
+		// Check for mismatch between reward's vote pubkey and stake cache
+		if delegation.VoterPubkey != reward.VotePubkey {
+			mismatchCount++
+			mlog.Log.Warnf("VotePubkey mismatch: stake=%s cache=%s reward=%s lamports=%d",
+				stakePubkey, delegation.VoterPubkey, reward.VotePubkey, reward.VoterRewards)
+		}
+
+		// Use reward.VotePubkey (from calculation time) not delegation.VoterPubkey (current cache)
+		voteRewards[reward.VotePubkey] += reward.VoterRewards
+	}
+
+	if mismatchCount > 0 || notInCacheCount > 0 {
+		mlog.Log.Infof("AggregateVoteRewards: %d mismatches, %d not-in-cache (using reward.VotePubkey for both)",
+			mismatchCount, notInCacheCount)
 	}
 
 	return voteRewards
