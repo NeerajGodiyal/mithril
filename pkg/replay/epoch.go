@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -158,15 +160,24 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	decoder := bin.NewBinDecoder(stakeHistoryAcct.Data)
 	stakeHistory.MustUnmarshalWithDecoder(decoder)
 
-	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 
-	block.VoteAccts = refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
-	block.TotalEpochStake = 0
-	for _, stake := range block.VoteAccts {
-		block.TotalEpochStake += stake
+	leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
+	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, epochSchedule, f)
+
+	if global.ManageLeaderSchedule() {
+		_, err = PrepareLeaderScheduleLocalFromVoteCache(newEpoch, epochSchedule, "")
+		if err != nil {
+			panic(err)
+		}
+
+		var hasLeader bool
+		block.Leader, hasLeader = global.LeaderForSlot(block.Slot)
+		if !hasLeader {
+			panic(fmt.Sprintf("couldn't find leader for slot %d at epoch boundary", block.Slot))
+		}
 	}
 
 	if partitionedEpochRewards {
@@ -179,4 +190,77 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	mlog.Log.Infof("epoch transition %d -> %d done.", epoch, newEpoch)
 
 	return partitionedRewardsInfo
+}
+
+type epochStakesVoteAcctData struct {
+	nodePubkey solana.PublicKey
+	stake      atomic.Uint64
+}
+
+type epochStakesBuilder struct {
+	mu             sync.Mutex
+	epoch          uint64
+	epochStakesMap map[solana.PublicKey]*epochStakesVoteAcctData
+	totalStake     atomic.Uint64
+}
+
+func newEpochStakesBuilder(epoch uint64, voteCache map[solana.PublicKey]*sealevel.VoteStateVersions) *epochStakesBuilder {
+	epochStakesMap := make(map[solana.PublicKey]*epochStakesVoteAcctData, len(voteCache))
+	for votePk, voteAcct := range voteCache {
+		epochStakesMap[votePk] = &epochStakesVoteAcctData{nodePubkey: voteAcct.NodePubkey()}
+	}
+	return &epochStakesBuilder{epoch: epoch, epochStakesMap: epochStakesMap}
+}
+
+func (esb *epochStakesBuilder) AddStakeForVoteAcct(voteAcct solana.PublicKey, stake uint64) {
+	info := esb.epochStakesMap[voteAcct]
+	info.stake.Add(stake)
+	esb.totalStake.Add(stake)
+}
+
+func (esb *epochStakesBuilder) Finish() {
+	for voterPubkey, entry := range esb.epochStakesMap {
+		global.PutEpochStakesEntry(esb.epoch, voterPubkey, entry.stake.Load(), &epochstakes.VoteAccount{NodePubkey: entry.nodePubkey})
+	}
+	global.PutEpochTotalStake(esb.epoch, esb.totalStake.Load())
+}
+
+func (esb *epochStakesBuilder) TotalEpochStake() uint64 {
+	return esb.totalStake.Load()
+}
+
+func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) {
+	stakes := global.StakeCache()
+	voteCache := global.VoteCache()
+	newRateActivationEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
+
+	esb := newEpochStakesBuilder(leaderScheduleEpoch, voteCache)
+	var wg sync.WaitGroup
+
+	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
+		defer wg.Done()
+
+		delegation := i.(*sealevel.Delegation)
+		_, exists := voteCache[delegation.VoterPubkey]
+		if exists {
+			effectiveStake := delegation.Stake(esb.epoch, sealevel.SysvarCache.StakeHistory.Sysvar, newRateActivationEpoch)
+			esb.AddStakeForVoteAcct(delegation.VoterPubkey, effectiveStake)
+		}
+	})
+
+	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
+	if hasEpochStakes {
+		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
+		return
+	}
+
+	for _, entry := range stakes {
+		wg.Add(1)
+		workerPool.Invoke(entry)
+	}
+	wg.Wait()
+	esb.Finish()
+
+	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
+	b.TotalEpochStake = esb.TotalEpochStake()
 }

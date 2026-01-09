@@ -208,7 +208,7 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		// update the delegation in the stake account state
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			panic(fmt.Sprintf("unable to deserialize stake account in distributing partitioned rewards: %s", err))
+			panic(fmt.Sprintf("unable to deserialize stake account %s in distributing partitioned rewards: %s", stakeAcct.Key, err))
 		}
 
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved

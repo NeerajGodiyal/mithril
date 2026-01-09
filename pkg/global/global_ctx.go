@@ -148,6 +148,10 @@ func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
 	return instance.epochStakes.EpochStakes(epoch)
 }
 
+func HasEpochStakes(epoch uint64) bool {
+	return instance.epochStakes.HasEpochStakes(epoch)
+}
+
 func PutEpochTotalStake(epoch uint64, totalStake uint64) {
 	if instance.epochStakes == nil {
 		instance.epochStakes = epochstakes.NewEpochStakesCache()

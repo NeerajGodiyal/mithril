@@ -45,6 +45,11 @@ func (cache *EpochStakesCache) EpochStakes(epoch uint64) map[solana.PublicKey]ui
 	return cache.stakeCache[epoch]
 }
 
+func (cache *EpochStakesCache) HasEpochStakes(epoch uint64) bool {
+	_, exists := cache.stakeCache[epoch]
+	return exists
+}
+
 func (cache *EpochStakesCache) EpochStakesAccts(epoch uint64) map[solana.PublicKey]*VoteAccount {
 	return cache.voteAcctCache[epoch]
 }
