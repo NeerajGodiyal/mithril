@@ -938,6 +938,12 @@ type LocalStakingReward struct {
 	Lamports   uint64
 	Commission uint8
 	VotePubkey solana.PublicKey
+	// Debug info for diagnosing force_credits_update triggers
+	ForceCreditsReason string // "credits_backward", "activation_epoch", "total_rewards_zero", ""
+	CreditsInVote      uint64 // vote credits at maxEpoch
+	CreditsInStake     uint64 // stake's credits_observed
+	ActivationEpoch    uint64 // delegation's activation epoch
+	RewardedEpoch      uint64 // epoch being rewarded
 }
 
 // CompareStakingRewardsToRpc compares local staking rewards distribution to RPC rewards for a slot.
@@ -1095,7 +1101,14 @@ type PartitionAccountDetail struct {
 	BeforeStakeLamports uint64 `json:"before_stake_lamports"`
 	AfterStakeLamports  uint64 `json:"after_stake_lamports"`
 	BeforeAcctLamports  uint64 `json:"before_acct_lamports"`
-	IsForceCreditsUpdate bool   `json:"is_force_credits_update"` // true if reward=0 but credits changed
+	IsForceCreditsUpdate bool  `json:"is_force_credits_update"` // true if reward=0 but credits changed
+	// RPC comparison (fetched from actual account state on mainnet)
+	RpcCreditsObserved  *uint64 `json:"rpc_credits_observed,omitempty"`  // nil if fetch failed
+	RpcStakeLamports    *uint64 `json:"rpc_stake_lamports,omitempty"`    // nil if fetch failed
+	RpcAcctLamports     *uint64 `json:"rpc_acct_lamports,omitempty"`     // nil if fetch failed
+	CreditsMatch        *bool   `json:"credits_match,omitempty"`         // nil if not comparable
+	StakeMatch          *bool   `json:"stake_match,omitempty"`           // nil if not comparable
+	LamportsMatch       *bool   `json:"lamports_match,omitempty"`        // nil if not comparable
 }
 
 // PartitionAccountDetails holds all account details for a partition
@@ -1141,16 +1154,22 @@ type StakeAccountComparison struct {
 	LocalStakeLamports   uint64 `json:"local_stake_lamports"`   // stake.delegation.stake
 	LocalReward          uint64 `json:"local_reward"`           // Reward we calculated
 	LocalCommission      uint8  `json:"local_commission"`       // Commission rate used
-	// RPC state (from block.Rewards)
-	RpcPostBalance       uint64 `json:"rpc_post_balance"`       // postBalance from RPC
-	RpcReward            uint64 `json:"rpc_reward"`             // lamports from RPC reward
-	RpcCommission        uint8  `json:"rpc_commission"`         // commission from RPC
-	// Comparison
-	RewardDiff           int64  `json:"reward_diff,omitempty"`       // local_reward - rpc_reward
-	PostBalanceDiff      int64  `json:"post_balance_diff,omitempty"` // local_post_balance - rpc_post_balance
-	CommissionMatch      bool   `json:"commission_match"`
-	InLocalOnly          bool   `json:"in_local_only,omitempty"`
-	InRpcOnly            bool   `json:"in_rpc_only,omitempty"`
+	// Debug info for 0-reward accounts (ForceCreditsUpdate)
+	ForceCreditsReason   string `json:"force_credits_reason,omitempty"` // "credits_backward", "activation_epoch", "total_rewards_zero", ""
+	CreditsInVote        uint64 `json:"credits_in_vote,omitempty"`       // vote credits at maxEpoch
+	CreditsInStake       uint64 `json:"credits_in_stake,omitempty"`      // stake's credits_observed
+	ActivationEpoch      uint64 `json:"activation_epoch,omitempty"`      // delegation's activation epoch
+	RewardedEpoch        uint64 `json:"rewarded_epoch,omitempty"`        // epoch being rewarded
+	// RPC state (from block.Rewards) - nil means RPC didn't report this account (N/A)
+	RpcPostBalance       *uint64 `json:"rpc_post_balance"`       // postBalance from RPC (nil if not in RPC)
+	RpcReward            *uint64 `json:"rpc_reward"`             // lamports from RPC reward (nil if not in RPC)
+	RpcCommission        *uint8  `json:"rpc_commission"`         // commission from RPC (nil if not in RPC)
+	// Comparison - only set when both local and RPC have data
+	RewardDiff           *int64  `json:"reward_diff,omitempty"`       // local_reward - rpc_reward (nil if not comparable)
+	PostBalanceDiff      *int64  `json:"post_balance_diff,omitempty"` // local_post_balance - rpc_post_balance (nil if not comparable)
+	CommissionMatch      *bool   `json:"commission_match,omitempty"`  // nil if not comparable
+	InLocalOnly          bool    `json:"in_local_only,omitempty"`
+	InRpcOnly            bool    `json:"in_rpc_only,omitempty"`
 }
 
 // PartitionStakeComparison holds full local vs RPC comparison for a partition
@@ -1236,6 +1255,12 @@ func ComparePartitionStakeToRpc(
 		acctComp.Pubkey = pk.String()
 		acctComp.LocalReward = localReward.Lamports
 		acctComp.LocalCommission = localReward.Commission
+		// Debug info for ForceCreditsUpdate accounts
+		acctComp.ForceCreditsReason = localReward.ForceCreditsReason
+		acctComp.CreditsInVote = localReward.CreditsInVote
+		acctComp.CreditsInStake = localReward.CreditsInStake
+		acctComp.ActivationEpoch = localReward.ActivationEpoch
+		acctComp.RewardedEpoch = localReward.RewardedEpoch
 
 		// Get local account state
 		if localAcct, ok := localAcctMap[pk]; ok {
@@ -1249,35 +1274,39 @@ func ComparePartitionStakeToRpc(
 
 		// Get RPC data
 		if rpcData, ok := rpcRewards[pk]; ok {
-			acctComp.RpcReward = rpcData.lamports
-			acctComp.RpcPostBalance = rpcData.postBalance
-			acctComp.RpcCommission = rpcData.commission
+			// RPC has this account - set pointer values
+			acctComp.RpcReward = &rpcData.lamports
+			acctComp.RpcPostBalance = &rpcData.postBalance
+			acctComp.RpcCommission = &rpcData.commission
 			delete(rpcRewards, pk) // Mark as processed
 
-			// Compare
-			acctComp.RewardDiff = int64(acctComp.LocalReward) - int64(acctComp.RpcReward)
-			acctComp.PostBalanceDiff = int64(acctComp.LocalPostBalance) - int64(acctComp.RpcPostBalance)
-			acctComp.CommissionMatch = acctComp.LocalCommission == acctComp.RpcCommission
+			// Compare (only when we have RPC data)
+			rewardDiff := int64(acctComp.LocalReward) - int64(rpcData.lamports)
+			postBalDiff := int64(acctComp.LocalPostBalance) - int64(rpcData.postBalance)
+			commMatch := acctComp.LocalCommission == rpcData.commission
+			acctComp.RewardDiff = &rewardDiff
+			acctComp.PostBalanceDiff = &postBalDiff
+			acctComp.CommissionMatch = &commMatch
 
 			// Count mismatches
-			if acctComp.RewardDiff != 0 {
+			if rewardDiff != 0 {
 				comp.LamportsMismatch++
 			}
-			if acctComp.PostBalanceDiff != 0 {
+			if postBalDiff != 0 {
 				comp.PostBalMismatch++
 			}
-			if !acctComp.CommissionMatch {
+			if !commMatch {
 				comp.CommissionMismatch++
 			}
 
 			// Is it a match?
-			if acctComp.RewardDiff == 0 && acctComp.PostBalanceDiff == 0 && acctComp.CommissionMatch {
+			if rewardDiff == 0 && postBalDiff == 0 && commMatch {
 				comp.MatchCount++
 			} else {
 				comp.DivergentAccounts = append(comp.DivergentAccounts, acctComp)
 			}
 		} else {
-			// In local but not in RPC
+			// In local but not in RPC - RPC fields stay nil (will show as null in JSON)
 			acctComp.InLocalOnly = true
 			comp.InLocalOnlyCount++
 			comp.DivergentAccounts = append(comp.DivergentAccounts, acctComp)
@@ -1287,12 +1316,16 @@ func ComparePartitionStakeToRpc(
 	// Remaining RPC rewards are in RPC but not local
 	for pk, rpcData := range rpcRewards {
 		comp.InRpcOnlyCount++
+		rpcLamports := rpcData.lamports
+		rpcPostBal := rpcData.postBalance
+		rpcComm := rpcData.commission
 		comp.DivergentAccounts = append(comp.DivergentAccounts, StakeAccountComparison{
 			Pubkey:         pk.String(),
-			RpcReward:      rpcData.lamports,
-			RpcPostBalance: rpcData.postBalance,
-			RpcCommission:  rpcData.commission,
+			RpcReward:      &rpcLamports,
+			RpcPostBalance: &rpcPostBal,
+			RpcCommission:  &rpcComm,
 			InRpcOnly:      true,
+			// Local fields stay at zero values (not pointers, so will show 0 not null)
 		})
 	}
 
@@ -1423,4 +1456,145 @@ func WriteSlotModifiedAccounts(slot, partitionIdx uint64, accounts []*accounts.A
 
 	mlog.Log.Infof("wrote slot modified accounts to %s (total=%d stake=%d sysvar=%d vote=%d other=%d nil=%d)",
 		filename, dump.TotalCount, dump.StakeCount, dump.SysvarCount, dump.VoteCount, dump.OtherCount, dump.NilCount)
+}
+
+// AccountStateDiff shows local vs RPC difference for a single account
+type AccountStateDiff struct {
+	Pubkey             string  `json:"pubkey"`
+	Field              string  `json:"field"`               // "credits_observed", "stake_lamports", "lamports"
+	LocalValue         uint64  `json:"local_value"`
+	RpcValue           uint64  `json:"rpc_value"`
+	Diff               int64   `json:"diff"`
+}
+
+// PartitionStateDiff contains only the differences between local and RPC for a partition
+type PartitionStateDiff struct {
+	Slot              uint64             `json:"slot"`
+	PartitionIdx      uint64             `json:"partition_idx"`
+	LocalAccountCount int                `json:"local_account_count"`
+	RpcFetchedCount   int                `json:"rpc_fetched_count"`
+	RpcFailedCount    int                `json:"rpc_failed_count"`
+	DiffCount         int                `json:"diff_count"`
+	Diffs             []AccountStateDiff `json:"diffs,omitempty"`
+}
+
+// ComparePartitionStateToRpc fetches actual account state from RPC and compares to local
+// Only outputs differences - if everything matches, diffs array is empty
+func ComparePartitionStateToRpc(
+	rpcc *rpcclient.RpcClient,
+	slot uint64,
+	partitionIdx uint64,
+	localAccts []*accounts.Account,
+) *PartitionStateDiff {
+	if rpcc == nil {
+		return nil
+	}
+
+	// Only for P10/P11
+	if partitionIdx != 9 && partitionIdx != 10 {
+		return nil
+	}
+
+	diff := &PartitionStateDiff{
+		Slot:              slot,
+		PartitionIdx:      partitionIdx,
+		LocalAccountCount: len(localAccts),
+	}
+
+	for _, localAcct := range localAccts {
+		if localAcct == nil {
+			continue
+		}
+
+		// Fetch actual account state from RPC
+		rpcAcctInfo, err := rpcc.GetClient().GetAccountInfo(rpcc.GetContext(), localAcct.Key)
+		if err != nil || rpcAcctInfo == nil || rpcAcctInfo.Value == nil {
+			diff.RpcFailedCount++
+			continue
+		}
+		diff.RpcFetchedCount++
+
+		rpcData := rpcAcctInfo.Value.Data.GetBinary()
+		rpcLamports := rpcAcctInfo.Value.Lamports
+
+		// Compare lamports
+		if localAcct.Lamports != rpcLamports {
+			diff.Diffs = append(diff.Diffs, AccountStateDiff{
+				Pubkey:     localAcct.Key.String(),
+				Field:      "lamports",
+				LocalValue: localAcct.Lamports,
+				RpcValue:   rpcLamports,
+				Diff:       int64(localAcct.Lamports) - int64(rpcLamports),
+			})
+			diff.DiffCount++
+		}
+
+		// Deserialize both and compare stake state
+		localStake, localErr := sealevel.UnmarshalStakeState(localAcct.Data)
+		rpcStake, rpcErr := sealevel.UnmarshalStakeState(rpcData)
+
+		if localErr == nil && rpcErr == nil &&
+			localStake.Status == sealevel.StakeStateV2StatusStake &&
+			rpcStake.Status == sealevel.StakeStateV2StatusStake {
+
+			// Compare CreditsObserved
+			localCredits := localStake.Stake.Stake.CreditsObserved
+			rpcCredits := rpcStake.Stake.Stake.CreditsObserved
+			if localCredits != rpcCredits {
+				diff.Diffs = append(diff.Diffs, AccountStateDiff{
+					Pubkey:     localAcct.Key.String(),
+					Field:      "credits_observed",
+					LocalValue: localCredits,
+					RpcValue:   rpcCredits,
+					Diff:       int64(localCredits) - int64(rpcCredits),
+				})
+				diff.DiffCount++
+			}
+
+			// Compare stake lamports
+			localStakeLam := localStake.Stake.Stake.Delegation.StakeLamports
+			rpcStakeLam := rpcStake.Stake.Stake.Delegation.StakeLamports
+			if localStakeLam != rpcStakeLam {
+				diff.Diffs = append(diff.Diffs, AccountStateDiff{
+					Pubkey:     localAcct.Key.String(),
+					Field:      "stake_lamports",
+					LocalValue: localStakeLam,
+					RpcValue:   rpcStakeLam,
+					Diff:       int64(localStakeLam) - int64(rpcStakeLam),
+				})
+				diff.DiffCount++
+			}
+		}
+	}
+
+	return diff
+}
+
+// WritePartitionStateDiff writes the partition state diff to a JSON file
+func WritePartitionStateDiff(diff *PartitionStateDiff) {
+	if diff == nil {
+		return
+	}
+
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("partition_diff_slot_%d_p%d.json", diff.Slot, diff.PartitionIdx+1))
+
+	data, err := json.MarshalIndent(diff, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal partition state diff: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write partition state diff: %v", err)
+		return
+	}
+
+	if diff.DiffCount > 0 {
+		mlog.Log.Warnf("PARTITION_DIFF P%d: %d differences found (fetched=%d failed=%d)",
+			diff.PartitionIdx+1, diff.DiffCount, diff.RpcFetchedCount, diff.RpcFailedCount)
+	} else {
+		mlog.Log.Infof("PARTITION_DIFF P%d: no differences (fetched=%d failed=%d)",
+			diff.PartitionIdx+1, diff.RpcFetchedCount, diff.RpcFailedCount)
+	}
 }

@@ -608,6 +608,10 @@ type CalculatedStakePoints struct {
 	Points                              wide.Uint128
 	NewCreditsObserved                  uint64
 	ForceCreditsUpdateWithSkippedReward bool
+	// Debug info for diagnosing force_credits_update triggers
+	ForceCreditsReason string // "credits_backward", "activation_epoch", "total_rewards_zero", ""
+	CreditsInVote      uint64 // vote credits at maxEpoch
+	CreditsInStake     uint64 // stake's credits_observed
 }
 
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
@@ -2057,6 +2061,12 @@ type CalculatedStakeRewards struct {
 	NewCreditsObserved uint64
 	Commission         uint8            // Commission rate used (0-100)
 	VotePubkey         solana.PublicKey // Vote account this stake delegates to
+	// Debug info for diagnosing force_credits_update triggers
+	ForceCreditsReason string // "credits_backward", "activation_epoch", "total_rewards_zero", ""
+	CreditsInVote      uint64 // vote credits at maxEpoch
+	CreditsInStake     uint64 // stake's credits_observed
+	ActivationEpoch    uint64 // delegation's activation epoch
+	RewardedEpoch      uint64 // epoch being rewarded
 }
 
 func CalculateStakeRewards(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features) map[solana.PublicKey]*CalculatedStakeRewards {
@@ -2254,14 +2264,29 @@ func CalculateStakeRewardsAndPartitions(
 }
 
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
-	if pointValue.Rewards == 0 || delegation.ActivationEpoch == rewardedEpoch {
+	// Check activation_epoch and total_rewards triggers (in addition to credits_backward from points calc)
+	if pointValue.Rewards == 0 {
 		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
+		if stakePointsResult.ForceCreditsReason == "" {
+			stakePointsResult.ForceCreditsReason = "total_rewards_zero"
+		}
+	}
+	if delegation.ActivationEpoch == rewardedEpoch {
+		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
+		if stakePointsResult.ForceCreditsReason == "" {
+			stakePointsResult.ForceCreditsReason = "activation_epoch"
+		}
 	}
 
 	if stakePointsResult.ForceCreditsUpdateWithSkippedReward {
 		result := &CalculatedStakeRewards{
-			NewCreditsObserved: stakePointsResult.NewCreditsObserved,
-			VotePubkey:         delegation.VoterPubkey,
+			NewCreditsObserved:     stakePointsResult.NewCreditsObserved,
+			VotePubkey:             delegation.VoterPubkey,
+			ForceCreditsReason:     stakePointsResult.ForceCreditsReason,
+			CreditsInVote:          stakePointsResult.CreditsInVote,
+			CreditsInStake:         stakePointsResult.CreditsInStake,
+			ActivationEpoch:        delegation.ActivationEpoch,
+			RewardedEpoch:          rewardedEpoch,
 		}
 		return result
 	}
@@ -2564,11 +2589,18 @@ func calculateStakePointsAndCredits(
 		return CalculatedStakePoints{
 			NewCreditsObserved:                  creditsInVote,
 			ForceCreditsUpdateWithSkippedReward: true,
+			ForceCreditsReason:                  "credits_backward",
+			CreditsInVote:                       creditsInVote,
+			CreditsInStake:                      creditsInStake,
 		}
 	}
 
 	if creditsInVote == creditsInStake || len(epochCredits) == 0 {
-		return CalculatedStakePoints{NewCreditsObserved: creditsInVote}
+		return CalculatedStakePoints{
+			NewCreditsObserved: creditsInVote,
+			CreditsInVote:      creditsInVote,
+			CreditsInStake:     creditsInStake,
+		}
 	}
 
 	/*start := sort.Search(len(epochCredits), func(i int) bool {
@@ -2605,6 +2637,8 @@ func calculateStakePointsAndCredits(
 	return CalculatedStakePoints{
 		Points:             points,
 		NewCreditsObserved: newObserved,
+		CreditsInVote:      creditsInVote,
+		CreditsInStake:     creditsInStake,
 	}
 }
 

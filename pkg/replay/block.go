@@ -1970,9 +1970,14 @@ func ReplayBlocks(
 								}
 							}
 							localRewards[pk] = LocalStakingReward{
-								Lamports:   reward.StakerRewards,
-								Commission: commission,
-								VotePubkey: reward.VotePubkey,
+								Lamports:           reward.StakerRewards,
+								Commission:         commission,
+								VotePubkey:         reward.VotePubkey,
+								ForceCreditsReason: reward.ForceCreditsReason,
+								CreditsInVote:      reward.CreditsInVote,
+								CreditsInStake:     reward.CreditsInStake,
+								ActivationEpoch:    reward.ActivationEpoch,
+								RewardedEpoch:      reward.RewardedEpoch,
 							}
 						}
 					}
@@ -1988,6 +1993,10 @@ func ReplayBlocks(
 						// Compare local stake state to RPC (includes CreditsObserved, postBalance)
 						stakeComp := ComparePartitionStakeToRpc(currentSlot, partitionIdx, distributedAccts, localRewards, block)
 						WritePartitionStakeComparison(stakeComp)
+
+						// Compare actual account state to RPC - ONLY shows differences
+						stateDiff := ComparePartitionStateToRpc(rpcc, currentSlot, partitionIdx, distributedAccts)
+						WritePartitionStateDiff(stateDiff)
 					}
 				}
 			}
