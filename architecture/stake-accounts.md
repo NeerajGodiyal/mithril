@@ -165,17 +165,14 @@ On resume:
 
 ## Minimum Stake for Rewards Eligibility
 
-**IMPORTANT:** `StakeRaiseMinimumDelegationTo1Sol` is for the STAKE PROGRAM's delegation
-minimum (preventing delegations < 1 SOL), NOT for rewards eligibility filtering.
-
-For rewards eligibility, the minimum is 1 lamport:
+For rewards eligibility, the minimum is 1 lamport (after StakeMinimumDelegationForRewards feature):
 
 ```go
 func minimumStakeDelegation(features *Features) uint64 {
     if !features.IsActive(StakeMinimumDelegationForRewards) {
         return 0  // No minimum before feature
     }
-    return 1  // 1 lamport minimum for rewards eligibility
+    return 1  // 1 lamport
 }
 ```
 
