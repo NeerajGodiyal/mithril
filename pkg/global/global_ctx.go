@@ -268,11 +268,11 @@ func HasStakeCacheItem(pubkey solana.PublicKey) bool {
 }
 
 func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
 	if instance.voteCache == nil {
 		instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
 	}
-	instance.voteCacheMutex.Lock()
-	defer instance.voteCacheMutex.Unlock()
 	instance.voteCache[pubkey] = voteState
 }
 
