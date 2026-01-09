@@ -1979,6 +1979,16 @@ func ReplayBlocks(
 					// Compare to RPC rewards
 					comp := CompareStakingRewardsToRpc(block, localRewards, partitionIdx)
 					WriteStakingRewardsComparison(comp)
+
+					// For P10/P11: detailed stake state comparison and all modified accounts dump
+					if partitionIdx == 9 || partitionIdx == 10 {
+						// Dump all modified accounts (stake + non-stake)
+						WriteSlotModifiedAccounts(currentSlot, partitionIdx, distributedAccts)
+
+						// Compare local stake state to RPC (includes CreditsObserved, postBalance)
+						stakeComp := ComparePartitionStakeToRpc(currentSlot, partitionIdx, distributedAccts, localRewards, block)
+						WritePartitionStakeComparison(stakeComp)
+					}
 				}
 			}
 		}

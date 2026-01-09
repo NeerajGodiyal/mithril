@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -1128,4 +1130,297 @@ func WritePartitionAccountDetails(details *PartitionAccountDetails) {
 
 	mlog.Log.Infof("wrote partition account details to %s (accounts=%d force_credits=%d)",
 		filename, details.AccountCount, details.ForceCreditsCount)
+}
+
+// StakeAccountComparison holds local vs RPC comparison for a single stake account
+type StakeAccountComparison struct {
+	Pubkey               string `json:"pubkey"`
+	// Local state (after distribution)
+	LocalLamports        uint64 `json:"local_lamports"`
+	LocalCreditsObserved uint64 `json:"local_credits_observed"`
+	LocalStakeLamports   uint64 `json:"local_stake_lamports"`
+	LocalReward          uint64 `json:"local_reward"`
+	LocalCommission      uint8  `json:"local_commission"`
+	// RPC state
+	RpcRewardLamports    uint64 `json:"rpc_reward_lamports"`
+	RpcPostBalance       uint64 `json:"rpc_post_balance"`
+	RpcCommission        uint8  `json:"rpc_commission"`
+	// Comparison
+	LamportsDiff         int64  `json:"lamports_diff,omitempty"`
+	PostBalanceDiff      int64  `json:"post_balance_diff,omitempty"`
+	CommissionMatch      bool   `json:"commission_match"`
+	InLocalOnly          bool   `json:"in_local_only,omitempty"`
+	InRpcOnly            bool   `json:"in_rpc_only,omitempty"`
+}
+
+// PartitionStakeComparison holds full local vs RPC comparison for a partition
+type PartitionStakeComparison struct {
+	Slot                uint64                    `json:"slot"`
+	PartitionIdx        uint64                    `json:"partition_idx"`
+	LocalCount          int                       `json:"local_count"`
+	RpcCount            int                       `json:"rpc_count"`
+	MatchCount          int                       `json:"match_count"`
+	LamportsMismatch    int                       `json:"lamports_mismatch_count"`
+	PostBalMismatch     int                       `json:"post_balance_mismatch_count"`
+	CommissionMismatch  int                       `json:"commission_mismatch_count"`
+	InLocalOnlyCount    int                       `json:"in_local_only_count"`
+	InRpcOnlyCount      int                       `json:"in_rpc_only_count"`
+	Accounts            []StakeAccountComparison  `json:"accounts,omitempty"`
+	// Only include divergent accounts to keep file size reasonable
+	DivergentAccounts   []StakeAccountComparison  `json:"divergent_accounts,omitempty"`
+}
+
+// ComparePartitionStakeToRpc compares local stake account state to RPC for P10/P11
+// localAccts are the accounts we wrote (post-distribution state)
+// localRewards are the calculated rewards with CreditsObserved
+// block contains RPC rewards
+func ComparePartitionStakeToRpc(
+	slot, partitionIdx uint64,
+	localAccts []*accounts.Account,
+	localRewards map[solana.PublicKey]LocalStakingReward,
+	block *b.Block,
+) *PartitionStakeComparison {
+	if block == nil {
+		return nil
+	}
+
+	// Only for P10/P11
+	if partitionIdx != 9 && partitionIdx != 10 {
+		return nil
+	}
+
+	comp := &PartitionStakeComparison{
+		Slot:         slot,
+		PartitionIdx: partitionIdx,
+	}
+
+	// Build map of RPC rewards
+	rpcRewards := make(map[solana.PublicKey]struct {
+		lamports    uint64
+		postBalance uint64
+		commission  uint8
+	})
+	for _, reward := range block.Rewards {
+		if string(reward.RewardType) != "Staking" {
+			continue
+		}
+		lamports := uint64(0)
+		if reward.Lamports > 0 {
+			lamports = uint64(reward.Lamports)
+		}
+		commission := uint8(0)
+		if reward.Commission != nil {
+			commission = *reward.Commission
+		}
+		rpcRewards[reward.Pubkey] = struct {
+			lamports    uint64
+			postBalance uint64
+			commission  uint8
+		}{lamports, reward.PostBalance, commission}
+		comp.RpcCount++
+	}
+
+	// Build map of local accounts for lookup
+	localAcctMap := make(map[solana.PublicKey]*accounts.Account)
+	for _, acct := range localAccts {
+		if acct != nil {
+			localAcctMap[acct.Key] = acct
+		}
+	}
+
+	// Compare each local reward to RPC
+	for pk, localReward := range localRewards {
+		comp.LocalCount++
+
+		var acctComp StakeAccountComparison
+		acctComp.Pubkey = pk.String()
+		acctComp.LocalReward = localReward.Lamports
+		acctComp.LocalCommission = localReward.Commission
+
+		// Get local account state
+		if localAcct, ok := localAcctMap[pk]; ok {
+			acctComp.LocalLamports = localAcct.Lamports
+			// Try to deserialize to get CreditsObserved
+			if stakeState, err := sealevel.UnmarshalStakeState(localAcct.Data); err == nil && stakeState.Status == sealevel.StakeStateV2StatusStake {
+				acctComp.LocalCreditsObserved = stakeState.Stake.Stake.CreditsObserved
+				acctComp.LocalStakeLamports = stakeState.Stake.Stake.Delegation.StakeLamports
+			}
+		}
+
+		// Get RPC data
+		if rpcData, ok := rpcRewards[pk]; ok {
+			acctComp.RpcRewardLamports = rpcData.lamports
+			acctComp.RpcPostBalance = rpcData.postBalance
+			acctComp.RpcCommission = rpcData.commission
+			delete(rpcRewards, pk) // Mark as processed
+
+			// Compare
+			acctComp.LamportsDiff = int64(acctComp.LocalReward) - int64(acctComp.RpcRewardLamports)
+			acctComp.PostBalanceDiff = int64(acctComp.LocalLamports) - int64(acctComp.RpcPostBalance)
+			acctComp.CommissionMatch = acctComp.LocalCommission == acctComp.RpcCommission
+
+			// Count mismatches
+			if acctComp.LamportsDiff != 0 {
+				comp.LamportsMismatch++
+			}
+			if acctComp.PostBalanceDiff != 0 {
+				comp.PostBalMismatch++
+			}
+			if !acctComp.CommissionMatch {
+				comp.CommissionMismatch++
+			}
+
+			// Is it a match?
+			if acctComp.LamportsDiff == 0 && acctComp.PostBalanceDiff == 0 && acctComp.CommissionMatch {
+				comp.MatchCount++
+			} else {
+				comp.DivergentAccounts = append(comp.DivergentAccounts, acctComp)
+			}
+		} else {
+			// In local but not in RPC
+			acctComp.InLocalOnly = true
+			comp.InLocalOnlyCount++
+			comp.DivergentAccounts = append(comp.DivergentAccounts, acctComp)
+		}
+	}
+
+	// Remaining RPC rewards are in RPC but not local
+	for pk, rpcData := range rpcRewards {
+		comp.InRpcOnlyCount++
+		comp.DivergentAccounts = append(comp.DivergentAccounts, StakeAccountComparison{
+			Pubkey:            pk.String(),
+			RpcRewardLamports: rpcData.lamports,
+			RpcPostBalance:    rpcData.postBalance,
+			RpcCommission:     rpcData.commission,
+			InRpcOnly:         true,
+		})
+	}
+
+	return comp
+}
+
+// WritePartitionStakeComparison writes the local vs RPC comparison to a file
+func WritePartitionStakeComparison(comp *PartitionStakeComparison) {
+	if comp == nil {
+		return
+	}
+
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("stake_comparison_slot_%d_p%d.json", comp.Slot, comp.PartitionIdx+1))
+
+	data, err := json.MarshalIndent(comp, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal stake comparison: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write stake comparison: %v", err)
+		return
+	}
+
+	// Log summary
+	mlog.Log.Infof("STAKE_CMP P%d: local=%d rpc=%d match=%d lamports_diff=%d postbal_diff=%d commission_diff=%d local_only=%d rpc_only=%d",
+		comp.PartitionIdx+1, comp.LocalCount, comp.RpcCount, comp.MatchCount,
+		comp.LamportsMismatch, comp.PostBalMismatch, comp.CommissionMismatch,
+		comp.InLocalOnlyCount, comp.InRpcOnlyCount)
+
+	if len(comp.DivergentAccounts) > 0 {
+		mlog.Log.Warnf("STAKE_CMP P%d: %d divergent accounts - see %s", comp.PartitionIdx+1, len(comp.DivergentAccounts), filename)
+	}
+}
+
+// SlotModifiedAccount holds info about an account modified in a distribution slot
+type SlotModifiedAccount struct {
+	Pubkey       string `json:"pubkey"`
+	Type         string `json:"type"` // "stake", "sysvar", "vote", "other"
+	Owner        string `json:"owner"`
+	Lamports     uint64 `json:"lamports"`
+	DataLen      int    `json:"data_len"`
+	IsNil        bool   `json:"is_nil,omitempty"`
+}
+
+// SlotModifiedAccountsDump holds all modified accounts for a distribution slot
+type SlotModifiedAccountsDump struct {
+	Slot           uint64                `json:"slot"`
+	PartitionIdx   uint64                `json:"partition_idx"`
+	TotalCount     int                   `json:"total_count"`
+	StakeCount     int                   `json:"stake_count"`
+	SysvarCount    int                   `json:"sysvar_count"`
+	VoteCount      int                   `json:"vote_count"`
+	OtherCount     int                   `json:"other_count"`
+	NilCount       int                   `json:"nil_count"`
+	Accounts       []SlotModifiedAccount `json:"accounts"`
+}
+
+// WriteSlotModifiedAccounts writes all modified accounts for a distribution slot to a JSON file
+// This helps identify if non-stake accounts are causing divergence
+func WriteSlotModifiedAccounts(slot, partitionIdx uint64, accounts []*accounts.Account) {
+	if len(accounts) == 0 {
+		return
+	}
+
+	// Only write for P10/P11 (partitionIdx 9 and 10)
+	if partitionIdx != 9 && partitionIdx != 10 {
+		return
+	}
+
+	diagDir := getDiagnosticsDir()
+	filename := filepath.Join(diagDir, fmt.Sprintf("slot_modified_accounts_%d_p%d.json", slot, partitionIdx+1))
+
+	dump := SlotModifiedAccountsDump{
+		Slot:         slot,
+		PartitionIdx: partitionIdx,
+		TotalCount:   len(accounts),
+	}
+
+	for _, acct := range accounts {
+		if acct == nil {
+			dump.NilCount++
+			dump.Accounts = append(dump.Accounts, SlotModifiedAccount{
+				IsNil: true,
+			})
+			continue
+		}
+
+		// Categorize by owner
+		owner := acct.Owner
+		var acctType string
+		switch owner {
+		case addresses.StakeProgramAddr:
+			acctType = "stake"
+			dump.StakeCount++
+		case addresses.VoteProgramAddr:
+			acctType = "vote"
+			dump.VoteCount++
+		case addresses.SysvarOwnerAddr:
+			acctType = "sysvar"
+			dump.SysvarCount++
+		default:
+			acctType = "other"
+			dump.OtherCount++
+		}
+
+		dump.Accounts = append(dump.Accounts, SlotModifiedAccount{
+			Pubkey:   acct.Key.String(),
+			Type:     acctType,
+			Owner:    solana.PublicKeyFromBytes(owner[:]).String(),
+			Lamports: acct.Lamports,
+			DataLen:  len(acct.Data),
+		})
+	}
+
+	data, err := json.MarshalIndent(dump, "", "  ")
+	if err != nil {
+		mlog.Log.Warnf("failed to marshal slot modified accounts: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		mlog.Log.Warnf("failed to write slot modified accounts: %v", err)
+		return
+	}
+
+	mlog.Log.Infof("wrote slot modified accounts to %s (total=%d stake=%d sysvar=%d vote=%d other=%d nil=%d)",
+		filename, dump.TotalCount, dump.StakeCount, dump.SysvarCount, dump.VoteCount, dump.OtherCount, dump.NilCount)
 }
