@@ -634,7 +634,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
 	mlog.Log.Infof("loading vote and stake accounts from AccountsDB...")
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
-	block.VoteAccts = make(map[solana.PublicKey]uint64)
+	block.EpochStakesPerVoteAcct = make(map[solana.PublicKey]uint64)
 
 	var wg sync.WaitGroup
 	voteAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
@@ -679,7 +679,7 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		for _, va := range snapshotManifest.Bank.Stakes.VoteAccounts {
 			ts := sealevel.BlockTimestamp{Slot: va.Value.LastTimestampSlot, Timestamp: va.Value.LastTimestampTs}
 			block.VoteTimestamps[va.Key] = ts
-			block.VoteAccts[va.Key] = va.Stake
+			block.EpochStakesPerVoteAcct[va.Key] = va.Stake
 			block.TotalEpochStake += va.Stake
 
 			wg.Add(1)
@@ -759,7 +759,7 @@ func configureBlock(block *b.Block,
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
 	block.VoteTimestamps = lastSlotCtx.VoteTimestamps
-	block.VoteAccts = lastSlotCtx.VoteAccts
+	block.EpochStakesPerVoteAcct = lastSlotCtx.VoteAccts
 	block.ParentSlot = lastSlotCtx.Slot
 	block.LatestEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
@@ -774,17 +774,18 @@ func configureBlock(block *b.Block,
 	configureGlobalCtx(block)
 
 	if global.ManageLeaderSchedule() {
-		// if we've crossed an epoch boundary, fetch the new leader schedule
-		if epochSchedule.GetEpoch(block.Slot) != lastSlotCtx.Epoch {
-			_, err := PrepareLeaderScheduleLocalFromVoteCache(epochSchedule.GetEpoch(block.Slot), epochSchedule, "")
-			if err != nil {
-				panic(err)
+		// epoch boundary. do not set leader
+		if epochSchedule.GetEpoch(block.Slot) == lastSlotCtx.Epoch {
+			var hasLeader bool
+			block.Leader, hasLeader = global.LeaderForSlot(block.Slot)
+			if !hasLeader {
+				panic(fmt.Sprintf("couldn't find leader for slot %d at epoch boundary", block.Slot))
 			}
-		}
-		var exists bool
-		block.Leader, exists = global.LeaderForSlot(block.Slot)
-		if !exists {
-			return fmt.Errorf("unable to find leader for slot %d", block.Slot)
+			var exists bool
+			block.Leader, exists = global.LeaderForSlot(block.Slot)
+			if !exists {
+				return fmt.Errorf("unable to find leader for slot %d", block.Slot)
+			}
 		}
 	}
 
@@ -1624,7 +1625,7 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		Features:               block.Features,
 		AcctsLtHash:            block.AcctsLtHash,
 
-		VoteAccts:       block.VoteAccts,
+		VoteAccts:       block.EpochStakesPerVoteAcct,
 		VoteTimestampMu: &sync.Mutex{},
 		VoteTimestamps:  block.VoteTimestamps,
 		TotalEpochStake: block.TotalEpochStake,
