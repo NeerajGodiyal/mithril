@@ -383,6 +383,15 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 
 	txCtx.ModifiedStakeAccts = true
 
+	// DIAGNOSTIC: Log stake program attempts during rewards distribution.
+	// If any stake transactions succeed during rewards distribution, the boundary
+	// snapshots would be stale, causing bank hash divergence.
+	if epochRewardsActive {
+		instrName := stakeInstrTypeName(instructionType)
+		mlog.Log.Warnf("STAKE_DURING_REWARDS: slot=%d instr=%s(%d) - will be blocked by EpochRewardsActive",
+			execCtx.SlotCtx.Slot, instrName, instructionType)
+	}
+
 	switch instructionType {
 	case StakeProgramInstrTypeInitialize:
 		{
@@ -1091,6 +1100,51 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 	}
 
 	return err
+}
+
+// stakeInstrTypeName returns a human-readable name for stake instruction types.
+// Used for diagnostic logging.
+func stakeInstrTypeName(instrType uint32) string {
+	switch instrType {
+	case StakeProgramInstrTypeInitialize:
+		return "Initialize"
+	case StakeProgramInstrTypeAuthorize:
+		return "Authorize"
+	case StakeProgramInstrTypeDelegateStake:
+		return "DelegateStake"
+	case StakeProgramInstrTypeSplit:
+		return "Split"
+	case StakeProgramInstrTypeWithdraw:
+		return "Withdraw"
+	case StakeProgramInstrTypeDeactivate:
+		return "Deactivate"
+	case StakeProgramInstrTypeSetLockup:
+		return "SetLockup"
+	case StakeProgramInstrTypeMerge:
+		return "Merge"
+	case StakeProgramInstrTypeAuthorizeWithSeed:
+		return "AuthorizeWithSeed"
+	case StakeProgramInstrTypeInitializeChecked:
+		return "InitializeChecked"
+	case StakeProgramInstrTypeAuthorizeChecked:
+		return "AuthorizeChecked"
+	case StakeProgramInstrTypeAuthorizeCheckedWithSeed:
+		return "AuthorizeCheckedWithSeed"
+	case StakeProgramInstrTypeSetLockupChecked:
+		return "SetLockupChecked"
+	case StakeProgramInstrTypeGetMinimumDelegation:
+		return "GetMinimumDelegation"
+	case StakeProgramInstrTypeDeactivateDelinquent:
+		return "DeactivateDelinquent"
+	case StakeProgramInstrTypeRedelegate:
+		return "Redelegate"
+	case StakeProgramInstrTypeMoveStake:
+		return "MoveStake"
+	case StakeProgramInstrTypeMoveLamports:
+		return "MoveLamports"
+	default:
+		return "Unknown"
+	}
 }
 
 func StakeProgramInitialize(stakeAcct *BorrowedAccount, authorized Authorized, lockup StakeLockup, rent SysvarRent, f features.Features) error {
