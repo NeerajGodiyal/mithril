@@ -219,7 +219,9 @@ func BuildAccountsDb(
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true, progress: dp})
+			// Note: Don't pass progress to incremental - it's much smaller and would interfere
+			// with the full snapshot's progress tracking (both would update same bar)
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
 		}()
 	}
