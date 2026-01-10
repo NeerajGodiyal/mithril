@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Overclock-Validator/mithril/pkg/version"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -45,8 +44,6 @@ type logger struct {
 	bufWriter     *bufio.Writer
 	fileWriter    *lumberjack.Logger
 	logPath       string
-	runDir        string // per-run directory (e.g., mithril-logs/20250104-120000Z_abc123_12345678/)
-	baseDir       string // base log directory (e.g., /mnt/mithril-logs)
 	runID         string
 	initialized   bool
 	stopCh        chan struct{}
@@ -69,22 +66,6 @@ func DefaultConfig() LogConfig {
 
 // Initialize sets up file logging with the given config and run ID.
 // If dir is empty, only stdout logging is used.
-//
-// Directory structure:
-//
-//	<dir>/
-//	├── runs.log                               # Append-only log tracking all runs
-//	├── latest -> <run_dir>/                   # Symlink to latest run directory
-//	├── 20250104-120000Z_abc123_12345678/      # Per-run directory
-//	│   ├── mithril.log                        # Main log file
-//	│   ├── config.toml                        # Copy of config used for this run
-//	│   └── leader_schedule/                   # Leader schedule artifacts
-//	│       ├── epoch905_local_12345678_validators.csv
-//	│       ├── epoch905_local_12345678_skipped.csv
-//	│       ├── epoch905_local_12345678_summary.txt
-//	│       └── mismatch_12345678.log
-//	└── 20250104-130000Z_def456_87654321/
-//	    └── ...
 func Initialize(cfg LogConfig, runID string) error {
 	Log.mu.Lock()
 	defer Log.mu.Unlock()
@@ -96,7 +77,6 @@ func Initialize(cfg LogConfig, runID string) error {
 	Log.runID = runID
 	Log.toStdout = cfg.ToStdout
 	Log.level = parseLevel(cfg.Level)
-	Log.baseDir = cfg.Dir
 
 	// If no dir specified, stderr only (stderr to avoid breaking progress bar cursor positioning)
 	if cfg.Dir == "" {
@@ -105,31 +85,19 @@ func Initialize(cfg LogConfig, runID string) error {
 		return nil
 	}
 
-	// Create base log directory if it doesn't exist
+	// Create log directory if it doesn't exist
 	if err := os.MkdirAll(cfg.Dir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory %s: %w", cfg.Dir, err)
 	}
 
-	// Build per-run directory name: YYYYMMDD-HHMMSSZ_<commit>_<runid>
+	// Generate log filename: mithril-YYYYMMDD-HHMMSSZ-<runid>.log
 	now := time.Now().UTC()
 	shortRunID := runID
 	if len(shortRunID) > 8 {
 		shortRunID = shortRunID[:8]
 	}
-	shortCommit := version.GitCommit
-	if len(shortCommit) > 7 {
-		shortCommit = shortCommit[:7]
-	}
-	runDirName := fmt.Sprintf("%s_%s_%s", now.Format("20060102-150405Z"), shortCommit, shortRunID)
-	Log.runDir = filepath.Join(cfg.Dir, runDirName)
-
-	// Create per-run directory
-	if err := os.MkdirAll(Log.runDir, 0755); err != nil {
-		return fmt.Errorf("failed to create run directory %s: %w", Log.runDir, err)
-	}
-
-	// Main log file goes inside the run directory
-	Log.logPath = filepath.Join(Log.runDir, "mithril.log")
+	filename := fmt.Sprintf("mithril-%s-%s.log", now.Format("20060102-150405Z"), shortRunID)
+	Log.logPath = filepath.Join(cfg.Dir, filename)
 
 	// Set up lumberjack for rotation
 	Log.fileWriter = &lumberjack.Logger{
@@ -151,17 +119,13 @@ func Initialize(cfg LogConfig, runID string) error {
 	// Wrap with buffered writer for performance
 	Log.bufWriter = bufio.NewWriterSize(Log.writer, 16*1024) // 16KB buffer
 
-	// Create symlink to latest run directory
-	symlinkPath := filepath.Join(cfg.Dir, "latest")
+	// Create symlink to latest log
+	symlinkPath := filepath.Join(cfg.Dir, "mithril-latest.log")
 	os.Remove(symlinkPath) // Ignore error if doesn't exist
-	if err := os.Symlink(runDirName, symlinkPath); err != nil {
+	if err := os.Symlink(filename, symlinkPath); err != nil {
 		// Non-fatal, just log to stdout
 		fmt.Fprintf(os.Stderr, "warning: failed to create symlink %s: %v\n", symlinkPath, err)
 	}
-
-	// Append to runs.log at the base directory level (tracks all runs)
-	runsLogPath := filepath.Join(cfg.Dir, "runs.log")
-	appendRunsLogEntry(runsLogPath, now, runID, shortCommit, runDirName)
 
 	// Start background flush goroutine
 	Log.stopCh = make(chan struct{})
@@ -170,22 +134,6 @@ func Initialize(cfg LogConfig, runID string) error {
 
 	Log.initialized = true
 	return nil
-}
-
-// appendRunsLogEntry appends an entry to the runs.log file
-func appendRunsLogEntry(runsLogPath string, ts time.Time, runID, commit, runDir string) {
-	f, err := os.OpenFile(runsLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to open runs.log: %v\n", err)
-		return
-	}
-	defer f.Close()
-
-	entry := fmt.Sprintf("[%s] run_id=%s commit=%s version=%s dir=%s\n",
-		ts.Format(time.RFC3339), runID, commit, version.Version, runDir)
-	if _, err := f.WriteString(entry); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to write to runs.log: %v\n", err)
-	}
 }
 
 // flushLoop periodically flushes the buffer and syncs to disk
@@ -263,45 +211,6 @@ func GetLogPath() string {
 	Log.mu.Lock()
 	defer Log.mu.Unlock()
 	return Log.logPath
-}
-
-// GetRunID returns the run ID for the current session
-func GetRunID() string {
-	Log.mu.Lock()
-	defer Log.mu.Unlock()
-	return Log.runID
-}
-
-// GetLogDir returns the per-run log directory path (where mithril.log and artifacts go)
-func GetLogDir() string {
-	Log.mu.Lock()
-	defer Log.mu.Unlock()
-	return Log.runDir
-}
-
-// GetBaseLogDir returns the base log directory (parent of all run directories)
-func GetBaseLogDir() string {
-	Log.mu.Lock()
-	defer Log.mu.Unlock()
-	return Log.baseDir
-}
-
-// SaveRunConfig saves a copy of the config to the run directory.
-// Should be called after Initialize with the full config content.
-func SaveRunConfig(configContent []byte) error {
-	Log.mu.Lock()
-	runDir := Log.runDir
-	Log.mu.Unlock()
-
-	if runDir == "" {
-		return nil // No run directory (stderr-only mode)
-	}
-
-	configPath := filepath.Join(runDir, "config.toml")
-	if err := os.WriteFile(configPath, configContent, 0644); err != nil {
-		return fmt.Errorf("failed to save config to run directory: %w", err)
-	}
-	return nil
 }
 
 // parseLevel converts a string level to LogLevel

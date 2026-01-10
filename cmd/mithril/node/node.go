@@ -1020,23 +1020,14 @@ func runLive(c *cobra.Command, args []string) {
 		logCfg.MaxBackups = 10
 	}
 
+	// Store log dir for startup info display
+	logDir = logCfg.Dir
+
 	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
 		// Non-fatal, continue with stdout-only logging
 		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
 	}
 	defer mlog.Shutdown()
-
-	// Store log dir for startup info display (run directory, not base dir)
-	logDir = mlog.GetLogDir()
-
-	// Save a copy of the config file to the run directory
-	if config.ConfigFile != "" {
-		if configContent, err := os.ReadFile(config.ConfigFile); err == nil {
-			if err := mlog.SaveRunConfig(configContent); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to save config to run directory: %v\n", err)
-			}
-		}
-	}
 
 	// Kill any existing mithril processes to prevent zombie accumulation
 	if killed := killExistingMithrilProcesses(); killed > 0 {
@@ -1873,7 +1864,6 @@ func printStartupInfo(commandName string) {
 				}
 				fmt.Printf("  Last shutdown:  %s%s%s\n", reasonColor, shutdownInfo, reset)
 			}
-
 		}
 	}
 
