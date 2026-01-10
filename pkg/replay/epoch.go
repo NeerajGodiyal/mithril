@@ -176,9 +176,9 @@ func prepareEpochStakes(acctsDb *accountsdb.AccountsDb, prevSlotCtx *sealevel.Sl
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 
-	block.VoteAccts = refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
+	block.EpochStakesPerVoteAcct = refreshVoteAcctsCache(prevSlotCtx, acctsDb, &stakeHistory, newEpoch, newWarmupCooldownRateEpoch)
 	block.TotalEpochStake = 0
-	for _, stake := range block.VoteAccts {
+	for _, stake := range block.EpochStakesPerVoteAcct {
 		block.TotalEpochStake += stake
 	}
 
