@@ -999,6 +999,8 @@ func ReplayBlocks(
 	var voteTxCounts []uint64    // vote txns per block
 	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
+	var lastModeWasNearTip bool   // track mode changes for logging
+	var summaryStartSlot uint64   // first slot in current 100-slot interval
 
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
@@ -1103,9 +1105,8 @@ func ReplayBlocks(
 			if leader, exists := global.LeaderForSlot(block.Slot); exists {
 				leaderStr = leader.String()
 			}
-			// Log skipped slot in same format as regular blocks (with N/A for missing values)
-			// Padding: cu=10 chars + space, txns=16 chars + space, exec=variable (matches normal format)
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
+			// Log skipped slot to terminal only (not to log file)
+			mlog.Log.TerminalOnlyPrecisef("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
 				block.Slot, leaderStr, waitTime.Seconds())
 			skippedSlotsCount++
 			continue // Skip all execution - no state changes for skipped slots
@@ -1282,10 +1283,29 @@ func ReplayBlocks(
 			leaderStr = block.Leader.String()
 		}
 
-		// Fixed-width format for consistent alignment (use precise timing for block replay)
+		// Fixed-width format for consistent alignment - terminal only (log file gets summaries)
 		totalSlotTime := waitTime + slotReplayDuration
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
+		mlog.Log.TerminalOnlyPrecisef("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
 			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds(), totalSlotTime.Seconds())
+
+		// Log slow slots to file (> 1 second execution time)
+		if slotReplayDuration.Seconds() > 1.0 {
+			mlog.Log.FileOnlyf("SLOW slot %d: exec=%.3fs total=%.3fs cu=%d txns=%d",
+				block.Slot, slotReplayDuration.Seconds(), totalSlotTime.Seconds(), totalCU, voteTxCount+nonVoteTxCount)
+		}
+
+		// Check for mode changes and log to file
+		currentFetchStats := blockStream.GetFetchStats()
+		if currentFetchStats.IsNearTip != lastModeWasNearTip {
+			if currentFetchStats.IsNearTip {
+				mlog.Log.Infof("MODE: switched to near-tip at slot %d (tip=%d, behind=%d)",
+					block.Slot, currentFetchStats.ConfirmedTip, currentFetchStats.ConfirmedTip-block.Slot)
+			} else {
+				mlog.Log.Infof("MODE: switched to catchup at slot %d (tip=%d, behind=%d)",
+					block.Slot, currentFetchStats.ConfirmedTip, currentFetchStats.ConfirmedTip-block.Slot)
+			}
+			lastModeWasNearTip = currentFetchStats.IsNearTip
+		}
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
@@ -1303,6 +1323,9 @@ func ReplayBlocks(
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
+			if statsCounter == 1 {
+				summaryStartSlot = block.Slot
+			}
 			execTimes = append(execTimes, slotReplayDuration.Seconds())
 			waitTimes = append(waitTimes, waitTime.Seconds())
 			cuValues = append(cuValues, totalCU)
@@ -1444,15 +1467,16 @@ func ReplayBlocks(
 					tipDistanceStr = "tip unknown"
 				}
 
-				// Print summary in reorganized format
-				mlog.Log.InfofPrecise("")
-				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
-
 				// Line 1: Mode, blocks/sec, skipped slots, tip distance
 				modeStr := "catchup"
 				if fetchStats.IsNearTip {
 					modeStr = "near-tip"
 				}
+
+				// Print summary (goes to both terminal and log file)
+				mlog.Log.InfofPrecise("")
+				mlog.Log.InfofPrecise("=== 100 Slot Summary (slots %d-%d) ===", summaryStartSlot, block.Slot)
+
 				if skippedSlotsCount > 0 {
 					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %d skipped | %s",
 						modeStr, blocksPerSec, skippedSlotsCount, tipDistanceStr)

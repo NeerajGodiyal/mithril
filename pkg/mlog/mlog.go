@@ -446,6 +446,26 @@ func (l *logger) InfofPrecise(format string, args ...interface{}) {
 	l.writeImmediate(msg)
 }
 
+// TerminalOnlyf logs a message only to stderr/terminal, not to the log file.
+// Used for per-slot output that would bloat the log file.
+func (l *logger) TerminalOnlyf(format string, args ...interface{}) {
+	if l.level > LevelInfo {
+		return
+	}
+	msg := fmt.Sprintf("%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
+	fmt.Fprint(os.Stderr, msg)
+}
+
+// TerminalOnlyPrecisef logs with millisecond precision timing to terminal only.
+// Used for per-slot block replay output that should not go to the log file.
+func (l *logger) TerminalOnlyPrecisef(format string, args ...interface{}) {
+	if l.level > LevelInfo {
+		return
+	}
+	msg := fmt.Sprintf("%s%s\n", relativePrefixPrecise(), fmt.Sprintf(format, args...))
+	fmt.Fprint(os.Stderr, msg)
+}
+
 func (l *logger) Warnf(format string, args ...interface{}) {
 	if l.level > LevelWarn {
 		return
