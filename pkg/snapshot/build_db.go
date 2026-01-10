@@ -210,7 +210,7 @@ func BuildAccountsDb(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{})
+		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
 	}()
 
 	var incrementalErr error
@@ -219,7 +219,7 @@ func BuildAccountsDb(
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true, progress: dp})
 			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
 		}()
 	}
