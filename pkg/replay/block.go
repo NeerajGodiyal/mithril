@@ -1154,6 +1154,13 @@ func ReplayBlocks(
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			partitionedRewardsInfo = handleEpochTransition(acctsDb, rpcc, rpcBackups, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch
+			// Generate leader schedule for new epoch
+			if global.ManageLeaderSchedule() {
+				_, err := PrepareLeaderScheduleLocal(block.Epoch, epochSchedule, "")
+				if err != nil {
+					mlog.Log.Errorf("failed to prepare leader schedule for epoch %d: %v", block.Epoch, err)
+				}
+			}
 			justCrossedEpochBoundary = true
 			if len(newlyActivatedFeatures) != 0 {
 				block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, newlyActivatedFeatures...)
