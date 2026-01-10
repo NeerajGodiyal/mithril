@@ -39,18 +39,7 @@
 
 | Test | Mode | Result | Notes |
 |------|------|--------|-------|
-| Epoch 907→908 | Snapshot straight through boundary | FAIL | maxEpoch=nil didn't help. Diagnosed: 95 extra ForceCreditsUpdate accounts in local P11 |
-
-### Current Test (ForceCreditsUpdate exclusion)
-
-| Test | Mode | Result | Notes |
-|------|------|--------|-------|
-| Epoch 907→908 | Snapshot straight through boundary | PENDING | Excluding ForceCreditsUpdate accounts from partitions |
-
-**Changes made:**
-- `pkg/rewards/rewards.go:2982-2996` - Partition assignment now requires `hasPoints` only (not `|| needsCreditsUpdate`)
-- `pkg/rewards/rewards.go:3118-3130` - Same change in sequential fallback path
-- Clear comments added indicating this is EXPERIMENTAL and may need to be reverted
+| Epoch 907→908 | Snapshot straight through boundary | PENDING | Disabled maxEpoch filtering (nil instead of &rewardedEpoch) |
 
 ---
 
@@ -60,14 +49,16 @@
 
 | Hypothesis | Result | Notes |
 |------------|--------|-------|
-| maxEpoch filtering causes issue | RULED OUT | Disabling had no effect; 95 extra accounts still appeared |
+| (none confirmed yet) | | |
 
 ### Pending
 
 | Hypothesis | Priority | Rationale |
 |------------|----------|-----------|
-| **ForceCreditsUpdate accounts shouldn't be in partitions** | HIGH | RPC shows 95 fewer accounts in P11, all are ForceCreditsUpdate with 0 lamports |
+| maxEpoch filtering causes issue | LOW | Should be no-op in normal replay (no future epoch credits to filter) |
+| ForceCreditsUpdate partition assignment | MEDIUM | Commit 89a8197 changed this logic |
 | LtHash computation difference | MEDIUM | Could cause bank hash mismatch even with correct rewards |
+| Different account set in partition | HIGH | Need to compare local vs RPC partition accounts |
 | Something specific to epoch 907→908 data | MEDIUM | 5f13cebc also failed at 906→907, maybe epoch-specific |
 
 ---
@@ -80,13 +71,9 @@
 
 3. **VoteCache at boundary is clean** - In normal replay (no crash/resume), VoteCache has correct end-of-epoch state with no future epoch credits
 
-4. **maxEpoch filtering is a no-op** - CONFIRMED: At normal boundary, there are no epoch 908 credits to filter, so filtering doesn't change anything
+4. **maxEpoch filtering should be no-op** - At normal boundary, there are no epoch 908 credits to filter, so filtering shouldn't change anything
 
 5. **Stop/resume is broken** - 5f13cebc crashed on stop/resume for 905→906
-
-6. **P11 account count mismatch diagnosed** - `local=4072 rpc=3977` (95 extra accounts, all ForceCreditsUpdate with lamports=0)
-
-7. **Reward totals match perfectly** - `local_total=152105939008 rpc_total=152105939008 diff=0`
 
 ---
 
@@ -122,11 +109,7 @@ Check these in the diagnostics directory when running:
 
 ## Next Steps
 
-1. **Run current test** - Excluding ForceCreditsUpdate accounts from partitions
-   - If PASS: Confirms mainnet doesn't process these accounts
-   - If FAIL: Mainnet DOES process them, need different fix
-
-2. If test fails, investigate:
-   - Are the 95 accounts being MODIFIED differently by mainnet vs Mithril?
-   - LtHash computation differences
-   - Check if Agave's partition assignment differs from our understanding
+1. Wait for `3d4e8b7` maxEpoch filtering test result
+2. If fails: Compare partition 11 accounts with RPC directly
+3. Consider: Is the issue epoch-specific? (5f13cebc also failed at 906→907)
+4. May need git bisect between 5f13cebc and HEAD to find exact breaking commit
