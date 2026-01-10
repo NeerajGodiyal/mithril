@@ -2830,8 +2830,9 @@ func CombinedRefreshPointsAndPartitions(
 		result.snapshot = stakeAcct.Clone()
 		result.processed = true
 
-		// Calculate partition assignment for accounts with points > 0 OR ForceCreditsUpdateWithSkippedReward
-		// (ForceCreditsUpdateWithSkippedReward accounts need to be in partitions so credits can be updated)
+		// Calculate partition index for eligible accounts (used later to decide partition inclusion)
+		// Note: EXPERIMENTAL change - ForceCreditsUpdate accounts have partition index calculated here
+		// but are NOT added to partitions (see result collection loop for rationale)
 		if numPartitions != 0 {
 			result.partitionIdx = CalculateRewardPartitionForPubkey(task.pubkey, slotCtx.Blockhash, numPartitions)
 		}
@@ -2979,11 +2980,18 @@ func CombinedRefreshPointsAndPartitions(
 			result.delegation.CreditsObserved = result.dbCredits
 		}
 
-		// Add to partition if eligible (has points > 0 OR needs credits update via ForceCreditsUpdateWithSkippedReward)
+		// Add to partition if eligible (has points > 0)
+		//
+		// EXPERIMENTAL: Excluding ForceCreditsUpdateWithSkippedReward accounts from partitions.
+		// Hypothesis: Mainnet may not process these accounts (RPC shows 95 fewer accounts in P11).
+		// Evidence: 95 extra accounts in local P11, all ForceCreditsUpdate with lamports=0, not in RPC rewards.
+		// REVERT IF WRONG: If bank hash still mismatches, mainnet DOES process these accounts and we need
+		// to restore the original condition: if hasPoints || needsCreditsUpdate { ... }
+		// Original code also included: needsCreditsUpdate := result.points.ForceCreditsUpdateWithSkippedReward
 		if result.points != nil && numPartitions != 0 {
 			hasPoints := !result.points.Points.Eq(wide.Uint128FromUint64(0))
-			needsCreditsUpdate := result.points.ForceCreditsUpdateWithSkippedReward
-			if hasPoints || needsCreditsUpdate {
+			// needsCreditsUpdate := result.points.ForceCreditsUpdateWithSkippedReward  // EXPERIMENTAL: disabled
+			if hasPoints { // was: if hasPoints || needsCreditsUpdate
 				partitions[result.partitionIdx].pubkeys = append(partitions[result.partitionIdx].pubkeys, result.pubkey)
 			}
 		}
@@ -3108,11 +3116,15 @@ func combinedRefreshPointsSequentialFull(
 		snapshots[pubkey] = stakeAcct.Clone()
 		totalPoints = totalPoints.Add(pts.Points)
 
-		// Add to partition if has points > 0 OR needs credits update
+		// Add to partition if has points > 0
+		//
+		// EXPERIMENTAL: Excluding ForceCreditsUpdateWithSkippedReward accounts from partitions.
+		// See comment in parallel path above for full rationale.
+		// REVERT IF WRONG: Restore original condition: if hasPoints || needsCreditsUpdate { ... }
 		if numPartitions != 0 {
 			hasPoints := !pts.Points.Eq(wide.Uint128FromUint64(0))
-			needsCreditsUpdate := pts.ForceCreditsUpdateWithSkippedReward
-			if hasPoints || needsCreditsUpdate {
+			// needsCreditsUpdate := pts.ForceCreditsUpdateWithSkippedReward  // EXPERIMENTAL: disabled
+			if hasPoints { // was: if hasPoints || needsCreditsUpdate
 				idx := CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numPartitions)
 				partitions[idx].pubkeys = append(partitions[idx].pubkeys, pubkey)
 			}
