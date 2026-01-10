@@ -210,41 +210,35 @@ func BuildAccountsDbPaths(
 		dp.Start()
 	}
 
-	// Process both snapshots in parallel for maximum speed
-	// Incremental snapshot has suppressLogging to avoid interleaved output
-	var fullSnapshotErr error
-	var incrementalErr error
+	// Process snapshots sequentially for better performance (less lock contention)
+	// Full snapshot first
+	err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fullSnapshotErr = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
-	}()
-
-	if incrementalSnapshotFile != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying,
-				readTarOptions{isIncremental: true})
-		}()
-	}
-
-	// Wait for both tar reads to complete
+	// Wait for ALL worker tasks from full snapshot to complete before starting incremental
 	wg.Wait()
 
-	// Stop progress display
+	// Stop progress display after full snapshot
 	if dp != nil {
-		if fullSnapshotErr != nil {
-			dp.Interrupt(fullSnapshotErr)
+		if err != nil {
+			dp.Interrupt(err)
 		} else {
 			dp.Stop()
 		}
 	}
 
-	// Check for errors from either snapshot
-	if err := joinErrors(fullSnapshotErr, incrementalErr); err != nil {
+	if err != nil {
 		return nil, nil, err
+	}
+
+	// Process incremental snapshot (if provided)
+	if incrementalSnapshotFile != "" {
+		err = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying,
+			readTarOptions{isIncremental: true})
+		if err != nil {
+			return nil, nil, err
+		}
+		// Wait for all incremental worker tasks to complete
+		wg.Wait()
 	}
 
 	mlog.Log.Debugf("done processing snapshots in %s.", fmtDuration(time.Since(start)))
@@ -550,17 +544,6 @@ func (p *snapshotWorkerPools) Release() {
 	p.appendVecCopying.Release()
 	p.indexEntryBuilder.Release()
 	p.indexEntryCommitter.Release()
-}
-
-// joinErrors combines two errors into one, returning nil if both are nil.
-func joinErrors(err1, err2 error) error {
-	if err1 != nil && err2 != nil {
-		return fmt.Errorf("multiple errors: %v; %v", err1, err2)
-	}
-	if err1 != nil {
-		return err1
-	}
-	return err2
 }
 
 // Ingest SSTs into a fresh pebble DB and return it.
