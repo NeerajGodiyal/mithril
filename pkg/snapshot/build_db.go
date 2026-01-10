@@ -214,6 +214,7 @@ func BuildAccountsDb(
 	}()
 
 	var incrementalErr error
+	var incrementalDuration time.Duration
 	if incrementalSnapshotFile != "" {
 		wg.Add(1)
 		go func() {
@@ -222,7 +223,8 @@ func BuildAccountsDb(
 			// Note: Don't pass progress to incremental - it's much smaller and would interfere
 			// with the full snapshot's progress tracking (both would update same bar)
 			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
+			incrementalDuration = time.Since(start)
+			// Don't log here - it interferes with progress bar cursor positioning
 		}()
 	}
 
@@ -231,6 +233,11 @@ func BuildAccountsDb(
 	// Stop progress display
 	if dp != nil {
 		dp.Stop()
+	}
+
+	// Log incremental completion after progress bars are stopped
+	if incrementalSnapshotFile != "" && incrementalErr == nil {
+		mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(incrementalDuration))
 	}
 
 	if err := errors.Join(err, incrementalErr); err != nil {
