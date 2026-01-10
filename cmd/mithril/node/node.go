@@ -23,6 +23,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/boundary"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -1051,6 +1052,10 @@ func runLive(c *cobra.Command, args []string) {
 			}
 		}
 	}
+
+	// Initialize boundary logging level from config
+	boundaryLevelStr := config.GetString("log.boundary_level")
+	boundary.SetLevel(boundary.ParseLevel(boundaryLevelStr))
 
 	// Kill any existing mithril processes to prevent zombie accumulation
 	if killed := killExistingMithrilProcesses(); killed > 0 {

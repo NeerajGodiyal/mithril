@@ -136,12 +136,13 @@ type SnapshotConfig struct {
 
 // LogConfig holds logging configuration
 type LogConfig struct {
-	Dir        string `toml:"dir" mapstructure:"dir"`                 // Log directory (default: /mnt/mithril-logs)
-	Level      string `toml:"level" mapstructure:"level"`             // Log level: debug, info, warn, error
-	ToStdout   bool   `toml:"to_stdout" mapstructure:"to_stdout"`     // Also write to stdout (default: true)
-	MaxSizeMB  int    `toml:"max_size_mb" mapstructure:"max_size_mb"` // Max log file size in MB before rotation
-	MaxAgeDays int    `toml:"max_age_days" mapstructure:"max_age_days"` // Delete logs older than this many days
-	MaxBackups int    `toml:"max_backups" mapstructure:"max_backups"` // Keep up to N old log files
+	Dir           string `toml:"dir" mapstructure:"dir"`                       // Log directory (default: /mnt/mithril-logs)
+	Level         string `toml:"level" mapstructure:"level"`                   // Log level: debug, info, warn, error
+	ToStdout      bool   `toml:"to_stdout" mapstructure:"to_stdout"`           // Also write to stdout (default: true)
+	MaxSizeMB     int    `toml:"max_size_mb" mapstructure:"max_size_mb"`       // Max log file size in MB before rotation
+	MaxAgeDays    int    `toml:"max_age_days" mapstructure:"max_age_days"`     // Delete logs older than this many days
+	MaxBackups    int    `toml:"max_backups" mapstructure:"max_backups"`       // Keep up to N old log files
+	BoundaryLevel string `toml:"boundary_level" mapstructure:"boundary_level"` // Epoch boundary diagnostics: off, summary, compare, debug
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)

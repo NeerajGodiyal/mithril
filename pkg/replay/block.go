@@ -1148,8 +1148,6 @@ func ReplayBlocks(
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
-			mlog.Log.Infof("epoch boundary, %d -> %d", currentEpoch, currentEpoch+1)
-
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)

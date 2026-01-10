@@ -3,16 +3,19 @@ package replay
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/boundary"
 	"github.com/Overclock-Validator/mithril/pkg/features"
-
-	//"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/version"
 	"github.com/Overclock-Validator/wide"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -68,7 +71,123 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
 
+	// Generate boundary report
+	writeBoundaryReport(slotCtx, epochCtx, epoch, slot, points, pointsPerStakeAcct, partitionedRewardsInfo, validatorRewards, voteRewardsDistributed, &newEpochRewards)
+
 	return partitionedRewardsInfo, updatedAccts, parentUpdatedAccts
+}
+
+// writeBoundaryReport generates and writes the LOCAL boundary report
+func writeBoundaryReport(
+	slotCtx *sealevel.SlotCtx,
+	epochCtx *ReplayCtx,
+	epoch uint64,
+	slot uint64,
+	points wide.Uint128,
+	pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints,
+	partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo,
+	validatorRewards map[solana.PublicKey]uint64,
+	voteRewardsDistributed uint64,
+	epochRewardsSysvar *sealevel.SysvarEpochRewards,
+) {
+	// Always log summary to mithril.log
+	mlog.Log.Infof("epoch %d: %d stake accounts, %d partitions, staking_rewards=%d, vote_rewards=%d, total_points=%s",
+		epoch, len(partitionedRewardsInfo.StakingRewards), partitionedRewardsInfo.RewardPartitions.NumPartitions(),
+		partitionedRewardsInfo.TotalStakingRewards, voteRewardsDistributed, points.String())
+
+	// Check if boundary file logging is enabled
+	if !boundary.IsEnabled() {
+		return
+	}
+
+	// Count statistics from points calculation
+	zero128 := wide.Uint128FromUint64(0)
+	var numForceCreditsUpdate, numZeroPoints int
+	for _, pts := range pointsPerStakeAcct {
+		if pts.ForceCreditsUpdateWithSkippedReward {
+			numForceCreditsUpdate++
+		}
+		if pts.Points.Eq(zero128) {
+			numZeroPoints++
+		}
+	}
+
+	// Count zero-reward stake accounts (points > 0 but reward calculated as 0)
+	numZeroReward := 0
+	for _, reward := range partitionedRewardsInfo.StakingRewards {
+		if reward.StakerRewards == 0 && reward.VoterRewards == 0 {
+			numZeroReward++
+		}
+	}
+
+	// Calculate total staked from stake cache
+	var totalStaked uint64
+	for _, delegation := range global.StakeCache() {
+		totalStaked += delegation.StakeLamports
+	}
+
+	// Get partition counts for debug level
+	var partitionCounts []int
+	if partitionedRewardsInfo.RewardPartitions != nil {
+		numParts := partitionedRewardsInfo.RewardPartitions.NumPartitions()
+		partitionCounts = make([]int, numParts)
+		for i := uint64(0); i < numParts; i++ {
+			partition := partitionedRewardsInfo.RewardPartitions.Partition(i)
+			if partition != nil {
+				partitionCounts[i] = int(partition.NumPubkeys())
+			}
+		}
+	}
+
+	report := &boundary.BoundaryReport{
+		Header: boundary.HeaderSection{
+			Source:          "LOCAL",
+			Epoch:           epoch,
+			PrevEpoch:       epoch - 1,
+			BoundarySlot:    slotCtx.Slot,
+			FirstRewardSlot: partitionedRewardsInfo.FirstStakingRewardSlot,
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			GitCommit:       version.GitCommit,
+			RunID:           mlog.GetRunID(),
+		},
+		Inputs: boundary.InputsSection{
+			Capitalization:   epochCtx.Capitalization,
+			InflationRate:    epochCtx.Inflation.Total(float64(epoch)),
+			ValidatorRewards: epochCtx.Inflation.Validator(float64(epoch)),
+			TotalStaked:      totalStaked,
+			NumStakeAccounts: len(global.StakeCache()),
+			NumVoteAccounts:  len(validatorRewards),
+			ParentBlockhash:  solana.HashFromBytes(slotCtx.Blockhash[:]).String(),
+		},
+		Schedule: boundary.ScheduleSection{
+			Source: "local",
+		},
+		Rewards: boundary.RewardsSection{
+			TotalPoints:           points.String(),
+			TotalStakingRewards:   partitionedRewardsInfo.TotalStakingRewards,
+			TotalVoteRewards:      voteRewardsDistributed,
+			NumPartitions:         int(partitionedRewardsInfo.RewardPartitions.NumPartitions()),
+			NumEligibleStakeAccts: len(partitionedRewardsInfo.StakingRewards),
+			NumForceCreditsUpdate: numForceCreditsUpdate,
+			NumZeroPoints:         numZeroPoints,
+			NumZeroReward:         numZeroReward,
+		},
+		Sysvars: boundary.SysvarsSection{
+			EpochRewardsActive:      epochRewardsSysvar.Active,
+			DistributionStartHeight: epochRewardsSysvar.DistributionStartingBlockHeight,
+			NumPartitions:           epochRewardsSysvar.NumPartitions,
+			TotalRewards:            epochRewardsSysvar.TotalRewards,
+			DistributedRewards:      epochRewardsSysvar.DistributedRewards,
+			ParentBlockhash:         solana.HashFromBytes(epochRewardsSysvar.ParentBlockhash[:]).String(),
+		},
+		Partitions: &boundary.PartitionsSection{
+			PartitionCounts: partitionCounts,
+		},
+	}
+
+	if err := boundary.WriteReport(report, boundary.LevelCompare); err != nil {
+		mlog.Log.Warnf("failed to write boundary report: %v", err)
+	}
 }
 
 func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
