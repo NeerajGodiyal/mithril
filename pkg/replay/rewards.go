@@ -94,14 +94,26 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	mlog.Log.Infof("rewards partition: epoch=%d recipients=%d partitions=%d first=%d last=%d total_rewards=%d",
 		epoch, len(stakingRewards), numRewardPartitions, firstStakingRewardSlot, lastStakingRewardSlot, totalStakingRewards)
 
-	// Build partitions from stakingRewards keys (accounts that will receive rewards or need credits update)
-	// This matches dev-calc behavior where partitions are built from stakeInfoResults keys.
+	// Build partitions from stakingRewards keys (accounts that will receive rewards)
+	// EXPERIMENTAL: Exclude ForceCreditsUpdate accounts (StakerRewards=0 with ForceCreditsReason set)
+	// Hypothesis: RPC shows 95 fewer accounts in P11, all are ForceCreditsUpdate with 0 lamports.
+	// REVERT IF WRONG: If bank hash still mismatches, mainnet DOES process these accounts.
+	// Original code added ALL stakingRewards keys to partitions unconditionally.
 	partitions := rewards.NewPartitions(numRewardPartitions)
-	for pubkey := range stakingRewards {
+	forceCreditsSkipped := 0
+	for pubkey, reward := range stakingRewards {
 		if numRewardPartitions != 0 {
+			// EXPERIMENTAL: Skip ForceCreditsUpdate accounts (0 reward but credits need update)
+			if reward.StakerRewards == 0 && reward.ForceCreditsReason != "" {
+				forceCreditsSkipped++
+				continue
+			}
 			partitionIdx := rewards.CalculateRewardPartitionForPubkey(pubkey, slotCtx.Blockhash, numRewardPartitions)
 			partitions.AddPubkey(partitionIdx, pubkey)
 		}
+	}
+	if forceCreditsSkipped > 0 {
+		mlog.Log.Infof("EXPERIMENTAL: Skipped %d ForceCreditsUpdate accounts from partitions", forceCreditsSkipped)
 	}
 
 	// DIAGNOSTIC: Verify no duplicate pubkeys across partitions
