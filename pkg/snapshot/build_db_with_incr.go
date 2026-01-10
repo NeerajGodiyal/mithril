@@ -34,8 +34,8 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
-// BuildAccountsDbWithIncr builds the accounts database from full + incremental snapshots.
-func BuildAccountsDbWithIncr(
+// BuildAccountsDbAuto builds the accounts database from full + incremental snapshots.
+func BuildAccountsDbAuto(
 	ctx context.Context,
 	fullSnapshotFile string,
 	snapshotDownloadPath string,

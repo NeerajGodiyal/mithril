@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -153,11 +152,12 @@ var (
 	appendVecCopyingInProgress    = &atomic.Int64{}
 )
 
-func BuildAccountsDb(
+func BuildAccountsDbPaths(
 	ctx context.Context,
 	snapshotFile string,
 	incrementalSnapshotFile string,
 	accountsDbDir string,
+	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
@@ -201,31 +201,55 @@ func BuildAccountsDb(
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
 	}
 
+	// Start progress display if provided
+	if dp != nil {
+		// Flush any pending log output before starting progress bars
+		// This prevents late-flushing logs from breaking cursor positioning
+		os.Stdout.Sync()
+		os.Stderr.Sync()
+		dp.Start()
+	}
+
+	// Process both snapshots in parallel for maximum speed
+	// Incremental snapshot has suppressLogging to avoid interleaved output
+	var fullSnapshotErr error
+	var incrementalErr error
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{})
+		fullSnapshotErr = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
 	}()
 
-	var incrementalErr error
 	if incrementalSnapshotFile != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
+			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying,
+				readTarOptions{isIncremental: true})
 		}()
 	}
 
+	// Wait for both tar reads to complete
 	wg.Wait()
-	if err := errors.Join(err, incrementalErr); err != nil {
-		mlog.Log.Errorf("failed while processing snapshots: %v", err)
+
+	// Stop progress display
+	if dp != nil {
+		if fullSnapshotErr != nil {
+			dp.Interrupt(fullSnapshotErr)
+		} else {
+			dp.Stop()
+		}
+	}
+
+	// Check for errors from either snapshot
+	if err := joinErrors(fullSnapshotErr, incrementalErr); err != nil {
 		return nil, nil, err
 	}
-	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", fmtDuration(time.Since(start)))
 
-	// Show indexing progress for shard flush
+	mlog.Log.Debugf("done processing snapshots in %s.", fmtDuration(time.Since(start)))
+
+	// Show indexing progress for shard flush (no gap between DualProgress and this)
 	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
 	err = sl.CloseWithProgress(ctx, func(completed, total int) {
@@ -284,7 +308,7 @@ func isAppendVec(filename string) bool {
 type readTarOptions struct {
 	// Saves snapshot to a file if non-empty.
 	savePath string
-	// Update a progress bar if Progress is non-nil. If nil, will update via log.
+	// Update a progress bar if Progress is non-nil.
 	progress *progress.DualProgress
 	// True if the tar file is incremental or false if it's a full snapshot.
 	isIncremental bool
@@ -526,6 +550,17 @@ func (p *snapshotWorkerPools) Release() {
 	p.appendVecCopying.Release()
 	p.indexEntryBuilder.Release()
 	p.indexEntryCommitter.Release()
+}
+
+// joinErrors combines two errors into one, returning nil if both are nil.
+func joinErrors(err1, err2 error) error {
+	if err1 != nil && err2 != nil {
+		return fmt.Errorf("multiple errors: %v; %v", err1, err2)
+	}
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 // Ingest SSTs into a fresh pebble DB and return it.

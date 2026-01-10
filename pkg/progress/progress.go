@@ -452,7 +452,7 @@ func (p *IndexingProgress) Start(total int) {
 	p.total = total
 	p.started = true
 	p.startTime = time.Now()
-	fmt.Fprintln(p.output) // Reserve line for progress
+	// Don't reserve a line here - first Update will render in place
 }
 
 // Update updates progress and re-renders
@@ -464,12 +464,16 @@ func (p *IndexingProgress) Update(completed, total int) {
 		return
 	}
 
-	p.completed.Store(int32(completed))
+	prevCompleted := p.completed.Swap(int32(completed))
 	p.total = total
 
-	// Move up and clear line
+	// On first update (prevCompleted was 0), just clear current line
+	// On subsequent updates, move up first then clear
 	if p.useColor {
-		fmt.Fprint(p.output, moveUp+clearLine)
+		if prevCompleted > 0 {
+			fmt.Fprint(p.output, moveUp)
+		}
+		fmt.Fprint(p.output, clearLine)
 	}
 
 	percent := float64(completed) / float64(total) * 100

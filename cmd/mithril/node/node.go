@@ -168,6 +168,8 @@ func init() {
 	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
+	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -381,7 +383,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
-	snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
+	// storage.snapshots config is handled via snapshotDlPath fallback below
+	snapshotArchivePath = getString("snapshot", "")
 	if snapshotArchivePath == "" {
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
@@ -482,10 +486,14 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		blockNearTipLookahead = 0
 	}
 
-	// Snapshot download path - defaults to storage.snapshots, can be overridden
+	// Snapshot download path - for auto-discovery/download of snapshots
+	// Priority: CLI --download-snapshot-path > snapshot.download_path > storage.snapshots
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 	if snapshotDlPath == "" {
-		snapshotDlPath = snapshotArchivePath // Use storage.snapshots as default
+		snapshotDlPath = config.GetString("storage.snapshots")
+	}
+	if snapshotDlPath == "" {
+		snapshotDlPath = snapshotArchivePath // Fallback to explicit path if set
 	}
 
 	// [tuning.pprof] section (with fallback to legacy [development.pprof])
@@ -674,7 +682,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 		}
@@ -702,7 +711,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
 
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, dlPath, incrementalSnapshotFilename, accountsPath)
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, dlPath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", dlPath, err)
 		}
@@ -1034,6 +1044,11 @@ func runLive(c *cobra.Command, args []string) {
 		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
 	}
 
+	// Override bootstrap mode display when explicit snapshot paths are provided
+	if snapshotArchivePath != "" {
+		bootstrapMode = "explicit"
+	}
+
 	// Print consolidated startup info
 	printStartupInfo("run")
 
@@ -1121,6 +1136,52 @@ func runLive(c *cobra.Command, args []string) {
 	if hasValidState {
 		hasAccountsDB = true
 		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
+	}
+
+	// Handle explicit --snapshot flag (bypasses all auto-discovery, does NOT delete snapshot files)
+	if snapshotArchivePath != "" {
+		mlog.Log.Infof("using explicit snapshot file: %s", snapshotArchivePath)
+
+		// Parse full snapshot slot from filename for validation
+		fullSnapshotSlot := parseSlotFromSnapshotName(filepath.Base(snapshotArchivePath))
+		if fullSnapshotSlot == 0 {
+			klog.Fatalf("could not parse slot from snapshot filename: %s", snapshotArchivePath)
+		}
+		mlog.Log.Infof("full snapshot slot: %d", fullSnapshotSlot)
+
+		if incrementalSnapshotFilename != "" {
+			mlog.Log.Infof("using explicit incremental snapshot: %s", incrementalSnapshotFilename)
+
+			// Validate incremental base matches full snapshot slot
+			incrBase, incrEnd := parseSlotsFromIncrementalName(filepath.Base(incrementalSnapshotFilename))
+			if incrBase == 0 {
+				klog.Fatalf("could not parse base slot from incremental snapshot filename: %s", incrementalSnapshotFilename)
+			}
+			if incrBase != fullSnapshotSlot {
+				klog.Fatalf("incremental base slot %d does not match full snapshot slot %d", incrBase, fullSnapshotSlot)
+			}
+			mlog.Log.Infof("incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
+		}
+
+		// Build directly from the specified files (BuildAccountsDbPaths handles AccountsDB cleanup internally)
+		// NOTE: We do NOT clean snapshot files in explicit mode - user wants to keep their explicit snapshots
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+
+		// Write state file
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		goto postBootstrap
 	}
 
 	switch bootstrapMode {
@@ -1415,6 +1476,7 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
+postBootstrap:
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
@@ -1778,6 +1840,8 @@ func printStartupInfo(commandName string) {
 		bootstrapDesc = "download fresh snapshot from network"
 	case "accountsdb":
 		bootstrapDesc = "require existing AccountsDB"
+	case "explicit":
+		bootstrapDesc = "build from explicit --snapshot path"
 	default:
 		bootstrapDesc = ""
 	}
@@ -1936,6 +2000,7 @@ func printStartupInfo(commandName string) {
 type snapshotInfo struct {
 	filename string
 	slot     uint64
+	baseSlot uint64 // For incrementals: the base (full) snapshot slot
 	isIncr   bool
 }
 
@@ -1999,10 +2064,11 @@ func detectExistingSnapshots(dir string) []snapshotInfo {
 
 		// Incremental snapshot: incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst
 		if len(name) > 21 && name[:21] == "incremental-snapshot-" && filepath.Ext(name) == ".zst" {
-			slot := parseSlotFromIncrementalName(name)
+			base, end := parseSlotsFromIncrementalName(name)
 			snapshots = append(snapshots, snapshotInfo{
 				filename: name,
-				slot:     slot,
+				slot:     end,
+				baseSlot: base,
 				isIncr:   true,
 			})
 		}
@@ -2033,9 +2099,15 @@ func parseSlotFromSnapshotName(name string) uint64 {
 
 // parseSlotFromIncrementalName extracts end slot from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
 func parseSlotFromIncrementalName(name string) uint64 {
+	_, endSlot := parseSlotsFromIncrementalName(name)
+	return endSlot
+}
+
+// parseSlotsFromIncrementalName extracts both base and end slots from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
+func parseSlotsFromIncrementalName(name string) (baseSlot, endSlot uint64) {
 	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
 	if len(name) <= 29 {
-		return 0
+		return 0, 0
 	}
 	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
 
@@ -2048,21 +2120,44 @@ func parseSlotFromIncrementalName(name string) uint64 {
 		}
 	}
 	if firstDash == -1 {
-		return 0
+		return 0, 0
+	}
+
+	// Parse base slot
+	base, err := strconv.ParseUint(trimmed[:firstDash], 10, 64)
+	if err != nil {
+		return 0, 0
 	}
 
 	// Find second dash (after endSlot)
 	remaining := trimmed[firstDash+1:]
 	for i := 0; i < len(remaining); i++ {
 		if remaining[i] == '-' {
-			slot, err := strconv.ParseUint(remaining[:i], 10, 64)
+			end, err := strconv.ParseUint(remaining[:i], 10, 64)
 			if err != nil {
-				return 0
+				return base, 0
 			}
-			return slot
+			return base, end
 		}
 	}
-	return 0
+	return base, 0
+}
+
+// findMatchingIncremental finds a local incremental snapshot that matches the given base slot.
+// Returns the best (highest end slot) matching incremental, or nil if none found.
+func findMatchingIncremental(snapshotDir string, baseSlot uint64) *snapshotInfo {
+	snapshots := detectExistingSnapshots(snapshotDir)
+
+	var best *snapshotInfo
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.isIncr && snap.baseSlot == baseSlot {
+			if best == nil || snap.slot > best.slot {
+				best = snap
+			}
+		}
+	}
+	return best
 }
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
@@ -2141,7 +2236,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	// Create progress display for extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbAuto(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -2175,7 +2270,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbAuto(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
