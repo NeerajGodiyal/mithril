@@ -158,6 +158,7 @@ func BuildAccountsDb(
 	snapshotFile string,
 	incrementalSnapshotFile string,
 	accountsDbDir string,
+	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
@@ -201,6 +202,11 @@ func BuildAccountsDb(
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
 	}
 
+	// Start progress display if provided
+	if dp != nil {
+		dp.Start()
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -219,6 +225,12 @@ func BuildAccountsDb(
 	}
 
 	wg.Wait()
+
+	// Stop progress display
+	if dp != nil {
+		dp.Stop()
+	}
+
 	if err := errors.Join(err, incrementalErr); err != nil {
 		mlog.Log.Errorf("failed while processing snapshots: %v", err)
 		return nil, nil, err

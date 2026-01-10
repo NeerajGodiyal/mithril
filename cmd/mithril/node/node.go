@@ -681,8 +681,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
 
+		// Create progress display for snapshot extract
+		dp := progress.NewDualProgress()
+
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 		}
@@ -710,7 +713,10 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
 
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, dlPath, incrementalSnapshotFilename, accountsPath)
+		// Create progress display for snapshot extract
+		dp := progress.NewDualProgress()
+
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, dlPath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", dlPath, err)
 		}
@@ -1170,9 +1176,12 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Infof("incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
 		}
 
+		// Create progress display for snapshot extract
+		dp := progress.NewDualProgress()
+
 		// Build directly from the specified files (BuildAccountsDb handles AccountsDB cleanup internally)
 		// NOTE: We do NOT clean snapshot files in explicit mode - user wants to keep their explicit snapshots
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
+		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
