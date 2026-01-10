@@ -387,9 +387,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// storage.snapshots config is handled via snapshotDlPath fallback below
 	snapshotArchivePath = getString("snapshot", "")
 	if snapshotArchivePath == "" {
-		snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
-	}
-	if snapshotArchivePath == "" {
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
 	incrementalSnapshotFilename = getString("incremental-snapshot", "storage.incremental_snapshot")
@@ -2168,46 +2165,6 @@ func findMatchingIncremental(snapshotDir string, baseSlot uint64) *snapshotInfo 
 		}
 	}
 	return best
-}
-
-// parseSlotsFromIncrementalName extracts both base and end slots from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
-func parseSlotsFromIncrementalName(name string) (baseSlot, endSlot uint64) {
-	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
-	if len(name) <= 29 {
-		return 0, 0
-	}
-	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
-
-	// Find first dash (after baseSlot)
-	firstDash := -1
-	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] == '-' {
-			firstDash = i
-			break
-		}
-	}
-	if firstDash == -1 {
-		return 0, 0
-	}
-
-	// Parse base slot
-	base, err := strconv.ParseUint(trimmed[:firstDash], 10, 64)
-	if err != nil {
-		return 0, 0
-	}
-
-	// Find second dash (after endSlot)
-	remaining := trimmed[firstDash+1:]
-	for i := 0; i < len(remaining); i++ {
-		if remaining[i] == '-' {
-			end, err := strconv.ParseUint(remaining[:i], 10, 64)
-			if err != nil {
-				return base, 0
-			}
-			return base, end
-		}
-	}
-	return base, 0
 }
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
