@@ -1235,7 +1235,7 @@ func validateLeaderSchedule(
 	voteAcctMap := global.EpochStakesVoteAccts(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
@@ -1354,7 +1354,7 @@ func validateLeaderScheduleFromVoteCache(
 	voteAcctStakes := global.EpochStakes(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
@@ -1463,7 +1463,7 @@ func PrepareLeaderScheduleLocal(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
 		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
@@ -1553,7 +1553,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
 		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d source=vote_cache", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
