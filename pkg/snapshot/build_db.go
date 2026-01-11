@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -153,28 +152,31 @@ var (
 	appendVecCopyingInProgress    = &atomic.Int64{}
 )
 
-func BuildAccountsDb(
+func BuildAccountsDbPaths(
 	ctx context.Context,
 	snapshotFile string,
 	incrementalSnapshotFile string,
 	accountsDbDir string,
+	dp *progress.DualProgress,
 ) (*accountsdb.AccountsDb, *SnapshotManifest, error) {
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
 
+	mlog.Log.Infof("Parsing manifest from %s", snapshotFile)
 	manifest, err := UnmarshalManifestFromSnapshot(ctx, snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
-	mlog.Log.Infof("parsed manifest from snapshotFile=%s", snapshotFile)
+	mlog.Log.Infof("Parsed manifest from full snapshot")
 
 	var incrementalManifest *SnapshotManifest
 	if incrementalSnapshotFile != "" {
+		mlog.Log.Infof("Parsing manifest from %s", incrementalSnapshotFile)
 		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotFile, accountsDbDir)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
-		mlog.Log.Infof("parsed manifest from incrementalSnapshotFile=%s", incrementalSnapshotFile)
+		mlog.Log.Infof("Parsed manifest from incremental snapshot")
 	}
 
 	start := time.Now()
@@ -201,31 +203,50 @@ func BuildAccountsDb(
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{})
-	}()
-
-	var incrementalErr error
-	if incrementalSnapshotFile != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-			incrementalErr = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying, readTarOptions{isIncremental: true})
-			mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotFile, fmtDuration(time.Since(start)))
-		}()
+	// Start progress display if provided
+	if dp != nil {
+		// Flush mlog's buffered writer AND OS buffers before starting progress bars
+		// This prevents late-flushing logs from breaking cursor positioning
+		mlog.Flush()
+		os.Stdout.Sync()
+		os.Stderr.Sync()
+		dp.Start()
 	}
 
+	// Process snapshots sequentially for better performance (less lock contention)
+	// Full snapshot first
+	err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
+
+	// Wait for ALL worker tasks from full snapshot to complete before starting incremental
 	wg.Wait()
-	if err := errors.Join(err, incrementalErr); err != nil {
-		mlog.Log.Errorf("failed while processing snapshots: %v", err)
+
+	// Stop progress display after full snapshot
+	if dp != nil {
+		if err != nil {
+			dp.Interrupt(err)
+		} else {
+			dp.Stop()
+		}
+	}
+
+	if err != nil {
 		return nil, nil, err
 	}
-	mlog.Log.Infof("Done unpacking and sharding snapshot in %s, closing shard logger", fmtDuration(time.Since(start)))
 
-	// Show indexing progress for shard flush
+	// Process incremental snapshot (if provided)
+	if incrementalSnapshotFile != "" {
+		err = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying,
+			readTarOptions{isIncremental: true})
+		if err != nil {
+			return nil, nil, err
+		}
+		// Wait for all incremental worker tasks to complete
+		wg.Wait()
+	}
+
+	mlog.Log.Debugf("done processing snapshots in %s.", fmtDuration(time.Since(start)))
+
+	// Show indexing progress for shard flush (no gap between DualProgress and this)
 	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
 	err = sl.CloseWithProgress(ctx, func(completed, total int) {
@@ -284,7 +305,7 @@ func isAppendVec(filename string) bool {
 type readTarOptions struct {
 	// Saves snapshot to a file if non-empty.
 	savePath string
-	// Update a progress bar if Progress is non-nil. If nil, will update via log.
+	// Update a progress bar if Progress is non-nil.
 	progress *progress.DualProgress
 	// True if the tar file is incremental or false if it's a full snapshot.
 	isIncremental bool

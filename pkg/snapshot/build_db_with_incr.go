@@ -18,7 +18,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/cockroachdb/pebble"
 	"github.com/panjf2000/ants/v2"
-	"k8s.io/klog/v2"
 )
 
 // fmtDuration formats a duration to 3 decimal places in the most appropriate unit
@@ -34,8 +33,8 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
-// BuildAccountsDbWithIncr builds the accounts database from full + incremental snapshots.
-func BuildAccountsDbWithIncr(
+// BuildAccountsDbAuto builds the accounts database from full + incremental snapshots.
+func BuildAccountsDbAuto(
 	ctx context.Context,
 	fullSnapshotFile string,
 	snapshotDownloadPath string,
@@ -50,11 +49,12 @@ func BuildAccountsDbWithIncr(
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
 
+	mlog.Log.Infof("Parsing manifest from %s", fullSnapshotFile)
 	manifest, err := UnmarshalManifestFromSnapshot(ctx, fullSnapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
-	mlog.Log.Infof("parsed manifest from snapshotFile=%s", fullSnapshotFile)
+	mlog.Log.Infof("Parsed manifest from full snapshot")
 
 	start := time.Now()
 
@@ -99,6 +99,11 @@ func BuildAccountsDbWithIncr(
 
 	// Start progress display if provided
 	if dp != nil {
+		// Flush mlog's buffered writer AND OS buffers before starting progress bars
+		// This prevents late-flushing logs from breaking cursor positioning
+		mlog.Flush()
+		os.Stdout.Sync()
+		os.Stderr.Sync()
 		dp.Start()
 	}
 
@@ -130,7 +135,14 @@ func BuildAccountsDbWithIncr(
 	incrSnapshotDlStart := time.Now()
 	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 	if err != nil {
-		klog.Fatalf("error getting incremental snapshot URL: %s", err)
+		// Return error instead of fatal exit so caller can handle gracefully
+		errMsg := fmt.Sprintf("failed to find incremental snapshot: %v", err)
+		if strings.Contains(err.Error(), "threshold") {
+			errMsg += fmt.Sprintf("\n  Hint: Try increasing incremental_threshold in config (current: %d slots)", snapCfg.IncrementalThreshold)
+		} else if strings.Contains(err.Error(), "no rpc nodes") || strings.Contains(err.Error(), "no nodes found") {
+			errMsg += "\n  Hint: Check RPC endpoints connectivity or try again later"
+		}
+		return nil, nil, fmt.Errorf(errMsg)
 	}
 	mlog.Log.Infof("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
 
@@ -153,6 +165,7 @@ func BuildAccountsDbWithIncr(
 		}
 
 		incrSnapshotStart := time.Now()
+		mlog.Log.Infof("Parsing manifest from %s", incrementalSnapshotPath)
 		incrementalManifestCopy, err := UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
 		if err != nil {
 			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
@@ -160,7 +173,7 @@ func BuildAccountsDbWithIncr(
 		}
 		// Copy the manifest so the worker pool's pointer has the value.
 		*incrementalManifest = *incrementalManifestCopy
-		mlog.Log.Infof("parsed manifest from incrementalFile=%s", incrementalSnapshotPath)
+		mlog.Log.Infof("Parsed manifest from incremental snapshot")
 
 		// Determine save path for incremental snapshot if streaming from HTTP
 		var incrSavePath string

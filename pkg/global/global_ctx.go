@@ -28,8 +28,8 @@ type GlobalCtx struct {
 	calcUnixTimeForClockSysvar bool
 	manageLeaderSchedule       bool
 	manageBlockHeight          bool
-	stakeCacheMutex            sync.Mutex
-	voteCacheMutex             sync.Mutex
+	stakeCacheMutex            sync.RWMutex
+	voteCacheMutex             sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
 	mu                         sync.Mutex
 }
@@ -69,11 +69,11 @@ func IncrTransactionCount(num uint64) {
 }
 
 func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
 	if instance.stakeCache == nil {
 		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
 	}
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
 	instance.stakeCache[pubkey] = delegation
 }
 
@@ -114,16 +114,33 @@ func StakeCache() map[solana.PublicKey]*sealevel.Delegation {
 	return instance.stakeCache
 }
 
+func StakeCacheSnapshot() map[solana.PublicKey]*sealevel.Delegation {
+	instance.stakeCacheMutex.RLock()
+	defer instance.stakeCacheMutex.RUnlock()
+
+	if instance.stakeCache == nil {
+		return nil
+	}
+
+	snapshot := make(map[solana.PublicKey]*sealevel.Delegation, len(instance.stakeCache))
+	for pk, delegation := range instance.stakeCache {
+		snapshot[pk] = delegation
+	}
+	return snapshot
+}
+
 func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
 	if instance.voteCache == nil {
 		instance.voteCache = make(map[solana.PublicKey]*sealevel.VoteStateVersions)
 	}
-	instance.voteCacheMutex.Lock()
-	defer instance.voteCacheMutex.Unlock()
 	instance.voteCache[pubkey] = voteState
 }
 
 func VoteCacheItem(pubkey solana.PublicKey) *sealevel.VoteStateVersions {
+	instance.voteCacheMutex.RLock()
+	defer instance.voteCacheMutex.RUnlock()
 	return instance.voteCache[pubkey]
 }
 
@@ -137,6 +154,21 @@ func VoteCache() map[solana.PublicKey]*sealevel.VoteStateVersions {
 	return instance.voteCache
 }
 
+func VoteCacheSnapshot() map[solana.PublicKey]*sealevel.VoteStateVersions {
+	instance.voteCacheMutex.RLock()
+	defer instance.voteCacheMutex.RUnlock()
+
+	if instance.voteCache == nil {
+		return nil
+	}
+
+	snapshot := make(map[solana.PublicKey]*sealevel.VoteStateVersions, len(instance.voteCache))
+	for pk, voteState := range instance.voteCache {
+		snapshot[pk] = voteState
+	}
+	return snapshot
+}
+
 func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
 	if instance.epochStakes == nil {
 		instance.epochStakes = epochstakes.NewEpochStakesCache()
@@ -146,6 +178,10 @@ func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, vo
 
 func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
 	return instance.epochStakes.EpochStakes(epoch)
+}
+
+func HasEpochStakes(epoch uint64) bool {
+	return instance.epochStakes.HasEpochStakes(epoch)
 }
 
 func PutEpochTotalStake(epoch uint64, totalStake uint64) {
@@ -214,10 +250,6 @@ func ManageBlockHeight() bool {
 
 func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
 	instance.leaderSchedule = ls
-}
-
-func LeaderSchedule() *leaderschedule.LeaderSchedule {
-	return instance.leaderSchedule
 }
 
 func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {

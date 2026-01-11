@@ -167,7 +167,9 @@ func init() {
 
 	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
+	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -367,8 +369,8 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Update variables (CLI flags take precedence over TOML config when explicitly set)
 	// CLI flag names -> TOML nested keys (Firedancer-style)
 
-	// [bootstrap] section (new unified mode replacing two booleans)
-	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
+	// [bootstrap] section
+	bootstrapMode = getString("bootstrap", "bootstrap.mode")
 	if bootstrapMode == "" {
 		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
@@ -381,7 +383,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	txParallelism = getInt64("txpar", "replay.txpar")
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
-	snapshotArchivePath = getString("snapshot-archive-path", "storage.snapshots")
+	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
+	// storage.snapshots config is handled via snapshotDlPath fallback below
+	snapshotArchivePath = getString("snapshot", "")
 	if snapshotArchivePath == "" {
 		snapshotArchivePath = getString("snapshot-archive-path", "ledger.snapshot_archive_path")
 	}
@@ -482,10 +486,14 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		blockNearTipLookahead = 0
 	}
 
-	// Snapshot download path - defaults to storage.snapshots, can be overridden
+	// Snapshot download path - for auto-discovery/download of snapshots
+	// Priority: CLI --download-snapshot-path > snapshot.download_path > storage.snapshots
 	snapshotDlPath = getString("download-snapshot-path", "snapshot.download_path")
 	if snapshotDlPath == "" {
-		snapshotDlPath = snapshotArchivePath // Use storage.snapshots as default
+		snapshotDlPath = config.GetString("storage.snapshots")
+	}
+	if snapshotDlPath == "" {
+		snapshotDlPath = snapshotArchivePath // Fallback to explicit path if set
 	}
 
 	// [tuning.pprof] section (with fallback to legacy [development.pprof])
@@ -674,7 +682,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
 
 		// extract accountvecs from full snapshot, build accountsdb index, and write it all out to disk
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath)
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", snapshotArchivePath, err)
 		}
@@ -702,7 +711,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 			klog.Fatalf("error downloading snapshot: %s", err)
 		}
 
-		accountsDb, manifest, err = snapshot.BuildAccountsDb(ctx, dlPath, incrementalSnapshotFilename, accountsPath)
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, dlPath, incrementalSnapshotFilename, accountsPath, dp)
 		if err != nil {
 			klog.Fatalf("failed to populate new accounts db from snapshot %s: %s", dlPath, err)
 		}
@@ -1020,27 +1030,23 @@ func runLive(c *cobra.Command, args []string) {
 		logCfg.MaxBackups = 10
 	}
 
+	// Store log dir for startup info display
+	logDir = logCfg.Dir
+
 	if err := mlog.Initialize(logCfg, replay.CurrentRunID); err != nil {
 		// Non-fatal, continue with stdout-only logging
 		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
 	}
 	defer mlog.Shutdown()
 
-	// Store log dir for startup info display (run directory, not base dir)
-	logDir = mlog.GetLogDir()
-
-	// Save a copy of the config file to the run directory
-	if config.ConfigFile != "" {
-		if configContent, err := os.ReadFile(config.ConfigFile); err == nil {
-			if err := mlog.SaveRunConfig(configContent); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to save config to run directory: %v\n", err)
-			}
-		}
-	}
-
 	// Kill any existing mithril processes to prevent zombie accumulation
 	if killed := killExistingMithrilProcesses(); killed > 0 {
 		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
+	}
+
+	// Override bootstrap mode display when explicit snapshot paths are provided
+	if snapshotArchivePath != "" {
+		bootstrapMode = "explicit"
 	}
 
 	// Print consolidated startup info
@@ -1112,7 +1118,7 @@ func runLive(c *cobra.Command, args []string) {
 		genesisHash := fetchGenesisHash(ctx)
 		if genesisHash != "" {
 			if err := mithrilState.ValidateGenesisHash(genesisHash); err != nil {
-				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap-mode=snapshot to rebuild.", err)
+				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap snapshot to rebuild.", err)
 			}
 			// If state has no genesis hash (older version), set it now
 			if mithrilState.GenesisHash == "" {
@@ -1130,6 +1136,52 @@ func runLive(c *cobra.Command, args []string) {
 	if hasValidState {
 		hasAccountsDB = true
 		accountsDBSlot = mithrilState.GetCurrentSlot() // Use current slot (LastSlot if replayed, else SnapshotSlot)
+	}
+
+	// Handle explicit --snapshot flag (bypasses all auto-discovery, does NOT delete snapshot files)
+	if snapshotArchivePath != "" {
+		mlog.Log.Infof("using explicit snapshot file: %s", snapshotArchivePath)
+
+		// Parse full snapshot slot from filename for validation
+		fullSnapshotSlot := parseSlotFromSnapshotName(filepath.Base(snapshotArchivePath))
+		if fullSnapshotSlot == 0 {
+			klog.Fatalf("could not parse slot from snapshot filename: %s", snapshotArchivePath)
+		}
+		mlog.Log.Infof("full snapshot slot: %d", fullSnapshotSlot)
+
+		if incrementalSnapshotFilename != "" {
+			mlog.Log.Infof("using explicit incremental snapshot: %s", incrementalSnapshotFilename)
+
+			// Validate incremental base matches full snapshot slot
+			incrBase, incrEnd := parseSlotsFromIncrementalName(filepath.Base(incrementalSnapshotFilename))
+			if incrBase == 0 {
+				klog.Fatalf("could not parse base slot from incremental snapshot filename: %s", incrementalSnapshotFilename)
+			}
+			if incrBase != fullSnapshotSlot {
+				klog.Fatalf("incremental base slot %d does not match full snapshot slot %d", incrBase, fullSnapshotSlot)
+			}
+			mlog.Log.Infof("incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
+		}
+
+		// Build directly from the specified files (BuildAccountsDbPaths handles AccountsDB cleanup internally)
+		// NOTE: We do NOT clean snapshot files in explicit mode - user wants to keep their explicit snapshots
+		dp := progress.NewDualProgress()
+		accountsDb, manifest, err = snapshot.BuildAccountsDbPaths(ctx, snapshotArchivePath, incrementalSnapshotFilename, accountsPath, dp)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+
+		// Write state file
+		var snapshotEpoch uint64
+		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
+			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
+		}
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		goto postBootstrap
 	}
 
 	switch bootstrapMode {
@@ -1154,7 +1206,7 @@ func runLive(c *cobra.Command, args []string) {
 		if hasValidState {
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
 				mlog.Log.Errorf("WARNING: integrity check failed: %v", err)
-				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap-mode=snapshot to rebuild.")
+				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap snapshot to rebuild.")
 			}
 		}
 
@@ -1163,7 +1215,7 @@ func runLive(c *cobra.Command, args []string) {
 		if snapshotDownloadPath == "" {
 			klog.Fatalf("mode=new-snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
 		}
-		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
+		mlog.Log.Infof("mode=new-snapshot: Downloading fresh snapshot")
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
@@ -1171,13 +1223,17 @@ func runLive(c *cobra.Command, args []string) {
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "new-snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
-		// Clean ALL existing snapshots (force fresh download)
+		// Clean existing snapshots (respecting retention setting)
 		if snapshotDownloadPath != "" {
-			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
-			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0) // 0 = delete all
+			maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+			if maxSnapshots < 0 {
+				maxSnapshots = 0
+			}
+			mlog.Log.Infof("Cleaning up existing snapshot files in %s (keeping %d)", snapshotDownloadPath, maxSnapshots)
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 		}
 		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 		if err != nil {
@@ -1200,7 +1256,7 @@ func runLive(c *cobra.Command, args []string) {
 		if snapshotDownloadPath == "" {
 			klog.Fatalf("mode=snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
 		}
-		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
+		mlog.Log.Infof("mode=snapshot: Will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
@@ -1208,7 +1264,7 @@ func runLive(c *cobra.Command, args []string) {
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
 
@@ -1324,7 +1380,7 @@ func runLive(c *cobra.Command, args []string) {
 				// choice == 1: continue with existing AccountsDB
 			}
 
-			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			mlog.Log.Infof("mode=auto: Resuming from existing AccountsDB at slot %d", accountsDBSlot)
 			// Record resume in history
 			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit())
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
@@ -1365,7 +1421,7 @@ func runLive(c *cobra.Command, args []string) {
 			if hasAccountsDB {
 				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
 			} else {
-				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+				mlog.Log.Infof("mode=auto: No existing AccountsDB, will download snapshot")
 			}
 			if accountsPath != "" {
 				// Record rebuild in history before cleanup (history file is preserved)
@@ -1381,7 +1437,7 @@ func runLive(c *cobra.Command, args []string) {
 				} else {
 					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), reason)
 				}
-				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+				mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
 			}
 
@@ -1424,6 +1480,7 @@ func runLive(c *cobra.Command, args []string) {
 		}
 	}
 
+postBootstrap:
 	// Determine start slot from state file or manifest
 	var snapshotBaseSlot = manifest.Bank.Slot
 	startSlot := int64(manifest.Bank.Slot + 1)
@@ -1758,7 +1815,15 @@ func printStartupInfo(commandName string) {
 	// Commit info
 	if revision != "" {
 		commitStr := revision
-		if modified == "true" {
+		// Add branch info if available (skip "unknown" and "HEAD" for detached state)
+		branch := version.GitBranch
+		if branch != "" && branch != "unknown" && branch != "HEAD" {
+			if modified == "true" {
+				commitStr += fmt.Sprintf(" (%s, modified)", branch)
+			} else {
+				commitStr += fmt.Sprintf(" (%s)", branch)
+			}
+		} else if modified == "true" {
 			commitStr += " (modified)"
 		}
 		fmt.Printf("  Commit:       %s%s%s\n", dim, commitStr, reset)
@@ -1787,6 +1852,8 @@ func printStartupInfo(commandName string) {
 		bootstrapDesc = "download fresh snapshot from network"
 	case "accountsdb":
 		bootstrapDesc = "require existing AccountsDB"
+	case "explicit":
+		bootstrapDesc = "build from explicit --snapshot path"
 	default:
 		bootstrapDesc = ""
 	}
@@ -1873,7 +1940,6 @@ func printStartupInfo(commandName string) {
 				}
 				fmt.Printf("  Last shutdown:  %s%s%s\n", reasonColor, shutdownInfo, reset)
 			}
-
 		}
 	}
 
@@ -1917,9 +1983,15 @@ func printStartupInfo(commandName string) {
 		}
 	}
 
-	// Log directory
+	// Log directory with disk info
 	if logDir != "" {
-		fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(logDir))
+		if diskInfo != "" {
+			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+		}
 	}
 
 	// Block source
@@ -1946,6 +2018,7 @@ func printStartupInfo(commandName string) {
 type snapshotInfo struct {
 	filename string
 	slot     uint64
+	baseSlot uint64 // For incrementals: the base (full) snapshot slot
 	isIncr   bool
 }
 
@@ -2009,10 +2082,11 @@ func detectExistingSnapshots(dir string) []snapshotInfo {
 
 		// Incremental snapshot: incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst
 		if len(name) > 21 && name[:21] == "incremental-snapshot-" && filepath.Ext(name) == ".zst" {
-			slot := parseSlotFromIncrementalName(name)
+			base, end := parseSlotsFromIncrementalName(name)
 			snapshots = append(snapshots, snapshotInfo{
 				filename: name,
-				slot:     slot,
+				slot:     end,
+				baseSlot: base,
 				isIncr:   true,
 			})
 		}
@@ -2043,9 +2117,15 @@ func parseSlotFromSnapshotName(name string) uint64 {
 
 // parseSlotFromIncrementalName extracts end slot from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
 func parseSlotFromIncrementalName(name string) uint64 {
+	_, endSlot := parseSlotsFromIncrementalName(name)
+	return endSlot
+}
+
+// parseSlotsFromIncrementalName extracts both base and end slots from "incremental-snapshot-{baseSlot}-{endSlot}-{hash}.tar.zst"
+func parseSlotsFromIncrementalName(name string) (baseSlot, endSlot uint64) {
 	// Remove "incremental-snapshot-" prefix and ".tar.zst" suffix
 	if len(name) <= 29 {
-		return 0
+		return 0, 0
 	}
 	trimmed := name[21 : len(name)-8] // "baseSlot-endSlot-hash"
 
@@ -2058,21 +2138,44 @@ func parseSlotFromIncrementalName(name string) uint64 {
 		}
 	}
 	if firstDash == -1 {
-		return 0
+		return 0, 0
+	}
+
+	// Parse base slot
+	base, err := strconv.ParseUint(trimmed[:firstDash], 10, 64)
+	if err != nil {
+		return 0, 0
 	}
 
 	// Find second dash (after endSlot)
 	remaining := trimmed[firstDash+1:]
 	for i := 0; i < len(remaining); i++ {
 		if remaining[i] == '-' {
-			slot, err := strconv.ParseUint(remaining[:i], 10, 64)
+			end, err := strconv.ParseUint(remaining[:i], 10, 64)
 			if err != nil {
-				return 0
+				return base, 0
 			}
-			return slot
+			return base, end
 		}
 	}
-	return 0
+	return base, 0
+}
+
+// findMatchingIncremental finds a local incremental snapshot that matches the given base slot.
+// Returns the best (highest end slot) matching incremental, or nil if none found.
+func findMatchingIncremental(snapshotDir string, baseSlot uint64) *snapshotInfo {
+	snapshots := detectExistingSnapshots(snapshotDir)
+
+	var best *snapshotInfo
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.isIncr && snap.baseSlot == baseSlot {
+			if best == nil || snap.slot > best.slot {
+				best = snap
+			}
+		}
+	}
+	return best
 }
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
@@ -2151,7 +2254,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	// Create progress display for extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbAuto(ctx, fullSnapshotPath, snapshotDir, int(snap.slot), int(snap.slot), accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
@@ -2185,7 +2288,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	// Create progress display for snapshot download and extract
 	dp := progress.NewDualProgress()
 
-	accountsDb, manifest, err := snapshot.BuildAccountsDbWithIncr(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
+	accountsDb, manifest, err := snapshot.BuildAccountsDbAuto(ctx, fullSnapshotURL, snapshotDownloadPath, fullSnapshotSlot, fullSnapshotSlot, accountsPath, rpcEndpoints, blockstorePath, snapCfg, dp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}

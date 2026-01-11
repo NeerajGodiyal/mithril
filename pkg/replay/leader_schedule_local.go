@@ -724,9 +724,9 @@ type ScheduleSummary struct {
 	Repeat        uint64
 
 	// Stake info
-	TotalInputStake    uint64 // Total stake from EpochStakes (before filtering)
-	FilteredStake      uint64 // Stake used in schedule (after filtering)
-	MissingStake       uint64 // Stake skipped due to missing data
+	TotalInputStake     uint64 // Total stake from EpochStakes (before filtering)
+	FilteredStake       uint64 // Stake used in schedule (after filtering)
+	MissingStake        uint64 // Stake skipped due to missing data
 	MissingStakePercent float64
 
 	// Validator counts
@@ -810,12 +810,12 @@ type ValidationStats struct {
 	MinStake                    uint64
 	MaxStake                    uint64
 	ValidatorCount              int // Validators with non-zero stake and valid NodePubkey
-	MismatchCount int
-	Capped        bool
-	TopStakes     []StakeEntry // Top 10 by stake
-	BottomStakes                []StakeEntry    // Bottom 10 by stake
-	MissingVoteAccts            []StakeEntry    // First few missing vote accounts (for debugging)
-	ZeroNodePkAccts             []StakeEntry    // First few zero NodePubkey accounts
+	MismatchCount               int
+	Capped                      bool
+	TopStakes                   []StakeEntry // Top 10 by stake
+	BottomStakes                []StakeEntry // Bottom 10 by stake
+	MissingVoteAccts            []StakeEntry // First few missing vote accounts (for debugging)
+	ZeroNodePkAccts             []StakeEntry // First few zero NodePubkey accounts
 }
 
 // logScheduleBuildSummary logs a comprehensive summary of the schedule build.
@@ -1235,7 +1235,7 @@ func validateLeaderSchedule(
 	voteAcctMap := global.EpochStakesVoteAccts(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
@@ -1354,7 +1354,7 @@ func validateLeaderScheduleFromVoteCache(
 	voteAcctStakes := global.EpochStakes(blockEpoch)
 
 	// Guard: skip if no stake data available for this epoch
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Warnf("leader schedule validation: no stake data for epoch=%d, skipping", blockEpoch)
 		return
 	}
@@ -1463,7 +1463,7 @@ func PrepareLeaderScheduleLocal(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
 		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
@@ -1553,7 +1553,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 	firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
 	numSlots := epochSchedule.SlotsInEpoch(epoch)
 
-	if voteAcctStakes == nil || len(voteAcctStakes) == 0 {
+	if len(voteAcctStakes) == 0 {
 		mlog.Log.Errorf("LEADER SCHEDULE BUILD FAILED: epoch=%d reason=no_stake_data", epoch)
 		mlog.Log.FileOnlyf("  rng_epoch=%d first_slot=%d slots=%d source=vote_cache", epoch, firstSlot, numSlots)
 		mlog.Log.FileOnlyf("  EpochStakes(%d) returned nil or empty", epoch)
