@@ -322,6 +322,7 @@ func (d *DualProgress) Start() {
 	if d.useColor {
 		fmt.Fprintf(d.output, "%s", colorReset)
 	}
+	fmt.Fprintln(d.output) // blank line before progress bars
 
 	// Print initial empty lines for progress bars (2 bars)
 	fmt.Fprintln(d.output)
@@ -594,7 +595,6 @@ func PrintSnapshotSourceSummary(nodeIP string, slot int, referenceSlot int, node
 		rttStr = "N/A"
 	}
 
-	fmt.Println()
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
 	fmt.Printf("%s│%s FULL SNAPSHOT SOURCE SELECTED                                                %s│%s\n", c, r, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
@@ -662,14 +662,14 @@ func PrintShutdownSummary(info ShutdownInfo) {
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	resumeStr := fmt.Sprintf("   Resume from slot %s:", formatSlots(nextSlot))
 	fmt.Printf("%s│%s%-78s%s│%s\n", c, r, resumeStr, c, r)
-	fmt.Printf("%s│%s     mithril run --bootstrap-mode=accountsdb                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap accountsdb                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	snapshotStr := fmt.Sprintf("   Rebuild from existing snapshot (slot %s):", formatSlots(info.SnapshotBaseSlot))
 	fmt.Printf("%s│%s%-78s%s│%s\n", c, r, snapshotStr, c, r)
-	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap snapshot                                    %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap new-snapshot                                %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s State saved to: mithril_state.json                                           %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
@@ -707,11 +707,11 @@ func PrintBuildInterrupted(info BuildInterruptInfo) {
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	if info.SnapshotPath != "" {
 		fmt.Printf("%s│%s   Rebuild from existing snapshot (already downloaded):                       %s│%s\n", c, r, c, r)
-		fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+		fmt.Printf("%s│%s     mithril run --bootstrap snapshot                                    %s│%s\n", c, r, c, r)
 		fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	}
 	fmt.Printf("%s│%s   Download fresh snapshot and rebuild:                                       %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s     mithril run --bootstrap-mode=new-snapshot                                %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap new-snapshot                                %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	if info.SnapshotPath != "" {
 		// Truncate path if too long
@@ -1094,7 +1094,7 @@ func PrintDownloadInterrupted(info DownloadInterruptInfo) {
 	fmt.Printf("%s│%s TO RESTART:                                                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s   Download will resume from the beginning:                                   %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s     mithril run --bootstrap-mode=snapshot                                    %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s     mithril run --bootstrap snapshot                                    %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
 	fmt.Printf("%s│%s Note: Partial download has been cleaned up.                                  %s│%s\n", c, r, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)

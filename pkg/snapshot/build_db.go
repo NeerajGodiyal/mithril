@@ -162,19 +162,21 @@ func BuildAccountsDbPaths(
 	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
 	CleanAccountsDbDir(accountsDbDir)
 
+	mlog.Log.Infof("Parsing manifest from %s", snapshotFile)
 	manifest, err := UnmarshalManifestFromSnapshot(ctx, snapshotFile, accountsDbDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
-	mlog.Log.Infof("parsed manifest from snapshotFile=%s", snapshotFile)
+	mlog.Log.Infof("Parsed manifest from full snapshot")
 
 	var incrementalManifest *SnapshotManifest
 	if incrementalSnapshotFile != "" {
+		mlog.Log.Infof("Parsing manifest from %s", incrementalSnapshotFile)
 		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotFile, accountsDbDir)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
-		mlog.Log.Infof("parsed manifest from incrementalSnapshotFile=%s", incrementalSnapshotFile)
+		mlog.Log.Infof("Parsed manifest from incremental snapshot")
 	}
 
 	start := time.Now()
@@ -203,8 +205,9 @@ func BuildAccountsDbPaths(
 
 	// Start progress display if provided
 	if dp != nil {
-		// Flush any pending log output before starting progress bars
+		// Flush mlog's buffered writer AND OS buffers before starting progress bars
 		// This prevents late-flushing logs from breaking cursor positioning
+		mlog.Flush()
 		os.Stdout.Sync()
 		os.Stderr.Sync()
 		dp.Start()

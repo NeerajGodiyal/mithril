@@ -119,7 +119,7 @@ func DefaultSnapshotConfig() SnapshotConfig {
 
 		// Snapshot age thresholds
 		FullThreshold:        100000, // Full snapshots up to 100k slots old (Agave 3.0+)
-		IncrementalThreshold: 200,    // Allow slightly ahead incrementals
+		IncrementalThreshold: 1000,   // Allow incrementals up to 1000 slots ahead
 
 		// Snapshot storage (0 = stream-only, 1+ = save and retain N)
 		// Saved snapshots are valuable for debugging and reproducing issues

@@ -167,7 +167,7 @@ func init() {
 
 	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap-mode", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
 	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
 
@@ -369,8 +369,8 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Update variables (CLI flags take precedence over TOML config when explicitly set)
 	// CLI flag names -> TOML nested keys (Firedancer-style)
 
-	// [bootstrap] section (new unified mode replacing two booleans)
-	bootstrapMode = getString("bootstrap-mode", "bootstrap.mode")
+	// [bootstrap] section
+	bootstrapMode = getString("bootstrap", "bootstrap.mode")
 	if bootstrapMode == "" {
 		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
@@ -1118,7 +1118,7 @@ func runLive(c *cobra.Command, args []string) {
 		genesisHash := fetchGenesisHash(ctx)
 		if genesisHash != "" {
 			if err := mithrilState.ValidateGenesisHash(genesisHash); err != nil {
-				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap-mode=snapshot to rebuild.", err)
+				klog.Fatalf("FATAL: %v\nThis AccountsDB was built for a different cluster. Use --bootstrap snapshot to rebuild.", err)
 			}
 			// If state has no genesis hash (older version), set it now
 			if mithrilState.GenesisHash == "" {
@@ -1206,7 +1206,7 @@ func runLive(c *cobra.Command, args []string) {
 		if hasValidState {
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
 				mlog.Log.Errorf("WARNING: integrity check failed: %v", err)
-				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap-mode=snapshot to rebuild.")
+				mlog.Log.Errorf("WARNING: AccountsDB may be corrupted. Consider using --bootstrap snapshot to rebuild.")
 			}
 		}
 
@@ -1215,7 +1215,7 @@ func runLive(c *cobra.Command, args []string) {
 		if snapshotDownloadPath == "" {
 			klog.Fatalf("mode=new-snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
 		}
-		mlog.Log.Infof("mode=new-snapshot: downloading fresh snapshot")
+		mlog.Log.Infof("mode=new-snapshot: Downloading fresh snapshot")
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
@@ -1223,13 +1223,17 @@ func runLive(c *cobra.Command, args []string) {
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "new-snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
-		// Clean ALL existing snapshots (force fresh download)
+		// Clean existing snapshots (respecting retention setting)
 		if snapshotDownloadPath != "" {
-			mlog.Log.Infof("cleaning up existing snapshot files in %s", snapshotDownloadPath)
-			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, 0) // 0 = delete all
+			maxSnapshots := config.GetInt("snapshot.max_full_snapshots")
+			if maxSnapshots < 0 {
+				maxSnapshots = 0
+			}
+			mlog.Log.Infof("Cleaning up existing snapshot files in %s (keeping %d)", snapshotDownloadPath, maxSnapshots)
+			snapshot.CleanSnapshotDownloadDir(snapshotDownloadPath, maxSnapshots)
 		}
 		accountsDb, manifest, err = downloadAndBuildFromSnapshot(ctx, rpcEndpoints, snapshotDownloadPath, accountsPath, blockstorePath)
 		if err != nil {
@@ -1252,7 +1256,7 @@ func runLive(c *cobra.Command, args []string) {
 		if snapshotDownloadPath == "" {
 			klog.Fatalf("mode=snapshot requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
 		}
-		mlog.Log.Infof("mode=snapshot: will rebuild AccountsDB from snapshot")
+		mlog.Log.Infof("mode=snapshot: Will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
@@ -1260,7 +1264,7 @@ func runLive(c *cobra.Command, args []string) {
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
 		}
 
@@ -1376,7 +1380,7 @@ func runLive(c *cobra.Command, args []string) {
 				// choice == 1: continue with existing AccountsDB
 			}
 
-			mlog.Log.Infof("mode=auto: resuming from existing AccountsDB at slot %d", accountsDBSlot)
+			mlog.Log.Infof("mode=auto: Resuming from existing AccountsDB at slot %d", accountsDBSlot)
 			// Record resume in history
 			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit())
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
@@ -1417,7 +1421,7 @@ func runLive(c *cobra.Command, args []string) {
 			if hasAccountsDB {
 				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
 			} else {
-				mlog.Log.Infof("mode=auto: no existing AccountsDB, will download snapshot")
+				mlog.Log.Infof("mode=auto: No existing AccountsDB, will download snapshot")
 			}
 			if accountsPath != "" {
 				// Record rebuild in history before cleanup (history file is preserved)
@@ -1433,7 +1437,7 @@ func runLive(c *cobra.Command, args []string) {
 				} else {
 					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), reason)
 				}
-				mlog.Log.Infof("cleaning up previous AccountsDB artifacts in %s", accountsPath)
+				mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
 			}
 
@@ -1811,7 +1815,15 @@ func printStartupInfo(commandName string) {
 	// Commit info
 	if revision != "" {
 		commitStr := revision
-		if modified == "true" {
+		// Add branch info if available (skip "unknown" and "HEAD" for detached state)
+		branch := version.GitBranch
+		if branch != "" && branch != "unknown" && branch != "HEAD" {
+			if modified == "true" {
+				commitStr += fmt.Sprintf(" (%s, modified)", branch)
+			} else {
+				commitStr += fmt.Sprintf(" (%s)", branch)
+			}
+		} else if modified == "true" {
 			commitStr += " (modified)"
 		}
 		fmt.Printf("  Commit:       %s%s%s\n", dim, commitStr, reset)
@@ -1971,9 +1983,15 @@ func printStartupInfo(commandName string) {
 		}
 	}
 
-	// Log directory
+	// Log directory with disk info
 	if logDir != "" {
-		fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(logDir))
+		if diskInfo != "" {
+			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+		} else {
+			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
+		}
 	}
 
 	// Block source
