@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/cockroachdb/pebble"
+	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -76,7 +77,12 @@ func BuildAccountsDbAuto(
 	}
 	sl := NewShardLogger(numShards, logsDir)
 
-	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId)
+	// Create stake pubkey collector for building stake index during appendvec processing
+	stakeCollector := &stakeIndexCollector{
+		pubkeys: make([]solana.PublicKey, 0, 1000000), // Pre-allocate for ~1M stake accounts
+	}
+
+	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId, stakeCollector)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
 	}
@@ -236,6 +242,13 @@ func BuildAccountsDbAuto(
 	}
 
 	pools.Release()
+
+	// Write stake pubkey index file
+	stakeIndexPath := filepath.Join(accountsDbDir, "stake_pubkeys.idx")
+	if err := WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.pubkeys); err != nil {
+		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
+	}
+	mlog.Log.Infof("wrote %d stake pubkeys to index", len(stakeCollector.pubkeys))
 
 	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())

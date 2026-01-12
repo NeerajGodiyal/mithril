@@ -756,17 +756,16 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		}
 	}
 
-	// Create ResumeState if we have resume context from a previous graceful shutdown
+	// Create ResumeState if we have resume data from a previous graceful shutdown
 	var resumeState *replay.ResumeState
-	if mithrilState != nil && mithrilState.HasResumeContext() {
-		resumeCtx := mithrilState.GetResumeContext()
+	if mithrilState != nil && mithrilState.HasResumeData() {
 		// Decode bankhash from base58
 		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
 		if err != nil {
 			mlog.Log.Infof("warning: failed to decode last_bankhash from state file: %v", err)
 		} else {
 			// Decode LtHash from base64
-			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			ltHashBytes, err := base64.StdEncoding.DecodeString(mithrilState.LastAcctsLtHash)
 			if err != nil {
 				mlog.Log.Infof("warning: failed to decode last_accts_lt_hash from state file: %v", err)
 			} else {
@@ -776,39 +775,54 @@ func runVerifyRange(c *cobra.Command, args []string) {
 					ParentSlot:               mithrilState.LastSlot,
 					ParentBankhash:           parentBankhash,
 					AcctsLtHash:              ltHash,
-					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
-					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
-					NumSignatures:            resumeCtx.NumSignatures,
+					LamportsPerSignature:     mithrilState.LastLamportsPerSignature,
+					PrevLamportsPerSignature: mithrilState.LastPrevLamportsPerSig,
+					NumSignatures:            mithrilState.LastNumSignatures,
+					// ReplayCtx fields
+					Capitalization:          mithrilState.LastCapitalization,
+					SlotsPerYear:            mithrilState.LastSlotsPerYear,
+					InflationInitial:        mithrilState.LastInflationInitial,
+					InflationTerminal:       mithrilState.LastInflationTerminal,
+					InflationTaper:          mithrilState.LastInflationTaper,
+					InflationFoundation:     mithrilState.LastInflationFoundation,
+					InflationFoundationTerm: mithrilState.LastInflationFoundationTerm,
 				}
 
 				// Decode blockhash context
-				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
-					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+				if mithrilState.LastRecentBlockhashes != nil && len(mithrilState.LastRecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(mithrilState.LastRecentBlockhashes)
 					resumeState.RecentBlockhashes = &recentBlockhashes
 
-					if resumeCtx.EvictedBlockhash != "" {
-						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+					if mithrilState.LastEvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(mithrilState.LastEvictedBlockhash)
 						if err == nil && len(evictedBytes) == 32 {
 							copy(resumeState.EvictedBlockhash[:], evictedBytes)
 						}
 					}
 
-					if resumeCtx.LastBlockhash != "" {
-						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+					if mithrilState.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(mithrilState.LastBlockhash)
 						if err == nil && len(lastBhBytes) == 32 {
 							copy(resumeState.LastBlockhash[:], lastBhBytes)
 						}
 					}
-					mlog.Log.Infof("loaded resume context with %d blockhashes from state file", len(*resumeState.RecentBlockhashes))
+					mlog.Log.Infof("loaded resume data with %d blockhashes from state file", len(*resumeState.RecentBlockhashes))
 				} else {
-					mlog.Log.Infof("loaded resume context from state file (no blockhashes)")
+					mlog.Log.Infof("loaded resume data from state file (no blockhashes)")
 				}
 
 				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
-				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
-					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+				if mithrilState.LastSlotHashes != nil && len(mithrilState.LastSlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(mithrilState.LastSlotHashes)
 					resumeState.SlotHashes = &slotHashes
-					mlog.Log.Infof("loaded SlotHashes context with %d entries from state file", len(*resumeState.SlotHashes))
+				}
+
+				// Load persisted epoch stakes - required for correct leader schedule
+				if mithrilState.ComputedEpochStakes != nil && len(mithrilState.ComputedEpochStakes) > 0 {
+					resumeState.ComputedEpochStakes = make(map[uint64][]byte, len(mithrilState.ComputedEpochStakes))
+					for epoch, data := range mithrilState.ComputedEpochStakes {
+						resumeState.ComputedEpochStakes[epoch] = []byte(data)
+					}
 				}
 			}
 		}
@@ -841,8 +855,6 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		klog.Fatalf("end slot cannot be lower than start slot")
 	}
 	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
-
-	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
@@ -888,11 +900,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsDbDir, manifest, resumeState, uint64(startSlot), uint64(endSlot), rpcEndpoints, blockstorePath, int(txParallelism), false, false, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
-	// Update state file with last persisted slot and resume context
+	// Update state file with last persisted slot and shutdown context
 	// Skip if already written during cancellation (eliminates timing window)
 	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
-		// Build resume context for graceful shutdown
-		var resumeCtx *state.ResumeContext
+		// Build shutdown context for graceful shutdown
+		var shutdownCtx *state.ShutdownContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
 			var lastEpoch uint64
@@ -900,48 +912,56 @@ func runVerifyRange(c *cobra.Command, args []string) {
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
 			// Determine shutdown reason
-				shutdownReason := state.ShutdownReasonCompleted
-				if result.WasCancelled {
-					shutdownReason = state.ShutdownReasonNormal
-				} else if result.Error != nil {
-					if strings.Contains(result.Error.Error(), "stall") {
-						shutdownReason = state.ShutdownReasonStall
-					} else if strings.Contains(result.Error.Error(), "leader schedule") {
-						shutdownReason = state.ShutdownReasonLeaderSchedule
-					} else {
-						// Include the actual error for easier debugging
-						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
-					}
+			shutdownReason := state.ShutdownReasonCompleted
+			if result.WasCancelled {
+				shutdownReason = state.ShutdownReasonNormal
+			} else if result.Error != nil {
+				if strings.Contains(result.Error.Error(), "stall") {
+					shutdownReason = state.ShutdownReasonStall
+				} else if strings.Contains(result.Error.Error(), "leader schedule") {
+					shutdownReason = state.ShutdownReasonLeaderSchedule
+				} else {
+					// Include the actual error for easier debugging
+					shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
 				}
+			}
 
-				resumeCtx = &state.ResumeContext{
+			shutdownCtx = &state.ShutdownContext{
+				RunID:          replay.CurrentRunID,
+				WriterVersion:  getVersion(),
+				WriterCommit:   getCommit(),
+				WriterBranch:   getBranch(),
+				ShutdownReason: shutdownReason,
+				Epoch:          lastEpoch,
+
+				// LtHash and fee state
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
-				Epoch:                lastEpoch,
 
-				// Blockhash context - required because appendvec writes are not fsynced
+				// Blockhash context
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 
-				// SlotHashes context - vote program needs accurate slot→hash mappings
+				// SlotHashes context
 				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
 
-				// Run tracking - for log correlation
-				RunID:        replay.CurrentRunID,
-				RunStartedAt: replayStartTime,
+				// ReplayCtx fields
+				Capitalization:          result.LastCapitalization,
+				SlotsPerYear:            result.LastSlotsPerYear,
+				InflationInitial:        result.LastInflation.Initial,
+				InflationTerminal:       result.LastInflation.Terminal,
+				InflationTaper:          result.LastInflation.Taper,
+				InflationFoundation:     result.LastInflation.FoundationVal,
+				InflationFoundationTerm: result.LastInflation.FoundationTerm,
 
-				// Writer info
-				WriterVersion: getVersion(),
-				WriterCommit:  getCommit(),
-
-				// Shutdown tracking
-				ShutdownReason: shutdownReason,
+				// EpochStakes - required for correct leader schedule on resume
+				ComputedEpochStakes: result.ComputedEpochStakes,
 			}
 		}
-		if err := mithrilState.UpdateLastSlotWithContext(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+		if err := mithrilState.UpdateOnShutdown(accountsDbDir, result.LastPersistedSlot, result.LastPersistedBankhash, shutdownCtx); err != nil {
 			mlog.Log.Errorf("failed to update state file: %v", err)
 		}
 	}
@@ -967,7 +987,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		})
 	}
 
-	mlog.Log.Infof("done replaying, closing DB")
+	mlog.Log.Infof("Done replaying, closing DB")
 	accountsDb.CloseDb()
 }
 
@@ -1122,7 +1142,7 @@ func runLive(c *cobra.Command, args []string) {
 			}
 			// If state has no genesis hash (older version), set it now
 			if mithrilState.GenesisHash == "" {
-				mlog.Log.Infof("updating state file with cluster=%s genesis=%s", cluster, genesisHash[:12]+"...")
+				mlog.Log.Infof("Updating state file with cluster=%s genesis=%s", cluster, genesisHash[:12]+"...")
 				mithrilState.SetClusterInfo(cluster, genesisHash)
 				if err := mithrilState.Save(accountsPath); err != nil {
 					mlog.Log.Infof("WARNING: failed to update state file with cluster info: %v", err)
@@ -1140,17 +1160,16 @@ func runLive(c *cobra.Command, args []string) {
 
 	// Handle explicit --snapshot flag (bypasses all auto-discovery, does NOT delete snapshot files)
 	if snapshotArchivePath != "" {
-		mlog.Log.Infof("using explicit snapshot file: %s", snapshotArchivePath)
+		mlog.Log.Infof("Using snapshot file: %s", snapshotArchivePath)
 
 		// Parse full snapshot slot from filename for validation
 		fullSnapshotSlot := parseSlotFromSnapshotName(filepath.Base(snapshotArchivePath))
 		if fullSnapshotSlot == 0 {
 			klog.Fatalf("could not parse slot from snapshot filename: %s", snapshotArchivePath)
 		}
-		mlog.Log.Infof("full snapshot slot: %d", fullSnapshotSlot)
 
 		if incrementalSnapshotFilename != "" {
-			mlog.Log.Infof("using explicit incremental snapshot: %s", incrementalSnapshotFilename)
+			mlog.Log.Infof("Using incremental snapshot: %s", incrementalSnapshotFilename)
 
 			// Validate incremental base matches full snapshot slot
 			incrBase, incrEnd := parseSlotsFromIncrementalName(filepath.Base(incrementalSnapshotFilename))
@@ -1158,9 +1177,9 @@ func runLive(c *cobra.Command, args []string) {
 				klog.Fatalf("could not parse base slot from incremental snapshot filename: %s", incrementalSnapshotFilename)
 			}
 			if incrBase != fullSnapshotSlot {
-				klog.Fatalf("incremental base slot %d does not match full snapshot slot %d", incrBase, fullSnapshotSlot)
+				klog.Fatalf("Incremental base slot %d does not match full snapshot slot %d", incrBase, fullSnapshotSlot)
 			}
-			mlog.Log.Infof("incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
+			mlog.Log.Infof("Incremental snapshot: base=%d end=%d (validated)", incrBase, incrEnd)
 		}
 
 		// Build directly from the specified files (BuildAccountsDbPaths handles AccountsDB cleanup internally)
@@ -1180,7 +1199,7 @@ func runLive(c *cobra.Command, args []string) {
 		if err := mithrilState.Save(accountsPath); err != nil {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
-		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 		goto postBootstrap
 	}
 
@@ -1219,9 +1238,9 @@ func runLive(c *cobra.Command, args []string) {
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
-				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "new-snapshot mode")
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "new-snapshot mode")
 			} else {
-				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "new-snapshot mode (no prior state)")
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "new-snapshot mode (no prior state)")
 			}
 			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
@@ -1249,7 +1268,7 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 		// Record bootstrap in history
-		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 
 	case "snapshot":
 		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
@@ -1260,9 +1279,9 @@ func runLive(c *cobra.Command, args []string) {
 		if accountsPath != "" {
 			// Record rebuild in history before cleanup (history file is preserved)
 			if mithrilState != nil {
-				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "snapshot mode")
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "snapshot mode")
 			} else {
-				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), "snapshot mode (no prior state)")
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "snapshot mode (no prior state)")
 			}
 			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 			snapshot.CleanAccountsDbDir(accountsPath)
@@ -1277,7 +1296,7 @@ func runLive(c *cobra.Command, args []string) {
 
 		if existingSnap != nil {
 			// Reuse existing snapshot
-			mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+			mlog.Log.Infof("Reusing existing snapshot file at slot %d", existingSnap.slot)
 			accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 		} else {
 			// Download fresh
@@ -1305,7 +1324,7 @@ func runLive(c *cobra.Command, args []string) {
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 		// Record bootstrap in history
-		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 
 	case "auto":
 		fallthrough
@@ -1343,13 +1362,13 @@ func runLive(c *cobra.Command, args []string) {
 					if accountsPath != "" {
 						// Record rebuild in history before cleanup (history file is preserved)
 						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
-						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), "user chose rebuild (stale AccountsDB)")
+						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "user chose rebuild (stale AccountsDB)")
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// Check for existing fresh snapshot
 					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 					if existingSnap != nil {
-						mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+						mlog.Log.Infof("Reusing existing snapshot file at slot %d", existingSnap.slot)
 						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 					} else {
 						// Clean up old snapshot files
@@ -1374,7 +1393,7 @@ func runLive(c *cobra.Command, args []string) {
 						mlog.Log.Errorf("failed to save state file: %v", err)
 					}
 					// Record bootstrap in history
-					state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+					state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 					break // Exit the switch, continue with fresh AccountsDB
 				}
 				// choice == 1: continue with existing AccountsDB
@@ -1382,7 +1401,7 @@ func runLive(c *cobra.Command, args []string) {
 
 			mlog.Log.Infof("mode=auto: Resuming from existing AccountsDB at slot %d", accountsDBSlot)
 			// Record resume in history
-			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit())
+			state.RecordResume(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 			accountsDb, err = accountsdb.OpenDb(accountsPath)
 			if err != nil {
 				klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
@@ -1404,7 +1423,7 @@ func runLive(c *cobra.Command, args []string) {
 				} else {
 					mlog.Log.Infof("state file updated to indicate corruption")
 					// Record corruption in history
-					state.RecordCorrupted(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit(), err.Error())
+					state.RecordCorrupted(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, replay.CurrentRunID, getVersion(), getCommit(), getBranch(), err.Error())
 				}
 
 				// Close AccountsDB before exiting
@@ -1433,9 +1452,9 @@ func runLive(c *cobra.Command, args []string) {
 					reason = "auto mode (no existing AccountsDB)"
 				}
 				if existingState, _ := state.LoadState(accountsPath); existingState != nil {
-					state.RecordRebuild(accountsPath, existingState.LastSlot, existingState.LastBankhash, getVersion(), getCommit(), reason)
+					state.RecordRebuild(accountsPath, existingState.LastSlot, existingState.LastBankhash, getVersion(), getCommit(), getBranch(), reason)
 				} else {
-					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), reason)
+					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), reason)
 				}
 				mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 				snapshot.CleanAccountsDbDir(accountsPath)
@@ -1444,7 +1463,7 @@ func runLive(c *cobra.Command, args []string) {
 			// Check for existing fresh snapshot
 			existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 			if existingSnap != nil {
-				mlog.Log.Infof("reusing existing snapshot file at slot %d", existingSnap.slot)
+				mlog.Log.Infof("Reusing existing snapshot file at slot %d", existingSnap.slot)
 				accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
 			} else {
 				// Clean up old snapshot files based on retention settings
@@ -1476,7 +1495,7 @@ func runLive(c *cobra.Command, args []string) {
 				mlog.Log.Errorf("failed to save state file: %v", err)
 			}
 			// Record bootstrap in history
-			state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+			state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 		}
 	}
 
@@ -1504,9 +1523,7 @@ postBootstrap:
 
 	// Create ResumeState if we have resume context from state file
 	var resumeState *replay.ResumeState
-	if mithrilState != nil && mithrilState.HasResumeContext() {
-		resumeCtx := mithrilState.GetResumeContext()
-
+	if mithrilState != nil && mithrilState.HasResumeData() {
 		// Decode parent bankhash
 		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
 		if err != nil {
@@ -1515,7 +1532,7 @@ postBootstrap:
 			mithrilState = nil
 		} else {
 			// Decode AcctsLtHash
-			ltHashBytes, err := base64.StdEncoding.DecodeString(resumeCtx.AcctsLtHash)
+			ltHashBytes, err := base64.StdEncoding.DecodeString(mithrilState.LastAcctsLtHash)
 			if err != nil {
 				mlog.Log.Errorf("failed to decode accts_lt_hash from state file: %v", err)
 				mlog.Log.Infof("will start fresh from snapshot")
@@ -1528,25 +1545,33 @@ postBootstrap:
 					ParentSlot:               mithrilState.LastSlot,
 					ParentBankhash:           parentBankhash,
 					AcctsLtHash:              ltHash,
-					LamportsPerSignature:     resumeCtx.LamportsPerSignature,
-					PrevLamportsPerSignature: resumeCtx.PrevLamportsPerSig,
-					NumSignatures:            resumeCtx.NumSignatures,
+					LamportsPerSignature:     mithrilState.LastLamportsPerSignature,
+					PrevLamportsPerSignature: mithrilState.LastPrevLamportsPerSig,
+					NumSignatures:            mithrilState.LastNumSignatures,
+					// ReplayCtx fields
+					Capitalization:          mithrilState.LastCapitalization,
+					SlotsPerYear:            mithrilState.LastSlotsPerYear,
+					InflationInitial:        mithrilState.LastInflationInitial,
+					InflationTerminal:       mithrilState.LastInflationTerminal,
+					InflationTaper:          mithrilState.LastInflationTaper,
+					InflationFoundation:     mithrilState.LastInflationFoundation,
+					InflationFoundationTerm: mithrilState.LastInflationFoundationTerm,
 				}
 
 				// Decode blockhash context
-				if resumeCtx.RecentBlockhashes != nil && len(resumeCtx.RecentBlockhashes) > 0 {
-					recentBlockhashes := decodeRecentBlockhashes(resumeCtx.RecentBlockhashes)
+				if mithrilState.LastRecentBlockhashes != nil && len(mithrilState.LastRecentBlockhashes) > 0 {
+					recentBlockhashes := decodeRecentBlockhashes(mithrilState.LastRecentBlockhashes)
 					resumeState.RecentBlockhashes = &recentBlockhashes
 
-					if resumeCtx.EvictedBlockhash != "" {
-						evictedBytes, err := base58.Decode(resumeCtx.EvictedBlockhash)
+					if mithrilState.LastEvictedBlockhash != "" {
+						evictedBytes, err := base58.Decode(mithrilState.LastEvictedBlockhash)
 						if err == nil && len(evictedBytes) == 32 {
 							copy(resumeState.EvictedBlockhash[:], evictedBytes)
 						}
 					}
 
-					if resumeCtx.LastBlockhash != "" {
-						lastBhBytes, err := base58.Decode(resumeCtx.LastBlockhash)
+					if mithrilState.LastBlockhash != "" {
+						lastBhBytes, err := base58.Decode(mithrilState.LastBlockhash)
 						if err == nil && len(lastBhBytes) == 32 {
 							copy(resumeState.LastBlockhash[:], lastBhBytes)
 						}
@@ -1554,9 +1579,17 @@ postBootstrap:
 				}
 
 				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
-				if resumeCtx.SlotHashes != nil && len(resumeCtx.SlotHashes) > 0 {
-					slotHashes := decodeSlotHashes(resumeCtx.SlotHashes)
+				if mithrilState.LastSlotHashes != nil && len(mithrilState.LastSlotHashes) > 0 {
+					slotHashes := decodeSlotHashes(mithrilState.LastSlotHashes)
 					resumeState.SlotHashes = &slotHashes
+				}
+
+				// Load persisted epoch stakes - required for correct leader schedule
+				if mithrilState.ComputedEpochStakes != nil && len(mithrilState.ComputedEpochStakes) > 0 {
+					resumeState.ComputedEpochStakes = make(map[uint64][]byte, len(mithrilState.ComputedEpochStakes))
+					for epoch, data := range mithrilState.ComputedEpochStakes {
+						resumeState.ComputedEpochStakes[epoch] = []byte(data)
+					}
 				}
 			}
 		}
@@ -1573,12 +1606,10 @@ postBootstrap:
 			mlog.Log.Errorf("failed to save state file: %v", err)
 		}
 		// Record bootstrap in history
-		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit())
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 	}
 
 	liveEndSlot := uint64(math.MaxUint64)
-
-	mlog.Log.Infof("initializing caches")
 	accountsDb.InitCaches()
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
@@ -1624,10 +1655,10 @@ postBootstrap:
 	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
 
-	// Update state file with last persisted slot and resume context
+	// Update state file with last persisted slot and shutdown context
 	// Skip if already written during cancellation (eliminates timing window)
 	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
-		var resumeCtx *state.ResumeContext
+		var shutdownCtx *state.ShutdownContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
 			var lastEpoch uint64
@@ -1635,54 +1666,62 @@ postBootstrap:
 				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
 			}
 			// Determine shutdown reason
-				shutdownReason := state.ShutdownReasonCompleted
-				if result.WasCancelled {
-					shutdownReason = state.ShutdownReasonNormal
-				} else if result.Error != nil {
-					if strings.Contains(result.Error.Error(), "stall") {
-						shutdownReason = state.ShutdownReasonStall
-					} else if strings.Contains(result.Error.Error(), "leader schedule") {
-						shutdownReason = state.ShutdownReasonLeaderSchedule
-					} else {
-						// Include the actual error for easier debugging
-						shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
-					}
+			shutdownReason := state.ShutdownReasonCompleted
+			if result.WasCancelled {
+				shutdownReason = state.ShutdownReasonNormal
+			} else if result.Error != nil {
+				if strings.Contains(result.Error.Error(), "stall") {
+					shutdownReason = state.ShutdownReasonStall
+				} else if strings.Contains(result.Error.Error(), "leader schedule") {
+					shutdownReason = state.ShutdownReasonLeaderSchedule
+				} else {
+					// Include the actual error for easier debugging
+					shutdownReason = fmt.Sprintf("%s: %v", state.ShutdownReasonError, result.Error)
 				}
+			}
 
-				resumeCtx = &state.ResumeContext{
+			shutdownCtx = &state.ShutdownContext{
+				RunID:          replay.CurrentRunID,
+				WriterVersion:  getVersion(),
+				WriterCommit:   getCommit(),
+				WriterBranch:   getBranch(),
+				ShutdownReason: shutdownReason,
+				Epoch:          lastEpoch,
+
+				// LtHash and fee state
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: result.LastLamportsPerSignature,
 				PrevLamportsPerSig:   result.LastPrevLamportsPerSig,
 				NumSignatures:        result.LastNumSignatures,
-				Epoch:                lastEpoch,
 
-				// Blockhash context - required because appendvec writes are not fsynced
+				// Blockhash context
 				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 
-				// SlotHashes context - vote program needs accurate slot→hash mappings
+				// SlotHashes context
 				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
 
-				// Run tracking - for log correlation
-				RunID:        replay.CurrentRunID,
-				RunStartedAt: replayStartTime,
+				// ReplayCtx fields
+				Capitalization:          result.LastCapitalization,
+				SlotsPerYear:            result.LastSlotsPerYear,
+				InflationInitial:        result.LastInflation.Initial,
+				InflationTerminal:       result.LastInflation.Terminal,
+				InflationTaper:          result.LastInflation.Taper,
+				InflationFoundation:     result.LastInflation.FoundationVal,
+				InflationFoundationTerm: result.LastInflation.FoundationTerm,
 
-				// Writer info
-				WriterVersion: getVersion(),
-				WriterCommit:  getCommit(),
-
-				// Shutdown tracking
-				ShutdownReason: shutdownReason,
+				// EpochStakes - required for correct leader schedule on resume
+				ComputedEpochStakes: result.ComputedEpochStakes,
 			}
 			// Record shutdown in history (must be inside this block where shutdownReason is defined)
-			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+			if err := mithrilState.UpdateOnShutdown(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, shutdownCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
-			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), shutdownReason)
+			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), getBranch(), shutdownReason)
 		} else {
-			// No resume context - just update slot
-			if err := mithrilState.UpdateLastSlotWithContext(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, resumeCtx); err != nil {
+			// No shutdown context - just update slot
+			if err := mithrilState.UpdateOnShutdown(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, shutdownCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
 			}
 		}
@@ -1709,7 +1748,7 @@ postBootstrap:
 		})
 	}
 
-	mlog.Log.Infof("done replaying, closing DB")
+	mlog.Log.Infof("Done replaying, closing DB")
 	accountsDb.CloseDb()
 }
 
@@ -1738,6 +1777,17 @@ func getCommit() string {
 		}
 	}
 	return "unknown"
+}
+
+// getBranch returns the git branch name, preferring ldflags but falling back to
+// runtime/debug.BuildInfo for dev builds. Returns empty string if unavailable.
+func getBranch() string {
+	// If set via ldflags (release builds), use that
+	if version.GitBranch != "" && version.GitBranch != "unknown" {
+		return version.GitBranch
+	}
+	// runtime/debug doesn't expose git branch, so return empty for dev builds
+	return ""
 }
 
 // fetchGenesisHash fetches the genesis hash from the first RPC endpoint.
@@ -2482,15 +2532,22 @@ func runReplayWithRecovery(
 			lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(r.LastPersistedSlot)
 		}
 
-		// Build resume context
-		var resumeCtx *state.ResumeContext
+		// Build shutdown context
+		var shutdownCtx *state.ShutdownContext
 		if r.LastAcctsLtHash != nil {
-			resumeCtx = &state.ResumeContext{
+			shutdownCtx = &state.ShutdownContext{
+				RunID:          replay.CurrentRunID,
+				WriterVersion:  getVersion(),
+				WriterCommit:   getCommit(),
+				WriterBranch:   getBranch(),
+				ShutdownReason: state.ShutdownReasonNormal, // This is always a cancel (Ctrl+C)
+				Epoch:          lastEpoch,
+
+				// LtHash and fee state
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(r.LastAcctsLtHash.Hash()),
 				LamportsPerSignature: r.LastLamportsPerSignature,
 				PrevLamportsPerSig:   r.LastPrevLamportsPerSig,
 				NumSignatures:        r.LastNumSignatures,
-				Epoch:                lastEpoch,
 
 				// Blockhash context
 				RecentBlockhashes: encodeRecentBlockhashes(r.LastRecentBlockhashes),
@@ -2500,28 +2557,29 @@ func runReplayWithRecovery(
 				// SlotHashes context
 				SlotHashes: encodeSlotHashes(r.LastSlotHashes),
 
-				// Run tracking
-				RunID:        replay.CurrentRunID,
-				RunStartedAt: replayStartTime,
+				// ReplayCtx fields
+				Capitalization:          r.LastCapitalization,
+				SlotsPerYear:            r.LastSlotsPerYear,
+				InflationInitial:        r.LastInflation.Initial,
+				InflationTerminal:       r.LastInflation.Terminal,
+				InflationTaper:          r.LastInflation.Taper,
+				InflationFoundation:     r.LastInflation.FoundationVal,
+				InflationFoundationTerm: r.LastInflation.FoundationTerm,
 
-				// Writer info
-				WriterVersion: getVersion(),
-				WriterCommit:  getCommit(),
-
-				// Shutdown tracking - this is always a cancel (Ctrl+C)
-				ShutdownReason: state.ShutdownReasonNormal,
+				// EpochStakes - required for correct leader schedule on resume
+				ComputedEpochStakes: r.ComputedEpochStakes,
 			}
 		}
 
 		// Write state immediately
-		if err := mithrilState.UpdateLastSlotWithContext(accountsDbPath, r.LastPersistedSlot, r.LastPersistedBankhash, resumeCtx); err != nil {
+		if err := mithrilState.UpdateOnShutdown(accountsDbPath, r.LastPersistedSlot, r.LastPersistedBankhash, shutdownCtx); err != nil {
 			return err
 		}
 
 		// Record shutdown in history
-		state.RecordShutdown(accountsDbPath, r.LastPersistedSlot, base58.Encode(r.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), state.ShutdownReasonNormal)
+		state.RecordShutdown(accountsDbPath, r.LastPersistedSlot, base58.Encode(r.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), getBranch(), state.ShutdownReasonNormal)
 
-		mlog.Log.Infof("state written immediately on cancel at slot %d", r.LastPersistedSlot)
+		mlog.Log.Infof("State saved to %s/mithril_state.json at slot %d", accountsDbPath, r.LastPersistedSlot)
 		return nil
 	}
 
@@ -2539,7 +2597,7 @@ func runReplayWithRecovery(
 						mlog.Log.Errorf("[run:%s] Failed to mark state as corrupted: %v", runID, err)
 					} else {
 						// Record corruption in history
-						state.RecordCorrupted(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash, runID, getVersion(), getCommit(), reason)
+						state.RecordCorrupted(accountsDbPath, mithrilState.LastSlot, mithrilState.LastBankhash, runID, getVersion(), getCommit(), getBranch(), reason)
 					}
 				}
 			} else {
