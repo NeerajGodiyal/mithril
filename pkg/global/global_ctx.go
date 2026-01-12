@@ -441,7 +441,7 @@ func LoadStakePubkeyIndex(accountsDbDir string) ([]solana.PublicKey, error) {
 
 	numPubkeys := len(data) / 32
 	if numPubkeys == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("stake pubkey index file is empty (0 pubkeys) - indicates corrupt or incomplete AccountsDB")
 	}
 
 	// Deduplicate pubkeys using a map
