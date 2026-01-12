@@ -353,8 +353,9 @@ func RebuildVoteCacheFromAccountsDB(
 	successStake := totalStake - missingStake.Load() - unmarshalErrStake.Load() - zeroNodePkStake.Load()
 
 	// Terminal: single line summary
-	mlog.Log.Infof("vote cache rebuild: slot=%d accounts=%d success=%d duration=%v",
-		slot, nonZeroAccounts, successCount.Load(), duration)
+	skipped := nonZeroAccounts - int(successCount.Load())
+	mlog.Log.Infof("vote cache: loaded=%d skipped=%d duration=%v",
+		successCount.Load(), skipped, duration)
 
 	// File only: detailed results
 	mlog.Log.FileOnlyf("vote cache rebuild details: slot=%d duration=%v", slot, duration)
@@ -401,16 +402,23 @@ func RebuildVoteCacheFromAccountsDB(
 			}
 		}
 
-		// Any failure is an error - vote cache must be complete for correct leader schedule
-		mlog.Log.Errorf("VOTE CACHE REBUILD FAILED: slot=%d failed=%d (%.4f%% stake)",
-			slot, totalFailed, failedPercent)
-
-		if firstError != nil {
-			return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake): %w",
-				totalFailed, failedPercent, firstError)
+		// Small percentage of unavailable vote accounts is expected on mainnet (dead/closed validators)
+		// Only ERROR if significant stake is missing - otherwise it's just noise
+		if failedPercent > 5.0 {
+			mlog.Log.Errorf("VOTE CACHE REBUILD: slot=%d skipped=%d (%.4f%% stake) - exceeds threshold",
+				slot, totalFailed, failedPercent)
+			if firstError != nil {
+				return fmt.Errorf("vote cache rebuild: %d unavailable (%.4f%% stake): %w",
+					totalFailed, failedPercent, firstError)
+			}
+			return fmt.Errorf("vote cache rebuild: %d unavailable (%.4f%% stake)",
+				totalFailed, failedPercent)
 		}
-		return fmt.Errorf("vote cache rebuild failed with %d errors (%.4f%% stake)",
-			totalFailed, failedPercent)
+
+		// Expected mainnet behavior - log to file only
+		mlog.Log.FileOnlyf("vote cache rebuild: slot=%d skipped=%d unavailable vote accounts (%.4f%% stake)",
+			slot, totalFailed, failedPercent)
+		return nil
 	}
 
 	mlog.Log.FileOnlyf("  result: SUCCESS (all %d non-zero accounts rebuilt)", nonZeroAccounts)

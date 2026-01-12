@@ -33,11 +33,28 @@ type ReplayCtx struct {
 	HasEpochAcctsHash bool
 }
 
-func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest) *ReplayCtx {
+// newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
+// This ensures resume uses fresh values instead of potentially stale manifest data.
+func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest, resumeState *ResumeState) *ReplayCtx {
 	epochCtx := new(ReplayCtx)
-	epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
-	epochCtx.Inflation = snapshotManifest.Bank.Inflation
-	epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+
+	// Prefer resume state if available (has non-zero capitalization)
+	if resumeState != nil && resumeState.Capitalization > 0 {
+		epochCtx.Capitalization = resumeState.Capitalization
+		epochCtx.SlotsPerYear = resumeState.SlotsPerYear
+		epochCtx.Inflation = rewards.Inflation{
+			Initial:        resumeState.InflationInitial,
+			Terminal:       resumeState.InflationTerminal,
+			Taper:          resumeState.InflationTaper,
+			FoundationVal:  resumeState.InflationFoundation,
+			FoundationTerm: resumeState.InflationFoundationTerm,
+		}
+	} else {
+		// Fallback to manifest (fresh start)
+		epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
+		epochCtx.Inflation = snapshotManifest.Bank.Inflation
+		epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+	}
 
 	if snapshotManifest.EpochAccountHash != [32]byte{} {
 		epochCtx.HasEpochAcctsHash = true
@@ -113,41 +130,6 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	return &stakeHistory
 }
 
-func refreshVoteAcctsCache(prevSlotCtx *sealevel.SlotCtx, acctsDb *accountsdb.AccountsDb, stakeHistory *sealevel.SysvarStakeHistory, newEpoch uint64, newRateActivationEpoch *uint64) map[solana.PublicKey]uint64 {
-	voteAcctStakes := make(map[solana.PublicKey]uint64)
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
-		defer wg.Done()
-
-		delegation := i.(*sealevel.Delegation)
-		votePk := delegation.VoterPubkey
-		stakeLamports := delegation.Stake(newEpoch, stakeHistory, newRateActivationEpoch)
-
-		mu.Lock()
-		voteAcctStakes[votePk] += stakeLamports
-		mu.Unlock()
-	})
-
-	for _, delegation := range global.StakeCache() {
-		wg.Add(1)
-		workerPool.Invoke(delegation)
-	}
-
-	wg.Wait()
-	workerPool.Release()
-	ants.Release()
-
-	newVoteAccts := make(map[solana.PublicKey]uint64, len(prevSlotCtx.VoteAccts))
-	for voteAcctPk := range prevSlotCtx.VoteAccts {
-		newVoteAccts[voteAcctPk] = voteAcctStakes[voteAcctPk]
-	}
-
-	return newVoteAccts
-}
-
 func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcClient, rpcBackups []string, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
 	var stakeHistory sealevel.SysvarStakeHistory
 	stakeHistoryAcct, err := prevSlotCtx.GetAccount(sealevel.SysvarStakeHistoryAddr)
@@ -165,7 +147,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, rpcc *rpcclient.RpcCl
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 
 	leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
-	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, epochSchedule, f)
+	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, epochSchedule, f, acctsDb, prevSlotCtx.Slot)
 
 	if global.ManageLeaderSchedule() {
 		_, err = PrepareLeaderScheduleLocalFromVoteCache(newEpoch, epochSchedule, "")
@@ -229,11 +211,30 @@ func (esb *epochStakesBuilder) TotalEpochStake() uint64 {
 	return esb.totalStake.Load()
 }
 
-func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) {
+func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, acctsDb *accountsdb.AccountsDb, slot uint64) {
 	stakes := global.StakeCache()
-	voteCache := global.VoteCache()
 	newRateActivationEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
+	// Build vote pubkey set for vote cache refresh (only needs pubkeys, not effective stakes)
+	voteAcctStakes := make(map[solana.PublicKey]uint64)
+	for _, delegation := range stakes {
+		voteAcctStakes[delegation.VoterPubkey] += delegation.StakeLamports
+	}
+
+	// ALWAYS refresh vote cache from AccountsDB, even if HasEpochStakes is true
+	// This ensures the vote cache has fresh NodePubkey for leader schedule
+	if err := RebuildVoteCacheFromAccountsDB(acctsDb, slot, voteAcctStakes, 0); err != nil {
+		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
+	}
+
+	// Skip epoch stakes calculation if already cached (resume)
+	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
+	if hasEpochStakes {
+		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
+		return
+	}
+
+	voteCache := global.VoteCache()
 	esb := newEpochStakesBuilder(leaderScheduleEpoch, voteCache)
 	var wg sync.WaitGroup
 
@@ -247,12 +248,6 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 			esb.AddStakeForVoteAcct(delegation.VoterPubkey, effectiveStake)
 		}
 	})
-
-	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
-	if hasEpochStakes {
-		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
-		return
-	}
 
 	for _, entry := range stakes {
 		wg.Add(1)
