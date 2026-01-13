@@ -27,6 +27,11 @@ type AccountsDb struct {
 	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+
+	// InRewardsWindow is set during partitioned epoch rewards distribution.
+	// When true, stake accounts are not cached in CommonAcctsCache since they're
+	// one-shot reads that would evict genuinely hot accounts.
+	InRewardsWindow bool
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -196,8 +201,12 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 	acct.Slot = acctIdxEntry.Slot
 
-	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
+	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow {
+		// During reward distribution, stake accounts are one-shot reads that would
+		// evict genuinely hot accounts from the cache. Skip caching them.
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}

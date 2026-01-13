@@ -163,7 +163,6 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	err := acctsDb.StoreAccounts(updatedAccts, slot)
 	if err != nil {
@@ -213,11 +212,10 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 		stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
 		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.StakerRewards))
 
-		newStakeStateBytes, err := sealevel.MarshalStakeStake(stakeState)
+		err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
 		if err != nil {
 			panic(fmt.Sprintf("unable to serialize new stake account state in distributing partitioned rewards: %s", err))
 		}
-		copy(stakeAcct.Data, newStakeStateBytes)
 
 		// update lamports in stake account
 		stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.StakerRewards))
@@ -242,7 +240,6 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 	wg.Wait()
 
 	workerPool.Release()
-	ants.Release()
 
 	err := acctsDb.StoreAccounts(accts, slot)
 	if err != nil {
@@ -356,7 +353,6 @@ func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]
 	}
 	wg.Wait()
 	partitionCalcWorkerPool.Release()
-	ants.Release()
 
 	return stakeInfoResults, validatorRewards, partitions
 }
@@ -503,7 +499,6 @@ func CalculateStakePoints(
 
 	wg.Wait()
 	workerPool.Release()
-	ants.Release()
 
 	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints()
 }
