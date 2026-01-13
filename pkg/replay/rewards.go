@@ -218,6 +218,9 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	epochRewards.MustUnmarshalWithDecoder(decoder)
 
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
+
+	// Set flag to prevent stake account cache pollution during one-shot reward reads
+	acctsDb.InRewardsWindow = true
 	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot)
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
@@ -226,6 +229,7 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	if partitionedEpochRewardsInfo.NumRewardPartitionsRemaining == 0 {
 		epochRewards.Active = false
+		acctsDb.InRewardsWindow = false
 	}
 
 	writer := new(bytes.Buffer)

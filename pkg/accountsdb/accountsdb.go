@@ -40,6 +40,11 @@ type AccountsDb struct {
 	inProgressStoreRequests   *list.List
 	storeRequestChan          chan *list.Element
 	storeWorkerDone           chan struct{}
+
+	// InRewardsWindow is set during partitioned epoch rewards distribution.
+	// When true, stake accounts are not cached in CommonAcctsCache since they're
+	// one-shot reads that would evict genuinely hot accounts.
+	InRewardsWindow bool
 }
 
 type storeRequest struct {
@@ -254,8 +259,12 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 
 	acct.Slot = acctIdxEntry.Slot
 
-	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
+	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow {
+		// During reward distribution, stake accounts are one-shot reads that would
+		// evict genuinely hot accounts from the cache. Skip caching them.
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
