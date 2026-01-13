@@ -352,9 +352,9 @@ func RebuildVoteCacheFromAccountsDB(
 	}
 	successStake := totalStake - missingStake.Load() - unmarshalErrStake.Load() - zeroNodePkStake.Load()
 
-	// Terminal: single line summary
+	// File only: single line summary
 	skipped := nonZeroAccounts - int(successCount.Load())
-	mlog.Log.Infof("vote cache: loaded=%d skipped=%d duration=%v",
+	mlog.Log.FileOnlyf("Vote cache: loaded=%d skipped=%d duration=%v",
 		successCount.Load(), skipped, duration)
 
 	// File only: detailed results

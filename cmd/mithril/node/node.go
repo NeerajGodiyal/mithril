@@ -879,7 +879,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	} else if rpcPort != 0 {
 		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort))
 		rpcServer.Start()
-		mlog.Log.Infof("started RPC server on port %d", rpcPort)
+		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
 	}
 
 	replayStartTime := time.Now()
@@ -1212,7 +1212,7 @@ func runLive(c *cobra.Command, args []string) {
 		if !hasValidState {
 			mlog.Log.Infof("WARNING: no state file found, AccountsDB may be from incomplete build")
 		}
-		mlog.Log.Infof("resuming from existing AccountsDB at slot %d", accountsDBSlot)
+		mlog.Log.Infof("Resuming from existing AccountsDB at slot %d", accountsDBSlot)
 		accountsDb, err = accountsdb.OpenDb(accountsPath)
 		if err != nil {
 			klog.Fatalf("failed to open AccountsDB at %s: %v", accountsPath, err)
@@ -1634,7 +1634,7 @@ postBootstrap:
 	} else if rpcPort != 0 {
 		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort))
 		rpcServer.Start()
-		mlog.Log.Infof("started RPC server on port %d", rpcPort)
+		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
 	}
 
 	replayStartTime := time.Now()
@@ -2000,8 +2000,7 @@ func printStartupInfo(commandName string) {
 	if accountsPath != "" {
 		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(accountsPath))
 		if diskInfo != "" {
-			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
-			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+			fmt.Printf("  AccountsDB:   %s%s%s  %s%s%s\n", gold, accountsPath, reset, dim, diskInfo, reset)
 		} else {
 			fmt.Printf("  AccountsDB:   %s%s%s\n", gold, accountsPath, reset)
 		}
@@ -2011,8 +2010,7 @@ func printStartupInfo(commandName string) {
 	if blockstorePath != "" {
 		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(blockstorePath))
 		if diskInfo != "" {
-			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
-			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+			fmt.Printf("  Blockstore:   %s%s%s  %s%s%s\n", gold, blockstorePath, reset, dim, diskInfo, reset)
 		} else {
 			fmt.Printf("  Blockstore:   %s%s%s\n", gold, blockstorePath, reset)
 		}
@@ -2026,8 +2024,7 @@ func printStartupInfo(commandName string) {
 	if snapshotDir != "" {
 		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(snapshotDir))
 		if diskInfo != "" {
-			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
-			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+			fmt.Printf("  Snapshots:    %s%s%s  %s%s%s\n", gold, snapshotDir, reset, dim, diskInfo, reset)
 		} else {
 			fmt.Printf("  Snapshots:    %s%s%s\n", gold, snapshotDir, reset)
 		}
@@ -2037,8 +2034,7 @@ func printStartupInfo(commandName string) {
 	if logDir != "" {
 		diskInfo := progress.FormatDiskInfo(progress.GetDiskInfo(logDir))
 		if diskInfo != "" {
-			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
-			fmt.Printf("                %s%s%s\n", dim, diskInfo, reset)
+			fmt.Printf("  Logs:         %s%s%s  %s%s%s\n", gold, logDir, reset, dim, diskInfo, reset)
 		} else {
 			fmt.Printf("  Logs:         %s%s%s\n", gold, logDir, reset)
 		}

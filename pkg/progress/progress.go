@@ -1013,26 +1013,23 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 	latestSlot := formatSlots(info.LatestSnapshotSlot)
 	slotsBehind := formatSlots(info.SlotsBehind)
 
-	// Build option 1 text and calculate padding
-	opt1Text := fmt.Sprintf("  [1] Continue from AccountsDB (replay %s slots)", slotsBehind)
-	opt1Padding := 76 - len(opt1Text)
-	if opt1Padding < 0 {
-		opt1Padding = 0
-	}
+	// Build option texts and calculate padding (78 chars inner width)
+	opt1Text := fmt.Sprintf(" [1] Continue from AccountsDB (replay %s slots)", slotsBehind)
+	opt2Text := " [2] Start fresh from latest snapshot (faster to catch up)"
 
-	// Print the prompt box (76 chars inner width)
+	// Print the prompt box (78 chars inner width)
 	fmt.Println()
 	fmt.Printf("%s┌──────────────────────────────────────────────────────────────────────────────┐%s\n", c, r)
-	fmt.Printf("%s│%s ACCOUNTSDB BEHIND CHAIN TIP                                                  %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, "ACCOUNTSDB BEHIND CHAIN TIP", c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "AccountsDB last slot:", accountsSlot, c, r)
-	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Chain tip slot:", latestSlot, c, r)
-	fmt.Printf("%s│%s %-24s%-52s %s│%s\n", c, r, "Slots behind:", slotsBehind, c, r)
+	fmt.Printf("%s│%s %-24s%-53s%s│%s\n", c, r, "AccountsDB last slot:", accountsSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-53s%s│%s\n", c, r, "Chain tip slot:", latestSlot, c, r)
+	fmt.Printf("%s│%s %-24s%-53s%s│%s\n", c, r, "Slots behind:", slotsBehind, c, r)
 	fmt.Printf("%s├──────────────────────────────────────────────────────────────────────────────┤%s\n", c, r)
-	fmt.Printf("%s│%s OPTIONS:                                                                     %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s%s%*s %s│%s\n", c, r, opt1Text, opt1Padding, "", c, r)
-	fmt.Printf("%s│%s   [2] Start fresh from latest snapshot (faster to catch up)                 %s│%s\n", c, r, c, r)
-	fmt.Printf("%s│%s                                                                              %s│%s\n", c, r, c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, "OPTIONS:", c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, opt1Text, c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, opt2Text, c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, "", c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 
 	// Read user input

@@ -683,7 +683,6 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 // This ensures the stake cache reflects the actual on-chain state, not potentially outdated
 // manifest data. Fatal error if index file is missing - indicates corrupt/incomplete AccountsDB.
 func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b.Block, snapshotManifest *snapshot.SnapshotManifest) {
-	mlog.Log.Infof("loading vote and stake accounts from AccountsDB...")
 	block.VoteTimestamps = make(map[solana.PublicKey]sealevel.BlockTimestamp)
 	block.EpochStakesPerVoteAcct = make(map[solana.PublicKey]uint64)
 
@@ -707,7 +706,7 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		mlog.Log.Errorf("=======================================================")
 		os.Exit(1)
 	}
-	mlog.Log.Infof("loading stake cache from index (%d pubkeys)", len(stakePubkeys))
+	mlog.Log.Infof("Loading vote and stake caches")
 
 	var wg sync.WaitGroup
 	voteAcctWorkerPool, _ := ants.NewPoolWithFunc(1024, func(i interface{}) {
@@ -1228,6 +1227,7 @@ func ReplayBlocks(
 	go blockStream.Start()
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
+	replayStartLogged := false
 
 	for {
 		// Start stall monitor goroutine (only after first block to avoid startup false positives)
@@ -1280,9 +1280,9 @@ func ReplayBlocks(
 				leaderStr = leader.String()
 			}
 			// Log skipped slot in same format as regular blocks (with N/A for missing values)
-			// Padding: cu=10 chars + space, txns=16 chars + space, exec=variable (matches normal format)
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: N/A        | txns: N/A              | exec: N/A | total: %.3fs (skipped)",
-				block.Slot, leaderStr, waitTime.Seconds())
+			// Padding: cu=10 chars, txns fields, exec/wait/total=%7.3fs = 8 chars (7 for number + 's')
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)",
+				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 			skippedSlotsCount++
 			continue // Skip all execution - no state changes for skipped slots
 		}
@@ -1320,6 +1320,13 @@ func ReplayBlocks(
 			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
 			result.Error = configErr
 			break
+		}
+
+		// Log replay start message once, after initial configuration completes
+		if !replayStartLogged {
+			fmt.Println()
+			fmt.Println("=== Replay Start ===")
+			replayStartLogged = true
 		}
 
 		// epoch boundary
@@ -1496,9 +1503,10 @@ func ReplayBlocks(
 		}
 
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
+		// exec/wait/total use 7 char width to handle times up to 99.999s without breaking alignment
 		totalSlotTime := waitTime + slotReplayDuration
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | cu: %-10d | txns: v:%-5d nv:%-5d | exec: %.3fs | total: %.3fs",
-			block.Slot, leaderStr, totalCU, voteTxCount, nonVoteTxCount, slotReplayDuration.Seconds(), totalSlotTime.Seconds())
+		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: v:%-5d nv:%-5d | cu: %-10d | exec:%7.3fs | wait:%7.3fs | total:%7.3fs",
+			block.Slot, leaderStr, voteTxCount, nonVoteTxCount, totalCU, slotReplayDuration.Seconds(), waitTime.Seconds(), totalSlotTime.Seconds())
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
