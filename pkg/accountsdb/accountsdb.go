@@ -179,6 +179,24 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
+// cacheAccount evicts stale entries from all caches, then inserts into the correct
+// cache based on owner. This prevents stale data when an account changes owner
+// (e.g., stake account closed becomes system-owned).
+func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
+	accountsDb.VoteAcctCache.Delete(acct.Key)
+	accountsDb.StakeAcctCache.Delete(acct.Key)
+	accountsDb.CommonAcctsCache.Delete(acct.Key)
+
+	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+	if owner == addresses.VoteProgramAddr {
+		accountsDb.VoteAcctCache.Set(acct.Key, acct)
+	} else if owner == addresses.StakeProgramAddr {
+		accountsDb.StakeAcctCache.Set(acct.Key, acct)
+	} else {
+		accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+	}
+}
+
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
@@ -235,15 +253,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 	acct.Slot = acctIdxEntry.Slot
 
-	owner := solana.PublicKeyFromBytes(acct.Owner[:])
-	if owner == addresses.VoteProgramAddr {
-		accountsDb.VoteAcctCache.Set(pubkey, acct)
-	} else if owner == addresses.StakeProgramAddr {
-		// Stake accounts have their own small cache to prevent evicting hot non-stake accounts
-		accountsDb.StakeAcctCache.Set(pubkey, acct)
-	} else {
-		accountsDb.CommonAcctsCache.Set(pubkey, acct)
-	}
+	accountsDb.cacheAccount(acct)
 
 	return acct, err
 }
@@ -262,15 +272,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		if acct == nil {
 			continue
 		}
-		owner := solana.PublicKeyFromBytes(acct.Owner[:])
-		if owner == addresses.VoteProgramAddr {
-			accountsDb.VoteAcctCache.Set(acct.Key, acct)
-		} else if owner == addresses.StakeProgramAddr {
-			// Stake accounts have their own small cache to prevent evicting hot non-stake accounts
-			accountsDb.StakeAcctCache.Set(acct.Key, acct)
-		} else {
-			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
-		}
+		accountsDb.cacheAccount(acct)
 	}
 
 	return nil
