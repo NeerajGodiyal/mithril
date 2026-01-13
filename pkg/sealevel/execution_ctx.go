@@ -16,15 +16,16 @@ import (
 )
 
 type ExecutionCtx struct {
-	Log                      Logger
-	Accounts                 accounts.Accounts
-	TransactionContext       *TransactionCtx
-	Features                 features.Features
-	ComputeMeter             cu.ComputeMeter
-	Blockhash                [32]byte
-	PrevLamportsPerSignature uint64
-	SlotCtx                  *SlotCtx
-	ModifiedVoteStates       map[solana.PublicKey]*VoteStateVersions
+	Log                         Logger
+	Accounts                    accounts.Accounts
+	TransactionContext          *TransactionCtx
+	Features                    features.Features
+	ComputeMeter                cu.ComputeMeter
+	Blockhash                   [32]byte
+	PrevLamportsPerSignature    uint64
+	SlotCtx                     *SlotCtx
+	ModifiedVoteStates          map[solana.PublicKey]*VoteStateVersions
+	ModifiedValidatorIdentities []solana.PublicKey
 }
 
 type SlotBank struct {

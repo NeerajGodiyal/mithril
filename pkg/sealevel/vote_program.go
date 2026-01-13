@@ -1198,6 +1198,10 @@ func VoteProgramUpdateValidatorIdentity(execCtx *ExecutionCtx, voteAcct *Borrowe
 	voteState.NodePubkey = nodePubkey
 	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
+	if err == nil {
+		execCtx.ModifiedValidatorIdentities = append(execCtx.ModifiedValidatorIdentities, nodePubkey)
+	}
+
 	return err
 }
 

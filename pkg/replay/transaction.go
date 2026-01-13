@@ -240,6 +240,13 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 			recordStakeDelegation(acct)
 		}
 	}
+
+	if len(execCtx.ModifiedValidatorIdentities) != 0 {
+		for _, nodePubkey := range execCtx.ModifiedValidatorIdentities {
+			voteStateVersions := global.VoteCacheItem(nodePubkey)
+			global.PutVoteCacheItem(nodePubkey, voteStateVersions)
+		}
+	}
 }
 
 func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
