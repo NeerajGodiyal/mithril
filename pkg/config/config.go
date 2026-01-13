@@ -48,10 +48,11 @@ type DebugConfig struct {
 // those are unbounded maps holding vote state and delegation info.
 // These LRU caches store full account data for fast reads during replay.
 type CacheConfig struct {
-	VoteAcctLRU   int `toml:"vote_acct_lru" mapstructure:"vote_acct_lru"`     // Vote account data (default: 5000)
-	StakeAcctLRU  int `toml:"stake_acct_lru" mapstructure:"stake_acct_lru"`   // Stake account data (default: 2000)
-	CommonAcctLRU int `toml:"common_acct_lru" mapstructure:"common_acct_lru"` // All other accounts (default: 10000)
-	ProgramLRU    int `toml:"program_lru" mapstructure:"program_lru"`         // Compiled BPF programs (default: 5000)
+	VoteAcctLRU  int `toml:"vote_acct_lru" mapstructure:"vote_acct_lru"`   // Vote account data (default: 5000)
+	StakeAcctLRU int `toml:"stake_acct_lru" mapstructure:"stake_acct_lru"` // Stake account data (default: 2000)
+	SmallAcctLRU int `toml:"small_acct_lru" mapstructure:"small_acct_lru"` // Small accounts ≤256 bytes (default: 500000)
+	LargeAcctLRU int `toml:"large_acct_lru" mapstructure:"large_acct_lru"` // Large accounts >256 bytes (default: 10000)
+	ProgramLRU   int `toml:"program_lru" mapstructure:"program_lru"`       // Compiled BPF programs (default: 5000)
 }
 
 // DevelopmentConfig holds development/tuning configuration (matches Firedancer [development] section)

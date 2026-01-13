@@ -1692,18 +1692,15 @@ func ReplayBlocks(
 
 				// Line 4: Cache hit/miss stats
 				cs := accountsdb.GetAndResetCacheStats()
-				commonMiss := cs.CommonMissSmall + cs.CommonMissMedium + cs.CommonMissLarge
-				stakeMiss := cs.StakeMissSmall + cs.StakeMissMedium + cs.StakeMissLarge
-				voteMiss := cs.VoteMissSmall + cs.VoteMissMedium + cs.VoteMissLarge
-				totalHits := cs.CommonHits + cs.StakeHits + cs.VoteHits
-				totalMiss := commonMiss + stakeMiss + voteMiss
+				largeMiss := cs.LargeMissMedium + cs.LargeMissLarge
+				totalHits := cs.SmallHits + cs.LargeHits + cs.StakeHits + cs.VoteHits
+				totalMiss := cs.SmallMisses + largeMiss + cs.StakeMisses + cs.VoteMisses
 				if totalHits+totalMiss > 0 {
 					hitRate := float64(totalHits) / float64(totalHits+totalMiss) * 100
-					mlog.Log.InfofPrecise("  cache: %.1f%% hit rate | hits: common %d, stake %d, vote %d | misses: common %d (s:%d m:%d l:%d), stake %d (s:%d m:%d l:%d), vote %d",
-						hitRate, cs.CommonHits, cs.StakeHits, cs.VoteHits,
-						commonMiss, cs.CommonMissSmall, cs.CommonMissMedium, cs.CommonMissLarge,
-						stakeMiss, cs.StakeMissSmall, cs.StakeMissMedium, cs.StakeMissLarge,
-						voteMiss)
+					mlog.Log.InfofPrecise("  cache: %.1f%% hit | hits: small %d, large %d, stake %d, vote %d | miss: small %d, large %d (m:%d l:%d), stake %d, vote %d",
+						hitRate, cs.SmallHits, cs.LargeHits, cs.StakeHits, cs.VoteHits,
+						cs.SmallMisses, largeMiss, cs.LargeMissMedium, cs.LargeMissLarge,
+						cs.StakeMisses, cs.VoteMisses)
 				}
 
 				// Line 5: RPC/fetch debugging info

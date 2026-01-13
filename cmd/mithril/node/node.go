@@ -858,7 +858,8 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	accountsDb.InitCaches(
 		config.GetInt("tuning.cache.vote_acct_lru"),
 		config.GetInt("tuning.cache.stake_acct_lru"),
-		config.GetInt("tuning.cache.common_acct_lru"),
+		config.GetInt("tuning.cache.small_acct_lru"),
+		config.GetInt("tuning.cache.large_acct_lru"),
 		config.GetInt("tuning.cache.program_lru"),
 	)
 
@@ -1618,7 +1619,8 @@ postBootstrap:
 	accountsDb.InitCaches(
 		config.GetInt("tuning.cache.vote_acct_lru"),
 		config.GetInt("tuning.cache.stake_acct_lru"),
-		config.GetInt("tuning.cache.common_acct_lru"),
+		config.GetInt("tuning.cache.small_acct_lru"),
+		config.GetInt("tuning.cache.large_acct_lru"),
 		config.GetInt("tuning.cache.program_lru"),
 	)
 

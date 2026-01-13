@@ -24,15 +24,12 @@ type AccountsDb struct {
 	BankHashStore    *pebble.DB
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
-	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Vote accounts cached separately (frequently accessed)
-	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account] // General accounts (excludes vote & stake)
-	StakeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Stake accounts cached separately (small 2k cache)
+	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Vote accounts (frequently accessed)
+	StakeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Stake accounts (small 2k cache)
+	SmallAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Small accounts ≤256 bytes (500k entries, ~100MB)
+	LargeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Large accounts >256 bytes (10k entries)
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 	InRewardsWindow  bool // When true, only update existing stake cache entries (don't add new ones)
-	// Note: Stake accounts have their own small cache (2k entries) separate from CommonAcctsCache.
-	// During the ~243 slot reward window, ~1.25M stake accounts are touched exactly once each.
-	// When InRewardsWindow is true, we only update existing cache entries - we don't add new ones.
-	// This prevents cache thrash while preserving hot stake accounts.
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -47,76 +44,56 @@ var (
 )
 
 // Cache hit/miss counters for profiling
-// Miss counters are by size bucket: Small ≤256 bytes, Medium 257-4096 bytes, Large >4096 bytes
 var (
-	// Cache hits (total per cache type)
-	CommonCacheHits atomic.Uint64
-	StakeCacheHits  atomic.Uint64
-	VoteCacheHits   atomic.Uint64
+	// Cache hits per cache type
+	SmallCacheHits atomic.Uint64 // Small accounts ≤256 bytes
+	LargeCacheHits atomic.Uint64 // Large accounts >256 bytes
+	StakeCacheHits atomic.Uint64
+	VoteCacheHits  atomic.Uint64
 
-	// Common cache misses (non-stake, non-vote accounts)
-	CommonCacheMissSmall  atomic.Uint64
-	CommonCacheMissMedium atomic.Uint64
-	CommonCacheMissLarge  atomic.Uint64
-
-	// Stake cache misses
-	StakeCacheMissSmall  atomic.Uint64
-	StakeCacheMissMedium atomic.Uint64
-	StakeCacheMissLarge  atomic.Uint64
-
-	// Vote cache misses (for completeness)
-	VoteCacheMissSmall  atomic.Uint64
-	VoteCacheMissMedium atomic.Uint64
-	VoteCacheMissLarge  atomic.Uint64
+	// Cache misses
+	SmallCacheMisses      atomic.Uint64 // Small accounts ≤256 bytes
+	LargeCacheMissMedium  atomic.Uint64 // Large cache: 257-4096 bytes
+	LargeCacheMissLarge   atomic.Uint64 // Large cache: >4096 bytes
+	StakeCacheMisses      atomic.Uint64
+	VoteCacheMisses       atomic.Uint64
 )
 
 // CacheStats holds cache hit/miss counts for reporting
 type CacheStats struct {
-	// Hits per cache type
-	CommonHits, StakeHits, VoteHits uint64
-	// Misses by size bucket
-	CommonMissSmall, CommonMissMedium, CommonMissLarge uint64
-	StakeMissSmall, StakeMissMedium, StakeMissLarge    uint64
-	VoteMissSmall, VoteMissMedium, VoteMissLarge       uint64
+	SmallHits, LargeHits, StakeHits, VoteHits uint64
+	SmallMisses                               uint64
+	LargeMissMedium, LargeMissLarge           uint64 // Size breakdown for large cache
+	StakeMisses, VoteMisses                   uint64
 }
 
 // GetAndResetCacheStats returns current cache hit/miss counts and resets them
 func GetAndResetCacheStats() CacheStats {
 	return CacheStats{
-		CommonHits:       CommonCacheHits.Swap(0),
-		StakeHits:        StakeCacheHits.Swap(0),
-		VoteHits:         VoteCacheHits.Swap(0),
-		CommonMissSmall:  CommonCacheMissSmall.Swap(0),
-		CommonMissMedium: CommonCacheMissMedium.Swap(0),
-		CommonMissLarge:  CommonCacheMissLarge.Swap(0),
-		StakeMissSmall:   StakeCacheMissSmall.Swap(0),
-		StakeMissMedium:  StakeCacheMissMedium.Swap(0),
-		StakeMissLarge:   StakeCacheMissLarge.Swap(0),
-		VoteMissSmall:    VoteCacheMissSmall.Swap(0),
-		VoteMissMedium:   VoteCacheMissMedium.Swap(0),
-		VoteMissLarge:    VoteCacheMissLarge.Swap(0),
+		SmallHits:       SmallCacheHits.Swap(0),
+		LargeHits:       LargeCacheHits.Swap(0),
+		StakeHits:       StakeCacheHits.Swap(0),
+		VoteHits:        VoteCacheHits.Swap(0),
+		SmallMisses:     SmallCacheMisses.Swap(0),
+		LargeMissMedium: LargeCacheMissMedium.Swap(0),
+		LargeMissLarge:  LargeCacheMissLarge.Swap(0),
+		StakeMisses:     StakeCacheMisses.Swap(0),
+		VoteMisses:      VoteCacheMisses.Swap(0),
 	}
 }
 
 // recordCacheMiss increments the appropriate cache miss counter based on owner and size
 func recordCacheMiss(owner solana.PublicKey, dataLen uint64) {
-	// Classify by size bucket
-	var small, medium, large *atomic.Uint64
-
 	if owner == addresses.VoteProgramAddr {
-		small, medium, large = &VoteCacheMissSmall, &VoteCacheMissMedium, &VoteCacheMissLarge
+		VoteCacheMisses.Add(1)
 	} else if owner == addresses.StakeProgramAddr {
-		small, medium, large = &StakeCacheMissSmall, &StakeCacheMissMedium, &StakeCacheMissLarge
-	} else {
-		small, medium, large = &CommonCacheMissSmall, &CommonCacheMissMedium, &CommonCacheMissLarge
-	}
-
-	if dataLen <= 256 {
-		small.Add(1)
+		StakeCacheMisses.Add(1)
+	} else if dataLen <= 256 {
+		SmallCacheMisses.Add(1)
 	} else if dataLen <= 4096 {
-		medium.Add(1)
+		LargeCacheMissMedium.Add(1) // 257-4096 bytes
 	} else {
-		large.Add(1)
+		LargeCacheMissLarge.Add(1) // >4096 bytes
 	}
 }
 
@@ -180,7 +157,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 // InitCaches initializes the LRU caches with the given sizes.
 // Pass 0 for any size to use a reasonable builtin value.
-func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, commonSize, programSize int) {
+func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, largeSize, programSize int) {
 	// Apply builtin values when config not set
 	if voteSize <= 0 {
 		voteSize = 5000
@@ -188,8 +165,11 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, commonSize, progra
 	if stakeSize <= 0 {
 		stakeSize = 2000
 	}
-	if commonSize <= 0 {
-		commonSize = 10000
+	if smallSize <= 0 {
+		smallSize = 500000 // 500k small accounts (~100MB)
+	}
+	if largeSize <= 0 {
+		largeSize = 10000 // 10k large accounts
 	}
 	if programSize <= 0 {
 		programSize = 5000
@@ -214,7 +194,16 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, commonSize, progra
 		panic(err)
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](commonSize).
+	accountsDb.SmallAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](smallSize).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
+
+	accountsDb.LargeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](largeSize).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -232,8 +221,8 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, commonSize, progra
 		panic(err)
 	}
 
-	mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d common=%d program=%d",
-		voteSize, stakeSize, commonSize, programSize)
+	mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d large=%d program=%d",
+		voteSize, stakeSize, smallSize, largeSize, programSize)
 }
 
 type ProgramCacheEntry struct {
@@ -254,7 +243,7 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 }
 
 // cacheAccount evicts stale entries from other caches, then inserts into the correct
-// cache based on owner. This prevents stale data when an account changes owner
+// cache based on owner and size. This prevents stale data when an account changes owner
 // (e.g., stake account closed becomes system-owned).
 //
 // During rewards window (InRewardsWindow=true), stake accounts are only updated if
@@ -263,13 +252,15 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 
+	// Always evict from all caches first to prevent stale entries
+	accountsDb.VoteAcctCache.Delete(acct.Key)
+	accountsDb.StakeAcctCache.Delete(acct.Key)
+	accountsDb.SmallAcctCache.Delete(acct.Key)
+	accountsDb.LargeAcctCache.Delete(acct.Key)
+
 	if owner == addresses.VoteProgramAddr {
-		accountsDb.StakeAcctCache.Delete(acct.Key)
-		accountsDb.CommonAcctsCache.Delete(acct.Key)
 		accountsDb.VoteAcctCache.Set(acct.Key, acct)
 	} else if owner == addresses.StakeProgramAddr {
-		accountsDb.VoteAcctCache.Delete(acct.Key)
-		accountsDb.CommonAcctsCache.Delete(acct.Key)
 		// During rewards: only update existing entries, don't add new ones
 		if accountsDb.InRewardsWindow {
 			if _, exists := accountsDb.StakeAcctCache.Get(acct.Key); exists {
@@ -278,10 +269,10 @@ func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 		} else {
 			accountsDb.StakeAcctCache.Set(acct.Key, acct)
 		}
+	} else if len(acct.Data) <= 256 {
+		accountsDb.SmallAcctCache.Set(acct.Key, acct)
 	} else {
-		accountsDb.VoteAcctCache.Delete(acct.Key)
-		accountsDb.StakeAcctCache.Delete(acct.Key)
-		accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+		accountsDb.LargeAcctCache.Set(acct.Key, acct)
 	}
 }
 
@@ -298,9 +289,15 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		return cachedAcct, nil
 	}
 
-	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
+	cachedAcct, hasAcct = accountsDb.SmallAcctCache.Get(pubkey)
 	if hasAcct {
-		CommonCacheHits.Add(1)
+		SmallCacheHits.Add(1)
+		return cachedAcct, nil
+	}
+
+	cachedAcct, hasAcct = accountsDb.LargeAcctCache.Get(pubkey)
+	if hasAcct {
+		LargeCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
