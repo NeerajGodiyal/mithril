@@ -26,10 +26,13 @@ type AccountsDb struct {
 	LargestFileId    atomic.Uint64
 	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Vote accounts cached separately (frequently accessed)
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account] // General accounts (excludes vote & stake)
+	StakeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Stake accounts cached separately (small 2k cache)
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
-	// Note: Stake accounts are intentionally NOT cached. They're rarely accessed outside
-	// epoch rewards, and during the ~243 slot reward window, ~1.25M stake accounts would
-	// completely thrash any reasonably-sized cache, evicting genuinely hot accounts.
+	// Note: Stake accounts have their own small cache (2k entries) separate from CommonAcctsCache.
+	// During the ~243 slot reward window, ~1.25M stake accounts are touched exactly once each,
+	// so caching provides no benefit there. But outside rewards, some stake accounts may be
+	// accessed multiple times, and having a separate cache prevents them from evicting hot
+	// non-stake accounts from CommonAcctsCache.
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -129,6 +132,15 @@ func (accountsDb *AccountsDb) InitCaches() {
 	if err != nil {
 		panic(err)
 	}
+
+	accountsDb.StakeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](2000).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
 }
 
 type ProgramCacheEntry struct {
@@ -150,6 +162,11 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
+	if hasAcct {
+		return cachedAcct, nil
+	}
+
+	cachedAcct, hasAcct = accountsDb.StakeAcctCache.Get(pubkey)
 	if hasAcct {
 		return cachedAcct, nil
 	}
@@ -203,8 +220,8 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
 	} else if owner == addresses.StakeProgramAddr {
-		// Stake accounts are not cached - they're rarely accessed outside rewards,
-		// and during rewards they're one-shot reads that would evict hot accounts.
+		// Stake accounts have their own small cache to prevent evicting hot non-stake accounts
+		accountsDb.StakeAcctCache.Set(pubkey, acct)
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
@@ -230,8 +247,8 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		if owner == addresses.VoteProgramAddr {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 		} else if owner == addresses.StakeProgramAddr {
-			// Stake accounts are not cached - they're rarely accessed outside rewards,
-			// and during rewards they're one-shot writes that would evict hot accounts.
+			// Stake accounts have their own small cache to prevent evicting hot non-stake accounts
+			accountsDb.StakeAcctCache.Set(acct.Key, acct)
 		} else {
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
