@@ -46,6 +46,80 @@ var (
 	ErrNoAccount = errors.New("ErrNoAccount")
 )
 
+// Cache hit/miss counters for profiling
+// Miss counters are by size bucket: Small ≤256 bytes, Medium 257-4096 bytes, Large >4096 bytes
+var (
+	// Cache hits (total per cache type)
+	CommonCacheHits atomic.Uint64
+	StakeCacheHits  atomic.Uint64
+	VoteCacheHits   atomic.Uint64
+
+	// Common cache misses (non-stake, non-vote accounts)
+	CommonCacheMissSmall  atomic.Uint64
+	CommonCacheMissMedium atomic.Uint64
+	CommonCacheMissLarge  atomic.Uint64
+
+	// Stake cache misses
+	StakeCacheMissSmall  atomic.Uint64
+	StakeCacheMissMedium atomic.Uint64
+	StakeCacheMissLarge  atomic.Uint64
+
+	// Vote cache misses (for completeness)
+	VoteCacheMissSmall  atomic.Uint64
+	VoteCacheMissMedium atomic.Uint64
+	VoteCacheMissLarge  atomic.Uint64
+)
+
+// CacheStats holds cache hit/miss counts for reporting
+type CacheStats struct {
+	// Hits per cache type
+	CommonHits, StakeHits, VoteHits uint64
+	// Misses by size bucket
+	CommonMissSmall, CommonMissMedium, CommonMissLarge uint64
+	StakeMissSmall, StakeMissMedium, StakeMissLarge    uint64
+	VoteMissSmall, VoteMissMedium, VoteMissLarge       uint64
+}
+
+// GetAndResetCacheStats returns current cache hit/miss counts and resets them
+func GetAndResetCacheStats() CacheStats {
+	return CacheStats{
+		CommonHits:       CommonCacheHits.Swap(0),
+		StakeHits:        StakeCacheHits.Swap(0),
+		VoteHits:         VoteCacheHits.Swap(0),
+		CommonMissSmall:  CommonCacheMissSmall.Swap(0),
+		CommonMissMedium: CommonCacheMissMedium.Swap(0),
+		CommonMissLarge:  CommonCacheMissLarge.Swap(0),
+		StakeMissSmall:   StakeCacheMissSmall.Swap(0),
+		StakeMissMedium:  StakeCacheMissMedium.Swap(0),
+		StakeMissLarge:   StakeCacheMissLarge.Swap(0),
+		VoteMissSmall:    VoteCacheMissSmall.Swap(0),
+		VoteMissMedium:   VoteCacheMissMedium.Swap(0),
+		VoteMissLarge:    VoteCacheMissLarge.Swap(0),
+	}
+}
+
+// recordCacheMiss increments the appropriate cache miss counter based on owner and size
+func recordCacheMiss(owner solana.PublicKey, dataLen uint64) {
+	// Classify by size bucket
+	var small, medium, large *atomic.Uint64
+
+	if owner == addresses.VoteProgramAddr {
+		small, medium, large = &VoteCacheMissSmall, &VoteCacheMissMedium, &VoteCacheMissLarge
+	} else if owner == addresses.StakeProgramAddr {
+		small, medium, large = &StakeCacheMissSmall, &StakeCacheMissMedium, &StakeCacheMissLarge
+	} else {
+		small, medium, large = &CommonCacheMissSmall, &CommonCacheMissMedium, &CommonCacheMissLarge
+	}
+
+	if dataLen <= 256 {
+		small.Add(1)
+	} else if dataLen <= 4096 {
+		medium.Add(1)
+	} else {
+		large.Add(1)
+	}
+}
+
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	// check for existence of the 'accounts' directory, which holds the appendvecs
 	appendVecsDir := fmt.Sprintf("%s/accounts", accountsDbDir)
@@ -214,16 +288,19 @@ func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
+		VoteCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
 	cachedAcct, hasAcct = accountsDb.StakeAcctCache.Get(pubkey)
 	if hasAcct {
+		StakeCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
 	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
 	if hasAcct {
+		CommonCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
@@ -266,6 +343,9 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	}
 
 	acct.Slot = acctIdxEntry.Slot
+
+	// Record cache miss by owner type and size bucket (for profiling)
+	recordCacheMiss(solana.PublicKeyFromBytes(acct.Owner[:]), uint64(len(acct.Data)))
 
 	accountsDb.cacheAccount(acct)
 

@@ -1690,7 +1690,23 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
 					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
 
-				// Line 4: RPC/fetch debugging info
+				// Line 4: Cache hit/miss stats
+				cs := accountsdb.GetAndResetCacheStats()
+				commonMiss := cs.CommonMissSmall + cs.CommonMissMedium + cs.CommonMissLarge
+				stakeMiss := cs.StakeMissSmall + cs.StakeMissMedium + cs.StakeMissLarge
+				voteMiss := cs.VoteMissSmall + cs.VoteMissMedium + cs.VoteMissLarge
+				totalHits := cs.CommonHits + cs.StakeHits + cs.VoteHits
+				totalMiss := commonMiss + stakeMiss + voteMiss
+				if totalHits+totalMiss > 0 {
+					hitRate := float64(totalHits) / float64(totalHits+totalMiss) * 100
+					mlog.Log.InfofPrecise("  cache: %.1f%% hit rate | hits: common %d, stake %d, vote %d | misses: common %d (s:%d m:%d l:%d), stake %d (s:%d m:%d l:%d), vote %d",
+						hitRate, cs.CommonHits, cs.StakeHits, cs.VoteHits,
+						commonMiss, cs.CommonMissSmall, cs.CommonMissMedium, cs.CommonMissLarge,
+						stakeMiss, cs.StakeMissSmall, cs.StakeMissMedium, cs.StakeMissLarge,
+						voteMiss)
+				}
+
+				// Line 5: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
