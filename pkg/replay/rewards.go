@@ -226,7 +226,11 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 		}
 	}
 
+	// During reward distribution, don't add new stake accounts to cache (prevents thrash).
+	// Only existing hot entries are updated.
+	acctsDb.InRewardsWindow = true
 	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot, partitionedEpochRewardsInfo.WorkerPool)
+	acctsDb.InRewardsWindow = false
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
 	epochRewards.Distribute(distributedLamports)

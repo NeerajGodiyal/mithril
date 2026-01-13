@@ -28,11 +28,11 @@ type AccountsDb struct {
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account] // General accounts (excludes vote & stake)
 	StakeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Stake accounts cached separately (small 2k cache)
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+	InRewardsWindow  bool // When true, only update existing stake cache entries (don't add new ones)
 	// Note: Stake accounts have their own small cache (2k entries) separate from CommonAcctsCache.
-	// During the ~243 slot reward window, ~1.25M stake accounts are touched exactly once each,
-	// so caching provides no benefit there. But outside rewards, some stake accounts may be
-	// accessed multiple times, and having a separate cache prevents them from evicting hot
-	// non-stake accounts from CommonAcctsCache.
+	// During the ~243 slot reward window, ~1.25M stake accounts are touched exactly once each.
+	// When InRewardsWindow is true, we only update existing cache entries - we don't add new ones.
+	// This prevents cache thrash while preserving hot stake accounts.
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -179,20 +179,34 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
-// cacheAccount evicts stale entries from all caches, then inserts into the correct
+// cacheAccount evicts stale entries from other caches, then inserts into the correct
 // cache based on owner. This prevents stale data when an account changes owner
 // (e.g., stake account closed becomes system-owned).
+//
+// During rewards window (InRewardsWindow=true), stake accounts are only updated if
+// already cached - new entries are not added. This prevents cache thrash from the
+// ~1.25M one-shot stake account accesses while preserving hot entries.
 func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
-	accountsDb.VoteAcctCache.Delete(acct.Key)
-	accountsDb.StakeAcctCache.Delete(acct.Key)
-	accountsDb.CommonAcctsCache.Delete(acct.Key)
-
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+
 	if owner == addresses.VoteProgramAddr {
+		accountsDb.StakeAcctCache.Delete(acct.Key)
+		accountsDb.CommonAcctsCache.Delete(acct.Key)
 		accountsDb.VoteAcctCache.Set(acct.Key, acct)
 	} else if owner == addresses.StakeProgramAddr {
-		accountsDb.StakeAcctCache.Set(acct.Key, acct)
+		accountsDb.VoteAcctCache.Delete(acct.Key)
+		accountsDb.CommonAcctsCache.Delete(acct.Key)
+		// During rewards: only update existing entries, don't add new ones
+		if accountsDb.InRewardsWindow {
+			if _, exists := accountsDb.StakeAcctCache.Get(acct.Key); exists {
+				accountsDb.StakeAcctCache.Set(acct.Key, acct)
+			}
+		} else {
+			accountsDb.StakeAcctCache.Set(acct.Key, acct)
+		}
 	} else {
+		accountsDb.VoteAcctCache.Delete(acct.Key)
+		accountsDb.StakeAcctCache.Delete(acct.Key)
 		accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 	}
 }
