@@ -83,6 +83,21 @@ Please:
 
 ---
 
+## Architecture Documentation
+
+For detailed documentation on specific subsystems, see `docs/architecture/`:
+
+| Document | Contents |
+|----------|----------|
+| `epoch-boundary.md` | Epoch transition operations and known issues |
+| `stake-cache.md` | Stake cache lifecycle and staleness |
+| `vote-cache.md` | Vote cache lifecycle and timing |
+| `leader-schedule.md` | N-2 rule and schedule generation |
+| `partitioned-rewards.md` | Reward distribution mechanics |
+| `resume-persistence.md` | Stop/resume and crash recovery |
+
+---
+
 ## Reference Implementations
 
 Mithril behavior should match these canonical Solana implementations:
