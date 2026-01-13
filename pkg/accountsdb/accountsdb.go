@@ -30,8 +30,9 @@ type AccountsDb struct {
 
 	// InRewardsWindow is set during partitioned epoch rewards distribution.
 	// When true, stake accounts are not cached in CommonAcctsCache since they're
-	// one-shot reads that would evict genuinely hot accounts.
-	InRewardsWindow bool
+	// one-shot reads/writes that would evict genuinely hot accounts.
+	// Atomic for safe concurrent access from RPC goroutines.
+	InRewardsWindow atomic.Bool
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -204,7 +205,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
-	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow {
+	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow.Load() {
 		// During reward distribution, stake accounts are one-shot reads that would
 		// evict genuinely hot accounts from the cache. Skip caching them.
 	} else {
@@ -224,13 +225,17 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 
 	accountsDb.storeAccountsInternal(accts, slot)
 
+	inRewardsWindow := accountsDb.InRewardsWindow.Load()
 	for _, acct := range accts {
 		if acct == nil {
 			continue
 		}
-		// if vote account, do not serialize up and write into accountsdb - just save it in cache.
-		if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+		owner := solana.PublicKeyFromBytes(acct.Owner[:])
+		if owner == addresses.VoteProgramAddr {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+		} else if owner == addresses.StakeProgramAddr && inRewardsWindow {
+			// During reward distribution, stake accounts are one-shot writes that would
+			// evict genuinely hot accounts from the cache. Skip caching them.
 		} else {
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
