@@ -1698,10 +1698,17 @@ func ReplayBlocks(
 				if totalHits+totalMiss > 0 {
 					hitRate := float64(totalHits) / float64(totalHits+totalMiss) * 100
 					// Show size breakdown: 257-512 (could expand small), 513-4K, 4K-64K, >64K (huge)
-					mlog.Log.InfofPrecise("  cache: %.1f%% hit | hits: small %d, large %d, stake %d, vote %d | miss: small %d, large %d [257-512:%d 513-4K:%d 4K-64K:%d >64K:%d], stake %d, vote %d",
+					mlog.Log.InfofPrecise("  cache: %.1f%% hit | hits: small %d, large %d, stake %d, vote %d | miss: small %d, large %d [257-512:%d 512-4K:%d 4K-64K:%d >64K:%d], stake %d, vote %d",
 						hitRate, cs.SmallHits, cs.LargeHits, cs.StakeHits, cs.VoteHits,
 						cs.SmallMisses, largeMissTotal, cs.LargeMiss257to512, cs.LargeMiss513to4K, cs.LargeMiss4Kto64K, cs.LargeMissHuge,
 						cs.StakeMisses, cs.VoteMisses)
+
+					// Cache fill stats
+					cf := acctsDb.GetCacheFillStats()
+					mlog.Log.InfofPrecise("  cache fill: small %d/%d (%.0f%%), large %d/%d (%.0f%%), stake %d/%d, vote %d/%d",
+						cf.SmallSize, cf.SmallCap, float64(cf.SmallSize)/float64(cf.SmallCap)*100,
+						cf.LargeSize, cf.LargeCap, float64(cf.LargeSize)/float64(cf.LargeCap)*100,
+						cf.StakeSize, cf.StakeCap, cf.VoteSize, cf.VoteCap)
 				}
 
 				// Line 5: RPC/fetch debugging info

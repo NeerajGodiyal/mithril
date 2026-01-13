@@ -89,6 +89,28 @@ func GetAndResetCacheStats() CacheStats {
 	}
 }
 
+// CacheFillStats holds current cache fill levels
+type CacheFillStats struct {
+	SmallSize, SmallCap int
+	LargeSize, LargeCap int
+	StakeSize, StakeCap int
+	VoteSize, VoteCap   int
+}
+
+// GetCacheFillStats returns current cache fill levels (size/capacity)
+func (accountsDb *AccountsDb) GetCacheFillStats() CacheFillStats {
+	return CacheFillStats{
+		SmallSize: accountsDb.SmallAcctCache.Size(),
+		SmallCap:  accountsDb.SmallAcctCache.Capacity(),
+		LargeSize: accountsDb.LargeAcctCache.Size(),
+		LargeCap:  accountsDb.LargeAcctCache.Capacity(),
+		StakeSize: accountsDb.StakeAcctCache.Size(),
+		StakeCap:  accountsDb.StakeAcctCache.Capacity(),
+		VoteSize:  accountsDb.VoteAcctCache.Size(),
+		VoteCap:   accountsDb.VoteAcctCache.Capacity(),
+	}
+}
+
 // recordCacheMiss increments the appropriate cache miss counter based on owner and size
 func recordCacheMiss(owner solana.PublicKey, dataLen uint64) {
 	if owner == addresses.VoteProgramAddr {
