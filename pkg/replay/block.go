@@ -1692,14 +1692,15 @@ func ReplayBlocks(
 
 				// Line 4: Cache hit/miss stats
 				cs := accountsdb.GetAndResetCacheStats()
-				largeMiss := cs.LargeMissMedium + cs.LargeMissLarge
+				largeMissTotal := cs.LargeMiss257to512 + cs.LargeMiss513to4K + cs.LargeMiss4Kto64K + cs.LargeMissHuge
 				totalHits := cs.SmallHits + cs.LargeHits + cs.StakeHits + cs.VoteHits
-				totalMiss := cs.SmallMisses + largeMiss + cs.StakeMisses + cs.VoteMisses
+				totalMiss := cs.SmallMisses + largeMissTotal + cs.StakeMisses + cs.VoteMisses
 				if totalHits+totalMiss > 0 {
 					hitRate := float64(totalHits) / float64(totalHits+totalMiss) * 100
-					mlog.Log.InfofPrecise("  cache: %.1f%% hit | hits: small %d, large %d, stake %d, vote %d | miss: small %d, large %d (m:%d l:%d), stake %d, vote %d",
+					// Show size breakdown: 257-512 (could expand small), 513-4K, 4K-64K, >64K (huge)
+					mlog.Log.InfofPrecise("  cache: %.1f%% hit | hits: small %d, large %d, stake %d, vote %d | miss: small %d, large %d [257-512:%d 513-4K:%d 4K-64K:%d >64K:%d], stake %d, vote %d",
 						hitRate, cs.SmallHits, cs.LargeHits, cs.StakeHits, cs.VoteHits,
-						cs.SmallMisses, largeMiss, cs.LargeMissMedium, cs.LargeMissLarge,
+						cs.SmallMisses, largeMissTotal, cs.LargeMiss257to512, cs.LargeMiss513to4K, cs.LargeMiss4Kto64K, cs.LargeMissHuge,
 						cs.StakeMisses, cs.VoteMisses)
 				}
 

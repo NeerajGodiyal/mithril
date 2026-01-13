@@ -51,34 +51,41 @@ var (
 	StakeCacheHits atomic.Uint64
 	VoteCacheHits  atomic.Uint64
 
-	// Cache misses
-	SmallCacheMisses      atomic.Uint64 // Small accounts ≤256 bytes
-	LargeCacheMissMedium  atomic.Uint64 // Large cache: 257-4096 bytes
-	LargeCacheMissLarge   atomic.Uint64 // Large cache: >4096 bytes
-	StakeCacheMisses      atomic.Uint64
-	VoteCacheMisses       atomic.Uint64
+	// Cache misses - granular size buckets
+	SmallCacheMisses       atomic.Uint64 // ≤256 bytes
+	LargeCacheMiss257to512 atomic.Uint64 // 257-512 bytes (to evaluate small threshold)
+	LargeCacheMiss513to4K  atomic.Uint64 // 513-4096 bytes
+	LargeCacheMiss4Kto64K  atomic.Uint64 // 4097-65536 bytes
+	LargeCacheMissHuge     atomic.Uint64 // >65536 bytes (to see if huge accounts are common)
+	StakeCacheMisses       atomic.Uint64
+	VoteCacheMisses        atomic.Uint64
 )
 
 // CacheStats holds cache hit/miss counts for reporting
 type CacheStats struct {
 	SmallHits, LargeHits, StakeHits, VoteHits uint64
 	SmallMisses                               uint64
-	LargeMissMedium, LargeMissLarge           uint64 // Size breakdown for large cache
+	LargeMiss257to512                         uint64 // 257-512 bytes (evaluate small threshold)
+	LargeMiss513to4K                          uint64 // 513-4096 bytes
+	LargeMiss4Kto64K                          uint64 // 4097-65536 bytes
+	LargeMissHuge                             uint64 // >65536 bytes
 	StakeMisses, VoteMisses                   uint64
 }
 
 // GetAndResetCacheStats returns current cache hit/miss counts and resets them
 func GetAndResetCacheStats() CacheStats {
 	return CacheStats{
-		SmallHits:       SmallCacheHits.Swap(0),
-		LargeHits:       LargeCacheHits.Swap(0),
-		StakeHits:       StakeCacheHits.Swap(0),
-		VoteHits:        VoteCacheHits.Swap(0),
-		SmallMisses:     SmallCacheMisses.Swap(0),
-		LargeMissMedium: LargeCacheMissMedium.Swap(0),
-		LargeMissLarge:  LargeCacheMissLarge.Swap(0),
-		StakeMisses:     StakeCacheMisses.Swap(0),
-		VoteMisses:      VoteCacheMisses.Swap(0),
+		SmallHits:         SmallCacheHits.Swap(0),
+		LargeHits:         LargeCacheHits.Swap(0),
+		StakeHits:         StakeCacheHits.Swap(0),
+		VoteHits:          VoteCacheHits.Swap(0),
+		SmallMisses:       SmallCacheMisses.Swap(0),
+		LargeMiss257to512: LargeCacheMiss257to512.Swap(0),
+		LargeMiss513to4K:  LargeCacheMiss513to4K.Swap(0),
+		LargeMiss4Kto64K:  LargeCacheMiss4Kto64K.Swap(0),
+		LargeMissHuge:     LargeCacheMissHuge.Swap(0),
+		StakeMisses:       StakeCacheMisses.Swap(0),
+		VoteMisses:        VoteCacheMisses.Swap(0),
 	}
 }
 
@@ -90,10 +97,14 @@ func recordCacheMiss(owner solana.PublicKey, dataLen uint64) {
 		StakeCacheMisses.Add(1)
 	} else if dataLen <= 256 {
 		SmallCacheMisses.Add(1)
+	} else if dataLen <= 512 {
+		LargeCacheMiss257to512.Add(1)
 	} else if dataLen <= 4096 {
-		LargeCacheMissMedium.Add(1) // 257-4096 bytes
+		LargeCacheMiss513to4K.Add(1)
+	} else if dataLen <= 65536 {
+		LargeCacheMiss4Kto64K.Add(1)
 	} else {
-		LargeCacheMissLarge.Add(1) // >4096 bytes
+		LargeCacheMissHuge.Add(1) // >64KB
 	}
 }
 
