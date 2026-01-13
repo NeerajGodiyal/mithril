@@ -1139,7 +1139,7 @@ func runLive(c *cobra.Command, args []string) {
 
 	// Handle explicit --snapshot flag (bypasses all auto-discovery, does NOT delete snapshot files)
 	if snapshotArchivePath != "" {
-		mlog.Log.Infof("Using snapshot file: %s", snapshotArchivePath)
+		mlog.Log.Infof("Using full snapshot: %s", snapshotArchivePath)
 
 		// Parse full snapshot slot from filename for validation
 		fullSnapshotSlot := parseSlotFromSnapshotName(filepath.Base(snapshotArchivePath))
