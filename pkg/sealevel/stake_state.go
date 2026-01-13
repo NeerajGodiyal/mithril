@@ -783,13 +783,9 @@ func (w *fixedSliceWriter) Write(p []byte) (int, error) {
 }
 
 // MarshalStakeStakeInto writes the stake state directly into dst, avoiding allocation.
-// dst must be at least StakeStateV2Size (200) bytes.
+// dst should be at least StakeStateV2Size (200) bytes for valid stake accounts.
 func MarshalStakeStakeInto(state *StakeStateV2, dst []byte) error {
-	if len(dst) < StakeStateV2Size {
-		return fmt.Errorf("destination buffer too small: %d < %d", len(dst), StakeStateV2Size)
-	}
-
-	writer := &fixedSliceWriter{buf: dst[:StakeStateV2Size], pos: 0}
+	writer := &fixedSliceWriter{buf: dst, pos: 0}
 	encoder := bin.NewBinEncoder(writer)
 
 	return state.MarshalWithEncoder(encoder)
