@@ -24,15 +24,12 @@ type AccountsDb struct {
 	BankHashStore    *pebble.DB
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
-	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
-	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
+	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Vote accounts cached separately (frequently accessed)
+	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account] // General accounts (excludes vote & stake)
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
-
-	// InRewardsWindow is set during partitioned epoch rewards distribution.
-	// When true, stake accounts are not cached in CommonAcctsCache since they're
-	// one-shot reads/writes that would evict genuinely hot accounts.
-	// Atomic for safe concurrent access from RPC goroutines.
-	InRewardsWindow atomic.Bool
+	// Note: Stake accounts are intentionally NOT cached. They're rarely accessed outside
+	// epoch rewards, and during the ~243 slot reward window, ~1.25M stake accounts would
+	// completely thrash any reasonably-sized cache, evicting genuinely hot accounts.
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -205,9 +202,9 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
-	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow.Load() {
-		// During reward distribution, stake accounts are one-shot reads that would
-		// evict genuinely hot accounts from the cache. Skip caching them.
+	} else if owner == addresses.StakeProgramAddr {
+		// Stake accounts are not cached - they're rarely accessed outside rewards,
+		// and during rewards they're one-shot reads that would evict hot accounts.
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
@@ -225,7 +222,6 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 
 	accountsDb.storeAccountsInternal(accts, slot)
 
-	inRewardsWindow := accountsDb.InRewardsWindow.Load()
 	for _, acct := range accts {
 		if acct == nil {
 			continue
@@ -233,9 +229,9 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		owner := solana.PublicKeyFromBytes(acct.Owner[:])
 		if owner == addresses.VoteProgramAddr {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
-		} else if owner == addresses.StakeProgramAddr && inRewardsWindow {
-			// During reward distribution, stake accounts are one-shot writes that would
-			// evict genuinely hot accounts from the cache. Skip caching them.
+		} else if owner == addresses.StakeProgramAddr {
+			// Stake accounts are not cached - they're rarely accessed outside rewards,
+			// and during rewards they're one-shot writes that would evict hot accounts.
 		} else {
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
