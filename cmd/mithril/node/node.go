@@ -855,7 +855,12 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		klog.Fatalf("end slot cannot be lower than start slot")
 	}
 	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
-	accountsDb.InitCaches()
+	accountsDb.InitCaches(
+		config.GetInt("tuning.cache.vote_acct_lru"),
+		config.GetInt("tuning.cache.stake_acct_lru"),
+		config.GetInt("tuning.cache.common_acct_lru"),
+		config.GetInt("tuning.cache.program_lru"),
+	)
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
 	if err != nil {
@@ -1610,7 +1615,12 @@ postBootstrap:
 	}
 
 	liveEndSlot := uint64(math.MaxUint64)
-	accountsDb.InitCaches()
+	accountsDb.InitCaches(
+		config.GetInt("tuning.cache.vote_acct_lru"),
+		config.GetInt("tuning.cache.stake_acct_lru"),
+		config.GetInt("tuning.cache.common_acct_lru"),
+		config.GetInt("tuning.cache.program_lru"),
+	)
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
 	if err != nil {

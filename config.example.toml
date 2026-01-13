@@ -263,6 +263,32 @@ name = "mithril"
         # Filename to write CPU profile (for offline analysis)
         # cpu_profile_path = "/tmp/cpuprof.pprof"
 
+    # [tuning.cache] - AccountsDB LRU Cache Sizes
+    #
+    # These control the LRU caches for fast account data reads during replay.
+    # Values are NUMBER OF ENTRIES, not bytes.
+    #
+    # NOTE: These are DIFFERENT from the global vote/stake caches used for
+    # leader schedule building. Those are unbounded maps that store vote STATE
+    # (voting history, credits) and stake DELEGATIONS. These LRU caches store
+    # full ACCOUNT data for frequently-accessed accounts.
+    #
+    # Larger caches = fewer disk reads, but more memory usage.
+    # Memory per entry is ~200-1000 bytes depending on account data size.
+    [tuning.cache]
+        # Vote account data cache - number of entries (frequently accessed during replay)
+        vote_acct_lru = 5000
+
+        # Stake account data cache - number of entries (separated to avoid evicting
+        # hot accounts during epoch rewards when ~1.25M stake accounts are touched once each)
+        stake_acct_lru = 2000
+
+        # General account data cache - number of entries (everything except vote & stake)
+        common_acct_lru = 10000
+
+        # Compiled BPF program cache - number of entries
+        program_lru = 5000
+
 # ============================================================================
 # [debug] - Debug Logging
 # ============================================================================

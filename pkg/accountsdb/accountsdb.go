@@ -104,9 +104,25 @@ func (accountsDb *AccountsDb) CloseDb() {
 	mlog.Log.Infof("CloseDb: done\n") // extra newline for spacing after close
 }
 
-func (accountsDb *AccountsDb) InitCaches() {
+// InitCaches initializes the LRU caches with the given sizes.
+// Pass 0 for any size to use a reasonable builtin value.
+func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, commonSize, programSize int) {
+	// Apply builtin values when config not set
+	if voteSize <= 0 {
+		voteSize = 5000
+	}
+	if stakeSize <= 0 {
+		stakeSize = 2000
+	}
+	if commonSize <= 0 {
+		commonSize = 10000
+	}
+	if programSize <= 0 {
+		programSize = 5000
+	}
+
 	var err error
-	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
+	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](voteSize).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -115,7 +131,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](5000).
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](programSize).
 		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
 			return 1
 		}).
@@ -124,7 +140,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10000).
+	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](commonSize).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -133,7 +149,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.StakeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](2000).
+	accountsDb.StakeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](stakeSize).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -141,6 +157,9 @@ func (accountsDb *AccountsDb) InitCaches() {
 	if err != nil {
 		panic(err)
 	}
+
+	mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d common=%d program=%d",
+		voteSize, stakeSize, commonSize, programSize)
 }
 
 type ProgramCacheEntry struct {
