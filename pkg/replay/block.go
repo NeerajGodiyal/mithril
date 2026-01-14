@@ -1719,6 +1719,17 @@ func ReplayBlocks(
 					}
 				}
 
+				// Memory stats for GC pressure monitoring
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				mlog.Log.InfofPrecise("  mem: heap %.1fMB | alloc %.1fMB | sys %.1fMB | gc %d (%.1fms total) | goroutines %d",
+					float64(m.HeapAlloc)/1024/1024,
+					float64(m.TotalAlloc)/1024/1024,
+					float64(m.Sys)/1024/1024,
+					m.NumGC,
+					float64(m.PauseTotalNs)/1e6,
+					runtime.NumGoroutine())
+
 				// Line 5: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
