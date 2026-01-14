@@ -347,7 +347,7 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 // For common accounts (small/medium/huge), if SeenOnceFilter != nil, uses
 // admit-on-second-hit: only caches accounts seen twice within the filter window.
 // This filters one-shot reads that would pollute the cache.
-func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account, slot uint64) {
+func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 
 	// OSCILLATION FIX: Check if already in a common cache BEFORE deleting
@@ -500,7 +500,7 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	// Record cache miss by owner type and size bucket (for profiling)
 	recordCacheMiss(solana.PublicKeyFromBytes(acct.Owner[:]), uint64(len(acct.Data)))
 
-	accountsDb.cacheAccount(acct, slot)
+	accountsDb.cacheAccount(acct)
 
 	return acct, err
 }
@@ -519,7 +519,7 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		if acct == nil {
 			continue
 		}
-		accountsDb.cacheAccount(acct, slot)
+		accountsDb.cacheAccount(acct)
 	}
 
 	return nil
