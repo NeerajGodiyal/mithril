@@ -295,12 +295,15 @@ name = "mithril"
         # Compiled BPF program cache - number of entries
         program_lru = 5000
 
-        # Admit-on-second-hit filter for common accounts (small/medium/huge)
-        # Only caches accounts seen twice within this many slots, filtering one-shot reads.
+        # Admit-on-second-hit LRU filter for common accounts (small/medium/huge)
+        # Only caches accounts seen twice within the filter window, filtering one-shot reads.
         #   0 = disabled (cache everything immediately, like traditional LRU)
-        #   >0 = enable filtering, reset tracking every N slots (~N×0.4 seconds)
-        # Recommended: 100 slots (~40 seconds) if enabled
-        seen_once_reset_slots = 0
+        #   >0 = enable filtering with LRU of this capacity
+        # Recommended: 50000 (roughly 0.5-1x of small+medium+huge total)
+        # Monitor SeenOnceAdmitted/SeenOnceFiltered ratio to tune:
+        #   <5-10% admitted = too strict (filter too small)
+        #   >40-50% admitted = too lenient (filter too large or most accesses are hot)
+        seen_once_filter_size = 0
 
 # ============================================================================
 # [debug] - Debug Logging

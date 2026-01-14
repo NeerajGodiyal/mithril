@@ -54,7 +54,7 @@ type CacheConfig struct {
 	MediumAcctLRU        int `toml:"medium_acct_lru" mapstructure:"medium_acct_lru"`                 // Medium accounts 512-64KB (default: 20000)
 	HugeAcctLRU          int `toml:"huge_acct_lru" mapstructure:"huge_acct_lru"`                     // Huge accounts >64KB (default: 500)
 	ProgramLRU           int `toml:"program_lru" mapstructure:"program_lru"`                         // Compiled BPF programs (default: 5000)
-	SeenOnceResetSlots   int `toml:"seen_once_reset_slots" mapstructure:"seen_once_reset_slots"`     // Admit-on-second-hit window (0=disabled, default: 0)
+	SeenOnceFilterSize   int `toml:"seen_once_filter_size" mapstructure:"seen_once_filter_size"`     // Admit-on-second-hit LRU capacity (0=disabled, default: 0)
 }
 
 // DevelopmentConfig holds development/tuning configuration (matches Firedancer [development] section)

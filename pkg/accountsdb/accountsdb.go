@@ -32,11 +32,10 @@ type AccountsDb struct {
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 	InRewardsWindow  bool // When true, only update existing stake cache entries (don't add new ones)
 
-	// Admit-on-second-hit for common accounts (small/medium/huge)
-	// Only accounts seen twice within the reset window get cached, filtering one-shot reads.
-	CommonSeenOnce           map[solana.PublicKey]struct{} // Keys seen once but not yet cached
-	CommonSeenOnceSlot       uint64                        // Slot when current window started
-	CommonSeenOnceResetSlots uint64                        // Reset interval in slots (default: 100)
+	// Admit-on-second-hit LRU filter for common accounts (small/medium/huge)
+	// Only accounts seen twice within the filter window get cached, filtering one-shot reads.
+	// nil = disabled (cache everything immediately)
+	SeenOnceFilter *otter.Cache[solana.PublicKey, struct{}]
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -219,10 +218,10 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 // InitCaches initializes the LRU caches with the given sizes.
 // Pass 0 for any size to use a reasonable builtin value.
-// seenOnceResetSlots controls the admit-on-second-hit window for common accounts:
+// seenOnceFilterSize controls the admit-on-second-hit LRU filter for common accounts:
 //   - 0 = disabled (cache everything immediately, no filtering)
-//   - >0 = enable filtering, reset tracking every N slots
-func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize int, seenOnceResetSlots uint64) {
+//   - >0 = enable filtering with LRU of this capacity
+func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize int, seenOnceFilterSize int) {
 	// Apply builtin values when config not set
 	if voteSize <= 0 {
 		voteSize = 5000
@@ -298,16 +297,23 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, mediumS
 		panic(err)
 	}
 
-	// Initialize admit-on-second-hit tracking for common accounts
-	accountsDb.CommonSeenOnceResetSlots = seenOnceResetSlots
-	if seenOnceResetSlots > 0 {
-		accountsDb.CommonSeenOnce = make(map[solana.PublicKey]struct{})
-	}
-
-	if seenOnceResetSlots > 0 {
-		mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d medium=%d huge=%d program=%d seenOnceReset=%d",
-			voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize, seenOnceResetSlots)
+	// Initialize admit-on-second-hit LRU filter for common accounts
+	if seenOnceFilterSize > 0 {
+		// Otter v1 requires capacity >= 10
+		if seenOnceFilterSize < 10 {
+			seenOnceFilterSize = 10
+		}
+		filter, err := otter.MustBuilder[solana.PublicKey, struct{}](seenOnceFilterSize).
+			Cost(func(key solana.PublicKey, val struct{}) uint32 { return 1 }).
+			Build()
+		if err != nil {
+			panic(err)
+		}
+		accountsDb.SeenOnceFilter = &filter
+		mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d medium=%d huge=%d program=%d seenOnceFilter=%d",
+			voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize, seenOnceFilterSize)
 	} else {
+		// SeenOnceFilter stays nil (disabled)
 		mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d medium=%d huge=%d program=%d (seen-once filter disabled)",
 			voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize)
 	}
@@ -338,13 +344,27 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 // already cached - new entries are not added. This prevents cache thrash from the
 // ~1.25M one-shot stake account accesses while preserving hot entries.
 //
-// For common accounts (small/medium/huge), if CommonSeenOnceResetSlots > 0, uses
-// admit-on-second-hit: only caches accounts seen twice within the reset window.
+// For common accounts (small/medium/huge), if SeenOnceFilter != nil, uses
+// admit-on-second-hit: only caches accounts seen twice within the filter window.
 // This filters one-shot reads that would pollute the cache.
 func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account, slot uint64) {
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 
-	// Always evict from all caches first to prevent stale entries
+	// OSCILLATION FIX: Check if already in a common cache BEFORE deleting
+	// This preserves "was hot" information so writes don't oscillate
+	wasCommonCached := false
+	if owner != addresses.VoteProgramAddr && owner != addresses.StakeProgramAddr {
+		// Use GetEntryQuietly to avoid inflating hit stats
+		_, wasCommonCached = accountsDb.SmallAcctCache.Extension().GetEntryQuietly(acct.Key)
+		if !wasCommonCached {
+			_, wasCommonCached = accountsDb.MediumAcctCache.Extension().GetEntryQuietly(acct.Key)
+		}
+		if !wasCommonCached {
+			_, wasCommonCached = accountsDb.HugeAcctCache.Extension().GetEntryQuietly(acct.Key)
+		}
+	}
+
+	// Delete from all caches (prevents stale data if size tier changes)
 	accountsDb.VoteAcctCache.Delete(acct.Key)
 	accountsDb.StakeAcctCache.Delete(acct.Key)
 	accountsDb.SmallAcctCache.Delete(acct.Key)
@@ -363,48 +383,46 @@ func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account, slot uint64) 
 			accountsDb.StakeAcctCache.Set(acct.Key, acct)
 		}
 	} else {
-		// Common accounts (small/medium/huge) - apply admit-on-second-hit if enabled
-		accountsDb.cacheCommonAccount(acct, slot)
+		// Common accounts - pass wasCommonCached to bypass filter if already hot
+		accountsDb.cacheCommonAccount(acct, wasCommonCached)
 	}
 }
 
 // cacheCommonAccount handles caching for non-vote, non-stake accounts.
-// If seen-once filtering is enabled, only admits on second hit within the reset window.
-func (accountsDb *AccountsDb) cacheCommonAccount(acct *accounts.Account, slot uint64) {
-	// If seen-once filtering is disabled, cache immediately
-	if accountsDb.CommonSeenOnceResetSlots == 0 {
-		if len(acct.Data) <= 512 {
-			accountsDb.SmallAcctCache.Set(acct.Key, acct)
-		} else if len(acct.Data) <= 65536 {
-			accountsDb.MediumAcctCache.Set(acct.Key, acct)
-		} else {
-			accountsDb.HugeAcctCache.Set(acct.Key, acct)
+// If force=true or filter disabled, caches immediately.
+// Otherwise applies admit-on-second-hit filter.
+func (accountsDb *AccountsDb) cacheCommonAccount(acct *accounts.Account, force bool) {
+	// Direct cache if filter disabled or account was already cached (force=true)
+	if accountsDb.SeenOnceFilter == nil || force {
+		accountsDb.cacheCommonDirect(acct)
+		// Cleanup from filter if present (account is now hot)
+		if accountsDb.SeenOnceFilter != nil {
+			accountsDb.SeenOnceFilter.Delete(acct.Key)
 		}
 		return
 	}
 
-	// Check if it's time to reset the seen-once tracking window
-	if slot-accountsDb.CommonSeenOnceSlot >= accountsDb.CommonSeenOnceResetSlots {
-		accountsDb.CommonSeenOnce = make(map[solana.PublicKey]struct{})
-		accountsDb.CommonSeenOnceSlot = slot
-	}
-
-	// Admit-on-second-hit: only cache if seen before in this window
-	if _, seenBefore := accountsDb.CommonSeenOnce[acct.Key]; seenBefore {
+	// Admit-on-second-hit: only cache if seen before
+	if _, seenBefore := accountsDb.SeenOnceFilter.Get(acct.Key); seenBefore {
 		// Second hit - admit to cache
 		SeenOnceAdmitted.Add(1)
-		delete(accountsDb.CommonSeenOnce, acct.Key)
-		if len(acct.Data) <= 512 {
-			accountsDb.SmallAcctCache.Set(acct.Key, acct)
-		} else if len(acct.Data) <= 65536 {
-			accountsDb.MediumAcctCache.Set(acct.Key, acct)
-		} else {
-			accountsDb.HugeAcctCache.Set(acct.Key, acct)
-		}
+		accountsDb.SeenOnceFilter.Delete(acct.Key) // Delete AFTER checking
+		accountsDb.cacheCommonDirect(acct)
 	} else {
-		// First hit - just track it, don't cache yet
+		// First hit - track but don't cache
 		SeenOnceFiltered.Add(1)
-		accountsDb.CommonSeenOnce[acct.Key] = struct{}{}
+		accountsDb.SeenOnceFilter.Set(acct.Key, struct{}{})
+	}
+}
+
+// cacheCommonDirect inserts into the appropriate size-tiered cache
+func (accountsDb *AccountsDb) cacheCommonDirect(acct *accounts.Account) {
+	if len(acct.Data) <= 512 {
+		accountsDb.SmallAcctCache.Set(acct.Key, acct)
+	} else if len(acct.Data) <= 65536 {
+		accountsDb.MediumAcctCache.Set(acct.Key, acct)
+	} else {
+		accountsDb.HugeAcctCache.Set(acct.Key, acct)
 	}
 }
 

@@ -862,7 +862,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 		config.GetInt("tuning.cache.medium_acct_lru"),
 		config.GetInt("tuning.cache.huge_acct_lru"),
 		config.GetInt("tuning.cache.program_lru"),
-		uint64(config.GetInt("tuning.cache.seen_once_reset_slots")),
+		config.GetInt("tuning.cache.seen_once_filter_size"),
 	)
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
@@ -1625,7 +1625,7 @@ postBootstrap:
 		config.GetInt("tuning.cache.medium_acct_lru"),
 		config.GetInt("tuning.cache.huge_acct_lru"),
 		config.GetInt("tuning.cache.program_lru"),
-		uint64(config.GetInt("tuning.cache.seen_once_reset_slots")),
+		config.GetInt("tuning.cache.seen_once_filter_size"),
 	)
 
 	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
