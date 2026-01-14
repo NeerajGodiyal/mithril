@@ -1708,13 +1708,22 @@ func ReplayBlocks(
 						cs.SmallMisses, cs.MediumMisses, cs.HugeMisses, cs.HugeMiss64Kto256K, cs.HugeMiss256Kto1M, cs.HugeMissOver1M,
 						cs.StakeMisses, cs.VoteMisses)
 
+					// Program cache stats (compiled BPF programs)
+					if cs.ProgramHits+cs.ProgramMisses > 0 {
+						progHitRate := float64(cs.ProgramHits) / float64(cs.ProgramHits+cs.ProgramMisses) * 100
+						mlog.Log.InfofPrecise("  program cache: %.1f%% hit (%d/%d) | miss by size: <1M:%d ≥1M:%d",
+							progHitRate, cs.ProgramHits, cs.ProgramHits+cs.ProgramMisses,
+							cs.ProgramMissUnder1M, cs.ProgramMissOver1M)
+					}
+
 					// Cache fill stats
 					cf := acctsDb.GetCacheFillStats()
-					mlog.Log.InfofPrecise("  cache fill: small %d/%d (%.0f%%), medium %d/%d (%.0f%%), huge %d/%d (%.0f%%), stake %d/%d, vote %d/%d",
+					mlog.Log.InfofPrecise("  cache fill: small %d/%d (%.0f%%), medium %d/%d (%.0f%%), huge %d/%d (%.0f%%), stake %d/%d, vote %d/%d, program %d/%d (%.0f%%)",
 						cf.SmallSize, cf.SmallCap, float64(cf.SmallSize)/float64(cf.SmallCap)*100,
 						cf.MediumSize, cf.MediumCap, float64(cf.MediumSize)/float64(cf.MediumCap)*100,
 						cf.HugeSize, cf.HugeCap, float64(cf.HugeSize)/float64(cf.HugeCap)*100,
-						cf.StakeSize, cf.StakeCap, cf.VoteSize, cf.VoteCap)
+						cf.StakeSize, cf.StakeCap, cf.VoteSize, cf.VoteCap,
+						cf.ProgramSize, cf.ProgramCap, float64(cf.ProgramSize)/float64(cf.ProgramCap)*100)
 
 					// Seen-once filter stats (only show if filter is active)
 					if cs.SeenOnceFiltered > 0 || cs.SeenOnceAdmitted > 0 {

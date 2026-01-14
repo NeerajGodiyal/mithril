@@ -52,23 +52,29 @@ var (
 // Cache hit/miss counters for profiling
 var (
 	// Cache hits per cache type
-	SmallCacheHits  atomic.Uint64 // Small accounts ≤512 bytes
-	MediumCacheHits atomic.Uint64 // Medium accounts 512-64KB
-	HugeCacheHits   atomic.Uint64 // Huge accounts >64KB
-	StakeCacheHits  atomic.Uint64
-	VoteCacheHits   atomic.Uint64
+	SmallCacheHits   atomic.Uint64 // Small accounts ≤512 bytes
+	MediumCacheHits  atomic.Uint64 // Medium accounts 512-64KB
+	HugeCacheHits    atomic.Uint64 // Huge accounts >64KB
+	StakeCacheHits   atomic.Uint64
+	VoteCacheHits    atomic.Uint64
+	ProgramCacheHits atomic.Uint64 // Compiled BPF programs
 
 	// Cache misses per cache type
-	SmallCacheMisses  atomic.Uint64 // ≤512 bytes
-	MediumCacheMisses atomic.Uint64 // 512-64KB
-	HugeCacheMisses   atomic.Uint64 // >64KB (total)
-	StakeCacheMisses  atomic.Uint64
-	VoteCacheMisses   atomic.Uint64
+	SmallCacheMisses   atomic.Uint64 // ≤512 bytes
+	MediumCacheMisses  atomic.Uint64 // 512-64KB
+	HugeCacheMisses    atomic.Uint64 // >64KB (total)
+	StakeCacheMisses   atomic.Uint64
+	VoteCacheMisses    atomic.Uint64
+	ProgramCacheMisses atomic.Uint64 // Compiled BPF programs
 
 	// Granular miss breakdown within huge range (>64KB)
 	HugeMiss64Kto256K atomic.Uint64 // 64KB-256KB
 	HugeMiss256Kto1M  atomic.Uint64 // 256KB-1MB
 	HugeMissOver1M    atomic.Uint64 // >1MB
+
+	// Program cache miss size breakdown
+	ProgramMissUnder1M atomic.Uint64 // <1MB programs
+	ProgramMissOver1M  atomic.Uint64 // ≥1MB programs
 
 	// Admit-on-second-hit filter stats
 	SeenOnceFiltered atomic.Uint64 // First hit, added to seen-once tracking
@@ -80,6 +86,10 @@ type CacheStats struct {
 	SmallHits, MediumHits, HugeHits, StakeHits, VoteHits uint64
 	SmallMisses, MediumMisses, HugeMisses                uint64
 	StakeMisses, VoteMisses                              uint64
+	// Program cache stats
+	ProgramHits, ProgramMisses     uint64
+	ProgramMissUnder1M             uint64 // <1MB programs
+	ProgramMissOver1M              uint64 // ≥1MB programs
 	// Granular breakdown within huge range
 	HugeMiss64Kto256K uint64 // 64KB-256KB
 	HugeMiss256Kto1M  uint64 // 256KB-1MB
@@ -92,46 +102,53 @@ type CacheStats struct {
 // GetAndResetCacheStats returns current cache hit/miss counts and resets them
 func GetAndResetCacheStats() CacheStats {
 	return CacheStats{
-		SmallHits:         SmallCacheHits.Swap(0),
-		MediumHits:        MediumCacheHits.Swap(0),
-		HugeHits:          HugeCacheHits.Swap(0),
-		StakeHits:         StakeCacheHits.Swap(0),
-		VoteHits:          VoteCacheHits.Swap(0),
-		SmallMisses:       SmallCacheMisses.Swap(0),
-		MediumMisses:      MediumCacheMisses.Swap(0),
-		HugeMisses:        HugeCacheMisses.Swap(0),
-		StakeMisses:       StakeCacheMisses.Swap(0),
-		VoteMisses:        VoteCacheMisses.Swap(0),
-		HugeMiss64Kto256K: HugeMiss64Kto256K.Swap(0),
-		HugeMiss256Kto1M:  HugeMiss256Kto1M.Swap(0),
-		HugeMissOver1M:    HugeMissOver1M.Swap(0),
-		SeenOnceFiltered:  SeenOnceFiltered.Swap(0),
-		SeenOnceAdmitted:  SeenOnceAdmitted.Swap(0),
+		SmallHits:          SmallCacheHits.Swap(0),
+		MediumHits:         MediumCacheHits.Swap(0),
+		HugeHits:           HugeCacheHits.Swap(0),
+		StakeHits:          StakeCacheHits.Swap(0),
+		VoteHits:           VoteCacheHits.Swap(0),
+		ProgramHits:        ProgramCacheHits.Swap(0),
+		SmallMisses:        SmallCacheMisses.Swap(0),
+		MediumMisses:       MediumCacheMisses.Swap(0),
+		HugeMisses:         HugeCacheMisses.Swap(0),
+		StakeMisses:        StakeCacheMisses.Swap(0),
+		VoteMisses:         VoteCacheMisses.Swap(0),
+		ProgramMisses:      ProgramCacheMisses.Swap(0),
+		ProgramMissUnder1M: ProgramMissUnder1M.Swap(0),
+		ProgramMissOver1M:  ProgramMissOver1M.Swap(0),
+		HugeMiss64Kto256K:  HugeMiss64Kto256K.Swap(0),
+		HugeMiss256Kto1M:   HugeMiss256Kto1M.Swap(0),
+		HugeMissOver1M:     HugeMissOver1M.Swap(0),
+		SeenOnceFiltered:   SeenOnceFiltered.Swap(0),
+		SeenOnceAdmitted:   SeenOnceAdmitted.Swap(0),
 	}
 }
 
 // CacheFillStats holds current cache fill levels
 type CacheFillStats struct {
-	SmallSize, SmallCap   int
-	MediumSize, MediumCap int
-	HugeSize, HugeCap     int
-	StakeSize, StakeCap   int
-	VoteSize, VoteCap     int
+	SmallSize, SmallCap     int
+	MediumSize, MediumCap   int
+	HugeSize, HugeCap       int
+	StakeSize, StakeCap     int
+	VoteSize, VoteCap       int
+	ProgramSize, ProgramCap int
 }
 
 // GetCacheFillStats returns current cache fill levels (size/capacity)
 func (accountsDb *AccountsDb) GetCacheFillStats() CacheFillStats {
 	return CacheFillStats{
-		SmallSize:  accountsDb.SmallAcctCache.Size(),
-		SmallCap:   accountsDb.SmallAcctCache.Capacity(),
-		MediumSize: accountsDb.MediumAcctCache.Size(),
-		MediumCap:  accountsDb.MediumAcctCache.Capacity(),
-		HugeSize:   accountsDb.HugeAcctCache.Size(),
-		HugeCap:    accountsDb.HugeAcctCache.Capacity(),
-		StakeSize:  accountsDb.StakeAcctCache.Size(),
-		StakeCap:   accountsDb.StakeAcctCache.Capacity(),
-		VoteSize:   accountsDb.VoteAcctCache.Size(),
-		VoteCap:    accountsDb.VoteAcctCache.Capacity(),
+		SmallSize:   accountsDb.SmallAcctCache.Size(),
+		SmallCap:    accountsDb.SmallAcctCache.Capacity(),
+		MediumSize:  accountsDb.MediumAcctCache.Size(),
+		MediumCap:   accountsDb.MediumAcctCache.Capacity(),
+		HugeSize:    accountsDb.HugeAcctCache.Size(),
+		HugeCap:     accountsDb.HugeAcctCache.Capacity(),
+		StakeSize:   accountsDb.StakeAcctCache.Size(),
+		StakeCap:    accountsDb.StakeAcctCache.Capacity(),
+		VoteSize:    accountsDb.VoteAcctCache.Size(),
+		VoteCap:     accountsDb.VoteAcctCache.Capacity(),
+		ProgramSize: accountsDb.ProgramCache.Size(),
+		ProgramCap:  accountsDb.ProgramCache.Capacity(),
 	}
 }
 
@@ -325,7 +342,23 @@ type ProgramCacheEntry struct {
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
-	return accountsDb.ProgramCache.Get(pubkey)
+	entry, found := accountsDb.ProgramCache.Get(pubkey)
+	if found {
+		ProgramCacheHits.Add(1)
+	} else {
+		ProgramCacheMisses.Add(1)
+	}
+	return entry, found
+}
+
+// RecordProgramCacheMissSize records the size breakdown for a program cache miss.
+// Call this after loading the program to track <1MB vs ≥1MB breakdown.
+func RecordProgramCacheMissSize(programBytes uint64) {
+	if programBytes >= 1024*1024 {
+		ProgramMissOver1M.Add(1)
+	} else {
+		ProgramMissUnder1M.Add(1)
+	}
 }
 
 func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, programEntry *ProgramCacheEntry) {
