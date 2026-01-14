@@ -232,13 +232,13 @@ name = "mithril"
     port = 8899
 
 # ============================================================================
-# [tuning] - Performance Tuning & Profiling
+# [development] - Performance Tuning & Profiling
 # ============================================================================
 #
 # Advanced settings for optimizing Mithril's performance.
 # The defaults work well for most deployments.
 
-[tuning]
+[development]
     # Zstd decoder concurrency (defaults to NumCPU)
     # zstd_decoder_concurrency = 16
 
@@ -254,8 +254,8 @@ name = "mithril"
     # Enable/disable pool allocator for slices
     use_pool = true
 
-    # [tuning.pprof] - CPU/Memory Profiling
-    [tuning.pprof]
+    # [development.pprof] - CPU/Memory Profiling
+    [development.pprof]
         # Port to serve HTTP pprof endpoint (-1 to disable)
         # Access at http://localhost:PORT/debug/pprof/
         # port = 6060
@@ -263,7 +263,7 @@ name = "mithril"
         # Filename to write CPU profile (for offline analysis)
         # cpu_profile_path = "/tmp/cpuprof.pprof"
 
-    # [tuning.cache] - AccountsDB LRU Cache Sizes
+    # [development.cache] - AccountsDB LRU Cache Sizes
     #
     # These control the LRU caches for fast account data reads during replay.
     # Values are NUMBER OF ENTRIES, not bytes.
@@ -275,7 +275,7 @@ name = "mithril"
     #
     # Larger caches = fewer disk reads, but more memory usage.
     # Memory per entry is ~200-1000 bytes depending on account data size.
-    [tuning.cache]
+    [development.cache]
         # Vote account data cache - number of entries (frequently accessed during replay)
         vote_acct_lru = 5000
 

@@ -193,6 +193,7 @@ func init() {
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
 	// [tuning.pprof] section flags
+	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
 	Run.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
 	// [debug] section flags
@@ -1082,6 +1083,11 @@ func runLive(c *cobra.Command, args []string) {
 
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
+
+	// Start pprof HTTP server if configured
+	if pprofPort != -1 {
+		startPprofHandlers(int(pprofPort))
+	}
 
 	// Determine if using Lightbringer based on block source
 	// NOTE: Lightbringer mode is TEMPORARILY DISABLED. The background block downloader that
