@@ -284,8 +284,7 @@ name = "mithril"
         stake_acct_lru = 2000
 
         # Small account data cache - accounts ≤512 bytes (token accounts, etc.)
-        # Large size (500k) is cheap since small accounts are ~500 bytes each
-        small_acct_lru = 500000
+        small_acct_lru = 50000
 
         # Medium account data cache - accounts 512-64KB
         medium_acct_lru = 20000
@@ -295,6 +294,13 @@ name = "mithril"
 
         # Compiled BPF program cache - number of entries
         program_lru = 5000
+
+        # Admit-on-second-hit filter for common accounts (small/medium/huge)
+        # Only caches accounts seen twice within this many slots, filtering one-shot reads.
+        #   0 = disabled (cache everything immediately, like traditional LRU)
+        #   >0 = enable filtering, reset tracking every N slots (~N×0.4 seconds)
+        # Recommended: 100 slots (~40 seconds) if enabled
+        seen_once_reset_slots = 0
 
 # ============================================================================
 # [debug] - Debug Logging

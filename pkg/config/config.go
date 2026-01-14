@@ -48,12 +48,13 @@ type DebugConfig struct {
 // those are unbounded maps holding vote state and delegation info.
 // These LRU caches store full account data for fast reads during replay.
 type CacheConfig struct {
-	VoteAcctLRU   int `toml:"vote_acct_lru" mapstructure:"vote_acct_lru"`     // Vote account data (default: 5000)
-	StakeAcctLRU  int `toml:"stake_acct_lru" mapstructure:"stake_acct_lru"`   // Stake account data (default: 2000)
-	SmallAcctLRU  int `toml:"small_acct_lru" mapstructure:"small_acct_lru"`   // Small accounts ≤512 bytes (default: 500000)
-	MediumAcctLRU int `toml:"medium_acct_lru" mapstructure:"medium_acct_lru"` // Medium accounts 512-64KB (default: 20000)
-	HugeAcctLRU   int `toml:"huge_acct_lru" mapstructure:"huge_acct_lru"`     // Huge accounts >64KB (default: 500)
-	ProgramLRU    int `toml:"program_lru" mapstructure:"program_lru"`         // Compiled BPF programs (default: 5000)
+	VoteAcctLRU          int `toml:"vote_acct_lru" mapstructure:"vote_acct_lru"`                     // Vote account data (default: 5000)
+	StakeAcctLRU         int `toml:"stake_acct_lru" mapstructure:"stake_acct_lru"`                   // Stake account data (default: 2000)
+	SmallAcctLRU         int `toml:"small_acct_lru" mapstructure:"small_acct_lru"`                   // Small accounts ≤512 bytes (default: 50000)
+	MediumAcctLRU        int `toml:"medium_acct_lru" mapstructure:"medium_acct_lru"`                 // Medium accounts 512-64KB (default: 20000)
+	HugeAcctLRU          int `toml:"huge_acct_lru" mapstructure:"huge_acct_lru"`                     // Huge accounts >64KB (default: 500)
+	ProgramLRU           int `toml:"program_lru" mapstructure:"program_lru"`                         // Compiled BPF programs (default: 5000)
+	SeenOnceResetSlots   int `toml:"seen_once_reset_slots" mapstructure:"seen_once_reset_slots"`     // Admit-on-second-hit window (0=disabled, default: 0)
 }
 
 // DevelopmentConfig holds development/tuning configuration (matches Firedancer [development] section)
