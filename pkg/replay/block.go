@@ -1175,6 +1175,12 @@ func ReplayBlocks(
 	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
 
+	// Memory stats tracking for delta calculations
+	var lastMemStats runtime.MemStats
+	var lastSummaryTime time.Time
+	runtime.ReadMemStats(&lastMemStats)
+	lastSummaryTime = time.Now()
+
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
 	execTimes = make([]float64, 0, summaryInterval)
@@ -1719,16 +1725,32 @@ func ReplayBlocks(
 					}
 				}
 
-				// Memory stats for GC pressure monitoring
+				// Memory stats for GC pressure monitoring (with deltas)
 				var m runtime.MemStats
 				runtime.ReadMemStats(&m)
-				mlog.Log.InfofPrecise("  mem: heap %.1fMB | alloc %.1fMB | sys %.1fMB | gc %d (%.1fms total) | goroutines %d",
-					float64(m.HeapAlloc)/1024/1024,
-					float64(m.TotalAlloc)/1024/1024,
+				elapsed := time.Since(lastSummaryTime).Seconds()
+				if elapsed < 0.001 {
+					elapsed = 0.001 // Avoid division by zero
+				}
+
+				// Calculate deltas
+				deltaGC := m.NumGC - lastMemStats.NumGC
+				deltaPauseMs := float64(m.PauseTotalNs-lastMemStats.PauseTotalNs) / 1e6
+				deltaAllocMB := float64(m.TotalAlloc-lastMemStats.TotalAlloc) / 1024 / 1024
+				allocPerSec := deltaAllocMB / elapsed
+				deltaHeapMB := float64(m.HeapAlloc) - float64(lastMemStats.HeapAlloc)
+				deltaHeapMB = deltaHeapMB / 1024 / 1024
+
+				mlog.Log.InfofPrecise("  mem: heap %.1fMB (Δ%+.1fMB) | alloc %.1fMB/s | gc %d (Δ%d, Δ%.1fms) | sys %.1fMB | goroutines %d",
+					float64(m.HeapAlloc)/1024/1024, deltaHeapMB,
+					allocPerSec,
+					m.NumGC, deltaGC, deltaPauseMs,
 					float64(m.Sys)/1024/1024,
-					m.NumGC,
-					float64(m.PauseTotalNs)/1e6,
 					runtime.NumGoroutine())
+
+				// Update tracking for next interval
+				lastMemStats = m
+				lastSummaryTime = time.Now()
 
 				// Line 5: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
