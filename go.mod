@@ -19,13 +19,14 @@ require (
 	github.com/google/nftables v0.3.0
 	github.com/minio/sha256-simd v1.0.1
 	github.com/mr-tron/base58 v1.2.0
+	github.com/nixberg/chacha-rng-go v0.1.0
 	github.com/novifinancial/serde-reflection/serde-generate/runtime/golang v0.0.0-20220519162058-e5cd3c3b3f3a
 	github.com/prometheus/client_golang v1.20.4
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/twmb/murmur3 v1.1.8
 	github.com/vbauerster/mpb/v8 v8.4.0
-	golang.org/x/sync v0.17.0
+	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.39.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/klog/v2 v2.100.1
@@ -162,7 +163,7 @@ require (
 	go.uber.org/ratelimit v0.2.0 // indirect
 	go.uber.org/zap v1.24.0 // indirect
 	golang.org/x/crypto v0.43.0
-	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e
+	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/term v0.38.0
 	golang.org/x/time v0.9.0

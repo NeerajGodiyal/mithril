@@ -19,8 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "net/http/pprof"
-
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
@@ -985,6 +983,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 }
 
 func runLive(c *cobra.Command, args []string) {
+	if pprofPort != -1 {
+		startPprofHandlers(int(pprofPort))
+	}
 	ctx := c.Context()
 
 	// Print the Mithril banner first, before any other output

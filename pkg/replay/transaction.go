@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime/trace"
 	"slices"
 	"strings"
 	"sync"
@@ -291,6 +292,21 @@ func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.Wai
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
+	if slotCtx.TraceCtx != nil {
+		region := trace.StartRegion(slotCtx.TraceCtx, "ProcessTransaction")
+		defer region.End()
+
+		if len(tx.Signatures) > 0 {
+			trace.Log(slotCtx.TraceCtx, "signature", tx.Signatures[0].String())
+		}
+		if len(tx.Message.Instructions) > 0 {
+			progIdx := tx.Message.Instructions[0].ProgramIDIndex
+			if int(progIdx) < len(tx.Message.AccountKeys) {
+				trace.Log(slotCtx.TraceCtx, "program", tx.Message.AccountKeys[progIdx].String())
+			}
+		}
+	}
+
 	if arena != nil {
 		arena.Reset()
 	}
