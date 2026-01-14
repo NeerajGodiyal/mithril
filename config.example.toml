@@ -283,12 +283,15 @@ name = "mithril"
         # hot accounts during epoch rewards when ~1.25M stake accounts are touched once each)
         stake_acct_lru = 2000
 
-        # Small account data cache - accounts ≤256 bytes (token accounts, etc.)
-        # Large size (500k) is cheap since small accounts are ~200 bytes each (~100MB total)
+        # Small account data cache - accounts ≤512 bytes (token accounts, etc.)
+        # Large size (500k) is cheap since small accounts are ~500 bytes each
         small_acct_lru = 500000
 
-        # Large account data cache - accounts >256 bytes
-        large_acct_lru = 10000
+        # Medium account data cache - accounts 512-64KB
+        medium_acct_lru = 20000
+
+        # Huge account data cache - accounts >64KB (mostly programs)
+        huge_acct_lru = 500
 
         # Compiled BPF program cache - number of entries
         program_lru = 5000

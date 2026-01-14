@@ -26,8 +26,9 @@ type AccountsDb struct {
 	LargestFileId    atomic.Uint64
 	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Vote accounts (frequently accessed)
 	StakeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Stake accounts (small 2k cache)
-	SmallAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Small accounts ≤256 bytes (500k entries, ~100MB)
-	LargeAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Large accounts >256 bytes (10k entries)
+	SmallAcctCache   otter.Cache[solana.PublicKey, *accounts.Account] // Small accounts ≤512 bytes (500k entries)
+	MediumAcctCache  otter.Cache[solana.PublicKey, *accounts.Account] // Medium accounts 512-64KB (20k entries)
+	HugeAcctCache    otter.Cache[solana.PublicKey, *accounts.Account] // Huge accounts >64KB (500 entries, mostly programs)
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 	InRewardsWindow  bool // When true, only update existing stake cache entries (don't add new ones)
 }
@@ -46,68 +47,77 @@ var (
 // Cache hit/miss counters for profiling
 var (
 	// Cache hits per cache type
-	SmallCacheHits atomic.Uint64 // Small accounts ≤256 bytes
-	LargeCacheHits atomic.Uint64 // Large accounts >256 bytes
-	StakeCacheHits atomic.Uint64
-	VoteCacheHits  atomic.Uint64
+	SmallCacheHits  atomic.Uint64 // Small accounts ≤512 bytes
+	MediumCacheHits atomic.Uint64 // Medium accounts 512-64KB
+	HugeCacheHits   atomic.Uint64 // Huge accounts >64KB
+	StakeCacheHits  atomic.Uint64
+	VoteCacheHits   atomic.Uint64
 
-	// Cache misses - granular size buckets
-	SmallCacheMisses       atomic.Uint64 // ≤256 bytes
-	LargeCacheMiss257to512 atomic.Uint64 // 257-512 bytes (to evaluate small threshold)
-	LargeCacheMiss513to4K  atomic.Uint64 // 513-4096 bytes
-	LargeCacheMiss4Kto64K  atomic.Uint64 // 4097-65536 bytes
-	LargeCacheMissHuge     atomic.Uint64 // >65536 bytes (to see if huge accounts are common)
-	StakeCacheMisses       atomic.Uint64
-	VoteCacheMisses        atomic.Uint64
+	// Cache misses per cache type
+	SmallCacheMisses  atomic.Uint64 // ≤512 bytes
+	MediumCacheMisses atomic.Uint64 // 512-64KB
+	HugeCacheMisses   atomic.Uint64 // >64KB (total)
+	StakeCacheMisses  atomic.Uint64
+	VoteCacheMisses   atomic.Uint64
+
+	// Granular miss breakdown within huge range (>64KB)
+	HugeMiss64Kto256K atomic.Uint64 // 64KB-256KB
+	HugeMiss256Kto1M  atomic.Uint64 // 256KB-1MB
+	HugeMissOver1M    atomic.Uint64 // >1MB
 )
 
 // CacheStats holds cache hit/miss counts for reporting
 type CacheStats struct {
-	SmallHits, LargeHits, StakeHits, VoteHits uint64
-	SmallMisses                               uint64
-	LargeMiss257to512                         uint64 // 257-512 bytes (evaluate small threshold)
-	LargeMiss513to4K                          uint64 // 513-4096 bytes
-	LargeMiss4Kto64K                          uint64 // 4097-65536 bytes
-	LargeMissHuge                             uint64 // >65536 bytes
-	StakeMisses, VoteMisses                   uint64
+	SmallHits, MediumHits, HugeHits, StakeHits, VoteHits uint64
+	SmallMisses, MediumMisses, HugeMisses                uint64
+	StakeMisses, VoteMisses                              uint64
+	// Granular breakdown within huge range
+	HugeMiss64Kto256K uint64 // 64KB-256KB
+	HugeMiss256Kto1M  uint64 // 256KB-1MB
+	HugeMissOver1M    uint64 // >1MB
 }
 
 // GetAndResetCacheStats returns current cache hit/miss counts and resets them
 func GetAndResetCacheStats() CacheStats {
 	return CacheStats{
 		SmallHits:         SmallCacheHits.Swap(0),
-		LargeHits:         LargeCacheHits.Swap(0),
+		MediumHits:        MediumCacheHits.Swap(0),
+		HugeHits:          HugeCacheHits.Swap(0),
 		StakeHits:         StakeCacheHits.Swap(0),
 		VoteHits:          VoteCacheHits.Swap(0),
 		SmallMisses:       SmallCacheMisses.Swap(0),
-		LargeMiss257to512: LargeCacheMiss257to512.Swap(0),
-		LargeMiss513to4K:  LargeCacheMiss513to4K.Swap(0),
-		LargeMiss4Kto64K:  LargeCacheMiss4Kto64K.Swap(0),
-		LargeMissHuge:     LargeCacheMissHuge.Swap(0),
+		MediumMisses:      MediumCacheMisses.Swap(0),
+		HugeMisses:        HugeCacheMisses.Swap(0),
 		StakeMisses:       StakeCacheMisses.Swap(0),
 		VoteMisses:        VoteCacheMisses.Swap(0),
+		HugeMiss64Kto256K: HugeMiss64Kto256K.Swap(0),
+		HugeMiss256Kto1M:  HugeMiss256Kto1M.Swap(0),
+		HugeMissOver1M:    HugeMissOver1M.Swap(0),
 	}
 }
 
 // CacheFillStats holds current cache fill levels
 type CacheFillStats struct {
-	SmallSize, SmallCap int
-	LargeSize, LargeCap int
-	StakeSize, StakeCap int
-	VoteSize, VoteCap   int
+	SmallSize, SmallCap   int
+	MediumSize, MediumCap int
+	HugeSize, HugeCap     int
+	StakeSize, StakeCap   int
+	VoteSize, VoteCap     int
 }
 
 // GetCacheFillStats returns current cache fill levels (size/capacity)
 func (accountsDb *AccountsDb) GetCacheFillStats() CacheFillStats {
 	return CacheFillStats{
-		SmallSize: accountsDb.SmallAcctCache.Size(),
-		SmallCap:  accountsDb.SmallAcctCache.Capacity(),
-		LargeSize: accountsDb.LargeAcctCache.Size(),
-		LargeCap:  accountsDb.LargeAcctCache.Capacity(),
-		StakeSize: accountsDb.StakeAcctCache.Size(),
-		StakeCap:  accountsDb.StakeAcctCache.Capacity(),
-		VoteSize:  accountsDb.VoteAcctCache.Size(),
-		VoteCap:   accountsDb.VoteAcctCache.Capacity(),
+		SmallSize:  accountsDb.SmallAcctCache.Size(),
+		SmallCap:   accountsDb.SmallAcctCache.Capacity(),
+		MediumSize: accountsDb.MediumAcctCache.Size(),
+		MediumCap:  accountsDb.MediumAcctCache.Capacity(),
+		HugeSize:   accountsDb.HugeAcctCache.Size(),
+		HugeCap:    accountsDb.HugeAcctCache.Capacity(),
+		StakeSize:  accountsDb.StakeAcctCache.Size(),
+		StakeCap:   accountsDb.StakeAcctCache.Capacity(),
+		VoteSize:   accountsDb.VoteAcctCache.Size(),
+		VoteCap:    accountsDb.VoteAcctCache.Capacity(),
 	}
 }
 
@@ -117,16 +127,20 @@ func recordCacheMiss(owner solana.PublicKey, dataLen uint64) {
 		VoteCacheMisses.Add(1)
 	} else if owner == addresses.StakeProgramAddr {
 		StakeCacheMisses.Add(1)
-	} else if dataLen <= 256 {
-		SmallCacheMisses.Add(1)
 	} else if dataLen <= 512 {
-		LargeCacheMiss257to512.Add(1)
-	} else if dataLen <= 4096 {
-		LargeCacheMiss513to4K.Add(1)
+		SmallCacheMisses.Add(1)
 	} else if dataLen <= 65536 {
-		LargeCacheMiss4Kto64K.Add(1)
+		MediumCacheMisses.Add(1)
 	} else {
-		LargeCacheMissHuge.Add(1) // >64KB
+		// Huge: >64KB - track total and granular breakdown
+		HugeCacheMisses.Add(1)
+		if dataLen <= 262144 { // 64KB-256KB
+			HugeMiss64Kto256K.Add(1)
+		} else if dataLen <= 1048576 { // 256KB-1MB
+			HugeMiss256Kto1M.Add(1)
+		} else { // >1MB
+			HugeMissOver1M.Add(1)
+		}
 	}
 }
 
@@ -190,7 +204,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 // InitCaches initializes the LRU caches with the given sizes.
 // Pass 0 for any size to use a reasonable builtin value.
-func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, largeSize, programSize int) {
+func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize int) {
 	// Apply builtin values when config not set
 	if voteSize <= 0 {
 		voteSize = 5000
@@ -199,10 +213,13 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, largeSi
 		stakeSize = 2000
 	}
 	if smallSize <= 0 {
-		smallSize = 500000 // 500k small accounts (~100MB)
+		smallSize = 500000 // 500k small accounts ≤512 bytes
 	}
-	if largeSize <= 0 {
-		largeSize = 10000 // 10k large accounts
+	if mediumSize <= 0 {
+		mediumSize = 20000 // 20k medium accounts 512-64KB
+	}
+	if hugeSize <= 0 {
+		hugeSize = 500 // 500 huge accounts >64KB (mostly programs)
 	}
 	if programSize <= 0 {
 		programSize = 5000
@@ -236,7 +253,16 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, largeSi
 		panic(err)
 	}
 
-	accountsDb.LargeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](largeSize).
+	accountsDb.MediumAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](mediumSize).
+		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
+			return 1
+		}).
+		Build()
+	if err != nil {
+		panic(err)
+	}
+
+	accountsDb.HugeAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](hugeSize).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -254,8 +280,8 @@ func (accountsDb *AccountsDb) InitCaches(voteSize, stakeSize, smallSize, largeSi
 		panic(err)
 	}
 
-	mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d large=%d program=%d",
-		voteSize, stakeSize, smallSize, largeSize, programSize)
+	mlog.Log.Infof("AccountsDB caches initialized: vote=%d stake=%d small=%d medium=%d huge=%d program=%d",
+		voteSize, stakeSize, smallSize, mediumSize, hugeSize, programSize)
 }
 
 type ProgramCacheEntry struct {
@@ -289,7 +315,8 @@ func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 	accountsDb.VoteAcctCache.Delete(acct.Key)
 	accountsDb.StakeAcctCache.Delete(acct.Key)
 	accountsDb.SmallAcctCache.Delete(acct.Key)
-	accountsDb.LargeAcctCache.Delete(acct.Key)
+	accountsDb.MediumAcctCache.Delete(acct.Key)
+	accountsDb.HugeAcctCache.Delete(acct.Key)
 
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(acct.Key, acct)
@@ -302,10 +329,12 @@ func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
 		} else {
 			accountsDb.StakeAcctCache.Set(acct.Key, acct)
 		}
-	} else if len(acct.Data) <= 256 {
+	} else if len(acct.Data) <= 512 {
 		accountsDb.SmallAcctCache.Set(acct.Key, acct)
+	} else if len(acct.Data) <= 65536 {
+		accountsDb.MediumAcctCache.Set(acct.Key, acct)
 	} else {
-		accountsDb.LargeAcctCache.Set(acct.Key, acct)
+		accountsDb.HugeAcctCache.Set(acct.Key, acct)
 	}
 }
 
@@ -328,9 +357,15 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		return cachedAcct, nil
 	}
 
-	cachedAcct, hasAcct = accountsDb.LargeAcctCache.Get(pubkey)
+	cachedAcct, hasAcct = accountsDb.MediumAcctCache.Get(pubkey)
 	if hasAcct {
-		LargeCacheHits.Add(1)
+		MediumCacheHits.Add(1)
+		return cachedAcct, nil
+	}
+
+	cachedAcct, hasAcct = accountsDb.HugeAcctCache.Get(pubkey)
+	if hasAcct {
+		HugeCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
