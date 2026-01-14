@@ -1709,6 +1709,14 @@ func ReplayBlocks(
 						cf.MediumSize, cf.MediumCap, float64(cf.MediumSize)/float64(cf.MediumCap)*100,
 						cf.HugeSize, cf.HugeCap, float64(cf.HugeSize)/float64(cf.HugeCap)*100,
 						cf.StakeSize, cf.StakeCap, cf.VoteSize, cf.VoteCap)
+
+					// Seen-once filter stats (only show if filter is active)
+					if cs.SeenOnceFiltered > 0 || cs.SeenOnceAdmitted > 0 {
+						total := cs.SeenOnceFiltered + cs.SeenOnceAdmitted
+						admitRate := float64(cs.SeenOnceAdmitted) / float64(total) * 100
+						mlog.Log.InfofPrecise("  seen-once filter: %.1f%% admitted (%d/%d) | filtered %d",
+							admitRate, cs.SeenOnceAdmitted, total, cs.SeenOnceFiltered)
+					}
 				}
 
 				// Line 5: RPC/fetch debugging info
