@@ -11,6 +11,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -226,6 +227,11 @@ func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partit
 
 		accts[idx] = stakeAcct
 		distributedLamports.Add(reward.StakerRewards)
+
+		// update the stake cache
+		delegationToCache := stakeState.Stake.Stake.Delegation
+		delegationToCache.CreditsObserved = stakeState.Stake.Stake.CreditsObserved
+		global.PutStakeCacheItem(stakePk, &delegationToCache)
 	})
 
 	for idx, stakePk := range partition.Pubkeys() {
