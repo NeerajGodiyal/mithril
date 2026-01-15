@@ -110,14 +110,14 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 			if err := os.Remove(snap.path); err != nil {
 				mlog.Log.Errorf("failed to remove snapshot %s: %v", snap.name, err)
 			} else {
-				mlog.Log.Infof("cleaned up snapshot file: %s", snap.name)
+				mlog.Log.Infof("Cleaned up snapshot file: %s", snap.name)
 			}
 		}
 		for _, snap := range incrSnapshots {
 			if err := os.Remove(snap.path); err != nil {
 				mlog.Log.Errorf("failed to remove incremental snapshot %s: %v", snap.name, err)
 			} else {
-				mlog.Log.Infof("cleaned up incremental snapshot file: %s", snap.name)
+				mlog.Log.Infof("Cleaned up incremental snapshot file: %s", snap.name)
 			}
 		}
 		return
@@ -130,7 +130,7 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 			if err := os.Remove(fullSnapshots[i].path); err != nil {
 				mlog.Log.Errorf("failed to remove old snapshot %s: %v", fullSnapshots[i].name, err)
 			} else {
-				mlog.Log.Infof("cleaned up old snapshot file (retention limit %d): %s", maxSnapshots, fullSnapshots[i].name)
+				mlog.Log.Infof("Cleaned up old snapshot file (retention limit %d): %s", maxSnapshots, fullSnapshots[i].name)
 			}
 		}
 	}
@@ -142,7 +142,7 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 			if err := os.Remove(incrSnapshots[i].path); err != nil {
 				mlog.Log.Errorf("failed to remove old incremental snapshot %s: %v", incrSnapshots[i].name, err)
 			} else {
-				mlog.Log.Infof("cleaned up old incremental snapshot file (retention limit %d): %s", incrSnapshots[i].name)
+				mlog.Log.Infof("Cleaned up old incremental snapshot file (retention limit %d): %s", maxSnapshots, incrSnapshots[i].name)
 			}
 		}
 	}
@@ -268,7 +268,7 @@ func BuildAccountsDbPaths(
 		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
 	}
 
-	mlog.Log.Infof("snapshot processed in %s.", fmtDuration(time.Since(start)))
+	mlog.Log.Infof("Snapshot processed in %s.", fmtDuration(time.Since(start)))
 
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())
@@ -292,7 +292,7 @@ func BuildAccountsDbPaths(
 	if err := WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.pubkeys); err != nil {
 		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
 	}
-	mlog.Log.Infof("wrote %d stake pubkeys to index", len(stakeCollector.pubkeys))
+	mlog.Log.Infof("Wrote %d stake pubkeys to index", len(stakeCollector.pubkeys))
 
 	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
@@ -364,7 +364,7 @@ func readTar(
 
 	for {
 		if ctx.Err() != nil {
-			mlog.Log.Infof("context cancelled, stopping snapshot unpack: %v", ctx.Err())
+			mlog.Log.Infof("Context cancelled, stopping snapshot unpack: %v", ctx.Err())
 			cleanupPartial("cancelled")
 			return ctx.Err()
 		}

@@ -1356,11 +1356,12 @@ func runLive(c *cobra.Command, args []string) {
 					if snapshotDownloadPath == "" {
 						klog.Fatalf("cannot rebuild from snapshot: no snapshot directory configured (set storage.snapshots or snapshot.download_path in config)")
 					}
-					mlog.Log.Infof("user chose to rebuild from latest snapshot")
+					mlog.Log.Infof("User chose to rebuild from latest snapshot")
 					if accountsPath != "" {
 						// Record rebuild in history before cleanup (history file is preserved)
 						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
 						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "user chose rebuild (stale AccountsDB)")
+						mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// Check for existing fresh snapshot
