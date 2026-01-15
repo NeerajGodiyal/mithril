@@ -150,7 +150,7 @@ func BuildAccountsDbAuto(
 		}
 		return nil, nil, fmt.Errorf(errMsg)
 	}
-	mlog.Log.Infof("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
+	mlog.Log.Debugf("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
 
 	// Retry loop for incremental snapshot download
 	// If download fails mid-way (not context cancellation), re-discover sources and retry
@@ -170,7 +170,6 @@ func BuildAccountsDbAuto(
 			mlog.Log.Infof("Found new incremental snapshot URL: %s (slot %d)", incrementalSnapshotPath, incrSlot)
 		}
 
-		incrSnapshotStart := time.Now()
 		mlog.Log.Infof("Parsing manifest from %s", incrementalSnapshotPath)
 		incrementalManifestCopy, err := UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
 		if err != nil {
@@ -199,8 +198,6 @@ func BuildAccountsDbAuto(
 
 		err = readTar(ctx, wg, incrementalSnapshotPath, pools.appendVecCopying, readTarOptions{savePath: incrSavePath, isIncremental: true})
 		wg.Wait()
-		mlog.Log.Infof("finished reading %s in %s", incrementalSnapshotPath, fmtDuration(time.Since(start)))
-		mlog.Log.Infof("done processing incremental snapshot in %s.", fmtDuration(time.Since(incrSnapshotStart)))
 		// Check if we should retry
 		if err == nil {
 			break // Success
@@ -224,8 +221,6 @@ func BuildAccountsDbAuto(
 		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
 	}
 
-	mlog.Log.Infof("snapshots processed in %s.", fmtDuration(time.Since(start)))
-
 	var largestFileIdBytes [8]byte
 	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())
 
@@ -248,7 +243,6 @@ func BuildAccountsDbAuto(
 	if err := WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.pubkeys); err != nil {
 		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
 	}
-	mlog.Log.Infof("wrote %d stake pubkeys to index", len(stakeCollector.pubkeys))
 
 	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())
@@ -265,11 +259,11 @@ func BuildAccountsDbAuto(
 	_, incrSlot = snapshotdl.ExtractIncrementalSnapshotSlots(incrementalSnapshotPath)
 
 	if err != nil || latestSlot == 0 {
-		mlog.Log.Infof("node currently at slot %d (unable to fetch chain tip)", incrSlot)
+		mlog.Log.Infof("Node currently at slot %d (unable to fetch chain tip)", incrSlot)
 	} else if latestSlot > uint64(incrSlot) {
-		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d (%d slots behind)", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
+		mlog.Log.Infof("Node currently at slot %d, chain tip at slot %d (%d slots behind)", incrSlot, latestSlot, latestSlot-uint64(incrSlot))
 	} else {
-		mlog.Log.Infof("node currently at slot %d, chain tip at slot %d", incrSlot, latestSlot)
+		mlog.Log.Infof("Node currently at slot %d, chain tip at slot %d", incrSlot, latestSlot)
 	}
 
 	return accountsDb, incrementalManifest, nil

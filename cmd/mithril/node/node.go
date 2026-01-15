@@ -2305,7 +2305,7 @@ func buildFromExistingSnapshot(ctx context.Context, snap *snapshotInfo, snapshot
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
-	mlog.Log.Infof("finished building AccountsDB from existing snapshot")
+	mlog.Log.Infof("Finished building AccountsDB from existing snapshot")
 
 	return accountsDb, manifest, nil
 }
@@ -2339,7 +2339,7 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build AccountsDB from snapshot: %w", err)
 	}
-	mlog.Log.Infof("finished building AccountsDB")
+	mlog.Log.Infof("Finished building AccountsDB")
 
 	return accountsDb, manifest, nil
 }

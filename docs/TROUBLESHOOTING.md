@@ -41,6 +41,6 @@ The snapshot finder automatically tests many nodes and selects the fastest. If d
 
 ## Out of Memory
 
-- Mithril streams snapshots directly to processing without requiring disk space for the full snapshot file
+- By default, Mithril saves snapshots to disk (`max_full_snapshots = 1`). Set `max_full_snapshots = 0` for stream-only mode which doesn't require disk space for snapshot files.
 - Initial sync uses more RAM than steady-state replay
 - Consider increasing swap space for systems with limited RAM

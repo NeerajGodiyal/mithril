@@ -292,7 +292,6 @@ func BuildAccountsDbPaths(
 	if err := WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.pubkeys); err != nil {
 		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
 	}
-	mlog.Log.Infof("Wrote %d stake pubkeys to index", len(stakeCollector.pubkeys))
 
 	accountsDb := &accountsdb.AccountsDb{Index: index, AcctsDir: appendVecsOutputDir}
 	accountsDb.LargestFileId.Store(largestFileId.Load())

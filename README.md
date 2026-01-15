@@ -27,7 +27,7 @@ The `run` command starts Mithril as a live full node - it bootstraps from a Sola
 - Ubuntu 24.04 LTS (recommended)
 
 **CPU**
-- Higher core speed Ryzen series recommended, at least 3.5 GHz base clock
+- Higher clock speed CPUs are recommended such as Zen4 Ryzen CPUs, at least 3.5 GHz base clock
 - The 6-core AMD Ryzen 5 7640HS performs exceptionally well in our testing
 - We haven't extensively tested a wide range of hardware yet - join the `#mithril-hardware` channel on the [Overclock Validator Discord](https://discord.gg/KHAs9ujrN8) to discuss hardware configurations
 
@@ -128,7 +128,7 @@ This creates `config.toml`. **We strongly recommend reviewing [`config.example.t
 
 **Important: RPC Configuration**
 
-The default config uses `api.mainnet-beta.solana.com` as the RPC endpoint, but this public endpoint has rate limits. For reliable operation, add a dedicated RPC provider (Helius, Triton, etc.) as the primary endpoint:
+The default config uses `api.mainnet-beta.solana.com` as the RPC endpoint, but this public endpoint has low rate limits and is not suitable for getting blocks. For reliable operation, add a dedicated RPC provider (Helius, Triton, etc.) as the primary endpoint:
 
 ```toml
 [network]
@@ -211,20 +211,6 @@ Mithril fetches blocks via `getBlock` RPC calls during catchup. For **short-term
 For **extended testing** or if you'd like to help with longer-running nodes, reach out to us on the [Overclock Validator Discord](https://discord.gg/overclock) — we can provide access to our RPC endpoints.
 
 Once direct shred replay is implemented, external RPC sources will no longer be required for block fetching.
-
-### Troubleshooting
-
-**Slow snapshot downloads**
-- The snapshot finder automatically tests many nodes and selects the fastest. If downloads are consistently slow, your network may be the bottleneck, but try increasing stage 2 parameters.
-- Enable `verbose = true` in the `[snapshot]` config section to see detailed node discovery statistics.
-
-**High disk I/O**
-- Ensure AccountsDB is on your fastest NVMe drive
-- Consider using a higher-endurance drive (Samsung 990 Pro or better recommended)
-
-**Out of memory**
-- By default, Mithril saves snapshots to disk (`max_full_snapshots = 1`). Set `max_full_snapshots = 0` for stream-only mode which doesn't require disk space for snapshot files.
-- Initial sync uses more RAM than steady-state replay
 
 ### Updating Mithril
 
