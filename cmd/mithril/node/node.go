@@ -116,7 +116,6 @@ var (
 
 	debugTxs        []string
 	debugAcctWrites []string
-	metricsPath     string
 	cpuprofPath     string
 
 	paramArenaSizeMB         uint64
@@ -159,9 +158,6 @@ func init() {
 	VerifyRange.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	VerifyRange.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
 
-	// [reporting] section flags
-	VerifyRange.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
-
 	// [lightbringer] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
 
@@ -193,14 +189,12 @@ func init() {
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 
 	// [tuning.pprof] section flags
+	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
 	Run.Flags().StringVar(&cpuprofPath, "cpu-profile-path", "", "Filename to write CPU profile")
 
 	// [debug] section flags
 	Run.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	Run.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
-
-	// [reporting] section flags
-	Run.Flags().StringVar(&metricsPath, "metrics-path", "", "Filename to write JSONL records of latencies")
 
 	// Top-level flags
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
@@ -526,9 +520,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
 	}
 
-	// [reporting] section
-	metricsPath = getString("metrics-path", "reporting.metrics_path")
-
 	// Handle external package variables (try tuning.* first, fallback to development.*)
 	if flagChanged("zstd-decoder-concurrency") {
 		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
@@ -662,7 +653,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)
 	if err != nil {
-		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
+		klog.Fatalf("unable to create cpuprof writer to filename=%s: %v", cpuprofPath, err)
 	}
 	defer cpuprofCleanup()
 	if cpuprofWriter != nil {
@@ -857,9 +848,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 	mlog.Log.Infof("will replay startSlot=%d endSlot=%d", startSlot, endSlot)
 	accountsDb.InitCaches()
 
-	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
+	// Write replay timings to accounts directory for verify-range
+	replayTimingsPath := filepath.Join(accountsDbDir, "replay_timings.jsonl")
+	metricsWriter, metricsWriterCleanup, err := createBufWriter(replayTimingsPath)
 	if err != nil {
-		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
+		klog.Fatalf("unable to create replay timings writer: %v", err)
 	}
 	defer metricsWriterCleanup()
 
@@ -1011,8 +1004,8 @@ func runLive(c *cobra.Command, args []string) {
 	}
 
 	// Dir: default to /mnt/mithril-logs, but "" disables file logging
-	if config.IsSet("log.dir") {
-		logCfg.Dir = config.GetString("log.dir")
+	if config.IsSet("storage.logs") {
+		logCfg.Dir = config.GetString("storage.logs")
 	} else {
 		logCfg.Dir = "/mnt/mithril-logs"
 	}
@@ -1101,9 +1094,14 @@ func runLive(c *cobra.Command, args []string) {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
 	}
 
+	// Start pprof HTTP server if configured
+	if pprofPort != -1 {
+		startPprofHandlers(int(pprofPort))
+	}
+
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)
 	if err != nil {
-		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
+		klog.Fatalf("unable to create cpuprof writer to filename=%s: %v", cpuprofPath, err)
 	}
 	defer cpuprofCleanup()
 	if cpuprofWriter != nil {
@@ -1612,9 +1610,11 @@ postBootstrap:
 	liveEndSlot := uint64(math.MaxUint64)
 	accountsDb.InitCaches()
 
-	metricsWriter, metricsWriterCleanup, err := createBufWriter(metricsPath)
+	// Write replay timings to run-specific log directory
+	replayTimingsPath := filepath.Join(mlog.GetLogDir(), "replay_timings.jsonl")
+	metricsWriter, metricsWriterCleanup, err := createBufWriter(replayTimingsPath)
 	if err != nil {
-		klog.Fatalf("unable to create metrics writer to filename=%s: %v", metricsPath, err)
+		klog.Fatalf("unable to create replay timings writer: %v", err)
 	}
 	defer metricsWriterCleanup()
 

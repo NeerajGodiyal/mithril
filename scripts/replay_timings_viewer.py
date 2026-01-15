@@ -19,7 +19,15 @@ def _():
 
     latency_records = []
 
-    with open("../logs/metrics.jsonl") as f:
+    # Path to replay_timings.jsonl - update to point to your run's log directory
+    # Example: /mnt/mithril-logs/20260115-120000Z_abc123_def456/replay_timings.jsonl
+    import sys
+    if len(sys.argv) > 1:
+        timings_path = sys.argv[1]
+    else:
+        timings_path = "/mnt/mithril-logs/latest/replay_timings.jsonl"
+
+    with open(timings_path) as f:
         for l in f:
             record = json.loads(l)
             record["SlotCount"] = len(latency_records)

@@ -2,7 +2,7 @@
 
 Mithril is a Solana full node client written in Golang with the goal of serving as a "verifying full node" with lower hardware requirements than that of Solana validators and RPC nodes. This project is being developed upon the foundations of [Radiance](https://github.com/firedancer-io/radiance), which was built by Richard Patel (@ripatel) with contributions from @leoluk.
 
-This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release in early Q1 2026.
+This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release midway through Q1 2026.
 
 While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the **alpha** branch for the latest stable updates.
 
@@ -81,7 +81,7 @@ The scripts create the following directory structure and automatically set owner
 
 **Step 3: Install build dependencies**
 
-Mithril requires a C compiler for CGO dependencies:
+Mithril requires a C compiler for the zstd compression library:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y build-essential
@@ -282,7 +282,7 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for supported networks and feature gate
 - Achieve multi-epoch runs without bugs (e.g. bankhash mismatches with mainnet)
 - Transaction simulation and transaction sending
 - Earlier testing on testnet environments.
-- **Target**: More substantial release in early Q1 2026 following alpha release in December 2025.
+- **Target**: More polished release midway through Q1 2026.
 
 ### Future Directions
 - Implement Alpenglow consensus verification.

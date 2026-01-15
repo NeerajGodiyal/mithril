@@ -85,6 +85,9 @@ name = "mithril"
     # Snapshots - downloaded on first run (~100GB for full + incremental)
     snapshots = "/mnt/mithril-ledger/snapshots"
 
+    # Logs - runtime output for debugging and monitoring
+    logs = "/mnt/mithril-logs"
+
 # ============================================================================
 # [network] - RPC Endpoints
 # ============================================================================
@@ -213,10 +216,6 @@ name = "mithril"
     # Block at which to stop replaying, inclusive (-1 = no limit)
     # end_slot = -1
 
-    # Legacy bootstrap flags (use [bootstrap].mode instead for 'mithril run')
-    # load_from_snapshot = false
-    # load_from_accounts_db = false
-
 # ============================================================================
 # [rpc] - Mithril RPC Server
 # ============================================================================
@@ -255,13 +254,33 @@ name = "mithril"
     use_pool = true
 
     # [tuning.pprof] - CPU/Memory Profiling
+    #
+    # Usage (assuming port = 6060):
+    #
+    #   View in browser:
+    #     http://localhost:6060/debug/pprof/
+    #
+    #   CPU profile (30 sec sample, opens interactive terminal):
+    #     go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+    #
+    #   Heap profile (current memory usage):
+    #     go tool pprof http://localhost:6060/debug/pprof/heap
+    #
+    #   Alloc profile (total allocations since start):
+    #     go tool pprof http://localhost:6060/debug/pprof/allocs
+    #
+    #   View goroutines in terminal:
+    #     curl http://localhost:6060/debug/pprof/goroutine?debug=1
+    #
+    #   View all goroutines with full stack traces:
+    #     curl http://localhost:6060/debug/pprof/goroutine?debug=2
+    #
     [tuning.pprof]
         # Port to serve HTTP pprof endpoint (-1 to disable)
-        # Access at http://localhost:PORT/debug/pprof/
         # port = 6060
 
-        # Filename to write CPU profile (for offline analysis)
-        # cpu_profile_path = "/tmp/cpuprof.pprof"
+        # Filename to write CPU profile (for offline analysis with go tool pprof)
+        # cpu_profile_path = "/mnt/mithril-data/profiling/cpu.pprof"
 
 # ============================================================================
 # [debug] - Debug Logging
@@ -281,8 +300,8 @@ name = "mithril"
 # ============================================================================
 
 [reporting]
-    # Filename to write JSONL records of latencies
-    # metrics_path = "/tmp/metrics.jsonl"
+    # Replay timings (JSONL latency records per block) are automatically written
+    # to replay_timings.jsonl in each run's log directory.
 
 # ============================================================================
 # [snapshot] - Snapshot Download Settings
@@ -422,9 +441,7 @@ name = "mithril"
 # Each run creates a new log file with timestamp and run ID.
 
 [log]
-    # Directory for log files (created if missing)
-    # Set to "" to disable file logging (stdout only)
-    dir = "/mnt/mithril-logs"
+    # Log directory is set in [storage].logs above
 
     # Log level: "debug" | "info" | "warn" | "error"
     level = "info"
@@ -436,7 +453,7 @@ name = "mithril"
     max_size_mb = 100
 
     # Delete log files older than this many days (0 = never delete)
-    max_age_days = 7
+    max_age_days = 30
 
     # Maximum number of old log files to keep (0 = unlimited)
-    max_backups = 10
+    max_backups = 100

@@ -2,14 +2,10 @@
 *.log
 
 # Build artifacts
-_bin
-/radiance
 /mithril
 /blockdl
-/cmd/radiance/radiance
 /cmd/mithril/mithril
 /cmd/testzst/testzst
-/vendor
 
 # Data
 *.car
@@ -19,13 +15,6 @@ LOCK
 CURRENT
 MANIFEST-*
 OPTIONS-*
-
-# Nix
-/result
-
-# deps.sh
-opt/
-deps-bundle.tar.zst
 
 # firedancer's test-conformance corpus
 conformance/test-vectors

@@ -8,21 +8,13 @@
 
 ## Release Matrix
 
-| Mithril | Date | Agave baseline | Gate set | Mainnet | Testnet | Notes |
-|---------|------|----------------|----------|---------|---------|-------|
-| v0.1.0-alpha.1 | TBD | 3.0.x | mainnet-alpha-TBD | supported | not supported | first public alpha |
+| Mithril | Date | Agave baseline | Firedancer baseline | Mainnet | Testnet | Notes |
+|---------|------|----------------|---------------------|---------|---------|-------|
+| v0.1.0-alpha.1 | 2026-01-15 | v3.0.14 | v0.808.30014 | supported | not supported | first public alpha |
 
-## Gate Set: mainnet-alpha-TBD
+## Feature Gates
 
-Expected to match Solana mainnet feature gate state at release time.
-
-| Gate name | Feature pubkey | Expected state | Required | Notes |
-|-----------|----------------|----------------|----------|-------|
-| TBD | TBD | TBD | TBD | Fill in before release |
-
-## Network State Snapshot
-
-- mainnet: slot TBD, rpc TBD
+Feature gate compatibility will be documented in future releases.
 
 ## Divergences
 
