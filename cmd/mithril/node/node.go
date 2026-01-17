@@ -185,6 +185,7 @@ func init() {
 	Run.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
 	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -539,6 +540,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		sbpf.UsePool = config.GetBool("tuning.use_pool")
 	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
+	}
+	if flagChanged("store-accounts-workers") {
+		accountsdb.StoreAccountsWorkers = config.GetInt("store-accounts-workers")
+	} else if config.IsSet("tuning.store_accounts_workers") {
+		accountsdb.StoreAccountsWorkers = config.GetInt("tuning.store_accounts_workers")
 	}
 
 	return nil

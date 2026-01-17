@@ -1,7 +1,9 @@
 package accountsdb
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
 	"github.com/maypok86/otter"
+	"golang.org/x/sync/errgroup"
 )
 
 type AccountsDb struct {
@@ -38,6 +41,8 @@ func (silentLogger) Fatalf(format string, args ...interface{}) { log.Fatalf(form
 
 var (
 	ErrNoAccount = errors.New("ErrNoAccount")
+
+	StoreAccountsWorkers = 128
 )
 
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
@@ -213,7 +218,11 @@ func (accountsDb *AccountsDb) StoreAccounts(accts []*accounts.Account, slot uint
 		acct.Slot = slot
 	}
 
-	accountsDb.storeAccountsInternal(accts, slot)
+	if StoreAccountsWorkers == 1 {
+		accountsDb.storeAccountsInternal(accts, slot)
+	} else {
+		accountsDb.parallelStoreAccounts(StoreAccountsWorkers, accts, slot)
+	}
 
 	for _, acct := range accts {
 		if acct == nil {
@@ -322,6 +331,144 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 	// write the appendvecs data into the file
 	_, err = appendVecFile.Write(appendVecAcctsBuf.Bytes())
 	if err != nil {
+		panic(err)
+	}
+}
+
+// parallelStoreAccounts makes n workers which process a list of
+// accounts in parallel. One worker receives accounts to add to a new
+// appendvec file. The remaining workers do the following:
+// for each account they receive:
+// 1. Check the existing accounts length
+// 2. If the length of the new account data is the same, overwrite the existing account
+// 3. Otherwise, pass it on to be added to a new appendvec.
+func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Account, slot uint64) {
+	if n < 2 {
+		panic(fmt.Sprintf("AccountsDb.parallelStoreAccounts: n=%d must be >= 2", n))
+	}
+
+	acctsChan := make(chan *accounts.Account, len(accts))
+	for i := range len(accts) {
+		if accts[i] == nil {
+			continue
+		}
+		acctsChan <- accts[i]
+	}
+	close(acctsChan)
+
+	// Assumes that none of the accounts overlap in the same appendvec file.
+	lengthChangedAccounts := make(chan *accounts.Account)
+	overwriteOrPassGroup, ctx := errgroup.WithContext(context.Background())
+	for range n - 1 {
+		overwriteOrPassGroup.Go(func() error {
+			for acct := range acctsChan {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				err := func(a *accounts.Account) error {
+					existingacctIdxEntryBuf, c, err := accountsDb.Index.Get(a.Key[:])
+					if errors.Is(err, pebble.ErrNotFound) {
+						lengthChangedAccounts <- a
+						return nil
+					}
+					if err != nil {
+						return fmt.Errorf("reading from index: %w", err)
+					}
+					existingIdxEntry, err := unmarshalAcctIdxEntry(existingacctIdxEntryBuf)
+					c.Close()
+					if err != nil {
+						return fmt.Errorf("unmarshaling index entry: %w", err)
+					}
+
+					existingAppendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, existingIdxEntry.Slot, existingIdxEntry.FileId)
+					existingAppendVecFile, err := os.OpenFile(existingAppendVecFileName, os.O_RDWR, 0666)
+					if err != nil {
+						return fmt.Errorf("open %s: %w", existingAppendVecFileName, err)
+					}
+					defer existingAppendVecFile.Close()
+
+					existingDataLen, err := GetAppendVecDataLen(existingAppendVecFile, existingIdxEntry.Offset)
+					if err != nil {
+						return fmt.Errorf("GetAppendVecDataLen %s: %w", existingAppendVecFileName, err)
+					}
+
+					if uint64(len(a.Data)) != existingDataLen {
+						lengthChangedAccounts <- a
+						return nil
+					}
+
+					_, err = existingAppendVecFile.Seek(int64(existingIdxEntry.Offset), 0)
+					if err != nil {
+						return fmt.Errorf("seek %s %d: %w", existingAppendVecFileName, existingIdxEntry.Offset, err)
+					}
+					newAppendVecAcct := AppendVecAccount{
+						DataLen:    uint64(len(a.Data)),
+						Pubkey:     a.Key,
+						Lamports:   a.Lamports,
+						RentEpoch:  a.RentEpoch,
+						Owner:      a.Owner,
+						Executable: a.Executable,
+						Data:       a.Data,
+					}
+					err = newAppendVecAcct.Marshal(existingAppendVecFile)
+					if err != nil {
+						return fmt.Errorf("marshaling appendvec: %w", err)
+					}
+					return nil
+				}(acct)
+				if err != nil {
+					return fmt.Errorf("reading account key=%s: %w", acct.Key.String(), err)
+				}
+			}
+			return nil
+		})
+	}
+	newAppendVecGroup := errgroup.Group{}
+	newAppendVecGroup.Go(func() error {
+		fileId := accountsDb.LargestFileId.Add(1)
+		appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
+		appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			return err
+		}
+		defer appendVecFile.Close()
+		appendVecWriter := bufio.NewWriter(appendVecFile)
+		defer appendVecWriter.Flush()
+
+		appendVecFileOffset := uint64(0)
+		var acctIdxEntryBuf [24]byte
+
+		for acct := range lengthChangedAccounts {
+			indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: appendVecFileOffset}
+			indexEntry.Marshal(&acctIdxEntryBuf)
+			err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:], &pebble.WriteOptions{})
+			if err != nil {
+				return fmt.Errorf("unable to add acct for %s to acctsdb: %v", acct.Key, err)
+			}
+
+			appendVecAcct := AppendVecAccount{
+				DataLen:    uint64(len(acct.Data)),
+				Pubkey:     acct.Key,
+				Lamports:   acct.Lamports,
+				RentEpoch:  acct.RentEpoch,
+				Owner:      acct.Owner,
+				Executable: acct.Executable,
+				Data:       acct.Data,
+			}
+			l, err := appendVecAcct.MarshalReturningLength(appendVecWriter)
+			if err != nil {
+				return fmt.Errorf("unable to add acct for %s to acctsdb: %v", acct.Key, err)
+			}
+			appendVecFileOffset += uint64(l)
+		}
+
+		return nil
+	})
+
+	e1 := overwriteOrPassGroup.Wait()
+	close(lengthChangedAccounts)
+	e2 := newAppendVecGroup.Wait()
+	if err := errors.Join(e1, e2); err != nil {
 		panic(err)
 	}
 }
