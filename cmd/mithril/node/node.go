@@ -1101,11 +1101,6 @@ func runLive(c *cobra.Command, args []string) {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
 	}
 
-	// Start pprof HTTP server if configured
-	if pprofPort != -1 {
-		startPprofHandlers(int(pprofPort))
-	}
-
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)
 	if err != nil {
 		klog.Fatalf("unable to create cpuprof writer to filename=%s: %v", cpuprofPath, err)
