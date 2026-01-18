@@ -253,6 +253,9 @@ name = "mithril"
     # Enable/disable pool allocator for slices
     use_pool = true
 
+    # Number of goroutines to store modified accounts at the end of each block
+    store_accounts_workers = 128
+
     # [tuning.pprof] - CPU/Memory Profiling
     #
     # Usage (assuming port = 6060):
