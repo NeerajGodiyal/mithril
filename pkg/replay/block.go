@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/trace"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -676,9 +677,9 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 //
 // For stake accounts, we read ALL delegation fields from AccountsDB rather than trusting
 // the manifest's delegation list (which can be stale/incomplete per Firedancer). The flow:
-//   1. Load stake pubkeys from stake_pubkeys.idx (built during snapshot processing)
-//   2. For each pubkey, read the full stake state from AccountsDB
-//   3. Extract delegation fields (VoterPubkey, StakeLamports, epochs, etc.) from AccountsDB
+//  1. Load stake pubkeys from stake_pubkeys.idx (built during snapshot processing)
+//  2. For each pubkey, read the full stake state from AccountsDB
+//  3. Extract delegation fields (VoterPubkey, StakeLamports, epochs, etc.) from AccountsDB
 //
 // This ensures the stake cache reflects the actual on-chain state, not potentially outdated
 // manifest data. Fatal error if index file is missing - indicates corrupt/incomplete AccountsDB.
@@ -1982,6 +1983,11 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 }
 
 func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism int, dbgOpts *DebugOptions) (*sealevel.SlotCtx, error) {
+	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
+	defer task.End()
+	trace.Log(ctx, "slot", fmt.Sprintf("%d", block.Slot))
+	trace.Log(ctx, "txCount", fmt.Sprintf("%d", len(block.Transactions)))
+
 	if SerializedParameterArena != nil {
 		SerializedParameterArena.Reset()
 	}
@@ -2003,21 +2009,26 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	}
 
 	start = time.Now()
+	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
 	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
+	slotCtx.TraceCtx = ctx
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 
+	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
 	if txParallelism > 0 {
 		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
 		txFeeAccumulator = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
 	}
+	txLoopRegion.End()
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 
 	start = time.Now()
@@ -2065,7 +2076,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	commitInProgress.Store(true)
 
 	if len(modifiedAccts) > 0 {
+		storeAcctsRegion := trace.StartRegion(ctx, "StoreAccounts")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
+		storeAcctsRegion.End()
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 

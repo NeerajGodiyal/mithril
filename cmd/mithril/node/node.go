@@ -19,8 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "net/http/pprof"
-
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
@@ -134,7 +132,7 @@ func init() {
 	VerifyRange.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 
 	// [ledger] section flags
-	VerifyRange.Flags().StringVarP(&snapshotArchivePath, "snapshot-archive-path", "p", "", "Path of full snapshot or AccountsDB to load from")
+	VerifyRange.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Filename containing full snapshot")
 	VerifyRange.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Filename containing incremental snapshot")
 	VerifyRange.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
 	VerifyRange.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
@@ -187,6 +185,7 @@ func init() {
 	Run.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
 	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
+	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -542,6 +541,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	} else if config.IsSet("development.use_pool") {
 		sbpf.UsePool = config.GetBool("development.use_pool")
 	}
+	if flagChanged("store-accounts-workers") {
+		accountsdb.StoreAccountsWorkers = config.GetInt("store-accounts-workers")
+	} else if config.IsSet("tuning.store_accounts_workers") {
+		accountsdb.StoreAccountsWorkers = config.GetInt("tuning.store_accounts_workers")
+	}
 
 	return nil
 }
@@ -667,7 +671,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	if loadFromSnapshot {
 		if snapshotArchivePath == "" || accountsPath == "" {
-			klog.Fatalf("must specify snapshot path and directory path for writing generated AccountsDB")
+			klog.Fatalf("must specify snapshot path (was \"%s\") and directory path for writing generated AccountsDB (was \"%s\")", snapshotArchivePath, accountsPath)
 		}
 
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
@@ -683,11 +687,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		accountsDbDir = accountsPath
 	} else if loadFromAccountsDb {
-		if snapshotArchivePath == "" {
+		if accountsPath == "" {
 			klog.Fatalf("must specify an AccountsDB directory path to load from")
 		}
 
-		accountsDbDir = snapshotArchivePath
+		accountsDbDir = accountsPath
 	} else if snapshotDlPath != "" {
 		if accountsPath == "" {
 			klog.Fatalf("must specify a path to download a snapshot to")
@@ -985,6 +989,9 @@ func runVerifyRange(c *cobra.Command, args []string) {
 }
 
 func runLive(c *cobra.Command, args []string) {
+	if pprofPort != -1 {
+		startPprofHandlers(int(pprofPort))
+	}
 	ctx := c.Context()
 
 	// Print the Mithril banner first, before any other output
@@ -1092,11 +1099,6 @@ func runLive(c *cobra.Command, args []string) {
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
 	if err != nil {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
-	}
-
-	// Start pprof HTTP server if configured
-	if pprofPort != -1 {
-		startPprofHandlers(int(pprofPort))
 	}
 
 	cpuprofWriter, cpuprofCleanup, err := createBufWriter(cpuprofPath)

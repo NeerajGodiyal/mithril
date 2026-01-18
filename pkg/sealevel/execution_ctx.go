@@ -1,6 +1,7 @@
 package sealevel
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -64,6 +65,8 @@ type SlotCtx struct {
 	LatestEvictedBlockhash [32]byte
 
 	SerializedParameterArena *arena.Arena[byte]
+
+	TraceCtx context.Context
 }
 
 func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana.PublicKey) ([]InstructionAccount, []uint64, error) {

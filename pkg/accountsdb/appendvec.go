@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/util"
@@ -89,6 +90,18 @@ func (parser *appendVecParser) ParseNextAcctWithOwner(pk *solana.PublicKey, a *A
 	return nil
 }
 
+// GetAppendVecDataLen reads only the bytes necessary to determine the length
+// of the append vec. Should be kept in sync with
+// (*AppendVecAccount).Unmarshal.
+func GetAppendVecDataLen(f *os.File, offset uint64) (uint64, error) {
+	var hdrBytes [8]byte
+	_, err := f.ReadAt(hdrBytes[:], int64(offset+8))
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(hdrBytes[:]), nil
+}
+
 func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {
 	var err error
 	var hdrBytes [hdrLen]byte
@@ -116,6 +129,12 @@ func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {
 var padding [2048]byte
 
 func (acct *AppendVecAccount) Marshal(buf io.Writer) error {
+	_, err := acct.MarshalReturningLength(buf)
+	return err
+}
+
+func (acct *AppendVecAccount) MarshalReturningLength(buf io.Writer) (int, error) {
+	l := 0
 	var err error
 	var hdrBytes [hdrLen]byte
 
@@ -135,25 +154,28 @@ func (acct *AppendVecAccount) Marshal(buf io.Writer) error {
 	copy(hdrBytes[97:104], acct.Padding[:])
 	copy(hdrBytes[104:136], acct.Hash[:])
 
-	_, err = buf.Write(hdrBytes[:])
+	n, err := buf.Write(hdrBytes[:])
+	l += n
 	if err != nil {
-		return err
+		return l, err
 	}
 
-	_, err = buf.Write(acct.Data)
+	n, err = buf.Write(acct.Data)
+	l += n
 	if err != nil {
-		return err
+		return l, err
 	}
 
 	numPaddingBytes := util.AlignUp(acct.DataLen, 8) - acct.DataLen
-	n, err := buf.Write(padding[:numPaddingBytes])
+	n, err = buf.Write(padding[:numPaddingBytes])
+	l += n
 	if err != nil {
-		return err
+		return l, err
 	} else if n != int(numPaddingBytes) {
-		return fmt.Errorf("number of padding bytes written was %d rather than %d", n, numPaddingBytes)
+		return l, fmt.Errorf("number of padding bytes written was %d rather than %d", n, numPaddingBytes)
 	}
 
-	return nil
+	return l, nil
 }
 
 func (appendVecAcct *AppendVecAccount) ToAccount() *accounts.Account {
