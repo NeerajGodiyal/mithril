@@ -132,7 +132,7 @@ func init() {
 	VerifyRange.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 
 	// [ledger] section flags
-	VerifyRange.Flags().StringVarP(&snapshotArchivePath, "snapshot-archive-path", "p", "", "Path of full snapshot or AccountsDB to load from")
+	VerifyRange.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Filename containing full snapshot")
 	VerifyRange.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Filename containing incremental snapshot")
 	VerifyRange.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
 	VerifyRange.Flags().StringVar(&blockstorePath, "ledger-path", "/tmp/blocks", "Path containing slot.json files")
@@ -671,7 +671,7 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 	if loadFromSnapshot {
 		if snapshotArchivePath == "" || accountsPath == "" {
-			klog.Fatalf("must specify snapshot path and directory path for writing generated AccountsDB")
+			klog.Fatalf("must specify snapshot path (was \"%s\") and directory path for writing generated AccountsDB (was \"%s\")", snapshotArchivePath, accountsPath)
 		}
 
 		mlog.Log.Infof("building AccountsDB from snapshot at %s\n", snapshotArchivePath)
@@ -687,11 +687,11 @@ func runVerifyRange(c *cobra.Command, args []string) {
 
 		accountsDbDir = accountsPath
 	} else if loadFromAccountsDb {
-		if snapshotArchivePath == "" {
+		if accountsPath == "" {
 			klog.Fatalf("must specify an AccountsDB directory path to load from")
 		}
 
-		accountsDbDir = snapshotArchivePath
+		accountsDbDir = accountsPath
 	} else if snapshotDlPath != "" {
 		if accountsPath == "" {
 			klog.Fatalf("must specify a path to download a snapshot to")
