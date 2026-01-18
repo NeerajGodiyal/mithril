@@ -2076,12 +2076,9 @@ func ProcessBlock(acctsDb *accountsdb.AccountsDb, block *b.Block, txParallelism 
 	commitInProgress.Store(true)
 
 	if len(modifiedAccts) > 0 {
-		start = time.Now()
 		storeAcctsRegion := trace.StartRegion(ctx, "StoreAccounts")
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot)
 		storeAcctsRegion.End()
-		storeAccountsDur := time.Since(start)
-		mlog.Log.Infof("StoreAccountsWorkers=%d dur=%s", accountsdb.StoreAccountsWorkers, storeAccountsDur)
 	}
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
