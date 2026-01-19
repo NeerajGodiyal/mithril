@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"fmt"
 	"runtime/trace"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -92,7 +93,7 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 	// Load first block
 	block, acctsMap, err := p.loadBlockAccountsFromDB(ctx)
 	if err != nil {
-		p.prefetch <- prefetchResult{nil, nil, err}
+		p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: loading initial block: %w", err)}
 		return
 	}
 
@@ -100,6 +101,7 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 
 	for block != nil {
 		if ctx.Err() != nil {
+			mlog.Log.Errorf("prefetcher exiting: %v", ctx.Err())
 			return
 		}
 
@@ -125,7 +127,7 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 		if prefetch {
 			nextAcctsMap, err = loadBlockAccounts(ctx, p.acctsDb, nextBlock)
 			if err != nil {
-				p.prefetch <- prefetchResult{nil, nil, err}
+				p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: loading accounts on prefetch path: %w", err)}
 				return
 			}
 
@@ -151,7 +153,7 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 
 			acctsMap, err = loadBlockAccounts(ctx, p.acctsDb, nextBlock)
 			if err != nil {
-				p.prefetch <- prefetchResult{nil, nil, err}
+				p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: loading accounts on slow path: %w", err)}
 				return
 			}
 		} else {

@@ -266,6 +266,10 @@ func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
 		pubkeyMap[pk] = struct{}{}
 	}
 
+	// Some addresses are not explicitly specified in the block. Add them here so
+	// that the account loader gives us the correct data. We cannot rely on
+	// accountsDb.Get to give us accurate data if using an account loader that
+	// stores last block's modified accounts asynchronously.
 	for _, pk := range updatedSysvarAddrs {
 		pubkeyMap[pk] = struct{}{}
 	}
