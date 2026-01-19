@@ -1914,7 +1914,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	} else {
 		do := make(chan int, len(block.Transactions))
 		done := make(chan int, len(block.Transactions))
-		go TopsortPlannerStream(block, do, done)
+		go TopsortPlannerStream(rblock, do, done)
 
 		wg := &sync.WaitGroup{}
 		wg.Add(txParallelism)
