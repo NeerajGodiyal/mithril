@@ -64,6 +64,8 @@ type BlockFetchOpts struct {
 
 var SerializedParameterArena *arena.Arena[byte]
 
+var UseAccountPrefetcher = false
+
 // Commit state tracking for panic recovery
 // commitInProgress is set true during the critical window between StoreAccounts and StoreBankHashForSlot.
 // If a panic occurs while this is true, AccountsDB may be corrupted (partial writes).
@@ -264,6 +266,10 @@ func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
 		pubkeyMap[pk] = struct{}{}
 	}
 
+	for _, pk := range updatedSysvarAddrs {
+		pubkeyMap[pk] = struct{}{}
+	}
+
 	pubkeys := make([]solana.PublicKey, len(pubkeyMap))
 	i := 0
 	for pk := range pubkeyMap {
@@ -348,21 +354,33 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-// load sysvar accounts and assign them to the sysvar cache
-func loadAndUpdateSysvars(
-	accountsDb *accountsdb.AccountsDb,
+// The list of sysvars processed in updateAndCacheSysvars. We need to always
+// prefetch these accounts, since reading from AccountsDB could result in
+// stale data if the prefetcher hasn't stored them yet.
+var updatedSysvarAddrs = []solana.PublicKey{
+	sealevel.SysvarClockAddr,
+	sealevel.SysvarSlotHashesAddr,
+	sealevel.SysvarRecentBlockHashesAddr,
+	sealevel.SysvarSlotHistoryAddr,
+	sealevel.SysvarStakeHistoryAddr,
+	sealevel.SysvarLastRestartSlotAddr,
+}
+
+// update sysvar accounts and assign them to the sysvar cache
+func updateAndCacheSysvars(
+	loadedAccts map[solana.PublicKey]*accounts.Account,
 	block *b.Block,
 	accts accounts.Accounts,
 	parentAccts accounts.Accounts,
 ) {
 	// update and cache clock sysvar
 	{
-		clockAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
-		if err != nil {
+		clockAcct, loaded := loadedAccts[sealevel.SysvarClockAddr]
+		if !loaded {
 			panic("unable to retrieve clock sysvar when updating clock")
 		}
 
-		err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct.Clone())
+		err := parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct.Clone())
 		if err != nil {
 			panic("unable to set clock sysvar to accts")
 		}
@@ -393,8 +411,8 @@ func loadAndUpdateSysvars(
 
 	// update and cache SlotHashes sysvar
 	{
-		slotHashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHashesAddr)
-		if err != nil {
+		slotHashesAcct, loaded := loadedAccts[sealevel.SysvarSlotHashesAddr]
+		if !loaded {
 			panic("unable to retrieve slothashes sysvar from acctsdb")
 		}
 
@@ -403,7 +421,7 @@ func loadAndUpdateSysvars(
 		if sealevel.SysvarCache.SlotHashes.Sysvar == nil {
 			// Fresh start (first slot): unmarshal from AccountsDB
 			decoder := bin.NewBinDecoder(slotHashesAcct.Data)
-			err = slotHashes.UnmarshalWithDecoder(decoder)
+			err := slotHashes.UnmarshalWithDecoder(decoder)
 			if err != nil {
 				panic("unable to unmarshal slothashes sysvar")
 			}
@@ -423,7 +441,7 @@ func loadAndUpdateSysvars(
 		}
 
 		// Set parentAccts BEFORE updating slotHashes to ensure LtHash delta is computed correctly
-		err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct.Clone())
+		err := parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHashesAddr, slotHashesAcct.Clone())
 		if err != nil {
 			panic("unable to set slothashes sysvar to accountsdb")
 		}
@@ -443,8 +461,8 @@ func loadAndUpdateSysvars(
 
 	// cache RecentBlockhashes sysvar
 	{
-		recentBlockhashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarRecentBlockHashesAddr)
-		if err != nil {
+		recentBlockhashesAcct, loaded := loadedAccts[sealevel.SysvarRecentBlockHashesAddr]
+		if !loaded {
 			panic("unable to get recentblockhashes")
 		}
 
@@ -477,7 +495,7 @@ func loadAndUpdateSysvars(
 		}
 
 		// Set parentAccts AFTER potential data correction to ensure LtHash delta is computed correctly
-		err = parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct.Clone())
+		err := parentAccts.SetAccountWithoutLock(sealevel.SysvarRecentBlockHashesAddr, recentBlockhashesAcct.Clone())
 		if err != nil {
 			panic("unable to set recentblockhashes sysvar to accts")
 		}
@@ -490,12 +508,12 @@ func loadAndUpdateSysvars(
 
 	// cache SlotHistory sysvar
 	{
-		slotHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHistoryAddr)
-		if err != nil {
+		slotHistoryAcct, loaded := loadedAccts[sealevel.SysvarSlotHistoryAddr]
+		if !loaded {
 			panic("unable to get slothistory")
 		}
 
-		err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct.Clone())
+		err := parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct.Clone())
 		if err != nil {
 			panic("unable to set slothistory sysvar to accts")
 		}
@@ -514,8 +532,8 @@ func loadAndUpdateSysvars(
 
 	// cache StakeHistory sysvar
 	{
-		stakeHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarStakeHistoryAddr)
-		if err != nil {
+		stakeHistoryAcct, loaded := loadedAccts[sealevel.SysvarStakeHistoryAddr]
+		if !loaded {
 			panic("unable to get stakehistory")
 		}
 
@@ -524,7 +542,7 @@ func loadAndUpdateSysvars(
 			for _, a := range block.ParentEpochUpdatedAccts {
 				if a != nil {
 					if a.Key == sealevel.SysvarStakeHistoryAddr {
-						err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, a.Clone())
+						err := parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, a.Clone())
 						if err != nil {
 							panic("unable to set stakehistory sysvar to accts")
 						}
@@ -535,7 +553,7 @@ func loadAndUpdateSysvars(
 		}
 
 		if !setStakeHistoryParent {
-			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct.Clone())
+			err := parentAccts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct.Clone())
 			if err != nil {
 				panic("unable to set stakehistory sysvar to accts")
 			}
@@ -547,7 +565,7 @@ func loadAndUpdateSysvars(
 		sealevel.SysvarCache.StakeHistory.Sysvar = &stakeHistory
 		sealevel.SysvarCache.StakeHistory.Acct = stakeHistoryAcct
 
-		err = accts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
+		err := accts.SetAccountWithoutLock(sealevel.SysvarStakeHistoryAddr, stakeHistoryAcct)
 		if err != nil {
 			panic("unable to set stakehistory sysvar to accts")
 		}
@@ -555,12 +573,12 @@ func loadAndUpdateSysvars(
 
 	// cache LastRestartSlot sysvar
 	{
-		lastRestartSlotAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarLastRestartSlotAddr)
-		if err != nil {
+		lastRestartSlotAcct, loaded := loadedAccts[sealevel.SysvarLastRestartSlotAddr]
+		if !loaded {
 			panic("unable to get last restart slot sysvar acct")
 		}
 
-		err = parentAccts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct.Clone())
+		err := parentAccts.SetAccountWithoutLock(sealevel.SysvarLastRestartSlotAddr, lastRestartSlotAcct.Clone())
 		if err != nil {
 			panic("unable to set last restart slot sysvar to accts")
 		}
@@ -1178,7 +1196,14 @@ func ReplayBlocks(
 	}
 	go blockStream.Start()
 
-	loader := &sequentialAccountLoader{acctsDb, blockStream}
+	var loader accountLoader
+	if UseAccountPrefetcher {
+		mlog.Log.Infof("Using account prefetcher")
+		loader = newAccountPrefetcher(ctx, acctsDb, blockStream)
+	} else {
+		mlog.Log.Infof("Using sequential account loader")
+		loader = &sequentialAccountLoader{acctsDb, blockStream}
+	}
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
@@ -1245,6 +1270,8 @@ func ReplayBlocks(
 			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)",
 				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 			skippedSlotsCount++
+			// Maintain invariant: every NextBlock is followed by exactly one StoreAccounts
+			loader.StoreAccounts(nil, block.Slot)
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -1943,7 +1970,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 }
 
 func prepareAccountsAndSysvars(
-	accountsDb *accountsdb.AccountsDb,
 	block *b.Block,
 	loadedAccts map[solana.PublicKey]*accounts.Account,
 ) (accounts.Accounts, accounts.Accounts) {
@@ -1968,8 +1994,7 @@ func prepareAccountsAndSysvars(
 		block.FeeRateGovernor.PrevLamportsPerSignature = block.InitialPreviousLamportsPerSignature
 	}
 
-	// load sysvar accounts and assign them to the sysvar cache
-	loadAndUpdateSysvars(accountsDb, block, accts, parentAccts)
+	updateAndCacheSysvars(loadedAccts, block, accts, parentAccts)
 
 	for idx, acct := range block.EpochUpdatedAccts {
 		if acct == nil {
@@ -2026,7 +2051,7 @@ func ProcessBlock(
 
 	start = time.Now()
 	loadAcctsRegion := trace.StartRegion(ctx, "PrepareAccounts")
-	accts, parentAccts := prepareAccountsAndSysvars(acctsDb, block, loadedAccts)
+	accts, parentAccts := prepareAccountsAndSysvars(block, loadedAccts)
 	loadAcctsRegion.End()
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
@@ -2088,14 +2113,12 @@ func ProcessBlock(
 	commitSlot.Store(slotCtx.Slot)
 	commitInProgress.Store(true)
 
-	if len(modifiedAccts) > 0 {
-		storeAcctsRegion := trace.StartRegion(ctx, "StoreAccounts")
-		err := loader.StoreAccounts(modifiedAccts, slotCtx.Slot)
-		if err != nil {
-			return nil, err
-		}
-		storeAcctsRegion.End()
+	storeAcctsRegion := trace.StartRegion(ctx, "StoreAccounts")
+	err := loader.StoreAccounts(modifiedAccts, slotCtx.Slot)
+	if err != nil {
+		return nil, err
 	}
+	storeAcctsRegion.End()
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
 	// EAH workaround - see comment at top of replay loop for details
@@ -2106,7 +2129,7 @@ func ProcessBlock(
 		return slotCtx, nil
 	}
 
-	err := acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
+	err = acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
 	if err != nil {
 		mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
 	}
