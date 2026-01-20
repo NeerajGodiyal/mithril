@@ -1026,6 +1026,29 @@ func buildInitialEpochStakesCache(snapshotManifest *snapshot.SnapshotManifest, p
 	}
 }
 
+type persistedTracker struct {
+	mu       sync.Mutex
+	slot     uint64
+	bankhash []byte
+}
+
+func (t *persistedTracker) Set(slot uint64, hash []byte) {
+	t.mu.Lock()
+	t.slot = slot
+	t.bankhash = make([]byte, len(hash))
+	copy(t.bankhash, hash)
+	t.mu.Unlock()
+}
+
+func (t *persistedTracker) Get() (uint64, []byte) {
+	t.mu.Lock()
+	slot := t.slot
+	out := make([]byte, len(t.bankhash))
+	copy(out, t.bankhash)
+	t.mu.Unlock()
+	return slot, out
+}
+
 func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
@@ -1063,8 +1086,7 @@ func ReplayBlocks(
 	}
 
 	// Track last successfully persisted slot for checkpoint/resume
-	var lastPersistedSlot uint64
-	var lastPersistedBankhash []byte
+	pt := &persistedTracker{}
 
 	// RPC client - for all cluster access (blocks, leader schedule, tip polling)
 	// First endpoint is primary, rest are backups for failover
@@ -1275,7 +1297,7 @@ func ReplayBlocks(
 				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 			skippedSlotsCount++
 			// Maintain invariant: every NextBlock is followed by exactly one StoreAccounts
-			loader.StoreAccounts(nil, block.Slot)
+			loader.StoreAccounts(nil, block.Slot, func() {})
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -1399,7 +1421,7 @@ func ReplayBlocks(
 		*/
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(loader, acctsDb, block, loadedAccts, txParallelism, dbgOpts)
+		lastSlotCtx, err = ProcessBlock(loader, acctsDb, block, loadedAccts, txParallelism, dbgOpts, pt)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -1409,10 +1431,6 @@ func ReplayBlocks(
 		}
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
-
-		// Track last successfully persisted slot for checkpoint/resume
-		lastPersistedSlot = block.Slot
-		lastPersistedBankhash = lastSlotCtx.FinalBankhash
 
 		// Flush any new stake pubkeys discovered during this block to the index file.
 		// This must happen BEFORE we update the state file - crash recovery depends on
@@ -1435,8 +1453,7 @@ func ReplayBlocks(
 			result.WasCancelled = true
 
 			// Populate result immediately for state write
-			result.LastPersistedSlot = lastPersistedSlot
-			result.LastPersistedBankhash = lastPersistedBankhash
+			result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
 
 			// Capture resume context from the last slot context
 			if lastSlotCtx != nil {
@@ -1732,8 +1749,7 @@ func ReplayBlocks(
 		result.Error = fmt.Errorf("block fetch stalled - no progress for %v", blockStream.StallTimeout())
 	}
 
-	result.LastPersistedSlot = lastPersistedSlot
-	result.LastPersistedBankhash = lastPersistedBankhash
+	result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
 
 	// Capture resume context from the last slot context (if available)
 	// This enables proper resume from Ctrl+C shutdown
@@ -2027,6 +2043,9 @@ func ProcessBlock(
 	loadedAccts map[solana.PublicKey]*accounts.Account,
 	txParallelism int,
 	dbgOpts *DebugOptions,
+	// pt is updated after StoreAccounts completes through a callback.
+	// Must be non-nil.
+	pt *persistedTracker,
 ) (*sealevel.SlotCtx, error) {
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -2117,30 +2136,39 @@ func ProcessBlock(
 	commitSlot.Store(slotCtx.Slot)
 	commitInProgress.Store(true)
 
+	start = time.Now()
+	afterStoreAccounts := func() {
+		metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
+		err := acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
+		if err != nil {
+			mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
+		}
+
+		// Track last successfully persisted slot for checkpoint/resume
+		pt.Set(block.Slot, slotCtx.FinalBankhash)
+
+		// Exit critical commit window - AccountsDB is now consistent
+		commitInProgress.Store(false)
+		commitSlot.Store(0)
+	}
+
 	storeAcctsRegion := trace.StartRegion(ctx, "StoreAccounts")
-	err := loader.StoreAccounts(modifiedAccts, slotCtx.Slot)
+	err := loader.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
 	if err != nil {
 		return nil, err
 	}
 	storeAcctsRegion.End()
-	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 
-	// EAH workaround - see comment at top of replay loop for details
-	if slotCtx.HasEahWorkaround {
-		slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
-		commitInProgress.Store(false)
-		commitSlot.Store(0)
-		return slotCtx, nil
-	}
-
-	err = acctsDb.StoreBankHashForSlot(slotCtx.Slot, slotCtx.FinalBankhash)
-	if err != nil {
-		mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
-	}
-
-	// Exit critical commit window - AccountsDB is now consistent
-	commitInProgress.Store(false)
-	commitSlot.Store(0)
+	/*
+		// EAH workaround - see comment at top of replay loop for details.
+		// Commented since it seems to be disabled but preserved for the curious?
+		if slotCtx.HasEahWorkaround {
+			slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
+			commitInProgress.Store(false)
+			commitSlot.Store(0)
+			return slotCtx, nil
+		}
+	*/
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	return slotCtx, err

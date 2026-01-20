@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"io"
 	"runtime/trace"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -26,8 +27,16 @@ type accountLoader interface {
 
 	// StoreAccounts persists the modified accounts to the accounts database.
 	// Must be called exactly once after each NextBlock call.
-	// modifiedAccts may be nil or empty for skipped blocks or blocks with no writes.
-	StoreAccounts(modifiedAccts []*accounts.Account, slot uint64) error
+	// modifiedAccts may be nil or empty for skipped blocks or blocks with no
+	// writes. It accepts an optional callback to run after accounts are written
+	// to disk, since that may happen after the function call returns.
+	StoreAccounts(modifiedAccts []*accounts.Account, slot uint64, afterStoreCallback func()) error
+}
+
+func callIfNonnil(f func()) {
+	if f != nil {
+		f()
+	}
 }
 
 var _ accountLoader = (*sequentialAccountLoader)(nil)
@@ -52,8 +61,13 @@ func (l *sequentialAccountLoader) NextBlock() (*b.Block, map[solana.PublicKey]*a
 	return block, acctsMap, nil
 }
 
-func (l *sequentialAccountLoader) StoreAccounts(modifiedAccts []*accounts.Account, slot uint64) error {
-	return l.acctsDb.StoreAccounts(modifiedAccts, slot)
+func (l *sequentialAccountLoader) StoreAccounts(modifiedAccts []*accounts.Account, slot uint64, afterStoreCallback func()) error {
+	err := l.acctsDb.StoreAccounts(modifiedAccts, slot)
+	if err != nil {
+		return err
+	}
+	callIfNonnil(afterStoreCallback)
+	return nil
 }
 
 var _ accountLoader = (*accountPrefetcher)(nil)
@@ -67,6 +81,7 @@ type prefetchResult struct {
 type storeRequest struct {
 	accts []*accounts.Account
 	slot  uint64
+	cb    func()
 }
 
 // Buffers one block and prefetches accounts for the buffered block.
@@ -90,6 +105,7 @@ func newAccountPrefetcher(ctx context.Context, a *accountsdb.AccountsDb, b *bloc
 }
 
 func (p *accountPrefetcher) worker(ctx context.Context) {
+	defer close(p.prefetch)
 	// Load first block
 	block, acctsMap, err := p.loadBlockAccountsFromDB(ctx)
 	if err != nil {
@@ -101,7 +117,7 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 
 	for block != nil {
 		if ctx.Err() != nil {
-			mlog.Log.Errorf("prefetcher exiting: %v", ctx.Err())
+			p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher exiting: %w", ctx.Err())}
 			return
 		}
 
@@ -111,8 +127,13 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 		// While that block is executing, try to write previous block's stores
 		if prevStore != nil {
 			trace.WithRegion(ctx, "PrefetcherStoreAccounts", func() {
-				p.acctsDb.StoreAccounts(prevStore.accts, prevStore.slot)
+				err = p.acctsDb.StoreAccounts(prevStore.accts, prevStore.slot)
 			})
+			if err != nil {
+				p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: storing accounts: %w", err)}
+				return
+			}
+			callIfNonnil(prevStore.cb)
 			prevStore = nil
 		}
 
@@ -147,8 +168,13 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 
 			mlog.Log.Infof("slow path, prev block wrote my ALT :(")
 			trace.WithRegion(ctx, "PrefetcherStoreAccounts", func() {
-				p.acctsDb.StoreAccounts(s.accts, s.slot)
+				err = p.acctsDb.StoreAccounts(s.accts, s.slot)
 			})
+			if err != nil {
+				p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: storing accounts: %w", err)}
+				return
+			}
+			callIfNonnil(s.cb)
 			prevStore = nil
 
 			acctsMap, err = loadBlockAccounts(ctx, p.acctsDb, nextBlock)
@@ -168,7 +194,12 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 
 	// Write final store
 	if prevStore != nil {
-		p.acctsDb.StoreAccounts(prevStore.accts, prevStore.slot)
+		err := p.acctsDb.StoreAccounts(prevStore.accts, prevStore.slot)
+		if err != nil {
+			p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: %w", err)}
+			return
+		}
+		callIfNonnil(prevStore.cb)
 	}
 
 	// Signal end of stream
@@ -256,11 +287,14 @@ func extractALTKeys(block *b.Block) []solana.PublicKey {
 }
 
 func (p *accountPrefetcher) NextBlock() (*b.Block, map[solana.PublicKey]*accounts.Account, error) {
-	r := <-p.prefetch
+	r, ok := <-p.prefetch
+	if !ok {
+		return nil, nil, io.EOF
+	}
 	return r.blk, r.accts, r.err
 }
 
-func (p *accountPrefetcher) StoreAccounts(modifiedAccounts []*accounts.Account, slot uint64) error {
-	p.store <- storeRequest{modifiedAccounts, slot}
+func (p *accountPrefetcher) StoreAccounts(modifiedAccounts []*accounts.Account, slot uint64, afterStoreCallback func()) error {
+	p.store <- storeRequest{modifiedAccounts, slot, afterStoreCallback}
 	return nil
 }
