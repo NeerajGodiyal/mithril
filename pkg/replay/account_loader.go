@@ -16,9 +16,10 @@ import (
 
 // accountLoader abstracts the loading and storing of accounts for block processing.
 //
-// Invariant: Every call to NextBlock must be followed by exactly one call to
-// StoreAccounts, even for skipped blocks or when there are no modified accounts.
-// This enables pipelined implementations to synchronize correctly.
+// Invariant: Every call to NextBlock must be followed by one call to
+// StoreAccounts in order for NextBlock to be called again, even for skipped
+// blocks or when there are no modified accounts. This enables pipelined
+// implementations to synchronize correctly.
 type accountLoader interface {
 	// NextBlock returns the next block and the accounts it needs for execution.
 	// Returns (nil, nil, nil) when there are no more blocks.
@@ -26,11 +27,14 @@ type accountLoader interface {
 	NextBlock() (*b.Block, map[solana.PublicKey]*accounts.Account, error)
 
 	// StoreAccounts persists the modified accounts to the accounts database.
-	// Must be called exactly once after each NextBlock call.
 	// modifiedAccts may be nil or empty for skipped blocks or blocks with no
 	// writes. It accepts an optional callback to run after accounts are written
 	// to disk, since that may happen after the function call returns.
 	StoreAccounts(modifiedAccts []*accounts.Account, slot uint64, afterStoreCallback func()) error
+
+	// Close waits for any outstanding StoreAccounts calls to finish, then
+	// returns.
+	Close()
 }
 
 func callIfNonnil(f func()) {
@@ -70,6 +74,8 @@ func (l *sequentialAccountLoader) StoreAccounts(modifiedAccts []*accounts.Accoun
 	return nil
 }
 
+func (l *sequentialAccountLoader) Close() {}
+
 var _ accountLoader = (*accountPrefetcher)(nil)
 
 type prefetchResult struct {
@@ -93,21 +99,23 @@ type accountPrefetcher struct {
 	store    chan storeRequest
 }
 
-func newAccountPrefetcher(ctx context.Context, a *accountsdb.AccountsDb, b *blockstream.BlockSource) *accountPrefetcher {
+func newAccountPrefetcher(a *accountsdb.AccountsDb, b *blockstream.BlockSource) *accountPrefetcher {
 	p := &accountPrefetcher{
 		acctsDb:     a,
 		blockSource: b,
 		prefetch:    make(chan prefetchResult),
 		store:       make(chan storeRequest, 1),
 	}
-	go p.worker(ctx)
+	go p.worker()
 	return p
 }
 
-func (p *accountPrefetcher) worker(ctx context.Context) {
+func (p *accountPrefetcher) worker() {
+	// Intentionally not cancellation context aware. Cancellation should be done in outer loops and call Close.
+	ctx := context.Background()
 	defer close(p.prefetch)
 	// Load first block
-	block, acctsMap, err := p.loadBlockAccountsFromDB(ctx)
+	block, acctsMap, err := p.loadBlockAccountsFromDB()
 	if err != nil {
 		p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher: loading initial block: %w", err)}
 		return
@@ -116,11 +124,6 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 	var prevStore *storeRequest
 
 	for block != nil {
-		if ctx.Err() != nil {
-			p.prefetch <- prefetchResult{nil, nil, fmt.Errorf("prefetcher exiting: %w", ctx.Err())}
-			return
-		}
-
 		// Send block for execution
 		p.prefetch <- prefetchResult{block, acctsMap, nil}
 
@@ -152,7 +155,10 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 				return
 			}
 
-			s := <-p.store
+			s, ok := <-p.store
+			if !ok {
+				return
+			}
 
 			// patch prefetched accounts with current block's modifications
 			for _, modifiedAcct := range s.accts {
@@ -164,7 +170,10 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 			prevStore = &s
 			acctsMap = nextAcctsMap
 		} else if nextNeedsAccounts {
-			s := <-p.store
+			s, ok := <-p.store
+			if !ok {
+				return
+			}
 
 			mlog.Log.Infof("slow path, prev block wrote my ALT :(")
 			trace.WithRegion(ctx, "PrefetcherStoreAccounts", func() {
@@ -183,7 +192,10 @@ func (p *accountPrefetcher) worker(ctx context.Context) {
 				return
 			}
 		} else {
-			s := <-p.store
+			s, ok := <-p.store
+			if !ok {
+				return
+			}
 
 			prevStore = &s
 			acctsMap = nil
@@ -240,13 +252,13 @@ func loadBlockAccounts(ctx context.Context, acctsDb *accountsdb.AccountsDb, bloc
 }
 
 // loadBlockAccountsFromDB fetches the next block and loads its accounts from the database.
-func (p *accountPrefetcher) loadBlockAccountsFromDB(ctx context.Context) (*b.Block, map[solana.PublicKey]*accounts.Account, error) {
+func (p *accountPrefetcher) loadBlockAccountsFromDB() (*b.Block, map[solana.PublicKey]*accounts.Account, error) {
 	block := p.blockSource.NextBlock()
 	if block == nil || block.IsSkipped {
 		return block, nil, nil
 	}
 
-	acctsMap, err := loadBlockAccounts(ctx, p.acctsDb, block)
+	acctsMap, err := loadBlockAccounts(context.Background(), p.acctsDb, block)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -297,4 +309,12 @@ func (p *accountPrefetcher) NextBlock() (*b.Block, map[solana.PublicKey]*account
 func (p *accountPrefetcher) StoreAccounts(modifiedAccounts []*accounts.Account, slot uint64, afterStoreCallback func()) error {
 	p.store <- storeRequest{modifiedAccounts, slot, afterStoreCallback}
 	return nil
+}
+
+func (p *accountPrefetcher) Close() {
+	close(p.store)
+	// Consume any buffered blocks and wait for worker's defer
+	// close(p.prefetch) to know it's terminated.
+	for range p.prefetch {
+	}
 }

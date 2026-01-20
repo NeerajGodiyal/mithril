@@ -1225,11 +1225,13 @@ func ReplayBlocks(
 	var loader accountLoader
 	if UseAccountPrefetcher {
 		mlog.Log.Infof("Using account prefetcher")
-		loader = newAccountPrefetcher(ctx, acctsDb, blockStream)
+		loader = newAccountPrefetcher(acctsDb, blockStream)
 	} else {
 		mlog.Log.Infof("Using sequential account loader")
 		loader = &sequentialAccountLoader{acctsDb, blockStream}
 	}
+	closeAccountLoader := sync.OnceFunc(func() { loader.Close() })
+	defer closeAccountLoader()
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
@@ -1452,6 +1454,7 @@ func ReplayBlocks(
 			mlog.Log.Infof("Context cancelled after slot %d, exiting replay loop", block.Slot)
 			result.WasCancelled = true
 
+			closeAccountLoader()
 			// Populate result immediately for state write
 			result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
 
@@ -1749,6 +1752,7 @@ func ReplayBlocks(
 		result.Error = fmt.Errorf("block fetch stalled - no progress for %v", blockStream.StallTimeout())
 	}
 
+	closeAccountLoader()
 	result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
 
 	// Capture resume context from the last slot context (if available)
