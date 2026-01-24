@@ -348,11 +348,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	start = time.Now()
 	var transactionAccts *sealevel.TransactionAccounts
+	var txAcctMetas []*solana.AccountMeta
 
 	if slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize) {
-		transactionAccts, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	} else {
-		transactionAccts, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	}
 	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
 		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, err, nil)
@@ -525,12 +526,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, instrErr, rentStateErr)
 	}
 
-	txAcctMetas, err := tx.AccountMetaList()
-	if err != nil {
-		panic(err)
-	}
-
-	// Reuse programIDSet from instrsAndAcctMetasFromTx (already built once per tx)
+	// Reuse txAcctMetas from loadAndValidateTxAccts* (already built once per tx)
 	for _, txAcctMeta := range txAcctMetas {
 		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
