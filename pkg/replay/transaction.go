@@ -95,7 +95,7 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 			return nil, nil, nil, err
 		}
 
-		var acctMetas []sealevel.AccountMeta
+		acctMetas := make([]sealevel.AccountMeta, 0, len(ams))
 		for _, am := range ams {
 			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(am, f, programIDSet)}
 			acctMetas = append(acctMetas, acctMeta)
@@ -527,9 +527,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	// Reuse txAcctMetas from loadAndValidateTxAccts* (already built once per tx)
+	// Build writablePubkeySet inline to avoid second loop
+	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
 	for _, txAcctMeta := range txAcctMetas {
 		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
+			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
 		}
 	}
 
@@ -539,12 +542,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	handleModifiedAccounts(slotCtx, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
-
-	// Build writablePubkeySet for O(1) lookups in recordStakeAndVoteAccounts
-	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(writablePubkeys))
-	for _, pk := range writablePubkeys {
-		writablePubkeySet[pk] = struct{}{}
-	}
+	writablePubkeySet[payerAcct.Key] = struct{}{}
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeySet)
 	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 
