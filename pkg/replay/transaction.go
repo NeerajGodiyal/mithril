@@ -70,14 +70,14 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	return execCtx
 }
 
-func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
+func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, map[solana.PublicKey]struct{}, error) {
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
 	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
 
 	// Build programIDSet once for O(1) lookups in isWritable
 	programIDs, err := tx.GetProgramIDs()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	programIDSet := make(map[solana.PublicKey]struct{}, len(programIDs))
 	for _, pid := range programIDs {
@@ -87,12 +87,12 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 	for _, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		ams, err := compiledInstr.ResolveInstructionAccounts(&tx.Message)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		var acctMetas []sealevel.AccountMeta
@@ -106,7 +106,7 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 		acctMetasPerInstr = append(acctMetasPerInstr, acctMetas)
 	}
 
-	return instrs, acctMetasPerInstr, nil
+	return instrs, acctMetasPerInstr, programIDSet, nil
 }
 
 func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16) error {
@@ -327,7 +327,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		defer mlog.Log.DisableInfLogging()
 	}
 
-	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
+	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	start = time.Now()
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.Features)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
 	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
 
 	var instrErr error
@@ -484,7 +484,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, tx, &execCtx.Features)
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
 	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
 
@@ -530,16 +530,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		panic(err)
 	}
 
-	// Build programIDSet once for O(1) lookups
-	programIDs, err := tx.GetProgramIDs()
-	if err != nil {
-		panic(err)
-	}
-	programIDSet := make(map[solana.PublicKey]struct{}, len(programIDs))
-	for _, pid := range programIDs {
-		programIDSet[pid] = struct{}{}
-	}
-
+	// Reuse programIDSet from instrsAndAcctMetasFromTx (already built once per tx)
 	for _, txAcctMeta := range txAcctMetas {
 		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
