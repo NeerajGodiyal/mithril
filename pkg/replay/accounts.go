@@ -2,6 +2,7 @@ package replay
 
 import (
 	"slices"
+	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
@@ -10,6 +11,40 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
+
+// Account clone tracking for profiling copy-on-write optimization potential
+var (
+	// Per-transaction account clone stats (loaded in loadAndValidateTxAcctsSimd186)
+	TxAcctsCloned      atomic.Uint64 // Total accounts cloned across all txs
+	TxAcctsClonedBytes atomic.Uint64 // Total bytes of account data cloned
+
+	// Per-transaction modification stats (touched in handleModifiedAccounts)
+	TxAcctsTouched      atomic.Uint64 // Total accounts actually modified
+	TxAcctsTouchedBytes atomic.Uint64 // Total bytes of modified account data
+
+	// Transaction count for averaging
+	TxCount atomic.Uint64
+)
+
+// CloneStats holds account clone/modify metrics for reporting
+type CloneStats struct {
+	AcctsCloned      uint64 // Accounts loaded (cloned)
+	AcctsClonedBytes uint64 // Bytes cloned
+	AcctsTouched     uint64 // Accounts modified
+	AcctsTouchedBytes uint64 // Bytes of modified accounts
+	TxCount          uint64 // Number of transactions
+}
+
+// GetAndResetCloneStats returns current clone stats and resets counters
+func GetAndResetCloneStats() CloneStats {
+	return CloneStats{
+		AcctsCloned:      TxAcctsCloned.Swap(0),
+		AcctsClonedBytes: TxAcctsClonedBytes.Swap(0),
+		AcctsTouched:     TxAcctsTouched.Swap(0),
+		AcctsTouchedBytes: TxAcctsTouchedBytes.Swap(0),
+		TxCount:          TxCount.Swap(0),
+	}
+}
 
 func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, error) {
 	txAcctMetas, err := tx.AccountMetaList()
@@ -223,17 +258,23 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 	// Use slice indexed by account position (same ordering as txAcctMetas)
 	acctCache := make([]*accounts.Account, len(acctKeys))
 
+	var clonedBytes uint64
 	for i, pubkey := range acctKeys {
 		acct, err := slotCtx.GetAccount(pubkey)
 		if err != nil {
 			panic("should be impossible - programming error")
 		}
 		acctCache[i] = acct // Cache by index for reuse in Pass 2
+		clonedBytes += uint64(len(acct.Data))
 		err = accumulator.collectAcct(acct)
 		if err != nil {
 			return nil, err
 		}
 	}
+
+	// Track clone stats for profiling
+	TxAcctsCloned.Add(uint64(len(acctKeys)))
+	TxAcctsClonedBytes.Add(clonedBytes)
 
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
@@ -321,5 +362,6 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		}
 	}
 
+	TxCount.Add(1)
 	return transactionAccts, nil
 }

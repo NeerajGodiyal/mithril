@@ -154,8 +154,13 @@ func isWritable(am *solana.AccountMeta, f *features.Features, programIDSet map[s
 
 func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
 	// update account states in slotCtx for all accounts 'touched' during the tx's execution
+	var touchedCount, touchedBytes uint64
 	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
 		if execCtx.TransactionContext.Accounts.Touched[idx] {
+			// Track touched account stats for profiling
+			touchedCount++
+			touchedBytes += uint64(len(newAcctState.Data))
+
 			// clean up accounts closed during the tx (garbage collection)
 			if newAcctState.Lamports == 0 {
 				newAcctState = &accounts.Account{Key: newAcctState.Key, RentEpoch: math.MaxUint64}
@@ -169,6 +174,10 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 			//mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
 		}
 	}
+
+	// Record touched stats for clone optimization profiling
+	TxAcctsTouched.Add(touchedCount)
+	TxAcctsTouchedBytes.Add(touchedBytes)
 }
 
 func recordStakeDelegation(acct *accounts.Account) {
