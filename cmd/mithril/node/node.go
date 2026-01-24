@@ -87,18 +87,18 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	cluster                     string   // "mainnet-beta", "testnet", "devnet"
-	blockSource                 string   // "rpc" or "lightbringer"
+	cluster                     string // "mainnet-beta", "testnet", "devnet"
+	blockSource                 string // "rpc" or "lightbringer"
 	lightbringerEndpoint        string
-	blockMaxRPS                 int      // Rate limit for block fetching
-	blockMaxInflight            int    // Max concurrent block fetch workers
-	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
-	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
+	blockMaxRPS                 int // Rate limit for block fetching
+	blockMaxInflight            int // Max concurrent block fetch workers
+	blockTipPollIntervalMs      int // Tip poll interval in milliseconds
+	blockTipSafetyMargin        int // Don't fetch within N slots of tip
 
 	// Mode thresholds
-	blockNearTipThreshold       int    // Enter near-tip when gap <= this
-	blockCatchupThreshold       int    // Exit near-tip when gap >= this
-	blockCatchupTipGateThreshold int   // Only apply safety margin when gap > this
+	blockNearTipThreshold        int // Enter near-tip when gap <= this
+	blockCatchupThreshold        int // Exit near-tip when gap >= this
+	blockCatchupTipGateThreshold int // Only apply safety margin when gap > this
 
 	// Near-tip tuning
 	blockNearTipPollMs    int // Faster poll in near-tip mode
@@ -106,11 +106,11 @@ var (
 
 	snapshotDlPath string
 	logDir         string
-	numReplaySlots              int64
-	endSlot                     int64
-	pprofPort                   int64
-	blockstorePath              string
-	txParallelism               int64
+	numReplaySlots int64
+	endSlot        int64
+	pprofPort      int64
+	blockstorePath string
+	txParallelism  int64
 
 	debugTxs        []string
 	debugAcctWrites []string
@@ -186,7 +186,7 @@ func init() {
 	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
-	Run.Flags().BoolVar(&replay.UseAccountPrefetcher, "use-account-prefetcher", false, "Prefetch accounts")
+	Run.Flags().BoolVar(&accountsdb.StoreAsync, "store-async", false, "Store accounts asynchronously")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -520,38 +520,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		borrowedAccountArenaSize = getUint64("borrowed-account-arena-size", "development.borrowed_account_arena_size")
 	}
 
-	// Handle external package variables (try tuning.* first, fallback to development.*)
-	if flagChanged("zstd-decoder-concurrency") {
-		snapshot.ZstdDecoderConcurrency = config.GetInt("zstd-decoder-concurrency")
-	} else if config.IsSet("tuning.zstd_decoder_concurrency") {
-		snapshot.ZstdDecoderConcurrency = config.GetInt("tuning.zstd_decoder_concurrency")
-	} else if config.IsSet("development.zstd_decoder_concurrency") {
-		snapshot.ZstdDecoderConcurrency = config.GetInt("development.zstd_decoder_concurrency")
-	}
-	if flagChanged("max-concurrent-flushers") {
-		snapshot.MaxConcurrentFlushers = config.GetInt("max-concurrent-flushers")
-	} else if config.IsSet("tuning.max_concurrent_flushers") {
-		snapshot.MaxConcurrentFlushers = config.GetInt("tuning.max_concurrent_flushers")
-	} else if config.IsSet("development.max_concurrent_flushers") {
-		snapshot.MaxConcurrentFlushers = config.GetInt("development.max_concurrent_flushers")
-	}
-	if flagChanged("use-pool") {
-		sbpf.UsePool = config.GetBool("use-pool")
-	} else if config.IsSet("tuning.use_pool") {
-		sbpf.UsePool = config.GetBool("tuning.use_pool")
-	} else if config.IsSet("development.use_pool") {
-		sbpf.UsePool = config.GetBool("development.use_pool")
-	}
-	if flagChanged("store-accounts-workers") {
-		accountsdb.StoreAccountsWorkers = config.GetInt("store-accounts-workers")
-	} else if config.IsSet("tuning.store_accounts_workers") {
-		accountsdb.StoreAccountsWorkers = config.GetInt("tuning.store_accounts_workers")
-	}
-	if flagChanged("use-account-prefetcher") {
-		replay.UseAccountPrefetcher = config.GetBool("use-account-prefetcher")
-	} else if config.IsSet("tuning.use_account_prefetcher") {
-		replay.UseAccountPrefetcher = config.GetBool("tuning.use_account_prefetcher")
-	}
+	snapshot.ZstdDecoderConcurrency = getInt("zstd-decoder-concurrency", "tuning.zstd_decoder_concurrency")
+	snapshot.MaxConcurrentFlushers = getInt("max-concurrent-flushers", "tuning.max_concurrent_flushers")
+	sbpf.UsePool = getBool("use-pool", "tuning.use_pool")
+	accountsdb.StoreAccountsWorkers = getInt("store-accounts-workers", "tuning.store_accounts_workers")
+	accountsdb.StoreAsync = getBool("store-async", "tuning.store_async")
 
 	return nil
 }
