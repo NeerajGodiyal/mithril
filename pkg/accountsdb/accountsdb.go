@@ -69,6 +69,50 @@ var (
 	StoreAsync           = false
 )
 
+// Cache hit/miss counters for profiling
+var (
+	// Hits by account type
+	VoteCacheHits   atomic.Uint64
+	StakeCacheHits  atomic.Uint64
+	CommonCacheHits atomic.Uint64
+
+	// Misses by account type
+	VoteCacheMisses   atomic.Uint64
+	StakeCacheMisses  atomic.Uint64
+	CommonCacheMisses atomic.Uint64
+
+	// Misses by size bucket (all types combined)
+	CacheMissUnder1K atomic.Uint64 // <1KB
+	CacheMiss1Kto4K  atomic.Uint64 // 1KB-4KB
+	CacheMiss4Kto64K atomic.Uint64 // 4KB-64KB
+	CacheMiss64Kto1M atomic.Uint64 // 64KB-1MB
+	CacheMissOver1M  atomic.Uint64 // >1MB
+)
+
+// CacheStats holds cache hit/miss counts for reporting
+type CacheStats struct {
+	VoteHits, StakeHits, CommonHits                                uint64
+	VoteMisses, StakeMisses, CommonMisses                          uint64
+	MissUnder1K, Miss1Kto4K, Miss4Kto64K, Miss64Kto1M, MissOver1M uint64
+}
+
+// GetAndResetCacheStats returns current cache stats and resets counters
+func GetAndResetCacheStats() CacheStats {
+	return CacheStats{
+		VoteHits:     VoteCacheHits.Swap(0),
+		StakeHits:    StakeCacheHits.Swap(0),
+		CommonHits:   CommonCacheHits.Swap(0),
+		VoteMisses:   VoteCacheMisses.Swap(0),
+		StakeMisses:  StakeCacheMisses.Swap(0),
+		CommonMisses: CommonCacheMisses.Swap(0),
+		MissUnder1K:  CacheMissUnder1K.Swap(0),
+		Miss1Kto4K:   CacheMiss1Kto4K.Swap(0),
+		Miss4Kto64K:  CacheMiss4Kto64K.Swap(0),
+		Miss64Kto1M:  CacheMiss64Kto1M.Swap(0),
+		MissOver1M:   CacheMissOver1M.Swap(0),
+	}
+}
+
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	// check for existence of the 'accounts' directory, which holds the appendvecs
 	appendVecsDir := fmt.Sprintf("%s/accounts", accountsDbDir)
@@ -212,11 +256,19 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
+		VoteCacheHits.Add(1)
 		return cachedAcct, nil
 	}
 
 	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
 	if hasAcct {
+		// Distinguish stake vs other common accounts
+		owner := solana.PublicKeyFromBytes(cachedAcct.Owner[:])
+		if owner == addresses.StakeProgramAddr {
+			StakeCacheHits.Add(1)
+		} else {
+			CommonCacheHits.Add(1)
+		}
 		return cachedAcct, nil
 	}
 
@@ -261,6 +313,30 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 	acct.Slot = acctIdxEntry.Slot
 
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+
+	// Track cache miss by account type
+	if owner == addresses.VoteProgramAddr {
+		VoteCacheMisses.Add(1)
+	} else if owner == addresses.StakeProgramAddr {
+		StakeCacheMisses.Add(1)
+	} else {
+		CommonCacheMisses.Add(1)
+	}
+
+	// Track cache miss by size bucket
+	dataLen := len(acct.Data)
+	switch {
+	case dataLen < 1024:
+		CacheMissUnder1K.Add(1)
+	case dataLen < 4096:
+		CacheMiss1Kto4K.Add(1)
+	case dataLen < 65536:
+		CacheMiss4Kto64K.Add(1)
+	case dataLen < 1048576:
+		CacheMiss64Kto1M.Add(1)
+	default:
+		CacheMissOver1M.Add(1)
+	}
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
 	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow.Load() {
