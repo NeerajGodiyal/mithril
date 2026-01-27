@@ -95,8 +95,9 @@ type MithrilState struct {
 	ManifestTransactionCount uint64 `json:"manifest_transaction_count,omitempty"`
 
 	// Epoch authorized voters (for current epoch only)
-	// Maps vote account pubkey (base58) -> authorized voter pubkey (base58)
-	ManifestEpochAuthorizedVoters map[string]string `json:"manifest_epoch_authorized_voters,omitempty"`
+	// Maps vote account pubkey (base58) -> list of authorized voter pubkeys (base58)
+	// Multiple authorized voters per vote account are supported (matches original manifest behavior)
+	ManifestEpochAuthorizedVoters map[string][]string `json:"manifest_epoch_authorized_voters,omitempty"`
 
 	// Epoch stakes seed - AGGREGATED vote-account stakes only (NOT full VersionedEpochStakes)
 	// Same format as ComputedEpochStakes (PersistedEpochStakes JSON)

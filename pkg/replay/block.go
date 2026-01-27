@@ -773,15 +773,16 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		mlog.Log.Warnf("vote cache rebuild had errors: %v", err)
 	}
 
-	// NOW derive VoteTimestamps and EpochStakesPerVoteAcct from caches
-	// instead of manifest (AFTER RebuildVoteCacheFromAccountsDB completes)
+	// Derive EpochStakesPerVoteAcct and TotalEpochStake from stake delegations
 	for pk, stake := range voteAcctStakes {
 		block.EpochStakesPerVoteAcct[pk] = stake
 		block.TotalEpochStake += stake
+	}
 
-		// Get timestamp from vote cache (loaded from AccountsDB)
-		// NOTE: Use global.VoteCacheItem (not GetVoteCacheItem)
-		if voteState := global.VoteCacheItem(pk); voteState != nil {
+	// Derive VoteTimestamps from ALL vote accounts in cache (including zero-stake)
+	// This matches original manifest behavior where all vote accounts had timestamps populated
+	for pk, voteState := range global.VoteCache() {
+		if voteState != nil {
 			ts := voteState.LastTimestamp()
 			if ts != nil {
 				block.VoteTimestamps[pk] = *ts
@@ -1071,19 +1072,22 @@ func buildInitialEpochStakesCache(mithrilState *state.MithrilState) error {
 	}
 
 	// Load EpochAuthorizedVoters from state file (required)
+	// Supports multiple authorized voters per vote account (matches original manifest behavior)
 	if len(mithrilState.ManifestEpochAuthorizedVoters) == 0 {
 		return fmt.Errorf("state file missing manifest_epoch_authorized_voters - delete AccountsDB and rebuild from snapshot")
 	}
-	for voteAcctStr, authorizedVoterStr := range mithrilState.ManifestEpochAuthorizedVoters {
+	for voteAcctStr, authorizedVoterStrs := range mithrilState.ManifestEpochAuthorizedVoters {
 		voteAcct, err := base58.DecodeFromString(voteAcctStr)
 		if err != nil {
 			return fmt.Errorf("corrupted state file: failed to decode epoch_authorized_voters key %s: %w", voteAcctStr, err)
 		}
-		authorizedVoter, err := base58.DecodeFromString(authorizedVoterStr)
-		if err != nil {
-			return fmt.Errorf("corrupted state file: failed to decode epoch_authorized_voters value %s: %w", authorizedVoterStr, err)
+		for _, authorizedVoterStr := range authorizedVoterStrs {
+			authorizedVoter, err := base58.DecodeFromString(authorizedVoterStr)
+			if err != nil {
+				return fmt.Errorf("corrupted state file: failed to decode epoch_authorized_voters value %s: %w", authorizedVoterStr, err)
+			}
+			global.PutEpochAuthorizedVoter(voteAcct, authorizedVoter)
 		}
-		global.PutEpochAuthorizedVoter(voteAcct, authorizedVoter)
 	}
 
 	return nil

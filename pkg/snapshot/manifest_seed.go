@@ -76,11 +76,14 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	s.ManifestTransactionCount = m.Bank.TransactionCount
 
 	// Epoch authorized voters (for snapshot epoch only)
-	s.ManifestEpochAuthorizedVoters = make(map[string]string)
+	// Supports multiple authorized voters per vote account (matches original manifest behavior)
+	s.ManifestEpochAuthorizedVoters = make(map[string][]string)
 	for _, epochStake := range m.VersionedEpochStakes {
 		if epochStake.Epoch == m.Bank.Epoch {
 			for _, entry := range epochStake.Val.EpochAuthorizedVoters {
-				s.ManifestEpochAuthorizedVoters[base58.Encode(entry.Key[:])] = base58.Encode(entry.Val[:])
+				voteAcctStr := base58.Encode(entry.Key[:])
+				authorizedVoterStr := base58.Encode(entry.Val[:])
+				s.ManifestEpochAuthorizedVoters[voteAcctStr] = append(s.ManifestEpochAuthorizedVoters[voteAcctStr], authorizedVoterStr)
 			}
 		}
 	}
