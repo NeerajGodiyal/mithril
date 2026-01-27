@@ -2,6 +2,7 @@ package replay
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"maps"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
+	"github.com/Overclock-Validator/mithril/pkg/state"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
@@ -35,10 +37,10 @@ type ReplayCtx struct {
 
 // newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
 // This ensures resume uses fresh values instead of potentially stale manifest data.
-func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest, resumeState *ResumeState) *ReplayCtx {
+func newReplayCtx(mithrilState *state.MithrilState, snapshotManifest *snapshot.SnapshotManifest, resumeState *ResumeState) *ReplayCtx {
 	epochCtx := new(ReplayCtx)
 
-	// Prefer resume state if available (has non-zero capitalization)
+	// Priority 1: Resume state (has most recent values)
 	if resumeState != nil && resumeState.Capitalization > 0 {
 		epochCtx.Capitalization = resumeState.Capitalization
 		epochCtx.SlotsPerYear = resumeState.SlotsPerYear
@@ -49,14 +51,33 @@ func newReplayCtx(snapshotManifest *snapshot.SnapshotManifest, resumeState *Resu
 			FoundationVal:  resumeState.InflationFoundation,
 			FoundationTerm: resumeState.InflationFoundationTerm,
 		}
+	} else if mithrilState != nil && mithrilState.ManifestCapitalization > 0 {
+		// Priority 2: State file manifest_* fields (fresh start, new state file)
+		epochCtx.Capitalization = mithrilState.ManifestCapitalization
+		epochCtx.SlotsPerYear = mithrilState.ManifestSlotsPerYear
+		epochCtx.Inflation = rewards.Inflation{
+			Initial:        mithrilState.ManifestInflationInitial,
+			Terminal:       mithrilState.ManifestInflationTerminal,
+			Taper:          mithrilState.ManifestInflationTaper,
+			FoundationVal:  mithrilState.ManifestInflationFoundation,
+			FoundationTerm: mithrilState.ManifestInflationFoundationTerm,
+		}
 	} else {
-		// Fallback to manifest (fresh start)
+		// Priority 3: Direct manifest (backwards compat for old state files)
+		mlog.Log.Infof("State file missing manifest seed data, using manifest file")
 		epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
 		epochCtx.Inflation = snapshotManifest.Bank.Inflation
 		epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
 	}
 
-	if snapshotManifest.EpochAccountHash != [32]byte{} {
+	// Epoch account hash - prefer state file (base64 encoded)
+	if mithrilState != nil && mithrilState.ManifestEpochAcctsHash != "" {
+		epochAcctsHash, err := base64.StdEncoding.DecodeString(mithrilState.ManifestEpochAcctsHash)
+		if err == nil && len(epochAcctsHash) == 32 {
+			epochCtx.HasEpochAcctsHash = true
+			epochCtx.EpochAcctsHash = epochAcctsHash
+		}
+	} else if snapshotManifest != nil && snapshotManifest.EpochAccountHash != [32]byte{} {
 		epochCtx.HasEpochAcctsHash = true
 		epochCtx.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
 	}
