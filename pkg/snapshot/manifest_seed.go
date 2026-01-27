@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"sort"
 
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/state"
-	"github.com/mr-tron/base58"
 )
 
 // PopulateManifestSeed copies manifest data to state file for replay context.

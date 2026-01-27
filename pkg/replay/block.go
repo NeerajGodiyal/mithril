@@ -826,13 +826,14 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	block.PrevNumSignatures = mithrilState.ManifestSignatureCount
 	block.InitialPreviousLamportsPerSignature = mithrilState.ManifestLamportsPerSignature
 
-	if mithrilState.ManifestEvictedBlockhash != "" {
-		evictedHash, err := base58.DecodeFromString(mithrilState.ManifestEvictedBlockhash)
-		if err != nil {
-			return fmt.Errorf("corrupted state file: failed to decode manifest_evicted_blockhash: %w", err)
-		}
-		block.LatestEvictedBlockhash = evictedHash
+	if mithrilState.ManifestEvictedBlockhash == "" {
+		return fmt.Errorf("state file missing manifest_evicted_blockhash - delete AccountsDB and rebuild from snapshot")
 	}
+	evictedHash, err := base58.DecodeFromString(mithrilState.ManifestEvictedBlockhash)
+	if err != nil {
+		return fmt.Errorf("corrupted state file: failed to decode manifest_evicted_blockhash: %w", err)
+	}
+	block.LatestEvictedBlockhash = evictedHash
 
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 
