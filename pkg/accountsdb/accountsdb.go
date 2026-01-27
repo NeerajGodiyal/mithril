@@ -154,7 +154,7 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 func (accountsDb *AccountsDb) InitCaches() {
 	var err error
-	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
+	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](2500).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -163,7 +163,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](5000).
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](2000).
 		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
 			return 1
 		}).
@@ -172,7 +172,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10000).
+	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
