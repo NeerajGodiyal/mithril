@@ -204,16 +204,21 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 }
 
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {
+		r.End()
 		return cachedAcct, nil
 	}
 
 	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
 	if hasAcct {
+		r.End()
 		return cachedAcct, nil
 	}
+	r.End()
 
+	defer trace.StartRegion(context.Background(), "GetStoredAccountDisk").End()
 	acctIdxEntryBytes, c, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {
 		//mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
@@ -266,6 +271,7 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 // Returns a slice of the same length as the input with results matching indexes, nil if not found.
 // Returns clones to avoid data races with the store worker.
 func (accountsDb *AccountsDb) getStoreInProgressAccounts(pks []solana.PublicKey) []*accounts.Account {
+	defer trace.StartRegion(context.Background(), "getStoreInProgressAccounts").End()
 	out := make([]*accounts.Account, len(pks))
 	accountsDb.inProgressStoreRequestsMu.Lock()
 	defer accountsDb.inProgressStoreRequestsMu.Unlock()
