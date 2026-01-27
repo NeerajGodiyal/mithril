@@ -1076,6 +1076,14 @@ func (t *persistedTracker) Get() (uint64, []byte) {
 	return slot, out
 }
 
+func nilifySnapshotManifest(manifest *snapshot.SnapshotManifest) {
+	manifest.Bank = nil
+	manifest.AccountsDb = nil
+	manifest.BankIncrementalSnapshotPersistence = nil
+	manifest.VersionedEpochStakes = nil
+	manifest.LtHash = nil
+}
+
 func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
@@ -1335,6 +1343,9 @@ func ReplayBlocks(
 				// FRESH START: Use snapshot manifest
 				configErr = configureInitialBlock(acctsDb, block, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
 			}
+			// We're done with the SnapshotManifest object. Since these objects are quite large, we hint to the GC to free
+			// the object's contents by nil'ing the struct's members.
+			nilifySnapshotManifest(snapshotManifest)
 		} else {
 			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc, rpcBackups)
 		}

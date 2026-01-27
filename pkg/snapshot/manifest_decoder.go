@@ -255,10 +255,10 @@ type SerializableEpochRewardStatus struct {
 }
 
 type SnapshotManifest struct {
-	Bank                               DeserializableVersionedBank
-	AccountsDb                         AccountsDbFields
+	Bank                               *DeserializableVersionedBank
+	AccountsDb                         *AccountsDbFields
 	LamportsPerSignature               uint64
-	BankIncrementalSnapshotPersistence BankIncrementalSnapshotPersistence
+	BankIncrementalSnapshotPersistence *BankIncrementalSnapshotPersistence
 	EpochAccountHash                   [32]byte
 	VersionedEpochStakes               []VersionedEpochStakesPair
 	LtHash                             *lthash.LtHash
@@ -1413,12 +1413,14 @@ func (stakeRewards *SerializableStakeRewards) UnmarshalWithDecoder(decoder *bin.
 func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	var err error
 
+	snapshot.Bank = new(DeserializableVersionedBank)
 	err = snapshot.Bank.UnmarshalWithDecoder(decoder)
 	if err != nil {
 		util.VerboseHandleError(err)
 		return err
 	}
 
+	snapshot.AccountsDb = new(AccountsDbFields)
 	err = snapshot.AccountsDb.UnmarshalWithDecoder(decoder)
 	if err != nil {
 		util.VerboseHandleError(err)
@@ -1442,6 +1444,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 
 	if hasIncrementalSnapshotPersistence {
 		mlog.Log.Infof("hasIncrementalSnapshotPersistence")
+		snapshot.BankIncrementalSnapshotPersistence = new(BankIncrementalSnapshotPersistence)
 		err = snapshot.BankIncrementalSnapshotPersistence.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return nil
