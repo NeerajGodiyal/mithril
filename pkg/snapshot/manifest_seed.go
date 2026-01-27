@@ -72,6 +72,19 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 		s.ManifestEpochAcctsHash = base64.StdEncoding.EncodeToString(m.EpochAccountHash[:])
 	}
 
+	// Transaction count at snapshot
+	s.ManifestTransactionCount = m.Bank.TransactionCount
+
+	// Epoch authorized voters (for snapshot epoch only)
+	s.ManifestEpochAuthorizedVoters = make(map[string]string)
+	for _, epochStake := range m.VersionedEpochStakes {
+		if epochStake.Epoch == m.Bank.Epoch {
+			for _, entry := range epochStake.Val.EpochAuthorizedVoters {
+				s.ManifestEpochAuthorizedVoters[base58.Encode(entry.Key[:])] = base58.Encode(entry.Val[:])
+			}
+		}
+	}
+
 	// Epoch stakes: convert VersionedEpochStakes to PersistedEpochStakes format
 	// This stores ONLY vote-account aggregates, NOT full stake account data
 	s.ManifestEpochStakes = convertVersionedEpochStakesToPersisted(m.VersionedEpochStakes)

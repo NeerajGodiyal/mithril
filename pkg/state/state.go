@@ -91,6 +91,13 @@ type MithrilState struct {
 	// Epoch account hash (base64 for consistency with LtHash)
 	ManifestEpochAcctsHash string `json:"manifest_epoch_accts_hash,omitempty"` // base64
 
+	// Transaction count at snapshot slot
+	ManifestTransactionCount uint64 `json:"manifest_transaction_count,omitempty"`
+
+	// Epoch authorized voters (for current epoch only)
+	// Maps vote account pubkey (base58) -> authorized voter pubkey (base58)
+	ManifestEpochAuthorizedVoters map[string]string `json:"manifest_epoch_authorized_voters,omitempty"`
+
 	// Epoch stakes seed - AGGREGATED vote-account stakes only (NOT full VersionedEpochStakes)
 	// Same format as ComputedEpochStakes (PersistedEpochStakes JSON)
 	// Cleared after first replayed slot to save space.
@@ -204,22 +211,9 @@ func LoadState(accountsDbDir string) (*MithrilState, error) {
 		return nil, fmt.Errorf("failed to parse state file: %w", err)
 	}
 
-	// Migrate from older schema versions
-	if state.StateSchemaVersion == 0 {
-		// Version 0 → 1 migration:
-		// - Migrate LastCommit to LastWriterCommit
-		if state.LastCommit != "" && state.LastWriterCommit == "" {
-			state.LastWriterCommit = state.LastCommit
-		}
-		state.StateSchemaVersion = 1
-		// Note: We don't save here - the state will be saved on next update
-	}
-
-	if state.StateSchemaVersion == 1 {
-		// Version 1 → 2 migration:
-		// No data migration needed - manifest_* fields are optional
-		// Old state files will fall back to loading manifest at runtime
-		state.StateSchemaVersion = 2
+	// Require schema version 2 - no migration from older versions
+	if state.StateSchemaVersion != CurrentStateSchemaVersion {
+		return nil, fmt.Errorf("state file schema version %d is not supported (requires v%d). Delete AccountsDB and rebuild from snapshot", state.StateSchemaVersion, CurrentStateSchemaVersion)
 	}
 
 	return &state, nil

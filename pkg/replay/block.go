@@ -26,7 +26,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
-	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -38,7 +37,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	bin "github.com/gagliardetto/binary"
@@ -795,55 +793,45 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	block *b.Block,
 	mithrilState *state.MithrilState,
-	snapshotManifest *snapshot.SnapshotManifest,
 	epochCtx *ReplayCtx,
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	rpcClient *rpcclient.RpcClient,
 	auxBackupEndpoints []string) error {
 
-	// Prefer state file manifest_* fields, fall back to manifest for old state files
-	if mithrilState.ManifestParentBankhash != "" {
-		// NEW PATH: read from state file
-		parentBankhash, err := base58.DecodeFromString(mithrilState.ManifestParentBankhash)
-		if err == nil {
-			block.ParentBankhash = parentBankhash
-		}
-		block.ParentSlot = mithrilState.ManifestParentSlot
+	// Read from state file manifest_* fields (required)
+	if mithrilState.ManifestParentBankhash == "" {
+		return fmt.Errorf("state file missing manifest_parent_bankhash - delete AccountsDB and rebuild from snapshot")
+	}
 
-		// LtHash: decode base64, restore with InitWithHash
-		if mithrilState.ManifestAcctsLtHash != "" {
-			ltHashBytes, err := base64.StdEncoding.DecodeString(mithrilState.ManifestAcctsLtHash)
-			if err == nil {
-				block.AcctsLtHash = new(lthash.LtHash).InitWithHash(ltHashBytes)
-			}
-		}
+	parentBankhash, err := base58.DecodeFromString(mithrilState.ManifestParentBankhash)
+	if err != nil {
+		return fmt.Errorf("corrupted state file: failed to decode manifest_parent_bankhash: %w", err)
+	}
+	block.ParentBankhash = parentBankhash
+	block.ParentSlot = mithrilState.ManifestParentSlot
 
-		block.PrevFeeRateGovernor = reconstructFeeRateGovernor(mithrilState)
-		block.PrevNumSignatures = mithrilState.ManifestSignatureCount
-		block.InitialPreviousLamportsPerSignature = mithrilState.ManifestLamportsPerSignature
-
-		if mithrilState.ManifestEvictedBlockhash != "" {
-			evictedHash, err := base58.DecodeFromString(mithrilState.ManifestEvictedBlockhash)
-			if err == nil {
-				block.LatestEvictedBlockhash = evictedHash
-			}
+	// LtHash: decode base64, restore with InitWithHash
+	if mithrilState.ManifestAcctsLtHash != "" {
+		ltHashBytes, err := base64.StdEncoding.DecodeString(mithrilState.ManifestAcctsLtHash)
+		if err != nil {
+			return fmt.Errorf("corrupted state file: failed to decode manifest_accts_lt_hash: %w", err)
 		}
-	} else {
-		// BACKWARDS COMPAT: old state file without manifest_* fields
-		mlog.Log.Infof("State file missing manifest seed data, using manifest file")
-		block.ParentBankhash = snapshotManifest.Bank.Hash
-		block.ParentSlot = snapshotManifest.Bank.Slot
-		block.AcctsLtHash = snapshotManifest.LtHash
-		block.PrevFeeRateGovernor = &snapshotManifest.Bank.FeeRateGovernor
-		block.PrevNumSignatures = snapshotManifest.Bank.SignatureCount
-		block.InitialPreviousLamportsPerSignature = snapshotManifest.LamportsPerSignature
+		block.AcctsLtHash = new(lthash.LtHash).InitWithHash(ltHashBytes)
+	}
 
-		// Guard: check length before accessing ages[150]
-		ages := snapshotManifest.Bank.BlockhashQueue.HashAndAge
-		sort.Slice(ages, func(i, j int) bool { return ages[i].Val.HashIndex > ages[j].Val.HashIndex })
-		if len(ages) > 150 {
-			block.LatestEvictedBlockhash = ages[150].Key
+	block.PrevFeeRateGovernor = reconstructFeeRateGovernor(mithrilState)
+	if block.PrevFeeRateGovernor == nil {
+		return fmt.Errorf("state file missing manifest_fee_rate_governor - delete AccountsDB and rebuild from snapshot")
+	}
+	block.PrevNumSignatures = mithrilState.ManifestSignatureCount
+	block.InitialPreviousLamportsPerSignature = mithrilState.ManifestLamportsPerSignature
+
+	if mithrilState.ManifestEvictedBlockhash != "" {
+		evictedHash, err := base58.DecodeFromString(mithrilState.ManifestEvictedBlockhash)
+		if err != nil {
+			return fmt.Errorf("corrupted state file: failed to decode manifest_evicted_blockhash: %w", err)
 		}
+		block.LatestEvictedBlockhash = evictedHash
 	}
 
 	block.EpochAcctsHash = epochCtx.EpochAcctsHash
@@ -868,7 +856,6 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		block.BlockHeight = global.BlockHeight()
 	}
 
-	snapshotManifest = nil
 	return nil
 }
 
@@ -978,6 +965,9 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 
 	// Reconstruct PrevFeeRateGovernor from state file static fields + resume dynamic fields
 	prevFeeRateGovernor := reconstructFeeRateGovernor(mithrilState)
+	if prevFeeRateGovernor == nil {
+		return fmt.Errorf("cannot resume: state file missing manifest_fee_rate_governor (rebuild AccountsDB required)")
+	}
 	prevFeeRateGovernor.LamportsPerSignature = resumeState.LamportsPerSignature
 	prevFeeRateGovernor.PrevLamportsPerSignature = resumeState.PrevLamportsPerSignature
 	block.PrevFeeRateGovernor = prevFeeRateGovernor
@@ -1065,54 +1055,37 @@ func configureGlobalCtx(block *b.Block) {
 
 // buildInitialEpochStakesCache seeds the epoch stakes cache from state file or manifest.
 // Priority: 1) State file ManifestEpochStakes, 2) Direct manifest (backwards compat)
-func buildInitialEpochStakesCache(mithrilState *state.MithrilState, snapshotManifest *snapshot.SnapshotManifest) {
-	// Priority 1: State file ManifestEpochStakes (PersistedEpochStakes JSON format)
-	if mithrilState != nil && len(mithrilState.ManifestEpochStakes) > 0 {
-		for epoch, data := range mithrilState.ManifestEpochStakes {
-			if loadedEpoch, err := global.DeserializeAndLoadEpochStakes([]byte(data)); err != nil {
-				mlog.Log.Errorf("Failed to load manifest epoch %d stakes from state file: %v", epoch, err)
-			} else {
-				mlog.Log.Debugf("loaded epoch %d stakes from state file manifest_epoch_stakes", loadedEpoch)
-			}
-		}
-		// EpochAuthorizedVoters still needs manifest (not stored in state file)
-		// Only load for snapshot epoch if manifest available
-		if snapshotManifest != nil {
-			for _, epochStake := range snapshotManifest.VersionedEpochStakes {
-				if epochStake.Epoch == snapshotManifest.Bank.Epoch {
-					for _, entry := range epochStake.Val.EpochAuthorizedVoters {
-						global.PutEpochAuthorizedVoter(entry.Key, entry.Val)
-					}
-				}
-			}
-		}
-		return
+func buildInitialEpochStakesCache(mithrilState *state.MithrilState) error {
+	// Require state file ManifestEpochStakes (PersistedEpochStakes JSON format)
+	if mithrilState == nil || len(mithrilState.ManifestEpochStakes) == 0 {
+		return fmt.Errorf("state file missing manifest_epoch_stakes - delete AccountsDB and rebuild from snapshot")
 	}
 
-	// Priority 2: Direct manifest (backwards compat for old state files)
-	if snapshotManifest != nil {
-		mlog.Log.Infof("State file missing manifest_epoch_stakes, using manifest file")
-		for _, epochStake := range snapshotManifest.VersionedEpochStakes {
-			if epochStake.Epoch == snapshotManifest.Bank.Epoch {
-				for _, entry := range epochStake.Val.EpochAuthorizedVoters {
-					global.PutEpochAuthorizedVoter(entry.Key, entry.Val)
-				}
-			}
-
-			global.PutEpochTotalStake(epochStake.Epoch, epochStake.Val.TotalStake)
-			for _, entry := range epochStake.Val.Stakes.VoteAccounts {
-				voteAcct := &epochstakes.VoteAccount{Lamports: entry.Value.Lamports,
-					NodePubkey:        entry.Value.NodePubkey,
-					LastTimestampTs:   entry.Value.LastTimestampTs,
-					LastTimestampSlot: entry.Value.LastTimestampSlot,
-					Owner:             entry.Value.Owner,
-					Executable:        entry.Value.Executable,
-					RentEpoch:         entry.Value.RentEpoch}
-				global.PutEpochStakesEntry(epochStake.Epoch, entry.Key, entry.Stake, voteAcct)
-			}
-			mlog.Log.Debugf("loaded epoch %d stakes from manifest", epochStake.Epoch)
+	for epoch, data := range mithrilState.ManifestEpochStakes {
+		if loadedEpoch, err := global.DeserializeAndLoadEpochStakes([]byte(data)); err != nil {
+			return fmt.Errorf("failed to load manifest epoch %d stakes from state file: %w", epoch, err)
+		} else {
+			mlog.Log.Debugf("loaded epoch %d stakes from state file manifest_epoch_stakes", loadedEpoch)
 		}
 	}
+
+	// Load EpochAuthorizedVoters from state file (required)
+	if len(mithrilState.ManifestEpochAuthorizedVoters) == 0 {
+		return fmt.Errorf("state file missing manifest_epoch_authorized_voters - delete AccountsDB and rebuild from snapshot")
+	}
+	for voteAcctStr, authorizedVoterStr := range mithrilState.ManifestEpochAuthorizedVoters {
+		voteAcct, err := base58.DecodeFromString(voteAcctStr)
+		if err != nil {
+			return fmt.Errorf("corrupted state file: failed to decode epoch_authorized_voters key %s: %w", voteAcctStr, err)
+		}
+		authorizedVoter, err := base58.DecodeFromString(authorizedVoterStr)
+		if err != nil {
+			return fmt.Errorf("corrupted state file: failed to decode epoch_authorized_voters value %s: %w", authorizedVoterStr, err)
+		}
+		global.PutEpochAuthorizedVoter(voteAcct, authorizedVoter)
+	}
+
+	return nil
 }
 
 type persistedTracker struct {
@@ -1150,7 +1123,6 @@ func ReplayBlocks(
 	ctx context.Context,
 	acctsDb *accountsdb.AccountsDb,
 	acctsDbPath string,
-	snapshotManifest *snapshot.SnapshotManifest,
 	mithrilState *state.MithrilState, // State file with manifest_* seed fields
 	resumeState *ResumeState,         // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
@@ -1210,16 +1182,21 @@ func ReplayBlocks(
 	var featuresActivatedInFirstSlot []*accounts.Account
 	var parentFeaturesActivatedInFirstSlot []*accounts.Account
 
-	// Pass mithrilState + resumeState so ReplayCtx uses state file (not manifest) for seed data
-	replayCtx := newReplayCtx(mithrilState, snapshotManifest, resumeState)
+	// Pass mithrilState + resumeState so ReplayCtx uses state file for seed data
+	replayCtx, err := newReplayCtx(mithrilState, resumeState)
+	if err != nil {
+		result.Error = err
+		return result
+	}
 
-	global.IncrTransactionCount(snapshotManifest.Bank.TransactionCount)
+	// Use state file for transaction count (required)
+	global.IncrTransactionCount(mithrilState.ManifestTransactionCount)
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-	// Load epoch stakes - persisted stakes on resume, manifest on fresh start
-	snapshotEpoch := epochSchedule.GetEpoch(snapshotManifest.Bank.Slot)
+	// Load epoch stakes - persisted stakes on resume, state file on fresh start
+	snapshotEpoch := epochSchedule.GetEpoch(mithrilState.ManifestParentSlot)
 	if resumeState != nil {
 		// Resume case - check if we've crossed epoch boundaries since snapshot
 		epochsCrossed := currentEpoch > snapshotEpoch
@@ -1251,11 +1228,17 @@ func ReplayBlocks(
 			}
 		} else {
 			// Resume in same epoch as snapshot, no boundaries crossed - state file epoch stakes still valid
-			buildInitialEpochStakesCache(mithrilState, snapshotManifest)
+			if err := buildInitialEpochStakesCache(mithrilState); err != nil {
+				result.Error = err
+				return result
+			}
 		}
 	} else {
-		// Fresh start: load all epochs from state file (or manifest for backwards compat)
-		buildInitialEpochStakesCache(mithrilState, snapshotManifest)
+		// Fresh start: load all epochs from state file
+		if err := buildInitialEpochStakesCache(mithrilState); err != nil {
+			result.Error = err
+			return result
+		}
 	}
 	//forkChoice, err := forkchoice.NewForkChoiceService(currentEpoch, global.EpochStakes(currentEpoch), global.EpochTotalStake(currentEpoch), global.EpochAuthorizedVoters(), 4)
 	//forkChoice.Start()
@@ -1403,8 +1386,8 @@ func ReplayBlocks(
 				// RESUME: Use resume state + state file (for static fields)
 				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, mithrilState, replayCtx, epochSchedule, rpcc, rpcBackups)
 			} else {
-				// FRESH START: Use state file manifest_* fields (fallback to manifest for old state files)
-				configErr = configureInitialBlock(acctsDb, block, mithrilState, snapshotManifest, replayCtx, epochSchedule, rpcc, rpcBackups)
+				// FRESH START: Use state file manifest_* fields
+				configErr = configureInitialBlock(acctsDb, block, mithrilState, replayCtx, epochSchedule, rpcc, rpcBackups)
 			}
 			// We're done with the SnapshotManifest object. Since these objects are quite large, we hint to the GC to free
 			// the object's contents by nil'ing the struct's members.

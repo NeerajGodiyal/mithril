@@ -19,7 +19,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -37,7 +36,7 @@ type ReplayCtx struct {
 
 // newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
 // This ensures resume uses fresh values instead of potentially stale manifest data.
-func newReplayCtx(mithrilState *state.MithrilState, snapshotManifest *snapshot.SnapshotManifest, resumeState *ResumeState) *ReplayCtx {
+func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*ReplayCtx, error) {
 	epochCtx := new(ReplayCtx)
 
 	// Priority 1: Resume state (has most recent values)
@@ -52,7 +51,7 @@ func newReplayCtx(mithrilState *state.MithrilState, snapshotManifest *snapshot.S
 			FoundationTerm: resumeState.InflationFoundationTerm,
 		}
 	} else if mithrilState != nil && mithrilState.ManifestCapitalization > 0 {
-		// Priority 2: State file manifest_* fields (fresh start, new state file)
+		// Priority 2: State file manifest_* fields (fresh start)
 		epochCtx.Capitalization = mithrilState.ManifestCapitalization
 		epochCtx.SlotsPerYear = mithrilState.ManifestSlotsPerYear
 		epochCtx.Inflation = rewards.Inflation{
@@ -63,26 +62,23 @@ func newReplayCtx(mithrilState *state.MithrilState, snapshotManifest *snapshot.S
 			FoundationTerm: mithrilState.ManifestInflationFoundationTerm,
 		}
 	} else {
-		// Priority 3: Direct manifest (backwards compat for old state files)
-		mlog.Log.Infof("State file missing manifest seed data, using manifest file")
-		epochCtx.Capitalization = snapshotManifest.Bank.Capitalization
-		epochCtx.Inflation = snapshotManifest.Bank.Inflation
-		epochCtx.SlotsPerYear = snapshotManifest.Bank.SlotsPerYear
+		return nil, fmt.Errorf("state file missing manifest_capitalization - delete AccountsDB and rebuild from snapshot")
 	}
 
-	// Epoch account hash - prefer state file (base64 encoded)
+	// Epoch account hash from state file (required)
 	if mithrilState != nil && mithrilState.ManifestEpochAcctsHash != "" {
 		epochAcctsHash, err := base64.StdEncoding.DecodeString(mithrilState.ManifestEpochAcctsHash)
-		if err == nil && len(epochAcctsHash) == 32 {
+		if err != nil {
+			return nil, fmt.Errorf("corrupted state file: failed to decode manifest_epoch_accts_hash: %w", err)
+		}
+		if len(epochAcctsHash) == 32 {
 			epochCtx.HasEpochAcctsHash = true
 			epochCtx.EpochAcctsHash = epochAcctsHash
 		}
-	} else if snapshotManifest != nil && snapshotManifest.EpochAccountHash != [32]byte{} {
-		epochCtx.HasEpochAcctsHash = true
-		epochCtx.EpochAcctsHash = snapshotManifest.EpochAccountHash[:]
 	}
+	// Note: epoch account hash may be empty for snapshots before SIMD-0160
 
-	return epochCtx
+	return epochCtx, nil
 }
 
 func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block, prevSlotCtx *sealevel.SlotCtx, targetEpoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) *sealevel.SysvarStakeHistory {
