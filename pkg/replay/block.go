@@ -1696,6 +1696,19 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
 					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
 
+				// Account clone stats for copy-on-write optimization profiling
+				cloneStats := GetAndResetCloneStats()
+				if cloneStats.TxCount > 0 {
+					modifyRatio := float64(cloneStats.AcctsTouched) / float64(cloneStats.AcctsCloned) * 100
+					avgAcctsPerTx := float64(cloneStats.AcctsCloned) / float64(cloneStats.TxCount)
+					avgTouchedPerTx := float64(cloneStats.AcctsTouched) / float64(cloneStats.TxCount)
+					clonedMB := float64(cloneStats.AcctsClonedBytes) / 1024 / 1024
+					touchedMB := float64(cloneStats.AcctsTouchedBytes) / 1024 / 1024
+					mlog.Log.InfofPrecise("  clone stats: %.1f%% modified (%d/%d accts) | %.1fMB cloned, %.1fMB modified | avg/tx: %.1f cloned, %.1f modified",
+						modifyRatio, cloneStats.AcctsTouched, cloneStats.AcctsCloned,
+						clonedMB, touchedMB, avgAcctsPerTx, avgTouchedPerTx)
+				}
+
 				// Line 4: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
@@ -1792,7 +1805,7 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
-	alreadyAdded := make(map[solana.PublicKey]bool)
+	alreadyAdded := make(map[solana.PublicKey]bool, len(slotCtx.WritableAccts))
 
 	for pk := range slotCtx.WritableAccts {
 		acct, _ := slotCtx.GetAccount(pk)

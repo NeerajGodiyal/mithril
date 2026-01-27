@@ -42,12 +42,12 @@ func rentStateFromAcct(acct *accounts.Account, rent *sealevel.SysvarRent) *RentS
 	}
 }
 
-func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, tx *solana.Transaction, f *features.Features) []*RentStateInfo {
+func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, f *features.Features, programIDSet map[solana.PublicKey]struct{}) []*RentStateInfo {
 	rentStateInfos := make([]*RentStateInfo, 0, len(txCtx.Accounts.Accounts))
 	acctsMetas := txCtx.Accounts.AcctMetas
 
 	for idx, acct := range txCtx.Accounts.Accounts {
-		if sealevel.IsWritable(tx, acctsMetas[idx], f) {
+		if sealevel.IsWritable(acctsMetas[idx], f, programIDSet) {
 			rentStateInfo := rentStateFromAcct(acct, rent)
 			rentStateInfos = append(rentStateInfos, rentStateInfo)
 		} else {
