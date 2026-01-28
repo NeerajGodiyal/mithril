@@ -21,7 +21,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
-	"github.com/maypok86/otter"
+	"github.com/maypok86/otter/v2"
+	"github.com/maypok86/otter/v2/stats"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -30,9 +31,9 @@ type AccountsDb struct {
 	BankHashStore    *pebble.DB
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
-	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
-	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+	VoteAcctCache    *otter.Cache[solana.PublicKey, *accounts.Account]
+	CommonAcctsCache *otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache     *otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 
 	// A list of store requests. They are added to the back as they arrive and
 	// removed from the front as they are persisted.
@@ -147,33 +148,21 @@ func (accountsDb *AccountsDb) CloseDb() {
 }
 
 func (accountsDb *AccountsDb) InitCaches() {
-	var err error
-	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
-		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
-	}
+	accountsDb.VoteAcctCache = otter.Must(&otter.Options[solana.PublicKey, *accounts.Account]{
+		MaximumSize:   2500,
+		StatsRecorder: stats.NewCounter(),
+	})
 
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](5000).
-		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
-	}
+	accountsDb.ProgramCache = otter.Must(&otter.Options[solana.PublicKey, *ProgramCacheEntry]{
+		MaximumSize:   2000,
+		StatsRecorder: stats.NewCounter(),
+	})
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](10000).
-		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
-	}
+	accountsDb.CommonAcctsCache = otter.Must(&otter.Options[solana.PublicKey, *accounts.Account]{
+		MaximumSize:   5000,
+		StatsRecorder: stats.NewCounter(),
+	})
+
 }
 
 type ProgramCacheEntry struct {
@@ -182,7 +171,7 @@ type ProgramCacheEntry struct {
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
-	return accountsDb.ProgramCache.Get(pubkey)
+	return accountsDb.ProgramCache.GetIfPresent(pubkey)
 }
 
 func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, programEntry *ProgramCacheEntry) {
@@ -190,7 +179,7 @@ func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program
 }
 
 func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
-	accountsDb.ProgramCache.Delete(pubkey)
+	accountsDb.ProgramCache.Invalidate(pubkey)
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -205,13 +194,13 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
-	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
+	cachedAcct, hasAcct := accountsDb.VoteAcctCache.GetIfPresent(pubkey)
 	if hasAcct {
 		r.End()
 		return cachedAcct, nil
 	}
 
-	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
+	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.GetIfPresent(pubkey)
 	if hasAcct {
 		r.End()
 		return cachedAcct, nil
@@ -259,10 +248,17 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 
 	acct.Slot = acctIdxEntry.Slot
 
+	writeIfSlotHigher := func(cached *accounts.Account, isCached bool) (*accounts.Account, otter.ComputeOp) {
+		if (!isCached) || (cached.Slot <= acct.Slot) {
+			return acct, otter.WriteOp
+		}
+		return cached, otter.CancelOp
+	}
+
 	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
-		accountsDb.VoteAcctCache.Set(pubkey, acct)
+		accountsDb.VoteAcctCache.Compute(pubkey, writeIfSlotHigher)
 	} else {
-		accountsDb.CommonAcctsCache.Set(pubkey, acct)
+		accountsDb.CommonAcctsCache.Compute(pubkey, writeIfSlotHigher)
 	}
 
 	return acct, err
@@ -323,6 +319,10 @@ func (accountsDb *AccountsDb) StoreAccounts(
 		}
 		return nil
 	}
+}
+
+func (accountsDb *AccountsDb) warmCache(pks map[solana.PublicKey]struct{}) {
+
 }
 
 func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot uint64) {

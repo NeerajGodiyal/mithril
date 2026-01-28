@@ -42,6 +42,7 @@ import (
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/maypok86/otter/v2/stats"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -1254,6 +1255,8 @@ func ReplayBlocks(
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
 
+	var voteCacheStats, commonCacheStats, programCacheStats stats.Stats
+
 	for {
 		// Start stall monitor goroutine (only after first block to avoid startup false positives)
 		// Logs to file every second while waiting for a block
@@ -1515,6 +1518,21 @@ func ReplayBlocks(
 		totalSlotTime := waitTime + slotReplayDuration
 		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: v:%-5d nv:%-5d | cu: %-10d | exec:%7.3fs | wait:%7.3fs | total:%7.3fs",
 			block.Slot, leaderStr, voteTxCount, nonVoteTxCount, totalCU, slotReplayDuration.Seconds(), waitTime.Seconds(), totalSlotTime.Seconds())
+
+		curr := acctsDb.VoteAcctCache.Stats()
+		diff := curr.Minus(voteCacheStats)
+		mlog.Log.Infof("vote | hits %04d misses %04d evictions %04d", diff.Hits, diff.Misses, diff.Evictions)
+		voteCacheStats = curr
+
+		curr = acctsDb.CommonAcctsCache.Stats()
+		diff = curr.Minus(commonCacheStats)
+		mlog.Log.Infof("comm | hits %04d misses %04d evictions %04d", diff.Hits, diff.Misses, diff.Evictions)
+		commonCacheStats = curr
+
+		curr = acctsDb.ProgramCache.Stats()
+		diff = curr.Minus(programCacheStats)
+		mlog.Log.Infof("prog | hits %04d misses %04d evictions %04d", diff.Hits, diff.Misses, diff.Evictions)
+		programCacheStats = curr
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
