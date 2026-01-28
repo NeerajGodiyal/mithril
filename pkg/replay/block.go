@@ -1780,16 +1780,18 @@ func ReplayBlocks(
 					voteTotal := cacheStats.VoteHits + cacheStats.VoteMisses
 					stakeTotal := cacheStats.StakeHits + cacheStats.StakeMisses
 					commonTotal := cacheStats.CommonHits + cacheStats.CommonMisses
-					mlog.Log.InfofPrecise("  cache: %.1f%% total hit rate | hits/lookups: vote %d/%d, stake %d/%d, common %d/%d | misses/total: <1K: %d/%d, 1K-4K: %d/%d, 4K-64K: %d/%d, 64K-1M: %d/%d, >1M: %d/%d",
+					mlog.Log.InfofPrecise("  cache: %.1f%% total hit rate | hits/lookups: vote %d/%d, stake %d/%d, common %d/%d",
 						hitRate,
 						cacheStats.VoteHits, voteTotal,
 						cacheStats.StakeHits, stakeTotal,
-						cacheStats.CommonHits, commonTotal,
-						cacheStats.MissUnder1K, totalMisses,
-						cacheStats.Miss1Kto4K, totalMisses,
-						cacheStats.Miss4Kto64K, totalMisses,
-						cacheStats.Miss64Kto1M, totalMisses,
-						cacheStats.MissOver1M, totalMisses)
+						cacheStats.CommonHits, commonTotal)
+					mlog.Log.InfofPrecise("  cache miss sizes (%d total): <1K: %d, 1K-4K: %d, 4K-64K: %d, 64K-1M: %d, >1M: %d",
+						totalMisses,
+						cacheStats.MissUnder1K,
+						cacheStats.Miss1Kto4K,
+						cacheStats.Miss4Kto64K,
+						cacheStats.Miss64Kto1M,
+						cacheStats.MissOver1M)
 				}
 
 				// Line 4: RPC/fetch debugging info
