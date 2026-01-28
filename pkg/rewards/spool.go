@@ -1,6 +1,7 @@
 package rewards
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,8 +16,6 @@ import (
 // Format: stake_pubkey(32) + vote_pubkey(32) + stake_lamports(8) +
 //
 //	credits_observed(8) + reward_lamports(8) = 88 bytes
-//
-// Note: partition_index is no longer stored in records since we use per-partition files.
 const SpoolRecordSize = 88
 
 // SpoolRecord represents a single stake reward record.
@@ -49,6 +48,7 @@ func decodeRecord(buf []byte, rec *SpoolRecord) {
 
 // PartitionedSpoolWriters manages per-partition spool files.
 // Thread-safe - multiple goroutines can write concurrently.
+// Uses buffered I/O for performance.
 type PartitionedSpoolWriters struct {
 	baseDir       string
 	slot          uint64
@@ -58,9 +58,10 @@ type PartitionedSpoolWriters struct {
 	closed        bool
 }
 
-// partitionWriter is a writer for a single partition file.
+// partitionWriter is a buffered writer for a single partition file.
 type partitionWriter struct {
 	file  *os.File
+	bufw  *bufio.Writer
 	count int
 }
 
@@ -104,21 +105,22 @@ func (p *PartitionedSpoolWriters) WriteRecord(rec *SpoolRecord) error {
 		if err != nil {
 			return fmt.Errorf("creating partition %d spool file: %w", partition, err)
 		}
-		w = &partitionWriter{file: f}
+		// 1MB buffer for efficient sequential writes
+		w = &partitionWriter{file: f, bufw: bufio.NewWriterSize(f, 1<<20)}
 		p.writers[partition] = w
 	}
 
-	// Write record
+	// Write record to buffer
 	var buf [SpoolRecordSize]byte
 	encodeRecord(rec, buf[:])
-	if _, err := w.file.Write(buf[:]); err != nil {
+	if _, err := w.bufw.Write(buf[:]); err != nil {
 		return fmt.Errorf("writing to partition %d: %w", partition, err)
 	}
 	w.count++
 	return nil
 }
 
-// Close closes all partition files and syncs to disk.
+// Close flushes buffers, syncs, and closes all partition files.
 // Returns the first error encountered.
 func (p *PartitionedSpoolWriters) Close() error {
 	p.mu.Lock()
@@ -131,9 +133,15 @@ func (p *PartitionedSpoolWriters) Close() error {
 
 	var firstErr error
 	for partition, w := range p.writers {
+		// Flush buffer first
+		if err := w.bufw.Flush(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("flushing partition %d: %w", partition, err)
+		}
+		// Sync to disk
 		if err := w.file.Sync(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("syncing partition %d: %w", partition, err)
 		}
+		// Close file
 		if err := w.file.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("closing partition %d: %w", partition, err)
 		}
@@ -154,8 +162,10 @@ func (p *PartitionedSpoolWriters) TotalRecords() int {
 }
 
 // PartitionReader reads records sequentially from a partition spool file.
+// Uses buffered I/O for efficient sequential reads.
 type PartitionReader struct {
 	file *os.File
+	bufr *bufio.Reader
 	buf  [SpoolRecordSize]byte
 }
 
@@ -165,17 +175,18 @@ func NewPartitionReader(baseDir string, slot uint64, partition uint32) (*Partiti
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No records for this partition - return empty reader
+			// No records for this partition
 			return nil, nil
 		}
 		return nil, fmt.Errorf("opening partition %d spool: %w", partition, err)
 	}
-	return &PartitionReader{file: f}, nil
+	// 1MB buffer for efficient sequential reads
+	return &PartitionReader{file: f, bufr: bufio.NewReaderSize(f, 1<<20)}, nil
 }
 
 // Next reads the next record. Returns io.EOF when done.
 func (r *PartitionReader) Next() (*SpoolRecord, error) {
-	_, err := io.ReadFull(r.file, r.buf[:])
+	_, err := io.ReadFull(r.bufr, r.buf[:])
 	if err == io.EOF {
 		return nil, io.EOF
 	}
@@ -186,22 +197,6 @@ func (r *PartitionReader) Next() (*SpoolRecord, error) {
 	rec := &SpoolRecord{}
 	decodeRecord(r.buf[:], rec)
 	return rec, nil
-}
-
-// ReadAll reads all records from the partition file.
-func (r *PartitionReader) ReadAll() ([]SpoolRecord, error) {
-	var records []SpoolRecord
-	for {
-		rec, err := r.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, *rec)
-	}
-	return records, nil
 }
 
 // Close closes the partition file.
@@ -219,189 +214,5 @@ func CleanupPartitionedSpoolFiles(baseDir string, slot uint64, numPartitions uin
 	for p := uint64(0); p < numPartitions; p++ {
 		path := partitionFilePath(baseDir, slot, uint32(p))
 		os.Remove(path) // Ignore errors - file may not exist
-	}
-}
-
-// ===========================================================================
-// Legacy single-file spool (kept for compatibility, may be removed later)
-// ===========================================================================
-
-// LegacySpoolRecordSize includes the partition index (old format).
-const LegacySpoolRecordSize = 92
-
-// SpoolWriter writes stake reward records to a spool file.
-// Thread-safe - multiple goroutines can write concurrently.
-// DEPRECATED: Use PartitionedSpoolWriters instead.
-type SpoolWriter struct {
-	file   *os.File
-	mu     sync.Mutex
-	count  int
-	closed bool
-}
-
-// NewSpoolWriter creates a new spool file for writing.
-func NewSpoolWriter(path string) (*SpoolWriter, error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, fmt.Errorf("creating spool file: %w", err)
-	}
-	return &SpoolWriter{file: f}, nil
-}
-
-// WriteRecord writes a single record to the spool file.
-// Thread-safe.
-func (w *SpoolWriter) WriteRecord(rec *SpoolRecord) error {
-	var buf [LegacySpoolRecordSize]byte
-
-	// Pack record into buffer (legacy format with partition index)
-	copy(buf[0:32], rec.StakePubkey[:])
-	copy(buf[32:64], rec.VotePubkey[:])
-	binary.LittleEndian.PutUint64(buf[64:72], rec.StakeLamports)
-	binary.LittleEndian.PutUint64(buf[72:80], rec.CreditsObserved)
-	binary.LittleEndian.PutUint64(buf[80:88], rec.RewardLamports)
-	binary.LittleEndian.PutUint32(buf[88:92], rec.PartitionIndex)
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.closed {
-		return fmt.Errorf("spool writer is closed")
-	}
-
-	_, err := w.file.Write(buf[:])
-	if err != nil {
-		return fmt.Errorf("writing spool record: %w", err)
-	}
-	w.count++
-	return nil
-}
-
-// Count returns the number of records written.
-func (w *SpoolWriter) Count() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.count
-}
-
-// Close closes the spool file and syncs to disk.
-func (w *SpoolWriter) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.closed {
-		return nil
-	}
-	w.closed = true
-
-	if err := w.file.Sync(); err != nil {
-		w.file.Close()
-		return fmt.Errorf("syncing spool file: %w", err)
-	}
-	return w.file.Close()
-}
-
-// SpoolReader reads stake reward records from a spool file.
-// Builds an in-memory index at open time for efficient partition reads.
-// DEPRECATED: Use PartitionReader instead.
-type SpoolReader struct {
-	file           *os.File
-	fileSize       int64
-	partitionIndex map[uint32][]int64 // partition -> list of file offsets
-}
-
-// NewSpoolReader opens a spool file and builds the partition index.
-func NewSpoolReader(path string) (*SpoolReader, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("opening spool file: %w", err)
-	}
-
-	stat, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("stat spool file: %w", err)
-	}
-
-	fileSize := stat.Size()
-	if fileSize%LegacySpoolRecordSize != 0 {
-		f.Close()
-		return nil, fmt.Errorf("spool file size %d is not a multiple of record size %d", fileSize, LegacySpoolRecordSize)
-	}
-
-	// Build partition index by scanning file once
-	partitionIndex := make(map[uint32][]int64)
-	numRecords := fileSize / LegacySpoolRecordSize
-	var buf [LegacySpoolRecordSize]byte
-
-	for i := int64(0); i < numRecords; i++ {
-		offset := i * LegacySpoolRecordSize
-		_, err := f.ReadAt(buf[:], offset)
-		if err != nil {
-			f.Close()
-			return nil, fmt.Errorf("reading record at offset %d: %w", offset, err)
-		}
-
-		partitionIdx := binary.LittleEndian.Uint32(buf[88:92])
-		partitionIndex[partitionIdx] = append(partitionIndex[partitionIdx], offset)
-	}
-
-	return &SpoolReader{
-		file:           f,
-		fileSize:       fileSize,
-		partitionIndex: partitionIndex,
-	}, nil
-}
-
-// ReadPartition reads all records for a given partition index.
-func (r *SpoolReader) ReadPartition(partitionIndex uint32) ([]SpoolRecord, error) {
-	offsets, ok := r.partitionIndex[partitionIndex]
-	if !ok {
-		return nil, nil // No records for this partition
-	}
-
-	records := make([]SpoolRecord, 0, len(offsets))
-	var buf [LegacySpoolRecordSize]byte
-
-	for _, offset := range offsets {
-		_, err := r.file.ReadAt(buf[:], offset)
-		if err != nil {
-			return nil, fmt.Errorf("reading record at offset %d: %w", offset, err)
-		}
-
-		rec := SpoolRecord{
-			StakeLamports:   binary.LittleEndian.Uint64(buf[64:72]),
-			CreditsObserved: binary.LittleEndian.Uint64(buf[72:80]),
-			RewardLamports:  binary.LittleEndian.Uint64(buf[80:88]),
-			PartitionIndex:  binary.LittleEndian.Uint32(buf[88:92]),
-		}
-		copy(rec.StakePubkey[:], buf[0:32])
-		copy(rec.VotePubkey[:], buf[32:64])
-
-		records = append(records, rec)
-	}
-
-	return records, nil
-}
-
-// NumPartitions returns the number of distinct partitions in the spool file.
-func (r *SpoolReader) NumPartitions() int {
-	return len(r.partitionIndex)
-}
-
-// RecordCount returns the total number of records in the spool file.
-func (r *SpoolReader) RecordCount() int64 {
-	return r.fileSize / LegacySpoolRecordSize
-}
-
-// Close closes the spool file.
-func (r *SpoolReader) Close() error {
-	return r.file.Close()
-}
-
-// CleanupSpoolFile removes the spool file after distribution is complete.
-// DEPRECATED: Use CleanupPartitionedSpoolFiles instead.
-func CleanupSpoolFile(path string) {
-	if path != "" {
-		os.Remove(path)
 	}
 }

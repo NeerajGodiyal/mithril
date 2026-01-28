@@ -2,6 +2,7 @@ package rewards
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"runtime"
@@ -34,92 +35,8 @@ type PartitionedRewardDistributionInfo struct {
 	TotalStakingRewards          uint64
 	FirstStakingRewardSlot       uint64
 	NumRewardPartitionsRemaining uint64
-	Credits                      map[solana.PublicKey]CalculatedStakePoints
-	RewardPartitions             Partitions
-	StakingRewards               map[solana.PublicKey]*CalculatedStakeRewards
-	WorkerPool                   *ants.PoolWithFunc
 	SpoolDir                     string // Base directory for per-partition spool files
 	SpoolSlot                    uint64 // Slot for spool file naming
-}
-
-// rewardDistributionTask carries all context needed for processing one stake account.
-// Used with the shared worker pool to avoid per-partition pool creation overhead.
-type rewardDistributionTask struct {
-	acctsDb             *accountsdb.AccountsDb
-	slot                uint64
-	stakingRewards      map[solana.PublicKey]*CalculatedStakeRewards
-	accts               []*accounts.Account
-	parentAccts         []*accounts.Account
-	distributedLamports *atomic.Uint64
-	wg                  *sync.WaitGroup
-	idx                 int
-	pubkey              solana.PublicKey
-}
-
-// rewardDistributionWorker is the shared worker function for stake reward distribution.
-func rewardDistributionWorker(i interface{}) {
-	task := i.(*rewardDistributionTask)
-	defer task.wg.Done()
-
-	reward, ok := task.stakingRewards[task.pubkey]
-	if !ok {
-		return
-	}
-
-	stakeAcct, err := task.acctsDb.GetAccount(task.slot, task.pubkey)
-	if err != nil {
-		panic(fmt.Sprintf("unable to get acct %s from acctsdb for partitioned epoch rewards distribution in slot %d", task.pubkey, task.slot))
-	}
-	task.parentAccts[task.idx] = stakeAcct.Clone()
-
-	stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
-	if err != nil {
-		return
-	}
-
-	stakeState.Stake.Stake.CreditsObserved = reward.NewCreditsObserved
-	stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(stakeState.Stake.Stake.Delegation.StakeLamports, uint64(reward.StakerRewards))
-
-	err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
-	if err != nil {
-		panic(fmt.Sprintf("unable to serialize new stake account state in distributing partitioned rewards: %s", err))
-	}
-
-	stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, uint64(reward.StakerRewards))
-	if err != nil {
-		panic(fmt.Sprintf("overflow in partitioned epoch rewards distribution in slot %d to acct %s: %s", task.slot, task.pubkey, err))
-	}
-
-	task.accts[task.idx] = stakeAcct
-	task.distributedLamports.Add(reward.StakerRewards)
-
-	// update the stake cache
-	delegationToCache := stakeState.Stake.Stake.Delegation
-	delegationToCache.CreditsObserved = stakeState.Stake.Stake.CreditsObserved
-	global.PutStakeCacheItem(task.pubkey, &delegationToCache)
-}
-
-// InitWorkerPool creates the shared worker pool for reward distribution.
-// Call once at the start of partitioned rewards, before processing any partition.
-func (info *PartitionedRewardDistributionInfo) InitWorkerPool() error {
-	if info.WorkerPool != nil {
-		return nil
-	}
-	size := runtime.GOMAXPROCS(0) * 8
-	pool, err := ants.NewPoolWithFunc(size, rewardDistributionWorker)
-	if err != nil {
-		return err
-	}
-	info.WorkerPool = pool
-	return nil
-}
-
-// ReleaseWorkerPool releases the shared pool. Call when NumRewardPartitionsRemaining == 0.
-func (info *PartitionedRewardDistributionInfo) ReleaseWorkerPool() {
-	if info.WorkerPool != nil {
-		info.WorkerPool.Release()
-		info.WorkerPool = nil
-	}
 }
 
 type CalculatedStakePoints struct {
@@ -254,38 +171,6 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 	}
 
 	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
-}
-
-func DistributeStakingRewardsForPartition(acctsDb *accountsdb.AccountsDb, partition *Partition, stakingRewards map[solana.PublicKey]*CalculatedStakeRewards, slot uint64, workerPool *ants.PoolWithFunc) ([]*accounts.Account, []*accounts.Account, uint64) {
-	var distributedLamports atomic.Uint64
-	accts := make([]*accounts.Account, partition.NumPubkeys())
-	parentAccts := make([]*accounts.Account, partition.NumPubkeys())
-
-	var wg sync.WaitGroup
-
-	for idx, stakePk := range partition.Pubkeys() {
-		task := &rewardDistributionTask{
-			acctsDb:             acctsDb,
-			slot:                slot,
-			stakingRewards:      stakingRewards,
-			accts:               accts,
-			parentAccts:         parentAccts,
-			distributedLamports: &distributedLamports,
-			wg:                  &wg,
-			idx:                 idx,
-			pubkey:              stakePk,
-		}
-		wg.Add(1)
-		workerPool.Invoke(task)
-	}
-	wg.Wait()
-
-	err := acctsDb.StoreAccounts(accts, slot, nil)
-	if err != nil {
-		panic(fmt.Sprintf("error updating accounts for partitioned epoch rewards in slot %d: %s", slot, err))
-	}
-
-	return accts, parentAccts, distributedLamports.Load()
 }
 
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
@@ -820,8 +705,21 @@ func CalculateRewardsStreaming(
 	}, nil
 }
 
+// spoolDistributionTask carries context for processing one spool record.
+type spoolDistributionTask struct {
+	rec         *SpoolRecord
+	acctsDb     *accountsdb.AccountsDb
+	slot        uint64
+	accts       *[]*accounts.Account
+	parentAccts *[]*accounts.Account
+	mu          *sync.Mutex
+	distributed *atomic.Uint64
+	firstError  *atomic.Value
+}
+
 // DistributeStakingRewardsFromSpool reads rewards from a per-partition spool file and distributes them.
-// Uses sequential I/O - each partition has its own file, read start to finish.
+// Uses streaming I/O - reads records one at a time to keep RAM flat.
+// STRICT MODE: Any account read/unmarshal/marshal failure is fatal - we cannot diverge from consensus.
 func DistributeStakingRewardsFromSpool(
 	acctsDb *accountsdb.AccountsDb,
 	spoolDir string,
@@ -840,99 +738,96 @@ func DistributeStakingRewardsFromSpool(
 	}
 	defer reader.Close()
 
-	// Read all records from partition file (sequential I/O)
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("reading partition %d: %w", partitionIndex, err)
-	}
-
-	if len(records) == 0 {
-		return nil, nil, 0, nil
-	}
-
 	var distributedLamports atomic.Uint64
-	accts := make([]*accounts.Account, len(records))
-	parentAccts := make([]*accounts.Account, len(records))
-
-	// Track errors for reporting
-	var failedAccounts atomic.Int64
 	var firstError atomic.Value
+	var mu sync.Mutex
+
+	// Dynamic slices - append as we process (no pre-allocation with nils)
+	var accts []*accounts.Account
+	var parentAccts []*accounts.Account
 
 	var wg sync.WaitGroup
 	size := runtime.GOMAXPROCS(0) * 8
 	workerPool, err := ants.NewPoolWithFunc(size, func(i interface{}) {
 		defer wg.Done()
 
-		idx := i.(int)
-		rec := records[idx]
+		task := i.(*spoolDistributionTask)
 
-		stakeAcct, err := acctsDb.GetAccount(slot, rec.StakePubkey)
-		if err != nil {
-			failedAccounts.Add(1)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("account %s: %w", rec.StakePubkey, err))
-			}
+		// Skip if we already have an error
+		if task.firstError.Load() != nil {
 			return
 		}
-		parentAccts[idx] = stakeAcct.Clone()
+
+		stakeAcct, err := task.acctsDb.GetAccount(task.slot, task.rec.StakePubkey)
+		if err != nil {
+			task.firstError.CompareAndSwap(nil, fmt.Errorf("GetAccount %s: %w", task.rec.StakePubkey, err))
+			return
+		}
+		parentAcct := stakeAcct.Clone()
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			failedAccounts.Add(1)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("unmarshal %s: %w", rec.StakePubkey, err))
-			}
+			task.firstError.CompareAndSwap(nil, fmt.Errorf("UnmarshalStakeState %s: %w", task.rec.StakePubkey, err))
 			return
 		}
 
 		// Apply reward
-		stakeState.Stake.Stake.CreditsObserved = rec.CreditsObserved
+		stakeState.Stake.Stake.CreditsObserved = task.rec.CreditsObserved
 		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(
-			stakeState.Stake.Stake.Delegation.StakeLamports, rec.RewardLamports)
+			stakeState.Stake.Stake.Delegation.StakeLamports, task.rec.RewardLamports)
 
 		err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
 		if err != nil {
-			failedAccounts.Add(1)
-			if firstError.Load() == nil {
-				firstError.Store(fmt.Errorf("marshal %s: %w", rec.StakePubkey, err))
-			}
+			task.firstError.CompareAndSwap(nil, fmt.Errorf("MarshalStakeStakeInto %s: %w", task.rec.StakePubkey, err))
 			return
 		}
 
-		stakeAcct.Lamports = safemath.SaturatingAddU64(stakeAcct.Lamports, rec.RewardLamports)
-		accts[idx] = stakeAcct
-		distributedLamports.Add(rec.RewardLamports)
+		stakeAcct.Lamports = safemath.SaturatingAddU64(stakeAcct.Lamports, task.rec.RewardLamports)
+		task.distributed.Add(task.rec.RewardLamports)
+
+		// Append to result slices under lock
+		task.mu.Lock()
+		*task.accts = append(*task.accts, stakeAcct)
+		*task.parentAccts = append(*task.parentAccts, parentAcct)
+		task.mu.Unlock()
 	})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("creating worker pool: %w", err)
 	}
 	defer workerPool.Release()
 
-	for idx := range records {
+	// Stream records from spool file - one at a time (flat RAM)
+	for {
+		rec, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("reading partition %d record: %w", partitionIndex, err)
+		}
+
+		// Submit to worker pool
 		wg.Add(1)
-		workerPool.Invoke(idx)
+		workerPool.Invoke(&spoolDistributionTask{
+			rec:         rec,
+			acctsDb:     acctsDb,
+			slot:        slot,
+			accts:       &accts,
+			parentAccts: &parentAccts,
+			mu:          &mu,
+			distributed: &distributedLamports,
+			firstError:  &firstError,
+		})
 	}
 	wg.Wait()
 
-	// Log errors if any accounts failed (Fix C: silent account errors)
-	if failed := failedAccounts.Load(); failed > 0 {
-		if ferr := firstError.Load(); ferr != nil {
-			// Log but don't fail - some accounts may have been closed/merged
-			fmt.Printf("reward distribution partition %d: %d/%d accounts failed, first error: %v\n",
-				partitionIndex, failed, len(records), ferr)
-		}
+	// STRICT: Any failure is fatal - we cannot silently skip rewards and diverge from consensus
+	if ferr := firstError.Load(); ferr != nil {
+		return nil, nil, 0, fmt.Errorf("reward distribution partition %d failed: %w", partitionIndex, ferr.(error))
 	}
 
-	// Filter out nil accounts (failed reads)
-	validAccts := make([]*accounts.Account, 0, len(accts))
-	for _, a := range accts {
-		if a != nil {
-			validAccts = append(validAccts, a)
-		}
-	}
-
-	if len(validAccts) > 0 {
-		err = acctsDb.StoreAccounts(validAccts, slot, nil)
+	if len(accts) > 0 {
+		err = acctsDb.StoreAccounts(accts, slot, nil)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("storing accounts: %w", err)
 		}
