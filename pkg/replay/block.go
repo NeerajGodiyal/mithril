@@ -708,19 +708,28 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		mlog.Log.Errorf("=======================================================")
 		os.Exit(1)
 	}
-	mlog.Log.Infof("Loading vote and stake caches")
+	mlog.Log.Infof("Loading vote and stake caches (aggregate-only mode)")
 
 	var wg sync.WaitGroup
 
-	// Stake worker pool reads ALL delegation fields from AccountsDB (not manifest)
-	// Uses batched processing to reduce wg.Add/Invoke overhead (1M pubkeys → ~1K batches)
+	// Shared aggregated stake totals - built directly from AccountsDB scan
+	// Thread-safe: each worker builds local map, then merges under mutex
+	voteAcctStakes := make(map[solana.PublicKey]uint64)
+	var voteAcctStakesMu sync.Mutex
+
+	// Stake worker pool reads stake accounts and aggregates totals directly
+	// Does NOT populate global.StakeCache - only builds vote account totals
 	const stakeBatchSize = 1000
 	stakeAcctWorkerPool, _ := ants.NewPoolWithFunc(runtime.NumCPU()*2, func(i interface{}) {
 		defer wg.Done()
 
 		batch := i.([]solana.PublicKey)
+
+		// Build local aggregation for this batch
+		localStakes := make(map[solana.PublicKey]uint64)
+
 		for _, pk := range batch {
-			// Read from AccountsDB - ALL fields, not manifest
+			// Read from AccountsDB
 			stakeAcct, err := acctsDb.GetAccount(block.Slot, pk)
 			if err != nil {
 				continue // Account not found or closed
@@ -731,24 +740,22 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 				continue // Invalid stake state
 			}
 
-			// Only cache if this is a delegated stake account (status must be "Stake")
+			// Only count delegated stake accounts (status must be "Stake")
 			if stakeState.Status != sealevel.StakeStateV2StatusStake {
 				continue
 			}
 
-			// Use delegation from AccountsDB, not manifest
-			// Use Bulk variant for startup loading - doesn't track as "new" for index append
+			// Aggregate stake by vote account
 			delegation := stakeState.Stake.Stake.Delegation
-			global.PutStakeCacheItemBulk(pk,
-				&sealevel.Delegation{
-					VoterPubkey:        delegation.VoterPubkey,
-					StakeLamports:      delegation.StakeLamports,
-					ActivationEpoch:    delegation.ActivationEpoch,
-					DeactivationEpoch:  delegation.DeactivationEpoch,
-					WarmupCooldownRate: delegation.WarmupCooldownRate,
-					CreditsObserved:    stakeState.Stake.Stake.CreditsObserved,
-				})
+			localStakes[delegation.VoterPubkey] += delegation.StakeLamports
 		}
+
+		// Merge local aggregation into shared map under lock
+		voteAcctStakesMu.Lock()
+		for voter, stake := range localStakes {
+			voteAcctStakes[voter] += stake
+		}
+		voteAcctStakesMu.Unlock()
 	})
 
 	// Submit stake pubkeys in batches (reduces wg.Add/Invoke calls from ~1M to ~1K)
@@ -762,18 +769,15 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 	wg.Wait()
 	stakeAcctWorkerPool.Release()
 
-	// Build voteAcctStakes from stake cache (loaded from AccountsDB)
-	voteAcctStakes := make(map[solana.PublicKey]uint64)
-	for _, delegation := range global.StakeCache() {
-		voteAcctStakes[delegation.VoterPubkey] += delegation.StakeLamports
-	}
+	// Store aggregated totals in global for later use
+	global.SetVoteStakeTotals(voteAcctStakes)
 
 	// Load vote accounts from AccountsDB into vote cache
 	if err := RebuildVoteCacheFromAccountsDB(acctsDb, block.Slot, voteAcctStakes, 0); err != nil {
 		mlog.Log.Warnf("vote cache rebuild had errors: %v", err)
 	}
 
-	// Derive EpochStakesPerVoteAcct and TotalEpochStake from stake delegations
+	// Derive EpochStakesPerVoteAcct and TotalEpochStake from aggregated totals
 	for pk, stake := range voteAcctStakes {
 		block.EpochStakesPerVoteAcct[pk] = stake
 		block.TotalEpochStake += stake

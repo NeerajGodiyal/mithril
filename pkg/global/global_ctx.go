@@ -27,6 +27,7 @@ type GlobalCtx struct {
 	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
 	pendingNewStakePubkeys     []solana.PublicKey // New stake pubkeys to append to index after block commit
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
+	voteStakeTotals            map[solana.PublicKey]uint64 // Aggregated stake totals per vote account (replaces full stake cache at startup)
 	epochStakes                *epochstakes.EpochStakesCache
 	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
 	forkChoice                 *forkchoice.ForkChoiceService
@@ -37,6 +38,7 @@ type GlobalCtx struct {
 	manageBlockHeight          bool
 	stakeCacheMutex            sync.Mutex // Changed from RWMutex - simpler, used for both cache and pending
 	voteCacheMutex             sync.RWMutex
+	voteStakeTotalsMu          sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
 	mu                         sync.Mutex
 }
@@ -194,6 +196,37 @@ func VoteCacheSnapshot() map[solana.PublicKey]*sealevel.VoteStateVersions {
 		snapshot[pk] = voteState
 	}
 	return snapshot
+}
+
+// SetVoteStakeTotals sets the aggregated stake totals per vote account.
+// Called at startup after scanning all stake accounts.
+func SetVoteStakeTotals(m map[solana.PublicKey]uint64) {
+	instance.voteStakeTotalsMu.Lock()
+	instance.voteStakeTotals = m
+	instance.voteStakeTotalsMu.Unlock()
+}
+
+// VoteStakeTotalsCopy returns a copy of the vote stake totals map.
+// Safe for concurrent use - callers can mutate the returned map.
+func VoteStakeTotalsCopy() map[solana.PublicKey]uint64 {
+	instance.voteStakeTotalsMu.RLock()
+	defer instance.voteStakeTotalsMu.RUnlock()
+	if instance.voteStakeTotals == nil {
+		return nil
+	}
+	result := make(map[solana.PublicKey]uint64, len(instance.voteStakeTotals))
+	for k, v := range instance.voteStakeTotals {
+		result[k] = v
+	}
+	return result
+}
+
+// VoteStakeTotalsRef returns a direct reference to the vote stake totals map.
+// Callers must NOT mutate the returned map.
+func VoteStakeTotalsRef() map[solana.PublicKey]uint64 {
+	instance.voteStakeTotalsMu.RLock()
+	defer instance.voteStakeTotalsMu.RUnlock()
+	return instance.voteStakeTotals
 }
 
 func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
