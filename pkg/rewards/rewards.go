@@ -20,7 +20,6 @@ import (
 	"github.com/Overclock-Validator/wide"
 	"github.com/dgryski/go-sip13"
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -105,11 +104,6 @@ func DeterminePartitionedStakingRewardsInfo(rpcc *rpcclient.RpcClient, rpcBackup
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 	totalStakingRewards := CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
 	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1}
-}
-
-type idxAndReward struct {
-	idx    int
-	reward rpc.BlockReward
 }
 
 type idxAndRewardNew struct {
@@ -210,77 +204,6 @@ type CalculatedStakeRewards struct {
 	NewCreditsObserved uint64
 }
 
-func CalculateStakeRewardsAndPartitions(pointsPerStakeAcct map[solana.PublicKey]*CalculatedStakePoints, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, slot uint64, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64, f *features.Features, stakeCache map[solana.PublicKey]*sealevel.Delegation, voteCache map[solana.PublicKey]*sealevel.VoteStateVersions) (map[solana.PublicKey]*CalculatedStakeRewards, map[solana.PublicKey]*atomic.Uint64, Partitions) {
-	stakeInfoResults := make(map[solana.PublicKey]*CalculatedStakeRewards, 1500000)
-	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64, 2000)
-
-	minimumStakeDelegation := minimumStakeDelegation(slotCtx)
-
-	var stakeMu sync.Mutex
-	var wg sync.WaitGroup
-
-	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
-		defer wg.Done()
-
-		delegation := i.(*delegationAndPubkey)
-
-		if delegation.delegation.StakeLamports < minimumStakeDelegation {
-			return
-		}
-
-		voterPk := delegation.delegation.VoterPubkey
-		voteStateVersioned := voteCache[voterPk]
-		if voteStateVersioned == nil {
-			return
-		}
-
-		pointsForStakeAcct := pointsPerStakeAcct[delegation.pubkey]
-		calculatedStakeRewards := CalculateStakeRewardsForAcct(delegation.pubkey, pointsForStakeAcct, delegation.delegation, voteStateVersioned, rewardedEpoch, pointValue, newRateActivationEpoch)
-		if calculatedStakeRewards != nil {
-			stakeMu.Lock()
-			stakeInfoResults[delegation.pubkey] = calculatedStakeRewards
-			stakeMu.Unlock()
-
-			validatorRewards[voterPk].Add(calculatedStakeRewards.VoterRewards)
-		}
-	})
-
-	for _, delegation := range stakeCache {
-		_, exists := validatorRewards[delegation.VoterPubkey]
-		if !exists {
-			validatorRewards[delegation.VoterPubkey] = &atomic.Uint64{}
-		}
-	}
-
-	for pk, delegation := range stakeCache {
-		d := &delegationAndPubkey{delegation: delegation, pubkey: pk}
-		wg.Add(1)
-		workerPool.Invoke(d)
-	}
-	wg.Wait()
-	workerPool.Release()
-
-	numRewardPartitions := CalculateNumRewardPartitions(uint64(len(stakeInfoResults)))
-	partitions := NewPartitions(numRewardPartitions)
-
-	partitionCalcWorkerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
-		defer wg.Done()
-
-		stakePk := i.(solana.PublicKey)
-		idx := CalculateRewardPartitionForPubkey(stakePk, slotCtx.Blockhash, numRewardPartitions)
-		partitions.AddPubkey(idx, stakePk)
-	})
-
-	for stakePk := range stakeInfoResults {
-		wg.Add(1)
-		partitionCalcWorkerPool.Invoke(stakePk)
-	}
-	wg.Wait()
-	partitionCalcWorkerPool.Release()
-
-	return stakeInfoResults, validatorRewards, partitions
-}
-
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
 	if pointValue.Rewards == 0 || delegation.ActivationEpoch == rewardedEpoch {
 		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
@@ -369,62 +292,6 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 	}
 
 	return result
-}
-
-type delegationAndPubkey struct {
-	delegation *sealevel.Delegation
-	pubkey     solana.PublicKey
-}
-
-func CalculateStakePoints(
-	acctsDb *accountsdb.AccountsDb,
-	slotCtx *sealevel.SlotCtx,
-	slot uint64,
-	stakeHistory *sealevel.SysvarStakeHistory,
-	newWarmupCooldownRateEpoch *uint64,
-	stakeCache map[solana.PublicKey]*sealevel.Delegation,
-	voteCache map[solana.PublicKey]*sealevel.VoteStateVersions,
-) (map[solana.PublicKey]*CalculatedStakePoints, wide.Uint128) {
-	minimum := minimumStakeDelegation(slotCtx)
-
-	n := len(stakeCache)
-	pks := make([]solana.PublicKey, 0, n)
-	for pk := range stakeCache {
-		pks = append(pks, pk)
-	}
-
-	pointsAccum := NewCalculatedStakePointsAccumulator(pks)
-	var wg sync.WaitGroup
-
-	size := runtime.GOMAXPROCS(0) * 8
-	workerPool, _ := ants.NewPoolWithFunc(size, func(i interface{}) {
-		defer wg.Done()
-
-		t := i.(*delegationAndPubkey)
-		d := t.delegation
-		if d.StakeLamports < minimum {
-			return
-		}
-
-		voterPk := d.VoterPubkey
-		voteState := voteCache[voterPk]
-		if voteState == nil {
-			return
-		}
-
-		pcs := calculateStakePointsAndCredits(t.pubkey, stakeHistory, d, voteState, newWarmupCooldownRateEpoch)
-		pointsAccum.Add(t.pubkey, pcs)
-	})
-
-	for pk, delegation := range stakeCache {
-		wg.Add(1)
-		workerPool.Invoke(&delegationAndPubkey{delegation: delegation, pubkey: pk})
-	}
-
-	wg.Wait()
-	workerPool.Release()
-
-	return pointsAccum.CalculatedStakePoints(), pointsAccum.TotalPoints()
 }
 
 func calculateStakePointsAndCredits(

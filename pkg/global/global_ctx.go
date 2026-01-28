@@ -607,11 +607,13 @@ func StreamStakeAccounts(
 	defer workerPool.Release()
 
 	// Submit stake pubkeys in batches
-	numBatches := (len(stakePubkeys) + batchSize - 1) / batchSize
-	wg.Add(numBatches)
 	for i := 0; i < len(stakePubkeys); i += batchSize {
 		end := min(i+batchSize, len(stakePubkeys))
-		workerPool.Invoke(stakePubkeys[i:end])
+		wg.Add(1)
+		if invokeErr := workerPool.Invoke(stakePubkeys[i:end]); invokeErr != nil {
+			wg.Done() // balance the Add since worker won't run
+			return 0, fmt.Errorf("worker pool invoke failed: %w", invokeErr)
+		}
 	}
 
 	wg.Wait()
