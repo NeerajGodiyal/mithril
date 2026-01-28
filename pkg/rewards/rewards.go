@@ -595,7 +595,7 @@ func CalculateRewardsStreaming(
 	// Channel-based single writer pattern to capture write errors
 	// All writes go through one goroutine to avoid file handle contention
 	writeChan := make(chan spoolWriteRequest, 10000)
-	var writeErr atomic.Value
+	var writeErr atomic.Pointer[error]
 	var writerWg sync.WaitGroup
 	writerWg.Add(1)
 
@@ -606,7 +606,7 @@ func CalculateRewardsStreaming(
 				continue // already failed, drain channel
 			}
 			if err := spoolWriters.WriteRecord(req.record); err != nil {
-				writeErr.Store(err)
+				writeErr.Store(&err)
 			}
 		}
 	}()
@@ -681,7 +681,7 @@ func CalculateRewardsStreaming(
 	if werr := writeErr.Load(); werr != nil {
 		spoolWriters.Close()
 		CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
-		return nil, fmt.Errorf("spool write failed: %w", werr.(error))
+		return nil, fmt.Errorf("spool write failed: %w", *werr)
 	}
 
 	// Close all partition spool files and check for errors
@@ -714,7 +714,7 @@ type spoolDistributionTask struct {
 	parentAccts *[]*accounts.Account
 	mu          *sync.Mutex
 	distributed *atomic.Uint64
-	firstError  *atomic.Value
+	firstError  *atomic.Pointer[error]
 }
 
 // DistributeStakingRewardsFromSpool reads rewards from a per-partition spool file and distributes them.
@@ -739,7 +739,7 @@ func DistributeStakingRewardsFromSpool(
 	defer reader.Close()
 
 	var distributedLamports atomic.Uint64
-	var firstError atomic.Value
+	var firstError atomic.Pointer[error]
 	var mu sync.Mutex
 
 	// Dynamic slices - append as we process (no pre-allocation with nils)
@@ -760,14 +760,16 @@ func DistributeStakingRewardsFromSpool(
 
 		stakeAcct, err := task.acctsDb.GetAccount(task.slot, task.rec.StakePubkey)
 		if err != nil {
-			task.firstError.CompareAndSwap(nil, fmt.Errorf("GetAccount %s: %w", task.rec.StakePubkey, err))
+			newErr := fmt.Errorf("GetAccount %s: %w", task.rec.StakePubkey, err)
+			task.firstError.CompareAndSwap(nil, &newErr)
 			return
 		}
 		parentAcct := stakeAcct.Clone()
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
-			task.firstError.CompareAndSwap(nil, fmt.Errorf("UnmarshalStakeState %s: %w", task.rec.StakePubkey, err))
+			newErr := fmt.Errorf("UnmarshalStakeState %s: %w", task.rec.StakePubkey, err)
+			task.firstError.CompareAndSwap(nil, &newErr)
 			return
 		}
 
@@ -778,7 +780,8 @@ func DistributeStakingRewardsFromSpool(
 
 		err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
 		if err != nil {
-			task.firstError.CompareAndSwap(nil, fmt.Errorf("MarshalStakeStakeInto %s: %w", task.rec.StakePubkey, err))
+			newErr := fmt.Errorf("MarshalStakeStakeInto %s: %w", task.rec.StakePubkey, err)
+			task.firstError.CompareAndSwap(nil, &newErr)
 			return
 		}
 
@@ -806,9 +809,9 @@ func DistributeStakingRewardsFromSpool(
 			return nil, nil, 0, fmt.Errorf("reading partition %d record: %w", partitionIndex, err)
 		}
 
-		// Submit to worker pool
+		// Submit to worker pool - check for invoke errors
 		wg.Add(1)
-		workerPool.Invoke(&spoolDistributionTask{
+		if invokeErr := workerPool.Invoke(&spoolDistributionTask{
 			rec:         rec,
 			acctsDb:     acctsDb,
 			slot:        slot,
@@ -817,13 +820,16 @@ func DistributeStakingRewardsFromSpool(
 			mu:          &mu,
 			distributed: &distributedLamports,
 			firstError:  &firstError,
-		})
+		}); invokeErr != nil {
+			wg.Done() // balance the Add since worker won't run
+			return nil, nil, 0, fmt.Errorf("worker pool invoke failed: %w", invokeErr)
+		}
 	}
 	wg.Wait()
 
 	// STRICT: Any failure is fatal - we cannot silently skip rewards and diverge from consensus
 	if ferr := firstError.Load(); ferr != nil {
-		return nil, nil, 0, fmt.Errorf("reward distribution partition %d failed: %w", partitionIndex, ferr.(error))
+		return nil, nil, 0, fmt.Errorf("reward distribution partition %d failed: %w", partitionIndex, *ferr)
 	}
 
 	if len(accts) > 0 {
