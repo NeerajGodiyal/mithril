@@ -177,8 +177,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		panic(fmt.Sprintf("streaming rewards calculation failed: %s", err))
 	}
 
-	// Store spool path for distribution phase
-	partitionedRewardsInfo.SpoolPath = streamingResult.SpoolPath
+	// Store spool info for distribution phase
+	partitionedRewardsInfo.SpoolDir = streamingResult.SpoolDir
+	partitionedRewardsInfo.SpoolSlot = streamingResult.SpoolSlot
 	partitionedRewardsInfo.NumRewardPartitionsRemaining = streamingResult.NumPartitions
 
 	// Distribute voting rewards
@@ -209,8 +210,8 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
 
-	mlog.Log.Infof("streaming rewards: %d stake accounts, %d partitions, spool at %s",
-		streamingResult.NumStakeRewards, streamingResult.NumPartitions, streamingResult.SpoolPath)
+	mlog.Log.Infof("streaming rewards: %d stake accounts, %d partitions (per-partition spool files in %s)",
+		streamingResult.NumStakeRewards, streamingResult.NumPartitions, streamingResult.SpoolDir)
 
 	return partitionedRewardsInfo, updatedAccts, parentUpdatedAccts
 }
@@ -230,9 +231,9 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	// Set flag to prevent stake account cache pollution during one-shot reward reads/writes
 	acctsDb.InRewardsWindow.Store(true)
 
-	// Use spool-based distribution
+	// Use spool-based distribution (sequential I/O from per-partition file)
 	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsFromSpool(
-		acctsDb, partitionedEpochRewardsInfo.SpoolPath, uint32(partitionIdx), currentSlot)
+		acctsDb, partitionedEpochRewardsInfo.SpoolDir, partitionedEpochRewardsInfo.SpoolSlot, uint32(partitionIdx), currentSlot)
 	if err != nil {
 		panic(fmt.Sprintf("spool distribution failed for partition %d: %s", partitionIdx, err))
 	}
@@ -245,8 +246,11 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	if partitionedEpochRewardsInfo.NumRewardPartitionsRemaining == 0 {
 		epochRewards.Active = false
 		acctsDb.InRewardsWindow.Store(false)
-		// Clean up spool file when done
-		rewards.CleanupSpoolFile(partitionedEpochRewardsInfo.SpoolPath)
+		// Clean up all per-partition spool files when done
+		rewards.CleanupPartitionedSpoolFiles(
+			partitionedEpochRewardsInfo.SpoolDir,
+			partitionedEpochRewardsInfo.SpoolSlot,
+			epochRewards.NumPartitions)
 	}
 
 	writer := new(bytes.Buffer)
