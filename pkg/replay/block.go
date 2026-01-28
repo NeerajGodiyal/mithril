@@ -247,25 +247,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 }
 
 func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
-	var numPubkeys int
-	for _, tx := range block.Transactions {
-		numPubkeys += len(tx.Message.AccountKeys)
-	}
-
-	numPubkeys += len(block.UpdatedAccts)
-
-	pubkeyMap := make(map[solana.PublicKey]struct{}, numPubkeys)
-
-	for _, tx := range block.Transactions {
-		for _, pk := range tx.Message.AccountKeys {
-			pubkeyMap[pk] = struct{}{}
-		}
-	}
-
-	for _, pk := range block.UpdatedAccts {
-		pubkeyMap[pk] = struct{}{}
-	}
-
+	pubkeyMap := block.UniqueAccounts()
 	pubkeys := make([]solana.PublicKey, len(pubkeyMap))
 	i := 0
 	for pk := range pubkeyMap {
@@ -358,7 +340,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
 	ctx := context.Background()
-	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
+	slotAccts, err := accountsDb.GetAccountsBatch(ctx, dedupedAccts)
 	if err != nil {
 		return nil, nil, err
 	}
