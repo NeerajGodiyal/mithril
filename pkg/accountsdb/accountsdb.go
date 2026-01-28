@@ -63,7 +63,7 @@ var (
 	ErrNoAccount = errors.New("ErrNoAccount")
 
 	StoreAccountsWorkers = 128
-	StoreAsync           = false
+	StoreAsync           = true
 
 	VoteCacheSize    = 2500
 	CommonCacheSize  = 5000

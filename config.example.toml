@@ -256,6 +256,11 @@ name = "mithril"
     # Number of goroutines to store modified accounts at the end of each block
     store_accounts_workers = 128
 
+    # Store modified accounts asynchronously (experimental, default: false)
+    # When enabled, account writes are queued and flushed in the background
+    # rather than blocking at the end of each block.
+    store_async = true
+
     # Account cache sizes (max entries per cache)
     vote_cache_size = 2500         # Vote accounts
     common_cache_size = 5000       # Common (non-vote) accounts
