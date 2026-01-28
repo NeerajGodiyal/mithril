@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
+	"github.com/panjf2000/ants/v2"
 )
 
 // StakePubkeyIndexFileName is the name of the stake pubkey index file
@@ -80,6 +84,8 @@ func IncrTransactionCount(num uint64) {
 // PutStakeCacheItem adds or updates a stake cache entry during replay.
 // If this is a NEW pubkey (not already in cache), it's added to pendingNewStakePubkeys
 // for later append to the index file via FlushPendingStakePubkeys.
+// NOTE: With streaming rewards, this function may only be called during rewards distribution
+// to maintain consistency. For normal transaction recording, use TrackNewStakePubkey instead.
 func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
 	instance.stakeCacheMutex.Lock()
 	defer instance.stakeCacheMutex.Unlock()
@@ -92,6 +98,31 @@ func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation)
 		instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, pubkey)
 	}
 	instance.stakeCache[pubkey] = delegation
+}
+
+// TrackNewStakePubkey tracks a new stake pubkey for index append without populating the cache.
+// Use this during normal transaction recording when streaming rewards is enabled.
+// Returns true if the pubkey was newly added to pending list.
+func TrackNewStakePubkey(pubkey solana.PublicKey) bool {
+	instance.stakeCacheMutex.Lock()
+	defer instance.stakeCacheMutex.Unlock()
+
+	// Check if already in cache or pending list
+	// Since we're not populating the cache anymore, we need to track seen pubkeys differently
+	if instance.stakeCache == nil {
+		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
+	}
+
+	// Check if already known (in cache from previous runs or pending)
+	_, exists := instance.stakeCache[pubkey]
+	if exists {
+		return false
+	}
+
+	// Mark as seen with nil delegation (just for tracking)
+	instance.stakeCache[pubkey] = nil
+	instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, pubkey)
+	return true
 }
 
 // PutStakeCacheItemBulk adds a stake cache entry during bulk population (startup).
@@ -519,4 +550,71 @@ func SaveStakePubkeyIndex(accountsDbDir string) error {
 	}
 
 	return nil
+}
+
+// StreamStakeAccounts iterates all stake accounts from the pubkey index,
+// calling fn for each valid delegation. Returns count of processed accounts.
+// This streams directly from AccountsDB without building a full stake cache.
+func StreamStakeAccounts(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	fn func(pubkey solana.PublicKey, delegation *sealevel.Delegation, creditsObserved uint64),
+) (int, error) {
+	// Load stake pubkeys from index file
+	acctsDbDir := filepath.Join(acctsDb.AcctsDir, "..")
+	stakePubkeys, err := LoadStakePubkeyIndex(acctsDbDir)
+	if err != nil {
+		return 0, fmt.Errorf("loading stake pubkey index: %w", err)
+	}
+
+	var processedCount atomic.Int64
+	var wg sync.WaitGroup
+
+	// Batched worker pool for parallel processing
+	const batchSize = 1000
+	workerPool, err := ants.NewPoolWithFunc(runtime.NumCPU()*2, func(i interface{}) {
+		defer wg.Done()
+
+		batch := i.([]solana.PublicKey)
+
+		for _, pk := range batch {
+			// Read stake account from AccountsDB
+			stakeAcct, err := acctsDb.GetAccount(slot, pk)
+			if err != nil {
+				continue // Account not found or closed
+			}
+
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				continue // Invalid stake state
+			}
+
+			// Only process delegated stake accounts (status must be "Stake")
+			if stakeState.Status != sealevel.StakeStateV2StatusStake {
+				continue
+			}
+
+			// Call the callback with delegation data
+			delegation := &stakeState.Stake.Stake.Delegation
+			creditsObserved := stakeState.Stake.Stake.CreditsObserved
+			fn(pk, delegation, creditsObserved)
+			processedCount.Add(1)
+		}
+	})
+	if err != nil {
+		return 0, fmt.Errorf("creating worker pool: %w", err)
+	}
+	defer workerPool.Release()
+
+	// Submit stake pubkeys in batches
+	numBatches := (len(stakePubkeys) + batchSize - 1) / batchSize
+	wg.Add(numBatches)
+	for i := 0; i < len(stakePubkeys); i += batchSize {
+		end := min(i+batchSize, len(stakePubkeys))
+		workerPool.Invoke(stakePubkeys[i:end])
+	}
+
+	wg.Wait()
+
+	return int(processedCount.Load()), nil
 }

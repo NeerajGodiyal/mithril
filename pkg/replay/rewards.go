@@ -166,22 +166,27 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
-	var points wide.Uint128
-	var pointsPerStakeAcct map[solana.PublicKey]*rewards.CalculatedStakePoints
-	stakeCacheSnapshot := global.StakeCacheSnapshot()
 	voteCacheSnapshot := global.VoteCacheSnapshot()
 
-	pointsPerStakeAcct, points = rewards.CalculateStakePoints(acctsDb, slotCtx, slot, stakeHistory, newWarmupCooldownRateEpoch, stakeCacheSnapshot, voteCacheSnapshot)
-	pointValue := rewards.PointValue{Rewards: totalRewards, Points: points}
+	// Use streaming rewards calculation - no full stake cache needed
+	pointValue := rewards.PointValue{Rewards: totalRewards, Points: wide.Uint128{}}
+	streamingResult, err := rewards.CalculateRewardsStreaming(
+		acctsDb, slot, stakeHistory, newWarmupCooldownRateEpoch,
+		voteCacheSnapshot, pointValue, epoch-1, slotCtx.Blockhash, slotCtx, f)
+	if err != nil {
+		panic(fmt.Sprintf("streaming rewards calculation failed: %s", err))
+	}
 
-	var validatorRewards map[solana.PublicKey]*atomic.Uint64
-	partitionedRewardsInfo.StakingRewards, validatorRewards, partitionedRewardsInfo.RewardPartitions = rewards.CalculateStakeRewardsAndPartitions(pointsPerStakeAcct, slotCtx, stakeHistory, slot, epoch-1, pointValue, newWarmupCooldownRateEpoch, slotCtx.Features, stakeCacheSnapshot, voteCacheSnapshot)
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, validatorRewards, slot)
-	partitionedRewardsInfo.NumRewardPartitionsRemaining = partitionedRewardsInfo.RewardPartitions.NumPartitions()
+	// Store spool path for distribution phase
+	partitionedRewardsInfo.SpoolPath = streamingResult.SpoolPath
+	partitionedRewardsInfo.NumRewardPartitionsRemaining = streamingResult.NumPartitions
+
+	// Distribute voting rewards
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, streamingResult.ValidatorRewards, slot)
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
-		NumPartitions: partitionedRewardsInfo.NumRewardPartitionsRemaining, ParentBlockhash: block.LastBlockhash,
-		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: points, Active: true}
+		NumPartitions: streamingResult.NumPartitions, ParentBlockhash: block.LastBlockhash,
+		TotalRewards: totalRewards, DistributedRewards: voteRewardsDistributed, TotalPoints: streamingResult.TotalPoints, Active: true}
 
 	epochRewardsAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
@@ -204,6 +209,9 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	updatedAccts = append(updatedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += voteRewardsDistributed
 
+	mlog.Log.Infof("streaming rewards: %d stake accounts, %d partitions, spool at %s",
+		streamingResult.NumStakeRewards, streamingResult.NumPartitions, streamingResult.SpoolPath)
+
 	return partitionedRewardsInfo, updatedAccts, parentUpdatedAccts
 }
 
@@ -219,16 +227,16 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
 
-	// Initialize shared worker pool on first partition (reused across all 243 partitions)
-	if partitionedEpochRewardsInfo.WorkerPool == nil {
-		if err := partitionedEpochRewardsInfo.InitWorkerPool(); err != nil {
-			panic(fmt.Sprintf("unable to initialize reward distribution worker pool: %s", err))
-		}
-	}
-
 	// Set flag to prevent stake account cache pollution during one-shot reward reads/writes
 	acctsDb.InRewardsWindow.Store(true)
-	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsForPartition(acctsDb, partitionedEpochRewardsInfo.RewardPartitions.Partition(partitionIdx), partitionedEpochRewardsInfo.StakingRewards, currentSlot, partitionedEpochRewardsInfo.WorkerPool)
+
+	// Use spool-based distribution
+	distributedAccts, parentDistributedAccts, distributedLamports, err := rewards.DistributeStakingRewardsFromSpool(
+		acctsDb, partitionedEpochRewardsInfo.SpoolPath, uint32(partitionIdx), currentSlot)
+	if err != nil {
+		panic(fmt.Sprintf("spool distribution failed for partition %d: %s", partitionIdx, err))
+	}
+
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
 	epochRewards.Distribute(distributedLamports)
@@ -237,7 +245,8 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 	if partitionedEpochRewardsInfo.NumRewardPartitionsRemaining == 0 {
 		epochRewards.Active = false
 		acctsDb.InRewardsWindow.Store(false)
-		partitionedEpochRewardsInfo.ReleaseWorkerPool()
+		// Clean up spool file when done
+		rewards.CleanupSpoolFile(partitionedEpochRewardsInfo.SpoolPath)
 	}
 
 	writer := new(bytes.Buffer)

@@ -3,6 +3,8 @@ package rewards
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
@@ -37,6 +39,7 @@ type PartitionedRewardDistributionInfo struct {
 	RewardPartitions             Partitions
 	StakingRewards               map[solana.PublicKey]*CalculatedStakeRewards
 	WorkerPool                   *ants.PoolWithFunc
+	SpoolPath                    string // Path to spool file for streaming rewards
 }
 
 // rewardDistributionTask carries all context needed for processing one stake account.
@@ -622,4 +625,260 @@ func CalculateNumRewardPartitions(numStakingRewards uint64) uint64 {
 	numRewardPartitions := min(unclamped, cap)
 
 	return numRewardPartitions
+}
+
+// StreamingRewardsResult holds the results from streaming rewards calculation.
+type StreamingRewardsResult struct {
+	SpoolPath        string
+	TotalPoints      wide.Uint128
+	ValidatorRewards map[solana.PublicKey]*atomic.Uint64
+	NumStakeRewards  uint64
+	NumPartitions    uint64
+}
+
+// CalculateRewardsStreaming performs a two-pass streaming calculation of stake rewards.
+// Pass 1: Stream stakes to calculate total points
+// Pass 2: Stream stakes again to calculate rewards and write to spool file
+// This avoids keeping the full stake cache in memory.
+func CalculateRewardsStreaming(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	stakeHistory *sealevel.SysvarStakeHistory,
+	newWarmupCooldownRateEpoch *uint64,
+	voteCache map[solana.PublicKey]*sealevel.VoteStateVersions,
+	pointValue PointValue,
+	rewardedEpoch uint64,
+	blockhash [32]byte,
+	slotCtx *sealevel.SlotCtx,
+	f *features.Features,
+) (*StreamingRewardsResult, error) {
+	minimum := minimumStakeDelegation(slotCtx)
+
+	// Pass 1: Stream stakes to calculate total points
+	var totalPoints wide.Uint128
+	var totalPointsMu sync.Mutex
+	stakePointsCache := make(map[solana.PublicKey]*CalculatedStakePoints)
+	var stakePointsCacheMu sync.Mutex
+
+	_, err := global.StreamStakeAccounts(acctsDb, slot,
+		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
+			if delegation.StakeLamports < minimum {
+				return
+			}
+
+			voterPk := delegation.VoterPubkey
+			voteState := voteCache[voterPk]
+			if voteState == nil {
+				return
+			}
+
+			// Calculate points for this stake account
+			// Need to set CreditsObserved on delegation for calculation
+			delegWithCredits := *delegation
+			delegWithCredits.CreditsObserved = creditsObs
+			pcs := calculateStakePointsAndCredits(pk, stakeHistory, &delegWithCredits, voteState, newWarmupCooldownRateEpoch)
+
+			// Accumulate total points
+			totalPointsMu.Lock()
+			totalPoints = totalPoints.Add(pcs.Points)
+			totalPointsMu.Unlock()
+
+			// Cache points result for pass 2 (only if has points)
+			zero128 := wide.Uint128FromUint64(0)
+			if !pcs.Points.Eq(zero128) || pcs.ForceCreditsUpdateWithSkippedReward {
+				stakePointsCacheMu.Lock()
+				stakePointsCache[pk] = &pcs
+				stakePointsCacheMu.Unlock()
+			}
+		})
+	if err != nil {
+		return nil, fmt.Errorf("pass 1 streaming stakes for points: %w", err)
+	}
+
+	// Create point value with calculated total points
+	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
+
+	// Calculate number of partitions based on expected stake count
+	numPartitions := CalculateNumRewardPartitions(uint64(len(stakePointsCache)))
+
+	// Create spool file for pass 2
+	acctsDbDir := filepath.Join(acctsDb.AcctsDir, "..")
+	spoolPath := filepath.Join(acctsDbDir, fmt.Sprintf("reward_spool_%d.bin", slot))
+	spoolWriter, err := NewSpoolWriter(spoolPath)
+	if err != nil {
+		return nil, fmt.Errorf("creating spool writer: %w", err)
+	}
+
+	// Track validator rewards (for voting rewards distribution)
+	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64)
+	var validatorRewardsMu sync.Mutex
+	var numStakeRewards atomic.Uint64
+
+	// Pass 2: Stream stakes again to calculate rewards and write to spool
+	_, err = global.StreamStakeAccounts(acctsDb, slot,
+		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
+			if delegation.StakeLamports < minimum {
+				return
+			}
+
+			// Check if we have cached points for this stake account
+			stakePointsCacheMu.Lock()
+			pointsResult, hasPoints := stakePointsCache[pk]
+			stakePointsCacheMu.Unlock()
+
+			if !hasPoints {
+				return
+			}
+
+			voterPk := delegation.VoterPubkey
+			voteState := voteCache[voterPk]
+			if voteState == nil {
+				return
+			}
+
+			// Calculate rewards using cached points
+			delegWithCredits := *delegation
+			delegWithCredits.CreditsObserved = creditsObs
+			calculatedRewards := CalculateStakeRewardsForAcct(pk, pointsResult, &delegWithCredits, voteState, rewardedEpoch, pv, newWarmupCooldownRateEpoch)
+
+			if calculatedRewards == nil {
+				return
+			}
+
+			// Calculate partition index
+			partitionIdx := CalculateRewardPartitionForPubkey(pk, blockhash, numPartitions)
+
+			// Write to spool
+			err := spoolWriter.WriteRecord(&SpoolRecord{
+				StakePubkey:     pk,
+				VotePubkey:      delegation.VoterPubkey,
+				StakeLamports:   delegation.StakeLamports,
+				CreditsObserved: calculatedRewards.NewCreditsObserved,
+				RewardLamports:  calculatedRewards.StakerRewards,
+				PartitionIndex:  uint32(partitionIdx),
+			})
+			if err != nil {
+				// Log error but continue - don't panic in streaming callback
+				return
+			}
+
+			numStakeRewards.Add(1)
+
+			// Track validator rewards
+			if calculatedRewards.VoterRewards > 0 {
+				validatorRewardsMu.Lock()
+				if _, exists := validatorRewards[voterPk]; !exists {
+					validatorRewards[voterPk] = &atomic.Uint64{}
+				}
+				validatorRewards[voterPk].Add(calculatedRewards.VoterRewards)
+				validatorRewardsMu.Unlock()
+			}
+		})
+
+	spoolWriter.Close()
+
+	if err != nil {
+		os.Remove(spoolPath)
+		return nil, fmt.Errorf("pass 2 streaming stakes for rewards: %w", err)
+	}
+
+	return &StreamingRewardsResult{
+		SpoolPath:        spoolPath,
+		TotalPoints:      totalPoints,
+		ValidatorRewards: validatorRewards,
+		NumStakeRewards:  numStakeRewards.Load(),
+		NumPartitions:    numPartitions,
+	}, nil
+}
+
+// DistributeStakingRewardsFromSpool reads rewards from the spool file and distributes them.
+// This replaces DistributeStakingRewardsForPartition for the streaming approach.
+func DistributeStakingRewardsFromSpool(
+	acctsDb *accountsdb.AccountsDb,
+	spoolPath string,
+	partitionIndex uint32,
+	slot uint64,
+) ([]*accounts.Account, []*accounts.Account, uint64, error) {
+	reader, err := NewSpoolReader(spoolPath)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("opening spool reader: %w", err)
+	}
+	defer reader.Close()
+
+	records, err := reader.ReadPartition(partitionIndex)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("reading partition %d: %w", partitionIndex, err)
+	}
+
+	if len(records) == 0 {
+		return nil, nil, 0, nil
+	}
+
+	var distributedLamports atomic.Uint64
+	accts := make([]*accounts.Account, len(records))
+	parentAccts := make([]*accounts.Account, len(records))
+
+	var wg sync.WaitGroup
+	size := runtime.GOMAXPROCS(0) * 8
+	workerPool, err := ants.NewPoolWithFunc(size, func(i interface{}) {
+		defer wg.Done()
+
+		idx := i.(int)
+		rec := records[idx]
+
+		stakeAcct, err := acctsDb.GetAccount(slot, rec.StakePubkey)
+		if err != nil {
+			return
+		}
+		parentAccts[idx] = stakeAcct.Clone()
+
+		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+		if err != nil {
+			return
+		}
+
+		// Apply reward
+		stakeState.Stake.Stake.CreditsObserved = rec.CreditsObserved
+		stakeState.Stake.Stake.Delegation.StakeLamports = safemath.SaturatingAddU64(
+			stakeState.Stake.Stake.Delegation.StakeLamports, rec.RewardLamports)
+
+		err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
+		if err != nil {
+			return
+		}
+
+		stakeAcct.Lamports = safemath.SaturatingAddU64(stakeAcct.Lamports, rec.RewardLamports)
+		accts[idx] = stakeAcct
+		distributedLamports.Add(rec.RewardLamports)
+
+		// Note: No stake cache update needed with streaming rewards
+		// The cache is no longer used; all reads come from AccountsDB directly
+	})
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("creating worker pool: %w", err)
+	}
+	defer workerPool.Release()
+
+	for idx := range records {
+		wg.Add(1)
+		workerPool.Invoke(idx)
+	}
+	wg.Wait()
+
+	// Filter out nil accounts (failed reads)
+	validAccts := make([]*accounts.Account, 0, len(accts))
+	for _, a := range accts {
+		if a != nil {
+			validAccts = append(validAccts, a)
+		}
+	}
+
+	if len(validAccts) > 0 {
+		err = acctsDb.StoreAccounts(validAccts, slot, nil)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("storing accounts: %w", err)
+		}
+	}
+
+	return accts, parentAccts, distributedLamports.Load(), nil
 }

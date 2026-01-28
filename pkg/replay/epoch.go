@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
-	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
-	"github.com/panjf2000/ants/v2"
 )
 
 type ReplayCtx struct {
@@ -97,34 +95,27 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 
 	newRateActivationEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
-	var wg sync.WaitGroup
 	var effective atomic.Uint64
 	var activating atomic.Uint64
 	var deactivating atomic.Uint64
 
-	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
-		defer wg.Done()
+	// Stream stakes from AccountsDB instead of iterating cache
+	// Note: callback is called from multiple goroutines (worker pool)
+	_, err = global.StreamStakeAccounts(acctsDb, prevSlotCtx.Slot,
+		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
+			if delegation.StakeLamports == 0 {
+				return
+			}
 
-		delegation := i.(*sealevel.Delegation)
-		if delegation.StakeLamports == 0 {
-			return
-		}
+			stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, &stakeHistory, newRateActivationEpoch)
 
-		stakeHistoryEntry := delegation.StakeActivatingAndDeactivating(targetEpoch, &stakeHistory, newRateActivationEpoch)
-
-		effective.Add(stakeHistoryEntry.Effective)
-		activating.Add(stakeHistoryEntry.Activating)
-		deactivating.Add(stakeHistoryEntry.Deactivating)
-	})
-
-	for _, delegation := range global.StakeCache() {
-		wg.Add(1)
-		workerPool.Invoke(delegation)
+			effective.Add(stakeHistoryEntry.Effective)
+			activating.Add(stakeHistoryEntry.Activating)
+			deactivating.Add(stakeHistoryEntry.Deactivating)
+		})
+	if err != nil {
+		panic(fmt.Sprintf("error streaming stake accounts for stake history: %s", err))
 	}
-
-	wg.Wait()
-	workerPool.Release()
-	ants.Release()
 
 	var accumulatorStakeHistoryEntry sealevel.StakeHistoryEntry
 	accumulatorStakeHistoryEntry.Activating = activating.Load()
@@ -234,13 +225,41 @@ func (esb *epochStakesBuilder) TotalEpochStake() uint64 {
 }
 
 func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, acctsDb *accountsdb.AccountsDb, slot uint64) {
-	stakes := global.StakeCache()
 	newRateActivationEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 
-	// Build vote pubkey set for vote cache refresh (only needs pubkeys, not effective stakes)
+	// Check if we need to compute epoch stakes (skip on resume)
+	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
+
+	// Build vote totals by streaming from AccountsDB
+	// Use per-batch local maps + mutex merge for thread-safety
 	voteAcctStakes := make(map[solana.PublicKey]uint64)
-	for _, delegation := range stakes {
-		voteAcctStakes[delegation.VoterPubkey] += delegation.StakeLamports
+	var voteAcctStakesMu sync.Mutex
+
+	// For epoch stakes calculation, we'll also track effective stakes
+	// We pre-compute these even if hasEpochStakes is true (minor overhead vs 2 passes)
+	effectiveStakes := make(map[solana.PublicKey]uint64)
+	var effectiveStakesMu sync.Mutex
+	var totalEffectiveStake atomic.Uint64
+
+	// Single streaming pass to build both raw totals and effective stakes
+	_, err := global.StreamStakeAccounts(acctsDb, slot,
+		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
+			// Accumulate raw stake totals for vote cache refresh
+			voteAcctStakesMu.Lock()
+			voteAcctStakes[delegation.VoterPubkey] += delegation.StakeLamports
+			voteAcctStakesMu.Unlock()
+
+			// Compute effective stake for epoch stakes
+			effectiveStake := delegation.Stake(leaderScheduleEpoch, sealevel.SysvarCache.StakeHistory.Sysvar, newRateActivationEpoch)
+			if effectiveStake > 0 {
+				effectiveStakesMu.Lock()
+				effectiveStakes[delegation.VoterPubkey] += effectiveStake
+				effectiveStakesMu.Unlock()
+				totalEffectiveStake.Add(effectiveStake)
+			}
+		})
+	if err != nil {
+		mlog.Log.Errorf("failed to stream stake accounts: %v", err)
 	}
 
 	// ALWAYS refresh vote cache from AccountsDB, even if HasEpochStakes is true
@@ -249,35 +268,22 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
 	}
 
-	// Skip epoch stakes calculation if already cached (resume)
-	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
+	// Skip epoch stakes storage if already cached (resume)
 	if hasEpochStakes {
 		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
 		return
 	}
 
+	// Store epoch stakes computed during streaming
 	voteCache := global.VoteCache()
-	esb := newEpochStakesBuilder(leaderScheduleEpoch, voteCache)
-	var wg sync.WaitGroup
-
-	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
-		defer wg.Done()
-
-		delegation := i.(*sealevel.Delegation)
-		_, exists := voteCache[delegation.VoterPubkey]
+	for votePk, stake := range effectiveStakes {
+		voteAcct, exists := voteCache[votePk]
 		if exists {
-			effectiveStake := delegation.Stake(esb.epoch, sealevel.SysvarCache.StakeHistory.Sysvar, newRateActivationEpoch)
-			esb.AddStakeForVoteAcct(delegation.VoterPubkey, effectiveStake)
+			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{NodePubkey: voteAcct.NodePubkey()})
 		}
-	})
-
-	for _, entry := range stakes {
-		wg.Add(1)
-		workerPool.Invoke(entry)
 	}
-	wg.Wait()
-	esb.Finish()
+	global.PutEpochTotalStake(leaderScheduleEpoch, totalEffectiveStake.Load())
 
 	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
-	b.TotalEpochStake = esb.TotalEpochStake()
+	b.TotalEpochStake = totalEffectiveStake.Load()
 }
