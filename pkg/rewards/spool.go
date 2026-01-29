@@ -263,13 +263,11 @@ func (w *TempSpoolWriter) Path() string {
 	return w.path
 }
 
-// Close flushes, syncs, and closes the temp spool file.
+// Close flushes and closes the temp spool file.
+// NOTE: No Sync() - temp spool is only used in-process and deleted immediately after reading.
 func (w *TempSpoolWriter) Close() error {
 	if err := w.bufw.Flush(); err != nil {
 		return fmt.Errorf("flushing temp spool: %w", err)
-	}
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("syncing temp spool: %w", err)
 	}
 	return w.file.Close()
 }
