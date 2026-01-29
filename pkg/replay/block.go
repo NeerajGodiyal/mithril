@@ -2192,7 +2192,7 @@ func ProcessBlock(
 		if err != nil {
 			mlog.Log.Infof("unable to store bankhash for slot %d", slotCtx.Slot)
 		}
-		flushed, err := global.FlushPendingStakePubkeys(acctsDb.AcctsDir)
+		flushed, err := global.FlushPendingStakePubkeys(filepath.Join(acctsDb.AcctsDir, ".."))
 		if err != nil {
 			mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
 		} else if flushed > 0 {
