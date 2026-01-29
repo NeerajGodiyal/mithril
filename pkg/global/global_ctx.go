@@ -14,6 +14,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
@@ -568,7 +569,12 @@ func StreamStakeAccounts(
 	}
 
 	var processedCount atomic.Int64
+	var getAccountErrors atomic.Int64
+	var unmarshalErrors atomic.Int64
+	var statusNotStake atomic.Int64
 	var wg sync.WaitGroup
+
+	totalPubkeys := len(stakePubkeys)
 
 	// Batched worker pool for parallel processing
 	const batchSize = 1000
@@ -581,16 +587,19 @@ func StreamStakeAccounts(
 			// Read stake account from AccountsDB
 			stakeAcct, err := acctsDb.GetAccount(slot, pk)
 			if err != nil {
+				getAccountErrors.Add(1)
 				continue // Account not found or closed
 			}
 
 			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 			if err != nil {
+				unmarshalErrors.Add(1)
 				continue // Invalid stake state
 			}
 
 			// Only process delegated stake accounts (status must be "Stake")
 			if stakeState.Status != sealevel.StakeStateV2StatusStake {
+				statusNotStake.Add(1)
 				continue
 			}
 
@@ -624,6 +633,10 @@ func StreamStakeAccounts(
 	if invokeErr != nil {
 		return 0, invokeErr
 	}
+
+	// Log diagnostic counters for debugging stake account streaming
+	mlog.Log.Infof("StreamStakeAccounts: totalPubkeys=%d processed=%d getAccountErrors=%d unmarshalErrors=%d statusNotStake=%d",
+		totalPubkeys, processedCount.Load(), getAccountErrors.Load(), unmarshalErrors.Load(), statusNotStake.Load())
 
 	return int(processedCount.Load()), nil
 }
