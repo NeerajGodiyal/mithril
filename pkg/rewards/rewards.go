@@ -420,20 +420,28 @@ func CalculateRewardsStreaming(
 	minimum := minimumStakeDelegation(slotCtx)
 	spoolDir := filepath.Join(acctsDb.AcctsDir, "..")
 
+	mlog.Log.Infof("rewards: voteCache has %d entries, minimum stake delegation=%d", len(voteCache), minimum)
+
 	// ==================== PHASE 1: Calculate total points ====================
 	var totalPoints wide.Uint128
 	var totalPointsMu sync.Mutex
 	var phase1StakeCount atomic.Int64
+	var phase1BelowMinimum atomic.Int64
+	var phase1NoVoteState atomic.Int64
+	var phase1ZeroPoints atomic.Int64
+	var phase1TotalStakeLamports atomic.Uint64
 
 	_, err := global.StreamStakeAccounts(acctsDb, slot,
 		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
 			if delegation.StakeLamports < minimum {
+				phase1BelowMinimum.Add(1)
 				return
 			}
 
 			voterPk := delegation.VoterPubkey
 			voteState := voteCache[voterPk]
 			if voteState == nil {
+				phase1NoVoteState.Add(1)
 				return
 			}
 
@@ -442,18 +450,26 @@ func CalculateRewardsStreaming(
 			delegWithCredits.CreditsObserved = creditsObs
 			pcs := calculateStakePointsAndCredits(pk, stakeHistory, &delegWithCredits, voteState, newWarmupCooldownRateEpoch)
 
+			// Track zero-point stakes
+			zero128 := wide.Uint128FromUint64(0)
+			if pcs.Points.Eq(zero128) {
+				phase1ZeroPoints.Add(1)
+			}
+
 			// Accumulate total points
 			totalPointsMu.Lock()
 			totalPoints = totalPoints.Add(pcs.Points)
 			totalPointsMu.Unlock()
 			phase1StakeCount.Add(1)
+			phase1TotalStakeLamports.Add(delegation.StakeLamports)
 		})
 	if err != nil {
 		return nil, fmt.Errorf("phase 1 streaming stakes for points: %w", err)
 	}
 
-	mlog.Log.Infof("rewards phase 1: %d stakes processed, totalPoints=%s, totalRewards=%d",
-		phase1StakeCount.Load(), totalPoints.String(), pointValue.Rewards)
+	mlog.Log.Infof("rewards phase 1: %d stakes (belowMin=%d, noVote=%d, zeroPoints=%d), totalStakeLamports=%d, totalPoints=%s, totalRewards=%d",
+		phase1StakeCount.Load(), phase1BelowMinimum.Load(), phase1NoVoteState.Load(), phase1ZeroPoints.Load(),
+		phase1TotalStakeLamports.Load(), totalPoints.String(), pointValue.Rewards)
 
 	// Create point value with calculated total points
 	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
@@ -469,6 +485,11 @@ func CalculateRewardsStreaming(
 	// Track validator rewards (for voting rewards distribution)
 	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64)
 	var validatorRewardsMu sync.Mutex
+
+	// Phase 2 stats for debugging
+	var phase2SkippedZeroPoints atomic.Int64
+	var phase2SkippedNilReward atomic.Int64
+	var phase2TotalStakerRewards atomic.Uint64
 
 	// Channel-based single writer pattern to capture write errors
 	writeChan := make(chan spoolWriteRequest, 10000)
@@ -508,14 +529,18 @@ func CalculateRewardsStreaming(
 			// Skip if no points and not forced update
 			zero128 := wide.Uint128FromUint64(0)
 			if pcs.Points.Eq(zero128) && !pcs.ForceCreditsUpdateWithSkippedReward {
+				phase2SkippedZeroPoints.Add(1)
 				return
 			}
 
 			// Calculate rewards using recomputed points
 			calculatedRewards := CalculateStakeRewardsForAcct(pk, &pcs, &delegWithCredits, voteState, rewardedEpoch, pv, newWarmupCooldownRateEpoch)
 			if calculatedRewards == nil {
+				phase2SkippedNilReward.Add(1)
 				return // Not counted - this is the key fix!
 			}
+
+			phase2TotalStakerRewards.Add(calculatedRewards.StakerRewards)
 
 			// Write to temp spool WITHOUT partition index
 			writeChan <- spoolWriteRequest{record: &SpoolRecord{
@@ -569,8 +594,9 @@ func CalculateRewardsStreaming(
 	for _, v := range validatorRewards {
 		totalVotingRewards += v.Load()
 	}
-	mlog.Log.Infof("rewards phase 2: %d records written (from %d phase1 stakes), numPartitions=%d, totalVotingRewards=%d, validatorCount=%d",
-		actualRewardCount, phase1StakeCount.Load(), numPartitions, totalVotingRewards, len(validatorRewards))
+	mlog.Log.Infof("rewards phase 2: %d records (skippedZeroPoints=%d, skippedNilReward=%d), totalStakerRewards=%d, totalVotingRewards=%d, validatorCount=%d, numPartitions=%d",
+		actualRewardCount, phase2SkippedZeroPoints.Load(), phase2SkippedNilReward.Load(),
+		phase2TotalStakerRewards.Load(), totalVotingRewards, len(validatorRewards), numPartitions)
 
 	// ==================== PHASE 3: Read temp spool, assign partitions, write per-partition spools ====================
 	tempReader, err := NewTempSpoolReader(tempPath)
