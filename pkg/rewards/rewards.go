@@ -394,10 +394,16 @@ type spoolWriteRequest struct {
 	record *SpoolRecord
 }
 
-// CalculateRewardsStreaming performs a two-pass streaming calculation of stake rewards.
-// Pass 1: Stream stakes to calculate total points (no caching - flat RAM)
-// Pass 2: Recompute points + calculate rewards + write to spool file
+// CalculateRewardsStreaming performs a three-phase streaming calculation of stake rewards.
+// Phase 1: Stream stakes to calculate total points (no caching - flat RAM)
+// Phase 2: Recompute points + calculate rewards + write to TEMP spool (no partition yet)
+// Phase 3: Read temp spool, calculate partitions from ACTUAL count, write per-partition spools
 // Uses channel-based single writer to capture spool write errors.
+//
+// CRITICAL FIX: numPartitions must be calculated from ACTUAL reward count (accounts where
+// CalculateStakeRewardsForAcct returns non-nil), not from "eligible" count. The old code
+// used eligibleCount which included accounts that later returned nil rewards, causing
+// partition count mismatch with Solana and divergence.
 func CalculateRewardsStreaming(
 	acctsDb *accountsdb.AccountsDb,
 	slot uint64,
@@ -411,11 +417,11 @@ func CalculateRewardsStreaming(
 	f *features.Features,
 ) (*StreamingRewardsResult, error) {
 	minimum := minimumStakeDelegation(slotCtx)
+	spoolDir := filepath.Join(acctsDb.AcctsDir, "..")
 
-	// Pass 1: Stream stakes to calculate total points only (no caching)
+	// ==================== PHASE 1: Calculate total points ====================
 	var totalPoints wide.Uint128
 	var totalPointsMu sync.Mutex
-	var eligibleCount atomic.Uint64
 
 	_, err := global.StreamStakeAccounts(acctsDb, slot,
 		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
@@ -438,29 +444,27 @@ func CalculateRewardsStreaming(
 			totalPointsMu.Lock()
 			totalPoints = totalPoints.Add(pcs.Points)
 			totalPointsMu.Unlock()
-
-			// Count eligible accounts for partition calculation
-			zero128 := wide.Uint128FromUint64(0)
-			if !pcs.Points.Eq(zero128) || pcs.ForceCreditsUpdateWithSkippedReward {
-				eligibleCount.Add(1)
-			}
 		})
 	if err != nil {
-		return nil, fmt.Errorf("pass 1 streaming stakes for points: %w", err)
+		return nil, fmt.Errorf("phase 1 streaming stakes for points: %w", err)
 	}
 
 	// Create point value with calculated total points
 	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
 
-	// Calculate number of partitions based on eligible stake count
-	numPartitions := CalculateNumRewardPartitions(eligibleCount.Load())
+	// ==================== PHASE 2: Calculate rewards, write to TEMP spool ====================
+	// Write to temp spool WITHOUT partition index - we don't know numPartitions yet
+	tempWriter, err := NewTempSpoolWriter(spoolDir, slot)
+	if err != nil {
+		return nil, fmt.Errorf("creating temp spool: %w", err)
+	}
+	tempPath := tempWriter.Path()
 
-	// Create per-partition spool writers for pass 2
-	spoolDir := filepath.Join(acctsDb.AcctsDir, "..")
-	spoolWriters := NewPartitionedSpoolWriters(spoolDir, slot, numPartitions)
+	// Track validator rewards (for voting rewards distribution)
+	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64)
+	var validatorRewardsMu sync.Mutex
 
 	// Channel-based single writer pattern to capture write errors
-	// All writes go through one goroutine to avoid file handle contention
 	writeChan := make(chan spoolWriteRequest, 10000)
 	var writeErr atomic.Pointer[error]
 	var writerWg sync.WaitGroup
@@ -472,19 +476,12 @@ func CalculateRewardsStreaming(
 			if writeErr.Load() != nil {
 				continue // already failed, drain channel
 			}
-			if err := spoolWriters.WriteRecord(req.record); err != nil {
+			if err := tempWriter.WriteRecord(req.record); err != nil {
 				writeErr.Store(&err)
 			}
 		}
 	}()
 
-	// Track validator rewards (for voting rewards distribution)
-	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64)
-	var validatorRewardsMu sync.Mutex
-	var numStakeRewards atomic.Uint64
-
-	// Pass 2: Recompute points + calculate rewards + write to per-partition spool files
-	// (Recomputing points is cheap CPU vs 140MB RAM cache)
 	_, err = global.StreamStakeAccounts(acctsDb, slot,
 		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
 			if delegation.StakeLamports < minimum {
@@ -497,7 +494,7 @@ func CalculateRewardsStreaming(
 				return
 			}
 
-			// Recompute points (same as Pass 1 - cheap)
+			// Recompute points (same as Phase 1 - cheap)
 			delegWithCredits := *delegation
 			delegWithCredits.CreditsObserved = creditsObs
 			pcs := calculateStakePointsAndCredits(pk, stakeHistory, &delegWithCredits, voteState, newWarmupCooldownRateEpoch)
@@ -511,23 +508,18 @@ func CalculateRewardsStreaming(
 			// Calculate rewards using recomputed points
 			calculatedRewards := CalculateStakeRewardsForAcct(pk, &pcs, &delegWithCredits, voteState, rewardedEpoch, pv, newWarmupCooldownRateEpoch)
 			if calculatedRewards == nil {
-				return
+				return // Not counted - this is the key fix!
 			}
 
-			// Calculate partition index
-			partitionIdx := CalculateRewardPartitionForPubkey(pk, blockhash, numPartitions)
-
-			// Send to single writer (non-blocking if channel has room)
+			// Write to temp spool WITHOUT partition index
 			writeChan <- spoolWriteRequest{record: &SpoolRecord{
 				StakePubkey:     pk,
 				VotePubkey:      delegation.VoterPubkey,
 				StakeLamports:   delegation.StakeLamports,
 				CreditsObserved: calculatedRewards.NewCreditsObserved,
 				RewardLamports:  calculatedRewards.StakerRewards,
-				PartitionIndex:  uint32(partitionIdx),
+				// PartitionIndex NOT set - will be assigned in Phase 3
 			}}
-
-			numStakeRewards.Add(1)
 
 			// Track validator rewards
 			if calculatedRewards.VoterRewards > 0 {
@@ -544,22 +536,68 @@ func CalculateRewardsStreaming(
 	close(writeChan)
 	writerWg.Wait()
 
-	// Check for spool write errors
+	// Check for temp spool write errors
 	if werr := writeErr.Load(); werr != nil {
-		spoolWriters.Close()
-		CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
-		return nil, fmt.Errorf("spool write failed: %w", *werr)
+		tempWriter.Close()
+		CleanupTempSpoolFile(tempPath)
+		return nil, fmt.Errorf("temp spool write failed: %w", *werr)
 	}
 
-	// Close all partition spool files and check for errors
-	if err := spoolWriters.Close(); err != nil {
-		CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
-		return nil, fmt.Errorf("spool close failed: %w", err)
+	// Close temp spool and check for errors
+	if err := tempWriter.Close(); err != nil {
+		CleanupTempSpoolFile(tempPath)
+		return nil, fmt.Errorf("temp spool close failed: %w", err)
 	}
 
 	if err != nil {
+		CleanupTempSpoolFile(tempPath)
+		return nil, fmt.Errorf("phase 2 streaming stakes for rewards: %w", err)
+	}
+
+	// ==================== Calculate numPartitions from ACTUAL count ====================
+	actualRewardCount := uint64(tempWriter.Count())
+	numPartitions := CalculateNumRewardPartitions(actualRewardCount)
+
+	// ==================== PHASE 3: Read temp spool, assign partitions, write per-partition spools ====================
+	tempReader, err := NewTempSpoolReader(tempPath)
+	if err != nil {
+		CleanupTempSpoolFile(tempPath)
+		return nil, fmt.Errorf("opening temp spool reader: %w", err)
+	}
+
+	partitionWriters := NewPartitionedSpoolWriters(spoolDir, slot, numPartitions)
+
+	for {
+		rec, err := tempReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			tempReader.Close()
+			partitionWriters.Close()
+			CleanupTempSpoolFile(tempPath)
+			CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
+			return nil, fmt.Errorf("reading temp spool: %w", err)
+		}
+
+		// Assign partition index using CORRECT numPartitions
+		rec.PartitionIndex = uint32(CalculateRewardPartitionForPubkey(rec.StakePubkey, blockhash, numPartitions))
+
+		if err := partitionWriters.WriteRecord(rec); err != nil {
+			tempReader.Close()
+			partitionWriters.Close()
+			CleanupTempSpoolFile(tempPath)
+			CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
+			return nil, fmt.Errorf("partition spool write: %w", err)
+		}
+	}
+
+	tempReader.Close()
+	CleanupTempSpoolFile(tempPath)
+
+	if err := partitionWriters.Close(); err != nil {
 		CleanupPartitionedSpoolFiles(spoolDir, slot, numPartitions)
-		return nil, fmt.Errorf("pass 2 streaming stakes for rewards: %w", err)
+		return nil, fmt.Errorf("partition spool close failed: %w", err)
 	}
 
 	return &StreamingRewardsResult{
@@ -567,7 +605,7 @@ func CalculateRewardsStreaming(
 		SpoolSlot:        slot,
 		TotalPoints:      totalPoints,
 		ValidatorRewards: validatorRewards,
-		NumStakeRewards:  numStakeRewards.Load(),
+		NumStakeRewards:  actualRewardCount,
 		NumPartitions:    numPartitions,
 	}, nil
 }

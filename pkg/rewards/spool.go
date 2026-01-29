@@ -216,3 +216,110 @@ func CleanupPartitionedSpoolFiles(baseDir string, slot uint64, numPartitions uin
 		os.Remove(path) // Ignore errors - file may not exist
 	}
 }
+
+// TempSpoolWriter writes reward records to a single temp file (no partition separation).
+// Used in the first phase of reward calculation before partition count is known.
+// NOT thread-safe - should be used with a single-writer pattern.
+type TempSpoolWriter struct {
+	file  *os.File
+	bufw  *bufio.Writer
+	path  string
+	count int
+}
+
+// NewTempSpoolWriter creates a new temp spool writer.
+func NewTempSpoolWriter(baseDir string, slot uint64) (*TempSpoolWriter, error) {
+	path := tempSpoolPath(baseDir, slot)
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("creating temp spool: %w", err)
+	}
+	// 1MB buffer for efficient sequential writes
+	return &TempSpoolWriter{
+		file: f,
+		bufw: bufio.NewWriterSize(f, 1<<20),
+		path: path,
+	}, nil
+}
+
+// WriteRecord writes a record to the temp spool.
+func (w *TempSpoolWriter) WriteRecord(rec *SpoolRecord) error {
+	var buf [SpoolRecordSize]byte
+	encodeRecord(rec, buf[:])
+	if _, err := w.bufw.Write(buf[:]); err != nil {
+		return fmt.Errorf("writing temp spool record: %w", err)
+	}
+	w.count++
+	return nil
+}
+
+// Count returns the number of records written.
+func (w *TempSpoolWriter) Count() int {
+	return w.count
+}
+
+// Path returns the temp spool file path.
+func (w *TempSpoolWriter) Path() string {
+	return w.path
+}
+
+// Close flushes, syncs, and closes the temp spool file.
+func (w *TempSpoolWriter) Close() error {
+	if err := w.bufw.Flush(); err != nil {
+		return fmt.Errorf("flushing temp spool: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("syncing temp spool: %w", err)
+	}
+	return w.file.Close()
+}
+
+// TempSpoolReader reads records sequentially from a temp spool file.
+type TempSpoolReader struct {
+	file *os.File
+	bufr *bufio.Reader
+	buf  [SpoolRecordSize]byte
+}
+
+// NewTempSpoolReader opens a temp spool file for sequential reading.
+func NewTempSpoolReader(path string) (*TempSpoolReader, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening temp spool: %w", err)
+	}
+	// 1MB buffer for efficient sequential reads
+	return &TempSpoolReader{
+		file: f,
+		bufr: bufio.NewReaderSize(f, 1<<20),
+	}, nil
+}
+
+// Next reads the next record. Returns io.EOF when done.
+func (r *TempSpoolReader) Next() (*SpoolRecord, error) {
+	_, err := io.ReadFull(r.bufr, r.buf[:])
+	if err == io.EOF {
+		return nil, io.EOF
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading temp spool record: %w", err)
+	}
+
+	rec := &SpoolRecord{}
+	decodeRecord(r.buf[:], rec)
+	return rec, nil
+}
+
+// Close closes the temp spool file.
+func (r *TempSpoolReader) Close() error {
+	return r.file.Close()
+}
+
+// tempSpoolPath returns the path for a temp spool file.
+func tempSpoolPath(baseDir string, slot uint64) string {
+	return filepath.Join(baseDir, fmt.Sprintf("reward_temp_%d.bin", slot))
+}
+
+// CleanupTempSpoolFile removes a temp spool file.
+func CleanupTempSpoolFile(path string) {
+	os.Remove(path) // Ignore errors - file may not exist
+}
