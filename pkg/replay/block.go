@@ -74,6 +74,8 @@ var commitSlot atomic.Uint64 // The slot currently being committed (for error me
 // CurrentRunID is a unique identifier for this replay session, used to correlate logs
 var CurrentRunID string
 
+var EnablePrefetcher bool = false
+
 // GenerateRunID creates a short random hex string for log correlation
 func GenerateRunID() string {
 	b := make([]byte, 4) // 8 hex chars
@@ -215,7 +217,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 	for t := range tables {
 		tablesSlice = append(tablesSlice, t)
 	}
-	accts, err := accountsDb.GetAccountsBatch(context.Background(), block.Slot, tablesSlice)
+	accts, err := accountsDb.GetAccountsBatch(context.Background(), tablesSlice)
 	if err != nil {
 		return err
 	}
@@ -1227,6 +1229,11 @@ func ReplayBlocks(
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)
+	var prefetcher *blockstream.Prefetcher
+	mlog.Log.Infof("EnablePrefetcher=%t", EnablePrefetcher)
+	if EnablePrefetcher {
+		prefetcher = blockstream.NewPrefetcher(ctx, blockStream, acctsDb)
+	}
 
 	if !isLive {
 		blockStream.DownloadInitialBlocks()
@@ -1267,7 +1274,12 @@ func ReplayBlocks(
 		}
 
 		waitStart := time.Now()
-		block := blockStream.NextBlock()
+		var block *b.Block
+		if EnablePrefetcher {
+			block = prefetcher.NextBlock()
+		} else {
+			block = blockStream.NextBlock()
+		}
 		waitTime := time.Since(waitStart)
 
 		// Stop stall monitor

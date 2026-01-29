@@ -6,9 +6,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/gagliardetto/solana-go"
 )
 
-type prefetcher struct {
+type Prefetcher struct {
 	src        *BlockSource
 	accountsDb *accountsdb.AccountsDb
 	out        chan *block.Block
@@ -18,17 +19,17 @@ func NewPrefetcher(
 	ctx context.Context,
 	b *BlockSource,
 	a *accountsdb.AccountsDb,
-) *prefetcher {
-	p := &prefetcher{b, a, make(chan *block.Block)}
+) *Prefetcher {
+	p := &Prefetcher{b, a, make(chan *block.Block)}
 	go p.prefetchWorker(ctx)
 	return p
 }
 
-func (p *prefetcher) NextBlock() *block.Block {
+func (p *Prefetcher) NextBlock() *block.Block {
 	return <-p.out
 }
 
-func (p *prefetcher) prefetchWorker(ctx context.Context) {
+func (p *Prefetcher) prefetchWorker(ctx context.Context) {
 	for {
 		b := p.src.NextBlock()
 		select {
