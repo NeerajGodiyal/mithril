@@ -14,6 +14,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -422,6 +423,7 @@ func CalculateRewardsStreaming(
 	// ==================== PHASE 1: Calculate total points ====================
 	var totalPoints wide.Uint128
 	var totalPointsMu sync.Mutex
+	var phase1StakeCount atomic.Int64
 
 	_, err := global.StreamStakeAccounts(acctsDb, slot,
 		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
@@ -444,10 +446,14 @@ func CalculateRewardsStreaming(
 			totalPointsMu.Lock()
 			totalPoints = totalPoints.Add(pcs.Points)
 			totalPointsMu.Unlock()
+			phase1StakeCount.Add(1)
 		})
 	if err != nil {
 		return nil, fmt.Errorf("phase 1 streaming stakes for points: %w", err)
 	}
+
+	mlog.Log.Infof("rewards phase 1: %d stakes processed, totalPoints=%s, totalRewards=%d",
+		phase1StakeCount.Load(), totalPoints.String(), pointValue.Rewards)
 
 	// Create point value with calculated total points
 	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
@@ -557,6 +563,14 @@ func CalculateRewardsStreaming(
 	// ==================== Calculate numPartitions from ACTUAL count ====================
 	actualRewardCount := uint64(tempWriter.Count())
 	numPartitions := CalculateNumRewardPartitions(actualRewardCount)
+
+	// Calculate total validator rewards for debugging
+	var totalVotingRewards uint64
+	for _, v := range validatorRewards {
+		totalVotingRewards += v.Load()
+	}
+	mlog.Log.Infof("rewards phase 2: %d records written (from %d phase1 stakes), numPartitions=%d, totalVotingRewards=%d, validatorCount=%d",
+		actualRewardCount, phase1StakeCount.Load(), numPartitions, totalVotingRewards, len(validatorRewards))
 
 	// ==================== PHASE 3: Read temp spool, assign partitions, write per-partition spools ====================
 	tempReader, err := NewTempSpoolReader(tempPath)
