@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
 	"github.com/maypok86/otter"
@@ -54,6 +55,7 @@ type storeRequest struct {
 }
 
 type prefetchRequest struct {
+	alts map[solana.PublicKey]*[256]bool
 	keys map[solana.PublicKey]struct{}
 }
 
@@ -368,7 +370,7 @@ func (accountsDb *AccountsDb) storeWorker() {
 			}
 
 		case prefetchRequest:
-			accountsDb.prefetchSync(v.keys)
+			accountsDb.prefetchSync(v.alts, v.keys)
 			accountsDb.inProgressStoreRequestsMu.Lock()
 			accountsDb.inProgressStoreRequests.Remove(elt)
 			accountsDb.inProgressStoreRequestsMu.Unlock()
@@ -610,14 +612,37 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 	}
 }
 
-func (accountsDb *AccountsDb) Prefetch(keys map[solana.PublicKey]struct{}) {
+func (accountsDb *AccountsDb) Prefetch(alts map[solana.PublicKey]*[256]bool, keys map[solana.PublicKey]struct{}) {
 	accountsDb.inProgressStoreRequestsMu.Lock()
-	element := accountsDb.inProgressStoreRequests.PushBack(prefetchRequest{keys})
+	element := accountsDb.inProgressStoreRequests.PushBack(prefetchRequest{alts, keys})
 	accountsDb.inProgressStoreRequestsMu.Unlock()
 	accountsDb.storeRequestChan <- element
 }
 
-func (accountsDb *AccountsDb) prefetchSync(keys map[solana.PublicKey]struct{}) {
+func (accountsDb *AccountsDb) prefetchSync(alts map[solana.PublicKey]*[256]bool, keys map[solana.PublicKey]struct{}) {
+	altsSlice := make([]solana.PublicKey, 0, len(alts))
+	for k := range alts {
+		altsSlice = append(altsSlice, k)
+	}
+	accts, err := accountsDb.GetAccountsBatch(context.Background(), altsSlice)
+	if err != nil {
+		mlog.Log.Warnf("prefetcher: giving up after failing to fetch ALTs: %v", err)
+		return
+	}
+
+	for _, acct := range accts {
+		alt, err := sealevel.UnmarshalAddressLookupTable(acct.Data)
+		if err != nil {
+			mlog.Log.Warnf("prefetcher: unmarshaling ALT for acct.Key=%s: %v", acct.Key.String(), err)
+			continue
+		}
+		for i, addr := range alt.Addresses {
+			if alts[acct.Key][i] {
+				keys[addr] = struct{}{}
+			}
+		}
+	}
+
 	keySlice := make([]solana.PublicKey, 0, len(keys))
 	for k := range keys {
 		keySlice = append(keySlice, k)

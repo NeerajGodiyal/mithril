@@ -41,8 +41,9 @@ func (p *Prefetcher) prefetchWorker(ctx context.Context) {
 		default:
 		}
 
-		// TODO account for ALTs
-		p.accountsDb.Prefetch(b.UniqueAccounts())
+		alts := getALTs(b)
+
+		p.accountsDb.Prefetch(alts, b.UniqueAccounts())
 
 		select {
 		case <-ctx.Done():
@@ -51,4 +52,25 @@ func (p *Prefetcher) prefetchWorker(ctx context.Context) {
 		case p.out <- b:
 		}
 	}
+}
+
+func getALTs(b *block.Block) map[solana.PublicKey]*[256]bool {
+	out := make(map[solana.PublicKey]*[256]bool)
+	for _, tx := range b.Transactions {
+		if !tx.Message.IsVersioned() {
+			continue
+		}
+		for _, alt := range tx.Message.GetAddressTableLookups() {
+			if out[alt.AccountKey] == nil {
+				out[alt.AccountKey] = new([256]bool)
+			}
+			for _, wi := range alt.WritableIndexes {
+				out[alt.AccountKey][wi] = true
+			}
+			for _, ri := range alt.ReadonlyIndexes {
+				out[alt.AccountKey][ri] = true
+			}
+		}
+	}
+	return out
 }

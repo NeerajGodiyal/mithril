@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -33,10 +32,15 @@ type SlotBank struct {
 	BanksHash    [32]byte
 }
 
+// Break cyclic dependency between accountsdb and sealevel.
+type accountsDb interface {
+	GetAccount(uint64, solana.PublicKey) (*accounts.Account, error)
+}
+
 type SlotCtx struct {
 	Accounts        accounts.Accounts
 	ParentAccts     accounts.Accounts
-	AccountsDb      *accountsdb.AccountsDb
+	AccountsDb      accountsDb
 	FeeRateGovernor *FeeRateGovernor
 	Slot            uint64
 	ParentSlot      uint64
