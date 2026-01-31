@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime/trace"
 	"sync"
+	"time"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -41,11 +42,6 @@ type AccountsDb struct {
 	storeRequestChan          chan *list.Element
 	storeWorkerDone           chan struct{}
 
-	// InRewardsWindow is set during partitioned epoch rewards distribution.
-	// When true, stake accounts are not cached in CommonAcctsCache since they're
-	// one-shot reads/writes that would evict genuinely hot accounts.
-	// Atomic for safe concurrent access from RPC goroutines.
-	InRewardsWindow atomic.Bool
 }
 
 type storeRequest struct {
@@ -121,6 +117,24 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	}
 
 	return accountsDb, nil
+}
+
+// DrainStoreQueue waits until all queued async store requests have completed.
+// Unlike WaitForStoreWorker, this does NOT shut down the worker — it just
+// spins until the in-progress list is empty.
+func (accountsDb *AccountsDb) DrainStoreQueue() {
+	if !StoreAsync {
+		return
+	}
+	for {
+		accountsDb.inProgressStoreRequestsMu.Lock()
+		empty := accountsDb.inProgressStoreRequests.Len() == 0
+		accountsDb.inProgressStoreRequestsMu.Unlock()
+		if empty {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // Turns down the store worker. AccountsDb cannot accept writes after this if StoreAsync.
@@ -231,7 +245,7 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 		return nil, ErrNoAccount
 	}
 
-	acctIdxEntry, err := unmarshalAcctIdxEntry(acctIdxEntryBytes)
+	acctIdxEntry, err := UnmarshalAcctIdxEntry(acctIdxEntryBytes)
 	if err != nil {
 		panic("failed to unmarshal AccountIndexEntry from index kv database")
 	}
@@ -268,9 +282,6 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
 	if owner == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
-	} else if owner == addresses.StakeProgramAddr && accountsDb.InRewardsWindow.Load() {
-		// During reward distribution, stake accounts are one-shot reads that would
-		// evict genuinely hot accounts from the cache. Skip caching them.
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
@@ -343,7 +354,6 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		accountsDb.parallelStoreAccounts(StoreAccountsWorkers, accts, slot)
 	}
 
-	inRewardsWindow := accountsDb.InRewardsWindow.Load()
 	for _, acct := range accts {
 		if acct == nil {
 			continue
@@ -351,9 +361,6 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		owner := solana.PublicKeyFromBytes(acct.Owner[:])
 		if owner == addresses.VoteProgramAddr {
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
-		} else if owner == addresses.StakeProgramAddr && inRewardsWindow {
-			// During reward distribution, stake accounts are one-shot writes that would
-			// evict genuinely hot accounts from the cache. Skip caching them.
 		} else {
 			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
@@ -365,12 +372,13 @@ func (accountsDb *AccountsDb) storeWorker() {
 	for elt := range accountsDb.storeRequestChan {
 		sr := elt.Value.(storeRequest)
 		accountsDb.storeAccountsSync(sr.accts, sr.slot)
-		accountsDb.inProgressStoreRequestsMu.Lock()
-		accountsDb.inProgressStoreRequests.Remove(elt)
-		accountsDb.inProgressStoreRequestsMu.Unlock()
 		if sr.cb != nil {
 			sr.cb()
 		}
+		// Remove after callback so DrainStoreQueue waits for callbacks (e.g. index flush) to complete
+		accountsDb.inProgressStoreRequestsMu.Lock()
+		accountsDb.inProgressStoreRequests.Remove(elt)
+		accountsDb.inProgressStoreRequestsMu.Unlock()
 	}
 }
 
@@ -407,7 +415,7 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 		// if not, then we write out a new appendvec.
 		existingacctIdxEntryBuf, c, err := accountsDb.Index.Get(acct.Key[:])
 		if err == nil {
-			acctIdxEntry, err := unmarshalAcctIdxEntry(existingacctIdxEntryBuf)
+			acctIdxEntry, err := UnmarshalAcctIdxEntry(existingacctIdxEntryBuf)
 			if err != nil {
 				panic("failed to unmarshal AccountIndexEntry from index kv database")
 			}
@@ -509,7 +517,7 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 					if err != nil {
 						return fmt.Errorf("reading from index: %w", err)
 					}
-					existingIdxEntry, err := unmarshalAcctIdxEntry(existingacctIdxEntryBuf)
+					existingIdxEntry, err := UnmarshalAcctIdxEntry(existingacctIdxEntryBuf)
 					c.Close()
 					if err != nil {
 						return fmt.Errorf("unmarshaling index entry: %w", err)

@@ -3,16 +3,23 @@
 package global
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
+	"sync/atomic"
 
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
+	"github.com/panjf2000/ants/v2"
 )
 
 // StakePubkeyIndexFileName is the name of the stake pubkey index file
@@ -24,9 +31,11 @@ type GlobalCtx struct {
 	slot                       uint64
 	epoch                      uint64
 	transactionCount           uint64
-	stakeCache                 map[solana.PublicKey]*sealevel.Delegation
-	pendingNewStakePubkeys     []solana.PublicKey // New stake pubkeys to append to index after block commit
+	pendingNewStakePubkeys     []accountsdb.StakeIndexEntry // New stake entries to append to index after block commit
+	cachedStakeEntries         []accountsdb.StakeIndexEntry // Parsed+sorted index, populated on first load
+	entriesFlushedSinceCompact int                          // Appended entries since last compaction
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
+	voteStakeTotals            map[solana.PublicKey]uint64 // Aggregated stake totals per vote account (replaces full stake cache at startup)
 	epochStakes                *epochstakes.EpochStakesCache
 	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
 	forkChoice                 *forkchoice.ForkChoiceService
@@ -35,8 +44,9 @@ type GlobalCtx struct {
 	calcUnixTimeForClockSysvar bool
 	manageLeaderSchedule       bool
 	manageBlockHeight          bool
-	stakeCacheMutex            sync.Mutex // Changed from RWMutex - simpler, used for both cache and pending
+	pendingStakeMutex          sync.Mutex // Protects pendingNewStakePubkeys
 	voteCacheMutex             sync.RWMutex
+	voteStakeTotalsMu          sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
 	mu                         sync.Mutex
 }
@@ -75,39 +85,13 @@ func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
 }
 
-// PutStakeCacheItem adds or updates a stake cache entry during replay.
-// If this is a NEW pubkey (not already in cache), it's added to pendingNewStakePubkeys
-// for later append to the index file via FlushPendingStakePubkeys.
-func PutStakeCacheItem(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
-	if instance.stakeCache == nil {
-		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
-	}
-	// Track new pubkeys for index append
-	_, exists := instance.stakeCache[pubkey]
-	if !exists {
-		instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, pubkey)
-	}
-	instance.stakeCache[pubkey] = delegation
-}
-
-// PutStakeCacheItemBulk adds a stake cache entry during bulk population (startup).
-// Does NOT track new pubkeys - use this when loading cache from index/snapshot/scan
-// to avoid enqueueing the entire cache on rebuild.
-func PutStakeCacheItemBulk(pubkey solana.PublicKey, delegation *sealevel.Delegation) {
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
-	if instance.stakeCache == nil {
-		instance.stakeCache = make(map[solana.PublicKey]*sealevel.Delegation)
-	}
-	instance.stakeCache[pubkey] = delegation
-}
-
-func DeleteStakeCacheItem(pubkey solana.PublicKey) {
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
-	delete(instance.stakeCache, pubkey)
+// EnqueuePendingStakePubkey records a stake pubkey for later append to the index file.
+// Called during tx processing when a stake account is created or modified.
+// Deduplication happens at index load time (LoadStakePubkeyIndex keeps last occurrence).
+func EnqueuePendingStakePubkey(pubkey solana.PublicKey) {
+	instance.pendingStakeMutex.Lock()
+	defer instance.pendingStakeMutex.Unlock()
+	instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, accountsdb.StakeIndexEntry{Pubkey: pubkey})
 }
 
 func PutEpochAuthorizedVoter(voteAcct solana.PublicKey, authorizedVoter solana.PublicKey) {
@@ -135,25 +119,6 @@ func SlotConfirmed(slot uint64) bool {
 	defer instance.slotsConfirmedMutex.Unlock()
 	_, exists := instance.slotsConfirmed[slot]
 	return exists
-}
-
-func StakeCache() map[solana.PublicKey]*sealevel.Delegation {
-	return instance.stakeCache
-}
-
-func StakeCacheSnapshot() map[solana.PublicKey]*sealevel.Delegation {
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
-
-	if instance.stakeCache == nil {
-		return nil
-	}
-
-	snapshot := make(map[solana.PublicKey]*sealevel.Delegation, len(instance.stakeCache))
-	for pk, delegation := range instance.stakeCache {
-		snapshot[pk] = delegation
-	}
-	return snapshot
 }
 
 func PutVoteCacheItem(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
@@ -194,6 +159,14 @@ func VoteCacheSnapshot() map[solana.PublicKey]*sealevel.VoteStateVersions {
 		snapshot[pk] = voteState
 	}
 	return snapshot
+}
+
+// SetVoteStakeTotals sets the aggregated stake totals per vote account.
+// Called at startup after scanning all stake accounts.
+func SetVoteStakeTotals(m map[solana.PublicKey]uint64) {
+	instance.voteStakeTotalsMu.Lock()
+	instance.voteStakeTotals = m
+	instance.voteStakeTotalsMu.Unlock()
 }
 
 func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
@@ -379,20 +352,22 @@ func (globctx *GlobalCtx) TransactionCount() uint64 {
 	return globctx.transactionCount
 }
 
-// FlushPendingStakePubkeys appends any new stake pubkeys discovered during replay
+// FlushPendingStakePubkeys appends any new stake entries discovered during replay
 // to the stake pubkey index file. Called after each block commit.
-// Returns the number of pubkeys flushed.
+// Writes 48-byte records to match the header written at snapshot time.
+// Returns the number of entries flushed.
 func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
-	instance.stakeCacheMutex.Lock()
+	instance.pendingStakeMutex.Lock()
 	if len(instance.pendingNewStakePubkeys) == 0 {
-		instance.stakeCacheMutex.Unlock()
+		instance.pendingStakeMutex.Unlock()
 		return 0, nil
 	}
-	// Copy pending slice and clear it while holding lock
-	pending := make([]solana.PublicKey, len(instance.pendingNewStakePubkeys))
+	// Copy pending slice, clear it, and invalidate cache while holding lock
+	pending := make([]accountsdb.StakeIndexEntry, len(instance.pendingNewStakePubkeys))
 	copy(pending, instance.pendingNewStakePubkeys)
 	instance.pendingNewStakePubkeys = nil
-	instance.stakeCacheMutex.Unlock()
+	instance.cachedStakeEntries = nil // file is changing, invalidate cache
+	instance.pendingStakeMutex.Unlock()
 
 	// Append to index file (don't hold lock during I/O)
 	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
@@ -402,9 +377,27 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	}
 	defer f.Close()
 
-	for _, pk := range pending {
-		if _, err := f.Write(pk[:]); err != nil {
-			return 0, fmt.Errorf("writing stake pubkey to index: %w", err)
+	// If file is empty/new, write header first to avoid a headerless file
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat stake pubkey index: %w", err)
+	}
+	if info.Size() == 0 {
+		var header [8]byte
+		copy(header[0:4], accountsdb.StakeIndexMagic[:])
+		binary.LittleEndian.PutUint32(header[4:8], accountsdb.StakeIndexVersion)
+		if _, err := f.Write(header[:]); err != nil {
+			return 0, fmt.Errorf("writing stake index header: %w", err)
+		}
+	}
+
+	var record [accountsdb.StakeIndexRecordSize]byte
+	for _, e := range pending {
+		copy(record[0:32], e.Pubkey[:])
+		binary.LittleEndian.PutUint64(record[32:40], e.FileId)
+		binary.LittleEndian.PutUint64(record[40:48], e.Offset)
+		if _, err := f.Write(record[:]); err != nil {
+			return 0, fmt.Errorf("writing stake index entry: %w", err)
 		}
 	}
 
@@ -414,76 +407,254 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 		return 0, fmt.Errorf("syncing stake pubkey index: %w", err)
 	}
 
+	instance.pendingStakeMutex.Lock()
+	instance.entriesFlushedSinceCompact += len(pending)
+	instance.pendingStakeMutex.Unlock()
+
 	return len(pending), nil
 }
 
 // ClearPendingStakePubkeys discards any pending stake pubkeys without writing them.
 // Used for rollback on failed block replay.
 func ClearPendingStakePubkeys() {
-	instance.stakeCacheMutex.Lock()
-	defer instance.stakeCacheMutex.Unlock()
+	instance.pendingStakeMutex.Lock()
+	defer instance.pendingStakeMutex.Unlock()
 	instance.pendingNewStakePubkeys = nil
 }
 
-// LoadStakePubkeyIndex reads the stake pubkey index file and returns deduplicated pubkeys.
-// Validates that file length is a multiple of 32 bytes.
-func LoadStakePubkeyIndex(accountsDbDir string) ([]solana.PublicKey, error) {
+// compactThreshold is the minimum number of appended entries before compaction triggers.
+// At ~1 new stake account per block × 432k blocks/epoch ≈ a few thousand new entries max.
+// 1000 keeps the file clean without rewriting 24MB every boundary when only a handful changed.
+const compactThreshold = 1000
+
+// CompactStakePubkeyIndex rewrites the index file from the cached deduplicated entries.
+// Only triggers when at least compactThreshold entries have been appended since last compaction.
+// Should be called at epoch boundary when the cache is already populated.
+func CompactStakePubkeyIndex(accountsDbDir string) error {
+	instance.pendingStakeMutex.Lock()
+	flushed := instance.entriesFlushedSinceCompact
+	cached := instance.cachedStakeEntries
+	instance.pendingStakeMutex.Unlock()
+
+	if flushed < compactThreshold {
+		return nil // Not enough new entries to justify rewrite
+	}
+
+	if cached == nil || len(cached) == 0 {
+		return nil // Nothing to compact
+	}
+
+	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
+	if err := accountsdb.WriteStakePubkeyIndex(indexPath, cached); err != nil {
+		return fmt.Errorf("compacting stake pubkey index: %w", err)
+	}
+
+	instance.pendingStakeMutex.Lock()
+	instance.entriesFlushedSinceCompact = 0
+	instance.pendingStakeMutex.Unlock()
+
+	mlog.Log.Infof("compacted stake pubkey index: %d entries", len(cached))
+	return nil
+}
+
+// LoadStakePubkeyIndex reads the stake pubkey index file, auto-detecting format.
+// Returns deduplicated entries sorted by (FileId, Offset) for sequential I/O.
+// Results are cached after first load; subsequent calls return the cached slice.
+// IMPORTANT: The returned slice is shared — callers must NOT mutate it.
+// Legacy format: 32-byte pubkeys with no location hints (FileId=0, Offset=0).
+// Current format: 8-byte header ("STKI" + version) + 48-byte records (pubkey + fileId + offset).
+func LoadStakePubkeyIndex(accountsDbDir string) ([]accountsdb.StakeIndexEntry, error) {
+	instance.pendingStakeMutex.Lock()
+	if instance.cachedStakeEntries != nil {
+		cached := instance.cachedStakeEntries
+		instance.pendingStakeMutex.Unlock()
+		return cached, nil
+	}
+	instance.pendingStakeMutex.Unlock()
+
 	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate file length
-	if len(data)%32 != 0 {
-		return nil, fmt.Errorf("stake pubkey index file corrupt: length %d is not a multiple of 32", len(data))
+	var entries []accountsdb.StakeIndexEntry
+
+	// Detect format: current format starts with "STKI" magic
+	if len(data) >= 8 && string(data[0:4]) == "STKI" {
+		entries, err = loadStakePubkeyIndexCurrent(data)
+	} else {
+		entries, err = loadStakePubkeyIndexLegacy(data)
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	numPubkeys := len(data) / 32
-	if numPubkeys == 0 {
-		return nil, fmt.Errorf("stake pubkey index file is empty (0 pubkeys) - indicates corrupt or incomplete AccountsDB")
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("stake pubkey index file is empty (0 entries) - indicates corrupt or incomplete AccountsDB")
 	}
 
-	// Deduplicate pubkeys using a map
-	seen := make(map[solana.PublicKey]struct{}, numPubkeys)
-	pubkeys := make([]solana.PublicKey, 0, numPubkeys)
-
-	for i := 0; i < len(data); i += 32 {
-		var pk solana.PublicKey
-		copy(pk[:], data[i:i+32])
-		if _, exists := seen[pk]; !exists {
-			seen[pk] = struct{}{}
-			pubkeys = append(pubkeys, pk)
+	// Deduplicate by pubkey (keep last occurrence = freshest location hint)
+	seen := make(map[solana.PublicKey]int, len(entries))
+	deduped := make([]accountsdb.StakeIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if idx, exists := seen[e.Pubkey]; exists {
+			deduped[idx] = e // overwrite with newer entry
+		} else {
+			seen[e.Pubkey] = len(deduped)
+			deduped = append(deduped, e)
 		}
 	}
 
-	return pubkeys, nil
+	// Sort by (FileId, Offset) for sequential appendvec I/O
+	slices.SortFunc(deduped, func(a, b accountsdb.StakeIndexEntry) int {
+		if a.FileId != b.FileId {
+			if a.FileId < b.FileId {
+				return -1
+			}
+			return 1
+		}
+		if a.Offset < b.Offset {
+			return -1
+		}
+		if a.Offset > b.Offset {
+			return 1
+		}
+		return 0
+	})
+
+	// Cache for subsequent calls
+	instance.pendingStakeMutex.Lock()
+	instance.cachedStakeEntries = deduped
+	instance.pendingStakeMutex.Unlock()
+
+	return deduped, nil
 }
 
-// SaveStakePubkeyIndex writes the current stake cache pubkeys to the index file.
-// This compacts the index by removing duplicates and closed accounts.
-// Used during graceful shutdown.
-func SaveStakePubkeyIndex(accountsDbDir string) error {
-	instance.stakeCacheMutex.Lock()
-	// Get current cache pubkeys
-	pubkeys := make([]solana.PublicKey, 0, len(instance.stakeCache))
-	for pk := range instance.stakeCache {
-		pubkeys = append(pubkeys, pk)
+func loadStakePubkeyIndexLegacy(data []byte) ([]accountsdb.StakeIndexEntry, error) {
+	if len(data)%32 != 0 {
+		return nil, fmt.Errorf("stake pubkey index V1 corrupt: length %d not multiple of 32", len(data))
 	}
-	instance.stakeCacheMutex.Unlock()
+	count := len(data) / 32
+	entries := make([]accountsdb.StakeIndexEntry, count)
+	for i := 0; i < count; i++ {
+		copy(entries[i].Pubkey[:], data[i*32:(i+1)*32])
+		// FileId=0, Offset=0 — no location hint, sort is effectively no-op
+	}
+	return entries, nil
+}
 
-	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
-	f, err := os.Create(indexPath)
+func loadStakePubkeyIndexCurrent(data []byte) ([]accountsdb.StakeIndexEntry, error) {
+	version := binary.LittleEndian.Uint32(data[4:8])
+	if version != accountsdb.StakeIndexVersion {
+		return nil, fmt.Errorf("stake pubkey index: unsupported version %d", version)
+	}
+	body := data[8:]
+	if len(body)%accountsdb.StakeIndexRecordSize != 0 {
+		return nil, fmt.Errorf("stake pubkey index corrupt: body length %d not multiple of %d", len(body), accountsdb.StakeIndexRecordSize)
+	}
+	count := len(body) / accountsdb.StakeIndexRecordSize
+	entries := make([]accountsdb.StakeIndexEntry, count)
+	for i := 0; i < count; i++ {
+		base := i * accountsdb.StakeIndexRecordSize
+		copy(entries[i].Pubkey[:], body[base:base+32])
+		entries[i].FileId = binary.LittleEndian.Uint64(body[base+32 : base+40])
+		entries[i].Offset = binary.LittleEndian.Uint64(body[base+40 : base+48])
+	}
+	return entries, nil
+}
+
+// StreamStakeAccounts iterates all stake accounts from the pubkey index,
+// calling fn for each valid delegation. Returns count of processed accounts.
+// This streams directly from AccountsDB without building a full stake cache.
+// Entries are sorted by (FileId, Offset) and batched by FileId for sequential I/O.
+func StreamStakeAccounts(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	fn func(pubkey solana.PublicKey, delegation *sealevel.Delegation, creditsObserved uint64),
+) (int, error) {
+	// Load stake entries from index file (already sorted by FileId, Offset)
+	acctsDbDir := filepath.Join(acctsDb.AcctsDir, "..")
+	stakeEntries, err := LoadStakePubkeyIndex(acctsDbDir)
 	if err != nil {
-		return fmt.Errorf("creating stake pubkey index: %w", err)
+		return 0, fmt.Errorf("loading stake pubkey index: %w", err)
 	}
-	defer f.Close()
 
-	for _, pk := range pubkeys {
-		if _, err := f.Write(pk[:]); err != nil {
-			return fmt.Errorf("writing stake pubkey to index: %w", err)
+	var processedCount atomic.Int64
+	var getAccountErrors atomic.Int64
+	var unmarshalErrors atomic.Int64
+	var statusNotStake atomic.Int64
+	var wg sync.WaitGroup
+
+	totalEntries := len(stakeEntries)
+
+	// Batched worker pool for parallel processing
+	const maxBatchSize = 2000
+	workerPool, err := ants.NewPoolWithFunc(runtime.NumCPU()*2, func(i interface{}) {
+		defer wg.Done()
+
+		batch := i.([]accountsdb.StakeIndexEntry)
+
+		for _, entry := range batch {
+			// Read stake account from AccountsDB
+			stakeAcct, err := acctsDb.GetAccount(slot, entry.Pubkey)
+			if err != nil {
+				getAccountErrors.Add(1)
+				continue // Account not found or closed
+			}
+
+			stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
+			if err != nil {
+				unmarshalErrors.Add(1)
+				continue // Invalid stake state
+			}
+
+			// Only process delegated stake accounts (status must be "Stake")
+			if stakeState.Status != sealevel.StakeStateV2StatusStake {
+				statusNotStake.Add(1)
+				continue
+			}
+
+			// Call the callback with delegation data
+			delegation := &stakeState.Stake.Stake.Delegation
+			creditsObserved := stakeState.Stake.Stake.CreditsObserved
+			fn(entry.Pubkey, delegation, creditsObserved)
+			processedCount.Add(1)
+		}
+	})
+	if err != nil {
+		return 0, fmt.Errorf("creating worker pool: %w", err)
+	}
+	defer workerPool.Release()
+
+	// Submit FileId-aligned batches for sequential appendvec I/O
+	var invokeErr error
+	batchStart := 0
+	for i := 1; i <= len(stakeEntries); i++ {
+		flush := i == len(stakeEntries) ||
+			stakeEntries[i].FileId != stakeEntries[batchStart].FileId ||
+			i-batchStart >= maxBatchSize
+		if flush && i > batchStart {
+			wg.Add(1)
+			if err := workerPool.Invoke(stakeEntries[batchStart:i]); err != nil {
+				wg.Done()
+				invokeErr = fmt.Errorf("worker pool invoke failed: %w", err)
+				break
+			}
+			batchStart = i
 		}
 	}
 
-	return nil
+	// Always wait for all queued workers to finish before returning
+	wg.Wait()
+
+	if invokeErr != nil {
+		return 0, invokeErr
+	}
+
+	// Log diagnostic counters for debugging stake account streaming
+	mlog.Log.Infof("StreamStakeAccounts: totalEntries=%d processed=%d getAccountErrors=%d unmarshalErrors=%d statusNotStake=%d",
+		totalEntries, processedCount.Load(), getAccountErrors.Load(), unmarshalErrors.Load(), statusNotStake.Load())
+
+	return int(processedCount.Load()), nil
 }

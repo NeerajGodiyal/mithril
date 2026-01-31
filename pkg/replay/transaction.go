@@ -189,15 +189,9 @@ func recordStakeDelegation(acct *accounts.Account) {
 		isUninitialized = acctType == sealevel.StakeStateV2StatusUninitialized
 	}
 
-	if isEmpty || isUninitialized {
-		global.DeleteStakeCacheItem(acct.Key)
-	} else {
-		stakeState, err := sealevel.UnmarshalStakeState(acct.Data)
-		if err == nil {
-			delegation := stakeState.Stake.Stake.Delegation
-			delegation.CreditsObserved = stakeState.Stake.Stake.CreditsObserved
-			global.PutStakeCacheItem(acct.Key, &delegation)
-		}
+	if !isEmpty && !isUninitialized {
+		// Enqueue pubkey for index append so StreamStakeAccounts sees new stake accounts
+		global.EnqueuePendingStakePubkey(acct.Key)
 	}
 }
 

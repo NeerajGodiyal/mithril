@@ -1,7 +1,6 @@
 package snapshot
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -19,7 +18,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/cockroachdb/pebble"
-	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -202,7 +200,7 @@ func BuildAccountsDbPaths(
 
 	// Create stake pubkey collector for building stake index during appendvec processing
 	stakeCollector := &stakeIndexCollector{
-		pubkeys: make([]solana.PublicKey, 0, 1000000), // Pre-allocate for ~1M stake accounts
+		entries: make([]accountsdb.StakeIndexEntry, 0, 1000000), // Pre-allocate for ~1M stake accounts
 	}
 
 	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId, stakeCollector)
@@ -288,9 +286,9 @@ func BuildAccountsDbPaths(
 
 	pools.Release()
 
-	// Write stake pubkey index file
+	// Write stake pubkey index file (with appendvec location hints)
 	stakeIndexPath := filepath.Join(accountsDbDir, "stake_pubkeys.idx")
-	if err := WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.pubkeys); err != nil {
+	if err := accountsdb.WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.entries); err != nil {
 		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
 	}
 
@@ -430,15 +428,15 @@ type snapshotWorkerPools struct {
 // manifest data.
 type stakeIndexCollector struct {
 	mu      sync.Mutex
-	pubkeys []solana.PublicKey
+	entries []accountsdb.StakeIndexEntry
 }
 
-func (c *stakeIndexCollector) Add(pks []solana.PublicKey) {
-	if len(pks) == 0 {
+func (c *stakeIndexCollector) Add(entries []accountsdb.StakeIndexEntry) {
+	if len(entries) == 0 {
 		return
 	}
 	c.mu.Lock()
-	c.pubkeys = append(c.pubkeys, pks...)
+	c.entries = append(c.entries, entries...)
 	c.mu.Unlock()
 }
 
@@ -474,14 +472,14 @@ func initWorkerPools(
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
-		pubkeys, entries, stakePubkeys, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
+		pubkeys, entries, stakeEntries, err := accountsdb.BuildIndexEntriesFromAppendVecs(task.Data, task.FileSize, task.Slot, task.FileId)
 		if err != nil {
 			mlog.Log.Errorf("BuildIndexEntriesFromAppendVecs: %v", err)
 			return
 		}
 
-		// Collect stake pubkeys for building stake index
-		stakeCollector.Add(stakePubkeys)
+		// Collect stake entries with appendvec location hints for building stake index
+		stakeCollector.Add(stakeEntries)
 
 		indexEntryBuilderInProgress.Add(-1)
 		commitTask := indexEntryCommitterTask{IndexEntries: entries, Pubkeys: pubkeys}
@@ -618,35 +616,3 @@ func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
 	return db, nil
 }
 
-// WriteStakePubkeyIndex writes stake pubkeys to a binary index file.
-// Format: 32-byte pubkeys appended sequentially, no header.
-func WriteStakePubkeyIndex(path string, pubkeys []solana.PublicKey) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	buf := bufio.NewWriter(f)
-	for _, pk := range pubkeys {
-		if _, err := buf.Write(pk[:]); err != nil {
-			return err
-		}
-	}
-	return buf.Flush()
-}
-
-// LoadStakePubkeyIndex reads stake pubkeys from a binary index file.
-func LoadStakePubkeyIndex(path string) ([]solana.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	count := len(data) / 32
-	pubkeys := make([]solana.PublicKey, count)
-	for i := 0; i < count; i++ {
-		copy(pubkeys[i][:], data[i*32:(i+1)*32])
-	}
-	return pubkeys, nil
-}

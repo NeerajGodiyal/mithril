@@ -52,7 +52,6 @@ type SlotCtx struct {
 	VoteTimestampMu *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
-	StakeCache             map[solana.PublicKey]*Delegation
 	VoteAccts              map[solana.PublicKey]uint64
 	TotalEpochStake        uint64
 	FinalBankhash          []byte
