@@ -293,7 +293,7 @@ func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.Wai
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
-	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
+	if slotCtx.TraceCtx != nil {
 		region := trace.StartRegion(slotCtx.TraceCtx, "ProcessTransaction")
 		defer region.End()
 

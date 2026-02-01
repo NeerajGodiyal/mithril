@@ -17,6 +17,7 @@ require (
 	github.com/gagliardetto/binary v0.8.0
 	github.com/gagliardetto/solana-go v1.12.1-0.20250116180958-3786857b86e5
 	github.com/google/nftables v0.3.0
+	github.com/maypok86/otter/v2 v2.3.0
 	github.com/minio/sha256-simd v1.0.1
 	github.com/mr-tron/base58 v1.2.0
 	github.com/nixberg/chacha-rng-go v0.1.0
@@ -76,7 +77,6 @@ require (
 	github.com/dchest/blake2b v1.0.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
-	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -138,14 +138,12 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
-	github.com/maypok86/otter v1.2.4
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/mitchellh/go-testing-interface v1.14.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
-	github.com/nixberg/chacha-rng-go v0.1.0
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a
 	github.com/panjf2000/ants/v2 v2.10.0
 	github.com/pierrec/lz4/v4 v4.1.22

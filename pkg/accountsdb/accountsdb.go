@@ -22,7 +22,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
-	"github.com/maypok86/otter"
+	"github.com/maypok86/otter/v2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,9 +31,10 @@ type AccountsDb struct {
 	BankHashStore    *pebble.DB
 	AcctsDir         string
 	LargestFileId    atomic.Uint64
-	VoteAcctCache    otter.Cache[solana.PublicKey, *accounts.Account]
-	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
-	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
+	VoteAcctCache    *otter.Cache[solana.PublicKey, *accounts.Account]
+	CommonAcctsCache *otter.Cache[solana.PublicKey, *accounts.Account]
+	SmallAcctsCache  *otter.Cache[solana.PublicKey, *accounts.Account]
+	ProgramCache     *otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 
 	// A list of store requests. They are added to the back as they arrive and
 	// removed from the front as they are persisted.
@@ -63,7 +64,59 @@ var (
 
 	StoreAccountsWorkers = 128
 	StoreAsync           = false
+
+	VoteCacheSize    = 2500
+	CommonCacheSize  = 5000
+	SmallCacheSize   = 100000
+	ProgramCacheSize = 2000
 )
+
+// Cache hit/miss counters for profiling
+var (
+	// Hits by account type
+	VoteCacheHits   atomic.Uint64
+	StakeCacheHits  atomic.Uint64
+	CommonCacheHits atomic.Uint64
+	SmallCacheHits  atomic.Uint64
+
+	// Misses by account type
+	VoteCacheMisses   atomic.Uint64
+	StakeCacheMisses  atomic.Uint64
+	CommonCacheMisses atomic.Uint64
+
+	// Misses by size bucket (all types combined)
+	CacheMissUnder1K atomic.Uint64 // <1KB
+	CacheMiss1Kto4K  atomic.Uint64 // 1KB-4KB
+	CacheMiss4Kto64K atomic.Uint64 // 4KB-64KB
+	CacheMiss64Kto1M atomic.Uint64 // 64KB-1MB
+	CacheMissOver1M  atomic.Uint64 // >1MB
+
+)
+
+// CacheStats holds cache hit/miss counts for reporting
+type CacheStats struct {
+	VoteHits, StakeHits, CommonHits, SmallHits                     uint64
+	VoteMisses, StakeMisses, CommonMisses                          uint64
+	MissUnder1K, Miss1Kto4K, Miss4Kto64K, Miss64Kto1M, MissOver1M uint64
+}
+
+// GetAndResetCacheStats returns current cache stats and resets counters
+func GetAndResetCacheStats() CacheStats {
+	return CacheStats{
+		VoteHits:     VoteCacheHits.Swap(0),
+		StakeHits:    StakeCacheHits.Swap(0),
+		CommonHits:   CommonCacheHits.Swap(0),
+		SmallHits:    SmallCacheHits.Swap(0),
+		VoteMisses:   VoteCacheMisses.Swap(0),
+		StakeMisses:  StakeCacheMisses.Swap(0),
+		CommonMisses: CommonCacheMisses.Swap(0),
+		MissUnder1K:  CacheMissUnder1K.Swap(0),
+		Miss1Kto4K:   CacheMiss1Kto4K.Swap(0),
+		Miss4Kto64K:  CacheMiss4Kto64K.Swap(0),
+		Miss64Kto1M:  CacheMiss64Kto1M.Swap(0),
+		MissOver1M:   CacheMissOver1M.Swap(0),
+	}
+}
 
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	// check for existence of the 'accounts' directory, which holds the appendvecs
@@ -167,32 +220,28 @@ func (accountsDb *AccountsDb) CloseDb() {
 }
 
 func (accountsDb *AccountsDb) InitCaches() {
-	var err error
-	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](2500).
-		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
+	if VoteCacheSize > 0 {
+		accountsDb.VoteAcctCache = otter.Must(&otter.Options[solana.PublicKey, *accounts.Account]{
+			MaximumSize: VoteCacheSize,
+		})
 	}
 
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](2000).
-		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
+	if ProgramCacheSize > 0 {
+		accountsDb.ProgramCache = otter.Must(&otter.Options[solana.PublicKey, *ProgramCacheEntry]{
+			MaximumSize: ProgramCacheSize,
+		})
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
-		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
-			return 1
-		}).
-		Build()
-	if err != nil {
-		panic(err)
+	if CommonCacheSize > 0 {
+		accountsDb.CommonAcctsCache = otter.Must(&otter.Options[solana.PublicKey, *accounts.Account]{
+			MaximumSize: CommonCacheSize,
+		})
+	}
+
+	if SmallCacheSize > 0 {
+		accountsDb.SmallAcctsCache = otter.Must(&otter.Options[solana.PublicKey, *accounts.Account]{
+			MaximumSize: SmallCacheSize,
+		})
 	}
 }
 
@@ -202,15 +251,22 @@ type ProgramCacheEntry struct {
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
-	return accountsDb.ProgramCache.Get(pubkey)
+	if accountsDb.ProgramCache == nil {
+		return nil, false
+	}
+	return accountsDb.ProgramCache.GetIfPresent(pubkey)
 }
 
 func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, programEntry *ProgramCacheEntry) {
-	accountsDb.ProgramCache.Set(pubkey, programEntry)
+	if accountsDb.ProgramCache != nil {
+		accountsDb.ProgramCache.Set(pubkey, programEntry)
+	}
 }
 
 func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
-	accountsDb.ProgramCache.Delete(pubkey)
+	if accountsDb.ProgramCache != nil {
+		accountsDb.ProgramCache.Invalidate(pubkey)
+	}
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -224,21 +280,36 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 }
 
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
-	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
-	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
-	if hasAcct {
-		r.End()
-		return cachedAcct, nil
+	if accountsDb.VoteAcctCache != nil {
+		cachedAcct, hasAcct := accountsDb.VoteAcctCache.GetIfPresent(pubkey)
+		if hasAcct {
+			VoteCacheHits.Add(1)
+			return cachedAcct, nil
+		}
 	}
 
-	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
-	if hasAcct {
-		r.End()
-		return cachedAcct, nil
+	if accountsDb.CommonAcctsCache != nil {
+		cachedAcct, hasAcct := accountsDb.CommonAcctsCache.GetIfPresent(pubkey)
+		if hasAcct {
+			// Distinguish stake vs other common accounts
+			owner := solana.PublicKeyFromBytes(cachedAcct.Owner[:])
+			if owner == addresses.StakeProgramAddr {
+				StakeCacheHits.Add(1)
+			} else {
+				CommonCacheHits.Add(1)
+			}
+			return cachedAcct, nil
+		}
 	}
-	r.End()
 
-	defer trace.StartRegion(context.Background(), "GetStoredAccountDisk").End()
+	if accountsDb.SmallAcctsCache != nil {
+		cachedAcct, hasAcct := accountsDb.SmallAcctsCache.GetIfPresent(pubkey)
+		if hasAcct {
+			SmallCacheHits.Add(1)
+			return cachedAcct, nil
+		}
+	}
+
 	acctIdxEntryBytes, c, err := accountsDb.Index.Get(pubkey[:])
 	if err != nil {
 		//mlog.Log.Debugf("no account found in accountsdb for pubkey %s: %s", pubkey, err)
@@ -280,19 +351,65 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 	acct.Slot = acctIdxEntry.Slot
 
 	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+
+	// Track cache miss by account type
 	if owner == addresses.VoteProgramAddr {
-		accountsDb.VoteAcctCache.Set(pubkey, acct)
+		VoteCacheMisses.Add(1)
+	} else if owner == addresses.StakeProgramAddr {
+		StakeCacheMisses.Add(1)
 	} else {
-		accountsDb.CommonAcctsCache.Set(pubkey, acct)
+		CommonCacheMisses.Add(1)
 	}
 
+	// Track cache miss by size bucket
+	dataLen := len(acct.Data)
+	switch {
+	case dataLen < 1024:
+		CacheMissUnder1K.Add(1)
+	case dataLen < 4096:
+		CacheMiss1Kto4K.Add(1)
+	case dataLen < 65536:
+		CacheMiss4Kto64K.Add(1)
+	case dataLen < 1048576:
+		CacheMiss64Kto1M.Add(1)
+	default:
+		CacheMissOver1M.Add(1)
+	}
+	accountsDb.cacheAccount(acct)
+
 	return acct, err
+}
+
+func (accountsDb *AccountsDb) cacheAccount(acct *accounts.Account) {
+	if accountsDb.VoteAcctCache != nil {
+		accountsDb.VoteAcctCache.Invalidate(acct.Key)
+	}
+	if accountsDb.CommonAcctsCache != nil {
+		accountsDb.CommonAcctsCache.Invalidate(acct.Key)
+	}
+	if accountsDb.SmallAcctsCache != nil {
+		accountsDb.SmallAcctsCache.Invalidate(acct.Key)
+	}
+
+	owner := solana.PublicKeyFromBytes(acct.Owner[:])
+	if owner == addresses.VoteProgramAddr {
+		if accountsDb.VoteAcctCache != nil {
+			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+		}
+	} else if len(acct.Data) < 1024 {
+		if accountsDb.SmallAcctsCache != nil {
+			accountsDb.SmallAcctsCache.Set(acct.Key, acct)
+		}
+	} else {
+		if accountsDb.CommonAcctsCache != nil {
+			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+		}
+	}
 }
 
 // Returns a slice of the same length as the input with results matching indexes, nil if not found.
 // Returns clones to avoid data races with the store worker.
 func (accountsDb *AccountsDb) getStoreInProgressAccounts(pks []solana.PublicKey) []*accounts.Account {
-	defer trace.StartRegion(context.Background(), "getStoreInProgressAccounts").End()
 	out := make([]*accounts.Account, len(pks))
 	accountsDb.inProgressStoreRequestsMu.Lock()
 	defer accountsDb.inProgressStoreRequestsMu.Unlock()
@@ -358,12 +475,7 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		if acct == nil {
 			continue
 		}
-		owner := solana.PublicKeyFromBytes(acct.Owner[:])
-		if owner == addresses.VoteProgramAddr {
-			accountsDb.VoteAcctCache.Set(acct.Key, acct)
-		} else {
-			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
-		}
+		accountsDb.cacheAccount(acct)
 	}
 }
 

@@ -206,42 +206,30 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 			continue
 		}
 
+		var skipLookup bool
 		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
-			tables[addrTableKey] = nil
-		}
-	}
-
-	tablesSlice := make([]solana.PublicKey, 0, len(tables))
-	for t := range tables {
-		tablesSlice = append(tablesSlice, t)
-	}
-	accts, err := accountsDb.GetAccountsBatch(context.Background(), block.Slot, tablesSlice)
-	if err != nil {
-		return err
-	}
-
-	for i := range tablesSlice {
-		if len(accts[i].Data) == 0 {
-			delete(tables, tablesSlice[i])
-			continue
-		}
-		addrLookupTable, err := sealevel.UnmarshalAddressLookupTable(accts[i].Data)
-		if err != nil {
-			return err
-		}
-		tables[tablesSlice[i]] = addrLookupTable.Addresses
-	}
-
-txResolveLoop:
-	for _, tx := range block.Transactions {
-		if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
-			continue
-		}
-		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
-			if _, ok := tables[addrTableKey]; !ok {
-				continue txResolveLoop
+			if _, alreadyLoaded := tables[addrTableKey]; alreadyLoaded {
+				continue
 			}
+
+			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
+			if err != nil {
+				skipLookup = true
+				break
+			}
+
+			addrLookupTable, err := sealevel.UnmarshalAddressLookupTable(acct.Data)
+			if err != nil {
+				return err
+			}
+
+			tables[addrTableKey] = addrLookupTable.Addresses
 		}
+
+		if skipLookup {
+			continue
+		}
+
 		err := tx.Message.SetAddressTables(tables)
 		if err != nil {
 			return err
@@ -1789,6 +1777,30 @@ func ReplayBlocks(
 					mlog.Log.InfofPrecise("  clone stats: %.1f%% modified (%d/%d accts) | %.1fMB cloned, %.1fMB modified | avg/tx: %.1f cloned, %.1f modified",
 						modifyRatio, cloneStats.AcctsTouched, cloneStats.AcctsCloned,
 						clonedMB, touchedMB, avgAcctsPerTx, avgTouchedPerTx)
+				}
+
+				// Cache hit/miss stats
+				cacheStats := accountsdb.GetAndResetCacheStats()
+				totalHits := cacheStats.VoteHits + cacheStats.StakeHits + cacheStats.CommonHits + cacheStats.SmallHits
+				totalMisses := cacheStats.VoteMisses + cacheStats.StakeMisses + cacheStats.CommonMisses
+				if totalHits+totalMisses > 0 {
+					hitRate := float64(totalHits) / float64(totalHits+totalMisses) * 100
+					voteTotal := cacheStats.VoteHits + cacheStats.VoteMisses
+					stakeTotal := cacheStats.StakeHits + cacheStats.StakeMisses
+					commonTotal := cacheStats.CommonHits + cacheStats.CommonMisses
+					mlog.Log.InfofPrecise("  cache: %.1f%% total hit rate | hits/lookups: vote %d/%d, stake %d/%d, common %d/%d, small %d",
+						hitRate,
+						cacheStats.VoteHits, voteTotal,
+						cacheStats.StakeHits, stakeTotal,
+						cacheStats.CommonHits, commonTotal,
+						cacheStats.SmallHits)
+					mlog.Log.InfofPrecise("  cache miss sizes (%d total): <1K: %d, 1K-4K: %d, 4K-64K: %d, 64K-1M: %d, >1M: %d",
+						totalMisses,
+						cacheStats.MissUnder1K,
+						cacheStats.Miss1Kto4K,
+						cacheStats.Miss4Kto64K,
+						cacheStats.Miss64Kto1M,
+						cacheStats.MissOver1M)
 				}
 
 				// Line 4: RPC/fetch debugging info

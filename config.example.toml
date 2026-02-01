@@ -256,6 +256,12 @@ name = "mithril"
     # Number of goroutines to store modified accounts at the end of each block
     store_accounts_workers = 128
 
+    # Account cache sizes (max entries per cache)
+    vote_cache_size = 2500         # Vote accounts
+    common_cache_size = 5000       # Common (non-vote) accounts
+    small_cache_size = 100000      # Small common accounts (<1KB)
+    program_cache_size = 2000      # Compiled programs
+
     # [tuning.pprof] - CPU/Memory Profiling
     #
     # Usage (assuming port = 6060):

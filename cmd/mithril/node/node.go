@@ -187,6 +187,10 @@ func init() {
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 	Run.Flags().BoolVar(&accountsdb.StoreAsync, "store-async", false, "Store accounts asynchronously")
+	Run.Flags().IntVar(&accountsdb.VoteCacheSize, "vote-cache-size", 2500, "Max entries in vote account cache")
+	Run.Flags().IntVar(&accountsdb.CommonCacheSize, "common-cache-size", 5000, "Max entries in common account cache")
+	Run.Flags().IntVar(&accountsdb.SmallCacheSize, "small-cache-size", 100000, "Max entries in small account cache (<1KB)")
+	Run.Flags().IntVar(&accountsdb.ProgramCacheSize, "program-cache-size", 2000, "Max entries in program cache")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -525,6 +529,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	sbpf.UsePool = getBool("use-pool", "tuning.use_pool")
 	accountsdb.StoreAccountsWorkers = getInt("store-accounts-workers", "tuning.store_accounts_workers")
 	accountsdb.StoreAsync = getBool("store-async", "tuning.store_async")
+	accountsdb.VoteCacheSize = getInt("vote-cache-size", "tuning.vote_cache_size")
+	accountsdb.CommonCacheSize = getInt("common-cache-size", "tuning.common_cache_size")
+	accountsdb.SmallCacheSize = getInt("small-cache-size", "tuning.small_cache_size")
+	accountsdb.ProgramCacheSize = getInt("program-cache-size", "tuning.program_cache_size")
 
 	return nil
 }
