@@ -526,7 +526,18 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 		})
 	}
 	newAppendVecGroup := errgroup.Group{}
-	newAppendVecGroup.Go(func() error {
+	newAppendVecGroup.Go(func() (err error) {
+		b := accountsDb.Index.NewBatch()
+		defer func() {
+			if b.Empty() {
+				return
+			}
+			e := b.Commit(&pebble.WriteOptions{})
+			if e != nil {
+				err = errors.Join(err, e)
+			}
+		}()
+
 		fileId := accountsDb.LargestFileId.Add(1)
 		appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 		appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
@@ -541,7 +552,7 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 
 		for acct := range lengthChangedAccounts {
 			indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: appendVecFileOffset}
-			err = setAccountIndexEntry(accountsDb.Index, acct.Key, indexEntry)
+			err = setAccountIndexEntry(b, acct.Key, indexEntry)
 			if err != nil {
 				return fmt.Errorf("unable to add acct for %s to acctsdb: %v", acct.Key, err)
 			}
@@ -561,7 +572,6 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 			}
 			appendVecFileOffset += uint64(l)
 		}
-
 		return nil
 	})
 
