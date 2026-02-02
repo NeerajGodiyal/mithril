@@ -74,6 +74,8 @@ var commitSlot atomic.Uint64 // The slot currently being committed (for error me
 // CurrentRunID is a unique identifier for this replay session, used to correlate logs
 var CurrentRunID string
 
+var EnableBatchALT = true
+
 // GenerateRunID creates a short random hex string for log correlation
 func GenerateRunID() string {
 	b := make([]byte, 4) // 8 hex chars
@@ -256,6 +258,52 @@ txResolveLoop:
 	return nil
 }
 
+func resolveAddrTableLookupsSeq(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
+	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
+
+	for _, tx := range block.Transactions {
+		if !tx.Message.IsVersioned() {
+			continue
+		}
+
+		var skipLookup bool
+		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
+			if _, alreadyLoaded := tables[addrTableKey]; alreadyLoaded {
+				continue
+			}
+
+			acct, err := accountsDb.GetAccount(block.Slot, addrTableKey)
+			if err != nil {
+				skipLookup = true
+				break
+			}
+
+			addrLookupTable, err := sealevel.UnmarshalAddressLookupTable(acct.Data)
+			if err != nil {
+				return err
+			}
+
+			tables[addrTableKey] = addrLookupTable.Addresses
+		}
+
+		if skipLookup {
+			continue
+		}
+
+		err := tx.Message.SetAddressTables(tables)
+		if err != nil {
+			return err
+		}
+
+		err = tx.Message.ResolveLookups()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
 	var numPubkeys int
 	for _, tx := range block.Transactions {
@@ -361,7 +409,12 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 }
 
 func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block) (accounts.Accounts, accounts.Accounts, error) {
-	err := resolveAddrTableLookups(accountsDb, block)
+	var err error
+	if EnableBatchALT {
+		err = resolveAddrTableLookups(accountsDb, block)
+	} else {
+		err = resolveAddrTableLookupsSeq(accountsDb, block)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1142,7 +1195,7 @@ func ReplayBlocks(
 	acctsDb *accountsdb.AccountsDb,
 	acctsDbPath string,
 	mithrilState *state.MithrilState, // State file with manifest_* seed fields
-	resumeState *ResumeState,         // nil if not resuming, contains parent slot info when resuming
+	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
 	rpcEndpoints []string, // RPC endpoints in priority order (first = primary, rest = fallbacks)
 	blockDir string,
@@ -1157,6 +1210,7 @@ func ReplayBlocks(
 ) *ReplayResult {
 	result := &ReplayResult{}
 
+	mlog.Log.Infof("EnableBatchALT=%t", EnableBatchALT)
 	// Generate unique run ID for log correlation (only if not already set by startup)
 	if CurrentRunID == "" {
 		CurrentRunID = GenerateRunID()

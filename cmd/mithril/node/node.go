@@ -158,6 +158,7 @@ func init() {
 
 	// [lightbringer] section flags
 	VerifyRange.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Path to download snapshot to")
+	VerifyRange.Flags().BoolVar(&replay.EnableBatchALT, "enable-batch-alt", true, "Enable batch ALT lookups (or use sequential lookups)")
 
 	// flags for 'mithril run' (live full node mode)
 	// [bootstrap] section flags
