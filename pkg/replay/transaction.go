@@ -46,6 +46,7 @@ var (
 	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
 	TxErrInvalidProgramForExecution        = errors.New("TxErrInvalidProgramForExecution")
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
+	TxErrSanitizeFailure                   = errors.New("TxErrSanitizeFailure")
 )
 
 func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
@@ -317,6 +318,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	if arena != nil {
 		arena.Reset()
 	}
+
+	if slotCtx.Features.IsActive(features.StaticInstructionLimit) {
+		if len(tx.Message.Instructions) > maxInstrTraceCapacity {
+			return nil, TxErrSanitizeFailure
+		}
+	}
+
 	start := time.Now()
 	sigverifyWg.Add(1)
 	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
