@@ -376,6 +376,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	endSlot = getInt64("end-slot", "replay.end_slot")
 	txParallelism = getInt64("txpar", "replay.txpar")
 
+	// [replay.txloop_record] - TxLoop recording for offline replay
+	replay.InitTxLoopRecording()
+
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
 	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
 	// storage.snapshots config is handled via snapshotDlPath fallback below

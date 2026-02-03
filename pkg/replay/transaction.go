@@ -318,8 +318,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		arena.Reset()
 	}
 	start := time.Now()
-	sigverifyWg.Add(1)
-	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
+	// sigverifyWg == nil signals to skip signature verification (e.g., offline replay)
+	if sigverifyWg != nil {
+		sigverifyWg.Add(1)
+		go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
+	}
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])

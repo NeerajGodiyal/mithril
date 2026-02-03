@@ -198,7 +198,7 @@ func serializeAllEpochStakes() map[uint64][]byte {
 	return result
 }
 
-func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
+func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) (map[solana.PublicKey]solana.PublicKeySlice, error) {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for _, tx := range block.Transactions {
@@ -217,7 +217,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 	}
 	accts, err := accountsDb.GetAccountsBatch(context.Background(), block.Slot, tablesSlice)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for i := range tablesSlice {
@@ -227,7 +227,7 @@ func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) 
 		}
 		addrLookupTable, err := sealevel.UnmarshalAddressLookupTable(accts[i].Data)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		tables[tablesSlice[i]] = addrLookupTable.Addresses
 	}
@@ -244,16 +244,16 @@ txResolveLoop:
 		}
 		err := tx.Message.SetAddressTables(tables)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		err = tx.Message.ResolveLookups()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return tables, nil
 }
 
 func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
@@ -360,17 +360,17 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block) (accounts.Accounts, accounts.Accounts, error) {
-	err := resolveAddrTableLookups(accountsDb, block)
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block) (accounts.Accounts, accounts.Accounts, map[solana.PublicKey]solana.PublicKeySlice, error) {
+	addressTables, err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
 	ctx := context.Background()
 	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	numAccts := uint64(len(slotAccts))
@@ -380,12 +380,12 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	for _, acct := range slotAccts {
 		err = accts.SetAccountWithoutLock(acct.Key, acct)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		err = parentAccts.SetAccountWithoutLock(acct.Key, acct)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
@@ -636,7 +636,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 		}
 	}
 
-	return accts, parentAccts, nil
+	return accts, parentAccts, addressTables, nil
 }
 
 func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []*accounts.Account, []*accounts.Account) {
@@ -2059,7 +2059,7 @@ func ProcessBlock(
 
 	start = time.Now()
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	accts, parentAccts, addressTables, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -2068,6 +2068,16 @@ func ProcessBlock(
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
 	slotCtx.TraceCtx = ctx
+
+	// Capture pre-TxLoop state if recording is enabled for this slot
+	recordPath, shouldRecord := RecordTxLoopSlots[block.Slot]
+	var txLoopRecord *RecordedTxLoop
+	if shouldRecord {
+		mlog.Log.Infof("Recording TxLoop state for slot %d to %s", block.Slot, recordPath)
+		// Use unresolvedBlock so topsort planner can work during replay
+		txLoopRecord = CapturePreTxLoopState(slotCtx, unresolvedBlock, addressTables)
+	}
+
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 
@@ -2079,6 +2089,17 @@ func ProcessBlock(
 	}
 	txLoopRegion.End()
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
+
+	// Capture post-TxLoop state and save recording
+	if shouldRecord {
+		CapturePostTxLoopState(txLoopRecord, slotCtx)
+		if err := SaveRecordedTxLoop(recordPath, txLoopRecord); err != nil {
+			mlog.Log.Errorf("Failed to save TxLoop recording: %v", err)
+		} else {
+			mlog.Log.Infof("Saved TxLoop recording for slot %d (%d transactions, %d accounts, %d modified)",
+				block.Slot, len(block.Transactions), len(txLoopRecord.Accounts), len(txLoopRecord.ExpectedModifiedAccounts))
+		}
+	}
 
 	start = time.Now()
 

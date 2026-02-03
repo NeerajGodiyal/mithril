@@ -216,6 +216,17 @@ name = "mithril"
     # Block at which to stop replaying, inclusive (-1 = no limit)
     # end_slot = -1
 
+    # -------------------------------------------------------------------------
+    # TxLoop Recording (for developers)
+    # -------------------------------------------------------------------------
+    # Record TxLoop state for specific slots to enable offline replay and optimization.
+    # Each entry maps a slot number to an output file path.
+    # Use with: ./replay-txloop <snapshot.txloop.json>
+    #
+    # [replay.txloop_record]
+    # 123456789 = "/tmp/slot-123456789.txloop.json"
+    # 123456790 = "/tmp/slot-123456790.txloop.json"
+
 # ============================================================================
 # [rpc] - Mithril RPC Server
 # ============================================================================

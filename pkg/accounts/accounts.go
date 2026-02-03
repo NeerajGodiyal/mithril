@@ -21,7 +21,7 @@ type Account struct {
 	Key        solana.PublicKey
 	Lamports   uint64
 	Data       []byte
-	Owner      [32]byte
+	Owner      solana.PublicKey
 	Executable bool
 	RentEpoch  uint64
 	IsDummy    bool
@@ -112,7 +112,7 @@ func (a *Account) UnmarshalWithDecoder(decoder *bin.Decoder) (err error) {
 	if err != nil {
 		return err
 	}
-	copy(a.Owner[:], ownerBytes)
+	a.Owner = solana.PublicKeyFromBytes(ownerBytes)
 
 	a.Executable, err = decoder.ReadBool()
 	if err != nil {

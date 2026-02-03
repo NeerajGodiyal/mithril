@@ -193,7 +193,17 @@ func TopsortPlanner(b *block.Block) [][]int {
 
 // TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
 func TopsortPlannerStream(b *block.Block, out chan int, done chan int) {
+	TopsortPlannerStreamWithReady(b, out, done, nil)
+}
+
+// TopsortPlannerStreamWithReady is like TopsortPlannerStream but closes graphReady after building the dependency graph.
+// This allows callers to synchronize on graph completion before modifying transactions.
+func TopsortPlannerStreamWithReady(b *block.Block, out chan int, done chan int, graphReady chan struct{}) {
 	adjList, inDegree := blockToDependencyGraph(b)
+
+	if graphReady != nil {
+		close(graphReady)
+	}
 
 	sent := 0
 	// Output a topological sorting of the transactions

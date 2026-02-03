@@ -24,11 +24,12 @@ type RpcConfig struct {
 
 // ReplayConfig holds replay-related configuration
 type ReplayConfig struct {
-	Txpar              int64 `toml:"txpar" mapstructure:"txpar"`                             // UNCHANGED
-	NumSlots           int64 `toml:"num_slots" mapstructure:"num_slots"`                     // was: num-replay-slots
-	EndSlot            int64 `toml:"end_slot" mapstructure:"end_slot"`                       // was: endslot
-	LoadFromSnapshot   bool  `toml:"load_from_snapshot" mapstructure:"load_from_snapshot"`   // was: snapshot
-	LoadFromAccountsDb bool  `toml:"load_from_accounts_db" mapstructure:"load_from_accounts_db"` // was: accountsdb
+	Txpar              int64             `toml:"txpar" mapstructure:"txpar"`                             // UNCHANGED
+	NumSlots           int64             `toml:"num_slots" mapstructure:"num_slots"`                     // was: num-replay-slots
+	EndSlot            int64             `toml:"end_slot" mapstructure:"end_slot"`                       // was: endslot
+	LoadFromSnapshot   bool              `toml:"load_from_snapshot" mapstructure:"load_from_snapshot"`   // was: snapshot
+	LoadFromAccountsDb bool              `toml:"load_from_accounts_db" mapstructure:"load_from_accounts_db"` // was: accountsdb
+	TxLoopRecord       map[string]string `toml:"txloop_record" mapstructure:"txloop_record"`             // slot -> output path for recording
 }
 
 // PprofConfig holds pprof-related configuration
@@ -237,4 +238,9 @@ func IsSet(key string) bool {
 // GetFloat64 returns a float64 value from viper (config file or flag)
 func GetFloat64(key string) float64 {
 	return viper.GetFloat64(key)
+}
+
+// GetStringMapString returns a map[string]string value from viper (config file)
+func GetStringMapString(key string) map[string]string {
+	return viper.GetStringMapString(key)
 }

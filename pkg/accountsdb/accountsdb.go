@@ -627,6 +627,35 @@ func (accountsDb *AccountsDb) StoreBankHashForSlot(slot uint64, bankHash []byte)
 	return accountsDb.BankHashStore.Set(slotBytes[:], bankHash, &pebble.WriteOptions{})
 }
 
+// GetLatestSlot returns the highest slot number that has a bank hash stored.
+// Returns 0 if no slots are found.
+func (accountsDb *AccountsDb) GetLatestSlot() (uint64, error) {
+	iter, err := accountsDb.BankHashStore.NewIter(nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create iterator: %w", err)
+	}
+	defer iter.Close()
+
+	// Keys are little-endian uint64, which doesn't sort numerically in Pebble's
+	// lexicographic ordering. We must scan all keys to find the max.
+	var latestSlot uint64
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if len(key) == 8 {
+			slot := binary.LittleEndian.Uint64(key)
+			if slot > latestSlot {
+				latestSlot = slot
+			}
+		}
+	}
+
+	if err := iter.Error(); err != nil {
+		return 0, fmt.Errorf("iterator error: %w", err)
+	}
+
+	return latestSlot, nil
+}
+
 func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix uint64) []solana.PublicKey {
 	return nil
 	/*keys := accountsDb.IndexDb.KeysBetweenPrefixes(startPrefix, endPrefix)
@@ -642,4 +671,103 @@ func (accountsDb *AccountsDb) KeysBetweenPrefixes(startPrefix uint64, endPrefix 
 
 func (accountsDb *AccountsDb) AllKeys() [][]byte {
 	return nil
+}
+
+// CreateAccountsDbFromSnapshot creates a fully functional AccountsDb from in-memory accounts.
+// This is used for offline TxLoop replay where we have accounts from a JSON snapshot.
+// The dir parameter specifies where to create the database files.
+func CreateAccountsDbFromSnapshot(accts []*accounts.Account, slot uint64, dir string) (*AccountsDb, error) {
+	// Create directory structure
+	accountsDir := filepath.Join(dir, "accounts")
+	if err := os.MkdirAll(accountsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create accounts dir: %w", err)
+	}
+
+	indexDir := filepath.Join(dir, "mithril_db")
+	bankhashDir := filepath.Join(dir, "bankhash_db")
+
+	// Open pebble databases
+	indexDb, err := pebble.Open(indexDir, &pebble.Options{Logger: silentLogger{}})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open index db: %w", err)
+	}
+
+	bankhashDb, err := pebble.Open(bankhashDir, &pebble.Options{Logger: silentLogger{}})
+	if err != nil {
+		indexDb.Close()
+		return nil, fmt.Errorf("failed to open bankhash db: %w", err)
+	}
+
+	// Write accounts to appendvec and build index
+	fileId := uint64(1)
+	appendVecPath := filepath.Join(accountsDir, fmt.Sprintf("%d.%d", slot, fileId))
+	appendVecFile, err := os.Create(appendVecPath)
+	if err != nil {
+		indexDb.Close()
+		bankhashDb.Close()
+		return nil, fmt.Errorf("failed to create appendvec file: %w", err)
+	}
+
+	var offset uint64
+	var acctIdxEntryBuf [24]byte
+
+	for _, acct := range accts {
+		if acct == nil {
+			continue
+		}
+
+		// Create index entry
+		indexEntry := AccountIndexEntry{Slot: slot, FileId: fileId, Offset: offset}
+		indexEntry.Marshal(&acctIdxEntryBuf)
+
+		if err := indexDb.Set(acct.Key[:], acctIdxEntryBuf[:], &pebble.WriteOptions{}); err != nil {
+			appendVecFile.Close()
+			indexDb.Close()
+			bankhashDb.Close()
+			return nil, fmt.Errorf("failed to write index entry for %s: %w", acct.Key, err)
+		}
+
+		// Write account to appendvec
+		appendVecAcct := AppendVecAccount{
+			DataLen:    uint64(len(acct.Data)),
+			Pubkey:     acct.Key,
+			Lamports:   acct.Lamports,
+			RentEpoch:  acct.RentEpoch,
+			Owner:      acct.Owner,
+			Executable: acct.Executable,
+			Data:       acct.Data,
+		}
+
+		written, err := appendVecAcct.MarshalReturningLength(appendVecFile)
+		if err != nil {
+			appendVecFile.Close()
+			indexDb.Close()
+			bankhashDb.Close()
+			return nil, fmt.Errorf("failed to write account %s to appendvec: %w", acct.Key, err)
+		}
+		offset += uint64(written)
+	}
+
+	appendVecFile.Close()
+
+	// Write largest_file_id
+	largestFileIdPath := filepath.Join(dir, "largest_file_id")
+	var largestFileIdBytes [8]byte
+	binary.LittleEndian.PutUint64(largestFileIdBytes[:], fileId)
+	if err := os.WriteFile(largestFileIdPath, largestFileIdBytes[:], 0644); err != nil {
+		indexDb.Close()
+		bankhashDb.Close()
+		return nil, fmt.Errorf("failed to write largest_file_id: %w", err)
+	}
+
+	// Create AccountsDb
+	accountsDb := &AccountsDb{
+		Index:         indexDb,
+		BankHashStore: bankhashDb,
+		AcctsDir:      accountsDir,
+	}
+	accountsDb.LargestFileId.Store(fileId)
+	accountsDb.InitCaches()
+
+	return accountsDb, nil
 }
