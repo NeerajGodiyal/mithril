@@ -59,6 +59,7 @@ var EnableSbpfV3DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV3Deployme
 var DisableSbpfV0Execution = FeatureGate{Name: "DisableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature11111111111111111111111111111111")}
 var ReenableSbpfV0Execution = FeatureGate{Name: "ReenableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature21111111111111111111111111111111")}
 var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTransactionDataSize", Address: base58.MustDecodeFromString("DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8")}
+var IncreaseCpiAccountInfoLimit = FeatureGate{Name: "IncreaseCpiAccountInfoLimit", Address: base58.MustDecodeFromString("H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -73,4 +74,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
 	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
-	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize}
+	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit}
