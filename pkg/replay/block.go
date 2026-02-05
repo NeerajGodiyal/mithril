@@ -1963,9 +1963,8 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		FeeRateGovernor: block.FeeRateGovernor,
 		NumSignatures:   block.NumSignatures,
 
-		AcctMapsMu:    &sync.Mutex{},
-		ModifiedAccts: make(map[solana.PublicKey]bool),
-		WritableAccts: make(map[solana.PublicKey]bool),
+		ModifiedAccts: make(map[solana.PublicKey]struct{}),
+		WritableAccts: make(map[solana.PublicKey]struct{}),
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,
@@ -1974,9 +1973,8 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		Features:               block.Features,
 		AcctsLtHash:            block.AcctsLtHash,
 
-		VoteAccts:       block.EpochStakesPerVoteAcct,
-		VoteTimestampMu: &sync.Mutex{},
-		VoteTimestamps:  block.VoteTimestamps,
+		VoteAccts:      block.EpochStakesPerVoteAcct,
+		VoteTimestamps: block.VoteTimestamps,
 		TotalEpochStake: block.TotalEpochStake,
 
 		EpochsAcctHash:        block.EpochAcctsHash,
@@ -1992,13 +1990,14 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 
 func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	tracker := WrapTxTracker(slotCtx.ModifiedAccts, slotCtx.WritableAccts, slotCtx.VoteTimestamps)
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		var txMeta *rpc.TransactionMeta
 		if block.TxMetas != nil {
 			txMeta = block.TxMetas[idx]
 		}
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
+		txFeeInfo, txErr := ProcessTransaction(slotCtx, tracker, sigverifyWg, tx, txMeta, dbgOpts, nil)
 
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {
@@ -2021,6 +2020,16 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 
 		txFeeAccumulator.Add(txFeeInfo)
 	}
+	// Flush batched vote state changes and pending stake pubkeys to global caches
+	for _, pk := range tracker.DeletedVoteStates {
+		global.DeleteVoteCacheItem(pk)
+	}
+	for pk, vs := range tracker.VoteStates {
+		global.PutVoteCacheItem(pk, vs)
+	}
+	for _, pk := range tracker.PendingStakePubkeys {
+		global.EnqueuePendingStakePubkey(pk)
+	}
 	return txFeeAccumulator
 }
 
@@ -2029,28 +2038,37 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
+	wg := &sync.WaitGroup{}
+	workerTrackers := make([]*TxTracker, txParallelism)
+	for i := range txParallelism {
+		workerTrackers[i] = NewTxTracker()
+	}
 
 	if rblock.FromLightbringer {
-		wg := &sync.WaitGroup{}
-		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
-			defer wg.Done()
-			idx := i.(uint64)
-			txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], nil, dbgOpts, nil)
-		})
-
+		do := make(chan uint64, len(block.Transactions))
+		for i := range txParallelism {
+			go func() {
+				for idx := range do {
+					func() {
+						defer wg.Done()
+						txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, workerTrackers[i], sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
+					}()
+				}
+			}()
+		}
 		for _, entry := range rblock.Entries {
 			for _, txIdx := range entry.Indices {
 				wg.Add(1)
-				workerPool.Invoke(txIdx)
+				do <- txIdx
 			}
 			wg.Wait()
 		}
+		close(do)
 	} else {
-		do := make(chan int, len(block.Transactions))
 		done := make(chan int, len(block.Transactions))
+		do := make(chan int, len(block.Transactions))
 		go TopsortPlannerStream(block, do, done)
 
-		wg := &sync.WaitGroup{}
 		wg.Add(txParallelism)
 		for i := range txParallelism {
 			go func() {
@@ -2058,7 +2076,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 				for idx := range do {
 					txStart := time.Now()
 					tx := block.Transactions[idx]
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
+					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, workerTrackers[i], sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
 					txErr := errs[idx]
 					// check for success-failure return value divergences
 					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
@@ -2079,6 +2097,21 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 		wg.Wait()
 		close(done)
+	}
+
+	for _, t := range workerTrackers {
+		maps.Copy(slotCtx.ModifiedAccts, t.Modified)
+		maps.Copy(slotCtx.WritableAccts, t.Writable)
+		maps.Copy(slotCtx.VoteTimestamps, t.VoteTimestamps)
+		for _, pk := range t.DeletedVoteStates {
+			global.DeleteVoteCacheItem(pk)
+		}
+		for pk, vs := range t.VoteStates {
+			global.PutVoteCacheItem(pk, vs)
+		}
+		for _, pk := range t.PendingStakePubkeys {
+			global.EnqueuePendingStakePubkey(pk)
+		}
 	}
 
 	for idx, txFeeInfo := range txFeeInfos {
@@ -2168,10 +2201,12 @@ func ProcessBlock(
 	// skip leader handling if there are zero transactions in this block
 	if !global.ManageLeaderSchedule() && block.BlockReward != nil && len(block.Transactions) > 0 {
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
-		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
+		slotCtx.ModifiedAccts[block.BlockReward.Leader] = struct{}{}
+		slotCtx.WritableAccts[block.BlockReward.Leader] = struct{}{}
 	} else if global.ManageLeaderSchedule() && len(block.Transactions) > 0 {
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
-		slotCtx.RecordModifiedAcct(block.Leader)
+		slotCtx.ModifiedAccts[block.Leader] = struct{}{}
+		slotCtx.WritableAccts[block.Leader] = struct{}{}
 	}
 	metrics.GlobalBlockReplay.Reward.AddTimingSince(start)
 

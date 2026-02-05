@@ -16,7 +16,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/migration"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -27,6 +26,67 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
+
+// TxTracker tracks per-worker state during parallel transaction processing.
+// This avoids mutex contention by giving each worker its own maps to write to,
+// which are merged into slotCtx after all workers complete.
+type TxTracker struct {
+	// Modified accounts are always also writable.
+	Modified map[solana.PublicKey]struct{}
+	Writable map[solana.PublicKey]struct{}
+	// VoteTimestamps records the last timestamp from each vote account.
+	VoteTimestamps map[solana.PublicKey]sealevel.BlockTimestamp
+	// VoteStates accumulates modified vote states, flushed to global cache after merge.
+	VoteStates map[solana.PublicKey]*sealevel.VoteStateVersions
+	// DeletedVoteStates accumulates vote cache keys to delete, flushed at merge time.
+	DeletedVoteStates []solana.PublicKey
+	// PendingStakePubkeys accumulates stake pubkeys, flushed to global cache after merge.
+	PendingStakePubkeys []solana.PublicKey
+}
+
+func NewTxTracker() *TxTracker {
+	return &TxTracker{
+		Modified:       make(map[solana.PublicKey]struct{}),
+		Writable:       make(map[solana.PublicKey]struct{}),
+		VoteTimestamps: make(map[solana.PublicKey]sealevel.BlockTimestamp),
+		VoteStates:     make(map[solana.PublicKey]*sealevel.VoteStateVersions),
+	}
+}
+
+// WrapTxTracker wraps existing maps (for sequential processing where we write directly to slotCtx).
+func WrapTxTracker(modified, writable map[solana.PublicKey]struct{}, voteTimestamps map[solana.PublicKey]sealevel.BlockTimestamp) *TxTracker {
+	return &TxTracker{
+		Modified:       modified,
+		Writable:       writable,
+		VoteTimestamps: voteTimestamps,
+		VoteStates:     make(map[solana.PublicKey]*sealevel.VoteStateVersions),
+	}
+}
+
+func (t *TxTracker) RecordModified(pubkey solana.PublicKey) {
+	t.Modified[pubkey] = struct{}{}
+	t.Writable[pubkey] = struct{}{}
+}
+
+func (t *TxTracker) RecordWritable(pubkey solana.PublicKey) {
+	t.Writable[pubkey] = struct{}{}
+}
+
+func (t *TxTracker) RecordVoteTimestamp(pubkey solana.PublicKey, timestamp sealevel.BlockTimestamp) {
+	t.VoteTimestamps[pubkey] = timestamp
+}
+
+func (t *TxTracker) RecordVoteState(pubkey solana.PublicKey, voteState *sealevel.VoteStateVersions) {
+	t.VoteStates[pubkey] = voteState
+}
+
+func (t *TxTracker) RecordDeletedVoteState(pubkey solana.PublicKey) {
+	t.DeletedVoteStates = append(t.DeletedVoteStates, pubkey)
+}
+
+func (t *TxTracker) RecordPendingStakePubkey(pubkey solana.PublicKey) {
+	t.PendingStakePubkeys = append(t.PendingStakePubkeys, pubkey)
+}
 
 type TxErrInvalidSignature struct {
 	msg string
@@ -152,7 +212,7 @@ func isWritable(am *solana.AccountMeta, f *features.Features, programIDSet map[s
 	return true
 }
 
-func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
+func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, tracker *TxTracker, execCtx *sealevel.ExecutionCtx) {
 	// update account states in slotCtx for all accounts 'touched' during the tx's execution
 	var touchedCount, touchedBytes uint64
 	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
@@ -170,7 +230,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 			if err != nil {
 				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
 			}
-			slotCtx.RecordModifiedAcct(newAcctState.Key)
+			tracker.RecordModified(newAcctState.Key)
 			//mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
 		}
 	}
@@ -180,7 +240,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 	TxAcctsTouchedBytes.Add(touchedBytes)
 }
 
-func recordStakeDelegation(acct *accounts.Account) {
+func recordStakeDelegation(tracker *TxTracker, acct *accounts.Account) {
 	isEmpty := acct.Lamports == 0
 	isUninitialized := true
 
@@ -191,11 +251,11 @@ func recordStakeDelegation(acct *accounts.Account) {
 
 	if !isEmpty && !isUninitialized {
 		// Enqueue pubkey for index append so StreamStakeAccounts sees new stake accounts
-		global.EnqueuePendingStakePubkey(acct.Key)
+		tracker.RecordPendingStakePubkey(acct.Key)
 	}
 }
 
-func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
+func recordVoteTimestampAndSlot(tracker *TxTracker, acct *accounts.Account) {
 	voteStateVersioned := new(sealevel.VoteStateVersions)
 	decoder := bin.NewBinDecoder(acct.Data)
 
@@ -217,12 +277,10 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 		timestamp = voteStateVersioned.V1_14_11.LastTimestamp
 	}
 
-	slotCtx.VoteTimestampMu.Lock()
-	defer slotCtx.VoteTimestampMu.Unlock()
-	slotCtx.VoteTimestamps[acct.Key] = timestamp
+	tracker.RecordVoteTimestamp(acct.Key, timestamp)
 }
 
-func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, writablePubkeySet map[solana.PublicKey]struct{}) {
+func recordStakeAndVoteAccounts(tracker *TxTracker, execCtx *sealevel.ExecutionCtx, writablePubkeySet map[solana.PublicKey]struct{}) {
 	modifiedVoteAccts := execCtx.TransactionContext.ModifiedVoteAccts
 
 	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
@@ -231,24 +289,30 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 		}
 
 		if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr {
-			if global.VoteCacheItem(acct.Key) != nil {
-				global.DeleteVoteCacheItem(acct.Key)
-			}
+			tracker.RecordDeletedVoteState(acct.Key)
 		} else if modifiedVoteAccts {
-			recordVoteTimestampAndSlot(slotCtx, acct)
+			recordVoteTimestampAndSlot(tracker, acct)
 			newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
 			if wasModified {
-				global.PutVoteCacheItem(acct.Key, newVersionedVoteState)
+				tracker.RecordVoteState(acct.Key, newVersionedVoteState)
 			}
 		}
 
 		if acct.Owner == a.StakeProgramAddr {
-			recordStakeDelegation(acct)
+			recordStakeDelegation(tracker, acct)
 		}
 	}
 }
 
-func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
+func handleFailedTx(
+	slotCtx *sealevel.SlotCtx,
+	tracker *TxTracker,
+	tx *solana.Transaction,
+	instrs []sealevel.Instruction,
+	computeBudgetLimits *sealevel.ComputeBudgetLimits,
+	instrErr error,
+	rentStateErr error,
+) (*fees.TxFeeInfo, error) {
 	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
@@ -266,13 +330,13 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 	if err != nil {
 		panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
 	}
-	slotCtx.RecordModifiedAcct(payerAcctKey)
+	tracker.RecordModified(payerAcctKey)
 
 	if len(instrs) >= 1 {
 		instr := instrs[0]
 		noncePubkey, didAdvanceNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
 		if didAdvanceNonceAcct {
-			slotCtx.RecordModifiedAcct(noncePubkey)
+			tracker.RecordModified(noncePubkey)
 		}
 	}
 
@@ -296,7 +360,16 @@ func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.Wai
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
+func ProcessTransaction(
+	slotCtx *sealevel.SlotCtx,
+	// tracker should not require locking, and gets merged into slotCtx later.
+	tracker *TxTracker,
+	sigverifyWg *sync.WaitGroup,
+	tx *solana.Transaction,
+	txMeta *rpc.TransactionMeta,
+	dbgOpts *DebugOptions,
+	arena *arena.Arena[sealevel.BorrowedAccount],
+) (*fees.TxFeeInfo, error) {
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
 		regionType := "ProcessTransaction"
 		if tx.IsVote() {
@@ -358,7 +431,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	}
 	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
-		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, err, nil)
+		return handleFailedTx(slotCtx, tracker, tx, instrs, computeBudgetLimits, err, nil)
 	} else if err != nil {
 		return nil, err
 	}
@@ -525,7 +598,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// if there was an error in the tx, do not update account states, except for deducting the tx fee
 	// from the payer account and advancing the nonce account if applicable
 	if instrErr != nil || rentStateErr != nil {
-		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, instrErr, rentStateErr)
+		return handleFailedTx(slotCtx, tracker, tx, instrs, computeBudgetLimits, instrErr, rentStateErr)
 	}
 
 	// Reuse txAcctMetas from loadAndValidateTxAccts* (already built once per tx)
@@ -539,13 +612,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	for _, pk := range writablePubkeys {
-		slotCtx.RecordWritableAcct(pk)
+		tracker.RecordWritable(pk)
 	}
 
-	handleModifiedAccounts(slotCtx, execCtx)
+	handleModifiedAccounts(slotCtx, tracker, execCtx)
 	writablePubkeys = append(writablePubkeys, payerAcct.Key)
 	writablePubkeySet[payerAcct.Key] = struct{}{}
-	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeySet)
+	recordStakeAndVoteAccounts(tracker, execCtx, writablePubkeySet)
 	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 
 	return txFeeInfo, nil
