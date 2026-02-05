@@ -67,22 +67,32 @@ func newGoroutineTrackAllocator() *goroutineTrackAllocator {
 	}
 }
 
-// getOrCreateTrack returns a trackID and if it needs a Perfetto TrackDescriptor to be emitted.
-func (a *goroutineTrackAllocator) getOrCreateTrack(g exptrace.GoID) (trackID, bool) {
+// getOrCreateTrack returns a trackID and emits a TrackDescriptor if necessary.
+func (a *goroutineTrackAllocator) getOrCreateTrack(g exptrace.GoID, trace *pb.Trace) trackID {
 	if t, ok := a.goroutineToTrack[g]; ok {
-		return t, false
+		return t
 	}
 
 	var t trackID
 	if len(a.availableTracks) > 0 {
 		t, a.availableTracks = a.availableTracks[len(a.availableTracks)-1], a.availableTracks[:len(a.availableTracks)-1]
 		a.goroutineToTrack[g] = t
-		return t, false
+		return t
 	}
 	// Avoid 0 because protobuf
 	// Avoid 1 because that's used for the process TrackDescriptor
 	a.goroutineToTrack[g] = trackID(len(a.goroutineToTrack) + 2)
-	return a.goroutineToTrack[g], true
+	trace.Packet = append(trace.Packet, &pb.TracePacket{
+		TrustedPacketSequenceId: 1,
+		Data: &pb.TracePacket_TrackDescriptor{
+			TrackDescriptor: &pb.TrackDescriptor{
+				Uuid:       uint64(a.goroutineToTrack[g]),
+				Name:       fmt.Sprintf("Track %03d", a.goroutineToTrack[g]),
+				ParentUuid: 1,
+			},
+		},
+	})
+	return a.goroutineToTrack[g]
 }
 
 func (a *goroutineTrackAllocator) releaseGoroutine(g exptrace.GoID) {
@@ -92,11 +102,19 @@ func (a *goroutineTrackAllocator) releaseGoroutine(g exptrace.GoID) {
 	}
 }
 
-const ()
+// goroutineState tracks the current non-running state slice for a goroutine
+type goroutineState struct {
+	state  string // "WAITING" or "RUNNABLE"
+	reason string
+}
+
+// Transaction region names we care about
+var txRegions = map[string]bool{
+	"ProcessVote":        true,
+	"ProcessTransaction": true,
+}
 
 func convertTrace(r *exptrace.Reader) (*pb.Trace, error) {
-	// TODO: associate runtime.Trace.Log with slices as DebugAnnotation?
-
 	trace := &pb.Trace{}
 
 	p := uint64(1)
@@ -116,6 +134,10 @@ func convertTrace(r *exptrace.Reader) (*pb.Trace, error) {
 
 	a := newGoroutineTrackAllocator()
 
+	waitOrSchedGoroutineStates := make(map[exptrace.GoID]*goroutineState)
+	isTxWorker := make(map[exptrace.GoID]bool)
+	txLoopOpen := false
+
 	for {
 		ev, err := r.ReadEvent()
 		if err == io.EOF {
@@ -127,51 +149,107 @@ func convertTrace(r *exptrace.Reader) (*pb.Trace, error) {
 		var eventType pb.TrackEvent_Type
 		var sliceName string
 		var category string
+		var gid exptrace.GoID
 
 		switch ev.Kind() {
 		case exptrace.EventStateTransition:
 			st := ev.StateTransition()
-			if st.Resource.Kind == exptrace.ResourceGoroutine {
-				_, to := st.Goroutine()
-				// Release tracks for dead goroutines.
-				if to == exptrace.GoNotExist {
-					a.releaseGoroutine(st.Resource.Goroutine())
-				}
+			if st.Resource.Kind != exptrace.ResourceGoroutine {
+				continue
 			}
-			continue
+			gid = st.Resource.Goroutine()
+			_, to := st.Goroutine()
+
+			// Release tracks for dead goroutines
+			if to == exptrace.GoNotExist {
+				a.releaseGoroutine(gid)
+				delete(waitOrSchedGoroutineStates, gid)
+				continue
+			}
+			if !isTxWorker[gid] || !txLoopOpen {
+				continue
+			}
+
+			// End any existing state slice when state changes
+			if gs, ok := waitOrSchedGoroutineStates[gid]; ok {
+				t := a.getOrCreateTrack(gid, trace)
+				trace.Packet = append(trace.Packet, &pb.TracePacket{
+					Timestamp:               uint64(ev.Time()),
+					TrustedPacketSequenceId: 1,
+					Data: &pb.TracePacket_TrackEvent{
+						TrackEvent: &pb.TrackEvent{
+							TrackUuid:  uint64(t),
+							Name:       gs.state + ": " + gs.reason,
+							Type:       pb.TrackEvent_TYPE_SLICE_END,
+							Categories: []string{"state"},
+						},
+					},
+				})
+				delete(waitOrSchedGoroutineStates, gid)
+			}
+
+			switch to {
+			case exptrace.GoWaiting:
+				reason := st.Reason
+				if reason == "" {
+					reason = "unknown"
+				}
+				waitOrSchedGoroutineStates[gid] = &goroutineState{
+					state:  "WAITING",
+					reason: reason,
+				}
+				sliceName = "WAITING: " + reason
+
+			case exptrace.GoRunnable:
+				waitOrSchedGoroutineStates[gid] = &goroutineState{
+					state:  "RUNNABLE",
+					reason: "scheduler",
+				}
+				sliceName = "RUNNABLE: scheduler"
+
+			default:
+				continue
+			}
+			eventType = pb.TrackEvent_TYPE_SLICE_BEGIN
+			category = "state"
+
 		case exptrace.EventRegionBegin:
+			gid = ev.Goroutine()
 			eventType = pb.TrackEvent_TYPE_SLICE_BEGIN
 			sliceName = ev.Region().Type
 			category = "region"
+			if txRegions[sliceName] {
+				isTxWorker[gid] = true
+			} else if sliceName == "TxLoop" {
+				txLoopOpen = true
+			}
+
 		case exptrace.EventRegionEnd:
+			gid = ev.Goroutine()
 			eventType = pb.TrackEvent_TYPE_SLICE_END
 			sliceName = ev.Region().Type
 			category = "region"
+			if sliceName == "TxLoop" {
+				txLoopOpen = false
+			}
+
 		case exptrace.EventTaskBegin:
+			gid = ev.Goroutine()
 			eventType = pb.TrackEvent_TYPE_SLICE_BEGIN
 			sliceName = ev.Task().Type
 			category = "task"
+
 		case exptrace.EventTaskEnd:
+			gid = ev.Goroutine()
 			eventType = pb.TrackEvent_TYPE_SLICE_END
 			sliceName = ev.Task().Type
 			category = "task"
+
 		default:
 			continue
 		}
 
-		t, isNew := a.getOrCreateTrack(ev.Goroutine())
-		if isNew {
-			trace.Packet = append(trace.Packet, &pb.TracePacket{
-				TrustedPacketSequenceId: 1,
-				Data: &pb.TracePacket_TrackDescriptor{
-					TrackDescriptor: &pb.TrackDescriptor{
-						Uuid:       uint64(t),
-						Name:       fmt.Sprintf("Track %03d", t),
-						ParentUuid: p,
-					},
-				},
-			})
-		}
+		t := a.getOrCreateTrack(gid, trace)
 
 		trace.Packet = append(trace.Packet, &pb.TracePacket{
 			Timestamp:               uint64(ev.Time()),
