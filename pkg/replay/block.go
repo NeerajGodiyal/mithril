@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"runtime/trace"
 	"sort"
 	"sync"
@@ -2150,6 +2151,7 @@ func ProcessBlock(
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 
+	oldGCPercent := debug.SetGCPercent(-1)
 	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
 	if txParallelism > 0 {
 		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
@@ -2158,6 +2160,7 @@ func ProcessBlock(
 	}
 	txLoopRegion.End()
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
+	debug.SetGCPercent(oldGCPercent)
 
 	start = time.Now()
 
