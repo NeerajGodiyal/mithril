@@ -300,7 +300,11 @@ func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.Wai
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
-		region := trace.StartRegion(slotCtx.TraceCtx, "ProcessTransaction")
+		regionType := "ProcessTransaction"
+		if tx.IsVote() {
+			regionType = "ProcessVote"
+		}
+		region := trace.StartRegion(slotCtx.TraceCtx, regionType)
 		defer region.End()
 
 		if len(tx.Signatures) > 0 {
