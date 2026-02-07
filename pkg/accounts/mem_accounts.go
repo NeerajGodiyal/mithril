@@ -2,28 +2,28 @@ package accounts
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/spinlock"
 	"github.com/gagliardetto/solana-go"
 )
 
 type MemAccounts struct {
 	Map map[[32]byte]*Account
-	mu  *sync.Mutex
+	mu  *spinlock.SpinLock
 }
 
 func NewMemAccounts() MemAccounts {
 	return MemAccounts{
 		Map: make(map[[32]byte]*Account),
-		mu:  &sync.Mutex{},
+		mu:  &spinlock.SpinLock{},
 	}
 }
 
 func NewMemAccountsWithLen(len uint64) MemAccounts {
 	return MemAccounts{
 		Map: make(map[[32]byte]*Account, len),
-		mu:  &sync.Mutex{},
+		mu:  &spinlock.SpinLock{},
 	}
 }
 
