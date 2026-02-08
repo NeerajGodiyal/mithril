@@ -1679,7 +1679,8 @@ func detectExistingAccountsDB(path string) (bool, uint64) {
 	return true, manifest.Bank.Slot
 }
 
-// detectExistingSnapshots finds snapshot files in the given directory
+// detectExistingSnapshots finds snapshot files in the given directory.
+// Skips .partial files (incomplete downloads from crashed runs).
 func detectExistingSnapshots(dir string) []snapshotInfo {
 	if dir == "" {
 		return nil
@@ -1697,6 +1698,11 @@ func detectExistingSnapshots(dir string) []snapshotInfo {
 			continue
 		}
 		name := entry.Name()
+
+		// Skip partial downloads (incomplete files from crashed runs)
+		if strings.HasSuffix(name, ".partial") {
+			continue
+		}
 
 		// Full snapshot: snapshot-{slot}-{hash}.tar.zst
 		if len(name) > 9 && name[:9] == "snapshot-" && filepath.Ext(name) == ".zst" {

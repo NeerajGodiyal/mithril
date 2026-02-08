@@ -62,6 +62,17 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 		return // Directory may not exist yet
 	}
 
+	// Always clean up .partial files first (incomplete downloads from crashes)
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), PartialSuffix) {
+			path := filepath.Join(downloadPath, entry.Name())
+			mlog.Log.Infof("Cleaning up incomplete download from previous run: %s", entry.Name())
+			if err := os.Remove(path); err != nil {
+				mlog.Log.Errorf("Failed to remove partial download %s: %v", entry.Name(), err)
+			}
+		}
+	}
+
 	// Collect snapshot files with their info
 	type snapshotFile struct {
 		name    string
@@ -350,15 +361,11 @@ func readTar(
 		})
 	}
 
-	// cleanupPartial deletes the partial download file if it exists
+	// cleanupPartial removes the .partial download file on error/cancellation
 	cleanupPartial := func(reason string) {
 		if savePath != "" {
-			if _, statErr := os.Stat(savePath); statErr == nil {
-				mlog.Log.Infof("Deleting partial download %s (%s)", savePath, reason)
-				if rmErr := os.Remove(savePath); rmErr != nil {
-					mlog.Log.Errorf("Failed to delete partial download %s: %v", savePath, rmErr)
-				}
-			}
+			mlog.Log.Infof("Cleaning up partial download (%s)", reason)
+			CleanupPartialDownload(savePath)
 		}
 	}
 
@@ -403,6 +410,13 @@ func readTar(
 			cleanupPartial("pool error")
 			return err
 		}
+	}
+
+	// Successfully processed the entire tar — finalize by renaming from .partial
+	if err := FinalizePartialDownload(savePath); err != nil {
+		mlog.Log.Errorf("Failed to finalize snapshot download: %v", err)
+		// Don't return error — the snapshot was processed successfully,
+		// finalization failure just means we can't reuse the cached file
 	}
 
 	return nil
