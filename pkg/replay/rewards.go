@@ -9,6 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
@@ -85,10 +86,12 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
 
-	distributedAccts, parentDistributedAccts, distributedLamports := rewards.DistributeStakingRewardsFromSpool(acctsDb, partitionedEpochRewardsInfo.SpoolDir, partitionedEpochRewardsInfo.SpoolSlot, partitionIdx, currentSlot)
+	distributedAccts, parentDistributedAccts, distributedLamports, burnedLamports := rewards.DistributeStakingRewardsFromSpool(acctsDb, partitionedEpochRewardsInfo.SpoolDir, partitionedEpochRewardsInfo.SpoolSlot, partitionIdx, currentSlot)
 	parentDistributedAccts = append(parentDistributedAccts, epochRewardsAcct.Clone())
 
-	epochRewards.Distribute(distributedLamports)
+	// EpochRewards sysvar advances by distributed + burned (matching Agave/FD),
+	// but capitalization only increases by distributed.
+	epochRewards.Distribute(distributedLamports + burnedLamports)
 	partitionedEpochRewardsInfo.NumRewardPartitionsRemaining--
 
 	if partitionedEpochRewardsInfo.NumRewardPartitionsRemaining == 0 {
@@ -110,6 +113,10 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, ep
 
 	distributedAccts = append(distributedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += distributedLamports
+
+	if burnedLamports > 0 {
+		mlog.Log.Warnf("partition %d: distributed=%d burned=%d", partitionIdx, distributedLamports, burnedLamports)
+	}
 
 	return distributedAccts, parentDistributedAccts
 }
