@@ -204,16 +204,8 @@ name = "mithril"
     # Recommended: 2x your CPU core count (e.g., 192 for a 96-core machine)
     txpar = 24
 
-    # -------------------------------------------------------------------------
-    # Advanced: verify-range settings (for developers)
-    # -------------------------------------------------------------------------
-    # These settings are only used with 'mithril verify-range', not 'mithril run'.
-    # For normal operation, use [bootstrap].mode above instead.
-
-    # Number of slots to replay
+    # Finite replay: stop after N slots or at a specific slot (optional)
     # num_slots = 0
-
-    # Block at which to stop replaying, inclusive (-1 = no limit)
     # end_slot = -1
 
 # ============================================================================

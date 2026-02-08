@@ -24,11 +24,9 @@ type RpcConfig struct {
 
 // ReplayConfig holds replay-related configuration
 type ReplayConfig struct {
-	Txpar              int64 `toml:"txpar" mapstructure:"txpar"`                             // UNCHANGED
-	NumSlots           int64 `toml:"num_slots" mapstructure:"num_slots"`                     // was: num-replay-slots
-	EndSlot            int64 `toml:"end_slot" mapstructure:"end_slot"`                       // was: endslot
-	LoadFromSnapshot   bool  `toml:"load_from_snapshot" mapstructure:"load_from_snapshot"`   // was: snapshot
-	LoadFromAccountsDb bool  `toml:"load_from_accounts_db" mapstructure:"load_from_accounts_db"` // was: accountsdb
+	Txpar    int64 `toml:"txpar" mapstructure:"txpar"`
+	NumSlots int64 `toml:"num_slots" mapstructure:"num_slots"`
+	EndSlot  int64 `toml:"end_slot" mapstructure:"end_slot"`
 }
 
 // PprofConfig holds pprof-related configuration
