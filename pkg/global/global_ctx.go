@@ -35,7 +35,6 @@ type GlobalCtx struct {
 	cachedStakeEntries         []accountsdb.StakeIndexEntry // Parsed+sorted index, populated on first load
 	entriesFlushedSinceCompact int                          // Appended entries since last compaction
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
-	voteStakeTotals            map[solana.PublicKey]uint64 // Aggregated stake totals per vote account (replaces full stake cache at startup)
 	epochStakes                *epochstakes.EpochStakesCache
 	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
 	forkChoice                 *forkchoice.ForkChoiceService
@@ -46,7 +45,6 @@ type GlobalCtx struct {
 	manageBlockHeight          bool
 	pendingStakeMutex          sync.Mutex // Protects pendingNewStakePubkeys
 	voteCacheMutex             sync.RWMutex
-	voteStakeTotalsMu          sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
 	mu                         sync.Mutex
 }
@@ -159,14 +157,6 @@ func VoteCacheSnapshot() map[solana.PublicKey]*sealevel.VoteStateVersions {
 		snapshot[pk] = voteState
 	}
 	return snapshot
-}
-
-// SetVoteStakeTotals sets the aggregated stake totals per vote account.
-// Called at startup after scanning all stake accounts.
-func SetVoteStakeTotals(m map[solana.PublicKey]uint64) {
-	instance.voteStakeTotalsMu.Lock()
-	instance.voteStakeTotals = m
-	instance.voteStakeTotalsMu.Unlock()
 }
 
 func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
