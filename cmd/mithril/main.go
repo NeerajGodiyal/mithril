@@ -46,11 +46,9 @@ func init() {
 	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
 
 	cmd.AddCommand(
-		&node.Run,              // Primary command for running Mithril
-		&configcmd.ConfigCmd,   // Config management (init, etc.)
-		&statecmd.StateCmd,     // State file inspection and management
-		&node.VerifyRange,      // Developer/advanced command
-		&node.VerifyLive,       // Backwards compatibility alias for Run
+		&node.Run,            // Primary command for running Mithril
+		&configcmd.ConfigCmd, // Config management (init, etc.)
+		&statecmd.StateCmd,   // State file inspection and management
 	)
 }
 

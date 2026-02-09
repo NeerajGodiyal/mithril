@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
 // ProgressCallback is called with (bytesRead, totalBytes) to report download progress
@@ -47,8 +49,13 @@ func NewBufMonReaderHTTP(ctx context.Context, url string) (*bufmonreader, error)
 	return NewBufMonReaderHTTPWithSave(ctx, url, "")
 }
 
+// PartialSuffix is appended to snapshot files during download to mark them as incomplete.
+// Once download completes successfully, the file is atomically renamed to remove this suffix.
+const PartialSuffix = ".partial"
+
 // NewBufMonReaderHTTPWithSave streams from HTTP URL and optionally saves to disk.
-// If savePath is non-empty, the data will be written to disk while streaming.
+// If savePath is non-empty, the data will be written to a .partial file while streaming.
+// Use FinalizePartialDownload after successful processing to rename to the final path.
 // Returns: (*bufmonreader, error)
 func NewBufMonReaderHTTPWithSave(ctx context.Context, url string, savePath string) (*bufmonreader, error) {
 	resp, err := http.Head(url)
@@ -76,13 +83,15 @@ func NewBufMonReaderHTTPWithSave(ctx context.Context, url string, savePath strin
 	var reader io.Reader = resp.Body
 	var closer io.Closer = resp.Body
 
-	// If savePath is provided, use TeeReader to write to disk while streaming
+	// If savePath is provided, use TeeReader to write to disk while streaming.
+	// Write to .partial file first for crash safety.
 	if savePath != "" {
+		partialPath := savePath + PartialSuffix
 		// Note: Don't log here - caller logs before progress bar starts to avoid breaking cursor positioning
-		outFile, err := os.Create(savePath)
+		outFile, err := os.Create(partialPath)
 		if err != nil {
 			resp.Body.Close()
-			return nil, fmt.Errorf("creating save file %s: %v", savePath, err)
+			return nil, fmt.Errorf("creating save file %s: %v", partialPath, err)
 		}
 
 		// TeeReader splits the stream: data goes to both the tar reader AND the file
@@ -98,6 +107,37 @@ func NewBufMonReaderHTTPWithSave(ctx context.Context, url string, savePath strin
 		c:         closer,
 		totalSize: totalSize,
 	}, nil
+}
+
+// FinalizePartialDownload atomically renames a completed .partial file to its final name.
+// Call after successfully processing a snapshot saved with NewBufMonReaderHTTPWithSave.
+// No-op if savePath is empty or the partial file doesn't exist.
+func FinalizePartialDownload(savePath string) error {
+	if savePath == "" {
+		return nil
+	}
+	partialPath := savePath + PartialSuffix
+	if _, err := os.Stat(partialPath); os.IsNotExist(err) {
+		return nil
+	}
+	if err := os.Rename(partialPath, savePath); err != nil {
+		return fmt.Errorf("failed to finalize snapshot %s: %w", savePath, err)
+	}
+	mlog.Log.Infof("Finalized snapshot download: %s", savePath)
+	return nil
+}
+
+// CleanupPartialDownload removes a .partial file if it exists.
+// Call on error/cancellation to clean up incomplete downloads.
+func CleanupPartialDownload(savePath string) {
+	if savePath == "" {
+		return
+	}
+	partialPath := savePath + PartialSuffix
+	if _, err := os.Stat(partialPath); err == nil {
+		mlog.Log.Infof("Cleaning up partial download: %s", partialPath)
+		os.Remove(partialPath)
+	}
 }
 
 // multiCloser closes multiple io.Closers
