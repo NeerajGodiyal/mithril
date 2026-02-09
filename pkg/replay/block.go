@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -786,18 +787,37 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 	wg.Wait()
 	stakeAcctWorkerPool.Release()
 
-	// Store aggregated totals in global for later use
-	global.SetVoteStakeTotals(voteAcctStakes)
-
 	// Load vote accounts from AccountsDB into vote cache
 	if err := RebuildVoteCacheFromAccountsDB(acctsDb, block.Slot, voteAcctStakes, 0); err != nil {
 		mlog.Log.Warnf("vote cache rebuild had errors: %v", err)
 	}
 
-	// Derive EpochStakesPerVoteAcct and TotalEpochStake from aggregated totals
-	for pk, stake := range voteAcctStakes {
-		block.EpochStakesPerVoteAcct[pk] = stake
-		block.TotalEpochStake += stake
+	// Seed EpochStakesPerVoteAcct and TotalEpochStake from the epoch stakes cache,
+	// loaded by buildInitialEpochStakesCache() from the manifest. These are
+	// epoch-effective stakes (warmup/cooldown applied), matching Agave's
+	// get_epoch_stake syscall behavior. The raw AccountsDB scan above uses
+	// delegation.StakeLamports which can differ from effective stake.
+	epochStakes := global.EpochStakes(block.Epoch)
+	if len(epochStakes) == 0 {
+		mlog.Log.Errorf("FATAL: no epoch stakes in cache for epoch %d - "+
+			"buildInitialEpochStakesCache should have loaded these from manifest", block.Epoch)
+		mlog.Log.Errorf("Available cached epochs: %v", global.GetAllCachedEpochs())
+		os.Exit(1)
+	}
+	maps.Copy(block.EpochStakesPerVoteAcct, epochStakes)
+	block.TotalEpochStake = global.EpochTotalStake(block.Epoch)
+
+	// Diagnostic: one-time startup comparison of raw scan vs epoch-effective totals
+	var rawScanTotal uint64
+	for _, stake := range voteAcctStakes {
+		rawScanTotal += stake
+	}
+	if rawScanTotal != block.TotalEpochStake {
+		mlog.Log.Infof("startup stake check: rawScanTotal=%d epochEffectiveTotal=%d delta=%d "+
+			"(expected difference from warmup/cooldown)",
+			rawScanTotal, block.TotalEpochStake, int64(rawScanTotal)-int64(block.TotalEpochStake))
+	} else {
+		mlog.Log.Infof("startup stake check: rawScanTotal=%d matches epochEffectiveTotal (all stakes fully warmed up)", rawScanTotal)
 	}
 
 	// Derive VoteTimestamps from ALL vote accounts in cache (including zero-stake)

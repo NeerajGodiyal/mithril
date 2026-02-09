@@ -1,6 +1,7 @@
 package rewards
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -166,13 +167,13 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
 }
 
-func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir string, spoolSlot uint64, partitionIdx uint64, currentSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir string, spoolSlot uint64, partitionIdx uint64, currentSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64) {
 	reader, err := NewPartitionReader(spoolDir, spoolSlot, uint32(partitionIdx))
 	if err != nil {
 		panic(fmt.Sprintf("unable to open partition %d spool for distribution: %s", partitionIdx, err))
 	}
 	if reader == nil {
-		return nil, nil, 0
+		return nil, nil, 0, 0
 	}
 	defer reader.Close()
 
@@ -189,12 +190,13 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 	}
 
 	if len(records) == 0 {
-		return nil, nil, 0
+		return nil, nil, 0, 0
 	}
 
 	accts := make([]*accounts.Account, len(records))
 	parentAccts := make([]*accounts.Account, len(records))
 	var distributedLamports atomic.Uint64
+	var burnedLamports atomic.Uint64
 
 	var wg sync.WaitGroup
 	workerPool, _ := ants.NewPoolWithFunc(runtime.GOMAXPROCS(0)*8, func(i interface{}) {
@@ -202,14 +204,36 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 		idx := i.(int)
 		rec := records[idx]
 
+		// Per-record failures burn rewards instead of panicking, matching Agave
+		// distribution.rs:282-294 and Firedancer fd_rewards.c:958-968.
+		// Burned rewards advance the EpochRewards sysvar but do NOT increase
+		// capitalization.
+
 		stakeAcct, err := acctsDb.GetAccount(currentSlot, rec.StakePubkey)
 		if err != nil {
-			panic(fmt.Sprintf("unable to get acct %s from acctsdb for spool distribution in slot %d", rec.StakePubkey, currentSlot))
+			if errors.Is(err, accountsdb.ErrNoAccount) {
+				// AccountNotFound — matches Agave DistributionError::AccountNotFound
+				mlog.Log.Warnf("spool distribution: account %s not found in slot %d, %d lamports burned", rec.StakePubkey, currentSlot, rec.RewardLamports)
+				burnedLamports.Add(rec.RewardLamports)
+				return
+			}
+			// Storage/IO error — hard fail, do not burn
+			panic(fmt.Sprintf("spool distribution: GetAccount failed for %s in slot %d: %v", rec.StakePubkey, currentSlot, err))
 		}
 		parentAccts[idx] = stakeAcct.Clone()
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
 		if err != nil {
+			// Stake state decode failure — matches FD fd_stake_get_state != 0
+			mlog.Log.Warnf("spool distribution: stake state decode failed for %s, %d lamports burned: %v", rec.StakePubkey, rec.RewardLamports, err)
+			burnedLamports.Add(rec.RewardLamports)
+			return
+		}
+
+		if stakeState.Status != sealevel.StakeStateV2StatusStake {
+			// Non-stake state — matches FD !fd_stake_state_v2_is_stake
+			mlog.Log.Warnf("spool distribution: account %s not in Stake state (status=%d), %d lamports burned", rec.StakePubkey, stakeState.Status, rec.RewardLamports)
+			burnedLamports.Add(rec.RewardLamports)
 			return
 		}
 
@@ -218,12 +242,18 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 
 		err = sealevel.MarshalStakeStakeInto(stakeState, stakeAcct.Data)
 		if err != nil {
-			panic(fmt.Sprintf("unable to serialize stake state in spool distribution: %s", err))
+			// Re-encode failure — matches Agave DistributionError::UnableToSetState
+			mlog.Log.Warnf("spool distribution: stake state encode failed for %s, %d lamports burned: %v", rec.StakePubkey, rec.RewardLamports, err)
+			burnedLamports.Add(rec.RewardLamports)
+			return
 		}
 
 		stakeAcct.Lamports, err = safemath.CheckedAddU64(stakeAcct.Lamports, rec.RewardLamports)
 		if err != nil {
-			panic(fmt.Sprintf("overflow in spool distribution in slot %d to acct %s: %s", currentSlot, rec.StakePubkey, err))
+			// Arithmetic overflow — matches Agave DistributionError::ArithmeticOverflow
+			mlog.Log.Warnf("spool distribution: lamports overflow for %s, %d lamports burned: %v", rec.StakePubkey, rec.RewardLamports, err)
+			burnedLamports.Add(rec.RewardLamports)
+			return
 		}
 
 		accts[idx] = stakeAcct
@@ -237,12 +267,22 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 	wg.Wait()
 	workerPool.Release()
 
-	err = acctsDb.StoreAccounts(accts, currentSlot, nil)
-	if err != nil {
-		panic(fmt.Sprintf("error updating accounts for spool distribution in slot %d: %s", currentSlot, err))
+	// Filter out nil entries (burned records) before storing
+	var filteredAccts []*accounts.Account
+	for _, a := range accts {
+		if a != nil {
+			filteredAccts = append(filteredAccts, a)
+		}
 	}
 
-	return accts, parentAccts, distributedLamports.Load()
+	if len(filteredAccts) > 0 {
+		err = acctsDb.StoreAccounts(filteredAccts, currentSlot, nil)
+		if err != nil {
+			panic(fmt.Sprintf("error updating accounts for spool distribution in slot %d: %s", currentSlot, err))
+		}
+	}
+
+	return accts, parentAccts, distributedLamports.Load(), burnedLamports.Load()
 }
 
 func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
