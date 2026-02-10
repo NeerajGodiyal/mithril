@@ -255,6 +255,7 @@ func RebuildVoteCacheFromAccountsDB(
 		// Read vote account from AccountsDB
 		voteAcct, err := acctsDb.GetAccount(slot, item.pk)
 		if err != nil {
+			global.DeleteVoteCacheItem(item.pk)
 			missingCount.Add(1)
 			missingStake.Add(item.stake)
 			errorsMu.Lock()
@@ -276,6 +277,7 @@ func RebuildVoteCacheFromAccountsDB(
 		// Unmarshal vote state
 		versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
+			global.DeleteVoteCacheItem(item.pk)
 			unmarshalErrCount.Add(1)
 			unmarshalErrStake.Add(item.stake)
 			errorsMu.Lock()
@@ -298,6 +300,7 @@ func RebuildVoteCacheFromAccountsDB(
 		nodePk := versionedVoteState.NodePubkey()
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
+			global.DeleteVoteCacheItem(item.pk)
 			zeroNodePkCount.Add(1)
 			zeroNodePkStake.Add(item.stake)
 			errorsMu.Lock()

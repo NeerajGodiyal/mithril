@@ -230,7 +230,11 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 			continue
 		}
 
-		if modifiedVoteAccts && acct.Owner == a.VoteProgramAddr {
+		if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr {
+			if global.VoteCacheItem(acct.Key) != nil {
+				global.DeleteVoteCacheItem(acct.Key)
+			}
+		} else if modifiedVoteAccts {
 			recordVoteTimestampAndSlot(slotCtx, acct)
 			newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
 			if wasModified {
