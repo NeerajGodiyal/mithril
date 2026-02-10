@@ -343,7 +343,7 @@ func TestConformance_AltBn128_Pairing1(t *testing.T) {
 	knownCorrect, err := hex.DecodeString("0000000000000000000000000000000000000000000000000000000000000001")
 	assert.NoError(t, err)
 
-	result, err := altbn128Pairing(inputBytes)
+	result, err := altbn128Pairing(inputBytes, false)
 	assert.NoError(t, err)
 
 	assert.Equal(t, knownCorrect, result)
@@ -390,7 +390,7 @@ func TestConformance_AltBn128_Pairing_Multiple(t *testing.T) {
 		inputBytes, err := hex.DecodeString(inStr)
 		assert.NoError(t, err)
 
-		result, err := altbn128Pairing(inputBytes)
+		result, err := altbn128Pairing(inputBytes, false)
 		assert.NoError(t, err)
 
 		knownCorrectBytes, err := hex.DecodeString(resultStrs[idx])

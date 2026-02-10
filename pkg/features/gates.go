@@ -62,6 +62,7 @@ var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTrans
 var IncreaseCpiAccountInfoLimit = FeatureGate{Name: "IncreaseCpiAccountInfoLimit", Address: base58.MustDecodeFromString("H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5")}
 var StaticInstructionLimit = FeatureGate{Name: "StaticInstructionLimit", Address: base58.MustDecodeFromString("64ixypL1HPu8WtJhNSMb9mSgfFaJvsANuRkTbHyuLfnx")}
 var PoseidonEnforcePadding = FeatureGate{Name: "PoseidonEnforcePadding", Address: base58.MustDecodeFromString("poUdAqRXXsNmfqAZ6UqpjbeYgwBygbfQLEvWSqVhSnb")}
+var FixAltBn128PairingLengthCheck = FeatureGate{Name: "FixAltBn128PairingLengthCheck", Address: base58.MustDecodeFromString("bnYzodLwmybj7e1HAe98yZrdJTd7we69eMMLgCXqKZm")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -77,4 +78,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
-	StaticInstructionLimit}
+	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck}
