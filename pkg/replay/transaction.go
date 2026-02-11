@@ -18,9 +18,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
-	"github.com/Overclock-Validator/mithril/pkg/migration"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
-	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -316,10 +314,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		}
 	}
 
-	if arena != nil {
-		arena.Reset()
-	}
-	start := time.Now()
 	sigverifyWg.Add(1)
 	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
 
@@ -329,171 +323,108 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		defer mlog.Log.DisableInfLogging()
 	}
 
-	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
-	if err != nil {
-		return nil, err
+	// Execute via pure function
+	input := LoadAndExecuteTransactionInput{
+		SlotCtx:     slotCtx,
+		Transaction: tx,
+		Arena:       arena,
+		TxMeta:      txMeta,
 	}
-	metrics.GlobalBlockReplay.InstructionsAndAccountMetasFromTx.AddTimingSince(start)
+	output := LoadAndExecuteTransaction(input)
 
-	start = time.Now()
-	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
-	if err != nil {
-		return nil, err
-	}
-	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
+	execCtx := output.ExecCtx
+	instrs := output.Instrs
+	computeBudgetLimits := output.ComputeBudgetLimits
 
-	if !sealevel.IsTransactionAgeValid(tx, instrs, slotCtx) {
-		return nil, TxErrInvalidBlockhash
-	}
-
-	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
-
-	start = time.Now()
-	var transactionAccts *sealevel.TransactionAccounts
-	var txAcctMetas []*solana.AccountMeta
-
-	if slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize) {
-		transactionAccts, txAcctMetas, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
-	} else {
-		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
-	}
-	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
-		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, err, nil)
-	} else if err != nil {
-		return nil, err
-	}
-	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)
-
-	var log sealevel.LogRecorder
-	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
-	execCtx.TransactionContext.AllInstructions = instrs
-	execCtx.TransactionContext.Signature = tx.Signatures[0]
-	execCtx.TransactionContext.BorrowedAccountArena = arena
-
-	start = time.Now()
-	// check for pre-balance divergences
-	if txMeta != nil {
+	// Pre-balance divergence check (uses pre-fee-deduction lamports from pure function output)
+	start := time.Now()
+	if txMeta != nil && output.PreBalances != nil && execCtx != nil {
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
-			txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
-			if err != nil {
-				panic(fmt.Sprintf("unable to get tx acct %d whilst checking for pre-balances divergences", count))
-			}
+			txAcct := execCtx.TransactionContext.Accounts.Accounts[count]
 			if dbgOpts.IsDebugTx(tx.Signatures[0]) {
 				// Avoid calling util.PrettyPrintAcct when not debug logging.
 				////mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
 			}
 
 			if !isNativeProgram(txAcct.Key) && !txAcct.IsDummy {
-				if txAcct.Lamports != txMeta.PreBalances[count] {
+				if output.PreBalances[count] != txMeta.PreBalances[count] {
 					mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s pre-balance mismatch for %s: mithril=%d, onchain=%d",
-						CurrentRunID, slotCtx.Slot, tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count])
-					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
+						CurrentRunID, slotCtx.Slot, tx.Signatures[0], txAcct.Key, output.PreBalances[count], txMeta.PreBalances[count])
+					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, output.PreBalances[count], txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
 				}
 			}
-
-			execCtx.TransactionContext.Accounts.Unlock(count)
 		}
 	}
 	metrics.GlobalBlockReplay.PreBalanceDivergenceCheck.AddTimingSince(start)
 
-	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, txMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
-	if err != nil {
-		return txFeeInfo, nil
+	// Handle transaction errors from the pure function
+	if output.ProcessingResult.TransactionError != nil {
+		txErr := output.ProcessingResult.TransactionError
+
+		switch txErr.ErrorType {
+		case TransactionErrorSanitizeFailure:
+			return nil, txErr.InstructionError
+
+		case TransactionErrorBlockhashNotFound:
+			return nil, TxErrInvalidBlockhash
+
+		case TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+			TransactionErrorInvalidProgramForExecution,
+			TransactionErrorProgramAccountNotFound:
+			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+
+		case TransactionErrorInsufficientFundsForFee:
+			// CalculateAndDeductTxFees failed - return fee info with nil error (matches original behavior)
+			return output.FeeInfo, nil
+
+		case TransactionErrorInstructionError:
+			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+
+		case TransactionErrorInsufficientFundsForRent:
+			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, nil, txErr.InstructionError)
+
+		default:
+			return nil, txErr.InstructionError
+		}
 	}
 
-	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
+	// Successful execution path
+	processedTx := output.ProcessingResult.ProcessedTransaction
+	executedTx := processedTx.Executed
+	txFeeInfo := output.FeeInfo
 
-	// check for fee divergences
+	// Fee divergence check
 	if txMeta != nil && txFeeInfo.TotalFee != txMeta.Fee {
 		mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s fee mismatch: mithril=%d, onchain=%d",
 			CurrentRunID, slotCtx.Slot, tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
 		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
-	start = time.Now()
-	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
-	if err != nil {
-		panic("failed to get and deserialize rent sysvar")
-	}
-	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
-
-	start = time.Now()
-	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
-	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
-
-	var instrErr error
-	writablePubkeys := make([]solana.PublicKey, 0, 64)
-
-	start = time.Now()
-	for instrIdx, instr := range tx.Message.Instructions {
-		ixStart := time.Now()
-		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
-		if err != nil {
-			return txFeeInfo, err
-		}
-		metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
-
-		ixStart = time.Now()
-		acctMetas := acctMetasPerInstr[instrIdx]
-		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
-
-		programId := tx.Message.AccountKeys[instr.ProgramIDIndex]
-		migratingCus, isMigrating := migration.IsMigratingProgramAndGetCUs(programId)
-		if isMigrating {
-			err = execCtx.ComputeMeter.Consume(migratingCus)
-			if err != nil {
-				instrErr = err
-				break
-			}
-			execCtx.ComputeMeter.Disable()
-		}
-
-		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
-		if err == nil {
-			for _, am := range acctMetas {
-				if am.IsWritable {
-					writablePubkeys = append(writablePubkeys, am.Pubkey)
-				}
-			}
-			if isMigrating {
-				execCtx.ComputeMeter.Enable()
-			}
-		} else {
-			instrErr = err
-			break
-		}
-	}
-	metrics.GlobalBlockReplay.IxLoop.AddTimingSince(start)
-
+	// Debug logging
 	if dbgOpts.IsDebugTx(tx.Signatures[0]) {
-		for _, l := range log.Logs {
+		for _, l := range executedTx.ExecutionDetails.LogMessages {
 			mlog.Log.Debugf("%s", l)
 		}
 	}
 
-	// check for CU consumed divergences
-	if instrErr == nil && *txMeta.ComputeUnitsConsumed != execCtx.ComputeMeter.Used() {
-		discrepancy := max(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed) - min(execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed)
-		var sign byte
-		if execCtx.ComputeMeter.Used() > *txMeta.ComputeUnitsConsumed {
-			sign = '+'
-		} else {
-			sign = '-'
+	// CU divergence check (non-failing)
+	if txMeta != nil && txMeta.ComputeUnitsConsumed != nil {
+		cuUsed := execCtx.ComputeMeter.Used()
+		if *txMeta.ComputeUnitsConsumed != cuUsed {
+			discrepancy := max(cuUsed, *txMeta.ComputeUnitsConsumed) - min(cuUsed, *txMeta.ComputeUnitsConsumed)
+			var sign byte
+			if cuUsed > *txMeta.ComputeUnitsConsumed {
+				sign = '+'
+			} else {
+				sign = '-'
+			}
+			mlog.Log.Infof("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], cuUsed, *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 		}
-		mlog.Log.Infof("tx %s CU divergence: used was %d but onchain CU consumed was %d (%c%d discrepancy) [non-failing]", tx.Signatures[0], execCtx.ComputeMeter.Used(), *txMeta.ComputeUnitsConsumed, sign, discrepancy)
 	}
 
+	// Post-balance divergence check (only if tx succeeded)
 	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
-	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
-	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
-
-	start = time.Now()
-	// check for post-balances divergences (but only if the tx succeeded)
-	if txMeta != nil && instrErr == nil && rentStateErr == nil {
+	if txMeta != nil {
 		var errBuf strings.Builder
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct, err := execCtx.TransactionContext.Accounts.GetAccount(count)
@@ -519,32 +450,16 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 	metrics.GlobalBlockReplay.PostBalanceDivergenceCheck.AddTimingSince(start)
 
+	// Apply state changes to slotCtx
 	start = time.Now()
-	payerAcct := execCtx.TransactionContext.Accounts.Accounts[0]
-
-	// if there was an error in the tx, do not update account states, except for deducting the tx fee
-	// from the payer account and advancing the nonce account if applicable
-	if instrErr != nil || rentStateErr != nil {
-		return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, instrErr, rentStateErr)
-	}
-
-	// Reuse txAcctMetas from loadAndValidateTxAccts* (already built once per tx)
-	// Build writablePubkeySet inline to avoid second loop
-	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
-	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
-			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
-			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
-		}
-	}
+	writablePubkeys := output.ExecutionResult.WritableAccounts
+	writablePubkeySet := output.ExecutionResult.WritableAccountSet
 
 	for _, pk := range writablePubkeys {
 		slotCtx.RecordWritableAcct(pk)
 	}
 
 	handleModifiedAccounts(slotCtx, execCtx)
-	writablePubkeys = append(writablePubkeys, payerAcct.Key)
-	writablePubkeySet[payerAcct.Key] = struct{}{}
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeySet)
 	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 

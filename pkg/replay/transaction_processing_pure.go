@@ -1,0 +1,432 @@
+package replay
+
+import (
+	"math"
+	"time"
+
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/fees"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
+	"github.com/Overclock-Validator/mithril/pkg/migration"
+	"github.com/Overclock-Validator/mithril/pkg/rent"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
+)
+
+// LoadAndExecuteTransactionInput contains all the input state needed for pure transaction processing
+type LoadAndExecuteTransactionInput struct {
+	// SlotCtx provides access to accounts and slot state (used read-only)
+	SlotCtx *sealevel.SlotCtx
+	// Transaction is the transaction to process
+	Transaction *solana.Transaction
+	// Arena for borrowed accounts (optional)
+	Arena *arena.Arena[sealevel.BorrowedAccount]
+	// TxMeta is the on-chain transaction metadata (optional, used for fee calculation)
+	TxMeta *rpc.TransactionMeta
+}
+
+// LoadAndExecuteTransaction is a pure function that loads and executes a transaction.
+// It takes all required state as input and returns all state changes as output without
+// modifying the input SlotCtx. This function can be used for both actual execution
+// and simulation.
+func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExecuteTransactionOutput {
+	tx := input.Transaction
+	slotCtx := input.SlotCtx
+
+	if input.Arena != nil {
+		input.Arena.Reset()
+	}
+
+	// Parse instructions and account metas
+	start := time.Now()
+	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
+	if err != nil {
+		return LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        TransactionErrorSanitizeFailure,
+					InstructionError: err,
+				},
+			},
+		}
+	}
+	metrics.GlobalBlockReplay.InstructionsAndAccountMetasFromTx.AddTimingSince(start)
+
+	// Compute budget limits
+	start = time.Now()
+	computeBudgetLimits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, slotCtx.Features)
+	if err != nil {
+		return LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        TransactionErrorInstructionError,
+					InstructionError: err,
+				},
+			},
+			Instrs:       instrs,
+			ProgramIDSet: programIDSet,
+		}
+	}
+	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
+
+	// Validate transaction age
+	if !sealevel.IsTransactionAgeValid(tx, instrs, slotCtx) {
+		return LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType: TransactionErrorBlockhashNotFound,
+				},
+			},
+			Instrs:              instrs,
+			ComputeBudgetLimits: computeBudgetLimits,
+			ProgramIDSet:        programIDSet,
+		}
+	}
+
+	// Load and validate accounts
+	start = time.Now()
+	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
+	var transactionAccts *sealevel.TransactionAccounts
+	var txAcctMetas []*solana.AccountMeta
+
+	if slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize) {
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	} else {
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+	}
+
+	// Base output fields for all paths after parsing
+	baseFields := func(out *LoadAndExecuteTransactionOutput) {
+		out.Instrs = instrs
+		out.ComputeBudgetLimits = computeBudgetLimits
+		out.ProgramIDSet = programIDSet
+	}
+
+	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
+		errType := mapLoadErrorType(err)
+		out := LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        errType,
+					InstructionError: err,
+				},
+			},
+		}
+		baseFields(&out)
+		return out
+	} else if err != nil {
+		out := LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        TransactionErrorAccountNotFound,
+					InstructionError: err,
+				},
+			},
+		}
+		baseFields(&out)
+		return out
+	}
+	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)
+
+	// Create execution context
+	var log sealevel.LogRecorder
+	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
+	execCtx.TransactionContext.AllInstructions = instrs
+	execCtx.TransactionContext.Signature = tx.Signatures[0]
+	execCtx.TransactionContext.BorrowedAccountArena = input.Arena
+
+	// Capture pre-balance lamports (before fee deduction)
+	preBalances := make([]uint64, len(tx.Message.AccountKeys))
+	for i := range tx.Message.AccountKeys {
+		acct := execCtx.TransactionContext.Accounts.Accounts[i]
+		preBalances[i] = acct.Lamports
+	}
+
+	// Calculate and deduct fees
+	start = time.Now()
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
+	if err != nil {
+		out := LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        TransactionErrorInsufficientFundsForFee,
+					InstructionError: err,
+				},
+			},
+			ExecCtx:     execCtx,
+			PreBalances: preBalances,
+			FeeInfo:     txFeeInfo,
+		}
+		baseFields(&out)
+		return out
+	}
+	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
+
+	// Read rent sysvar
+	start = time.Now()
+	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
+	if err != nil {
+		panic("failed to get and deserialize rent sysvar")
+	}
+	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
+
+	// Set rent-exempt rent epoch max and compute pre-tx rent states
+	start = time.Now()
+	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
+
+	// Execute all instructions
+	var instrErr error
+	writablePubkeys := make([]solana.PublicKey, 0, 64)
+
+	start = time.Now()
+	for instrIdx, instr := range tx.Message.Instructions {
+		ixStart := time.Now()
+		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
+		if err != nil {
+			instrErr = err
+			break
+		}
+		metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
+
+		ixStart = time.Now()
+		acctMetas := acctMetasPerInstr[instrIdx]
+		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
+		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
+
+		programId := tx.Message.AccountKeys[instr.ProgramIDIndex]
+		migratingCus, isMigrating := migration.IsMigratingProgramAndGetCUs(programId)
+		if isMigrating {
+			err = execCtx.ComputeMeter.Consume(migratingCus)
+			if err != nil {
+				instrErr = err
+				break
+			}
+			execCtx.ComputeMeter.Disable()
+		}
+
+		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
+		if err == nil {
+			for _, am := range acctMetas {
+				if am.IsWritable {
+					writablePubkeys = append(writablePubkeys, am.Pubkey)
+				}
+			}
+			if isMigrating {
+				execCtx.ComputeMeter.Enable()
+			}
+		} else {
+			instrErr = err
+			break
+		}
+	}
+	metrics.GlobalBlockReplay.IxLoop.AddTimingSince(start)
+
+	// Check rent state transitions
+	start = time.Now()
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
+	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
+
+	// If there was an error, return failed transaction result
+	if instrErr != nil || rentStateErr != nil {
+		var relevantErr error
+		var errType TransactionErrorType
+		if instrErr != nil {
+			relevantErr = instrErr
+			errType = TransactionErrorInstructionError
+		} else {
+			relevantErr = rentStateErr
+			errType = TransactionErrorInsufficientFundsForRent
+		}
+
+		out := LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        errType,
+					InstructionError: relevantErr,
+				},
+			},
+			ExecCtx:     execCtx,
+			PreBalances: preBalances,
+			FeeInfo:     txFeeInfo,
+		}
+		baseFields(&out)
+		return out
+	}
+
+	// Success path: collect all writable accounts
+	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
+	for _, txAcctMeta := range txAcctMetas {
+		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
+			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
+			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
+		}
+	}
+
+	// Add payer to writable sets
+	payerAcct := execCtx.TransactionContext.Accounts.Accounts[0]
+	writablePubkeys = append(writablePubkeys, payerAcct.Key)
+	writablePubkeySet[payerAcct.Key] = struct{}{}
+
+	// Collect modified accounts for simulation output
+	accountUpdates := collectAccountUpdates(execCtx)
+
+	// Collect modified vote accounts
+	modifiedVoteAccounts := make(map[solana.PublicKey]*sealevel.VoteStateVersions)
+	for pk, voteState := range execCtx.ModifiedVoteStates {
+		modifiedVoteAccounts[pk] = voteState
+	}
+
+	// Calculate loaded accounts data size
+	var loadedAccountsDataSize uint32
+	for _, acct := range transactionAccts.Accounts {
+		if !acct.IsDummy {
+			loadedAccountsDataSize += uint32(len(acct.Data))
+		}
+	}
+
+	// Collect return data
+	var returnData *TransactionReturnData
+	programId, data := execCtx.TransactionContext.ReturnData()
+	if len(data) > 0 {
+		returnData = &TransactionReturnData{
+			ProgramId: programId,
+			Data:      data,
+		}
+	}
+
+	// Calculate accounts data len delta
+	var accountsDataLenDelta int64
+	for idx, acct := range execCtx.TransactionContext.Accounts.Accounts {
+		if execCtx.TransactionContext.Accounts.Touched[idx] {
+			originalAcct := transactionAccts.Accounts[idx]
+			accountsDataLenDelta += int64(len(acct.Data)) - int64(len(originalAcct.Data))
+		}
+	}
+
+	// Build compute budget
+	computeBudget := SVMTransactionExecutionBudget{
+		ComputeUnitLimit:          uint64(computeBudgetLimits.ComputeUnitLimit),
+		MaxInstructionStackDepth:  maxStackCapacity,
+		MaxInstructionTraceLength: maxInstrTraceCapacity,
+		Sha256MaxSlices:           cu.CUSha256MaxSlices,
+		MaxCallDepth:              64,
+		StackFrameSize:            4096,
+		HeapSize:                  computeBudgetLimits.UpdatedHeapBytes,
+	}
+
+	// Build loaded transaction
+	loadedTransaction := LoadedTransaction{
+		Accounts:               convertToKeyedAccountSharedData(transactionAccts.Accounts),
+		ProgramIndices:         []uint16{},
+		FeeDetails:             *txFeeInfo,
+		ComputeBudget:          computeBudget,
+		LoadedAccountsDataSize: loadedAccountsDataSize,
+	}
+
+	// Build execution details
+	executionDetails := TransactionExecutionDetails{
+		Status:               nil,
+		LogMessages:          log.Logs,
+		ReturnData:           returnData,
+		ExecutedUnits:        execCtx.ComputeMeter.Used(),
+		AccountsDataLenDelta: accountsDataLenDelta,
+	}
+
+	// Build processed transaction
+	processedTx := ProcessedTransaction{
+		TransactionType: ProcessedTransactionTypeExecuted,
+		Executed: &ExecutedTransaction{
+			LoadedTransaction: loadedTransaction,
+			ExecutionDetails:  executionDetails,
+			ProgramsModified:  make(map[solana.PublicKey]bool),
+		},
+	}
+
+	// Build execution result
+	executionResult := &TransactionExecutionResult{
+		AccountUpdates:        accountUpdates,
+		WritableAccounts:      writablePubkeys,
+		WritableAccountSet:    writablePubkeySet,
+		ModifiedVoteAccounts:  modifiedVoteAccounts,
+		ModifiedStakeAccounts: []solana.PublicKey{},
+	}
+
+	out := LoadAndExecuteTransactionOutput{
+		ProcessingResult: TransactionProcessingResult{
+			ProcessedTransaction: &processedTx,
+		},
+		ExecutionResult: executionResult,
+		ExecCtx:         execCtx,
+		PreBalances:     preBalances,
+		FeeInfo:         txFeeInfo,
+	}
+	baseFields(&out)
+	return out
+}
+
+// mapLoadErrorType maps account loading errors to TransactionErrorType
+func mapLoadErrorType(err error) TransactionErrorType {
+	switch err {
+	case TxErrMaxLoadedAccountsDataSizeExceeded:
+		return TransactionErrorMaxLoadedAccountsDataSizeExceeded
+	case TxErrInvalidProgramForExecution:
+		return TransactionErrorInvalidProgramForExecution
+	case TxErrProgramAccountNotFound:
+		return TransactionErrorProgramAccountNotFound
+	default:
+		return TransactionErrorAccountNotFound
+	}
+}
+
+// collectAccountUpdates collects all modified accounts from the execution context
+func collectAccountUpdates(execCtx *sealevel.ExecutionCtx) []AccountUpdate {
+	updates := make([]AccountUpdate, 0)
+
+	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
+		if execCtx.TransactionContext.Accounts.Touched[idx] {
+			acct := *newAcctState
+			if acct.Lamports == 0 {
+				acct = accounts.Account{Key: acct.Key, RentEpoch: math.MaxUint64}
+			}
+
+			updates = append(updates, AccountUpdate{
+				Pubkey:  acct.Key,
+				Account: acct,
+			})
+		}
+	}
+
+	return updates
+}
+
+// convertToKeyedAccountSharedData converts accounts to KeyedAccountSharedData
+func convertToKeyedAccountSharedData(accts []*accounts.Account) []KeyedAccountSharedData {
+	result := make([]KeyedAccountSharedData, len(accts))
+	for i, acct := range accts {
+		result[i] = KeyedAccountSharedData{
+			Pubkey:      acct.Key,
+			AccountData: accountToSharedData(acct),
+		}
+	}
+	return result
+}
+
+// accountToSharedData converts an Account to AccountSharedData
+func accountToSharedData(acct *accounts.Account) AccountSharedData {
+	data := make([]byte, len(acct.Data))
+	copy(data, acct.Data)
+	return AccountSharedData{
+		Lamports:   acct.Lamports,
+		Data:       data,
+		Owner:      acct.Owner,
+		Executable: acct.Executable,
+		RentEpoch:  acct.RentEpoch,
+	}
+}
