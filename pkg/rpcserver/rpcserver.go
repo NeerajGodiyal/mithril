@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -20,6 +21,8 @@ type RpcServer struct {
 	listener      net.Listener
 	acctsDb       *accountsdb.AccountsDb
 	epochSchedule *sealevel.SysvarEpochSchedule
+	slotCtx       *sealevel.SlotCtx
+	slotCtxMu     sync.RWMutex
 }
 
 func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16) *RpcServer {
@@ -55,6 +58,18 @@ func fetchAndUnmarshalEpochScheduleSysvar(acctsDb *accountsdb.AccountsDb) *seale
 	epochSchedule.MustUnmarshalWithDecoder(decoder)
 
 	return &epochSchedule
+}
+
+func (rpcServer *RpcServer) SetSlotCtx(slotCtx *sealevel.SlotCtx) {
+	rpcServer.slotCtxMu.Lock()
+	rpcServer.slotCtx = slotCtx
+	rpcServer.slotCtxMu.Unlock()
+}
+
+func (rpcServer *RpcServer) getSlotCtx() *sealevel.SlotCtx {
+	rpcServer.slotCtxMu.RLock()
+	defer rpcServer.slotCtxMu.RUnlock()
+	return rpcServer.slotCtx
 }
 
 func (rpcServer *RpcServer) Start() {

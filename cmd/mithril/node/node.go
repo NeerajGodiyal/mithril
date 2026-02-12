@@ -1235,7 +1235,11 @@ postBootstrap:
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
+	var slotCtxSetter replay.SlotCtxSetter
+	if rpcServer != nil {
+		slotCtxSetter = rpcServer
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, replayStartTime)
 
 	// Update state file with last persisted slot and shutdown context
 	// Skip if already written during cancellation (eliminates timing window)
@@ -2096,7 +2100,7 @@ func runReplayWithRecovery(
 	useLightbringer bool,
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
-	rpcServer *rpcserver.RpcServer,
+	rpcServer replay.SlotCtxSetter,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	replayStartTime time.Time, // Start time for resume context

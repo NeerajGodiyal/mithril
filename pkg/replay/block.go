@@ -36,7 +36,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
-	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
@@ -45,6 +44,11 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
 )
+
+// SlotCtxSetter is implemented by types that accept a SlotCtx update (e.g. RpcServer).
+type SlotCtxSetter interface {
+	SetSlotCtx(slotCtx *sealevel.SlotCtx)
+}
 
 // BlockFetchOpts contains options for parallel block fetching
 type BlockFetchOpts struct {
@@ -1171,7 +1175,7 @@ func ReplayBlocks(
 	useLightbringer bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
-	rpcServer *rpcserver.RpcServer,
+	rpcServer SlotCtxSetter,
 	blockFetchOpts *BlockFetchOpts,
 	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
 ) *ReplayResult {
@@ -1531,6 +1535,10 @@ func ReplayBlocks(
 			// Clear any pending stake pubkeys from this failed block
 			global.ClearPendingStakePubkeys()
 			break
+		}
+
+		if rpcServer != nil {
+			rpcServer.SetSlotCtx(lastSlotCtx)
 		}
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
