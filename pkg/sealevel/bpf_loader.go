@@ -538,8 +538,8 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	size += solana.PublicKeyLength     // program id
 
 	var serializedData []byte
-	if execCtx.SlotCtx.SerializedParameterArena != nil {
-		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
+	if execCtx.SerializedParameterArena != nil {
+		arenaData, _ := execCtx.SerializedParameterArena.AllocN(size)
 		serializedData = arenaData[:0]
 	} else {
 		serializedData = make([]byte, 0, size) // No arena configured
@@ -814,8 +814,8 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	size += solana.PublicKeyLength     // program id
 
 	var serializedData []byte
-	if execCtx.SlotCtx.SerializedParameterArena != nil {
-		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
+	if execCtx.SerializedParameterArena != nil {
+		arenaData, _ := execCtx.SerializedParameterArena.AllocN(size)
 		serializedData = arenaData[:0] // Use arena slice with zero length but full capacity
 	} else {
 		serializedData = make([]byte, 0, size) // No arena configured
@@ -1082,7 +1082,7 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 	}
 
 	entry := &accountsdb.ProgramCacheEntry{Program: program}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+	execCtx.ProgramLoader.AddProgramToCache(programAddr, entry)
 
 	metrics.GlobalBlockReplay.AddProgramToCache.AddTimingSince(start)
 
@@ -1148,21 +1148,17 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 	if programOwner == a.BpfLoader2Addr || programOwner == a.BpfLoaderDeprecatedAddr {
 		var programCacheEntry *accountsdb.ProgramCacheEntry
-		programCacheEntry, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcct.Key())
+		programCacheEntry, hasLoadedProgram = execCtx.ProgramLoader.MaybeGetProgramFromCache(programAcct.Key())
 		if hasLoadedProgram {
 			programAcctKey = programAcct.Key()
 			loadedProgram = programCacheEntry.Program
 		} else { // program is not cached
 			if len(programAcct.Data()) == 0 {
 				var paTmp *accounts.Account
-				paTmp, err = execCtx.SlotCtx.GetAccount(programAcct.Key())
-
+				paTmp, err = execCtx.ProgramLoader.GetProgramAccount(programAcct.Key())
 				if err != nil {
-					paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
-					if err != nil {
-						//mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
-						return InstrErrUnsupportedProgramId
-					}
+					//mlog.Log.Debugf("unable to get account %s from accountsdb", programAcct.Key())
+					return InstrErrUnsupportedProgramId
 				}
 				programBytes = paTmp.Data
 			} else {
@@ -1176,13 +1172,9 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 		if len(programAcct.Data()) == 0 {
 			start := time.Now()
 			var paTmp *accounts.Account
-			paTmp, err = execCtx.SlotCtx.GetAccount(programAcct.Key())
-
+			paTmp, err = execCtx.ProgramLoader.GetProgramAccount(programAcct.Key())
 			if err != nil {
-				paTmp, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcct.Key())
-				if err != nil {
-					return InstrErrUnsupportedProgramId
-				}
+				return InstrErrUnsupportedProgramId
 			}
 			programAcctState, err = UnmarshalUpgradeableLoaderState(paTmp.Data)
 			if err != nil {
@@ -1198,25 +1190,20 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 
 		start := time.Now()
 		var programCacheEntry *accountsdb.ProgramCacheEntry
-		programCacheEntry, hasLoadedProgram = execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(programAcctState.Program.ProgramDataAddress)
+		programCacheEntry, hasLoadedProgram = execCtx.ProgramLoader.MaybeGetProgramFromCache(programAcctState.Program.ProgramDataAddress)
 		if hasLoadedProgram {
-			if programCacheEntry.DeploymentSlot >= execCtx.SlotCtx.Slot {
+			if programCacheEntry.DeploymentSlot >= execCtx.Slot {
 				return InstrErrInvalidAccountData
 			}
 			programAcctKey = programAcctState.Program.ProgramDataAddress
 			loadedProgram = programCacheEntry.Program
 			metrics.GlobalBlockReplay.GetProgramDataCached.AddTimingSince(start)
 		} else { // program is not cached
-			programDataAcct, err := execCtx.SlotCtx.GetAccount(programAcctState.Program.ProgramDataAddress)
+			programDataAcct, err := execCtx.ProgramLoader.GetProgramAccount(programAcctState.Program.ProgramDataAddress)
 			if err != nil {
-				programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(programAcctState.Program.ProgramDataAddress)
-				if err != nil {
-					return InstrErrUnsupportedProgramId
-				}
-				metrics.GlobalBlockReplay.GetProgramDataUncachedAccountsDb.AddTimingSince(start)
-			} else {
-				metrics.GlobalBlockReplay.GetProgramDataUncachedAccounts.AddTimingSince(start)
+				return InstrErrUnsupportedProgramId
 			}
+			metrics.GlobalBlockReplay.GetProgramDataUncachedAccounts.AddTimingSince(start)
 
 			start = time.Now()
 			programDataAcctState, err := UnmarshalUpgradeableLoaderState(programDataAcct.Data)
@@ -1229,7 +1216,7 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 			}
 
 			programDataSlot := programDataAcctState.ProgramData.Slot
-			if programDataSlot >= execCtx.SlotCtx.Slot {
+			if programDataSlot >= execCtx.Slot {
 				return InstrErrInvalidAccountData
 			}
 
@@ -1636,7 +1623,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	//mlog.Log.Debugf("deployed program: %s", newProgramId)
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataKey, entry)
+	execCtx.ProgramLoader.AddProgramToCache(programDataKey, entry)
 
 	return nil
 }
@@ -1888,7 +1875,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	//mlog.Log.Debugf("upgraded program %s", program.Key())
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programData.Key(), entry)
+	execCtx.ProgramLoader.AddProgramToCache(programData.Key(), entry)
 
 	return nil
 }
@@ -2351,7 +2338,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 					if err != nil {
 						return err
 					}
-					execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(closeKey)
+					execCtx.ProgramLoader.RemoveProgramFromCache(closeKey)
 				}
 
 			default:
@@ -2538,7 +2525,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	//mlog.Log.Debugf("Extended ProgramData account by %d bytes", additionalBytes)
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataAcct.Key(), entry)
+	execCtx.ProgramLoader.AddProgramToCache(programDataAcct.Key(), entry)
 
 	return nil
 }

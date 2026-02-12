@@ -16,6 +16,15 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+// ProgramAccountLoader abstracts program cache and program account loading.
+// During replay, SlotCtx implements this; tests can provide mock implementations.
+type ProgramAccountLoader interface {
+	MaybeGetProgramFromCache(pubkey solana.PublicKey) (*accountsdb.ProgramCacheEntry, bool)
+	AddProgramToCache(pubkey solana.PublicKey, entry *accountsdb.ProgramCacheEntry)
+	RemoveProgramFromCache(pubkey solana.PublicKey)
+	GetProgramAccount(pubkey solana.PublicKey) (*accounts.Account, error)
+}
+
 type ExecutionCtx struct {
 	Log                      Logger
 	Accounts                 accounts.Accounts
@@ -26,6 +35,16 @@ type ExecutionCtx struct {
 	PrevLamportsPerSignature uint64
 	SlotCtx                  *SlotCtx
 	ModifiedVoteStates       map[solana.PublicKey]*VoteStateVersions
+
+	// Fields below are used during instruction execution instead of SlotCtx.
+	// They enable ExecuteLoadedTransaction to be a pure function.
+	Slot                     uint64
+	LastBlockhash            [32]byte
+	TotalEpochStake          uint64
+	VoteAccts                map[solana.PublicKey]uint64
+	SerializedParameterArena *arena.Arena[byte]
+	ProgramLoader            ProgramAccountLoader
+	AccountsForLookup        accounts.Accounts
 }
 
 type SlotBank struct {
@@ -357,6 +376,28 @@ func (execCtx *ExecutionCtx) CheckAligned() bool {
 	} else {
 		return true
 	}
+}
+
+// ProgramAccountLoader implementation for SlotCtx
+
+func (slotCtx *SlotCtx) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*accountsdb.ProgramCacheEntry, bool) {
+	return slotCtx.AccountsDb.MaybeGetProgramFromCache(pubkey)
+}
+
+func (slotCtx *SlotCtx) AddProgramToCache(pubkey solana.PublicKey, entry *accountsdb.ProgramCacheEntry) {
+	slotCtx.AccountsDb.AddProgramToCache(pubkey, entry)
+}
+
+func (slotCtx *SlotCtx) RemoveProgramFromCache(pubkey solana.PublicKey) {
+	slotCtx.AccountsDb.RemoveProgramFromCache(pubkey)
+}
+
+func (slotCtx *SlotCtx) GetProgramAccount(pubkey solana.PublicKey) (*accounts.Account, error) {
+	acct, err := slotCtx.GetAccount(pubkey)
+	if err != nil {
+		return slotCtx.GetAccountFromAccountsDb(pubkey)
+	}
+	return acct, nil
 }
 
 func (slotCtx *SlotCtx) GetAccount(pubkey solana.PublicKey) (*accounts.Account, error) {

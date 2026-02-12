@@ -2,6 +2,8 @@ package replay
 
 import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
@@ -290,6 +292,45 @@ type TransactionReturnData struct {
 type AccountUpdate struct {
 	Pubkey  solana.PublicKey
 	Account accounts.Account
+}
+
+// ExecuteLoadedTransactionInput contains all input for the pure execution function.
+// All dependencies are explicit fields — no SlotCtx, no I/O. Fees must already be
+// deducted from TransactionAccts before calling ExecuteLoadedTransaction.
+type ExecuteLoadedTransactionInput struct {
+	// --- Pre-loaded transaction data ---
+	Tx                *solana.Transaction
+	TransactionAccts  *sealevel.TransactionAccounts
+	TxAcctMetas       []*solana.AccountMeta
+	AcctMetasPerInstr [][]sealevel.AccountMeta
+	Instrs            []sealevel.Instruction
+	ProgramIDSet      map[solana.PublicKey]struct{}
+	ComputeBudgetLimits *sealevel.ComputeBudgetLimits
+
+	// --- Configuration (static for the slot) ---
+	Features              features.Features
+	RentSysvar            sealevel.SysvarRent
+	Epoch                 uint64
+	Slot                  uint64
+	PrevLamportsPerSignature uint64
+	LastBlockhash            [32]byte
+	TotalEpochStake          uint64
+	VoteAccts                map[solana.PublicKey]uint64
+
+	// --- Execution environment ---
+	AccountsForLookup        accounts.Accounts                    // account store for sysvar lookups
+	ProgramLoader            sealevel.ProgramAccountLoader        // program cache + account loading
+	SerializedParameterArena *arena.Arena[byte]
+	Arena                    *arena.Arena[sealevel.BorrowedAccount]
+}
+
+// ExecuteLoadedTransactionOutput contains the result of pure transaction execution.
+type ExecuteLoadedTransactionOutput struct {
+	ExecCtx           *sealevel.ExecutionCtx
+	InstrErr          error
+	RentStateErr      error
+	WritablePubkeys   []solana.PublicKey
+	WritablePubkeySet map[solana.PublicKey]struct{}
 }
 
 // TransactionExecutionResult contains all the updates from executing a transaction

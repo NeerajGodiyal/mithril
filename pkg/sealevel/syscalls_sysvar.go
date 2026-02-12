@@ -288,7 +288,7 @@ func SyscallGetEpochStakeImpl(vm sbpf.VM, varAddr uint64) (uint64, error) {
 			return syscallCuErr()
 		}
 
-		return syscallSuccess(execCtx.SlotCtx.TotalEpochStake)
+		return syscallSuccess(execCtx.TotalEpochStake)
 	} else {
 		cost := uint64(cu.CUSyscallBaseCost + (32 / cu.CUCpiBytesPerUnit) + cu.CUMemOpBaseCost)
 		err = execCtx.ComputeMeter.Consume(cost)
@@ -303,7 +303,7 @@ func SyscallGetEpochStakeImpl(vm sbpf.VM, varAddr uint64) (uint64, error) {
 		}
 		voteAddr := solana.PublicKeyFromBytes(voteAddrBytes)
 
-		stake, exists := execCtx.SlotCtx.VoteAccts[voteAddr]
+		stake, exists := execCtx.VoteAccts[voteAddr]
 		if exists {
 			return syscallSuccess(stake)
 		} else {

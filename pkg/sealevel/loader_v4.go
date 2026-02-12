@@ -277,19 +277,16 @@ func LoaderV4Execute(execCtx *ExecutionCtx) error {
 		var loadedProgram *sbpf.Program
 		var programBytes []byte
 
-		programCacheEntry, hasLoadedProgram := execCtx.SlotCtx.AccountsDb.MaybeGetProgramFromCache(program.Key())
+		programCacheEntry, hasLoadedProgram := execCtx.ProgramLoader.MaybeGetProgramFromCache(program.Key())
 		if hasLoadedProgram {
-			if programCacheEntry.DeploymentSlot >= execCtx.SlotCtx.Slot {
+			if programCacheEntry.DeploymentSlot >= execCtx.Slot {
 				return InstrErrInvalidAccountData
 			}
 			loadedProgram = programCacheEntry.Program
 		} else {
-			programDataAcct, err := execCtx.SlotCtx.GetAccount(program.Key())
+			programDataAcct, err := execCtx.ProgramLoader.GetProgramAccount(program.Key())
 			if err != nil {
-				programDataAcct, err = execCtx.SlotCtx.GetAccountFromAccountsDb(program.Key())
-				if err != nil {
-					return InstrErrUnsupportedProgramId
-				}
+				return InstrErrUnsupportedProgramId
 			}
 
 			state, err := decodeLoaderV4State(programDataAcct.Data)
@@ -300,7 +297,7 @@ func LoaderV4Execute(execCtx *ExecutionCtx) error {
 			if state.Status == LoaderV4StatusRetracted {
 				return InstrErrUnsupportedProgramId
 			}
-			if state.Slot >= execCtx.SlotCtx.Slot {
+			if state.Slot >= execCtx.Slot {
 				return InstrErrUnsupportedProgramId
 			}
 
@@ -619,7 +616,7 @@ func LoaderV4ProcessDeploy(execCtx *ExecutionCtx) error {
 	}
 
 	entry := &accountsdb.ProgramCacheEntry{Program: programObj, DeploymentSlot: currentSlot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(program.Key(), entry)
+	execCtx.ProgramLoader.AddProgramToCache(program.Key(), entry)
 
 	return nil
 }
@@ -669,7 +666,7 @@ func LoaderV4ProcessRetract(execCtx *ExecutionCtx) error {
 		return err
 	}
 
-	execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(program.Key())
+	execCtx.ProgramLoader.RemoveProgramFromCache(program.Key())
 	return nil
 }
 

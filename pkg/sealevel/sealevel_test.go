@@ -735,6 +735,7 @@ func TestInterpreter_Get_Stack_Height_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -807,6 +808,7 @@ func TestInterpreter_ReturnData_Syscalls(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -892,6 +894,7 @@ func TestInterpreter_Poseidon_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1007,6 +1010,7 @@ func TestInterpreter_Get_Sysvar_Syscalls(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1062,8 +1066,11 @@ func TestInterpreter_AltBn128_Ops_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
-	execCtx.SlotCtx.Accounts = accounts.NewMemAccounts()
+	accts := accounts.NewMemAccounts()
+	execCtx.SlotCtx.Accounts = accts
+	execCtx.AccountsForLookup = accts
 	var clock SysvarClock
 	clock.Slot = 1234
 	clock.Epoch = 1111
@@ -1188,6 +1195,7 @@ func TestInterpreter_Alloc_Free_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1252,6 +1260,7 @@ func TestInterpreter_Alt_Bn128_Compression_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1316,6 +1325,7 @@ func TestInterpreter_Validate_Point_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1380,6 +1390,7 @@ func TestInterpreter_Curve_Group_Ops_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1444,6 +1455,7 @@ func TestInterpreter_Curve_Multiscalar_Mul_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1508,6 +1520,7 @@ func TestInterpreter_Log_Data_Syscall(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1583,6 +1596,7 @@ func TestInterpreter_Cpi_C_System_Program_Allocate(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.NoError(t, err)
@@ -1663,6 +1677,7 @@ func TestInterpreter_Cpi_Rust_System_Program_Allocate(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.NoError(t, err)
@@ -1745,6 +1760,7 @@ func TestInterpreter_Cpi_C_Bpf_Program_Call(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.NoError(t, err)
@@ -1837,6 +1853,7 @@ func executeFirstBpfProgramAndReturnExecCtx(t *testing.T, log *LogRecorder, acct
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -1966,6 +1983,7 @@ func TestInterpreter_Test_Memo_Program_With_LoaderV2(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)
@@ -2041,6 +2059,7 @@ func TestInterpreter_Test_Deprecated_Loader(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.Equal(t, nil, err)

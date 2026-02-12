@@ -111,6 +111,7 @@ func TestExecute_Tx_Sysvar_Instructions_Bpf_Test(t *testing.T) {
 
 	execCtx.SlotCtx = new(SlotCtx)
 	execCtx.SlotCtx.Slot = 1337
+	execCtx.Slot = 1337
 
 	err = execCtx.ProcessInstruction(instrData, instructionAccts, []uint64{0})
 	assert.NoError(t, err)

@@ -10,8 +10,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
-	"github.com/Overclock-Validator/mithril/pkg/migration"
-	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -29,10 +27,9 @@ type LoadAndExecuteTransactionInput struct {
 	TxMeta *rpc.TransactionMeta
 }
 
-// LoadAndExecuteTransaction is a pure function that loads and executes a transaction.
-// It takes all required state as input and returns all state changes as output without
-// modifying the input SlotCtx. This function can be used for both actual execution
-// and simulation.
+// LoadAndExecuteTransaction is a function that loads and executes a transaction.
+// It handles the loading phase (parsing, validation, account loading, fee deduction)
+// and delegates execution to ExecuteLoadedTransaction.
 func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExecuteTransactionOutput {
 	tx := input.Transaction
 	slotCtx := input.SlotCtx
@@ -132,24 +129,21 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	}
 	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)
 
-	// Create execution context
-	var log sealevel.LogRecorder
-	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
-	execCtx.TransactionContext.AllInstructions = instrs
-	execCtx.TransactionContext.Signature = tx.Signatures[0]
-	execCtx.TransactionContext.BorrowedAccountArena = input.Arena
-
 	// Capture pre-balance lamports (before fee deduction)
 	preBalances := make([]uint64, len(tx.Message.AccountKeys))
 	for i := range tx.Message.AccountKeys {
-		acct := execCtx.TransactionContext.Accounts.Accounts[i]
-		preBalances[i] = acct.Lamports
+		preBalances[i] = transactionAccts.Accounts[i].Lamports
 	}
 
-	// Calculate and deduct fees
+	// Calculate and deduct fees (directly on transactionAccts — pointers share Account objects)
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, transactionAccts, computeBudgetLimits, slotCtx.Features)
 	if err != nil {
+		// Create a temporary ExecCtx for the InsufficientFundsForFee error path
+		// (ProcessTransaction needs ExecCtx for divergence checks even on fee failure)
+		var log sealevel.LogRecorder
+		execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
+
 		out := LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{
 				TransactionError: &TransactionError{
@@ -166,82 +160,48 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	}
 	metrics.GlobalBlockReplay.CalcAndDeductFees.AddTimingSince(start)
 
-	// Read rent sysvar
+	// Read rent sysvar from cache
 	start = time.Now()
-	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
-	if err != nil {
-		panic("failed to get and deserialize rent sysvar")
+	if sealevel.SysvarCache.Rent.Sysvar == nil {
+		panic("rent sysvar not in cache")
 	}
+	rentSysvar := *sealevel.SysvarCache.Rent.Sysvar
 	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
 
-	// Set rent-exempt rent epoch max and compute pre-tx rent states
-	start = time.Now()
-	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
-	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
+	// Delegate to the pure execution function
+	execOutput := ExecuteLoadedTransaction(ExecuteLoadedTransactionInput{
+		Tx:                       tx,
+		TransactionAccts:         transactionAccts,
+		TxAcctMetas:              txAcctMetas,
+		AcctMetasPerInstr:        acctMetasPerInstr,
+		Instrs:                   instrs,
+		ProgramIDSet:             programIDSet,
+		ComputeBudgetLimits:      computeBudgetLimits,
+		Features:                 *slotCtx.Features,
+		RentSysvar:               rentSysvar,
+		Epoch:                    slotCtx.Epoch,
+		Slot:                     slotCtx.Slot,
+		PrevLamportsPerSignature: slotCtx.FeeRateGovernor.PrevLamportsPerSignature,
+		LastBlockhash:            slotCtx.LastBlockhash,
+		TotalEpochStake:          slotCtx.TotalEpochStake,
+		VoteAccts:                slotCtx.VoteAccts,
+		AccountsForLookup:        slotCtx.Accounts,
+		ProgramLoader:            slotCtx,
+		SerializedParameterArena: slotCtx.SerializedParameterArena,
+		Arena:                    input.Arena,
+	})
 
-	// Execute all instructions
-	var instrErr error
-	writablePubkeys := make([]solana.PublicKey, 0, 64)
+	execCtx := execOutput.ExecCtx
 
-	start = time.Now()
-	for instrIdx, instr := range tx.Message.Instructions {
-		ixStart := time.Now()
-		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
-		if err != nil {
-			instrErr = err
-			break
-		}
-		metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
-
-		ixStart = time.Now()
-		acctMetas := acctMetasPerInstr[instrIdx]
-		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
-
-		programId := tx.Message.AccountKeys[instr.ProgramIDIndex]
-		migratingCus, isMigrating := migration.IsMigratingProgramAndGetCUs(programId)
-		if isMigrating {
-			err = execCtx.ComputeMeter.Consume(migratingCus)
-			if err != nil {
-				instrErr = err
-				break
-			}
-			execCtx.ComputeMeter.Disable()
-		}
-
-		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
-		if err == nil {
-			for _, am := range acctMetas {
-				if am.IsWritable {
-					writablePubkeys = append(writablePubkeys, am.Pubkey)
-				}
-			}
-			if isMigrating {
-				execCtx.ComputeMeter.Enable()
-			}
-		} else {
-			instrErr = err
-			break
-		}
-	}
-	metrics.GlobalBlockReplay.IxLoop.AddTimingSince(start)
-
-	// Check rent state transitions
-	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
-	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
-	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
-
-	// If there was an error, return failed transaction result
-	if instrErr != nil || rentStateErr != nil {
+	// If there was an execution error, return failed transaction result
+	if execOutput.InstrErr != nil || execOutput.RentStateErr != nil {
 		var relevantErr error
 		var errType TransactionErrorType
-		if instrErr != nil {
-			relevantErr = instrErr
+		if execOutput.InstrErr != nil {
+			relevantErr = execOutput.InstrErr
 			errType = TransactionErrorInstructionError
 		} else {
-			relevantErr = rentStateErr
+			relevantErr = execOutput.RentStateErr
 			errType = TransactionErrorInsufficientFundsForRent
 		}
 
@@ -260,21 +220,11 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		return out
 	}
 
-	// Success path: collect all writable accounts
-	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
-	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
-			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
-			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
-		}
-	}
+	// Success path: build full output from execution result
+	writablePubkeys := execOutput.WritablePubkeys
+	writablePubkeySet := execOutput.WritablePubkeySet
 
-	// Add payer to writable sets
-	payerAcct := execCtx.TransactionContext.Accounts.Accounts[0]
-	writablePubkeys = append(writablePubkeys, payerAcct.Key)
-	writablePubkeySet[payerAcct.Key] = struct{}{}
-
-	// Collect modified accounts for simulation output
+	// Collect modified accounts
 	accountUpdates := collectAccountUpdates(execCtx)
 
 	// Collect modified vote accounts
@@ -330,10 +280,16 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		LoadedAccountsDataSize: loadedAccountsDataSize,
 	}
 
+	// Get logs from the execution context
+	var logMessages []string
+	if logRecorder, ok := execCtx.Log.(*sealevel.LogRecorder); ok && logRecorder != nil {
+		logMessages = logRecorder.Logs
+	}
+
 	// Build execution details
 	executionDetails := TransactionExecutionDetails{
 		Status:               nil,
-		LogMessages:          log.Logs,
+		LogMessages:          logMessages,
 		ReturnData:           returnData,
 		ExecutedUnits:        execCtx.ComputeMeter.Used(),
 		AccountsDataLenDelta: accountsDataLenDelta,

@@ -110,9 +110,9 @@ func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateI
 	return nil
 }
 
-func MaybeSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, f *features.Features, txAccts *sealevel.TransactionAccounts) {
+func MaybeSetRentExemptRentEpochMax(epoch uint64, rent *sealevel.SysvarRent, f *features.Features, txAccts *sealevel.TransactionAccounts) {
 	for idx := range txAccts.Accounts {
-		if ShouldSetRentExemptRentEpochMax(slotCtx, rent, f, txAccts.Accounts[idx]) {
+		if ShouldSetRentExemptRentEpochMax(epoch, rent, f, txAccts.Accounts[idx]) {
 			txAccts.Accounts[idx].RentEpoch = math.MaxUint64
 			txAccts.Touch(uint64(idx))
 		}
@@ -131,7 +131,7 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 	}
 }
 
-func ShouldSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, f *features.Features, acct *accounts.Account) bool {
+func ShouldSetRentExemptRentEpochMax(epoch uint64, rent *sealevel.SysvarRent, f *features.Features, acct *accounts.Account) bool {
 	if f.IsActive(features.DisableRentFeesCollection) {
 		if acct.RentEpoch != math.MaxUint64 && acct.Lamports >= rent.MinimumBalance(uint64(len(acct.Data))) {
 			return true
@@ -147,7 +147,7 @@ func ShouldSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.S
 		return false
 	}
 
-	if acct.RentEpoch == math.MaxUint64 || acct.RentEpoch > slotCtx.Epoch {
+	if acct.RentEpoch == math.MaxUint64 || acct.RentEpoch > epoch {
 		return false
 	}
 

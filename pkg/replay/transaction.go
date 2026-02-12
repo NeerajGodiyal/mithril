@@ -65,6 +65,16 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
 	execCtx.ModifiedVoteStates = make(map[solana.PublicKey]*sealevel.VoteStateVersions, 8)
+
+	// Populate execution fields from SlotCtx for native program compatibility
+	execCtx.Slot = slotCtx.Slot
+	execCtx.LastBlockhash = slotCtx.LastBlockhash
+	execCtx.TotalEpochStake = slotCtx.TotalEpochStake
+	execCtx.VoteAccts = slotCtx.VoteAccts
+	execCtx.SerializedParameterArena = slotCtx.SerializedParameterArena
+	execCtx.ProgramLoader = slotCtx
+	execCtx.AccountsForLookup = slotCtx.Accounts
+
 	return execCtx
 }
 
