@@ -863,9 +863,14 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 	return resultBytes, nil
 }
 
-func altbn128Pairing(input []byte) ([]byte, error) {
-	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
+func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error) {
+	if enforceSimd0334LenCheck {
+		if len(input)%AltBn128PairingElementLen != 0 {
+			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+		}
+	}
 
+	elementsLen := uint64(len(input)) / AltBn128PairingElementLen
 	g1Vals := make([]*bn256.G1, 0)
 	g2Vals := make([]*bn256.G2, 0)
 
@@ -990,7 +995,12 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 
 	case AltBn128Pairing:
 		{
-			result, err := altbn128Pairing(inputSlice)
+			var enforceSimd0334LenCheck bool
+			if execCtx.Features.IsActive(features.FixAltBn128PairingLengthCheck) {
+				enforceSimd0334LenCheck = true
+			}
+
+			result, err := altbn128Pairing(inputSlice, enforceSimd0334LenCheck)
 			if err != nil {
 				mlog.Log.Debugf("altbn128 pairing err: %s", err)
 				return syscallSuccess(1)

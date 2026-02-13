@@ -641,8 +641,8 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 }
 
 func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []*accounts.Account, []*accounts.Account) {
-	parentNewlyActivatedFeatureAccts := make([]*accounts.Account, 0)
-	newlyActivatedFeatureAccts := make([]*accounts.Account, 0)
+	parentAccts := make([]*accounts.Account, 0)
+	modifiedAccts := make([]*accounts.Account, 0)
 
 	f := features.NewFeaturesDefault()
 
@@ -652,7 +652,7 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 			if acct.Owner != a.FeatureAddr {
 				continue
 			}
-			parentNewlyActivatedFeatureAccts = append(parentNewlyActivatedFeatureAccts, acct.Clone())
+			parentAccts = append(parentAccts, acct.Clone())
 
 			featureAcct := features.UnmarshalFeatureAcct(acct.Data)
 
@@ -669,21 +669,48 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfE
 				}
 
 				acct.Data = newFeatureAcctBytes
-				newlyActivatedFeatureAccts = append(newlyActivatedFeatureAccts, acct)
+				modifiedAccts = append(modifiedAccts, acct)
 
 				f.EnableFeature(featureGate, slot)
 			}
 		}
 	}
 
-	if len(newlyActivatedFeatureAccts) != 0 {
-		err := acctsDb.StoreAccounts(newlyActivatedFeatureAccts, slot, nil)
+	if len(modifiedAccts) != 0 {
+		err := acctsDb.StoreAccounts(modifiedAccts, slot, nil)
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	return f, newlyActivatedFeatureAccts, parentNewlyActivatedFeatureAccts
+	for _, featureAcct := range modifiedAccts {
+		// Handle *SIMD-0194: Deprecate rent exemption threshold* feature activation by updating the Rent sysvar.
+		if f.IsActive(features.DeprecateRentExemptionThreshold) && featureAcct.Key == features.DeprecateRentExemptionThreshold.Address {
+			var rentSysvar sealevel.SysvarRent
+			rentSysvar.LamportsPerUint8Year = uint64(float64(sealevel.SysvarCache.Rent.Sysvar.LamportsPerUint8Year) * sealevel.SysvarCache.Rent.Sysvar.ExemptionThreshold)
+			rentSysvar.ExemptionThreshold = 1.0
+			rentSysvar.BurnPercent = sealevel.SysvarCache.Rent.Sysvar.BurnPercent
+
+			rentAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarRentAddr)
+			if err != nil {
+				panic(err)
+			}
+			parentAccts = append(parentAccts, rentAcct.Clone())
+
+			newRentSysvarBytes := rentSysvar.MustMarshal()
+			copy(rentAcct.Data, newRentSysvarBytes)
+			err = acctsDb.StoreAccounts([]*accounts.Account{rentAcct}, slot, nil)
+			if err != nil {
+				panic(err)
+			}
+			modifiedAccts = append(modifiedAccts, rentAcct)
+
+			sealevel.SysvarCache.Rent.Sysvar = &rentSysvar
+			sealevel.SysvarCache.Rent.Acct = rentAcct
+		}
+	}
+
+	return f, modifiedAccts, parentAccts
 }
 
 // setupInitialVoteAcctsAndStakeAccts populates the vote and stake caches at startup.
