@@ -2072,32 +2072,34 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			wg.Wait()
 		}
 	} else {
-		do := make(chan int, len(block.Transactions))
+		do := make(chan WorkItem, len(block.Transactions))
 		done := make(chan int, len(block.Transactions))
-		go TopsortPlannerStream(block, do, done)
+		go TopsortPlannerStreamWithChains(block, do, done)
 
 		wg := &sync.WaitGroup{}
 		wg.Add(txParallelism)
 		for i := range txParallelism {
 			go func() {
 				defer wg.Done()
-				for idx := range do {
-					txStart := time.Now()
-					tx := block.Transactions[idx]
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
-					txErr := errs[idx]
-					// check for success-failure return value divergences
-					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
-						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
-							CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
-					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
-						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
-							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+				for item := range do {
+					for _, idx := range item.Indices {
+						txStart := time.Now()
+						tx := block.Transactions[idx]
+						txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
+						txErr := errs[idx]
+						// check for success-failure return value divergences
+						if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
+							mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
+								CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
+							panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
+						} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
+							mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
+								CurrentRunID, block.Slot, tx.Signatures[0], txErr)
+							panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+						}
+						txDurations[i] += time.Since(txStart)
 					}
-					txDurations[i] += time.Since(txStart)
-					done <- idx
+					done <- item.Indices[0]
 				}
 
 			}()

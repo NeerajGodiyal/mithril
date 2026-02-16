@@ -226,6 +226,199 @@ func TestTopsort(t *testing.T) {
 	}
 }
 
+// runStreamChains runs TopsortPlannerStreamWithChains single-threaded,
+// processing one chain at a time and signaling done with the first index.
+// Returns the chains in the order they were dispatched.
+func runStreamChains(b *block.Block) [][]int {
+	do := make(chan WorkItem, len(b.Transactions))
+	done := make(chan int, len(b.Transactions))
+	go TopsortPlannerStreamWithChains(b, do, done)
+	var chains [][]int
+	totalTxs := 0
+	for totalTxs < len(b.Transactions) {
+		item := <-do
+		chains = append(chains, item.Indices)
+		totalTxs += len(item.Indices)
+		done <- item.Indices[0]
+	}
+	return chains
+}
+
+// verifyDependencyOrder checks that the flattened order of tx indices respects
+// all dependency edges: no tx appears before any of its prerequisites.
+func verifyDependencyOrder(t *testing.T, b *block.Block, order []int) {
+	t.Helper()
+	adjList, _ := blockToDependencyGraph(b)
+	// Build position map: txIdx -> position in execution order
+	pos := make(map[int]int, len(order))
+	for i, idx := range order {
+		pos[idx] = i
+	}
+	for u, deps := range adjList {
+		for _, v := range deps {
+			if pos[u] >= pos[int(v)] {
+				t.Errorf("dependency violation: tx %d (pos %d) must come before tx %d (pos %d)", u, pos[u], int(v), pos[int(v)])
+			}
+		}
+	}
+}
+
+func TestTopsortChains(t *testing.T) {
+	// Run all existing test cases through the chain planner and verify:
+	// 1. All tx indices appear exactly once
+	// 2. Flattened order respects all dependencies
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			chains := runStreamChains(test.b)
+			flat := flatten(chains)
+
+			// Check all indices present exactly once
+			if len(flat) != len(test.b.Transactions) {
+				t.Fatalf("expected %d txs, got %d", len(test.b.Transactions), len(flat))
+			}
+			seen := make(map[int]bool)
+			for _, idx := range flat {
+				if seen[idx] {
+					t.Errorf("duplicate tx index %d", idx)
+				}
+				seen[idx] = true
+			}
+			for i := range test.b.Transactions {
+				if !seen[i] {
+					t.Errorf("missing tx index %d", i)
+				}
+			}
+
+			verifyDependencyOrder(t, test.b, flat)
+		})
+	}
+}
+
+type chainTestCase struct {
+	name           string
+	b              *block.Block
+	expectedChains [][]int // expected chains in dispatch order
+}
+
+var chainTests = []chainTestCase{
+	{
+		// 0→1→2→3: single linear chain, all coalesced
+		"LinearChain",
+		&block.Block{
+			Transactions: testTxs(4),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0, 1, 2, 3}},
+	},
+	{
+		// 0→1, 1→2, 1→3: chain [0,1] then singletons [2] and [3]
+		// tx0 writes A, tx1 writes A+B, tx2 writes A, tx3 writes B
+		// adjList[0]=[1], adjList[1]=[2,3], so chain breaks at 1 (out-degree 2)
+		"ForkAtMiddle",
+		&block.Block{
+			Transactions: testTxs(4),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+			},
+		},
+		[][]int{{0, 1}, {2}, {3}},
+	},
+	{
+		// 0→2, 1→2, 2→3: singletons [0],[1] then chain [2,3]
+		// tx0 writes A, tx1 writes B, tx2 writes A+B, tx3 writes A
+		"JoinThenChain",
+		&block.Block{
+			Transactions: testTxs(4),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}, {1}, {2, 3}},
+	},
+	{
+		// Diamond: 0→1, 0→2, 1→3, 2→3 — all singletons
+		// tx0 writes A+B, tx1 writes A, tx2 writes B, tx3 writes A+B
+		"Diamond",
+		&block.Block{
+			Transactions: testTxs(4),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0, 1}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{0, 1}),
+			},
+		},
+		[][]int{{0}, {1}, {2}, {3}},
+	},
+	{
+		// Two independent linear chains: 0→1→2 on acct A, 3→4→5 on acct B
+		"DisjointLinearChains",
+		&block.Block{
+			Transactions: testTxs(6),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{1}),
+			},
+		},
+		[][]int{{0, 1, 2}, {3, 4, 5}},
+	},
+	{
+		// Single tx
+		"SingleTx",
+		&block.Block{
+			Transactions: testTxs(1),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+			},
+		},
+		[][]int{{0}},
+	},
+	{
+		// All independent — each is its own chain
+		"AllIndependent",
+		&block.Block{
+			Transactions: testTxs(4),
+			TxMetas: []*rpc.TransactionMeta{
+				testTxMeta(nil, []byte{0}),
+				testTxMeta(nil, []byte{1}),
+				testTxMeta(nil, []byte{2}),
+				testTxMeta(nil, []byte{3}),
+			},
+		},
+		[][]int{{0}, {1}, {2}, {3}},
+	},
+}
+
+func TestTopsortChainDecomposition(t *testing.T) {
+	for _, test := range chainTests {
+		t.Run(test.name, func(t *testing.T) {
+			chains := runStreamChains(test.b)
+			if diff := cmp.Diff(test.expectedChains, chains); diff != "" {
+				t.Errorf("chains -want +got:\n%s", diff)
+			}
+
+			// Also verify dependency order
+			flat := flatten(chains)
+			verifyDependencyOrder(t, test.b, flat)
+		})
+	}
+}
+
 func mustMarshal(b *block.Block) []byte {
 	bBytes, err := json.Marshal(b)
 	if err != nil {

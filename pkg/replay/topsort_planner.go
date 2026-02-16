@@ -191,6 +191,186 @@ func TopsortPlanner(b *block.Block) [][]int {
 	return topSortLevels
 }
 
+// WorkItem represents a batch of transactions to be processed sequentially by
+// a single worker. For chain-coalesced scheduling, Indices contains a maximal
+// chain from the dependency graph. Workers signal done with Indices[0].
+type WorkItem struct {
+	Indices []int
+}
+
+// hasSingleTRSuccessor returns true if u has exactly one successor in the
+// transitive reduction of the DAG. This is the case when all successors of u
+// except the first (smallest) are also direct successors of that first
+// successor, meaning they're reachable via u→first→... and thus redundant.
+func hasSingleTRSuccessor(adjList [][]tx, u int) bool {
+	succs := adjList[u]
+	if len(succs) <= 1 {
+		return len(succs) == 1
+	}
+	// Check that every successor after the first is a direct successor of succs[0]
+	firstSuccAdj := adjList[int(succs[0])]
+	j := 0
+	for i := 1; i < len(succs); i++ {
+		w := succs[i]
+		for j < len(firstSuccAdj) && firstSuccAdj[j] < w {
+			j++
+		}
+		if j >= len(firstSuccAdj) || firstSuccAdj[j] != w {
+			return false
+		}
+	}
+	return true
+}
+
+// computeTRInDegree computes the in-degree of each node in the transitive
+// reduction. For each node u, we scan its successors left-to-right (smallest
+// first). The first successor is always in the TR. Subsequent successors are
+// in the TR only if they aren't reachable via previously-identified TR successors.
+func computeTRInDegree(adjList [][]tx, numTxs int) []int {
+	trInDeg := make([]int, numTxs)
+	for u := range numTxs {
+		succs := adjList[u]
+		if len(succs) == 0 {
+			continue
+		}
+		// First successor is always in TR
+		trInDeg[int(succs[0])]++
+		if len(succs) == 1 {
+			continue
+		}
+		// Track nodes reachable from already-identified TR successors
+		reachable := make(map[int]bool, len(adjList[int(succs[0])]))
+		for _, w := range adjList[int(succs[0])] {
+			reachable[int(w)] = true
+		}
+		for i := 1; i < len(succs); i++ {
+			w := int(succs[i])
+			if reachable[w] {
+				continue // reachable via earlier TR successor, transitive edge
+			}
+			trInDeg[w]++
+			for _, x := range adjList[w] {
+				reachable[int(x)] = true
+			}
+		}
+	}
+	return trInDeg
+}
+
+// TopsortPlannerStreamWithChains decomposes the dependency graph into maximal
+// chains and streams them as WorkItems. A chain is a maximal path where each
+// internal node has exactly one successor and that successor has exactly one
+// predecessor in the transitive reduction. Workers signal done with
+// item.Indices[0] once per chain rather than per-tx, reducing channel overhead.
+// This is safe because internal chain nodes cannot unblock anything outside
+// the chain.
+func TopsortPlannerStreamWithChains(b *block.Block, out chan WorkItem, done chan int) {
+	adjList, _ := blockToDependencyGraph(b)
+	numTxs := len(b.Transactions)
+
+	trInDeg := computeTRInDegree(adjList, numTxs)
+
+	chainOf := make([]int, numTxs)
+	var chains [][]int
+	visited := make([]bool, numTxs)
+
+	for t := range numTxs {
+		if visited[t] {
+			continue
+		}
+		chain := []int{t}
+		visited[t] = true
+		cur := t
+		for hasSingleTRSuccessor(adjList, cur) {
+			next := int(adjList[cur][0])
+			if trInDeg[next] != 1 {
+				break
+			}
+			chain = append(chain, next)
+			visited[next] = true
+			cur = next
+		}
+		cid := len(chains)
+		for _, idx := range chain {
+			chainOf[idx] = cid
+		}
+		chains = append(chains, chain)
+	}
+
+	numChains := len(chains)
+	chainAdj := make([][]int, numChains)
+	chainInDeg := make([]int, numChains)
+
+	for cid, chain := range chains {
+		lastNode := chain[len(chain)-1]
+		seen := make(map[int]bool)
+		for _, dep := range adjList[lastNode] {
+			tc := chainOf[int(dep)]
+			if !seen[tc] {
+				seen[tc] = true
+				chainAdj[cid] = append(chainAdj[cid], tc)
+				chainInDeg[tc]++
+			}
+		}
+	}
+
+	chainsSent := 0
+	var voteBatchIndices []int
+	var voteBatchChainIDs []int
+	isVoteBatchChain := make(map[int]bool)
+
+	for cid := range chainInDeg {
+		if chainInDeg[cid] != 0 {
+			continue
+		}
+		chain := chains[cid]
+		if len(chain) == 1 && b.Transactions[chain[0]].IsVote() {
+			voteBatchIndices = append(voteBatchIndices, chain[0])
+			voteBatchChainIDs = append(voteBatchChainIDs, cid)
+			isVoteBatchChain[cid] = true
+		}
+	}
+
+	if len(voteBatchIndices) > 0 {
+		out <- WorkItem{Indices: voteBatchIndices}
+		chainsSent += len(voteBatchChainIDs)
+	}
+
+	for cid := range chainInDeg {
+		if chainInDeg[cid] == 0 && !isVoteBatchChain[cid] {
+			out <- WorkItem{Indices: chains[cid]}
+			chainsSent++
+		}
+	}
+
+	for chainsSent < numChains {
+		completedTx := <-done
+		completedChain := chainOf[completedTx]
+
+		if isVoteBatchChain[completedChain] {
+			for _, vbcid := range voteBatchChainIDs {
+				for _, depChain := range chainAdj[vbcid] {
+					chainInDeg[depChain]--
+					if chainInDeg[depChain] == 0 {
+						out <- WorkItem{Indices: chains[depChain]}
+						chainsSent++
+					}
+				}
+			}
+			isVoteBatchChain = nil
+		} else {
+			for _, depChain := range chainAdj[completedChain] {
+				chainInDeg[depChain]--
+				if chainInDeg[depChain] == 0 {
+					out <- WorkItem{Indices: chains[depChain]}
+					chainsSent++
+				}
+			}
+		}
+	}
+	close(out)
+}
+
 // TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
 func TopsortPlannerStream(b *block.Block, out chan int, done chan int) {
 	adjList, inDegree := blockToDependencyGraph(b)
