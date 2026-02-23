@@ -111,7 +111,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20251229023828-edd283e1db59
+	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20260223201452-d8363b514fc0
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
@@ -145,7 +145,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
-	github.com/nixberg/chacha-rng-go v0.1.0
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a
 	github.com/panjf2000/ants/v2 v2.10.0
 	github.com/pierrec/lz4/v4 v4.1.22

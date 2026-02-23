@@ -3,8 +3,11 @@ package snapshotdl
 import (
 	"context"
 	"fmt"
+	"io"
+	stdlog "log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -12,6 +15,27 @@ import (
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/rpc"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/snapshot"
 )
+
+// stdlogMu protects global log config changes from racing if multiple
+// snapshot flows run concurrently.
+var stdlogMu sync.Mutex
+
+// suppressStdlogOutput temporarily redirects stdlib log output to io.Discard
+// so snapshot-finder internal logging doesn't appear in Mithril's output.
+// Caller must defer the returned restore function.
+func suppressStdlogOutput() func() {
+	stdlogMu.Lock()
+	oldWriter := stdlog.Writer()
+	oldFlags := stdlog.Flags()
+	oldPrefix := stdlog.Prefix()
+	stdlog.SetOutput(io.Discard)
+	return func() {
+		stdlog.SetOutput(oldWriter)
+		stdlog.SetFlags(oldFlags)
+		stdlog.SetPrefix(oldPrefix)
+		stdlogMu.Unlock()
+	}
+}
 
 // SnapshotInfo contains details about a selected snapshot source.
 // This is returned by GetSnapshotURLWithInfo for display purposes.
@@ -176,7 +200,6 @@ func (sc SnapshotConfig) toInternalConfig(path string) config.Config {
 		AllowedNodeVersions:  sc.AllowedNodeVersions,
 		MaxFullSnapshots:  sc.MaxFullSnapshots,
 		SafetyMarginSlots: sc.SafetyMarginSlots,
-		Quiet:                true, // Mithril prints its own summary
 	}
 }
 
@@ -290,6 +313,7 @@ func DownloadSnapshot(ctx context.Context, rpcEndpoints []string, path string) (
 // The returned URL can be passed directly to snapshot processing functions
 // which will stream the data from HTTP (no disk download required).
 func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, int, error) {
+	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
@@ -317,7 +341,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -331,8 +355,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 			MinVersion:      cfg.MinNodeVersion,
 			AllowedVersions: cfg.AllowedNodeVersions,
 		}
-		stats.PrintNodeDiscoveryReport()
-		stats.PrintFilterPipeline(filterCfg, speedStats)
+		stats.PrintReport(filterCfg)
 	}
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
@@ -399,6 +422,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 // This is like GetSnapshotURL but returns a SnapshotInfo struct with additional
 // details useful for display (node IP, version, speed, age).
 func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
+	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
@@ -424,11 +448,6 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	// This prevents selecting a fast full snapshot that has no compatible incrementals
 	results, incBaseStats := filterByIncrementalBaseMatch(results)
 
-	// Print Node Discovery Report (before speed testing)
-	if stats != nil {
-		stats.PrintNodeDiscoveryReport()
-	}
-
 	// Print incremental base match stats
 	if incBaseStats.totalWithFull > 0 {
 		mlog.Log.Infof("Incremental base matching: %d/%d full snapshots have compatible incrementals (%d unique base slots)",
@@ -442,48 +461,22 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
 	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
-	bestNodes, rankedNodes, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return nil, fmt.Errorf("no suitable nodes found with snapshots (check incremental base matching)")
 	}
 
-	// Print Stage 2 candidates as a table (no timestamps)
-	maxCandidates := 8
-	if len(rankedNodes) < maxCandidates {
-		maxCandidates = len(rankedNodes)
-	}
-	candidates := make([]rpc.RankedNodeInfo, maxCandidates)
-	for i := 0; i < maxCandidates; i++ {
-		rn := rankedNodes[i]
-		candidates[i] = rpc.RankedNodeInfo{
-			Rank:    i + 1,
-			RPC:     rn.Result.RPC,
-			Version: rn.Result.Version,
-			RTTMs:   int(rn.Result.Latency), // Latency is already in milliseconds
-			SpeedS1: rn.S1.MedianMBs,
-			SpeedS2: rn.S2.MinMBs,
-		}
-	}
-	rpc.PrintStage2CandidatesTable(candidates)
-
-	// Print Filter Pipeline with speed test stats (after speed testing, before source selection)
-	filterCfg := rpc.FilterConfig{
-		MaxRTTMs:        cfg.MaxRTTMs,
-		FullThreshold:   cfg.FullThreshold,
-		IncThreshold:    cfg.IncrementalThreshold,
-		MinVersion:      cfg.MinNodeVersion,
-		AllowedVersions: cfg.AllowedNodeVersions,
-	}
+	// Print statistics report (after filtering is complete)
 	if stats != nil {
-		stats.PrintFilterPipeline(filterCfg, speedStats)
+		filterCfg := rpc.FilterConfig{
+			MaxRTTMs:        cfg.MaxRTTMs,
+			FullThreshold:   cfg.FullThreshold,
+			IncThreshold:    cfg.IncrementalThreshold,
+			MinVersion:      cfg.MinNodeVersion,
+			AllowedVersions: cfg.AllowedNodeVersions,
+		}
+		stats.PrintReport(filterCfg)
 	}
-
-	// Speed test log writing disabled - uncomment to enable
-	// if speedStats != nil && snapCfg.LogDir != "" {
-	// 	if err := speedStats.WriteSpeedTestLog(snapCfg.LogDir, filterCfg); err != nil {
-	// 		mlog.Log.Infof("Warning: failed to write speed test log: %v", err)
-	// 	}
-	// }
 
 	// Step 5: Get snapshot URL from best nodes (with configurable fallback)
 	var snapshotURL string
@@ -574,6 +567,7 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 
 // DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
 func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg SnapshotConfig) (string, int, int, error) {
+	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig(path)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
@@ -601,7 +595,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _, speedStats := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -615,8 +609,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 			MinVersion:      cfg.MinNodeVersion,
 			AllowedVersions: cfg.AllowedNodeVersions,
 		}
-		stats.PrintNodeDiscoveryReport()
-		stats.PrintFilterPipeline(filterCfg, speedStats)
+		stats.PrintReport(filterCfg)
 	}
 
 	// Step 5: Download snapshot from best nodes (with configurable fallback)
@@ -694,6 +687,7 @@ func DownloadIncrementalSnapshot(rpcEndpoints []string, path string, referenceSl
 
 // DownloadIncrementalSnapshotWithConfig is like DownloadIncrementalSnapshot but accepts custom config
 func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig(path)
 	ctx := context.Background()
 
@@ -720,8 +714,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 			MinVersion:      cfg.MinNodeVersion,
 			AllowedVersions: cfg.AllowedNodeVersions,
 		}
-		stats.PrintNodeDiscoveryReport()
-		stats.PrintFilterPipeline(filterCfg, nil)
+		stats.PrintReport(filterCfg)
 	}
 
 	// Step 3: Filter to only nodes with matching incremental base slot FIRST
@@ -740,7 +733,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	}
 
 	// Step 3.5: Apply threshold filtering with two-pass approach
-	bestNodes, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
+	bestNodes, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
 		baseMatchingResults, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 
 	// Pass 2: If no matches, relax incremental threshold
@@ -751,7 +744,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 
 		relaxedCfg := cfg
 		relaxedCfg.IncrementalThreshold = relaxedThreshold
-		bestNodes, rankedNodes, _ = rpc.SortBestRPCsFilteredBySlot(
+		bestNodes, rankedNodes = rpc.SortBestRPCsFilteredBySlot(
 			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
 	}
 
@@ -867,6 +860,7 @@ func extractFullSnapshotSlot(path string) int {
 //    b. Speed (faster downloads preferred when end slots are equal)
 // 4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
 func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
 	ctx := context.Background()
 
@@ -927,8 +921,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 			MinVersion:      cfg.MinNodeVersion,
 			AllowedVersions: cfg.AllowedNodeVersions,
 		}
-		stats.PrintNodeDiscoveryReport()
-		stats.PrintFilterPipeline(filterCfg, nil)
+		stats.PrintReport(filterCfg)
 	}
 
 	// Step 2.1: Filter to only nodes with matching base slot FIRST (before threshold filtering)
@@ -952,7 +945,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	var matchingNodes []rpc.RankedNode
 
 	// Pass 1: Apply normal incremental threshold
-	_, rankedNodes, _ := rpc.SortBestRPCsFilteredBySlot(
+	_, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
 		baseMatchingResults, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
 	for _, node := range rankedNodes {
 		matchingNodes = append(matchingNodes, node)
@@ -968,7 +961,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		relaxedCfg := cfg
 		relaxedCfg.IncrementalThreshold = relaxedThreshold
 
-		_, rankedNodesRelaxed, _ := rpc.SortBestRPCsFilteredBySlot(
+		_, rankedNodesRelaxed := rpc.SortBestRPCsFilteredBySlot(
 			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
 		for _, node := range rankedNodesRelaxed {
 			matchingNodes = append(matchingNodes, node)
