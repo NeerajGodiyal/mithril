@@ -38,6 +38,18 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		input.Arena.Reset()
 	}
 
+	if slotCtx.Features.IsActive(features.StaticInstructionLimit) {
+		if len(tx.Message.Instructions) > maxInstrTraceCapacity {
+			return LoadAndExecuteTransactionOutput{
+				ProcessingResult: TransactionProcessingResult{
+					TransactionError: &TransactionError{
+						ErrorType: TransactionErrorSanitizeFailure,
+					},
+				},
+			}
+		}
+	}
+
 	// Parse instructions and account metas
 	start := time.Now()
 	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)

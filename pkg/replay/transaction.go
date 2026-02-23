@@ -44,6 +44,7 @@ var (
 	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
 	TxErrInvalidProgramForExecution        = errors.New("TxErrInvalidProgramForExecution")
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
+	TxErrSanitizeFailure                   = errors.New("TxErrSanitizeFailure")
 )
 
 func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {

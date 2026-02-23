@@ -54,6 +54,28 @@ func (sr *SysvarRent) MustUnmarshalWithDecoder(decoder *bin.Decoder) {
 	}
 }
 
+func (sr *SysvarRent) MustMarshal() []byte {
+	data := new(bytes.Buffer)
+	enc := bin.NewBinEncoder(data)
+
+	err := enc.WriteUint64(sr.LamportsPerUint8Year, bin.LE)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal LamportsPerUint8Year in sysvar rent: %s", err))
+	}
+
+	err = enc.WriteFloat64(sr.ExemptionThreshold, bin.LE)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal ExemptionThreshold in sysvar rent: %s", err))
+	}
+
+	err = enc.WriteByte(sr.BurnPercent)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal BurnPercent in sysvar rent: %s", err))
+	}
+
+	return data.Bytes()
+}
+
 func (sr *SysvarRent) MinimumBalance(dataLen uint64) uint64 {
 	dataLenWithOverhead := safemath.SaturatingAddU64(dataLen, rentAccountStorageOverhead)
 	lamportsPerYear := safemath.SaturatingMulU64(dataLenWithOverhead, sr.LamportsPerUint8Year)

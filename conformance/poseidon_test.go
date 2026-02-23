@@ -18,7 +18,7 @@ func TestConformance_Poseidon_Big_Endian(t *testing.T) {
 		3, 85, 242, 99, 25, 32, 123, 132, 254, 156, 162,
 		206, 27, 38, 231, 53, 200, 41, 130, 25, 144}
 
-	hash, err := sealevel.PoseidonHash([][]byte{bytes1, bytes2}, true)
+	hash, err := sealevel.PoseidonHash([][]byte{bytes1, bytes2}, true, false)
 	assert.NoError(t, err)
 	assert.Equal(t, expected1, hash)
 
@@ -32,7 +32,7 @@ func TestConformance_Poseidon_Big_Endian(t *testing.T) {
 		169, 243, 2, 63, 119, 18, 148, 167, 138, 203, 112,
 		231, 63, 144, 175, 226, 124, 173, 64, 30, 129}
 
-	hash, err = sealevel.PoseidonHash([][]byte{input3, input3}, true)
+	hash, err = sealevel.PoseidonHash([][]byte{input3, input3}, true, false)
 	assert.NoError(t, err)
 	assert.Equal(t, expected2, hash)
 
@@ -42,7 +42,7 @@ func TestConformance_Poseidon_Big_Endian(t *testing.T) {
 		205, 35, 194, 2, 177, 134, 115, 191, 37, 67,
 	}
 
-	hash, err = sealevel.PoseidonHash([][]byte{input3, input3, input3}, true)
+	hash, err = sealevel.PoseidonHash([][]byte{input3, input3, input3}, true, false)
 	assert.NoError(t, err)
 	assert.Equal(t, expected3, hash)
 }
@@ -58,7 +58,7 @@ func TestConformance_Poseidon_Little_Endian(t *testing.T) {
 		156, 254, 132, 123, 32, 25, 99, 242, 85, 3, 94,
 		235, 125, 28, 140, 138, 143, 147, 225, 84, 13}
 
-	hash, err := sealevel.PoseidonHash([][]byte{bytes1, bytes2}, false)
+	hash, err := sealevel.PoseidonHash([][]byte{bytes1, bytes2}, false, false)
 	assert.NoError(t, err)
 	assert.Equal(t, expected, hash)
 }
