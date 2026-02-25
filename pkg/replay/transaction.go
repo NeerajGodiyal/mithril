@@ -395,6 +395,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 				if txAcct.Lamports != txMeta.PreBalances[count] {
 					mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s pre-balance mismatch for %s: mithril=%d, onchain=%d",
 						CurrentRunID, slotCtx.Slot, tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count])
+					WriteDivergenceRecord(DivergenceRecord{
+						Slot: slotCtx.Slot, ParentSlot: slotCtx.ParentSlot, TxIndex: -1,
+						TxSig: tx.Signatures[0].String(),
+						Path: "transaction", DivergenceType: "pre_balance",
+						LocalErr:   fmt.Sprintf("lamports=%d for %s", txAcct.Lamports, txAcct.Key),
+						OnchainErr: fmt.Sprintf("lamports=%d for %s", txMeta.PreBalances[count], txAcct.Key),
+					})
+					divergenceArtifactPointer()
 					panic(fmt.Sprintf("tx %s pre-balance divergence: lamport balance for %s was %d but onchain lamport balance was %d\n%s", tx.Signatures[0], txAcct.Key, txAcct.Lamports, txMeta.PreBalances[count], util.PrettyPrintAcct(txAcct)))
 				}
 			}
@@ -416,6 +424,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	if txMeta != nil && txFeeInfo.TotalFee != txMeta.Fee {
 		mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s fee mismatch: mithril=%d, onchain=%d",
 			CurrentRunID, slotCtx.Slot, tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee)
+		WriteDivergenceRecord(DivergenceRecord{
+			Slot: slotCtx.Slot, ParentSlot: slotCtx.ParentSlot, TxIndex: -1,
+			TxSig: tx.Signatures[0].String(),
+			Path: "transaction", DivergenceType: "fee",
+			LocalErr:   fmt.Sprintf("fee=%d", txFeeInfo.TotalFee),
+			OnchainErr: fmt.Sprintf("fee=%d", txMeta.Fee),
+		})
+		divergenceArtifactPointer()
 		panic(fmt.Sprintf("tx %s fee divergence: totalFee was %d, but onchain fee was %d", tx.Signatures[0], txFeeInfo.TotalFee, txMeta.Fee))
 	}
 
@@ -521,6 +537,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		if errBuf.Len() > 0 {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s post-balance mismatches detected",
 				CurrentRunID, slotCtx.Slot, tx.Signatures[0])
+			WriteDivergenceRecord(DivergenceRecord{
+				Slot: slotCtx.Slot, ParentSlot: slotCtx.ParentSlot, TxIndex: -1,
+				TxSig: tx.Signatures[0].String(),
+				Path: "transaction", DivergenceType: "post_balance",
+				LocalErr: errBuf.String(),
+			})
+			divergenceArtifactPointer()
 			msg := fmt.Sprintf("tx %s post-balance divergences:", tx.Signatures[0]) + errBuf.String()
 			panic(msg)
 		}

@@ -2030,6 +2030,13 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 			if txMeta.Err == nil && tx.IsVote() {
 				mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: vote tx %s failed locally but succeeded onchain => bankhash mismatch at parent slot %d",
 					CurrentRunID, block.Slot, tx.Signatures[0], block.ParentSlot)
+				WriteDivergenceRecord(DivergenceRecord{
+					Slot: block.Slot, ParentSlot: block.ParentSlot, TxIndex: idx,
+					TxSig: tx.Signatures[0].String(), Leader: block.Leader.String(),
+					Path: "sequential", DivergenceType: "vote_return_value",
+					LocalErr: errString(txErr),
+				})
+				divergenceArtifactPointer()
 				panic(fmt.Sprintf("vote tx %s failed in slot %d => bankhash mismatch at slot %d", tx.Signatures[0], block.Slot, block.ParentSlot))
 			}
 		}
@@ -2038,10 +2045,24 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		if txErr == nil && txMeta.Err != nil {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
 				CurrentRunID, block.Slot, tx.Signatures[0], block.TxMetas[idx].Err)
+			WriteDivergenceRecord(DivergenceRecord{
+				Slot: block.Slot, ParentSlot: block.ParentSlot, TxIndex: idx,
+				TxSig: tx.Signatures[0].String(), Leader: block.Leader.String(),
+				Path: "sequential", DivergenceType: "return_value",
+				OnchainErr: fmtErr(block.TxMetas[idx].Err),
+			})
+			divergenceArtifactPointer()
 			panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], block.TxMetas[idx].Err))
 		} else if txErr != nil && txMeta.Err == nil {
 			mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
 				CurrentRunID, block.Slot, tx.Signatures[0], txErr)
+			WriteDivergenceRecord(DivergenceRecord{
+				Slot: block.Slot, ParentSlot: block.ParentSlot, TxIndex: idx,
+				TxSig: tx.Signatures[0].String(), Leader: block.Leader.String(),
+				Path: "sequential", DivergenceType: "return_value",
+				LocalErr: errString(txErr),
+			})
+			divergenceArtifactPointer()
 			panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 		}
 
@@ -2089,11 +2110,25 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 					// check for success-failure return value divergences
 					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
-							CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
+							CurrentRunID, rblock.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
+						WriteDivergenceRecord(DivergenceRecord{
+							Slot: rblock.Slot, ParentSlot: rblock.ParentSlot, TxIndex: idx,
+							TxSig: tx.Signatures[0].String(), Leader: rblock.Leader.String(),
+							Path: "parallel", DivergenceType: "return_value",
+							OnchainErr: fmtErr(rblock.TxMetas[idx].Err),
+						})
+						divergenceArtifactPointer()
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
 					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
-							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
+							CurrentRunID, rblock.Slot, tx.Signatures[0], txErr)
+						WriteDivergenceRecord(DivergenceRecord{
+							Slot: rblock.Slot, ParentSlot: rblock.ParentSlot, TxIndex: idx,
+							TxSig: tx.Signatures[0].String(), Leader: rblock.Leader.String(),
+							Path: "parallel", DivergenceType: "return_value",
+							LocalErr: errString(txErr),
+						})
+						divergenceArtifactPointer()
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 					}
 					txDurations[i] += time.Since(txStart)
@@ -2151,8 +2186,12 @@ func ProcessBlock(
 	defer sigverifyWg.Wait()
 	start := time.Now()
 	unresolvedBlock := &b.Block{
-		Transactions: make([]*solana.Transaction, len(block.Transactions)),
-		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
+		Slot:             block.Slot,
+		ParentSlot:       block.ParentSlot,
+		Leader:           block.Leader,
+		FromLightbringer: block.FromLightbringer,
+		Transactions:     make([]*solana.Transaction, len(block.Transactions)),
+		TxMetas:          make([]*rpc.TransactionMeta, len(block.TxMetas)),
 	}
 	for i := range block.Transactions {
 		unresolvedBlock.Transactions[i] = &solana.Transaction{}
