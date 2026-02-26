@@ -26,7 +26,8 @@ type Interpreter struct {
 	ro     []byte
 	stack  Stack
 	heap   []byte
-	input  []byte
+	input          []byte
+	inputDataVaddr uint64
 
 	entry    uint64
 	heapSize uint64
@@ -85,6 +86,7 @@ func NewInterpreter(p *Program, opts *VMOpts) *Interpreter {
 		stack:             NewStack(p.SbpfVersion),
 		heap:              heap,
 		input:             opts.Input,
+		inputDataVaddr:    opts.InputDataVaddr,
 		entry:             p.Entrypoint,
 		syscalls:          opts.Syscalls,
 		funcs:             p.Funcs,
@@ -113,6 +115,7 @@ func (ip *Interpreter) Finish() {
 func (ip *Interpreter) Run() (ret uint64, cuConsumed uint64, err error) {
 	var r [11]uint64
 	r[1] = VaddrInput
+	r[2] = ip.inputDataVaddr
 
 	// initialise fp
 	var sz uint64

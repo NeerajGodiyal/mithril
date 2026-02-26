@@ -463,21 +463,21 @@ type serializedAcctMetadata struct {
 	vmOwnerAddr     uint64
 }
 
-func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error) {
+func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, error) {
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	numIxAccts := instrCtx.NumberOfInstructionAccounts()
 	if numIxAccts > MaxInstructionAccounts {
-		return nil, nil, InstrErrMaxAccountsExceeded
+		return nil, nil, 0, InstrErrMaxAccountsExceeded
 	}
 
 	programAcct, err := instrCtx.BorrowLastProgramAccount(txCtx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	programId := programAcct.Key()
 	programAcct.Drop()
@@ -495,14 +495,14 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if isDupe {
 			accts[int(instrAcctIdx)] = serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
 		} else {
 			acct, err := instrCtx.BorrowInstructionAccount(txCtx, instrAcctIdx)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 
 			accts[int(instrAcctIdx)] = serializeAcct{indexOfAcct: instrAcctIdx, acct: acct}
@@ -623,6 +623,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 	}
 
 	l := len(serializedData)
+	instructionDataOffset := uint64(l) + 8 // offset of actual instruction data bytes (past length prefix)
 	serializedData = serializedData[:len(serializedData)+
 		8+ /*instr data len*/
 		len(instrData)+ /*instr data*/
@@ -637,7 +638,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, error)
 		panic(fmt.Sprintf("mismatch between serialized data and expected length: len(serializedData) = %d, expected size = %d", uint64(len(serializedData)), size))
 	}
 
-	return serializedData, preLens, nil
+	return serializedData, preLens, instructionDataOffset, nil
 }
 
 func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, preLens []uint64) error {
@@ -747,21 +748,21 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 	return nil
 }
 
-func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, error) {
+func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, error) {
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	numIxAccts := instrCtx.NumberOfInstructionAccounts()
 	if numIxAccts > MaxInstructionAccounts {
-		return nil, nil, InstrErrMaxAccountsExceeded
+		return nil, nil, 0, InstrErrMaxAccountsExceeded
 	}
 
 	programAcct, err := instrCtx.BorrowLastProgramAccount(txCtx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	programId := programAcct.Key()
 	programAcct.Drop()
@@ -773,7 +774,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if isDupe {
 			sa := serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
@@ -781,7 +782,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 		} else {
 			acct, err := instrCtx.BorrowInstructionAccount(txCtx, instrAcctIdx)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 			defer acct.Drop()
 
@@ -882,6 +883,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 	}
 
 	// instr data len
+	instructionDataOffset := uint64(len(serializedData)) + 8 // offset of actual instruction data bytes (past length prefix)
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(instrData)))
 
 	// instr data
@@ -896,7 +898,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, erro
 		panic("mismatch between serialized data and expected length")
 	}
 
-	return serializedData, preLens, nil
+	return serializedData, preLens, instructionDataOffset, nil
 }
 
 func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte, preLens []uint64) error {
@@ -1001,28 +1003,35 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 
 	var parameterBytes []byte
 	var preLens []uint64
+	var instrDataOffset uint64
 
 	if isLoaderDeprecated {
-		parameterBytes, preLens, err = serializeParametersUnaligned(execCtx)
+		parameterBytes, preLens, instrDataOffset, err = serializeParametersUnaligned(execCtx)
 		if err != nil {
 			return err
 		}
 	} else {
-		parameterBytes, preLens, err = serializeParametersAligned(execCtx)
+		parameterBytes, preLens, instrDataOffset, err = serializeParametersAligned(execCtx)
 		if err != nil {
 			return err
 		}
 	}
 
+	var inputDataVaddr uint64
+	if execCtx.Features.IsActive(features.ProvideInstructionDataOffsetInVmR2) {
+		inputDataVaddr = sbpf.VaddrInput + instrDataOffset
+	}
+
 	opts := &sbpf.VMOpts{
-		HeapMax:      int(heapSize),
-		Input:        parameterBytes,
-		Syscalls:     syscallRegistry,
-		MaxCU:        int(execCtx.ComputeMeter.Remaining()),
-		ComputeMeter: &execCtx.ComputeMeter,
-		Context:      execCtx,
-		TxSignature:  execCtx.TransactionContext.Signature,
-		ProgramId:    programId,
+		HeapMax:        int(heapSize),
+		Input:          parameterBytes,
+		InputDataVaddr: inputDataVaddr,
+		Syscalls:       syscallRegistry,
+		MaxCU:          int(execCtx.ComputeMeter.Remaining()),
+		ComputeMeter:   &execCtx.ComputeMeter,
+		Context:        execCtx,
+		TxSignature:    execCtx.TransactionContext.Signature,
+		ProgramId:      programId,
 	}
 
 	start := time.Now()
