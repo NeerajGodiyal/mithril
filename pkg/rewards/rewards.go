@@ -388,6 +388,8 @@ func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) 
 		commission = voteState.V0_23_5.Commission
 	case sealevel.VoteStateVersionV1_14_11:
 		commission = voteState.V1_14_11.Commission
+	case sealevel.VoteStateVersionV4:
+		commission = byte(voteState.V4.InflationRewardsCommissionBps / 100)
 	}
 
 	commissionRate := uint64(min(commission, 100))
@@ -429,6 +431,8 @@ func calculateStakePointsAndCredits(
 		epochCredits = voteState.V0_23_5.EpochCredits
 	case sealevel.VoteStateVersionV1_14_11:
 		epochCredits = voteState.V1_14_11.EpochCredits
+	case sealevel.VoteStateVersionV4:
+		epochCredits = voteState.V4.EpochCredits
 	default:
 		panic("invalid vote state - should be impossible")
 	}

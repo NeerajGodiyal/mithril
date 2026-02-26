@@ -1108,7 +1108,7 @@ func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, auth
 				} else {
 					return verifySigner(epochAuthorizedVoter, signers)
 				}
-			})
+			}, f)
 			if err != nil {
 				return err
 			}
@@ -1246,12 +1246,15 @@ func VoteProgramUpdateCommission(execCtx *ExecutionCtx, voteAcct *BorrowedAccoun
 	}
 
 	voteState.Commission = commission
+	if voteState.wasV4 {
+		voteState.v4InflationRewardsCommBps = uint16(commission) * 100
+	}
 	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
 
-func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers []solana.PublicKey) (*VoteState, error) {
+func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers []solana.PublicKey, f features.Features) (*VoteState, error) {
 	versioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
 	if err != nil {
 		return nil, err
@@ -1262,7 +1265,7 @@ func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers
 	}
 
 	voteState := versioned.ConvertToCurrent()
-	authVoter, err := voteState.GetAndUpdateAuthorizedVoter(clock.Epoch)
+	authVoter, err := voteState.GetAndUpdateAuthorizedVoter(clock.Epoch, f)
 	if err != nil {
 		return nil, err
 	}
@@ -1378,7 +1381,7 @@ func processVote(voteState *VoteState, vote *VoteInstrVote, slotHashes SysvarSlo
 func VoteProgramProcessVote(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, vote *VoteInstrVote, signers []solana.PublicKey, f features.Features) error {
 	//mlog.Log.Debugf("Vote / VoteSwitch")
 
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}
@@ -1769,7 +1772,7 @@ func processNewVoteState(voteState *VoteState, newState *deque.Deque[LandedVote]
 func VoteProgramProcessVoteStateUpdate(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, voteStateUpdate *VoteInstrUpdateVoteState, signers []solana.PublicKey, f features.Features) error {
 	//mlog.Log.Debugf("VoteStateUpdate")
 
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}
@@ -1877,7 +1880,7 @@ var (
 )
 
 func VoteProgramProcessTowerSync(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}
