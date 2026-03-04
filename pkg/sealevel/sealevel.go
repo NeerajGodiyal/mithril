@@ -35,7 +35,6 @@ func (t *TransactionCtx) newVMOpts(params *Params) *sbpf.VMOpts {
 }
 
 // NewReservedAcctsSet contains reserved account addresses that should not be writable.
-// Exported so transaction.go can use the same set (avoiding duplication/drift).
 var NewReservedAcctsSet = map[solana.PublicKey]struct{}{
 	a.AddressLookupTableAddr:    {},
 	a.ComputeBudgetProgramAddr:  {},
@@ -49,7 +48,7 @@ var NewReservedAcctsSet = map[solana.PublicKey]struct{}{
 	a.SysvarOwnerAddr:           {},
 }
 
-func IsWritable(am *AccountMeta, f *features.Features, programIDSet map[solana.PublicKey]struct{}) bool {
+func IsWritable(am *AccountMeta, f *features.Features) bool {
 	if !am.IsWritable {
 		return false
 	}
@@ -68,10 +67,6 @@ func IsWritable(am *AccountMeta, f *features.Features, programIDSet map[solana.P
 		if am.Pubkey == a.Secp256r1PrecompileAddr {
 			return false
 		}
-	}
-
-	if _, isProgramID := programIDSet[am.Pubkey]; isProgramID {
-		return false
 	}
 
 	return true

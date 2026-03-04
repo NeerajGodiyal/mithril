@@ -71,34 +71,47 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	return execCtx
 }
 
-func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, map[solana.PublicKey]struct{}, error) {
+func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
 	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
 
-	// Build programIDSet once for O(1) lookups in isWritable
+	// "write-demote" program IDs unless the upgradeable loader is present
+	// in the transaction.
 	programIDs, err := tx.GetProgramIDs()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	programIDSet := make(map[solana.PublicKey]struct{}, len(programIDs))
 	for _, pid := range programIDs {
 		programIDSet[pid] = struct{}{}
 	}
+	upgradeableLoaderPresent := false
+	for _, key := range tx.Message.AccountKeys {
+		if key == a.BpfLoaderUpgradeableAddr {
+			upgradeableLoaderPresent = true
+			break
+		}
+	}
+	demoteProgramIDs := !upgradeableLoaderPresent
 
 	for _, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
 		ams, err := compiledInstr.ResolveInstructionAccounts(&tx.Message)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
 		acctMetas := make([]sealevel.AccountMeta, 0, len(ams))
 		for _, am := range ams {
-			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(am, f, programIDSet)}
+			acctMeta := sealevel.AccountMeta{
+				Pubkey:     am.PublicKey,
+				IsSigner:   am.IsSigner,
+				IsWritable: isWritableForInstr(am, programIDSet, demoteProgramIDs, f),
+			}
 			acctMetas = append(acctMetas, acctMeta)
 		}
 
@@ -107,7 +120,7 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 		acctMetasPerInstr = append(acctMetasPerInstr, acctMetas)
 	}
 
-	return instrs, acctMetasPerInstr, programIDSet, nil
+	return instrs, acctMetasPerInstr, nil
 }
 
 func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16) error {
@@ -125,29 +138,25 @@ func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16
 	return nil
 }
 
-func isWritable(am *solana.AccountMeta, f *features.Features, programIDSet map[solana.PublicKey]struct{}) bool {
-	if !am.IsWritable {
+func isWritable(am *solana.AccountMeta, f *features.Features) bool {
+	acctMeta := sealevel.AccountMeta{
+		Pubkey:     am.PublicKey,
+		IsSigner:   am.IsSigner,
+		IsWritable: am.IsWritable,
+	}
+	return sealevel.IsWritable(&acctMeta, f)
+}
+
+func isWritableForInstr(am *solana.AccountMeta, programIDSet map[solana.PublicKey]struct{}, demoteProgramIDs bool, f *features.Features) bool {
+	// writability checks (native programs, sysvars, reserved keys, etc.)
+	if !isWritable(am, f) {
 		return false
 	}
 
-	if isNativeProgram(am.PublicKey) || isSysvar(am.PublicKey) {
-		return false
-	}
-
-	if f.IsActive(features.AddNewReservedAccountKeys) {
-		if _, isReserved := sealevel.NewReservedAcctsSet[am.PublicKey]; isReserved {
+	if demoteProgramIDs {
+		if _, isProgramID := programIDSet[am.PublicKey]; isProgramID {
 			return false
 		}
-	}
-
-	if f.IsActive(features.EnableSecp256r1Precompile) {
-		if am.PublicKey == a.Secp256r1PrecompileAddr {
-			return false
-		}
-	}
-
-	if _, isProgramID := programIDSet[am.PublicKey]; isProgramID {
-		return false
 	}
 
 	return true
@@ -337,7 +346,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		defer mlog.Log.DisableInfLogging()
 	}
 
-	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
+	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +437,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	start = time.Now()
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features)
 	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
 
 	var instrErr error
@@ -495,7 +504,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
 	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
 
@@ -540,7 +549,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// Build writablePubkeySet inline to avoid second loop
 	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
 	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
+		if isWritable(txAcctMeta, &execCtx.Features) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
 			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
 		}
