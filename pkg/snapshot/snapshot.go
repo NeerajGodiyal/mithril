@@ -63,17 +63,21 @@ func UnmarshalManifestFromSnapshot(ctx context.Context, filename string, account
 	return manifest, err
 }
 
-type appendVecCopyingTask struct {
-	Filename                string
-	TarBuffer               *bytes.Buffer
-	FromIncrementalSnapshot bool
+// appendVecEntry describes one appendvec within a batched builder task.
+type appendVecEntry struct {
+	Data       []byte // Slice into the shared buffer
+	FileSize   uint64
+	Slot       uint64
+	BaseOffset uint64 // Global offset into the big snapshot file
 }
 
+// indexEntryBuilderTask is a batch of appendvecs sharing a single pooled buffer.
+// The builder processes all entries, then returns the buffer to the pool.
 type indexEntryBuilderTask struct {
-	Data     []byte
-	FileSize uint64
-	Slot     uint64
-	FileId   uint64
+	Entries    []appendVecEntry
+	FileId     uint64    // Sentinel FileId (SnapshotFileId or IncrementalFileId)
+	Buf        []byte    // The pooled buffer backing all Data slices
+	Pool       chan []byte // Channel to return Buf to when done
 }
 
 type indexEntryCommitterTask struct {

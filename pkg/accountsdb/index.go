@@ -11,6 +11,24 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+const (
+	// Sentinel FileId values for big snapshot files.
+	// Accounts loaded from the full snapshot have FileId=0, pointing into accounts/snapshot.dat.
+	// Accounts loaded from the incremental snapshot have FileId=1, pointing into accounts/incremental.dat.
+	// All other FileIds (>= FirstReplayFileId) are individual appendvec files created during replay.
+	SnapshotFileId    = uint64(0)
+	IncrementalFileId = uint64(1)
+	FirstReplayFileId = uint64(2)
+
+	SnapshotDatFilename    = "snapshot.dat"
+	IncrementalDatFilename = "incremental.dat"
+)
+
+// IsSnapshotFile returns true if the FileId refers to one of the big snapshot files.
+func IsSnapshotFile(fileId uint64) bool {
+	return fileId == SnapshotFileId || fileId == IncrementalFileId
+}
+
 type AccountIndexEntry struct {
 	Slot   uint64
 	FileId uint64

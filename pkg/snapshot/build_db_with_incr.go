@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -66,7 +65,6 @@ func BuildAccountsDbAuto(
 	defer ants.Release()
 
 	incrementalManifest := &SnapshotManifest{}
-	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
 	numShards := 256
@@ -81,9 +79,19 @@ func BuildAccountsDbAuto(
 		entries: make([]accountsdb.StakeIndexEntry, 0, 1000000), // Pre-allocate for ~1M stake accounts
 	}
 
-	pools, err := initWorkerPools(wg, sl, manifest, incrementalManifest, accountsDbDir, &largestFileId, stakeCollector)
+	pools, err := initWorkerPools(wg, sl, stakeCollector)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initializing worker pools: %w", err)
+	}
+
+	// Create and fallocate the big snapshot file
+	fullTotalSize := computeTotalSize(manifest)
+	mlog.Log.Infof("Full snapshot total size: %d bytes (%.1f GB)", fullTotalSize, float64(fullTotalSize)/(1024*1024*1024))
+
+	snapshotDatPath := filepath.Join(appendVecsOutputDir, accountsdb.SnapshotDatFilename)
+	snapshotDat, err := accountsdb.OpenDirect(snapshotDatPath, os.O_CREATE|os.O_RDWR, 0644, int64(fullTotalSize))
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening %s: %w", accountsdb.SnapshotDatFilename, err)
 	}
 
 	// Determine save path for full snapshot if streaming from HTTP
@@ -112,8 +120,18 @@ func BuildAccountsDbAuto(
 		dp.Start()
 	}
 
-	err = readTar(ctx, wg, fullSnapshotFile, pools.appendVecCopying, readTarOptions{savePath: fullSavePath, progress: dp})
+	fullFileSizes := buildFileSizeMap(manifest)
+	err = readTar(ctx, wg, fullSnapshotFile, readTarOptions{
+		savePath:              fullSavePath,
+		progress:              dp,
+		sentinelFileId:        accountsdb.SnapshotFileId,
+		fileSizes:             fullFileSizes,
+		indexEntryBuilderPool: pools.indexEntryBuilder,
+		bigFile:               snapshotDat,
+		bigFileTotalSize:      fullTotalSize,
+	})
 	if err != nil {
+		snapshotDat.Close()
 		if dp != nil {
 			dp.Interrupt(err)
 		}
@@ -127,6 +145,8 @@ func BuildAccountsDbAuto(
 
 	// Wait for all workers to finish before continuing to incremental phase
 	wg.Wait()
+
+	snapshotDat.Close()
 
 	// Log full snapshot processing time to debug log only (noise reduction)
 	mlog.Log.Debugf("done processing full snapshot in %s.", fmtDuration(time.Since(start)))
@@ -147,7 +167,7 @@ func BuildAccountsDbAuto(
 		} else if strings.Contains(err.Error(), "no rpc nodes") || strings.Contains(err.Error(), "no nodes found") {
 			errMsg += "\n  Hint: Check RPC endpoints connectivity or try again later"
 		}
-		return nil, nil, fmt.Errorf(errMsg)
+		return nil, nil, fmt.Errorf("%s", errMsg)
 	}
 	mlog.Log.Debugf("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
 
@@ -175,9 +195,20 @@ func BuildAccountsDbAuto(
 			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
 			continue
 		}
-		// Copy the manifest so the worker pool's pointer has the value.
 		*incrementalManifest = *incrementalManifestCopy
 		mlog.Log.Infof("Parsed incremental snapshot manifest")
+
+		// Create and fallocate the incremental big file
+		incrTotalSize := computeTotalSize(incrementalManifest)
+		mlog.Log.Infof("Incremental snapshot total size: %d bytes (%.1f GB)", incrTotalSize, float64(incrTotalSize)/(1024*1024*1024))
+
+		incrDatPath := filepath.Join(appendVecsOutputDir, accountsdb.IncrementalDatFilename)
+		incrDat, incrErr := accountsdb.OpenDirect(incrDatPath, os.O_CREATE|os.O_RDWR, 0644, int64(incrTotalSize))
+		if incrErr != nil {
+			mlog.Log.Errorf("opening %s: %v", accountsdb.IncrementalDatFilename, incrErr)
+			err = incrErr
+			continue
+		}
 
 		// Determine save path for incremental snapshot if streaming from HTTP
 		var incrSavePath string
@@ -185,6 +216,7 @@ func BuildAccountsDbAuto(
 			if snapshotDownloadPath != "" {
 				// Ensure snapshot download directory exists (may not exist if full was local)
 				if err := os.MkdirAll(snapshotDownloadPath, 0o755); err != nil {
+					incrDat.Close()
 					return nil, nil, fmt.Errorf("failed to create snapshot download directory %s: %w", snapshotDownloadPath, err)
 				}
 				// Extract filename from URL and create save path
@@ -195,17 +227,33 @@ func BuildAccountsDbAuto(
 			}
 		}
 
-		err = readTar(ctx, wg, incrementalSnapshotPath, pools.appendVecCopying, readTarOptions{savePath: incrSavePath, isIncremental: true})
+		incrFileSizes := buildFileSizeMap(manifest, incrementalManifest)
+		err = readTar(ctx, wg, incrementalSnapshotPath, readTarOptions{
+			savePath:              incrSavePath,
+			sentinelFileId:        accountsdb.IncrementalFileId,
+			fileSizes:             incrFileSizes,
+			indexEntryBuilderPool: pools.indexEntryBuilder,
+			bigFile:               incrDat,
+			bigFileTotalSize:      incrTotalSize,
+		})
 		wg.Wait()
-		// Check if we should retry
+
 		if err == nil {
+			incrDat.Close()
 			break // Success
 		}
+		incrDat.Close()
 		// Download failed mid-way, will retry with re-discovery
 		mlog.Log.Errorf("Incremental download failed: %v", err)
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Compute largestFileId from both manifests
+	largestFileId := computeLargestFileId(manifest, incrementalManifest)
+	if largestFileId < accountsdb.FirstReplayFileId {
+		largestFileId = accountsdb.FirstReplayFileId
 	}
 
 	// Show indexing progress for shard flush
@@ -222,11 +270,11 @@ func BuildAccountsDbAuto(
 	index.Close()
 
 	var largestFileIdBytes [8]byte
-	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())
+	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId)
 
 	path := filepath.Join(accountsDbDir, "largest_file_id")
 	if err := os.WriteFile(path, largestFileIdBytes[:], 0644); err != nil {
-		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId.Load(), path, err)
+		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId, path, err)
 		return nil, nil, err
 	}
 
