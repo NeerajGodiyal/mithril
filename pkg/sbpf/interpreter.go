@@ -429,7 +429,7 @@ mainLoop:
 			}
 			dst128 := wide.Int128FromInt64(int64(r[ins.Dst()]))
 			imm128 := wide.Int128FromInt64(int64(ins.Imm()))
-			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
+			r[ins.Dst()] = dst128.Mul(imm128).Uint128().RShiftN(64).Uint64()
 			pc++
 		case OpShmul64Reg:
 			if !ip.sbpfVersion.EnablePqr() {
@@ -437,8 +437,8 @@ mainLoop:
 				break
 			}
 			dst128 := wide.Int128FromInt64(int64(r[ins.Dst()]))
-			imm128 := wide.Int128FromInt64(int64(r[ins.Src()]))
-			r[ins.Dst()] = dst128.Mul(imm128).RShiftN(64).Uint64()
+			src128 := wide.Int128FromInt64(int64(r[ins.Src()]))
+			r[ins.Dst()] = dst128.Mul(src128).Uint128().RShiftN(64).Uint64()
 			pc++
 		case OpUdiv32Imm:
 			if !ip.sbpfVersion.EnablePqr() {
