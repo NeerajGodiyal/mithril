@@ -19,6 +19,10 @@ Use **alpha** for reliability; use **dev** if you want the newest changes and ca
 
 The `run` command starts Mithril as a live full node - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced on mainnet-beta.
 
+### Nix (NixOS / nix-darwin / Home Manager)
+
+See `docs/nix.md` for flake and module usage.
+
 ### Hardware Requirements
 
 > **Tip for new users:** The easiest way to run Mithril is on a dedicated small server or mini PC. This avoids disk management headaches from sharing storage with other applications and simplifies the setup process significantly.
