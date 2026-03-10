@@ -48,7 +48,8 @@ type VMOpts struct {
 	Context      any // passed to syscalls
 	MaxCU        int
 	ComputeMeter *cu.ComputeMeter
-	Input        []byte // mapped at VaddrInput
+	Input          []byte // mapped at VaddrInput
+	InputDataVaddr uint64 // VM address of instruction data within Input (SIMD-0321)
 
 	// Debug
 	ProgramId   solana.PublicKey
