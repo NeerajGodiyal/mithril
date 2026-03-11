@@ -46,3 +46,4 @@ docs/snapshot-integration-handoff*.txt
 
 # Claude Code settings
 .claude/
+.direnv
