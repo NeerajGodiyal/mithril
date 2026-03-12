@@ -329,6 +329,13 @@ func checkAccountInfos(execCtx *ExecutionCtx, numAccountInfos uint64) error {
 	return nil
 }
 
+func cpiInvokeUnits(f *features.Features) uint64 {
+	if f != nil && f.IsActive(features.IncreaseCpiAccountInfoLimit) {
+		return cu.CUInvokeUnitsSimd0339
+	}
+	return cu.CUInvokeUnits
+}
+
 func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64) ([]SolAccountInfoC, []solana.PublicKey, error) {
 	size := safemath.SaturatingMulU64(accountInfosLen, SolAccountInfoCSize)
 	accountInfosData, err := vm.Translate(accountInfosAddr, size, false)
@@ -788,7 +795,7 @@ func translateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, pr
 // SyscallInvokeSignedCImpl is an implementation of the sol_invoke_signed_c syscall
 func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cpiInvokeUnits(&execCtx.Features))
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -866,7 +873,7 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 	//mlog.Log.Debugf("SyscallInvokeSignedRust")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cpiInvokeUnits(&execCtx.Features))
 	if err != nil {
 		return syscallCuErr()
 	}

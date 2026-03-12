@@ -11,6 +11,7 @@ const (
 	CUCreateProgramAddressUnits                                  = 1500
 	CUSecP256k1RecoverCost                                       = 25000
 	CUInvokeUnits                                                = 1000
+	CUInvokeUnitsSimd0339                                        = 946
 	CUConfigProcessorDefaultComputeUnits                         = 450
 	CUSystemProgramDefaultComputeUnits                           = 150
 	CUVoteProgramDefaultComputeUnits                             = 2100
