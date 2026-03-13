@@ -9,8 +9,6 @@ import (
 	"math"
 	"math/bits"
 	"strings"
-
-	"github.com/Overclock-Validator/mithril/pkg/sbpf/sbpfver"
 )
 
 // parse checks ELF file for validity and loads metadata with minimal allocations.
@@ -146,21 +144,15 @@ func (l *Loader) validateElfHeader() error {
 		return fmt.Errorf("invalid ELF file")
 	}
 
-	if l.maxSbpfVersion != sbpfver.SbpfVersionV0 {
-		if eh.Flags > l.maxSbpfVersion {
-			return fmt.Errorf("invalid sbpf version")
-		}
-	} else {
-		if eh.Flags == EF_SBPF_V2 {
-			return fmt.Errorf("invalid sbpf version")
-		}
+	if eh.Flags == EF_SBF_V2 {
+		return fmt.Errorf("invalid sbpf version")
 	}
-
-	if eh.Flags < l.minSbpfVersion {
+	if eh.Flags < l.minSbpfVersion || eh.Flags > l.maxSbpfVersion {
 		return fmt.Errorf("invalid sbpf version")
 	}
 
-	if eh.Phoff < ehLen {
+	phTableSize := uint64(eh.Phnum) * phEntLen
+	if phTableSize > 0 && eh.Phoff < ehLen {
 		return fmt.Errorf("program header overlaps with file header")
 	}
 	if eh.Shoff < ehLen {
@@ -295,11 +287,19 @@ func (l *Loader) getString(strtab *elf.Section64, stroff uint32, maxLen uint16) 
 	if elf.SectionType(strtab.Type) != elf.SHT_STRTAB {
 		return "", fmt.Errorf("invalid strtab")
 	}
+	if uint64(stroff) >= strtab.Size {
+		return "", fmt.Errorf("string offset out of bounds")
+	}
 	offset := strtab.Off + uint64(stroff)
-	if offset > l.fileSize || offset+uint64(maxLen) > l.fileSize {
+	remaining := strtab.Size - uint64(stroff)
+	readLen := uint64(maxLen)
+	if readLen > remaining {
+		readLen = remaining
+	}
+	if offset > l.fileSize || offset+readLen > l.fileSize {
 		return "", io.ErrUnexpectedEOF
 	}
-	rd := bufio.NewReader(io.NewSectionReader(l.rd, int64(offset), int64(maxLen)))
+	rd := bufio.NewReader(io.NewSectionReader(l.rd, int64(offset), int64(readLen)))
 	var builder strings.Builder
 	for {
 		b, err := rd.ReadByte()
@@ -338,6 +338,9 @@ func (l *Loader) parseSections() error {
 		case ".bss":
 			return fmt.Errorf("unsupported section .bss")
 		case ".text":
+			if elf.SectionType(sh.Type) == elf.SHT_NOBITS {
+				sh.Size = 0
+			}
 			err = setSection(&l.shText)
 		case ".symtab":
 			err = setSection(&l.shSymtab)
@@ -372,7 +375,7 @@ func (l *Loader) parseSections() error {
 func (l *Loader) newDynIter() (*dynTableIter, error) {
 	var off uint64
 	var size uint64
-	if ph := l.phDynamic; ph != nil {
+	if ph := l.phDynamic; ph != nil && ph.Off%8 == 0 && (ph.Off+ph.Filesz) <= l.fileSize && (ph.Off+ph.Filesz) >= ph.Off {
 		off, size = ph.Off, ph.Filesz
 	} else if sh := l.shDynamic; sh != nil {
 		off, size = sh.Off, sh.Size
@@ -380,10 +383,6 @@ func (l *Loader) newDynIter() (*dynTableIter, error) {
 		return nil, nil
 	}
 
-	// TODO: check Agave
-	/*if size%dynLen != 0 {
-		return nil, fmt.Errorf("odd .dynamic size")
-	}*/
 	if (off+size) > l.fileSize || (off+size) < off {
 		return nil, io.ErrUnexpectedEOF
 	}
@@ -471,7 +470,7 @@ func (l *Loader) parseRelocs() error {
 		if overflow != 0 {
 			return fmt.Errorf("offset underflow")
 		}
-		offset, overflow = bits.Add64(offset, ph.Vaddr, 0)
+		offset, overflow = bits.Add64(offset, ph.Off, 0)
 		if overflow != 0 {
 			return fmt.Errorf("offset overflow")
 		}
@@ -548,12 +547,18 @@ func (l *Loader) validate() error {
 
 func (l *Loader) checkEntrypoint() bool {
 	start := l.shText.Addr
+	entry := l.eh.Entry
+	if (entry-start)%8 != 0 || entry < start {
+		return false
+	}
+	if l.shText.Size == 0 {
+		return true
+	}
 	end, overflow := bits.Add64(start, l.shText.Size, 0)
 	if overflow != 0 {
 		end = math.MaxUint64
 	}
-	entry := l.eh.Entry
-	return start <= entry && entry < end && (entry-start)%8 == 0
+	return entry < end
 }
 
 type shTableIter struct {
@@ -847,11 +852,16 @@ func lookupFromTable(l *Loader, section *elf.Section64, i uint32, elemSize uint1
 }
 
 func (l *Loader) getDynsym(idx uint32) (elf.Sym64, error) {
-	// TODO is shDynsym.Off checked?
+	if l.shDynsym == nil {
+		return elf.Sym64{}, fmt.Errorf("unknown symbol: no dynamic symbol table")
+	}
 	return lookupFromTable(l, l.shDynsym, idx, symLen)
 }
 
 func (l *Loader) getDynstr(name uint32) (string, error) {
+	if l.shDynstr == nil {
+		return "", fmt.Errorf("unknown symbol: no dynamic string table")
+	}
 	return l.getString(l.shDynstr, name, maxSymbolNameLen)
 }
 
@@ -863,5 +873,5 @@ func isOverlap(startA uint64, sizeA uint64, startB uint64, sizeB uint64) (bool, 
 	if endA < startA || endB < startB {
 		return false, fmt.Errorf("isOverlap: integer overflow")
 	}
-	return sizeA != 0 && sizeB != 0 && (startA == startB || endA > endB), nil
+	return sizeA != 0 && sizeB != 0 && (startA == startB || endA > startB), nil
 }

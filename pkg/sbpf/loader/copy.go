@@ -35,11 +35,9 @@ func (l *Loader) getText() error {
 		return fmt.Errorf("invalid .text: %w", err)
 	}
 
-	if l.shText.Size%8 != 0 {
-		return fmt.Errorf(".text section size was not divisible by 8, got %d", l.shText.Size)
-	}
+	textSize := (l.shText.Size / 8) * 8
 
-	l.textRange = addrRange{min: l.shText.Off, max: l.shText.Off + l.shText.Size}
+	l.textRange = addrRange{min: l.shText.Off, max: l.shText.Off + textSize}
 	return nil
 }
 
@@ -85,12 +83,10 @@ func (l *Loader) mapSections() error {
 }
 
 func (l *Loader) checkSectionAddrs(sh *elf.Section64) error {
-	// TODO Support true vaddr ELFs
-
 	if sh.Size > l.fileSize {
 		return io.ErrUnexpectedEOF
 	}
-	if sh.Addr != sh.Off {
+	if (sh.Flags&uint64(elf.SHF_ALLOC)) != 0 && sh.Addr != sh.Off {
 		return fmt.Errorf("section physical address out-of-place")
 	}
 
