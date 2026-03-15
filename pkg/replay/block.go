@@ -96,6 +96,13 @@ func GetCommitSlot() uint64 {
 	return commitSlot.Load()
 }
 
+func formatBlockSourceStatus(fetchStats blockstream.FetchStatsSnapshot) string {
+	if fetchStats.SourceStatus == "" || fetchStats.SourceStatus == fetchStats.CurrentSource {
+		return fetchStats.CurrentSource
+	}
+	return fetchStats.SourceStatus
+}
+
 // ReplayResult contains the result of a replay operation, including shutdown state
 type ReplayResult struct {
 	// LastPersistedSlot is the last slot whose state was successfully persisted to AccountsDB
@@ -1189,9 +1196,10 @@ func ReplayBlocks(
 	acctsDb *accountsdb.AccountsDb,
 	acctsDbPath string,
 	mithrilState *state.MithrilState, // State file with manifest_* seed fields
-	resumeState *ResumeState,         // nil if not resuming, contains parent slot info when resuming
+	resumeState *ResumeState, // nil if not resuming, contains parent slot info when resuming
 	startSlot, endSlot uint64,
 	rpcEndpoints []string, // RPC endpoints in priority order (first = primary, rest = fallbacks)
+	lightbringerEndpoint string,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -1328,12 +1336,13 @@ func ReplayBlocks(
 	var opts *blockstream.BlockSourceOpts
 	if useLightbringer {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:         blockstream.BlockSourceLightbringer,
-			RpcClient:          rpcc,
-			BackupRpcEndpoints: rpcBackups,
-			StartSlot:          startSlot,
-			EndSlot:            endSlot,
-			BlockDir:           blockDir,
+			SourceType:           blockstream.BlockSourceLightbringer,
+			RpcClient:            rpcc,
+			LightbringerEndpoint: lightbringerEndpoint,
+			BackupRpcEndpoints:   rpcBackups,
+			StartSlot:            startSlot,
+			EndSlot:              endSlot,
+			BlockDir:             blockDir,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
@@ -1344,22 +1353,23 @@ func ReplayBlocks(
 			EndSlot:            endSlot,
 			BlockDir:           blockDir,
 		}
-		// Apply block fetching options if provided
-		if blockFetchOpts != nil {
-			opts.MaxRPS = blockFetchOpts.MaxRPS
-			opts.MaxInflight = blockFetchOpts.MaxInflight
-			opts.TipPollMs = blockFetchOpts.TipPollMs
-			opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
+	}
 
-			// Mode thresholds
-			opts.NearTipThreshold = blockFetchOpts.NearTipThreshold
-			opts.CatchupThreshold = blockFetchOpts.CatchupThreshold
-			opts.CatchupTipGateThreshold = blockFetchOpts.CatchupTipGateThreshold
+	// Apply block fetching options if provided
+	if blockFetchOpts != nil {
+		opts.MaxRPS = blockFetchOpts.MaxRPS
+		opts.MaxInflight = blockFetchOpts.MaxInflight
+		opts.TipPollMs = blockFetchOpts.TipPollMs
+		opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
 
-			// Near-tip tuning
-			opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
-			opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
-		}
+		// Mode thresholds
+		opts.NearTipThreshold = blockFetchOpts.NearTipThreshold
+		opts.CatchupThreshold = blockFetchOpts.CatchupThreshold
+		opts.CatchupTipGateThreshold = blockFetchOpts.CatchupTipGateThreshold
+
+		// Near-tip tuning
+		opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
+		opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
 	}
 	blockStream := blockstream.NewBlockSource(opts)
 
@@ -1817,11 +1827,14 @@ func ReplayBlocks(
 						modeStr, blocksPerSec, tipDistanceStr)
 				}
 
-				// Line 2: CU and transaction stats (median/min/max)
+				// Line 2: Current block source
+				mlog.Log.InfofPrecise("  block source: %s", formatBlockSourceStatus(fetchStats))
+
+				// Line 3: CU and transaction stats (median/min/max)
 				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
 					medCU, minCU, maxCU, medVoteTx, medNonVoteTx)
 
-				// Line 3: Execution stats (median/min/max for execution, wait; median for replay total)
+				// Line 4: Execution stats (median/min/max for execution, wait; median for replay total)
 				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
 					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
 
@@ -1838,7 +1851,7 @@ func ReplayBlocks(
 						clonedMB, touchedMB, avgAcctsPerTx, avgTouchedPerTx)
 				}
 
-				// Line 4: RPC/fetch debugging info
+				// Line 5: RPC/fetch debugging info
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
@@ -2026,6 +2039,14 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		}
 		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
 
+		if txMeta == nil {
+			if txFeeInfo == nil {
+				panic(fmt.Sprintf("txFeeInfo is nil for tx %s in slot %d", tx.Signatures[0], block.Slot))
+			}
+			txFeeAccumulator.Add(txFeeInfo)
+			continue
+		}
+
 		if txErr != nil {
 			if txMeta.Err == nil && tx.IsVote() {
 				mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: vote tx %s failed locally but succeeded onchain => bankhash mismatch at parent slot %d",
@@ -2045,6 +2066,9 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 			panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 		}
 
+		if txFeeInfo == nil {
+			panic(fmt.Sprintf("txFeeInfo is nil for tx %s in slot %d", tx.Signatures[0], block.Slot))
+		}
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 	return txFeeAccumulator

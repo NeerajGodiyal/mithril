@@ -133,7 +133,7 @@ cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "lightbringer" (lightbringer temporarily disabled, falls back to rpc)
+source = "rpc"   # "rpc" | "lightbringer"
 # lightbringer_endpoint = "localhost:9000"
 
 [replay]
