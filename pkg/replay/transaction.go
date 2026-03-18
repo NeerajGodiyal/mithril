@@ -299,14 +299,137 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 	return txFeeInfo, relevantErr
 }
 
-func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.WaitGroup) {
+type sigverifySnapshot struct {
+	slot             uint64
+	txSig            string
+	version          solana.MessageVersion
+	resolved         bool
+	requiredSigs     uint8
+	readonlySigned   uint8
+	readonlyUnsigned uint8
+	staticKeys       int
+	totalKeys        int
+	lookups          int
+	firstSigners     []string
+	firstKeys        []string
+	signers          []solana.PublicKey
+	signatures       []solana.Signature
+	message          []byte
+}
+
+func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnapshot, error) {
+	message, err := tx.Message.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	txSig := "<missing>"
+	if len(tx.Signatures) > 0 {
+		txSig = tx.Signatures[0].String()
+	}
+
+	numStaticKeys := len(tx.Message.AccountKeys)
+	if tx.Message.IsResolved() {
+		numStaticKeys -= tx.Message.AddressTableLookups.NumLookups()
+	}
+
+	signers := tx.Message.Signers()
+	maxSigners := min(4, len(signers))
+	firstSigners := make([]string, 0, maxSigners)
+	for i := 0; i < maxSigners; i++ {
+		firstSigners = append(firstSigners, signers[i].String())
+	}
+
+	maxItems := min(6, len(tx.Message.AccountKeys))
+	firstKeys := make([]string, 0, maxItems)
+	for i := 0; i < maxItems; i++ {
+		firstKeys = append(firstKeys, tx.Message.AccountKeys[i].String())
+	}
+
+	snapshot := &sigverifySnapshot{
+		slot:             slot,
+		txSig:            txSig,
+		version:          tx.Message.GetVersion(),
+		resolved:         tx.Message.IsResolved(),
+		requiredSigs:     tx.Message.Header.NumRequiredSignatures,
+		readonlySigned:   tx.Message.Header.NumReadonlySignedAccounts,
+		readonlyUnsigned: tx.Message.Header.NumReadonlyUnsignedAccounts,
+		staticKeys:       numStaticKeys,
+		totalKeys:        len(tx.Message.AccountKeys),
+		lookups:          tx.Message.AddressTableLookups.NumLookups(),
+		firstSigners:     firstSigners,
+		firstKeys:        firstKeys,
+		signers:          append([]solana.PublicKey(nil), signers...),
+		signatures:       append([]solana.Signature(nil), tx.Signatures...),
+		message:          message,
+	}
+
+	return snapshot, nil
+}
+
+func verifySignatures(snapshot *sigverifySnapshot, sigverifyWg *sync.WaitGroup) {
 	defer sigverifyWg.Done()
 	start := time.Now()
-	err := tx.VerifySignatures()
-	if err != nil {
-		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: %s", tx.Signatures[0], tx.Message.GetVersion(), err))
+
+	if len(snapshot.signers) != len(snapshot.signatures) {
+		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
+			snapshot.slot,
+			snapshot.txSig,
+			snapshot.version,
+			snapshot.resolved,
+			snapshot.requiredSigs,
+			snapshot.readonlySigned,
+			snapshot.readonlyUnsigned,
+			snapshot.staticKeys,
+			snapshot.totalKeys,
+			snapshot.lookups,
+			snapshot.firstSigners,
+			snapshot.firstKeys,
+		)
+		panic(fmt.Sprintf("error - tx %s (version = %d) had mismatched signers/signatures: got %d signers, but %d signatures",
+			snapshot.txSig, snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
+	}
+
+	for i, sig := range snapshot.signatures {
+		if snapshot.signers[i].Verify(snapshot.message, sig) {
+			continue
+		}
+		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
+			snapshot.slot,
+			snapshot.txSig,
+			snapshot.version,
+			snapshot.resolved,
+			snapshot.requiredSigs,
+			snapshot.readonlySigned,
+			snapshot.readonlyUnsigned,
+			snapshot.staticKeys,
+			snapshot.totalKeys,
+			snapshot.lookups,
+			snapshot.firstSigners,
+			snapshot.firstKeys,
+		)
+		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: invalid signature by %s",
+			snapshot.txSig, snapshot.version, snapshot.signers[i]))
 	}
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
+}
+
+func cloneTransaction(tx *solana.Transaction) (*solana.Transaction, error) {
+	if tx == nil {
+		return nil, nil
+	}
+
+	raw, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	cloned, err := solana.TransactionFromBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return cloned, nil
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
@@ -340,8 +463,12 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	start := time.Now()
+	sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
+	if err != nil {
+		return nil, err
+	}
 	sigverifyWg.Add(1)
-	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
+	go verifySignatures(sigverifySnapshot, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])

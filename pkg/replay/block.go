@@ -2080,7 +2080,50 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
+	plannerBlock := block
 	if rblock.FromLightbringer {
+		plannerBlock = rblock
+	}
+
+	if canUseDependencyPlanner(plannerBlock) {
+		do := make(chan int, len(block.Transactions))
+		done := make(chan int, len(block.Transactions))
+		go TopsortPlannerStream(plannerBlock, do, done)
+
+		wg := &sync.WaitGroup{}
+		wg.Add(txParallelism)
+		for i := range txParallelism {
+			go func() {
+				defer wg.Done()
+				for idx := range do {
+					txStart := time.Now()
+					tx := block.Transactions[idx]
+					var txMeta *rpc.TransactionMeta
+					if idx < len(rblock.TxMetas) {
+						txMeta = rblock.TxMetas[idx]
+					}
+					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[i])
+					txErr := errs[idx]
+					// check for success-failure return value divergences
+					if txMeta != nil && txErr == nil && txMeta.Err != nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
+							CurrentRunID, block.Slot, tx.Signatures[0], txMeta.Err)
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], txMeta.Err))
+					} else if txMeta != nil && txErr != nil && txMeta.Err == nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
+							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+					}
+					txDurations[i] += time.Since(txStart)
+					done <- idx
+				}
+
+			}()
+		}
+
+		wg.Wait()
+		close(done)
+	} else if rblock.FromLightbringer {
 		wg := &sync.WaitGroup{}
 		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
 			defer wg.Done()
@@ -2096,39 +2139,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			wg.Wait()
 		}
 	} else {
-		do := make(chan int, len(block.Transactions))
-		done := make(chan int, len(block.Transactions))
-		go TopsortPlannerStream(block, do, done)
-
-		wg := &sync.WaitGroup{}
-		wg.Add(txParallelism)
-		for i := range txParallelism {
-			go func() {
-				defer wg.Done()
-				for idx := range do {
-					txStart := time.Now()
-					tx := block.Transactions[idx]
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], rblock.TxMetas[idx], dbgOpts, sealevel.BorrowedAccountArenas[i])
-					txErr := errs[idx]
-					// check for success-failure return value divergences
-					if rblock.TxMetas != nil && txErr == nil && rblock.TxMetas[idx].Err != nil {
-						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
-							CurrentRunID, block.Slot, tx.Signatures[0], rblock.TxMetas[idx].Err)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], rblock.TxMetas[idx].Err))
-					} else if rblock.TxMetas != nil && txErr != nil && rblock.TxMetas[idx].Err == nil {
-						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
-							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
-						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
-					}
-					txDurations[i] += time.Since(txStart)
-					done <- idx
-				}
-
-			}()
-		}
-
-		wg.Wait()
-		close(done)
+		panic("dependency planner unavailable for non-Lightbringer block")
 	}
 
 	for idx, txFeeInfo := range txFeeInfos {
@@ -2179,8 +2190,11 @@ func ProcessBlock(
 		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
 	}
 	for i := range block.Transactions {
-		unresolvedBlock.Transactions[i] = &solana.Transaction{}
-		*(unresolvedBlock.Transactions[i]) = *block.Transactions[i]
+		clonedTx, cloneErr := cloneTransaction(block.Transactions[i])
+		if cloneErr != nil {
+			panic(fmt.Sprintf("unable to clone tx %s for unresolved block copy in slot %d: %v", block.Transactions[i].Signatures[0], block.Slot, cloneErr))
+		}
+		unresolvedBlock.Transactions[i] = clonedTx
 		if unresolvedBlock.TxMetas != nil && !block.FromLightbringer {
 			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
 			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
