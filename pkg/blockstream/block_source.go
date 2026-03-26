@@ -255,23 +255,28 @@ type BlockSource struct {
 	nearTipLookahead    uint64        // Slots ahead to schedule in near-tip
 
 	// Lightbringer live-stream handoff
-	lightbringerEndpoint       string
-	lightbringerStarted        atomic.Bool
-	lightbringerConnected      atomic.Bool
-	lightbringerLastStreamSlot atomic.Uint64
-	lightbringerLastRecvUnix   atomic.Int64
-	lightbringerHandoffSlot    atomic.Uint64 // First slot from the active stream connection, 0 = no active handoff
-	lightbringerForceRPCUntil  atomic.Uint64 // While set, ignore Lightbringer and use RPC until this slot is executed
-	lightbringerCooldownUntil  atomic.Uint64 // After a missing-slot recovery, keep RPC active until this slot executes
-	lightbringerNeedRPCResume  atomic.Bool   // Set when a live handoff disconnects and RPC must fill the gap again
-	lightbringerActive         atomic.Bool   // True once emitted blocks are being sourced from Lightbringer
-	lightbringerGapSlot        atomic.Uint64 // Waiting slot currently being watched for a Lightbringer gap
-	lightbringerGapSinceUnix   atomic.Int64  // UnixNano when the current Lightbringer gap was first observed
-	lightbringerRepairSlot     atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
-	lightbringerWg             sync.WaitGroup
-	lightbringerBufferMu       sync.Mutex
-	lightbringerBuffer         map[uint64]*b.Block
-	lightbringerBufferOrder    []uint64
+	lightbringerEndpoint           string
+	lightbringerStarted            atomic.Bool
+	lightbringerConnected          atomic.Bool
+	lightbringerLastStreamSlot     atomic.Uint64
+	lightbringerLastRecvUnix       atomic.Int64
+	lightbringerReconnectRequested atomic.Bool
+	lightbringerCancelMu           sync.Mutex
+	lightbringerCancel             context.CancelFunc
+	lightbringerHandoffSlot        atomic.Uint64 // First slot from the active stream connection, 0 = no active handoff
+	lightbringerForceRPCUntil      atomic.Uint64 // While set, ignore Lightbringer and use RPC until this slot is executed
+	lightbringerCooldownUntil      atomic.Uint64 // After a missing-slot recovery, keep RPC active until this slot executes
+	lightbringerNeedRPCResume      atomic.Bool   // Set when a live handoff disconnects and RPC must fill the gap again
+	lightbringerActive             atomic.Bool   // True once emitted blocks are being sourced from Lightbringer
+	lightbringerGapSlot            atomic.Uint64 // Waiting slot currently being watched for a Lightbringer gap
+	lightbringerGapSinceUnix       atomic.Int64  // UnixNano when the current Lightbringer gap was first observed
+	lightbringerGapLastLogUnix     atomic.Int64  // UnixNano of the last active-gap wait log
+	lightbringerGapReconnectSlot   atomic.Uint64 // Waiting slot that already triggered a Lightbringer reconnect
+	lightbringerRepairSlot         atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
+	lightbringerWg                 sync.WaitGroup
+	lightbringerBufferMu           sync.Mutex
+	lightbringerBuffer             map[uint64]*b.Block
+	lightbringerBufferOrder        []uint64
 
 	// Stats tracking
 	stats          BlockSourceStats
@@ -327,16 +332,17 @@ const (
 	defaultTipGateThreshold = 128
 
 	// Lightbringer stream settings
-	lightbringerDialTimeout     = 10 * time.Second
-	lightbringerRetryBackoff    = 2 * time.Second
-	lightbringerMaxRetryBackoff = 15 * time.Second
-	lightbringerBufferSlots     = 256
-	lightbringerFirstSlotWarn   = 10 * time.Second
-	lightbringerIdleReconnect   = 10 * time.Second
-	lightbringerMinHandoffRun   = 3
-	lightbringerGapFallbackWait = 2 * time.Second
-	lightbringerGapBufferDepth  = 12
-	lightbringerRecoverySlots   = 16
+	lightbringerDialTimeout       = 10 * time.Second
+	lightbringerRetryBackoff      = 2 * time.Second
+	lightbringerMaxRetryBackoff   = 15 * time.Second
+	lightbringerBufferSlots       = 256
+	lightbringerFirstSlotWarn     = 10 * time.Second
+	lightbringerIdleReconnect     = 10 * time.Second
+	lightbringerGapReconnectAfter = 10 * time.Second
+	lightbringerMinHandoffRun     = 3
+	lightbringerGapFallbackWait   = 2 * time.Second
+	lightbringerGapBufferDepth    = 12
+	lightbringerRecoverySlots     = 16
 
 	// RPC getBlock can transiently report SlotSkipped or "block not available"
 	// for slots that later turn out to have real blocks. Never emit a skipped
@@ -586,6 +592,48 @@ func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 func (bs *BlockSource) clearLightbringerGapWatch() {
 	bs.lightbringerGapSlot.Store(0)
 	bs.lightbringerGapSinceUnix.Store(0)
+	bs.lightbringerGapLastLogUnix.Store(0)
+	bs.lightbringerGapReconnectSlot.Store(0)
+}
+
+func (bs *BlockSource) setLightbringerCancel(cancel context.CancelFunc) {
+	bs.lightbringerCancelMu.Lock()
+	bs.lightbringerCancel = cancel
+	bs.lightbringerCancelMu.Unlock()
+}
+
+func (bs *BlockSource) clearLightbringerCancel() {
+	bs.lightbringerCancelMu.Lock()
+	bs.lightbringerCancel = nil
+	bs.lightbringerCancelMu.Unlock()
+}
+
+func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
+	if !bs.lightbringerConnected.Load() {
+		return false
+	}
+	if !bs.lightbringerReconnectRequested.CompareAndSwap(false, true) {
+		return false
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	lastEmitted := bs.lastEmittedBlockSlot
+	bs.reorderMu.Unlock()
+	latestStreamed := bs.lightbringerLastStreamSlot.Load()
+
+	mlog.Log.Warnf("Lightbringer stream reconnect requested: %s | waiting_slot=%d | last_emitted=%d | latest_streamed=%d",
+		reason, waitingSlot, lastEmitted, latestStreamed)
+
+	bs.lightbringerCancelMu.Lock()
+	cancel := bs.lightbringerCancel
+	bs.lightbringerCancelMu.Unlock()
+	if cancel == nil {
+		bs.lightbringerReconnectRequested.Store(false)
+		return false
+	}
+	cancel()
+	return true
 }
 
 func (bs *BlockSource) isLightbringerRepairSlot(slot uint64) bool {
@@ -625,7 +673,11 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 		return
 	}
 
-	bs.clearLightbringerGapWatch()
+	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
+	gapAge := time.Duration(0)
+	if gapSinceUnix != 0 {
+		gapAge = time.Since(time.Unix(0, gapSinceUnix))
+	}
 
 	waitReason := fmt.Sprintf("first buffered Lightbringer block %d still depends on parent slot %d", firstBufferedSlot, firstBufferedParentSlot)
 	switch {
@@ -635,8 +687,19 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 		waitReason = fmt.Sprintf("later buffered block %d points back to anchor %d, so the missing range may be a skipped run", firstBufferedSlot, bs.lastEmittedBlockSlot)
 	}
 
-	mlog.Log.Warnf("BLOCK SOURCE STATUS: waiting for missing Lightbringer slot %d from live stream while keeping Lightbringer active | first_buffered=%d | first_parent_slot=%d | buffered_lightbringer=%d | reason=%s | mode=%s",
-		waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString())
+	now := time.Now()
+	lastLog := time.Unix(0, bs.lightbringerGapLastLogUnix.Load())
+	if lastLog.IsZero() || now.Sub(lastLog) >= reorderGapWarnInterval {
+		bs.lightbringerGapLastLogUnix.Store(now.UnixNano())
+		mlog.Log.Warnf("BLOCK SOURCE STATUS: waiting for missing Lightbringer slot %d from live stream while keeping Lightbringer active | first_buffered=%d | first_parent_slot=%d | buffered_lightbringer=%d | reason=%s | mode=%s",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString())
+	}
+
+	if firstBufferedParentSlot == waitingSlot && gapAge >= lightbringerGapReconnectAfter &&
+		bs.lightbringerGapReconnectSlot.CompareAndSwap(0, waitingSlot) {
+		bs.requestLightbringerReconnect(fmt.Sprintf("waiting %s for live Lightbringer slot %d while later buffered blocks still depend on it",
+			gapAge.Round(time.Second), waitingSlot))
+	}
 }
 
 func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
@@ -1234,6 +1297,7 @@ func (bs *BlockSource) runLightbringerStream() {
 		}
 
 		streamCtx, cancelStream := context.WithCancel(context.Background())
+		bs.setLightbringerCancel(cancelStream)
 		streamDone := make(chan struct{})
 		go func() {
 			defer close(streamDone)
@@ -1249,6 +1313,7 @@ func (bs *BlockSource) runLightbringerStream() {
 		if err != nil {
 			cancelStream()
 			<-streamDone
+			bs.clearLightbringerCancel()
 			_ = conn.Close()
 			mlog.Log.Warnf("Lightbringer stream setup failed for %s: %v", bs.lightbringerEndpoint, err)
 			if bs.waitForStopOrTimeout(backoff) {
@@ -1269,7 +1334,6 @@ func (bs *BlockSource) runLightbringerStream() {
 		firstSlotOnce := sync.Once{}
 		connectionClosed := make(chan struct{})
 		connectionClosedOnce := sync.Once{}
-		var idleReconnectRequested atomic.Bool
 		go func(endpoint string) {
 			ticker := time.NewTicker(lightbringerFirstSlotWarn)
 			defer ticker.Stop()
@@ -1314,20 +1378,8 @@ func (bs *BlockSource) runLightbringerStream() {
 					if idleFor < lightbringerIdleReconnect {
 						continue
 					}
-					if !idleReconnectRequested.CompareAndSwap(false, true) {
-						continue
-					}
-
-					bs.reorderMu.Lock()
-					waitingSlot := bs.nextSlotToSend
-					lastEmitted := bs.lastEmittedBlockSlot
-					bs.reorderMu.Unlock()
-					latestStreamed := bs.lightbringerLastStreamSlot.Load()
-
-					mlog.Log.Warnf("Lightbringer live stream idle for %s while waiting on slot %d (last_emitted=%d latest_streamed=%d); reconnecting stream",
-						idleFor.Round(time.Second), waitingSlot, lastEmitted, latestStreamed)
-					cancelStream()
-					return
+					bs.requestLightbringerReconnect(fmt.Sprintf("live stream idle for %s while near-tip replay is active",
+						idleFor.Round(time.Second)))
 				}
 			}
 		}(bs.lightbringerEndpoint)
@@ -1339,6 +1391,7 @@ func (bs *BlockSource) runLightbringerStream() {
 					close(connectionClosed)
 				})
 				bs.lightbringerConnected.Store(false)
+				bs.clearLightbringerCancel()
 				clearedPrefetched := bs.clearBufferedLightbringerBlocks()
 				if bs.lightbringerHandoffSlot.Load() != 0 {
 					bs.reorderMu.Lock()
@@ -1358,8 +1411,9 @@ func (bs *BlockSource) runLightbringerStream() {
 						return
 					}
 					if errors.Is(err, context.Canceled) {
-						if idleReconnectRequested.Load() {
-							mlog.Log.Warnf("Lightbringer stream reconnecting after idle period")
+						if bs.lightbringerReconnectRequested.Load() {
+							bs.lightbringerReconnectRequested.Store(false)
+							mlog.Log.Warnf("Lightbringer stream reconnecting after watchdog request")
 						} else {
 							return
 						}
