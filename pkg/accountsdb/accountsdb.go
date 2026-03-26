@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"runtime/trace"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
@@ -41,7 +41,6 @@ type AccountsDb struct {
 	inProgressStoreRequests   *list.List
 	storeRequestChan          chan *list.Element
 	storeWorkerDone           chan struct{}
-
 }
 
 type storeRequest struct {
@@ -49,6 +48,15 @@ type storeRequest struct {
 	slot  uint64
 	m     map[solana.PublicKey]*accounts.Account
 	cb    func()
+}
+
+func (accountsDb *AccountsDb) StoreQueueLen() int {
+	if !StoreAsync || accountsDb.inProgressStoreRequests == nil {
+		return 0
+	}
+	accountsDb.inProgressStoreRequestsMu.Lock()
+	defer accountsDb.inProgressStoreRequestsMu.Unlock()
+	return accountsDb.inProgressStoreRequests.Len()
 }
 
 // silentLogger implements pebble.Logger but discards all messages.

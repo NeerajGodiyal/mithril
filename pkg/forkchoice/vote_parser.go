@@ -1,6 +1,7 @@
 package forkchoice
 
 import (
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -13,7 +14,9 @@ type voteInfo struct {
 	votePubkey solana.PublicKey
 }
 
-func (f *forkChoiceState) parseAndValidateVoteTxForBankhashAndSlot(tx *solana.Transaction) (*voteInfo, bool) {
+// parseAndValidateVoteTx validates a vote transaction against the given authorized
+// voters cache. Accepts the cache as a parameter to avoid racing with epoch updates.
+func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) (*voteInfo, bool) {
 	if len(tx.Message.Instructions) < 1 {
 		return nil, false
 	}
@@ -26,7 +29,10 @@ func (f *forkChoiceState) parseAndValidateVoteTxForBankhashAndSlot(tx *solana.Tr
 	votePubkey := tx.Message.AccountKeys[instr.Accounts[0]]
 	voteAuthority := tx.Message.AccountKeys[instr.Accounts[1]]
 
-	if !(tx.IsSigner(voteAuthority) && f.epochAuthorizedVoters.IsAuthorizedVoter(votePubkey, voteAuthority)) {
+	if authorizedVoters == nil {
+		return nil, false
+	}
+	if !(tx.IsSigner(voteAuthority) && authorizedVoters.IsAuthorizedVoter(votePubkey, voteAuthority)) {
 		return nil, false
 	}
 
@@ -67,7 +73,7 @@ func (f *forkChoiceState) parseAndValidateVoteTxForBankhashAndSlot(tx *solana.Tr
 				return nil, false
 			}
 			return &voteInfo{slot: lockout.Slot,
-				bankHash:   vote.Hash,
+				bankHash:   vote.TowerSync.Hash,
 				votePubkey: votePubkey}, true
 		}
 
@@ -103,7 +109,7 @@ func (f *forkChoiceState) parseAndValidateVoteTxForBankhashAndSlot(tx *solana.Tr
 			}
 
 			return &voteInfo{slot: slot,
-				bankHash:   vote.Hash,
+				bankHash:   vote.Vote.Hash,
 				votePubkey: votePubkey}, true
 		}
 
@@ -137,7 +143,7 @@ func (f *forkChoiceState) parseAndValidateVoteTxForBankhashAndSlot(tx *solana.Tr
 				return nil, false
 			}
 			return &voteInfo{slot: lockout.Slot,
-				bankHash:   vote.Hash,
+				bankHash:   vote.UpdateVoteState.Hash,
 				votePubkey: votePubkey}, true
 		}
 
