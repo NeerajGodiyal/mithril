@@ -486,6 +486,7 @@ func (s *ForkChoiceService) ResolvePathToLeaf(anchorSlot uint64, leafSlot uint64
 // unresolved slot (no supermajority winner) transitions from NeedWait to
 // NoSupermajority. This is NOT a mandatory delay before confirmation — a slot
 // with observed supermajority is confirmed immediately regardless of this window.
+// abcd.
 const VoteConfirmationTimeoutSlots = 32
 
 // IsBankhashCorrect queries the confirmation status of a slot's bankhash.

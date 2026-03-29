@@ -7,6 +7,8 @@ import (
 	"time"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestLightbringerBlockConnectsLocked(t *testing.T) {
@@ -57,8 +59,8 @@ func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) 
 	if got := bs.lightbringerForceRPCUntil.Load(); got != 101 {
 		t.Fatalf("expected RPC to be forced until slot 101, got %d", got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got <= 101 {
-		t.Fatalf("expected cooldown to extend past slot 101, got %d", got)
+	if got := bs.lightbringerCooldownUntil.Load(); got != 101+lightbringerRecoverySlots {
+		t.Fatalf("expected cooldown boundary to match configured recovery window, got %d", got)
 	}
 	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected handoff slot to be cleared, got %d", got)
@@ -163,6 +165,31 @@ func TestPrepareLightbringerHandoffRequiresMinimumRunway(t *testing.T) {
 	}
 }
 
+func TestPrepareLightbringerHandoffRequiresRunwayThroughConfiguredBoundary(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lastEmittedBlockSlot = 150
+	for slot := uint64(151); slot <= 157; slot++ {
+		parentSlot := slot - 1
+		if slot == 151 {
+			parentSlot = 150
+		}
+		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
+		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+	}
+
+	if blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
+		t.Fatalf("expected handoff to stay unarmed when connected runway only covers through slot 157, got prepared=%v handoff=%d blocks=%+v",
+			prepared, handoffSlot, blocks)
+	}
+}
+
 func TestPrepareLightbringerHandoffRequiresConnectedRunway(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
@@ -251,7 +278,7 @@ func TestPrepareLightbringerHandoffPurgesRPCOwnedStateAtBoundary(t *testing.T) {
 	}
 }
 
-func TestSynthesizeLightbringerSkipsLockedMarksMissingSlots(t *testing.T) {
+func TestSynthesizeLightbringerSkipsLockedDoesNotInferMissingSlotsFromReconnectingDescendant(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
 		LightbringerEndpoint: "127.0.0.1:50051",
@@ -268,15 +295,15 @@ func TestSynthesizeLightbringerSkipsLockedMarksMissingSlots(t *testing.T) {
 	synthesized := bs.synthesizeLightbringerSkipsLocked()
 	bs.reorderMu.Unlock()
 
-	if !synthesized {
-		t.Fatalf("expected skipped slot inference to succeed")
+	if synthesized {
+		t.Fatalf("expected reconnecting descendant to stay diagnostic-only and not infer skipped slots")
 	}
-	if !bs.skippedSlots[151] {
-		t.Fatalf("expected slot 151 to be marked skipped")
+	if bs.skippedSlots[151] {
+		t.Fatalf("expected slot 151 to remain unresolved without an external skip confirmation")
 	}
 }
 
-func TestSynthesizeLightbringerSkipsLockedDropsDisconnectedWaitingBlockWhenDescendantConnects(t *testing.T) {
+func TestSynthesizeLightbringerSkipsLockedDoesNotBypassDisconnectedWaitingBlockFromDescendant(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
 		LightbringerEndpoint: "127.0.0.1:50051",
@@ -294,17 +321,133 @@ func TestSynthesizeLightbringerSkipsLockedDropsDisconnectedWaitingBlockWhenDesce
 	synthesized := bs.synthesizeLightbringerSkipsLocked()
 	bs.reorderMu.Unlock()
 
-	if !synthesized {
-		t.Fatalf("expected disconnected waiting block to be bypassed via skip inference")
+	if synthesized {
+		t.Fatalf("expected disconnected waiting block to remain unresolved instead of being rewritten as skipped")
 	}
-	if !bs.skippedSlots[151] {
-		t.Fatalf("expected slot 151 to be marked skipped")
+	if bs.skippedSlots[151] {
+		t.Fatalf("expected slot 151 to remain unresolved without a canonical skip proof")
 	}
-	if bs.reorderBuffer[151] != nil {
-		t.Fatalf("expected disconnected Lightbringer block at slot 151 to be dropped")
+	if bs.reorderBuffer[151] == nil {
+		t.Fatalf("expected disconnected Lightbringer block at slot 151 to remain buffered until parent mismatch handling runs")
 	}
 	if bs.reorderBuffer[152] == nil {
 		t.Fatalf("expected connected descendant at slot 152 to remain buffered")
+	}
+}
+
+func TestShouldPreferIncomingLightbringerBlockLockedPrefersConnectedSameSlotBlock(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lastEmittedBlockSlot = 150
+	disconnected := &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
+	connected := &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
+
+	bs.reorderMu.Lock()
+	preferIncoming := bs.shouldPreferIncomingLightbringerBlockLocked(disconnected, connected)
+	bs.reorderMu.Unlock()
+
+	if !preferIncoming {
+		t.Fatalf("expected same-slot Lightbringer block that matches the anchor to replace the disconnected buffered fork")
+	}
+}
+
+func TestWaitingLightbringerParentMismatchLockedDetectsDisconnectedBufferedSlot(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lastEmittedBlockSlot = 150
+	bs.nextSlotToSend = 151
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
+
+	bs.reorderMu.Lock()
+	waitingSlot, observedParent, expectedParent, mismatch := bs.waitingLightbringerParentMismatchLocked()
+	bs.reorderMu.Unlock()
+
+	if !mismatch {
+		t.Fatalf("expected disconnected waiting Lightbringer block to be recognized as a parent mismatch")
+	}
+	if waitingSlot != 151 || observedParent != 149 || expectedParent != 150 {
+		t.Fatalf("expected mismatch details slot=151 observed_parent=149 expected_parent=150, got slot=%d observed=%d expected=%d",
+			waitingSlot, observedParent, expectedParent)
+	}
+}
+
+func TestWaitingLightbringerParentMismatchLockedDefersWhenConsensusManaged(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.lastEmittedBlockSlot = 150
+	bs.nextSlotToSend = 151
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
+
+	bs.reorderMu.Lock()
+	waitingSlot, observedParent, expectedParent, mismatch := bs.waitingLightbringerParentMismatchLocked()
+	bs.reorderMu.Unlock()
+
+	if mismatch || waitingSlot != 0 || observedParent != 0 || expectedParent != 0 {
+		t.Fatalf("expected consensus-managed Lightbringer to defer parent mismatch handling, got mismatch=%v slot=%d observed=%d expected=%d",
+			mismatch, waitingSlot, observedParent, expectedParent)
+	}
+}
+
+func TestShouldDiscardSkippedSlotAfterHandoffDropsRPCSkipMarker(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerHandoffSlot.Store(151)
+	bs.skippedSlots[151] = true
+
+	if !bs.shouldDiscardSkippedSlotAfterHandoff(151) {
+		t.Fatalf("expected provisional RPC skip marker at slot 151 to be discarded after Lightbringer handoff")
+	}
+}
+
+func TestInspectLaterLightbringerBlocksLockedFindsConnectedDescendant(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lastEmittedBlockSlot = 150
+	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 151}
+	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLightbringer: false}
+	bs.reorderBuffer[155] = &b.Block{Slot: 155, FromLightbringer: true, SourceParentSlot: 150}
+	bs.reorderBuffer[156] = &b.Block{Slot: 156, FromLightbringer: true, SourceParentSlot: 155}
+
+	firstBufferedSlot, firstBufferedParentSlot, bufferedCount, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLightbringerBlocksLocked(151)
+	if firstBufferedSlot != 152 || firstBufferedParentSlot != 151 {
+		t.Fatalf("expected earliest later Lightbringer block to be 152(parent=151), got slot=%d parent=%d", firstBufferedSlot, firstBufferedParentSlot)
+	}
+	if bufferedCount != 3 {
+		t.Fatalf("expected three later Lightbringer blocks to be counted, got %d", bufferedCount)
+	}
+	if !foundConnected {
+		t.Fatalf("expected a connected descendant to the current anchor to be found")
+	}
+	if firstConnectedSlot != 155 || firstConnectedParentSlot != 150 {
+		t.Fatalf("expected first connected descendant to be 155(parent=150), got slot=%d parent=%d", firstConnectedSlot, firstConnectedParentSlot)
 	}
 }
 
@@ -341,6 +484,240 @@ func TestHandleDetectedLightbringerGapWaitsForStreamWhenLightbringerActive(t *te
 	}
 }
 
+func TestRepairLightbringerGapReconnectsForMissingAncestorRange(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lightbringerConnected.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.isNearTip.Store(true)
+	bs.nextSlotToSend = 120
+	bs.lastEmittedBlockSlot = 119
+	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerDeepGapReconnect + time.Second)).UnixNano())
+
+	reconnected := false
+	bs.setLightbringerCancel(func() {
+		reconnected = true
+	})
+
+	bs.repairLightbringerGap(120, 122, 121, reorderGapWarnThreshold)
+
+	if !reconnected {
+		t.Fatalf("expected reconnect to be requested for a missing Lightbringer ancestor range")
+	}
+	if got := bs.lightbringerGapReconnectSlot.Load(); got != 120 {
+		t.Fatalf("expected reconnect slot to be recorded as 120, got %d", got)
+	}
+}
+
+func TestDetectLightbringerGapWaitsForConfiguredFallbackDelay(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.nextSlotToSend = 120
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true, SourceParentSlot: 120}
+	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLightbringer: true, SourceParentSlot: 121}
+	bs.lightbringerGapSlot.Store(120)
+	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerGapFallbackWait / 2)).UnixNano())
+
+	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLightbringerGapLocked()
+	if waitingSlot != 0 || firstBufferedSlot != 0 || firstBufferedParentSlot != 0 || bufferedCount != 0 || shouldFallback {
+		t.Fatalf("expected Lightbringer gap detection to stay patient before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback)
+	}
+}
+
+func TestDetectLightbringerGapDefersWhenConsensusManaged(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.nextSlotToSend = 120
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true, SourceParentSlot: 120}
+	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLightbringer: true, SourceParentSlot: 121}
+	bs.lightbringerGapSlot.Store(120)
+	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-time.Minute).UnixNano())
+
+	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLightbringerGapLocked()
+	if waitingSlot != 0 || firstBufferedSlot != 0 || firstBufferedParentSlot != 0 || bufferedCount != 0 || shouldFallback {
+		t.Fatalf("expected consensus-managed Lightbringer to defer gap fallback, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback)
+	}
+	if got := bs.lightbringerGapSlot.Load(); got != 0 {
+		t.Fatalf("expected deferred gap tracking to clear the active gap watch, got slot %d", got)
+	}
+}
+
+func TestSetLastExecutedSlotClearsRecoveryWindowImmediatelyWhenDisabled(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	waitingSlot := uint64(125)
+	bs.lightbringerForceRPCUntil.Store(waitingSlot)
+	bs.lightbringerCooldownUntil.Store(waitingSlot + lightbringerRecoverySlots)
+
+	bs.SetLastExecutedSlot(waitingSlot)
+
+	if got := bs.lightbringerForceRPCUntil.Load(); got != 0 {
+		t.Fatalf("expected forced RPC boundary to clear at slot %d, got %d", waitingSlot, got)
+	}
+	if got := bs.lightbringerCooldownUntil.Load(); got != 0 {
+		t.Fatalf("expected disabled recovery window to clear immediately at slot %d, got %d", waitingSlot, got)
+	}
+}
+
+func TestSetLastExecutedSlotAdvancesDeferredLightbringerFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.nextSlotToSend = 151
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true}
+	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true}
+	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLightbringer: true}
+	bs.skippedSlots[153] = true
+	bs.slotState[151] = slotDone
+	bs.slotState[152] = slotDone
+	bs.slotState[154] = slotInflight
+	bs.retrySlots = []uint64{150, 151, 154}
+
+	bs.SetLastExecutedSlot(153)
+
+	if got := bs.nextSlotToSend; got != 154 {
+		t.Fatalf("expected resolved frontier to advance to slot 154, got %d", got)
+	}
+	if _, exists := bs.reorderBuffer[151]; exists {
+		t.Fatalf("expected resolved buffered slot 151 to be pruned")
+	}
+	if _, exists := bs.reorderBuffer[152]; exists {
+		t.Fatalf("expected resolved buffered slot 152 to be pruned")
+	}
+	if _, exists := bs.reorderBuffer[154]; !exists {
+		t.Fatalf("expected unresolved buffered slot 154 to remain")
+	}
+	if bs.skippedSlots[153] {
+		t.Fatalf("expected resolved skipped slot 153 to be pruned")
+	}
+	if _, exists := bs.slotState[151]; exists {
+		t.Fatalf("expected resolved slot state 151 to be pruned")
+	}
+	if _, exists := bs.slotState[152]; exists {
+		t.Fatalf("expected resolved slot state 152 to be pruned")
+	}
+	if _, exists := bs.slotState[154]; !exists {
+		t.Fatalf("expected unresolved slot state 154 to remain")
+	}
+	if len(bs.retrySlots) != 1 || bs.retrySlots[0] != 154 {
+		t.Fatalf("expected only unresolved retries to remain, got %+v", bs.retrySlots)
+	}
+}
+
+func TestEmitOrderedBlocksDirectlyStreamsConsensusManagedLightbringerObservations(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.nextSlotToSend = 101
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+
+	bs.resultQueue <- fetchResult{
+		slot:  105,
+		block: &b.Block{Slot: 105, FromLightbringer: true, SourceParentSlot: 104},
+	}
+	close(bs.resultQueue)
+
+	blk := bs.NextBlock()
+	<-done
+
+	if blk == nil || blk.Slot != 105 || !blk.FromLightbringer {
+		t.Fatalf("expected direct Lightbringer observation for slot 105, got %+v", blk)
+	}
+	if _, exists := bs.reorderBuffer[105]; exists {
+		t.Fatalf("expected direct observation to bypass the reorder buffer")
+	}
+	if got := bs.nextSlotToSend; got != 101 {
+		t.Fatalf("expected direct observation to leave nextSlotToSend at 101 until replay resolves it, got %d", got)
+	}
+}
+
+func TestIsLightbringerReconnectCancelRecognizesGrpcCanceledStatus(t *testing.T) {
+	err := status.Error(codes.Canceled, "context canceled")
+	if !isLightbringerReconnectCancel(err) {
+		t.Fatalf("expected gRPC canceled status to be treated as a reconnect cancel")
+	}
+}
+
+func TestDetectLightbringerGapResetsReconnectLatchForNewWaitingSlot(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true, SourceParentSlot: 120}
+	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLightbringer: true, SourceParentSlot: 121}
+	bs.nextSlotToSend = 120
+	bs.lightbringerGapSlot.Store(120)
+	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-6 * time.Second).UnixNano())
+	bs.lightbringerGapLastLogUnix.Store(time.Now().Add(-3 * time.Second).Unix())
+	bs.lightbringerGapReconnectSlot.Store(120)
+
+	delete(bs.reorderBuffer, 121)
+	delete(bs.reorderBuffer, 122)
+	bs.reorderBuffer[126] = &b.Block{Slot: 126, FromLightbringer: true, SourceParentSlot: 125}
+	bs.reorderBuffer[127] = &b.Block{Slot: 127, FromLightbringer: true, SourceParentSlot: 126}
+	bs.nextSlotToSend = 125
+
+	waitingSlot, _, _, _, shouldFallback := bs.detectLightbringerGapLocked()
+	if waitingSlot != 0 || shouldFallback {
+		t.Fatalf("expected first observation of a new gap to arm tracking only, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
+	}
+	if got := bs.lightbringerGapSlot.Load(); got != 125 {
+		t.Fatalf("expected new gap slot 125 to be tracked, got %d", got)
+	}
+	if got := bs.lightbringerGapReconnectSlot.Load(); got != 0 {
+		t.Fatalf("expected reconnect latch to reset for new gap, got %d", got)
+	}
+	if got := bs.lightbringerGapLastLogUnix.Load(); got != 0 {
+		t.Fatalf("expected gap log throttle to reset for new gap, got %d", got)
+	}
+}
+
 func TestHandleDetectedLightbringerGapForcesRPCBeforeLightbringerIsActive(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
@@ -356,8 +733,8 @@ func TestHandleDetectedLightbringerGapForcesRPCBeforeLightbringerIsActive(t *tes
 	if got := bs.lightbringerForceRPCUntil.Load(); got != 125 {
 		t.Fatalf("expected pending Lightbringer gap to force RPC until slot 125, got %d", got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got <= 125 {
-		t.Fatalf("expected pending Lightbringer gap to set recovery cooldown past 125, got %d", got)
+	if got := bs.lightbringerCooldownUntil.Load(); got != 125+lightbringerRecoverySlots {
+		t.Fatalf("expected pending Lightbringer gap to set cooldown boundary from the configured recovery window, got %d", got)
 	}
 	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected pending handoff to be cleared after forcing RPC, got %d", got)

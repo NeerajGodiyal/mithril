@@ -1444,7 +1444,7 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 		return VoteErrVoteTooOld
 	}
 
-	if proposedRoot != nil {
+	if proposedRoot != nil && *proposedRoot != nil {
 		pRoot := **proposedRoot
 		if pRoot < earliestSlotHashInHistory {
 			*proposedRoot = voteState.RootSlot
@@ -1461,7 +1461,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 		}
 	}
 
-	rootToCheck := *proposedRoot
+	var rootToCheck *uint64
+	if proposedRoot != nil {
+		rootToCheck = *proposedRoot
+	}
 	voteStateUpdateIndex := uint64(0)
 	slotHashesIndex := uint64(len(slotHashes))
 	var voteStateUpdateIndicesToFilter []uint64

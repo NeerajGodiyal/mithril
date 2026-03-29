@@ -1413,6 +1413,7 @@ func ReplayBlocks(
 
 	var readyConsensusPath *pendingConsensusPath
 	observedConsensusBlocks := make(map[uint64]*b.Block)
+	consensusCatchupHoldLogged := false
 
 	var opts *blockstream.BlockSourceOpts
 	if useLightbringer {
@@ -1424,6 +1425,9 @@ func ReplayBlocks(
 			StartSlot:            startSlot,
 			EndSlot:              endSlot,
 			BlockDir:             blockDir,
+			ConsensusManagedLightbringer: consensusEnforceActive &&
+				isLive &&
+				consensusEnforceSource == "lightbringer",
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
@@ -1541,12 +1545,27 @@ func ReplayBlocks(
 
 		stats := blockStream.GetFetchStats()
 		if consensusBufferedExecutionActive && !stats.IsNearTip {
+			anchorSlot := currentConsensusAnchorSlot()
+			hasObservedBlocks := len(observedConsensusBlocks) > 0
+			hasReadyDecisions := readyConsensusPath != nil && len(readyConsensusPath.decisions) > 0
+			hasUnresolvedGapAhead := stats.NextSlot > anchorSlot+1
+
+			if hasObservedBlocks || hasReadyDecisions || hasUnresolvedGapAhead {
+				if !consensusCatchupHoldLogged {
+					mlog.Log.Warnf("forkchoice: retaining buffered execution across catchup fallback at slot %d because anchor %d still has unresolved slots before next emitted slot %d",
+						triggerSlot, anchorSlot, stats.NextSlot)
+					consensusCatchupHoldLogged = true
+				}
+				return
+			}
+
 			consensusBufferedExecutionActive = false
 			readyConsensusPath = nil
 			clearObservedConsensusBlocks()
 			observeConsensusAnchor()
 			mlog.Log.Warnf("forkchoice: suspending buffered execution at slot %d because block source left near-tip mode (anchor=%d)",
 				triggerSlot, currentConsensusAnchorSlot())
+			consensusCatchupHoldLogged = false
 		}
 	}
 
@@ -1560,6 +1579,7 @@ func ReplayBlocks(
 				return nil
 			}
 			consensusBufferedExecutionActive = true
+			consensusCatchupHoldLogged = false
 			readyConsensusPath = nil
 			observeConsensusAnchor()
 			pruneObservedConsensusBlocks(currentConsensusAnchorSlot())
@@ -1741,6 +1761,9 @@ func ReplayBlocks(
 			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)",
 				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 			skippedSlotsCount++
+			// A resolved skip still advances replay progress for near-tip mode and
+			// consensus-managed Lightbringer delivery.
+			blockStream.SetLastExecutedSlot(block.Slot)
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -2551,6 +2574,51 @@ func ProcessBlock(
 	trace.Log(ctx, "slot", fmt.Sprintf("%d", block.Slot))
 	trace.Log(ctx, "txCount", fmt.Sprintf("%d", len(block.Transactions)))
 
+	var replayStage atomic.Value
+	var replayStageSince atomic.Int64
+	setReplayStage := func(stage string) {
+		replayStage.Store(stage)
+		replayStageSince.Store(time.Now().UnixNano())
+	}
+	setReplayStage("clone_transactions")
+
+	replayWatchdogDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		var lastLoggedStage string
+		var lastLoggedSince int64
+		for {
+			select {
+			case <-replayWatchdogDone:
+				return
+			case <-ticker.C:
+				stageVal := replayStage.Load()
+				stage, ok := stageVal.(string)
+				if !ok || stage == "" {
+					continue
+				}
+				sinceUnix := replayStageSince.Load()
+				if sinceUnix == 0 {
+					continue
+				}
+				if stage == lastLoggedStage && sinceUnix == lastLoggedSince {
+					continue
+				}
+				stageDuration := time.Since(time.Unix(0, sinceUnix))
+				if stageDuration < 10*time.Second {
+					continue
+				}
+				mlog.Log.Warnf("REPLAY WATCHDOG: slot %d stuck in stage %s for %s | txs=%d | lightbringer=%t",
+					block.Slot, stage, stageDuration.Round(time.Second), len(block.Transactions), block.FromLightbringer)
+				lastLoggedStage = stage
+				lastLoggedSince = sinceUnix
+			}
+		}
+	}()
+	defer close(replayWatchdogDone)
+
 	if SerializedParameterArena != nil {
 		SerializedParameterArena.Reset()
 	}
@@ -2575,6 +2643,7 @@ func ProcessBlock(
 	}
 
 	start = time.Now()
+	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
 	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
 	loadAcctsRegion.End()
@@ -2588,6 +2657,7 @@ func ProcessBlock(
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	start = time.Now()
 
+	setReplayStage("tx_loop")
 	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
 	if txParallelism > 0 {
 		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
@@ -2598,6 +2668,7 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 
 	start = time.Now()
+	setReplayStage("distribute_fees")
 
 	// distribute tx fees to the slot leader
 	// skip leader handling if there are zero transactions in this block
@@ -2611,19 +2682,23 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.Reward.AddTimingSince(start)
 
 	start = time.Now()
+	setReplayStage("collect_rent")
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	metrics.GlobalBlockReplay.Rent.AddTimingSince(start)
 
 	start = time.Now()
+	setReplayStage("run_incinerator")
 	runIncinerator(slotCtx)
 	metrics.GlobalBlockReplay.RunIncinerator.AddTimingSince(start)
 
 	start = time.Now()
+	setReplayStage("compile_accounts")
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 
 	start = time.Now()
+	setReplayStage("bankhash")
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
@@ -2635,6 +2710,7 @@ func ProcessBlock(
 	commitSlot.Store(slotCtx.Slot)
 	commitInProgress.Store(true)
 	start = time.Now()
+	setReplayStage("store_accounts")
 	persistedSlot := slotCtx.Slot
 	persistedBankhash := append([]byte(nil), slotCtx.FinalBankhash...)
 	persistedBlockSlot := block.Slot
@@ -2675,5 +2751,6 @@ func ProcessBlock(
 	*/
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
+	setReplayStage("done")
 	return slotCtx, err
 }
