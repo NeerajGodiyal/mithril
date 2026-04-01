@@ -187,6 +187,57 @@ func appendRunsLogEntry(runsLogPath string, ts time.Time, runID, commit, runDir 
 	}
 }
 
+// CreateSubprocessWriter creates a lumberjack-backed log writer for a named subprocess
+// (e.g., "lightbringer") in the current run directory. Returns os.Stderr if file
+// logging is not initialized.
+func (l *logger) CreateSubprocessWriter(name string) io.Writer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.initialized || l.runDir == "" {
+		// No file logging — at least prefix the output so it's identifiable in interleaved stderr
+		return newPrefixWriter(os.Stderr, "["+name+"] ")
+	}
+
+	logPath := filepath.Join(l.runDir, name+".log")
+	fileWriter := &lumberjack.Logger{
+		Filename:   logPath,
+		MaxSize:    100,   // 100MB default
+		MaxAge:     7,
+		MaxBackups: 5,
+		LocalTime:  false,
+		Compress:   true,
+	}
+
+	if l.toStdout {
+		return io.MultiWriter(newPrefixWriter(os.Stderr, "["+name+"] "), fileWriter)
+	}
+	return fileWriter
+}
+
+// prefixWriter wraps an io.Writer and prepends a prefix to each line.
+type prefixWriter struct {
+	w      io.Writer
+	prefix string
+}
+
+func newPrefixWriter(w io.Writer, prefix string) *prefixWriter {
+	return &prefixWriter{w: w, prefix: prefix}
+}
+
+func (pw *prefixWriter) Write(p []byte) (int, error) {
+	lines := bytes.Split(p, []byte("\n"))
+	for i, line := range lines {
+		if len(line) == 0 && i == len(lines)-1 {
+			continue // skip trailing empty line from split
+		}
+		if _, err := fmt.Fprintf(pw.w, "%s%s\n", pw.prefix, line); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
 // flushLoop periodically flushes the buffer and syncs to disk
 func (l *logger) flushLoop() {
 	defer l.wg.Done()

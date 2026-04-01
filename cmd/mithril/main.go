@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
@@ -53,7 +54,7 @@ func init() {
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	cobra.CheckErr(cmd.ExecuteContext(ctx))
 }
