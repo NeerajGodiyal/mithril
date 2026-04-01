@@ -236,6 +236,63 @@ name = "mithril"
 
 
 # ============================================================================
+# [lightbringer] - Lightbringer Sidecar
+# ============================================================================
+#
+# Lightbringer is a lightweight Solana edge node that caches and republishes
+# Turbine traffic. It runs alongside Mithril as a sidecar, streaming blocks
+# via gRPC for lower-latency block delivery than RPC polling.
+#
+# When enabled, Mithril manages Lightbringer's full lifecycle:
+#   1. Generates Lightbringer.toml from these settings
+#   2. Spawns the Lightbringer process
+#   3. Captures its logs to lightbringer.log in the run directory
+#   4. Shuts it down gracefully when Mithril stops
+#
+# Enabling this automatically sets block.source = "lightbringer" and
+# block.lightbringer_endpoint to match grpc_addr below.
+#
+# Requirements:
+#   - Lightbringer binary must be available at binary_path
+#   - A Solana gossip entrypoint is required (your validator or a known node)
+
+[lightbringer]
+    # Enable managed Lightbringer sidecar (default: false)
+    enabled = false
+
+    # Path to the Lightbringer binary
+    binary_path = "./lightbringer"
+
+    # Solana gossip entrypoint (REQUIRED when enabled)
+    # This is the IP:port of a Solana validator or RPC node running gossip.
+    # gossip_entrypoint = "1.2.3.4:8000"
+
+    # Where Lightbringer stores shreds (cached Turbine data)
+    storage = "/mnt/mithril-ledger/shred-store"
+
+    # Lightbringer's debug HTTP endpoint (for inspecting stored shreds)
+    rpc_addr = "127.0.0.1:3000"
+
+    # Lightbringer's gRPC stream endpoint (Mithril connects here for blocks)
+    # This value is automatically used as block.lightbringer_endpoint.
+    grpc_addr = "127.0.0.1:3001"
+
+    # Directory where Mithril writes the generated Lightbringer.toml
+    # Defaults to current working directory.
+    config_dir = "."
+
+    # Optional: InfluxDB metrics for Lightbringer
+    # (written as [influxdb] section in generated Lightbringer.toml)
+    # influxdb_host = "http://localhost:8181"
+    # influxdb_database = "test"
+    # influxdb_token = "xyz"
+
+    # Optional: Block confirmation via Solana RPC
+    # (written as [block_confirmation] section in generated Lightbringer.toml)
+    # block_confirmation_rpc_http = "http://localhost:8899"
+    # block_confirmation_rpc_websocket = "ws://localhost:8899"
+
+# ============================================================================
 # [rpc] - Mithril RPC Server
 # ============================================================================
 #

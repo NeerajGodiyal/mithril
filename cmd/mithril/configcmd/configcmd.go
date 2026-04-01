@@ -136,6 +136,15 @@ rpc = ["https://api.mainnet-beta.solana.com"]
 source = "rpc"   # "rpc" | "lightbringer"
 # lightbringer_endpoint = "localhost:9000"
 
+# [lightbringer]
+# enabled = false
+# binary_path = "./lightbringer"
+# gossip_entrypoint = "1.2.3.4:8000"
+# storage = "/mnt/mithril-ledger/shred-store"
+# rpc_addr = "127.0.0.1:3000"
+# grpc_addr = "127.0.0.1:3001"
+# See config.example.toml for full Lightbringer sidecar options.
+
 [replay]
 txpar = 24   # Recommended: 2x your CPU core count
 

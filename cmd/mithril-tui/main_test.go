@@ -96,22 +96,22 @@ func TestFilterRows(t *testing.T) {
 		allRows: rows,
 	}
 
-	// Test FilterAll
-	m.filterMode = FilterAll
+	// Test ViewMetricsAll
+	m.viewMode = ViewMetricsAll
 	filtered := m.filterRows()
 	assert.Len(t, filtered, 6)
 	assert.Equal(t, rows, filtered)
 
-	// Test FilterMachine
-	m.filterMode = FilterMachine
+	// Test ViewMetricsMachine
+	m.viewMode = ViewMetricsMachine
 	filtered = m.filterRows()
 	assert.Len(t, filtered, 3)
 	assert.Equal(t, "go_goroutines", filtered[0][0])
 	assert.Equal(t, "process_cpu_seconds", filtered[1][0])
 	assert.Equal(t, "promhttp_metric_handler_requests_total", filtered[2][0])
 
-	// Test FilterMithril
-	m.filterMode = FilterMithril
+	// Test ViewMetricsMithril
+	m.viewMode = ViewMetricsMithril
 	filtered = m.filterRows()
 	assert.Len(t, filtered, 3)
 	assert.Equal(t, "mithril_block_height", filtered[0][0])
