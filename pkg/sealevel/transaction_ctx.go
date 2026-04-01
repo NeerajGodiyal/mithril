@@ -17,10 +17,12 @@ type TxReturnData struct {
 }
 
 type TransactionAccounts struct {
-	Accounts  []*accounts.Account
-	Locked    []bool
-	Touched   []bool
-	AcctMetas []*AccountMeta
+	Accounts          []*accounts.Account
+	Shared            []bool
+	Locked            []bool
+	Touched           []bool
+	AcctMetas         []*AccountMeta
+	OnFirstWriteClone func(*accounts.Account)
 }
 
 type TransactionCtx struct {
@@ -47,11 +49,27 @@ func NewTransactionAccounts(accts []accounts.Account) *TransactionAccounts {
 	transactionAccts := new(TransactionAccounts)
 
 	transactionAccts.Accounts = make([]*accounts.Account, 0, len(accts))
+	transactionAccts.Shared = make([]bool, len(accts))
 	for _, acct := range accts {
 		a := acct
 		transactionAccts.Accounts = append(transactionAccts.Accounts, &a)
 	}
 
+	transactionAccts.Locked = make([]bool, len(accts), len(accts))
+	transactionAccts.Touched = make([]bool, len(accts), len(accts))
+
+	return transactionAccts
+}
+
+func NewTransactionAccountsFromRefs(accts []*accounts.Account, shared []bool) *TransactionAccounts {
+	if len(accts) != len(shared) {
+		panic("transaction accounts/shared flags length mismatch")
+	}
+
+	transactionAccts := new(TransactionAccounts)
+
+	transactionAccts.Accounts = append(make([]*accounts.Account, 0, len(accts)), accts...)
+	transactionAccts.Shared = append(make([]bool, 0, len(shared)), shared...)
 	transactionAccts.Locked = make([]bool, len(accts), len(accts))
 	transactionAccts.Touched = make([]bool, len(accts), len(accts))
 
@@ -287,10 +305,20 @@ func (txAccounts *TransactionAccounts) Unlock(idx uint64) {
 	txAccounts.Locked[idx] = false
 }
 
-func (txAccounts *TransactionAccounts) Touch(idx uint64) error {
+func (txAccounts *TransactionAccounts) Touch(idx uint64) (*accounts.Account, error) {
 	if len(txAccounts.Touched) == 0 || idx > uint64(len(txAccounts.Touched)-1) {
-		return InstrErrNotEnoughAccountKeys
+		return nil, InstrErrNotEnoughAccountKeys
 	}
+
+	if txAccounts.Shared[idx] {
+		clonedAcct := txAccounts.Accounts[idx].Clone()
+		txAccounts.Accounts[idx] = clonedAcct
+		txAccounts.Shared[idx] = false
+		if txAccounts.OnFirstWriteClone != nil {
+			txAccounts.OnFirstWriteClone(clonedAcct)
+		}
+	}
+
 	txAccounts.Touched[idx] = true
-	return nil
+	return txAccounts.Accounts[idx], nil
 }

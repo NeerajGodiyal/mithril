@@ -2223,14 +2223,19 @@ func ReplayBlocks(
 				// Account clone stats for copy-on-write optimization profiling
 				cloneStats := GetAndResetCloneStats()
 				if cloneStats.TxCount > 0 {
-					modifyRatio := float64(cloneStats.AcctsTouched) / float64(cloneStats.AcctsCloned) * 100
-					avgAcctsPerTx := float64(cloneStats.AcctsCloned) / float64(cloneStats.TxCount)
+					var cloneRatio float64
+					if cloneStats.AcctsLoaded > 0 {
+						cloneRatio = float64(cloneStats.AcctsCloned) / float64(cloneStats.AcctsLoaded) * 100
+					}
+					avgLoadedPerTx := float64(cloneStats.AcctsLoaded) / float64(cloneStats.TxCount)
+					avgClonedPerTx := float64(cloneStats.AcctsCloned) / float64(cloneStats.TxCount)
 					avgTouchedPerTx := float64(cloneStats.AcctsTouched) / float64(cloneStats.TxCount)
+					loadedMB := float64(cloneStats.AcctsLoadedBytes) / 1024 / 1024
 					clonedMB := float64(cloneStats.AcctsClonedBytes) / 1024 / 1024
 					touchedMB := float64(cloneStats.AcctsTouchedBytes) / 1024 / 1024
-					mlog.Log.InfofPrecise("  clone stats: %.1f%% modified (%d/%d accts) | %.1fMB cloned, %.1fMB modified | avg/tx: %.1f cloned, %.1f modified",
-						modifyRatio, cloneStats.AcctsTouched, cloneStats.AcctsCloned,
-						clonedMB, touchedMB, avgAcctsPerTx, avgTouchedPerTx)
+					mlog.Log.InfofPrecise("  account COW: %.1f%% cloned on write (%d/%d accts) | %.1fMB loaded, %.1fMB cloned, %.1fMB modified | avg/tx: %.1f loaded, %.1f cloned, %.1f modified",
+						cloneRatio, cloneStats.AcctsCloned, cloneStats.AcctsLoaded,
+						loadedMB, clonedMB, touchedMB, avgLoadedPerTx, avgClonedPerTx, avgTouchedPerTx)
 				}
 
 				var mem runtime.MemStats

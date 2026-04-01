@@ -31,10 +31,11 @@ func (acct *BorrowedAccount) RentEpoch() uint64 {
 }
 
 func (acct *BorrowedAccount) Touch() error {
-	err := acct.TxCtx.Accounts.Touch(acct.IndexInTransaction)
+	touchedAcct, err := acct.TxCtx.Accounts.Touch(acct.IndexInTransaction)
 	if err != nil {
 		return err
 	}
+	acct.Account = touchedAcct
 	return nil
 }
 
@@ -269,7 +270,10 @@ func (acct *BorrowedAccount) SetDataLength(newLength uint64, f features.Features
 		return nil
 	}
 
-	acct.Touch()
+	err = acct.Touch()
+	if err != nil {
+		return err
+	}
 	acct.UpdateAccountsResizeDelta(newLength)
 	acct.Account.Resize(newLength, 0)
 
