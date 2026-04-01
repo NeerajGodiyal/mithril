@@ -95,7 +95,8 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 
 // convertVersionedEpochStakesToPersisted converts manifest epoch stakes to
 // the same PersistedEpochStakes JSON format used by ComputedEpochStakes.
-// Only stores vote-account stakes (aggregated), NOT full stake account data.
+// This preserves full vote-account data so rewards can use Agave-like
+// epoch-cached vote accounts instead of a lossy live rebuild.
 func convertVersionedEpochStakesToPersisted(stakes []VersionedEpochStakesPair) map[uint64]string {
 	result := make(map[uint64]string, len(stakes))
 
@@ -114,6 +115,7 @@ func convertVersionedEpochStakesToPersisted(stakes []VersionedEpochStakesPair) m
 			persisted.Stakes[pkStr] = va.Stake
 			persisted.VoteAccts[pkStr] = &epochstakes.VoteAccountJSON{
 				Lamports:          va.Value.Lamports,
+				Data:              append([]byte(nil), va.Value.Data...),
 				NodePubkey:        base58.Encode(va.Value.NodePubkey[:]),
 				LastTimestampTs:   va.Value.LastTimestampTs,
 				LastTimestampSlot: va.Value.LastTimestampSlot,

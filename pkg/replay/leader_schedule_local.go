@@ -187,6 +187,32 @@ type VoteCacheRebuildError struct {
 	Err      error
 }
 
+func voteCacheFallbackUsable(voteState *sealevel.VoteStateVersions) bool {
+	if voteState == nil {
+		return false
+	}
+	var zeroPk solana.PublicKey
+	return voteState.NodePubkey() != zeroPk
+}
+
+func voteStateVersionLabel(voteState *sealevel.VoteStateVersions) string {
+	if voteState == nil {
+		return "nil"
+	}
+	switch voteState.Type {
+	case sealevel.VoteStateVersionV0_23_5:
+		return "v0_23_5"
+	case sealevel.VoteStateVersionV1_14_11:
+		return "v1_14_11"
+	case sealevel.VoteStateVersionCurrent:
+		return "current"
+	case sealevel.VoteStateVersionV4:
+		return "v4"
+	default:
+		return fmt.Sprintf("unknown_%d", voteState.Type)
+	}
+}
+
 // RebuildVoteCacheFromAccountsDB rebuilds the VoteCache from AccountsDB for all vote accounts
 // in the stake map. This ensures correctness at epoch boundaries by reading the canonical
 // state directly from AccountsDB.
@@ -230,6 +256,20 @@ func RebuildVoteCacheFromAccountsDB(
 	var missingStake atomic.Uint64
 	var unmarshalErrStake atomic.Uint64
 	var zeroNodePkStake atomic.Uint64
+	var preservedMissingCount atomic.Int64
+	var preservedUnmarshalErrCount atomic.Int64
+	var preservedZeroNodePkCount atomic.Int64
+	var preservedMissingStake atomic.Uint64
+	var preservedUnmarshalErrStake atomic.Uint64
+	var preservedZeroNodePkStake atomic.Uint64
+	var loadedV0235Count atomic.Int64
+	var loadedV11411Count atomic.Int64
+	var loadedCurrentCount atomic.Int64
+	var loadedV4Count atomic.Int64
+	var preservedV0235Count atomic.Int64
+	var preservedV11411Count atomic.Int64
+	var preservedCurrentCount atomic.Int64
+	var preservedV4Count atomic.Int64
 
 	// Track first few errors for each category (with mutex for thread safety)
 	const maxErrorsPerCategory = 5
@@ -237,6 +277,36 @@ func RebuildVoteCacheFromAccountsDB(
 	var missingErrors []VoteCacheRebuildError
 	var unmarshalErrors []VoteCacheRebuildError
 	var zeroNodePkErrors []VoteCacheRebuildError
+	var preservedFallbacks []VoteCacheRebuildError
+
+	incrementVersionCounter := func(voteState *sealevel.VoteStateVersions, loaded bool) {
+		switch voteStateVersionLabel(voteState) {
+		case "v0_23_5":
+			if loaded {
+				loadedV0235Count.Add(1)
+			} else {
+				preservedV0235Count.Add(1)
+			}
+		case "v1_14_11":
+			if loaded {
+				loadedV11411Count.Add(1)
+			} else {
+				preservedV11411Count.Add(1)
+			}
+		case "current":
+			if loaded {
+				loadedCurrentCount.Add(1)
+			} else {
+				preservedCurrentCount.Add(1)
+			}
+		case "v4":
+			if loaded {
+				loadedV4Count.Add(1)
+			} else {
+				preservedV4Count.Add(1)
+			}
+		}
+	}
 
 	// Track first error for reporting (use sync.Once to capture exactly one error)
 	var firstError error
@@ -251,13 +321,30 @@ func RebuildVoteCacheFromAccountsDB(
 			pk    solana.PublicKey
 			stake uint64
 		})
+		existingVoteState := global.VoteCacheItem(item.pk)
 
 		// Read vote account from AccountsDB
 		voteAcct, err := acctsDb.GetAccount(slot, item.pk)
 		if err != nil {
-			global.DeleteVoteCacheItem(item.pk)
 			missingCount.Add(1)
 			missingStake.Add(item.stake)
+			if voteCacheFallbackUsable(existingVoteState) {
+				incrementVersionCounter(existingVoteState, false)
+				preservedMissingCount.Add(1)
+				preservedMissingStake.Add(item.stake)
+				errorsMu.Lock()
+				if len(preservedFallbacks) < maxErrorsPerCategory {
+					preservedFallbacks = append(preservedFallbacks, VoteCacheRebuildError{
+						VoteAcct: item.pk,
+						Stake:    item.stake,
+						Reason:   "preserved_existing_after_missing_accountsdb_entry",
+						Err:      err,
+					})
+				}
+				errorsMu.Unlock()
+				return
+			}
+			global.DeleteVoteCacheItem(item.pk)
 			errorsMu.Lock()
 			if len(missingErrors) < maxErrorsPerCategory {
 				missingErrors = append(missingErrors, VoteCacheRebuildError{
@@ -277,9 +364,25 @@ func RebuildVoteCacheFromAccountsDB(
 		// Unmarshal vote state
 		versionedVoteState, err := sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
 		if err != nil {
-			global.DeleteVoteCacheItem(item.pk)
 			unmarshalErrCount.Add(1)
 			unmarshalErrStake.Add(item.stake)
+			if voteCacheFallbackUsable(existingVoteState) {
+				incrementVersionCounter(existingVoteState, false)
+				preservedUnmarshalErrCount.Add(1)
+				preservedUnmarshalErrStake.Add(item.stake)
+				errorsMu.Lock()
+				if len(preservedFallbacks) < maxErrorsPerCategory {
+					preservedFallbacks = append(preservedFallbacks, VoteCacheRebuildError{
+						VoteAcct: item.pk,
+						Stake:    item.stake,
+						Reason:   fmt.Sprintf("preserved_existing_after_unmarshal_failure (data_len=%d)", len(voteAcct.Data)),
+						Err:      err,
+					})
+				}
+				errorsMu.Unlock()
+				return
+			}
+			global.DeleteVoteCacheItem(item.pk)
 			errorsMu.Lock()
 			if len(unmarshalErrors) < maxErrorsPerCategory {
 				unmarshalErrors = append(unmarshalErrors, VoteCacheRebuildError{
@@ -300,9 +403,24 @@ func RebuildVoteCacheFromAccountsDB(
 		nodePk := versionedVoteState.NodePubkey()
 		var zeroPk solana.PublicKey
 		if nodePk == zeroPk {
-			global.DeleteVoteCacheItem(item.pk)
 			zeroNodePkCount.Add(1)
 			zeroNodePkStake.Add(item.stake)
+			if voteCacheFallbackUsable(existingVoteState) {
+				incrementVersionCounter(existingVoteState, false)
+				preservedZeroNodePkCount.Add(1)
+				preservedZeroNodePkStake.Add(item.stake)
+				errorsMu.Lock()
+				if len(preservedFallbacks) < maxErrorsPerCategory {
+					preservedFallbacks = append(preservedFallbacks, VoteCacheRebuildError{
+						VoteAcct: item.pk,
+						Stake:    item.stake,
+						Reason:   "preserved_existing_after_zero_nodepubkey",
+					})
+				}
+				errorsMu.Unlock()
+				return
+			}
+			global.DeleteVoteCacheItem(item.pk)
 			errorsMu.Lock()
 			if len(zeroNodePkErrors) < maxErrorsPerCategory {
 				zeroNodePkErrors = append(zeroNodePkErrors, VoteCacheRebuildError{
@@ -320,6 +438,7 @@ func RebuildVoteCacheFromAccountsDB(
 
 		// Update VoteCache
 		global.PutVoteCacheItem(item.pk, versionedVoteState)
+		incrementVersionCounter(versionedVoteState, true)
 		successCount.Add(1)
 	})
 	if err != nil {
@@ -353,35 +472,59 @@ func RebuildVoteCacheFromAccountsDB(
 	for _, stake := range voteAcctStakes {
 		totalStake += stake
 	}
-	successStake := totalStake - missingStake.Load() - unmarshalErrStake.Load() - zeroNodePkStake.Load()
+	rawFailedStake := missingStake.Load() + unmarshalErrStake.Load() + zeroNodePkStake.Load()
+	preservedStake := preservedMissingStake.Load() + preservedUnmarshalErrStake.Load() + preservedZeroNodePkStake.Load()
+	successStake := totalStake - rawFailedStake
+	availableStake := successStake + preservedStake
+	preservedCount := preservedMissingCount.Load() + preservedUnmarshalErrCount.Load() + preservedZeroNodePkCount.Load()
+	availableCount := successCount.Load() + preservedCount
 
 	// File only: single line summary
-	skipped := nonZeroAccounts - int(successCount.Load())
-	mlog.Log.FileOnlyf("Vote cache: loaded=%d skipped=%d duration=%v",
-		successCount.Load(), skipped, duration)
+	skipped := nonZeroAccounts - int(availableCount)
+	mlog.Log.FileOnlyf("Vote cache: loaded=%d preserved=%d skipped=%d duration=%v",
+		successCount.Load(), preservedCount, skipped, duration)
 
 	// File only: detailed results
 	mlog.Log.FileOnlyf("vote cache rebuild details: slot=%d duration=%v", slot, duration)
-	mlog.Log.FileOnlyf("  accounts: total=%d non_zero=%d success=%d",
-		totalAccounts, nonZeroAccounts, successCount.Load())
-	mlog.Log.FileOnlyf("  stake: total=%d success=%d (%.2f%%)",
-		totalStake, successStake, float64(successStake)/float64(totalStake)*100)
+	mlog.Log.FileOnlyf("  accounts: total=%d non_zero=%d loaded=%d preserved_existing=%d available=%d skipped=%d",
+		totalAccounts, nonZeroAccounts, successCount.Load(), preservedCount, availableCount, skipped)
+	mlog.Log.FileOnlyf("  stake: total=%d loaded=%d preserved_existing=%d available=%d (%.2f%%)",
+		totalStake, successStake, preservedStake, availableStake, float64(availableStake)/float64(totalStake)*100)
+	mlog.Log.FileOnlyf("  versions_loaded: v0_23_5=%d v1_14_11=%d current=%d v4=%d",
+		loadedV0235Count.Load(), loadedV11411Count.Load(), loadedCurrentCount.Load(), loadedV4Count.Load())
+	if preservedCount > 0 {
+		mlog.Log.FileOnlyf("  versions_preserved_existing: v0_23_5=%d v1_14_11=%d current=%d v4=%d",
+			preservedV0235Count.Load(), preservedV11411Count.Load(), preservedCurrentCount.Load(), preservedV4Count.Load())
+	}
 
 	// Check for any failures
-	missing := missingCount.Load()
-	unmarshalErr := unmarshalErrCount.Load()
-	zeroNodePk := zeroNodePkCount.Load()
+	rawMissing := missingCount.Load()
+	rawUnmarshalErr := unmarshalErrCount.Load()
+	rawZeroNodePk := zeroNodePkCount.Load()
+	missing := rawMissing - preservedMissingCount.Load()
+	unmarshalErr := rawUnmarshalErr - preservedUnmarshalErrCount.Load()
+	zeroNodePk := rawZeroNodePk - preservedZeroNodePkCount.Load()
 	totalFailed := missing + unmarshalErr + zeroNodePk
 
-	if totalFailed > 0 {
-		totalFailedStake := missingStake.Load() + unmarshalErrStake.Load() + zeroNodePkStake.Load()
+	if rawMissing+rawUnmarshalErr+rawZeroNodePk > 0 {
+		totalFailedStake := rawFailedStake - preservedStake
 		failedPercent := float64(totalFailedStake) / float64(totalStake) * 100
 
 		// File only: detailed failure info (always log for debugging)
 		mlog.Log.FileOnlyf("vote cache rebuild failures:")
 		mlog.Log.FileOnlyf("  slot=%d", slot)
-		mlog.Log.FileOnlyf("  failures: missing=%d (stake=%d) unmarshal_err=%d (stake=%d) zero_nodepk=%d (stake=%d)",
-			missing, missingStake.Load(), unmarshalErr, unmarshalErrStake.Load(), zeroNodePk, zeroNodePkStake.Load())
+		mlog.Log.FileOnlyf("  raw_failures: missing=%d (stake=%d) unmarshal_err=%d (stake=%d) zero_nodepk=%d (stake=%d)",
+			rawMissing, missingStake.Load(), rawUnmarshalErr, unmarshalErrStake.Load(), rawZeroNodePk, zeroNodePkStake.Load())
+		if preservedCount > 0 {
+			mlog.Log.FileOnlyf("  preserved_existing: missing=%d (stake=%d) unmarshal_err=%d (stake=%d) zero_nodepk=%d (stake=%d)",
+				preservedMissingCount.Load(), preservedMissingStake.Load(),
+				preservedUnmarshalErrCount.Load(), preservedUnmarshalErrStake.Load(),
+				preservedZeroNodePkCount.Load(), preservedZeroNodePkStake.Load())
+		}
+		mlog.Log.FileOnlyf("  actual_unavailable: missing=%d (stake=%d) unmarshal_err=%d (stake=%d) zero_nodepk=%d (stake=%d)",
+			missing, missingStake.Load()-preservedMissingStake.Load(),
+			unmarshalErr, unmarshalErrStake.Load()-preservedUnmarshalErrStake.Load(),
+			zeroNodePk, zeroNodePkStake.Load()-preservedZeroNodePkStake.Load())
 		mlog.Log.FileOnlyf("  total_failed=%d total_failed_stake=%d (%.4f%% of total)",
 			totalFailed, totalFailedStake, failedPercent)
 
@@ -402,6 +545,16 @@ func RebuildVoteCacheFromAccountsDB(
 			mlog.Log.FileOnlyf("  zero_nodepk_accounts (first %d):", len(zeroNodePkErrors))
 			for i, e := range zeroNodePkErrors {
 				mlog.Log.FileOnlyf("    %d. vote=%s stake=%d", i+1, e.VoteAcct, e.Stake)
+			}
+		}
+		if len(preservedFallbacks) > 0 {
+			mlog.Log.FileOnlyf("  preserved_existing_accounts (first %d):", len(preservedFallbacks))
+			for i, e := range preservedFallbacks {
+				if e.Err != nil {
+					mlog.Log.FileOnlyf("    %d. vote=%s stake=%d reason=%s err=%v", i+1, e.VoteAcct, e.Stake, e.Reason, e.Err)
+				} else {
+					mlog.Log.FileOnlyf("    %d. vote=%s stake=%d reason=%s", i+1, e.VoteAcct, e.Stake, e.Reason)
+				}
 			}
 		}
 

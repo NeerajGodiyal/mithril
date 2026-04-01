@@ -7,11 +7,12 @@ import (
 	"maps"
 	"path/filepath"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
@@ -25,12 +26,51 @@ import (
 )
 
 type ReplayCtx struct {
-	CurrentFeatures   *features.Features
-	Capitalization    uint64
-	Inflation         rewards.Inflation
-	SlotsPerYear      float64
-	EpochAcctsHash    []byte
-	HasEpochAcctsHash bool
+	CurrentFeatures     *features.Features
+	Capitalization      uint64
+	CapitalizationAudit uint64
+	Inflation           rewards.Inflation
+	SlotsPerYear        float64
+	EpochAcctsHash      []byte
+	HasEpochAcctsHash   bool
+}
+
+func logVoteStateV4FeatureStatus(epoch uint64, boundarySlot uint64, f *features.Features) {
+	type featureStatus struct {
+		gate      features.FeatureGate
+		agaveNote string
+	}
+
+	statuses := []featureStatus{
+		{gate: features.VoteStateV4},
+		{gate: features.DelayCommissionUpdates},
+		{gate: features.CommissionRateInBasisPoints},
+		{gate: features.BlsPubkeyManagementInVoteAccount},
+		{gate: features.CustomCommissionCollector, agaveNote: "Agave runtime currently hard-disables this feature"},
+		{gate: features.BlockRevenueSharing, agaveNote: "Agave runtime currently hard-disables this feature"},
+	}
+
+	mlog.Log.FileOnlyf("vote-state-v4 feature status: epoch=%d boundary_slot=%d", epoch, boundarySlot)
+	for _, status := range statuses {
+		active := f.IsActive(status.gate)
+		activationSlot, ok := f.ActivationSlot(status.gate)
+		if ok {
+			if status.agaveNote != "" {
+				mlog.Log.FileOnlyf("  %s: active=%t activation_slot=%d note=%s", status.gate.Name, active, activationSlot, status.agaveNote)
+			} else {
+				mlog.Log.FileOnlyf("  %s: active=%t activation_slot=%d", status.gate.Name, active, activationSlot)
+			}
+		} else if status.agaveNote != "" {
+			mlog.Log.FileOnlyf("  %s: active=%t activation_slot=inactive note=%s", status.gate.Name, active, status.agaveNote)
+		} else {
+			mlog.Log.FileOnlyf("  %s: active=%t activation_slot=inactive", status.gate.Name, active)
+		}
+	}
+
+	mlog.Log.FileOnlyf("  reward-path summary: vote_state_v4=%t commission_rate_in_basis_points=%t delay_commission_updates=%t",
+		f.IsActive(features.VoteStateV4),
+		f.IsActive(features.CommissionRateInBasisPoints),
+		f.IsActive(features.DelayCommissionUpdates))
 }
 
 // newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
@@ -41,6 +81,7 @@ func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*
 	// Priority 1: Resume state (has most recent values)
 	if resumeState != nil && resumeState.Capitalization > 0 {
 		epochCtx.Capitalization = resumeState.Capitalization
+		epochCtx.CapitalizationAudit = resumeState.Capitalization
 		epochCtx.SlotsPerYear = resumeState.SlotsPerYear
 		epochCtx.Inflation = rewards.Inflation{
 			Initial:        resumeState.InflationInitial,
@@ -52,6 +93,7 @@ func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*
 	} else if mithrilState != nil && mithrilState.ManifestCapitalization > 0 {
 		// Priority 2: State file manifest_* fields (fresh start)
 		epochCtx.Capitalization = mithrilState.ManifestCapitalization
+		epochCtx.CapitalizationAudit = mithrilState.ManifestCapitalization
 		epochCtx.SlotsPerYear = mithrilState.ManifestSlotsPerYear
 		epochCtx.Inflation = rewards.Inflation{
 			Initial:        mithrilState.ManifestInflationInitial,
@@ -92,6 +134,15 @@ type BoundaryStakeScanResult struct {
 	VoteAcctStakes      map[solana.PublicKey]uint64
 	EffectiveStakes     map[solana.PublicKey]uint64
 	TotalEffectiveStake uint64
+}
+
+type epochRewardVoteCacheStats struct {
+	TotalReferenced        int
+	LoadedLive             int
+	CarriedFromCurrent     int
+	CarriedFromPrevious    int
+	CarriedForwardFullData int
+	Unavailable            int
 }
 
 // scanStakesForEpochBoundary performs a single streaming pass over all stake accounts,
@@ -146,6 +197,71 @@ func scanStakesForEpochBoundary(acctsDb *accountsdb.AccountsDb, slot uint64, tar
 		EffectiveStakes:          effectiveStakes,
 		TotalEffectiveStake:      totalEffectiveStake.Load(),
 	}
+}
+
+func loadEpochRewardVoteAccount(acctsDb *accountsdb.AccountsDb, slot uint64, votePk solana.PublicKey) (*epochstakes.VoteAccount, error) {
+	acct, err := acctsDb.GetAccount(slot, votePk)
+	if err != nil {
+		return nil, err
+	}
+	if acct == nil {
+		return nil, fmt.Errorf("nil account")
+	}
+	if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr || len(acct.Data) == 0 {
+		return nil, fmt.Errorf("invalid vote account state")
+	}
+
+	voteAcct, err := epochstakes.NewVoteAccountFromAccount(acct)
+	if err != nil {
+		return nil, err
+	}
+	if voteAcct.NodePubkey == (solana.PublicKey{}) {
+		return nil, fmt.Errorf("vote account has zero node pubkey")
+	}
+	return voteAcct, nil
+}
+
+func populateEpochRewardVoteAccounts(leaderScheduleEpoch uint64, currentEpoch uint64, previousEpoch uint64, acctsDb *accountsdb.AccountsDb, slot uint64, voteAcctStakes map[solana.PublicKey]uint64) epochRewardVoteCacheStats {
+	stats := epochRewardVoteCacheStats{TotalReferenced: len(voteAcctStakes)}
+	currentVoteAccts := global.EpochStakesVoteAccts(currentEpoch)
+	previousVoteAccts := global.EpochStakesVoteAccts(previousEpoch)
+
+	for votePk := range voteAcctStakes {
+		if voteAcct, err := loadEpochRewardVoteAccount(acctsDb, slot, votePk); err == nil {
+			global.PutEpochVoteAccount(leaderScheduleEpoch, votePk, voteAcct)
+			stats.LoadedLive++
+			continue
+		}
+
+		carryForward := func(source *epochstakes.VoteAccount, current bool) bool {
+			if source == nil {
+				return false
+			}
+			cloned := source.Clone()
+			global.PutEpochVoteAccount(leaderScheduleEpoch, votePk, cloned)
+			if current {
+				stats.CarriedFromCurrent++
+			} else {
+				stats.CarriedFromPrevious++
+			}
+			if len(cloned.Data) > 0 {
+				stats.CarriedForwardFullData++
+			}
+			return true
+		}
+
+		if carryForward(currentVoteAccts[votePk], true) {
+			continue
+		}
+
+		if carryForward(previousVoteAccts[votePk], false) {
+			continue
+		}
+
+		stats.Unavailable++
+	}
+
+	return stats
 }
 
 // updateStakeHistorySysvar applies pre-computed stake history data to the sysvar.
@@ -209,13 +325,14 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	newEpoch := epoch + 1
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 	leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
+	logVoteStateV4FeatureStatus(newEpoch, firstSlotInEpoch, f)
 
 	// Single streaming pass for both stake history and epoch stakes
 	t0 := time.Now()
 	scanResult := scanStakesForEpochBoundary(acctsDb, prevSlotCtx.Slot, epoch, leaderScheduleEpoch, &stakeHistory, epochSchedule, f)
 	t1 := time.Now()
 
-	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
+	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, epoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
 	t2 := time.Now()
 
 	if global.ManageLeaderSchedule() {
@@ -236,6 +353,8 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 		}
 	}
 	t3 := time.Now()
+
+	logCapitalizationAudit(firstSlotInEpoch, replayCtx.Capitalization, replayCtx.CapitalizationAudit)
 
 	if partitionedEpochRewards {
 		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch)
@@ -262,7 +381,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 
 // updateEpochStakesAndRefreshVoteCache applies pre-computed vote/effective stake data
 // from the boundary scan to refresh the vote cache and store epoch stakes.
-func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult) {
+func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, previousEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult) {
 	// Check if we need to compute epoch stakes (skip on resume)
 	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
 
@@ -272,40 +391,51 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
 	}
 
-	// Rebuild authorized voters cache from vote accounts for the new epoch.
-	// This ensures forkchoice vote parsing uses current authorities, not stale manifest data.
-	newEpoch := b.Epoch
-	rebuildAuthorizedVotersFromVoteCache(newEpoch)
-
 	// Skip epoch stakes storage if already cached (resume)
 	if hasEpochStakes {
+		rebuildAuthorizedVotersFromEpochVoteAccounts(b.Epoch)
 		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
 		return
 	}
 
+	rewardVoteStats := populateEpochRewardVoteAccounts(leaderScheduleEpoch, b.Epoch, previousEpoch, acctsDb, slot, scanResult.VoteAcctStakes)
+	mlog.Log.FileOnlyf("epoch reward vote cache: epoch=%d referenced=%d live_loaded=%d carried_from_current=%d carried_from_previous=%d carried_forward_full_data=%d unavailable=%d",
+		leaderScheduleEpoch,
+		rewardVoteStats.TotalReferenced,
+		rewardVoteStats.LoadedLive,
+		rewardVoteStats.CarriedFromCurrent,
+		rewardVoteStats.CarriedFromPrevious,
+		rewardVoteStats.CarriedForwardFullData,
+		rewardVoteStats.Unavailable,
+	)
+
 	// Store epoch stakes computed during scanning
-	voteCache := global.VoteCache()
 	for votePk, stake := range scanResult.EffectiveStakes {
-		voteAcct, exists := voteCache[votePk]
-		if exists {
-			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{NodePubkey: voteAcct.NodePubkey()})
-		}
+		global.PutEpochStake(leaderScheduleEpoch, votePk, stake)
 	}
 	global.PutEpochTotalStake(leaderScheduleEpoch, scanResult.TotalEffectiveStake)
+
+	// Rebuild authorized voters cache from epoch-cached vote accounts for the new epoch.
+	// This matches the reward path's account source and avoids depending on the
+	// lossy live vote cache rebuild.
+	rebuildAuthorizedVotersFromEpochVoteAccounts(b.Epoch)
 
 	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
 	b.TotalEpochStake = scanResult.TotalEffectiveStake
 }
 
-// rebuildAuthorizedVotersFromVoteCache rebuilds the epoch authorized voters cache
-// using vote states already loaded in the global VoteCache. This avoids re-reading
-// AccountsDB since RebuildVoteCacheFromAccountsDB already populated the cache.
-func rebuildAuthorizedVotersFromVoteCache(epoch uint64) {
-	voteCache := global.VoteCache()
+// rebuildAuthorizedVotersFromEpochVoteAccounts rebuilds the epoch authorized voters
+// cache from the per-epoch cached vote accounts used by rewards.
+func rebuildAuthorizedVotersFromEpochVoteAccounts(epoch uint64) {
+	voteAcctMap := global.EpochStakesVoteAccts(epoch)
 	newCache := epochstakes.NewEpochAuthorizedVotersCache()
 
-	for voteAcct, voteState := range voteCache {
-		if voteState == nil {
+	for voteAcct, voteAccount := range voteAcctMap {
+		if voteAccount == nil {
+			continue
+		}
+		voteState, err := voteAccount.VoteState()
+		if err != nil || voteState == nil {
 			continue
 		}
 		switch voteState.Type {
@@ -319,6 +449,11 @@ func rebuildAuthorizedVotersFromVoteCache(epoch uint64) {
 			}
 		case sealevel.VoteStateVersionCurrent:
 			voter, _, err := voteState.Current.AuthorizedVoters.GetOrCalculateAuthorizedVoterForEpoch(epoch)
+			if err == nil {
+				newCache.PutEntry(voteAcct, voter)
+			}
+		case sealevel.VoteStateVersionV4:
+			voter, _, err := voteState.V4.AuthorizedVoters.GetOrCalculateAuthorizedVoterForEpoch(epoch)
 			if err == nil {
 				newCache.PutEntry(voteAcct, voter)
 			}

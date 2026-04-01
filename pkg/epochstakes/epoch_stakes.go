@@ -3,7 +3,10 @@ package epochstakes
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -16,12 +19,17 @@ type EpochStakesCache struct {
 
 type VoteAccount struct {
 	Lamports          uint64
+	Data              []byte
 	NodePubkey        solana.PublicKey
 	LastTimestampTs   int64
 	LastTimestampSlot uint64
 	Owner             solana.PublicKey
 	Executable        byte
 	RentEpoch         uint64
+
+	voteStateOnce sync.Once                   `json:"-"`
+	voteState     *sealevel.VoteStateVersions `json:"-"`
+	voteStateErr  error                       `json:"-"`
 }
 
 func NewEpochStakesCache() *EpochStakesCache {
@@ -30,13 +38,28 @@ func NewEpochStakesCache() *EpochStakesCache {
 		totalStakeCache: make(map[uint64]uint64)}
 }
 
-func (cache *EpochStakesCache) PutEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *VoteAccount) {
-	_, exists := cache.stakeCache[epoch]
-	if !exists {
+func (cache *EpochStakesCache) ensureEpoch(epoch uint64) {
+	if _, exists := cache.stakeCache[epoch]; !exists {
 		cache.stakeCache[epoch] = make(map[solana.PublicKey]uint64)
+	}
+	if _, exists := cache.voteAcctCache[epoch]; !exists {
 		cache.voteAcctCache[epoch] = make(map[solana.PublicKey]*VoteAccount)
 	}
+}
+
+func (cache *EpochStakesCache) PutEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *VoteAccount) {
+	cache.ensureEpoch(epoch)
 	cache.stakeCache[epoch][pubkey] = stake
+	cache.voteAcctCache[epoch][pubkey] = voteAcct
+}
+
+func (cache *EpochStakesCache) PutStake(epoch uint64, pubkey solana.PublicKey, stake uint64) {
+	cache.ensureEpoch(epoch)
+	cache.stakeCache[epoch][pubkey] = stake
+}
+
+func (cache *EpochStakesCache) PutVoteAccount(epoch uint64, pubkey solana.PublicKey, voteAcct *VoteAccount) {
+	cache.ensureEpoch(epoch)
 	cache.voteAcctCache[epoch][pubkey] = voteAcct
 }
 
@@ -71,15 +94,16 @@ func (cache *EpochStakesCache) ClearEpochStakes(epoch uint64) {
 
 // PersistedEpochStakes is the JSON-serializable format for epoch stakes.
 type PersistedEpochStakes struct {
-	Epoch      uint64                        `json:"epoch"`
-	TotalStake uint64                        `json:"total_stake"`
-	Stakes     map[string]uint64             `json:"stakes"`      // base58 pubkey → stake
-	VoteAccts  map[string]*VoteAccountJSON   `json:"vote_accts"`  // base58 pubkey → metadata
+	Epoch      uint64                      `json:"epoch"`
+	TotalStake uint64                      `json:"total_stake"`
+	Stakes     map[string]uint64           `json:"stakes"`     // base58 pubkey → stake
+	VoteAccts  map[string]*VoteAccountJSON `json:"vote_accts"` // base58 pubkey → metadata
 }
 
 // VoteAccountJSON is the JSON-serializable format for vote account metadata.
 type VoteAccountJSON struct {
 	Lamports          uint64 `json:"lamports"`
+	Data              []byte `json:"data,omitempty"`
 	NodePubkey        string `json:"node_pubkey"`
 	LastTimestampTs   int64  `json:"last_ts"`
 	LastTimestampSlot uint64 `json:"last_ts_slot"`
@@ -113,6 +137,7 @@ func (cache *EpochStakesCache) SerializeEpoch(epoch uint64) ([]byte, error) {
 		if va != nil {
 			persisted.VoteAccts[pk.String()] = &VoteAccountJSON{
 				Lamports:          va.Lamports,
+				Data:              append([]byte(nil), va.Data...),
 				NodePubkey:        va.NodePubkey.String(),
 				LastTimestampTs:   va.LastTimestampTs,
 				LastTimestampSlot: va.LastTimestampSlot,
@@ -164,6 +189,7 @@ func (cache *EpochStakesCache) DeserializeAndLoadEpoch(data []byte) (uint64, err
 		}
 		cache.voteAcctCache[epoch][pk] = &VoteAccount{
 			Lamports:          vaJSON.Lamports,
+			Data:              append([]byte(nil), vaJSON.Data...),
 			NodePubkey:        nodePubkey,
 			LastTimestampTs:   vaJSON.LastTimestampTs,
 			LastTimestampSlot: vaJSON.LastTimestampSlot,
@@ -183,4 +209,94 @@ func (cache *EpochStakesCache) GetAllEpochs() []uint64 {
 		epochs = append(epochs, epoch)
 	}
 	return epochs
+}
+
+func NewVoteAccountFromAccount(acct *accounts.Account) (*VoteAccount, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("nil vote account")
+	}
+
+	voteState, err := sealevel.UnmarshalVersionedVoteState(acct.Data)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal vote state: %w", err)
+	}
+
+	voteAcct := &VoteAccount{
+		Lamports:   acct.Lamports,
+		Data:       append([]byte(nil), acct.Data...),
+		NodePubkey: voteState.NodePubkey(),
+		Owner:      solana.PublicKeyFromBytes(acct.Owner[:]),
+		RentEpoch:  acct.RentEpoch,
+		voteState:  voteState,
+	}
+	if acct.Executable {
+		voteAcct.Executable = 1
+	}
+	if ts := voteState.LastTimestamp(); ts != nil {
+		voteAcct.LastTimestampTs = ts.Timestamp
+		voteAcct.LastTimestampSlot = ts.Slot
+	}
+	voteAcct.voteStateOnce.Do(func() {})
+	return voteAcct, nil
+}
+
+func (voteAcct *VoteAccount) Clone() *VoteAccount {
+	if voteAcct == nil {
+		return nil
+	}
+
+	clone := *voteAcct
+	clone.Data = append([]byte(nil), voteAcct.Data...)
+	clone.voteStateOnce = sync.Once{}
+	if voteAcct.voteState != nil || voteAcct.voteStateErr != nil || len(voteAcct.Data) == 0 {
+		clone.voteState = voteAcct.voteState
+		clone.voteStateErr = voteAcct.voteStateErr
+		clone.voteStateOnce.Do(func() {})
+	}
+	return &clone
+}
+
+func (voteAcct *VoteAccount) VoteState() (*sealevel.VoteStateVersions, error) {
+	if voteAcct == nil {
+		return nil, fmt.Errorf("nil vote account")
+	}
+
+	voteAcct.voteStateOnce.Do(func() {
+		if len(voteAcct.Data) == 0 {
+			voteAcct.voteStateErr = fmt.Errorf("vote account has no data")
+			return
+		}
+		voteAcct.voteState, voteAcct.voteStateErr = sealevel.UnmarshalVersionedVoteState(voteAcct.Data)
+	})
+
+	return voteAcct.voteState, voteAcct.voteStateErr
+}
+
+func (voteAcct *VoteAccount) NodePubkeyOrZero() solana.PublicKey {
+	if voteAcct == nil {
+		return solana.PublicKey{}
+	}
+	if voteState, err := voteAcct.VoteState(); err == nil && voteState != nil {
+		return voteState.NodePubkey()
+	}
+	return voteAcct.NodePubkey
+}
+
+func (voteAcct *VoteAccount) ToAccount(pubkey solana.PublicKey, slot uint64) *accounts.Account {
+	if voteAcct == nil {
+		return nil
+	}
+
+	var owner [32]byte
+	copy(owner[:], voteAcct.Owner[:])
+
+	return &accounts.Account{
+		Slot:       slot,
+		Key:        pubkey,
+		Lamports:   voteAcct.Lamports,
+		Data:       append([]byte(nil), voteAcct.Data...),
+		Owner:      owner,
+		Executable: voteAcct.Executable != 0,
+		RentEpoch:  voteAcct.RentEpoch,
+	}
 }

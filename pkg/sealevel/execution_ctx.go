@@ -59,6 +59,7 @@ type SlotCtx struct {
 	EpochsAcctHash         []byte
 	Replay                 bool
 	LamportsBurnt          uint64
+	CapitalizationDelta    int64
 	EahWorkaroundBankhash  []byte
 	HasEahWorkaround       bool
 	LatestEvictedBlockhash [32]byte

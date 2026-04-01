@@ -1952,6 +1952,13 @@ func ReplayBlocks(
 			}
 		}
 
+		replayCtx.CapitalizationAudit, err = applyCapitalizationDelta(replayCtx.CapitalizationAudit, lastSlotCtx.CapitalizationDelta)
+		if err != nil {
+			mlog.Log.Errorf("capitalization audit update failed after slot %d: %v", block.Slot, err)
+			result.Error = err
+			break
+		}
+
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
 		// Clear ManifestEpochStakes after first replayed slot past snapshot
@@ -2696,6 +2703,10 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("compile_accounts")
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
+	slotCtx.CapitalizationDelta, err = calculateCapitalizationDelta(slotCtx, modifiedAccts)
+	if err != nil {
+		return nil, fmt.Errorf("capitalization audit delta failed in slot %d: %w", block.Slot, err)
+	}
 
 	start = time.Now()
 	setReplayStage("bankhash")

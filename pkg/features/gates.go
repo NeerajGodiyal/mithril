@@ -65,7 +65,12 @@ var PoseidonEnforcePadding = FeatureGate{Name: "PoseidonEnforcePadding", Address
 var FixAltBn128PairingLengthCheck = FeatureGate{Name: "FixAltBn128PairingLengthCheck", Address: base58.MustDecodeFromString("bnYzodLwmybj7e1HAe98yZrdJTd7we69eMMLgCXqKZm")}
 var DeprecateRentExemptionThreshold = FeatureGate{Name: "DeprecateRentExemptionThreshold", Address: base58.MustDecodeFromString("rent6iVy6PDoViPBeJ6k5EJQrkj62h7DPyLbWGHwjrC")}
 var ProvideInstructionDataOffsetInVmR2 = FeatureGate{Name: "ProvideInstructionDataOffsetInVmR2", Address: base58.MustDecodeFromString("5xXZc66h4UdB6Yq7FzdBxBiRAFMMScMLwHxk2QZDaNZL")}
+var DelayCommissionUpdates = FeatureGate{Name: "DelayCommissionUpdates", Address: base58.MustDecodeFromString("BRUoCu28xjjPkDcNm7iY9a8LqgftZko99ioXz84wivXh")}
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
+var BlsPubkeyManagementInVoteAccount = FeatureGate{Name: "BlsPubkeyManagementInVoteAccount", Address: base58.MustDecodeFromString("2uxQgtKa2ECHGs67Zdj7dgmzn2w9HiqhdcedwCWfYzzq")}
+var CommissionRateInBasisPoints = FeatureGate{Name: "CommissionRateInBasisPoints", Address: base58.MustDecodeFromString("Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj")}
+var CustomCommissionCollector = FeatureGate{Name: "CustomCommissionCollector", Address: base58.MustDecodeFromString("GFZ5U5LUCWNecKMBJDuVR3vdepUMwSkwVUMxWKjJXkC4")}
+var BlockRevenueSharing = FeatureGate{Name: "BlockRevenueSharing", Address: base58.MustDecodeFromString("HqUXZzYaxpbjHRCZHn8GLDCSecyCe2A7JD3An6asGdw4")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -83,4 +88,5 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2,
-	VoteStateV4}
+	DelayCommissionUpdates, VoteStateV4, BlsPubkeyManagementInVoteAccount, CommissionRateInBasisPoints,
+	CustomCommissionCollector, BlockRevenueSharing}

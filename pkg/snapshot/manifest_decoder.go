@@ -45,6 +45,7 @@ type RentCollector struct {
 
 type VoteAccount struct {
 	Lamports          uint64
+	Data              []byte
 	NodePubkey        solana.PublicKey
 	LastTimestampTs   int64
 	LastTimestampSlot uint64
@@ -382,11 +383,13 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	}
 
 	if dataLen > 0 {
-		positionAfter := decoder.Position() + uint(dataLen)
+		voteAcct.Data, err = decoder.ReadBytes(int(dataLen))
+		if err != nil {
+			return err
+		}
 
 		var voteState sealevel.VoteStateVersions
-		err = voteState.UnmarshalWithDecoder(decoder)
-		decoder.SetPosition(positionAfter)
+		err = voteState.UnmarshalWithDecoder(bin.NewBinDecoder(voteAcct.Data))
 
 		var voteTimestamp sealevel.BlockTimestamp
 

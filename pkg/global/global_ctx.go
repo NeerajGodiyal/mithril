@@ -182,6 +182,20 @@ func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, vo
 	instance.epochStakes.PutEntry(epoch, pubkey, stake, voteAcct)
 }
 
+func PutEpochStake(epoch uint64, pubkey solana.PublicKey, stake uint64) {
+	if instance.epochStakes == nil {
+		instance.epochStakes = epochstakes.NewEpochStakesCache()
+	}
+	instance.epochStakes.PutStake(epoch, pubkey, stake)
+}
+
+func PutEpochVoteAccount(epoch uint64, pubkey solana.PublicKey, voteAcct *epochstakes.VoteAccount) {
+	if instance.epochStakes == nil {
+		instance.epochStakes = epochstakes.NewEpochStakesCache()
+	}
+	instance.epochStakes.PutVoteAccount(epoch, pubkey, voteAcct)
+}
+
 func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
 	return instance.epochStakes.EpochStakes(epoch)
 }

@@ -1,10 +1,12 @@
 package rewards
 
 import (
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -39,14 +42,193 @@ type PartitionedRewardDistributionInfo struct {
 	SpoolSlot                    uint64
 }
 
+type InflationRewardVariant struct {
+	SlotForRate              uint64
+	SlotInYear               float64
+	ValidatorRate            float64
+	PrevEpochDurationInYears float64
+	TotalRewards             uint64
+}
+
 type CalculatedStakePoints struct {
 	Points                              wide.Uint128
 	NewCreditsObserved                  uint64
 	ForceCreditsUpdateWithSkippedReward bool
 }
 
+type phase1ReasonStats struct {
+	count         atomic.Int64
+	stakeLamports atomic.Uint64
+	pointsMu      sync.Mutex
+	points        wide.Uint128
+}
+
+func (s *phase1ReasonStats) Add(stakeLamports uint64, points wide.Uint128) {
+	s.count.Add(1)
+	s.stakeLamports.Add(stakeLamports)
+	s.pointsMu.Lock()
+	s.points = s.points.Add(points)
+	s.pointsMu.Unlock()
+}
+
+func (s *phase1ReasonStats) Snapshot() (int64, uint64, wide.Uint128) {
+	s.pointsMu.Lock()
+	points := s.points
+	s.pointsMu.Unlock()
+	return s.count.Load(), s.stakeLamports.Load(), points
+}
+
+type phase1VoteSkipAggregate struct {
+	VotePubkey    solana.PublicKey
+	DelegationCnt int64
+	StakeLamports uint64
+}
+
+type phase2VoteRewardAggregate struct {
+	VotePubkey             solana.PublicKey
+	RewardingDelegations   int64
+	RewardingStakeLamports uint64
+	TotalPoints            wide.Uint128
+	TotalRawRewards        uint64
+	TotalVoterRewards      uint64
+	TotalStakerRewards     uint64
+	SplitDust              uint64
+}
+
+func addPhase1VoteSkipAggregate(m map[solana.PublicKey]*phase1VoteSkipAggregate, votePk solana.PublicKey, stakeLamports uint64) {
+	entry := m[votePk]
+	if entry == nil {
+		entry = &phase1VoteSkipAggregate{VotePubkey: votePk}
+		m[votePk] = entry
+	}
+	entry.DelegationCnt++
+	entry.StakeLamports += stakeLamports
+}
+
+func sortedPhase1VoteSkipAggregates(m map[solana.PublicKey]*phase1VoteSkipAggregate) []phase1VoteSkipAggregate {
+	out := make([]phase1VoteSkipAggregate, 0, len(m))
+	for _, entry := range m {
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].StakeLamports != out[j].StakeLamports {
+			return out[i].StakeLamports > out[j].StakeLamports
+		}
+		if out[i].DelegationCnt != out[j].DelegationCnt {
+			return out[i].DelegationCnt > out[j].DelegationCnt
+		}
+		return out[i].VotePubkey.String() < out[j].VotePubkey.String()
+	})
+	return out
+}
+
+func addPhase2VoteRewardAggregate(m map[solana.PublicKey]*phase2VoteRewardAggregate, votePk solana.PublicKey, stakeLamports uint64, points wide.Uint128, rawRewards uint64, voterRewards uint64, stakerRewards uint64) {
+	entry := m[votePk]
+	if entry == nil {
+		entry = &phase2VoteRewardAggregate{VotePubkey: votePk}
+		m[votePk] = entry
+	}
+	entry.RewardingDelegations++
+	entry.RewardingStakeLamports += stakeLamports
+	entry.TotalPoints = entry.TotalPoints.Add(points)
+	entry.TotalRawRewards += rawRewards
+	entry.TotalVoterRewards += voterRewards
+	entry.TotalStakerRewards += stakerRewards
+	entry.SplitDust += rawRewards - voterRewards - stakerRewards
+}
+
+func sortedPhase2VoteRewardAggregates(m map[solana.PublicKey]*phase2VoteRewardAggregate) []phase2VoteRewardAggregate {
+	out := make([]phase2VoteRewardAggregate, 0, len(m))
+	for _, entry := range m {
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalVoterRewards != out[j].TotalVoterRewards {
+			return out[i].TotalVoterRewards > out[j].TotalVoterRewards
+		}
+		if out[i].TotalRawRewards != out[j].TotalRawRewards {
+			return out[i].TotalRawRewards > out[j].TotalRawRewards
+		}
+		if out[i].RewardingDelegations != out[j].RewardingDelegations {
+			return out[i].RewardingDelegations > out[j].RewardingDelegations
+		}
+		return out[i].VotePubkey.String() < out[j].VotePubkey.String()
+	})
+	return out
+}
+
+func dumpPhase2VoteRewardSummaryCSV(slot uint64, voteAggregates map[solana.PublicKey]*phase2VoteRewardAggregate) {
+	logDir := mlog.GetLogDir()
+	if logDir == "" || len(voteAggregates) == 0 {
+		return
+	}
+
+	sorted := sortedPhase2VoteRewardAggregates(voteAggregates)
+	path := filepath.Join(logDir, fmt.Sprintf("rewards_phase2_vote_summary_slot%d.csv", slot))
+
+	file, err := os.Create(path)
+	if err != nil {
+		mlog.Log.Warnf("Rewards Phase 2: unable to create vote summary csv %s: %v", path, err)
+		return
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	if err := writer.Write([]string{
+		"vote_pubkey",
+		"rewarding_delegations",
+		"rewarding_stake_lamports",
+		"total_points",
+		"total_raw_rewards",
+		"total_voter_rewards",
+		"total_staker_rewards",
+		"split_dust",
+	}); err != nil {
+		mlog.Log.Warnf("Rewards Phase 2: unable to write csv header %s: %v", path, err)
+		return
+	}
+
+	for _, entry := range sorted {
+		record := []string{
+			entry.VotePubkey.String(),
+			fmt.Sprintf("%d", entry.RewardingDelegations),
+			fmt.Sprintf("%d", entry.RewardingStakeLamports),
+			entry.TotalPoints.String(),
+			fmt.Sprintf("%d", entry.TotalRawRewards),
+			fmt.Sprintf("%d", entry.TotalVoterRewards),
+			fmt.Sprintf("%d", entry.TotalStakerRewards),
+			fmt.Sprintf("%d", entry.SplitDust),
+		}
+		if err := writer.Write(record); err != nil {
+			mlog.Log.Warnf("Rewards Phase 2: unable to write csv row %s: %v", path, err)
+			return
+		}
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		mlog.Log.Warnf("Rewards Phase 2: unable to flush csv %s: %v", path, err)
+		return
+	}
+
+	mlog.Log.FileOnlyf("Rewards Phase 2 vote summary dumped to: %s (%d entries)", path, len(sorted))
+}
+
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
 	numSlots := GetInflationNumSlots(epochSchedule, epoch, f)
+	return float64(numSlots) / slotsPerYear
+}
+
+func InflationStartSlot(epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features) uint64 {
+	inflationActivationSlot := GetInflationStartSlot(f)
+	return epochSchedule.FirstSlotInEpoch(safemath.SaturatingSubU64(epochSchedule.GetEpoch(inflationActivationSlot), 1))
+}
+
+func SlotInYearForInflationSlot(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, slot uint64, f *features.Features) float64 {
+	inflationStartSlot := InflationStartSlot(epochSchedule, f)
+	numSlots := safemath.SaturatingSubU64(slot, inflationStartSlot)
 	return float64(numSlots) / slotsPerYear
 }
 
@@ -82,12 +264,23 @@ func GetInflationStartSlot(f *features.Features) uint64 {
 }
 
 func CalculatePreviousEpochInflationRewards(epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization, epoch, prevEpoch uint64, slotsPerYear float64, f *features.Features) uint64 {
-	slotInYear := SlotInYearForInflation(epochSchedule, slotsPerYear, epoch, f)
+	slotForRate := epochSchedule.FirstSlotInEpoch(epoch)
+	return CalculatePreviousEpochInflationRewardsAtSlot(epochSchedule, inflation, prevEpochCapitalization, prevEpoch, slotForRate, slotsPerYear, f).TotalRewards
+}
+
+func CalculatePreviousEpochInflationRewardsAtSlot(epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization, prevEpoch uint64, slotForRate uint64, slotsPerYear float64, f *features.Features) InflationRewardVariant {
+	slotInYear := SlotInYearForInflationSlot(epochSchedule, slotsPerYear, slotForRate, f)
 	validatorRate := inflation.Validator(slotInYear)
 	prevEpochDurationInYears := float64(epochSchedule.SlotsInEpoch(prevEpoch)) / slotsPerYear
 
 	validatorRewards := validatorRate * float64(prevEpochCapitalization) * prevEpochDurationInYears
-	return uint64(validatorRewards)
+	return InflationRewardVariant{
+		SlotForRate:              slotForRate,
+		SlotInYear:               slotInYear,
+		ValidatorRate:            validatorRate,
+		PrevEpochDurationInYears: prevEpochDurationInYears,
+		TotalRewards:             uint64(validatorRewards),
+	}
 }
 
 func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.SysvarEpochSchedule) bool {
@@ -102,8 +295,29 @@ func IsWithinRewardsPeriod(epoch uint64, slot uint64, epochSchedule *sealevel.Sy
 // DeterminePartitionedStakingRewardsInfo calculates the total staking rewards for the epoch.
 func DeterminePartitionedStakingRewardsInfo(epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization uint64, epoch uint64, prevEpoch uint64, slot uint64, slotsPerYear float64, f *features.Features) *PartitionedRewardDistributionInfo {
 	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	totalStakingRewards := CalculatePreviousEpochInflationRewards(epochSchedule, inflation, prevEpochCapitalization, epoch, prevEpoch, slotsPerYear, f)
-	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstSlotInEpoch + 1}
+	firstStakingRewardSlot := safemath.SaturatingAddU64(firstSlotInEpoch, 1)
+	currentVariant := CalculatePreviousEpochInflationRewardsAtSlot(epochSchedule, inflation, prevEpochCapitalization, prevEpoch, slot, slotsPerYear, f)
+	totalStakingRewards := currentVariant.TotalRewards
+
+	var minusVariant InflationRewardVariant
+	if slot > 0 {
+		minusVariant = CalculatePreviousEpochInflationRewardsAtSlot(epochSchedule, inflation, prevEpochCapitalization, prevEpoch, slot-1, slotsPerYear, f)
+	} else {
+		minusVariant = currentVariant
+	}
+	plusVariant := CalculatePreviousEpochInflationRewardsAtSlot(epochSchedule, inflation, prevEpochCapitalization, prevEpoch, slot+1, slotsPerYear, f)
+
+	mlog.Log.FileOnlyf("Rewards pool debug: epoch=%d prev_epoch=%d boundary_slot=%d first_slot_in_epoch=%d first_staking_reward_slot=%d capitalization=%d slots_per_year=%.6f",
+		epoch, prevEpoch, slot, firstSlotInEpoch, firstStakingRewardSlot, prevEpochCapitalization, slotsPerYear)
+	mlog.Log.FileOnlyf("  inflation_start_slot=%d prev_epoch_slots=%d prev_epoch_duration_years=%.12f",
+		InflationStartSlot(epochSchedule, f), epochSchedule.SlotsInEpoch(prevEpoch), currentVariant.PrevEpochDurationInYears)
+	mlog.Log.FileOnlyf("  slot-1: slot_for_rate=%d slot_in_year=%.12f validator_rate=%.12f total_rewards=%d delta_vs_slot=%d",
+		minusVariant.SlotForRate, minusVariant.SlotInYear, minusVariant.ValidatorRate, minusVariant.TotalRewards, int64(minusVariant.TotalRewards)-int64(currentVariant.TotalRewards))
+	mlog.Log.FileOnlyf("  slot:   slot_for_rate=%d slot_in_year=%.12f validator_rate=%.12f total_rewards=%d delta_vs_slot=%d",
+		currentVariant.SlotForRate, currentVariant.SlotInYear, currentVariant.ValidatorRate, currentVariant.TotalRewards, int64(currentVariant.TotalRewards)-int64(currentVariant.TotalRewards))
+	mlog.Log.FileOnlyf("  slot+1: slot_for_rate=%d slot_in_year=%.12f validator_rate=%.12f total_rewards=%d delta_vs_slot=%d",
+		plusVariant.SlotForRate, plusVariant.SlotInYear, plusVariant.ValidatorRate, plusVariant.TotalRewards, int64(plusVariant.TotalRewards)-int64(currentVariant.TotalRewards))
+	return &PartitionedRewardDistributionInfo{TotalStakingRewards: totalStakingRewards, FirstStakingRewardSlot: firstStakingRewardSlot}
 }
 
 type idxAndRewardNew struct {
@@ -112,7 +326,7 @@ type idxAndRewardNew struct {
 	voterPk solana.PublicKey
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]*atomic.Uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]*atomic.Uint64, rewardVoteAccts map[solana.PublicKey]*epochstakes.VoteAccount, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var totalVotingRewards atomic.Uint64
 
 	updatedAccts := make([]*accounts.Account, len(validatorRewards))
@@ -131,13 +345,23 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 
 		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
 		if err != nil {
-			return
+			cachedVoteAcct := rewardVoteAccts[voterPk]
+			if cachedVoteAcct == nil {
+				return
+			}
+			voteAcct = cachedVoteAcct.ToAccount(voterPk, slot)
+			if voteAcct == nil {
+				return
+			}
 		}
 		parentUpdatedAccts[idx] = voteAcct.Clone()
 
 		voteAcct.Lamports, err = safemath.CheckedAddU64(voteAcct.Lamports, uint64(reward))
 		if err != nil {
 			panic(fmt.Sprintf("overflow in voting rewards distribution in slot %d to acct %s: %s", slot, voterPk, err))
+		}
+		if cachedVoteAcct := rewardVoteAccts[voterPk]; cachedVoteAcct != nil {
+			cachedVoteAcct.Lamports = voteAcct.Lamports
 		}
 
 		updatedAccts[idx] = voteAcct
@@ -165,6 +389,15 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 	}
 
 	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
+}
+
+func rewardVoteState(votePubkey solana.PublicKey, rewardVoteAccts map[solana.PublicKey]*epochstakes.VoteAccount, liveVoteCache map[solana.PublicKey]*sealevel.VoteStateVersions) *sealevel.VoteStateVersions {
+	if voteAcct := rewardVoteAccts[votePubkey]; voteAcct != nil {
+		if voteState, err := voteAcct.VoteState(); err == nil && voteState != nil {
+			return voteState
+		}
+	}
+	return liveVoteCache[votePubkey]
 }
 
 func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir string, spoolSlot uint64, partitionIdx uint64, currentSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64) {
@@ -525,7 +758,8 @@ func CalculateRewardsStreaming(
 	slot uint64,
 	stakeHistory *sealevel.SysvarStakeHistory,
 	newWarmupCooldownRateEpoch *uint64,
-	voteCache map[solana.PublicKey]*sealevel.VoteStateVersions,
+	rewardVoteAccts map[solana.PublicKey]*epochstakes.VoteAccount,
+	liveVoteCache map[solana.PublicKey]*sealevel.VoteStateVersions,
 	pointValue PointValue,
 	rewardedEpoch uint64,
 	blockhash [32]byte,
@@ -535,7 +769,14 @@ func CalculateRewardsStreaming(
 	minimum := minimumStakeDelegation(slotCtx)
 	spoolDir := filepath.Join(acctsDb.AcctsDir, "..")
 
-	mlog.Log.Infof("Rewards: voteCache has %d entries, minimum stake delegation=%d", len(voteCache), minimum)
+	fullRewardVoteAccts := 0
+	for _, voteAcct := range rewardVoteAccts {
+		if voteAcct != nil && len(voteAcct.Data) > 0 {
+			fullRewardVoteAccts++
+		}
+	}
+	mlog.Log.Infof("Rewards: epochVoteAccts=%d fullData=%d liveVoteCache=%d minimum stake delegation=%d",
+		len(rewardVoteAccts), fullRewardVoteAccts, len(liveVoteCache), minimum)
 
 	// ==================== PHASE 1: Calculate total points + write points spool ====================
 	pointsWriter, err := NewPointsSpoolWriter(spoolDir, slot)
@@ -547,10 +788,20 @@ func CalculateRewardsStreaming(
 	var totalPoints wide.Uint128
 	var totalPointsMu sync.Mutex
 	var phase1StakeCount atomic.Int64
-	var phase1BelowMinimum atomic.Int64
-	var phase1NoVoteState atomic.Int64
-	var phase1ZeroPoints atomic.Int64
 	var phase1TotalStakeLamports atomic.Uint64
+	var phase1BelowMinimumStats phase1ReasonStats
+	var phase1NoVoteStateStats phase1ReasonStats
+	var phase1ZeroPointsStats phase1ReasonStats
+	var phase1ForceCreditsStats phase1ReasonStats
+	var phase1CreditsRollbackStats phase1ReasonStats
+	var phase1ActivationEpochSkipStats phase1ReasonStats
+	var phase1ZeroRewardsStats phase1ReasonStats
+	var phase1OtherForceCreditsStats phase1ReasonStats
+
+	var phase1NoVoteByVoteMu sync.Mutex
+	phase1NoVoteByVote := make(map[solana.PublicKey]*phase1VoteSkipAggregate)
+	var phase1CreditsRollbackByVoteMu sync.Mutex
+	phase1CreditsRollbackByVote := make(map[solana.PublicKey]*phase1VoteSkipAggregate)
 
 	// Collect ALL vote pubkeys from delegations (matching in-memory path's pre-population)
 	var allVotePubkeys sync.Map
@@ -582,14 +833,17 @@ func CalculateRewardsStreaming(
 			allVotePubkeys.Store(delegation.VoterPubkey, struct{}{})
 
 			if delegation.StakeLamports < minimum {
-				phase1BelowMinimum.Add(1)
+				phase1BelowMinimumStats.Add(delegation.StakeLamports, wide.Uint128{})
 				return
 			}
 
 			voterPk := delegation.VoterPubkey
-			voteState := voteCache[voterPk]
+			voteState := rewardVoteState(voterPk, rewardVoteAccts, liveVoteCache)
 			if voteState == nil {
-				phase1NoVoteState.Add(1)
+				phase1NoVoteStateStats.Add(delegation.StakeLamports, wide.Uint128{})
+				phase1NoVoteByVoteMu.Lock()
+				addPhase1VoteSkipAggregate(phase1NoVoteByVote, voterPk, delegation.StakeLamports)
+				phase1NoVoteByVoteMu.Unlock()
 				return
 			}
 
@@ -599,7 +853,7 @@ func CalculateRewardsStreaming(
 
 			zero128 := wide.Uint128FromUint64(0)
 			if pcs.Points.Eq(zero128) {
-				phase1ZeroPoints.Add(1)
+				phase1ZeroPointsStats.Add(delegation.StakeLamports, wide.Uint128{})
 			}
 
 			totalPointsMu.Lock()
@@ -610,9 +864,26 @@ func CalculateRewardsStreaming(
 
 			// Precompute the full forceCreditsUpdate flag using the same three
 			// triggers as CalculateStakeRewardsForAcct:
-			forceCredits := pcs.ForceCreditsUpdateWithSkippedReward ||
-				pointValue.Rewards == 0 ||
-				delegation.ActivationEpoch == rewardedEpoch
+			isCreditsRollback := pcs.ForceCreditsUpdateWithSkippedReward && pcs.NewCreditsObserved < creditsObs
+			isZeroRewards := pointValue.Rewards == 0
+			isActivationEpochSkip := delegation.ActivationEpoch == rewardedEpoch
+			forceCredits := pcs.ForceCreditsUpdateWithSkippedReward || isZeroRewards || isActivationEpochSkip
+			if forceCredits {
+				phase1ForceCreditsStats.Add(delegation.StakeLamports, pcs.Points)
+				switch {
+				case isCreditsRollback:
+					phase1CreditsRollbackStats.Add(delegation.StakeLamports, pcs.Points)
+					phase1CreditsRollbackByVoteMu.Lock()
+					addPhase1VoteSkipAggregate(phase1CreditsRollbackByVote, voterPk, delegation.StakeLamports)
+					phase1CreditsRollbackByVoteMu.Unlock()
+				case isActivationEpochSkip:
+					phase1ActivationEpochSkipStats.Add(delegation.StakeLamports, pcs.Points)
+				case isZeroRewards:
+					phase1ZeroRewardsStats.Add(delegation.StakeLamports, pcs.Points)
+				default:
+					phase1OtherForceCreditsStats.Add(delegation.StakeLamports, pcs.Points)
+				}
+			}
 
 			// Only write points records that Phase 2 will actually use:
 			// - forceCredits records produce spool records with 0 rewards
@@ -652,9 +923,52 @@ func CalculateRewardsStreaming(
 		return nil, fmt.Errorf("points spool close failed: %w", err)
 	}
 
+	belowMinCount, belowMinStake, _ := phase1BelowMinimumStats.Snapshot()
+	noVoteCount, noVoteStake, _ := phase1NoVoteStateStats.Snapshot()
+	zeroPointsCount, zeroPointsStake, _ := phase1ZeroPointsStats.Snapshot()
+	forceCreditsCount, forceCreditsStake, forceCreditsPoints := phase1ForceCreditsStats.Snapshot()
+	creditsRollbackCount, creditsRollbackStake, creditsRollbackPoints := phase1CreditsRollbackStats.Snapshot()
+	activationEpochSkipCount, activationEpochSkipStake, activationEpochSkipPoints := phase1ActivationEpochSkipStats.Snapshot()
+	zeroRewardsCount, zeroRewardsStake, zeroRewardsPoints := phase1ZeroRewardsStats.Snapshot()
+	otherForceCreditsCount, otherForceCreditsStake, otherForceCreditsPoints := phase1OtherForceCreditsStats.Snapshot()
+
 	mlog.Log.Infof("Rewards Phase 1: %d stakes (belowMin=%d, noVote=%d, zeroPoints=%d), totalStakeLamports=%d, totalPoints=%s, totalRewards=%d, pointsSpoolRecords=%d",
-		phase1StakeCount.Load(), phase1BelowMinimum.Load(), phase1NoVoteState.Load(), phase1ZeroPoints.Load(),
+		phase1StakeCount.Load(), belowMinCount, noVoteCount, zeroPointsCount,
 		phase1TotalStakeLamports.Load(), totalPoints.String(), pointValue.Rewards, pointsWriter.Count())
+
+	if belowMinCount > 0 || noVoteCount > 0 || zeroPointsCount > 0 || forceCreditsCount > 0 {
+		mlog.Log.FileOnlyf("Rewards Phase 1 details:")
+		mlog.Log.FileOnlyf("  below_minimum: count=%d stake=%d", belowMinCount, belowMinStake)
+		mlog.Log.FileOnlyf("  no_vote_state: count=%d stake=%d unique_vote_accts=%d", noVoteCount, noVoteStake, len(phase1NoVoteByVote))
+		if len(phase1NoVoteByVote) > 0 {
+			topNoVote := sortedPhase1VoteSkipAggregates(phase1NoVoteByVote)
+			limit := min(10, len(topNoVote))
+			mlog.Log.FileOnlyf("  no_vote_state top_by_stake (showing %d):", limit)
+			for i := 0; i < limit; i++ {
+				entry := topNoVote[i]
+				mlog.Log.FileOnlyf("    %d. vote=%s delegations=%d stake=%d", i+1, entry.VotePubkey, entry.DelegationCnt, entry.StakeLamports)
+			}
+		}
+		mlog.Log.FileOnlyf("  zero_points_with_vote_state: count=%d stake=%d", zeroPointsCount, zeroPointsStake)
+		mlog.Log.FileOnlyf("  force_credits_skip: count=%d stake=%d points_included_in_total=%s", forceCreditsCount, forceCreditsStake, forceCreditsPoints.String())
+		mlog.Log.FileOnlyf("    credits_rollback: count=%d stake=%d points_included=%s unique_vote_accts=%d",
+			creditsRollbackCount, creditsRollbackStake, creditsRollbackPoints.String(), len(phase1CreditsRollbackByVote))
+		if len(phase1CreditsRollbackByVote) > 0 {
+			topCreditsRollback := sortedPhase1VoteSkipAggregates(phase1CreditsRollbackByVote)
+			limit := min(10, len(topCreditsRollback))
+			mlog.Log.FileOnlyf("    credits_rollback top_by_stake (showing %d):", limit)
+			for i := 0; i < limit; i++ {
+				entry := topCreditsRollback[i]
+				mlog.Log.FileOnlyf("      %d. vote=%s delegations=%d stake=%d", i+1, entry.VotePubkey, entry.DelegationCnt, entry.StakeLamports)
+			}
+		}
+		mlog.Log.FileOnlyf("    activation_epoch: count=%d stake=%d points_included=%s",
+			activationEpochSkipCount, activationEpochSkipStake, activationEpochSkipPoints.String())
+		mlog.Log.FileOnlyf("    zero_rewards: count=%d stake=%d points_included=%s",
+			zeroRewardsCount, zeroRewardsStake, zeroRewardsPoints.String())
+		mlog.Log.FileOnlyf("    other_force_credits: count=%d stake=%d points_included=%s",
+			otherForceCreditsCount, otherForceCreditsStake, otherForceCreditsPoints.String())
+	}
 
 	// ==================== PHASE 2: Replay points spool → compute rewards → write temp spool ====================
 	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
@@ -684,6 +998,7 @@ func CalculateRewardsStreaming(
 
 	var phase2SkippedNilReward int64
 	var phase2TotalStakerRewards uint64
+	phase2VoteRewardsByVote := make(map[solana.PublicKey]*phase2VoteRewardAggregate)
 	zero128 := wide.Uint128FromUint64(0)
 
 	for {
@@ -738,7 +1053,7 @@ func CalculateRewardsStreaming(
 		}
 
 		// 4. Commission split
-		voteState := voteCache[rec.VotePubkey]
+		voteState := rewardVoteState(rec.VotePubkey, rewardVoteAccts, liveVoteCache)
 		if voteState == nil {
 			phase2SkippedNilReward++
 			continue
@@ -750,6 +1065,15 @@ func CalculateRewardsStreaming(
 		}
 
 		phase2TotalStakerRewards += splitResult.StakerPortion
+		addPhase2VoteRewardAggregate(
+			phase2VoteRewardsByVote,
+			rec.VotePubkey,
+			rec.StakeLamports,
+			rec.Points,
+			rewards,
+			splitResult.VoterPortion,
+			splitResult.StakerPortion,
+		)
 
 		if err := tempWriter.WriteRecord(&SpoolRecord{
 			StakePubkey:     rec.StakePubkey,
@@ -789,6 +1113,7 @@ func CalculateRewardsStreaming(
 	mlog.Log.Infof("Rewards Phase 2: %d records (skippedNilReward=%d), totalStakerRewards=%d, totalVotingRewards=%d, validatorCount=%d, numPartitions=%d",
 		actualRewardCount, phase2SkippedNilReward,
 		phase2TotalStakerRewards, totalVotingRewards, len(validatorRewards), numPartitions)
+	dumpPhase2VoteRewardSummaryCSV(slot, phase2VoteRewardsByVote)
 
 	// ==================== PHASE 3: Read temp spool, assign partitions, write per-partition spools ====================
 	tempReader, err := NewTempSpoolReader(tempPath)

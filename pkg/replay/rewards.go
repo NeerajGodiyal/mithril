@@ -30,12 +30,14 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
-	voteCacheSnapshot := global.VoteCacheSnapshot()
+	rewardVoteEpoch := epochSchedule.LeaderScheduleEpoch(slot)
+	rewardVoteAccts := global.EpochStakesVoteAccts(rewardVoteEpoch)
+	liveVoteCacheSnapshot := global.VoteCacheSnapshot()
 
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: wide.Uint128{}}
 	streamResult, streamErr := rewards.CalculateRewardsStreaming(
 		acctsDb, slot, stakeHistory, newWarmupCooldownRateEpoch,
-		voteCacheSnapshot, pointValue, epoch-1, slotCtx.Blockhash, slotCtx, f)
+		rewardVoteAccts, liveVoteCacheSnapshot, pointValue, epoch-1, slotCtx.Blockhash, slotCtx, f)
 	if streamErr != nil {
 		panic(fmt.Sprintf("streaming rewards calculation failed: %s", streamErr))
 	}
@@ -44,7 +46,7 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	partitionedRewardsInfo.SpoolSlot = streamResult.SpoolSlot
 	partitionedRewardsInfo.NumRewardPartitionsRemaining = streamResult.NumPartitions
 
-	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, streamResult.ValidatorRewards, slot)
+	updatedAccts, parentUpdatedAccts, voteRewardsDistributed := rewards.DistributeVotingRewards(acctsDb, streamResult.ValidatorRewards, rewardVoteAccts, slot)
 
 	newEpochRewards := sealevel.SysvarEpochRewards{DistributionStartingBlockHeight: block.BlockHeight + 1,
 		NumPartitions: streamResult.NumPartitions, ParentBlockhash: block.LastBlockhash,

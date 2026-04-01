@@ -43,16 +43,16 @@ type MithrilState struct {
 	// =========================================================================
 	// AccountsDB Origin (snapshot info - set once, never changes)
 	// =========================================================================
-	Stage          string        `json:"stage"`                       // "ready", "downloading", "building", "corrupted"
-	SnapshotSlot   uint64        `json:"snapshot_slot"`               // Slot of the snapshot used to build AccountsDB
-	SnapshotEpoch  uint64        `json:"snapshot_epoch,omitempty"`    // Epoch of the snapshot
-	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`     // Full snapshot file info
-	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`     // Incremental snapshot file info
+	Stage          string        `json:"stage"`                        // "ready", "downloading", "building", "corrupted"
+	SnapshotSlot   uint64        `json:"snapshot_slot"`                // Slot of the snapshot used to build AccountsDB
+	SnapshotEpoch  uint64        `json:"snapshot_epoch,omitempty"`     // Epoch of the snapshot
+	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`      // Full snapshot file info
+	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`      // Incremental snapshot file info
 	BuildCompleted time.Time     `json:"build_completed_at,omitempty"` // When AccountsDB build finished
-	BuildStartedAt time.Time     `json:"build_started_at,omitempty"`  // When bootstrap started
-	BuildMode      string        `json:"build_mode,omitempty"`        // "auto", "snapshot", "new-snapshot", "accountsdb"
-	Cluster        string        `json:"cluster,omitempty"`           // "mainnet-beta", "testnet", "devnet"
-	GenesisHash    string        `json:"genesis_hash,omitempty"`      // Base58 genesis hash from RPC
+	BuildStartedAt time.Time     `json:"build_started_at,omitempty"`   // When bootstrap started
+	BuildMode      string        `json:"build_mode,omitempty"`         // "auto", "snapshot", "new-snapshot", "accountsdb"
+	Cluster        string        `json:"cluster,omitempty"`            // "mainnet-beta", "testnet", "devnet"
+	GenesisHash    string        `json:"genesis_hash,omitempty"`       // Base58 genesis hash from RPC
 
 	// Corruption tracking - set when integrity check fails
 	CorruptionReason     string    `json:"corruption_reason,omitempty"`
@@ -99,8 +99,9 @@ type MithrilState struct {
 	// Multiple authorized voters per vote account are supported (matches original manifest behavior)
 	ManifestEpochAuthorizedVoters map[string][]string `json:"manifest_epoch_authorized_voters,omitempty"`
 
-	// Epoch stakes seed - AGGREGATED vote-account stakes only (NOT full VersionedEpochStakes)
-	// Same format as ComputedEpochStakes (PersistedEpochStakes JSON)
+	// Epoch stakes seed - PersistedEpochStakes JSON derived from manifest
+	// VersionedEpochStakes. This now preserves full vote-account data for
+	// reward calculation, while still carrying the aggregated effective stakes.
 	// Cleared after first replayed slot to save space.
 	ManifestEpochStakes map[uint64]string `json:"manifest_epoch_stakes,omitempty"`
 
@@ -131,9 +132,9 @@ type MithrilState struct {
 	LastSlotHashes []SlotHashEntry `json:"last_slot_hashes,omitempty"` // up to 512 entries, newest first
 
 	// ReplayCtx fields - so resume uses fresh values instead of stale manifest
-	LastCapitalization          uint64  `json:"last_capitalization,omitempty"`           // Total lamports in circulation
-	LastSlotsPerYear            float64 `json:"last_slots_per_year,omitempty"`           // Slots per year for inflation calc
-	LastInflationInitial        float64 `json:"last_inflation_initial,omitempty"`        // Inflation parameters
+	LastCapitalization          uint64  `json:"last_capitalization,omitempty"`    // Total lamports in circulation
+	LastSlotsPerYear            float64 `json:"last_slots_per_year,omitempty"`    // Slots per year for inflation calc
+	LastInflationInitial        float64 `json:"last_inflation_initial,omitempty"` // Inflation parameters
 	LastInflationTerminal       float64 `json:"last_inflation_terminal,omitempty"`
 	LastInflationTaper          float64 `json:"last_inflation_taper,omitempty"`
 	LastInflationFoundation     float64 `json:"last_inflation_foundation,omitempty"`
@@ -148,9 +149,9 @@ type MithrilState struct {
 	// Legacy fields - kept for backwards compatibility
 	// =========================================================================
 	// TODO: Remove after v1.0 release
-	LastCommit string    `json:"last_commit,omitempty"`  // Deprecated: use last_writer_commit
-	LastRunID  string    `json:"last_run_id,omitempty"`  // Deprecated: use current_run_id
-	LastRunAt  time.Time `json:"last_run_at,omitempty"`  // Deprecated: tracked via last_shutdown_at
+	LastCommit string    `json:"last_commit,omitempty"` // Deprecated: use last_writer_commit
+	LastRunID  string    `json:"last_run_id,omitempty"` // Deprecated: use current_run_id
+	LastRunAt  time.Time `json:"last_run_at,omitempty"` // Deprecated: tracked via last_shutdown_at
 }
 
 // Shutdown reason constants - these are stored in the state file and should be
@@ -159,7 +160,7 @@ const (
 	ShutdownReasonNormal         = "graceful shutdown (Ctrl+C)"
 	ShutdownReasonStall          = "block fetch stalled - no RPC progress for 5+ minutes"
 	ShutdownReasonLeaderSchedule = "leader schedule fetch failed from all RPC endpoints"
-	ShutdownReasonError          = "replay error"       // Will be suffixed with actual error
+	ShutdownReasonError          = "replay error" // Will be suffixed with actual error
 	ShutdownReasonCompleted      = "replay completed - reached end slot"
 )
 
