@@ -88,6 +88,27 @@ func (fetcher *RpcClient) GetBlockConfirmedOnce(slot uint64) (*rpc.GetBlockResul
 	return result, nil
 }
 
+// GetBlocksWithLimitConfirmed fetches a confirmed slot listing beginning at startSlot.
+// This is useful for confirming that a slot is genuinely absent before treating it as skipped.
+func (fetcher *RpcClient) GetBlocksWithLimitConfirmed(startSlot uint64, limit uint64) ([]uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := fetcher.client.GetBlocksWithLimit(
+		ctx,
+		startSlot,
+		limit,
+		rpc.CommitmentConfirmed,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return *result, nil
+}
+
 func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)

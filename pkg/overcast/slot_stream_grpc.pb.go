@@ -57,13 +57,14 @@ func (c *slotStreamClient) StreamSlots(ctx context.Context, in *SlotStreamReques
 type SlotStream_StreamSlotsClient = grpc.ServerStreamingClient[SlotResponse]
 
 // SlotStreamServer is the server API for SlotStream service.
-// All implementations should embed UnimplementedSlotStreamServer
+// All implementations must embed UnimplementedSlotStreamServer
 // for forward compatibility.
 type SlotStreamServer interface {
 	StreamSlots(*SlotStreamRequest, grpc.ServerStreamingServer[SlotResponse]) error
+	mustEmbedUnimplementedSlotStreamServer()
 }
 
-// UnimplementedSlotStreamServer should be embedded to have
+// UnimplementedSlotStreamServer must be embedded to have
 // forward compatible implementations.
 //
 // NOTE: this should be embedded by value instead of pointer to avoid a nil
@@ -73,7 +74,8 @@ type UnimplementedSlotStreamServer struct{}
 func (UnimplementedSlotStreamServer) StreamSlots(*SlotStreamRequest, grpc.ServerStreamingServer[SlotResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamSlots not implemented")
 }
-func (UnimplementedSlotStreamServer) testEmbeddedByValue() {}
+func (UnimplementedSlotStreamServer) mustEmbedUnimplementedSlotStreamServer() {}
+func (UnimplementedSlotStreamServer) testEmbeddedByValue()                    {}
 
 // UnsafeSlotStreamServer may be embedded to opt out of forward compatibility for this service.
 // Use of this interface is not recommended, as added methods to SlotStreamServer will

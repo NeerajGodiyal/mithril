@@ -366,9 +366,20 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
 
-	// Validate: blockSource=rpc requires RPC endpoints
-	if blockSource == "rpc" && len(rpcEndpoints) == 0 {
-		return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set network.rpc)")
+	switch blockSource {
+	case "rpc":
+		if len(rpcEndpoints) == 0 {
+			return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set network.rpc)")
+		}
+	case "lightbringer":
+		if lightbringerEndpoint == "" {
+			return fmt.Errorf("block.source=lightbringer but no block.lightbringer_endpoint provided")
+		}
+		if len(rpcEndpoints) == 0 {
+			return fmt.Errorf("block.source=lightbringer requires RPC endpoints for catchup (set network.rpc)")
+		}
+	default:
+		return fmt.Errorf("invalid block.source %q - must be 'rpc' or 'lightbringer'", blockSource)
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -630,25 +641,9 @@ func runLive(c *cobra.Command, args []string) {
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
 
-	// Determine if using Lightbringer based on block source
-	// NOTE: Lightbringer mode is TEMPORARILY DISABLED. The background block downloader that
-	// wrote Lightbringer blocks to disk was removed due to reliability issues (panics, race conditions).
-	// Until Lightbringer streaming is re-implemented with the new parallel fetcher architecture,
-	// all Lightbringer requests will fall back to RPC mode.
-	// TODO: Re-implement Lightbringer as a streaming BlockSource (push model -> reorder buffer)
 	useLightbringer := blockSource == "lightbringer"
 	if useLightbringer {
-		mlog.Log.Infof("WARNING: block.source=lightbringer is temporarily disabled - falling back to RPC")
-		mlog.Log.Infof("  The background block downloader was removed. Lightbringer streaming will be")
-		mlog.Log.Infof("  re-implemented in a future PR with the new parallel fetcher architecture.")
-		useLightbringer = false
-
-		// Validate RPC endpoints since we're falling back to RPC mode
-		// (This check is normally done in loadConfig but only when blockSource == "rpc")
-		if len(rpcEndpoints) == 0 {
-			klog.Fatalf("block.source=lightbringer requires fallback to RPC, but no RPC endpoints are configured. " +
-				"Set network.rpc in config, or use --rpc flag.")
-		}
+		mlog.Log.Infof("block.source=lightbringer enabled: RPC catchup will hand off to Lightbringer live stream at %s", lightbringerEndpoint)
 	}
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
@@ -1235,7 +1230,44 @@ postBootstrap:
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, replayStartTime)
+	// Build consensus options from config
+	consensusMaxDepth := config.GetInt("consensus.skip_path_max_depth")
+	if consensusMaxDepth <= 0 {
+		consensusMaxDepth = 64
+	}
+	consensusPolicy := config.GetString("consensus.unresolved_policy")
+	if consensusPolicy == "" {
+		consensusPolicy = "halt"
+	}
+	switch consensusPolicy {
+	case "halt", "warn":
+		// valid
+	default:
+		mlog.Log.Errorf("invalid consensus.unresolved_policy %q (must be \"halt\" or \"warn\"), defaulting to \"halt\"", consensusPolicy)
+		consensusPolicy = "halt"
+	}
+	consensusEnforceSource := config.GetString("consensus.enforce_on_source")
+	if consensusEnforceSource == "" {
+		consensusEnforceSource = "lightbringer"
+	}
+	switch consensusEnforceSource {
+	case "lightbringer", "all":
+		// valid
+	default:
+		mlog.Log.Errorf("invalid consensus.enforce_on_source %q (must be \"lightbringer\" or \"all\"), defaulting to \"lightbringer\"", consensusEnforceSource)
+		consensusEnforceSource = "lightbringer"
+	}
+	consensusOpts := &replay.ConsensusOpts{
+		SkipPathMaxDepth: consensusMaxDepth,
+		UnresolvedPolicy: consensusPolicy,
+		EnforceOnSource:  consensusEnforceSource,
+	}
+
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+
+	if result.Error != nil && result.LastPersistedSlot == 0 {
+		mlog.Log.Errorf("Replay stopped before persisting the first post-start slot: %v", result.Error)
+	}
 
 	// Update state file with last persisted slot and shutdown context
 	// Skip if already written during cancellation (eliminates timing window)
@@ -1625,8 +1657,7 @@ func printStartupInfo(commandName string) {
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
 	if blockSource == "lightbringer" {
-		// Lightbringer is temporarily disabled - show this in startup info
-		fmt.Printf(" %s(disabled, using rpc)%s\n", dim, reset)
+		fmt.Printf(" %s(rpc catchup -> live stream)%s\n", dim, reset)
 	} else {
 		fmt.Println()
 	}
@@ -1637,6 +1668,9 @@ func printStartupInfo(commandName string) {
 		for _, ep := range rpcEndpoints[1:] {
 			fmt.Printf("                %s%s%s (fallback)\n", gold, ep, reset)
 		}
+	}
+	if blockSource == "lightbringer" && lightbringerEndpoint != "" {
+		fmt.Printf("  Lightbringer: %s%s%s\n", gold, lightbringerEndpoint, reset)
 	}
 
 	fmt.Println()
@@ -2090,6 +2124,7 @@ func runReplayWithRecovery(
 	resumeState *replay.ResumeState,
 	startSlot, endSlot uint64,
 	rpcEndpoints []string, // RPC endpoints in priority order (first = primary)
+	lightbringerEndpoint string,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -2099,6 +2134,7 @@ func runReplayWithRecovery(
 	rpcServer *rpcserver.RpcServer,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
+	consensusOpts *replay.ConsensusOpts,
 	replayStartTime time.Time, // Start time for resume context
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
@@ -2210,6 +2246,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	return result
 }
