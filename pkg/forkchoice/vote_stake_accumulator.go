@@ -54,18 +54,10 @@ func newSlotVoteAccumulator(totalEpochStake uint64, slot uint64) *slotVoteAccumu
 //
 // thresholdCrossed is true only on the exact vote that causes the hash to cross
 // the 2/3 threshold. Uses Agave crossing semantics:
-//
-//	old_stake <= threshold_stake && threshold_stake < new_stake
-//
-// isNew is true if this pubkey had not previously voted for this (slot, hash).
-// Dedup is per (slot, hash, pubkey) — same pubkey can vote for different hashes.
-//
+
 // See: agave/core/src/consensus/vote_stake_tracker.rs:14-37
 func (acc *slotVoteAccumulator) addVote(hash solana.Hash, votePubkey solana.PublicKey, stake uint64) (thresholdCrossed bool, isNew bool) {
-	if priorHash, exists := acc.voterToHash[votePubkey]; exists {
-		if priorHash == hash {
-			return false, false
-		}
+	if _, exists := acc.voterToHash[votePubkey]; exists {
 		return false, false
 	}
 
