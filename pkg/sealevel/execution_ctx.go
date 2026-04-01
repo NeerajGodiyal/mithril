@@ -369,6 +369,11 @@ func (slotCtx *SlotCtx) GetAccount(pubkey solana.PublicKey) (*accounts.Account, 
 	}
 }
 
+func (slotCtx *SlotCtx) GetAccountShared(pubkey solana.PublicKey) (*accounts.Account, error) {
+	pk := [32]byte(pubkey)
+	return slotCtx.Accounts.GetAccount(&pk)
+}
+
 func (slotCtx *SlotCtx) GetParentAccount(pubkey solana.PublicKey) (*accounts.Account, error) {
 	acct, err := slotCtx.ParentAccts.GetAccountWithoutLock(pubkey)
 	if err != nil {

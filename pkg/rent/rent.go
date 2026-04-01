@@ -113,8 +113,11 @@ func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateI
 func MaybeSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, f *features.Features, txAccts *sealevel.TransactionAccounts) {
 	for idx := range txAccts.Accounts {
 		if ShouldSetRentExemptRentEpochMax(slotCtx, rent, f, txAccts.Accounts[idx]) {
-			txAccts.Accounts[idx].RentEpoch = math.MaxUint64
-			txAccts.Touch(uint64(idx))
+			touchedAcct, err := txAccts.Touch(uint64(idx))
+			if err != nil {
+				panic("unable to mark rent-exempt account as touched")
+			}
+			touchedAcct.RentEpoch = math.MaxUint64
 		}
 	}
 }

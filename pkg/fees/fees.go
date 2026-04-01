@@ -139,8 +139,11 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	}
 	////mlog.Log.Debugf("feePayerAcct.Lamports=%d totalTxFee=%d", feePayerAcct.Lamports, totalTxFee)
 
+	feePayerAcct, err = transactionAccts.Touch(feePayerIdx)
+	if err != nil {
+		return feeInfo, 0, err
+	}
 	feePayerAcct.Lamports -= totalTxFee
-	transactionAccts.Touch(feePayerIdx)
 
 	return feeInfo, feePayerAcct.Lamports, nil
 }
