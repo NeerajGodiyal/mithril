@@ -70,7 +70,6 @@ var (
 	ErrNoAccount = errors.New("ErrNoAccount")
 
 	StoreAccountsWorkers = 128
-	StoreAsync           = false
 )
 
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
@@ -116,41 +115,17 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	accountsDb := &AccountsDb{Index: db, BankHashStore: bankhashDb, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
 
-	mlog.Log.Infof("StoreAsync=%t", StoreAsync)
-	if StoreAsync {
-		accountsDb.inProgressStoreRequests = list.New()
-		accountsDb.storeRequestChan = make(chan *list.Element)
-		accountsDb.storeWorkerDone = make(chan struct{})
-		go accountsDb.storeWorker()
-	}
+	accountsDb.inProgressStoreRequests = list.New()
+	accountsDb.storeRequestChan = make(chan *list.Element)
+	accountsDb.storeWorkerDone = make(chan struct{})
+	go accountsDb.storeWorker()
 
 	return accountsDb, nil
 }
 
-// DrainStoreQueue waits until all queued async store requests have completed.
-// Unlike WaitForStoreWorker, this does NOT shut down the worker — it just
-// spins until the in-progress list is empty.
-func (accountsDb *AccountsDb) DrainStoreQueue() {
-	if !StoreAsync {
-		return
-	}
-	for {
-		accountsDb.inProgressStoreRequestsMu.Lock()
-		empty := accountsDb.inProgressStoreRequests.Len() == 0
-		accountsDb.inProgressStoreRequestsMu.Unlock()
-		if empty {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// Turns down the store worker. AccountsDb cannot accept writes after this if StoreAsync.
+// Turns down the store worker. AccountsDb cannot accept writes after this.
 // Should not be called concurrently.
 func (accountsDb *AccountsDb) WaitForStoreWorker() {
-	if !StoreAsync {
-		return
-	}
 	if accountsDb.storeWorkerDone == nil {
 		mlog.Log.Infof("AccountsDb: async store worker already done.")
 		return
@@ -222,11 +197,9 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
-	if StoreAsync {
-		accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
-		if accts[0] != nil {
-			return accts[0], nil
-		}
+	accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
+	if accts[0] != nil {
+		return accts[0], nil
 	}
 	return accountsDb.getStoredAccount(slot, pubkey)
 }
@@ -331,27 +304,19 @@ func (accountsDb *AccountsDb) StoreAccounts(
 		acct.Slot = slot
 	}
 
-	if StoreAsync {
-		m := make(map[solana.PublicKey]*accounts.Account, len(accts))
-		for _, a := range accts {
-			if a == nil {
-				continue
-			}
-			m[a.Key] = a
+	m := make(map[solana.PublicKey]*accounts.Account, len(accts))
+	for _, a := range accts {
+		if a == nil {
+			continue
 		}
-		// Must not hold lock during channel send to avoid deadlock with storeWorker.
-		accountsDb.inProgressStoreRequestsMu.Lock()
-		element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts, slot, m, cb})
-		accountsDb.inProgressStoreRequestsMu.Unlock()
-		accountsDb.storeRequestChan <- element
-		return nil
-	} else {
-		accountsDb.storeAccountsSync(accts, slot)
-		if cb != nil {
-			cb()
-		}
-		return nil
+		m[a.Key] = a
 	}
+	// Must not hold lock during channel send to avoid deadlock with storeWorker.
+	accountsDb.inProgressStoreRequestsMu.Lock()
+	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts, slot, m, cb})
+	accountsDb.inProgressStoreRequestsMu.Unlock()
+	accountsDb.storeRequestChan <- element
+	return nil
 }
 
 func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot uint64) {

@@ -124,7 +124,6 @@ func init() {
 	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
-	Run.Flags().BoolVar(&accountsdb.StoreAsync, "store-async", false, "Store accounts asynchronously")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -469,7 +468,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	snapshot.MaxConcurrentFlushers = getInt("max-concurrent-flushers", "tuning.max_concurrent_flushers")
 	sbpf.UsePool = getBool("use-pool", "tuning.use_pool")
 	accountsdb.StoreAccountsWorkers = getInt("store-accounts-workers", "tuning.store_accounts_workers")
-	accountsdb.StoreAsync = getBool("store-async", "tuning.store_async")
 
 	return nil
 }
