@@ -2236,14 +2236,13 @@ func ReplayBlocks(
 				var mem runtime.MemStats
 				runtime.ReadMemStats(&mem)
 				const gib = 1024 * 1024 * 1024
-				mlog.Log.InfofPrecise("  memory: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | objs %d | gc %d | store_async=%t queue=%d",
+				mlog.Log.InfofPrecise("  memory: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | objs %d | gc %d | queue=%d",
 					float64(mem.HeapAlloc)/gib,
 					float64(mem.HeapInuse)/gib,
 					float64(mem.HeapIdle)/gib,
 					float64(mem.HeapReleased)/gib,
 					mem.HeapObjects,
 					mem.NumGC,
-					accountsdb.StoreAsync,
 					acctsDb.StoreQueueLen(),
 				)
 
