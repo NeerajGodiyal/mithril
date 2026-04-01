@@ -14,7 +14,6 @@ import (
 	"runtime/trace"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
@@ -51,7 +50,7 @@ type storeRequest struct {
 }
 
 func (accountsDb *AccountsDb) StoreQueueLen() int {
-	if !StoreAsync || accountsDb.inProgressStoreRequests == nil {
+	if accountsDb.inProgressStoreRequests == nil {
 		return 0
 	}
 	accountsDb.inProgressStoreRequestsMu.Lock()
