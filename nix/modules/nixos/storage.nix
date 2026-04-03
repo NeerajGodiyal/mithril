@@ -150,7 +150,11 @@ in {
           if force
           then ''
             if [ -n "$existing" ]; then
-              echo "${diskLabel}: wiping existing $existing filesystem (force=true)"
+              if [ "$existing" = "$fstype" ]; then
+                echo "${diskLabel}: already formatted as $existing. Skipping."
+                exit 0
+              fi
+              echo "${diskLabel}: wiping existing $existing filesystem (force=true, want $fstype)"
               wipefs -a "$device"
             fi
           ''
