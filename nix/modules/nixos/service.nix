@@ -23,6 +23,7 @@
     if cfg.storage.singleDisk.mountPoint != null
     then "${escapeSystemdPath cfg.storage.singleDisk.mountPoint}.mount"
     else null;
+  fileLoggingEnabled = cfg.configSchema.logTarget == "file" || cfg.configSchema.logTarget == "both";
   hasExternalStorage =
     cfg.storage.singleDisk.enable
     || cfg.storage.accounts.device != null
@@ -38,7 +39,10 @@
       if cfg.storage.blocks.mountPoint != null
       then cfg.storage.blocks.mountPoint
       else "@STATE_DIRECTORY@/blocks";
-    logsPath = "@LOGS_DIRECTORY@";
+    logsPath =
+      if fileLoggingEnabled
+      then "@LOGS_DIRECTORY@"
+      else "@STATE_DIRECTORY@/logs";
   };
   mkdirsScript = pkgs.writeShellScript "mithril-mkdirs" ''
     set -euo pipefail
@@ -73,7 +77,7 @@
     set -euo pipefail
     config_dir="$CONFIGURATION_DIRECTORY"
     state_dir="$STATE_DIRECTORY"
-    logs_dir="$LOGS_DIRECTORY"
+    logs_dir="''${LOGS_DIRECTORY:-}"
     runtime_dir="$RUNTIME_DIRECTORY"
     mkdir -p "$config_dir"
     mkdir -p "$runtime_dir"
@@ -130,7 +134,7 @@
     then cfg.storage.blocks.mountPoint
     else "";
   logsMountPoint =
-    if cfg.configSchema.storageLogs != null
+    if fileLoggingEnabled && cfg.configSchema.storageLogs != null
     then cfg.configSchema.storageLogs
     else "";
 in {

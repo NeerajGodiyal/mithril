@@ -25,10 +25,13 @@
     if cfg.darwin.paths.blocksRoot != null
     then cfg.darwin.paths.blocksRoot
     else "${stateDir}/blocks";
+  fileLoggingEnabled = cfg.configSchema.logTarget == "file" || cfg.configSchema.logTarget == "both";
   logsPath =
     if cfg.darwin.paths.logsDir != null
     then cfg.darwin.paths.logsDir
-    else defaultLogsPath;
+    else if fileLoggingEnabled
+    then defaultLogsPath
+    else "${stateDir}/logs";
   configSource = shared.mkConfigToml {
     inherit cfg;
     inherit accountsPath;
@@ -103,14 +106,10 @@ in {
   ];
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = !(cfg.configFile != null && cfg.environmentFile != null);
-        message = "services.mithril.configFile and services.mithril.environmentFile cannot both be set.";
-      }
-    ];
     warnings =
-      lib.optional (!darwinExternalDiskUsed)
+      lib.optional (cfg.configFile != null && cfg.environmentFile != null)
+      (builtins.throw "services.mithril.configFile and services.mithril.environmentFile cannot both be set.")
+      ++ lib.optional (!darwinExternalDiskUsed)
       "Mithril on macOS writes heavily; use external storage (e.g. /Volumes/...) via services.mithril.darwin.paths.* or services.mithril.configSchema.storage* to reduce SSD wear.";
 
     services.mithril.configFile = lib.mkForce configFile;
