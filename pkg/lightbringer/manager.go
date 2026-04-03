@@ -25,10 +25,11 @@ type Manager struct {
 	grpcAddr   string
 	logWriter  io.Writer
 
-	cmd     *exec.Cmd
-	done    chan struct{} // closed when the child process exits
-	mu      sync.Mutex
-	running atomic.Bool
+	cmd      *exec.Cmd
+	done     chan struct{} // closed when the child process exits
+	mu       sync.Mutex
+	running  atomic.Bool
+	stopping atomic.Bool // set by Stop to prevent MonitorAndRestart from restarting
 }
 
 // ManagerConfig holds the parameters needed to create a Manager.
@@ -57,7 +58,7 @@ func (m *Manager) WriteConfig() (string, error) {
 	if err := m.tomlCfg.Validate(); err != nil {
 		return "", fmt.Errorf("invalid lightbringer config: %w", err)
 	}
-	if err := os.MkdirAll(m.configDir, 0755); err != nil {
+	if err := os.MkdirAll(m.configDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create config directory %s: %w", m.configDir, err)
 	}
 	return m.tomlCfg.WriteConfigFile(m.configDir)
@@ -203,6 +204,7 @@ func (m *Manager) captureOutput(name string, reader io.ReadCloser) {
 // Stop sends SIGTERM to the Lightbringer process and waits for it to exit.
 // If the process doesn't exit within the timeout, it sends SIGKILL.
 func (m *Manager) Stop(timeout time.Duration) error {
+	m.stopping.Store(true) // signal MonitorAndRestart to not restart
 	m.mu.Lock()
 	if !m.running.Load() {
 		m.mu.Unlock()
@@ -257,4 +259,74 @@ func (m *Manager) Pid() int {
 		return 0
 	}
 	return m.cmd.Process.Pid
+}
+
+// MonitorAndRestart watches for unexpected Lightbringer exits and restarts
+// with exponential backoff. Stops monitoring when stopCh is closed.
+// maxRetries=0 means unlimited retries. Returns when stopped or max retries exceeded.
+func (m *Manager) MonitorAndRestart(stopCh <-chan struct{}, maxRetries int) {
+	backoff := 2 * time.Second
+	maxBackoff := 60 * time.Second
+	retries := 0
+
+	for {
+		done := m.Done()
+		if done == nil {
+			return
+		}
+
+		select {
+		case <-stopCh:
+			return
+		case <-done:
+		}
+
+		// Process exited — wait for running flag to be cleared
+		// (small window between done closing and running.Store(false))
+		for i := 0; i < 10 && m.running.Load(); i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		// Check if this was a deliberate stop
+		if m.stopping.Load() {
+			return
+		}
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		retries++
+		if maxRetries > 0 && retries > maxRetries {
+			mlog.Log.Errorf("lightbringer: exceeded %d restart attempts, giving up", maxRetries)
+			return
+		}
+
+		mlog.Log.Warnf("lightbringer: process exited unexpectedly, restarting in %s (attempt %d)", backoff, retries)
+
+		select {
+		case <-stopCh:
+			return
+		case <-time.After(backoff):
+		}
+
+		// Exponential backoff for next attempt
+		backoff = backoff * 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		if _, err := m.WriteConfig(); err != nil {
+			mlog.Log.Errorf("lightbringer: failed to write config for restart: %v", err)
+			return
+		}
+
+		if err := m.Start(); err != nil {
+			mlog.Log.Errorf("lightbringer: failed to restart: %v — giving up", err)
+			return
+		}
+		mlog.Log.Infof("lightbringer: restarted successfully (attempt %d)", retries)
+		continue // re-fetch new done channel at top of loop
+	}
 }
