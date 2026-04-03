@@ -748,6 +748,11 @@ func runLive(c *cobra.Command, args []string) {
 				}
 			}()
 
+			// Monitor for crashes and auto-restart in background
+			lbStopMonitor := make(chan struct{})
+			go lbManager.MonitorAndRestart(lbStopMonitor, 5)
+			defer close(lbStopMonitor)
+
 			if err := lbManager.WaitReady(30 * time.Second); err != nil {
 				mlog.Log.Warnf("lightbringer: %v — falling back to RPC", err)
 				useLightbringer = false
