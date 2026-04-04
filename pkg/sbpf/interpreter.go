@@ -1072,6 +1072,9 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		}
 		return unsafe.Pointer(&ip.input[lo]), nil
 	default:
+		if size == 0 {
+			return emptySlice, nil
+		}
 		return nil, NewExcBadAccess(addr, size, write, "unmapped region")
 	}
 }
