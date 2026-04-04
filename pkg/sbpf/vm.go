@@ -45,9 +45,9 @@ type VMOpts struct {
 	EnableTracing bool
 
 	// Execution parameters
-	Context      any // passed to syscalls
-	MaxCU        int
-	ComputeMeter *cu.ComputeMeter
+	Context        any // passed to syscalls
+	MaxCU          int
+	ComputeMeter   *cu.ComputeMeter
 	Input          []byte // mapped at VaddrInput
 	InputDataVaddr uint64 // VM address of instruction data within Input (SIMD-0321)
 
@@ -78,6 +78,7 @@ var (
 	ExcInvalidInstr   = errors.New("invalid instruction - feature not enabled")
 
 	ExcUnsupportedInstruction = errors.New("unsupported BPF instruction")
+	ExcExecutionOverrun       = errors.New("attempted to execute past the end of the text segment")
 )
 
 type ExcBadAccess struct {
@@ -106,4 +107,16 @@ type ExcCallDest struct {
 
 func (e ExcCallDest) Error() string {
 	return fmt.Sprintf("unknown symbol or syscall 0x%08x", e.Imm)
+}
+
+type ExcSyscallError struct {
+	Err error
+}
+
+func (e ExcSyscallError) Error() string {
+	return fmt.Sprintf("syscall error: %s", e.Err)
+}
+
+func (e ExcSyscallError) Unwrap() error {
+	return e.Err
 }

@@ -132,6 +132,12 @@ func (ip *Interpreter) Run() (ret uint64, cuConsumed uint64, err error) {
 mainLoop:
 	for i := 0; true; i++ {
 		// Fetch
+		if pc < 0 || pc >= int64(len(ip.text)) {
+			return 0, 0, &Exception{
+				PC:     pc,
+				Detail: fmt.Errorf("tx: %s, programId: %s - %s:", ip.txSignature, ip.programId, ExcExecutionOverrun),
+			}
+		}
 		ins := ip.getSlot(pc)
 		if ip.enableTracing {
 			regsDump := fmt.Sprintf("%016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x, %016x",
@@ -522,6 +528,7 @@ mainLoop:
 			}
 			if int32(r[ins.Dst()]) == math.MinInt32 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
+				break
 			}
 			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) / ins.Imm()))
 			pc++
@@ -533,10 +540,12 @@ mainLoop:
 			if src := int32(r[ins.Src()]); src != 0 {
 				if int32(r[ins.Dst()]) == math.MinInt32 && src == -1 {
 					err = ExcDivideOverflow
+					break
 				}
 				r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) / src))
 			} else {
 				err = ExcDivideByZero
+				break
 			}
 			pc++
 		case OpSdiv64Imm:
@@ -546,6 +555,7 @@ mainLoop:
 			}
 			if int64(r[ins.Dst()]) == math.MinInt64 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
+				break
 			}
 			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) / int64(ins.Imm()))
 			pc++
@@ -557,10 +567,12 @@ mainLoop:
 			if src := int64(r[ins.Src()]); src != 0 {
 				if int64(r[ins.Dst()]) == math.MinInt64 && src == -1 {
 					err = ExcDivideOverflow
+					break
 				}
 				r[ins.Dst()] = uint64(int64(r[ins.Dst()]) / src)
 			} else {
 				err = ExcDivideByZero
+				break
 			}
 			pc++
 		case OpSrem32Imm:
@@ -570,6 +582,7 @@ mainLoop:
 			}
 			if int32(r[ins.Dst()]) == math.MinInt32 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
+				break
 			}
 			r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) % ins.Imm()))
 			pc++
@@ -581,10 +594,12 @@ mainLoop:
 			if src := int32(r[ins.Src()]); src != 0 {
 				if int32(r[ins.Dst()]) == math.MinInt32 && src == -1 {
 					err = ExcDivideOverflow
+					break
 				}
 				r[ins.Dst()] = uint64(uint32(int32(r[ins.Dst()]) % int32(r[ins.Src()])))
 			} else {
 				err = ExcDivideByZero
+				break
 			}
 			pc++
 		case OpSrem64Imm:
@@ -594,6 +609,7 @@ mainLoop:
 			}
 			if int64(r[ins.Dst()]) == math.MinInt64 && ins.Imm() == -1 {
 				err = ExcDivideOverflow
+				break
 			}
 			r[ins.Dst()] = uint64(int64(r[ins.Dst()]) % int64(ins.Imm()))
 			pc++
@@ -605,10 +621,12 @@ mainLoop:
 			if src := int64(r[ins.Src()]); src != 0 {
 				if int64(r[ins.Dst()]) == math.MinInt64 && src == -1 {
 					err = ExcDivideOverflow
+					break
 				}
 				r[ins.Dst()] = uint64(int64(r[ins.Dst()]) % int64(r[ins.Src()]))
 			} else {
 				err = ExcDivideByZero
+				break
 			}
 			pc++
 		case OpOr32Imm:
@@ -779,7 +797,7 @@ mainLoop:
 			case 64:
 				r[ins.Dst()] &= math.MaxUint64
 			default:
-				panic("invalid le instruction")
+				err = ExcUnsupportedInstruction
 			}
 			pc++
 		case OpBe:
@@ -791,7 +809,7 @@ mainLoop:
 			case 64:
 				r[ins.Dst()] = bits.ReverseBytes64(r[ins.Dst()])
 			default:
-				panic("invalid be instruction")
+				err = ExcUnsupportedInstruction
 			}
 			pc++
 		case OpLddw:
@@ -917,6 +935,9 @@ mainLoop:
 		case OpCall:
 			if sc, ok := ip.syscalls(ins.Uimm()); ok {
 				r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
+				if err != nil {
+					err = ExcSyscallError{Err: err}
+				}
 				pc++
 			} else if target, ok := ip.funcs[ins.Uimm()]; ok {
 				ok = ip.stack.Push(r[:], pc+1)
@@ -936,13 +957,13 @@ mainLoop:
 			}
 			target &= ^(uint64(0x7))
 
-			var ok bool
-			ok = ip.stack.Push(r[:], pc+1)
-			if !ok {
-				err = ExcCallDepth
-			}
 			if target < ip.textVA || target >= VaddrStack || target >= ip.textVA+uint64(len(ip.text)*8) {
 				err = NewExcBadAccess(target, 8, false, "jump out-of-bounds")
+				break
+			}
+			if ok := ip.stack.Push(r[:], pc+1); !ok {
+				err = ExcCallDepth
+				break
 			}
 			pc = int64((target - ip.textVA) / 8)
 		case OpExit:
@@ -1053,9 +1074,8 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 	default:
 		if size == 0 {
 			return emptySlice, nil
-		} else {
-			return nil, NewExcBadAccess(addr, size, write, "unmapped region")
 		}
+		return nil, NewExcBadAccess(addr, size, write, "unmapped region")
 	}
 }
 
