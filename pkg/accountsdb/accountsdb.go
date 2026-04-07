@@ -71,6 +71,19 @@ var (
 	StoreAccountsWorkers = 128
 )
 
+const (
+	indexPebbleMemTableSize                = 64 << 20
+	indexPebbleMemTableStopWritesThreshold = 4
+)
+
+func NewAccountsIndexPebbleOptions(logger pebble.Logger) *pebble.Options {
+	return &pebble.Options{
+		Logger:                      logger,
+		MemTableSize:                indexPebbleMemTableSize,
+		MemTableStopWritesThreshold: indexPebbleMemTableStopWritesThreshold,
+	}
+}
+
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	// check for existence of the 'accounts' directory, which holds the appendvecs
 	appendVecsDir := fmt.Sprintf("%s/accounts", accountsDbDir)
@@ -100,7 +113,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	largestFileId := binary.LittleEndian.Uint64(largestFileIdBytes)
 
 	indexDir := filepath.Join(accountsDbDir, "mithril_db")
-	db, err := pebble.Open(indexDir, &pebble.Options{Logger: silentLogger{}})
+	db, err := pebble.Open(indexDir, NewAccountsIndexPebbleOptions(silentLogger{}))
 	if err != nil {
 		return nil, fmt.Errorf("opening indexDir=%s: %w", indexDir, err)
 	}
@@ -183,6 +196,24 @@ type ProgramCacheEntry struct {
 	DeploymentSlot uint64
 }
 
+type PebbleMetricsSnapshot struct {
+	BlockCacheHits   int64
+	BlockCacheMisses int64
+	BlockCacheSize   int64
+	TableCacheHits   int64
+	TableCacheMisses int64
+	TableCacheSize   int64
+	ReadAmp          int
+	CompactionDebt   uint64
+	L0NumFiles       int64
+	L0Sublevels      int32
+	MemTableSize     uint64
+	MemTableCount    int64
+	WALFiles         int64
+	WALSize          uint64
+	WALBytesWritten  uint64
+}
+
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
 	return accountsDb.ProgramCache.Get(pubkey)
 }
@@ -193,6 +224,31 @@ func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program
 
 func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
+}
+
+func (accountsDb *AccountsDb) IndexMetricsSnapshot() PebbleMetricsSnapshot {
+	if accountsDb == nil || accountsDb.Index == nil {
+		return PebbleMetricsSnapshot{}
+	}
+
+	metrics := accountsDb.Index.Metrics()
+	return PebbleMetricsSnapshot{
+		BlockCacheHits:   metrics.BlockCache.Hits,
+		BlockCacheMisses: metrics.BlockCache.Misses,
+		BlockCacheSize:   metrics.BlockCache.Size,
+		TableCacheHits:   metrics.TableCache.Hits,
+		TableCacheMisses: metrics.TableCache.Misses,
+		TableCacheSize:   metrics.TableCache.Size,
+		ReadAmp:          metrics.ReadAmp(),
+		CompactionDebt:   metrics.Compact.EstimatedDebt,
+		L0NumFiles:       metrics.Levels[0].NumFiles,
+		L0Sublevels:      metrics.Levels[0].Sublevels,
+		MemTableSize:     metrics.MemTable.Size,
+		MemTableCount:    metrics.MemTable.Count,
+		WALFiles:         metrics.WAL.Files,
+		WALSize:          metrics.WAL.Size,
+		WALBytesWritten:  metrics.WAL.BytesWritten,
+	}
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -330,11 +386,26 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		if acct == nil {
 			continue
 		}
-		owner := solana.PublicKeyFromBytes(acct.Owner[:])
-		if owner == addresses.VoteProgramAddr {
-			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+
+		// If the account has been deleted (lamports == 0), remove the old version from
+		// the cache, if it exists. This is essential for vote accounts because after
+		// deletion (such as via a VoteWithdraw instruction) the account no longer has
+		// the vote program as its owner, so this logic is necessary to prevent stale
+		// versions of now deleted vote accounts from remaining in the vote cache and
+		// thereafter being served up as invalid account state.
+		if acct.Lamports == 0 {
+			if accountsDb.CommonAcctsCache.Has(acct.Key) {
+				accountsDb.CommonAcctsCache.Delete(acct.Key)
+			} else if accountsDb.VoteAcctCache.Has(acct.Key) {
+				accountsDb.VoteAcctCache.Delete(acct.Key)
+			}
 		} else {
-			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			owner := solana.PublicKeyFromBytes(acct.Owner[:])
+			if owner == addresses.VoteProgramAddr {
+				accountsDb.VoteAcctCache.Set(acct.Key, acct)
+			} else {
+				accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			}
 		}
 	}
 }

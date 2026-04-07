@@ -113,6 +113,53 @@ func formatBlockSourceStatus(fetchStats blockstream.FetchStatsSnapshot) string {
 	return fetchStats.SourceStatus
 }
 
+func counterDeltaInt64(after, before int64) int64 {
+	if after <= before {
+		return 0
+	}
+	return after - before
+}
+
+func counterDeltaUint64(after, before uint64) uint64 {
+	if after <= before {
+		return 0
+	}
+	return after - before
+}
+
+func nonNegativeUint64(v int64) uint64 {
+	if v <= 0 {
+		return 0
+	}
+	return uint64(v)
+}
+
+func formatSummaryBytes(bytes uint64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case bytes >= gib:
+		return fmt.Sprintf("%.1fGiB", float64(bytes)/gib)
+	case bytes >= mib:
+		return fmt.Sprintf("%.1fMiB", float64(bytes)/mib)
+	case bytes >= kib:
+		return fmt.Sprintf("%.1fKiB", float64(bytes)/kib)
+	default:
+		return fmt.Sprintf("%dB", bytes)
+	}
+}
+
+func formatWindowCacheStats(hits, misses int64) string {
+	requests := hits + misses
+	if requests <= 0 {
+		return "no lookups"
+	}
+	return fmt.Sprintf("%.1f%% (%d/%d)", float64(hits)/float64(requests)*100, hits, requests)
+}
+
 // ReplayResult contains the result of a replay operation, including shutdown state
 type ReplayResult struct {
 	// LastPersistedSlot is the last slot whose state was successfully persisted to AccountsDB
@@ -1396,6 +1443,7 @@ func ReplayBlocks(
 	var voteTxCounts []uint64    // vote txns per block
 	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
+	indexMetricsSummaryStart := acctsDb.IndexMetricsSnapshot()
 
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
@@ -2169,6 +2217,13 @@ func ReplayBlocks(
 				medVoteTx := medianUint(voteTxCounts)
 				medNonVoteTx := medianUint(nonVoteTxCounts)
 
+				indexMetricsSnapshot := acctsDb.IndexMetricsSnapshot()
+				blockCacheHits := counterDeltaInt64(indexMetricsSnapshot.BlockCacheHits, indexMetricsSummaryStart.BlockCacheHits)
+				blockCacheMisses := counterDeltaInt64(indexMetricsSnapshot.BlockCacheMisses, indexMetricsSummaryStart.BlockCacheMisses)
+				tableCacheHits := counterDeltaInt64(indexMetricsSnapshot.TableCacheHits, indexMetricsSummaryStart.TableCacheHits)
+				tableCacheMisses := counterDeltaInt64(indexMetricsSnapshot.TableCacheMisses, indexMetricsSummaryStart.TableCacheMisses)
+				walBytesWritten := counterDeltaUint64(indexMetricsSnapshot.WALBytesWritten, indexMetricsSummaryStart.WALBytesWritten)
+
 				// Blocks per second based on median total time
 				var blocksPerSec float64
 				if medTotal > 0 {
@@ -2238,6 +2293,22 @@ func ReplayBlocks(
 						loadedMB, clonedMB, touchedMB, avgLoadedPerTx, avgClonedPerTx, avgTouchedPerTx)
 				}
 
+				mlog.Log.InfofPrecise("  pebble cache: block %s, %s | table %s, %s",
+					formatWindowCacheStats(blockCacheHits, blockCacheMisses),
+					formatSummaryBytes(nonNegativeUint64(indexMetricsSnapshot.BlockCacheSize)),
+					formatWindowCacheStats(tableCacheHits, tableCacheMisses),
+					formatSummaryBytes(nonNegativeUint64(indexMetricsSnapshot.TableCacheSize)))
+				mlog.Log.InfofPrecise("  pebble idx: read amp %d | debt %s | L0 %d files/%d sublevels | mem %d (%s) | WAL +%s (%d files, live %s)",
+					indexMetricsSnapshot.ReadAmp,
+					formatSummaryBytes(indexMetricsSnapshot.CompactionDebt),
+					indexMetricsSnapshot.L0NumFiles,
+					indexMetricsSnapshot.L0Sublevels,
+					indexMetricsSnapshot.MemTableCount,
+					formatSummaryBytes(indexMetricsSnapshot.MemTableSize),
+					formatSummaryBytes(walBytesWritten),
+					indexMetricsSnapshot.WALFiles,
+					formatSummaryBytes(indexMetricsSnapshot.WALSize))
+
 				var mem runtime.MemStats
 				runtime.ReadMemStats(&mem)
 				const gib = 1024 * 1024 * 1024
@@ -2270,6 +2341,7 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("")
 
 				// Reset slices (reuse capacity)
+				indexMetricsSummaryStart = indexMetricsSnapshot
 				execTimes = execTimes[:0]
 				waitTimes = waitTimes[:0]
 				cuValues = cuValues[:0]
