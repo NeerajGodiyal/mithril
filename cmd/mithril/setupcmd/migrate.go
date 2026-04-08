@@ -47,7 +47,7 @@ func MigrateConfig(configPath string) bool {
 # enabled = false
 # binary_path = "./lightbringer"
 # gossip_entrypoint = ""
-# storage = "/mnt/mithril-ledger/shred-store"
+# shredstore path is in [storage] section (storage.shredstore)
 # rpc_addr = "127.0.0.1:3000"
 # grpc_addr = "127.0.0.1:3001"
 `

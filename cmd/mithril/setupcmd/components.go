@@ -232,6 +232,28 @@ func renderReview(title string, rows [][]string) string {
 
 // ── Done Screen ─────────────────────────────────────────────────────────
 
+// ── Logo ────────────────────────────────────────────────────────────
+
+func renderLogo() string {
+	art := lipgloss.NewStyle().Foreground(mithrilTeal).Render(
+		"     _______ __________________          _______ _________ _\n" +
+			"    (       )\\__   __/\\__   __/|\\     /|(  ____ )\\__   __/( \\\n" +
+			"    | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (\n" +
+			"    | || || |   | |      | |   | (___) || (____)|   | |   | |\n" +
+			"    | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |\n" +
+			"    | |   | |   | |      | |   | (   ) || (\\ (      | |   | |\n" +
+			"    | )   ( |___) (___   | |   | )   ( || ) \\ \\_____) (___| (____/\\\n" +
+			"    |/     \\|\\_______/   )_(   |/     \\||/   \\__/\\_______/(_______/")
+
+	divider := lipgloss.NewStyle().
+		Foreground(colorTextDisabled).
+		Render("  " + strings.Repeat("─", 62))
+
+	return "\n" + art + "\n\n" + divider
+}
+
+// ── Done Screen ─────────────────────────────────────────────────────
+
 func renderDone(configPath string, err error) string {
 	var b strings.Builder
 	k := lipgloss.NewStyle().Foreground(mithrilTeal)

@@ -86,7 +86,10 @@ func runConfigEdit() {
 	if logsPath == "" {
 		logsPath = v.GetString("log.dir")
 	}
-	txpar := v.GetString("replay.txpar")
+	txpar := v.GetString("tuning.txpar")
+	if txpar == "" {
+		txpar = v.GetString("replay.txpar") // legacy fallback
+	}
 	if txpar == "" {
 		txpar = fmt.Sprintf("%d", runtime.NumCPU()*2)
 	}
@@ -292,7 +295,7 @@ func runConfigEdit() {
 	content = setTomlValue(content, "storage", "snapshots", fmt.Sprintf("%q", filepath.Clean(snapshotsPath)))
 	content = setTomlValue(content, "block", "max_rps", blockMaxRPS)
 	content = setTomlValue(content, "block", "max_inflight", blockInflight)
-	content = setTomlValue(content, "replay", "txpar", txpar)
+	content = setTomlValue(content, "tuning", "txpar", txpar)
 	content = setTomlValue(content, "rpc", "port", rpcPort)
 	content = setTomlValue(content, "log", "level", fmt.Sprintf("%q", logLevel))
 	content = setTomlValue(content, "bootstrap", "mode", fmt.Sprintf("%q", bootstrapMode))

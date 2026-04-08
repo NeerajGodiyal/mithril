@@ -41,17 +41,17 @@ If config.toml already exists, this command will not overwrite it.`,
 
 Examples:
   mithril config set storage.accounts /mnt/accounts
-  mithril config set storage.blockstore /mnt/blockstore
+  mithril config set storage.shredstore /mnt/shredstore
   mithril config set storage.snapshots /mnt/snapshots
   mithril config set bootstrap.mode auto
-  mithril config set replay.txpar 48
+  mithril config set tuning.txpar 48
 
 Common keys:
   storage.accounts    - Path to AccountsDB directory
-  storage.blockstore  - Path to blockstore directory
+  storage.shredstore  - Path to shredstore directory
   storage.snapshots   - Path to snapshots directory
   bootstrap.mode      - Startup mode: auto, snapshot, or accountsdb
-  replay.txpar        - Transaction parallelism (recommended: 2x CPU cores)
+  tuning.txpar        - Transaction parallelism (recommended: 2x CPU cores)
   network.rpc         - RPC endpoint(s)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -125,7 +125,7 @@ mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
-blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporarily disabled
+shredstore = "/mnt/mithril-ledger/shredstore" # Lightbringer shred storage
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
 
 [network]
@@ -140,7 +140,7 @@ source = "rpc"   # "rpc" | "lightbringer"
 # enabled = false
 # binary_path = "./lightbringer"
 # gossip_entrypoint = "1.2.3.4:8000"
-# storage = "/mnt/mithril-ledger/shred-store"
+# shredstore stored in [storage] section
 # rpc_addr = "127.0.0.1:3000"
 # grpc_addr = "127.0.0.1:3001"
 # See config.example.toml for full Lightbringer sidecar options.

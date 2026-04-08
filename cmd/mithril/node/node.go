@@ -319,10 +319,17 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
 
-	// [replay] section
+	// [replay] section (txpar moved to [tuning], with backwards-compatible fallback)
 	numReplaySlots = getInt64("num-slots", "replay.num_slots")
 	endSlot = getInt64("end-slot", "replay.end_slot")
-	txParallelism = getInt64("txpar", "replay.txpar")
+	if config.IsSet("tuning.txpar") {
+		txParallelism = getInt64("txpar", "tuning.txpar")
+	} else if config.IsSet("replay.txpar") {
+		txParallelism = getInt64("txpar", "replay.txpar")
+		mlog.Log.Warnf("config: replay.txpar is deprecated, move to tuning.txpar")
+	} else {
+		txParallelism = getInt64("txpar", "tuning.txpar") // CLI flag or default
+	}
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
 	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
@@ -343,7 +350,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if err := checkDirWritable(accountsPath, "AccountsDB"); err != nil {
 		return err
 	}
-	blockstorePath = getString("ledger-path", "storage.blockstore")
+	blockstorePath = getString("ledger-path", "storage.shredstore")
+	if blockstorePath == "" && config.IsSet("storage.blockstore") {
+		blockstorePath = getString("ledger-path", "storage.blockstore")
+		mlog.Log.Warnf("config: storage.blockstore is deprecated, use storage.shredstore")
+	}
 	if blockstorePath == "" {
 		blockstorePath = getString("ledger-path", "ledger.path")
 	}
@@ -387,7 +398,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		lightbringerBinaryPath = "./lightbringer"
 	}
 	lightbringerGossipEntrypoint = config.GetString("lightbringer.gossip_entrypoint")
-	lightbringerStorage = config.GetString("lightbringer.storage")
+	lightbringerStorage = config.GetString("storage.shredstore")
+	if lightbringerStorage == "" && config.IsSet("lightbringer.storage") {
+		lightbringerStorage = config.GetString("lightbringer.storage")
+		mlog.Log.Warnf("config: lightbringer.storage is deprecated, use storage.shredstore")
+	}
 	if lightbringerStorage == "" {
 		lightbringerStorage = "./shred-store"
 	}

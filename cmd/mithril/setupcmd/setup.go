@@ -242,8 +242,8 @@ func (m setupModel) currentItems() []menuItem {
 		}
 	case scrLightbringer:
 		return []menuItem{
-			menuOptionDesc("Enable", "enable", "Stream blocks via Turbine — lower latency (recommended)"),
-			menuOptionDesc("Disable", "disable", "Use RPC only"),
+			menuOptionDesc("Disable", "disable", "Use RPC only (default)"),
+			menuOptionDesc("Enable", "enable", "Sidecar for lower-latency block streaming"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -547,7 +547,11 @@ func (m *setupModel) validateAndApplyInput() bool {
 func (m *setupModel) advanceFromInput() {
 	switch m.screen {
 	case scrRPC:
-		m.pushMenu(scrLightbringer)
+		if m.mode == "quick" {
+			m.pushMenu(scrReview) // Quick Start skips Lightbringer (disabled by default)
+		} else {
+			m.pushMenu(scrLightbringer) // Full Config lets user enable it
+		}
 	case scrGossip:
 		if m.mode == "quick" {
 			m.pushMenu(scrReview)
@@ -586,8 +590,8 @@ func (m setupModel) View() string {
 
 	case scrGossip:
 		return renderInput("Gossip Entrypoint",
-			"IP:port of a Solana validator or RPC node running gossip\n"+
-			"Lightbringer uses this to connect to the Solana network",
+			"IP:port of a Solana validator running gossip\n"+
+			"Used to receive shreds from the network",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorage:
@@ -678,12 +682,15 @@ func (m setupModel) View() string {
 		switch m.screen {
 		case scrMode:
 			title = "Mithril Setup"
-			desc = fmt.Sprintf("System: %d CPU cores detected", m.cpuCores)
+			desc = ""
+			items := m.currentItems()
+			logo := renderLogo()
+			return "\n" + logo + "\n\n" + renderMenu(title, desc, items, m.cursor, m.width) + "\n"
 		case scrCluster:
 			title = "Solana Cluster"
 		case scrLightbringer:
 			title = "Lightbringer Sidecar"
-			desc = "Streams blocks directly from the Solana network via Turbine."
+			desc = "Lightbringer sidecar for lower-latency block streaming."
 		case scrBootstrap:
 			title = "Bootstrap Mode"
 			desc = "How Mithril initializes on startup."
@@ -720,7 +727,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 
 	cfg.WriteString("[storage]\n")
 	fmt.Fprintf(&cfg, "accounts = %q\n", filepath.Clean(m.accountsPath))
-	cfg.WriteString("blockstore = \"/mnt/mithril-ledger/blockstore\"\n")
+	cfg.WriteString("shredstore = \"/mnt/mithril-ledger/shredstore\"\n")
 	fmt.Fprintf(&cfg, "snapshots = %q\n", filepath.Clean(m.snapshotsPath))
 	fmt.Fprintf(&cfg, "logs = %q\n\n", filepath.Clean(m.logsPath))
 
@@ -746,7 +753,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("rpc_addr = \"127.0.0.1:3000\"\n\n")
 	}
 
-	cfg.WriteString("[replay]\n")
+	cfg.WriteString("[tuning]\n")
 	fmt.Fprintf(&cfg, "txpar = %s\n\n", m.txpar)
 
 	cfg.WriteString("[consensus]\n")
@@ -791,7 +798,7 @@ mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"            # AccountsDB (~500GB, use fastest NVMe)
-blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporarily disabled
+shredstore = "/mnt/mithril-ledger/shredstore" # Lightbringer shred storage
 snapshots = "/mnt/mithril-ledger/snapshots"   # ~100GB for full + incremental
 logs = "/mnt/mithril-logs"                    # Log files (created if missing)
 
@@ -809,12 +816,12 @@ max_inflight = 8
 # enabled = false
 # binary_path = "./lightbringer"
 # gossip_entrypoint = "1.2.3.4:8000"
-# storage = "/mnt/mithril-ledger/shred-store"
+# shredstore stored in [storage] section above
 # rpc_addr = "127.0.0.1:3000"
 # grpc_addr = "127.0.0.1:3001"
 # See config.example.toml for full Lightbringer sidecar options.
 
-[replay]
+[tuning]
 txpar = %d   # Recommended: 2x your CPU core count
 
 [consensus]
