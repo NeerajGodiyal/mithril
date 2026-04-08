@@ -75,6 +75,8 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("already running")
 	}
 
+	m.stopping.Store(false) // reset in case of previous Stop()
+
 	if _, err := os.Stat(m.binaryPath); err != nil {
 		return fmt.Errorf("binary not found at %s: %w", m.binaryPath, err)
 	}
@@ -255,6 +257,8 @@ func (m *Manager) Done() <-chan struct{} {
 
 // Pid returns the PID of the running Lightbringer process, or 0 if not running.
 func (m *Manager) Pid() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.running.Load() || m.cmd == nil || m.cmd.Process == nil {
 		return 0
 	}

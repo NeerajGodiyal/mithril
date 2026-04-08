@@ -398,9 +398,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		lightbringerBinaryPath = "./lightbringer"
 	}
 	lightbringerGossipEntrypoint = config.GetString("lightbringer.gossip_entrypoint")
-	lightbringerStorage = config.GetString("storage.shredstore")
+	lightbringerStorage = getString("ledger-path", "storage.shredstore")
 	if lightbringerStorage == "" && config.IsSet("lightbringer.storage") {
-		lightbringerStorage = config.GetString("lightbringer.storage")
+		lightbringerStorage = getString("ledger-path", "lightbringer.storage")
 		mlog.Log.Warnf("config: lightbringer.storage is deprecated, use storage.shredstore")
 	}
 	if lightbringerStorage == "" {

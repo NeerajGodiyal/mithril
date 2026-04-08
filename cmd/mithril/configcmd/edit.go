@@ -173,7 +173,7 @@ func runConfigEdit() {
 		lbEnabled = choice == "enable"
 		if lbEnabled {
 			err = huh.NewForm(huh.NewGroup(
-				huh.NewInput().Title("Gossip Entrypoint").Placeholder("185.26.11.165:8000").Value(&gossipEntry),
+				huh.NewInput().Title("Gossip Entrypoint").Placeholder("203.0.113.1:8000").Value(&gossipEntry),
 			)).WithTheme(theme).Run()
 		}
 

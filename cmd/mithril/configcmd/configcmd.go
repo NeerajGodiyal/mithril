@@ -98,7 +98,7 @@ func runConfigInit() {
 	config := generateStarterConfig()
 
 	// Write to file
-	if err := os.WriteFile(outputPath, []byte(config), 0644); err != nil {
+	if err := os.WriteFile(outputPath, []byte(config), 0600); err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)
 	}
@@ -127,6 +127,7 @@ mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
 shredstore = "/mnt/mithril-ledger/shredstore" # Lightbringer shred storage
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
+logs = "/mnt/mithril-logs"                   # Log files (created if missing)
 
 [network]
 cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
@@ -145,7 +146,7 @@ source = "rpc"   # "rpc" | "lightbringer"
 # grpc_addr = "127.0.0.1:3001"
 # See config.example.toml for full Lightbringer sidecar options.
 
-[replay]
+[tuning]
 txpar = 24   # Recommended: 2x your CPU core count
 
 [rpc]
@@ -268,7 +269,7 @@ func runConfigSet(key, value string) {
 	}
 
 	// Write back
-	err = os.WriteFile(configFile, []byte(strings.Join(result, "\n")), 0644)
+	err = os.WriteFile(configFile, []byte(strings.Join(result, "\n")), 0600)
 	if err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)
@@ -298,7 +299,7 @@ func formatTOMLValue(value string) string {
 	}
 
 	// Otherwise, quote it as a string
-	return fmt.Sprintf(`"%s"`, value)
+	return fmt.Sprintf("%q", value)
 }
 
 // runConfigGet reads a key from the config file

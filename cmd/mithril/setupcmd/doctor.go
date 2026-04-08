@@ -100,15 +100,11 @@ func runDoctor() {
 		total++
 		gossip := config.GetString("lightbringer.gossip_entrypoint")
 		if gossip != "" {
-			// Try to resolve the address
-			conn, err := net.DialTimeout("udp", gossip, 3*time.Second)
-			if err == nil {
-				conn.Close()
-				fmt.Printf("  %s Gossip entrypoint reachable (%s)\n", successStyle.Render("✓"), gossip)
-				passed++
+			if _, _, err := net.SplitHostPort(gossip); err != nil {
+				fmt.Printf("  %s Gossip entrypoint invalid format (%s): %v\n", errorStyle.Render("✗"), gossip, err)
 			} else {
-				fmt.Printf("  %s Gossip entrypoint: %s (%s)\n", warnStyle.Render("~"), gossip, "couldn't verify, may still work")
-				passed++ // UDP can't really be verified
+				fmt.Printf("  %s Gossip entrypoint set (%s)\n", successStyle.Render("✓"), gossip)
+				passed++
 			}
 		} else {
 			fmt.Printf("  %s lightbringer.gossip_entrypoint not set\n", errorStyle.Render("✗"))

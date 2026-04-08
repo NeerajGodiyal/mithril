@@ -230,8 +230,6 @@ func renderReview(title string, rows [][]string) string {
 	return b.String()
 }
 
-// ── Done Screen ─────────────────────────────────────────────────────────
-
 // ── Logo ────────────────────────────────────────────────────────────
 
 func renderLogo() string {
