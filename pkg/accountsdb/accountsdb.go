@@ -196,24 +196,6 @@ type ProgramCacheEntry struct {
 	DeploymentSlot uint64
 }
 
-type PebbleMetricsSnapshot struct {
-	BlockCacheHits   int64
-	BlockCacheMisses int64
-	BlockCacheSize   int64
-	TableCacheHits   int64
-	TableCacheMisses int64
-	TableCacheSize   int64
-	ReadAmp          int
-	CompactionDebt   uint64
-	L0NumFiles       int64
-	L0Sublevels      int32
-	MemTableSize     uint64
-	MemTableCount    int64
-	WALFiles         int64
-	WALSize          uint64
-	WALBytesWritten  uint64
-}
-
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
 	return accountsDb.ProgramCache.Get(pubkey)
 }
@@ -224,31 +206,6 @@ func (accountsDb *AccountsDb) AddProgramToCache(pubkey solana.PublicKey, program
 
 func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
-}
-
-func (accountsDb *AccountsDb) IndexMetricsSnapshot() PebbleMetricsSnapshot {
-	if accountsDb == nil || accountsDb.Index == nil {
-		return PebbleMetricsSnapshot{}
-	}
-
-	metrics := accountsDb.Index.Metrics()
-	return PebbleMetricsSnapshot{
-		BlockCacheHits:   metrics.BlockCache.Hits,
-		BlockCacheMisses: metrics.BlockCache.Misses,
-		BlockCacheSize:   metrics.BlockCache.Size,
-		TableCacheHits:   metrics.TableCache.Hits,
-		TableCacheMisses: metrics.TableCache.Misses,
-		TableCacheSize:   metrics.TableCache.Size,
-		ReadAmp:          metrics.ReadAmp(),
-		CompactionDebt:   metrics.Compact.EstimatedDebt,
-		L0NumFiles:       metrics.Levels[0].NumFiles,
-		L0Sublevels:      metrics.Levels[0].Sublevels,
-		MemTableSize:     metrics.MemTable.Size,
-		MemTableCount:    metrics.MemTable.Count,
-		WALFiles:         metrics.WAL.Files,
-		WALSize:          metrics.WAL.Size,
-		WALBytesWritten:  metrics.WAL.BytesWritten,
-	}
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {

@@ -48,6 +48,7 @@ var PicoInflation = FeatureGate{Name: "PicoInflation", Address: base58.MustDecod
 var DisableAccountLoaderSpecialCase = FeatureGate{Name: "DisableAccountLoaderSpecialCase", Address: base58.MustDecodeFromString("EQUMpNFr7Nacb1sva56xn1aLfBxppEoSBH8RRVdkcD1x")}
 var EnableGetEpochStakeSyscall = FeatureGate{Name: "EnableGetEpochStakeSyscall", Address: base58.MustDecodeFromString("FKe75t4LXxGaQnVHdUKM6DSFifVVraGZ8LyNo7oPwy1Z")}
 var ReserveMinimalCUsForBuiltinInstructions = FeatureGate{Name: "ReserveMinimalCUsForBuiltinInstructions", Address: base58.MustDecodeFromString("C9oAhLxDBm3ssWtJx1yBGzPY55r2rArHmN1pbQn6HogH")}
+var RelaxIntraBatchAccountLocks = FeatureGate{Name: "RelaxIntraBatchAccountLocks", Address: base58.MustDecodeFromString("4WeHX6QoXCCwqbSFgi6dxnB6QsPo6YApaNTH7P4MLQ99")}
 var MaskOutRentEpochInVmSerialization = FeatureGate{Name: "MaskOutRentEpochInVmSerialization", Address: base58.MustDecodeFromString("RENtePQcDLrAbxAsP3k8dwVcnNYQ466hi2uKvALjnXx")}
 var RemoveAccountsExecutableFlagChecks = FeatureGate{Name: "RemoveAccountsExecutableFlagchecks", Address: base58.MustDecodeFromString("FXs1zh47QbNnhXcnB6YiAQoJ4sGB91tKF3UFHLcKT7PM")}
 var AccountsLtHash = FeatureGate{Name: "AccountsLtHash", Address: base58.MustDecodeFromString("LTHasHQX6661DaDD4S6A2TFi6QBuiwXKv66fB1obfHq")}
@@ -78,7 +79,7 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
-	ReserveMinimalCUsForBuiltinInstructions, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
+	ReserveMinimalCUsForBuiltinInstructions, RelaxIntraBatchAccountLocks, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,

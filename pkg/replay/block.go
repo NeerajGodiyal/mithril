@@ -113,53 +113,6 @@ func formatBlockSourceStatus(fetchStats blockstream.FetchStatsSnapshot) string {
 	return fetchStats.SourceStatus
 }
 
-func counterDeltaInt64(after, before int64) int64 {
-	if after <= before {
-		return 0
-	}
-	return after - before
-}
-
-func counterDeltaUint64(after, before uint64) uint64 {
-	if after <= before {
-		return 0
-	}
-	return after - before
-}
-
-func nonNegativeUint64(v int64) uint64 {
-	if v <= 0 {
-		return 0
-	}
-	return uint64(v)
-}
-
-func formatSummaryBytes(bytes uint64) string {
-	const (
-		kib = 1024
-		mib = 1024 * kib
-		gib = 1024 * mib
-	)
-	switch {
-	case bytes >= gib:
-		return fmt.Sprintf("%.1fGiB", float64(bytes)/gib)
-	case bytes >= mib:
-		return fmt.Sprintf("%.1fMiB", float64(bytes)/mib)
-	case bytes >= kib:
-		return fmt.Sprintf("%.1fKiB", float64(bytes)/kib)
-	default:
-		return fmt.Sprintf("%dB", bytes)
-	}
-}
-
-func formatWindowCacheStats(hits, misses int64) string {
-	requests := hits + misses
-	if requests <= 0 {
-		return "no lookups"
-	}
-	return fmt.Sprintf("%.1f%% (%d/%d)", float64(hits)/float64(requests)*100, hits, requests)
-}
-
 // ReplayResult contains the result of a replay operation, including shutdown state
 type ReplayResult struct {
 	// LastPersistedSlot is the last slot whose state was successfully persisted to AccountsDB
@@ -1443,7 +1396,6 @@ func ReplayBlocks(
 	var voteTxCounts []uint64    // vote txns per block
 	var nonVoteTxCounts []uint64 // non-vote txns per block
 	var justCrossedEpochBoundary bool
-	indexMetricsSummaryStart := acctsDb.IndexMetricsSnapshot()
 
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
@@ -2217,13 +2169,6 @@ func ReplayBlocks(
 				medVoteTx := medianUint(voteTxCounts)
 				medNonVoteTx := medianUint(nonVoteTxCounts)
 
-				indexMetricsSnapshot := acctsDb.IndexMetricsSnapshot()
-				blockCacheHits := counterDeltaInt64(indexMetricsSnapshot.BlockCacheHits, indexMetricsSummaryStart.BlockCacheHits)
-				blockCacheMisses := counterDeltaInt64(indexMetricsSnapshot.BlockCacheMisses, indexMetricsSummaryStart.BlockCacheMisses)
-				tableCacheHits := counterDeltaInt64(indexMetricsSnapshot.TableCacheHits, indexMetricsSummaryStart.TableCacheHits)
-				tableCacheMisses := counterDeltaInt64(indexMetricsSnapshot.TableCacheMisses, indexMetricsSummaryStart.TableCacheMisses)
-				walBytesWritten := counterDeltaUint64(indexMetricsSnapshot.WALBytesWritten, indexMetricsSummaryStart.WALBytesWritten)
-
 				// Blocks per second based on median total time
 				var blocksPerSec float64
 				if medTotal > 0 {
@@ -2293,22 +2238,6 @@ func ReplayBlocks(
 						loadedMB, clonedMB, touchedMB, avgLoadedPerTx, avgClonedPerTx, avgTouchedPerTx)
 				}
 
-				mlog.Log.InfofPrecise("  pebble cache: block %s, %s | table %s, %s",
-					formatWindowCacheStats(blockCacheHits, blockCacheMisses),
-					formatSummaryBytes(nonNegativeUint64(indexMetricsSnapshot.BlockCacheSize)),
-					formatWindowCacheStats(tableCacheHits, tableCacheMisses),
-					formatSummaryBytes(nonNegativeUint64(indexMetricsSnapshot.TableCacheSize)))
-				mlog.Log.InfofPrecise("  pebble idx: read amp %d | debt %s | L0 %d files/%d sublevels | mem %d (%s) | WAL +%s (%d files, live %s)",
-					indexMetricsSnapshot.ReadAmp,
-					formatSummaryBytes(indexMetricsSnapshot.CompactionDebt),
-					indexMetricsSnapshot.L0NumFiles,
-					indexMetricsSnapshot.L0Sublevels,
-					indexMetricsSnapshot.MemTableCount,
-					formatSummaryBytes(indexMetricsSnapshot.MemTableSize),
-					formatSummaryBytes(walBytesWritten),
-					indexMetricsSnapshot.WALFiles,
-					formatSummaryBytes(indexMetricsSnapshot.WALSize))
-
 				var mem runtime.MemStats
 				runtime.ReadMemStats(&mem)
 				const gib = 1024 * 1024 * 1024
@@ -2341,7 +2270,6 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("")
 
 				// Reset slices (reuse capacity)
-				indexMetricsSummaryStart = indexMetricsSnapshot
 				execTimes = execTimes[:0]
 				waitTimes = waitTimes[:0]
 				cuValues = cuValues[:0]
@@ -2546,6 +2474,79 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 	return txFeeAccumulator
 }
 
+func lightbringerEntryExecutionBatches(transactions []*solana.Transaction, entry *b.TxEntry, relaxIntraBatchAccountLocks bool) [][]uint64 {
+	if len(entry.Indices) == 0 {
+		return nil
+	}
+	if !relaxIntraBatchAccountLocks {
+		return [][]uint64{entry.Indices}
+	}
+
+	flushDerivableSegment := func(batches *[][]uint64, segment []uint64) {
+		if len(segment) == 0 {
+			return
+		}
+
+		// Build batches directly instead of allocating a full dependency graph per
+		// entry segment. The per-entry fallback is intentionally cheap because the
+		// common Lightbringer path should stay on the whole-block planner.
+		segmentBatches := make([][]uint64, 0, 1)
+		lastReadBatch := make(map[solana.PublicKey]int, len(segment)*4)
+		lastWriteBatch := make(map[solana.PublicKey]int, len(segment)*2)
+		for _, txIdx := range segment {
+			tx := transactions[txIdx]
+			readonlyAccounts := messageReadonlyAccounts(&tx.Message)
+			writableAccounts := messageWritableAccounts(&tx.Message)
+
+			batchIdx := 0
+			for _, roAcct := range readonlyAccounts {
+				if writeBatch, exists := lastWriteBatch[roAcct]; exists && writeBatch >= batchIdx {
+					batchIdx = writeBatch + 1
+				}
+			}
+			for _, writeAcct := range writableAccounts {
+				if readBatch, exists := lastReadBatch[writeAcct]; exists && readBatch >= batchIdx {
+					batchIdx = readBatch + 1
+				}
+				if writeBatch, exists := lastWriteBatch[writeAcct]; exists && writeBatch >= batchIdx {
+					batchIdx = writeBatch + 1
+				}
+			}
+
+			for len(segmentBatches) <= batchIdx {
+				segmentBatches = append(segmentBatches, nil)
+			}
+			segmentBatches[batchIdx] = append(segmentBatches[batchIdx], txIdx)
+			for _, roAcct := range readonlyAccounts {
+				lastReadBatch[roAcct] = batchIdx
+			}
+			for _, writeAcct := range writableAccounts {
+				lastWriteBatch[writeAcct] = batchIdx
+			}
+		}
+		*batches = append(*batches, segmentBatches...)
+	}
+
+	// Under SIMD-0083, Lightbringer entries may legally contain intra-entry
+	// conflicts. Recover safe parallelism for contiguous derivable segments and
+	// treat unresolved transactions as ordering barriers.
+	batches := make([][]uint64, 0, len(entry.Indices))
+	derivableSegment := make([]uint64, 0, len(entry.Indices))
+	for _, txIdx := range entry.Indices {
+		if canDeriveAccountsFromMessage(transactions[txIdx]) {
+			derivableSegment = append(derivableSegment, txIdx)
+			continue
+		}
+
+		flushDerivableSegment(&batches, derivableSegment)
+		derivableSegment = derivableSegment[:0]
+		batches = append(batches, []uint64{txIdx})
+	}
+	flushDerivableSegment(&batches, derivableSegment)
+
+	return batches
+}
+
 func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
@@ -2596,20 +2597,51 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		wg.Wait()
 		close(done)
 	} else if rblock.FromLightbringer {
-		wg := &sync.WaitGroup{}
-		workerPool, _ := ants.NewPoolWithFunc(txParallelism, func(i interface{}) {
-			defer wg.Done()
-			idx := i.(uint64)
-			txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], nil, dbgOpts, nil)
-		})
-
-		for _, entry := range rblock.Entries {
-			for _, txIdx := range entry.Indices {
-				wg.Add(1)
-				workerPool.Invoke(txIdx)
-			}
-			wg.Wait()
+		batchWg := &sync.WaitGroup{}
+		workersWg := &sync.WaitGroup{}
+		do := make(chan uint64, txParallelism)
+		workersWg.Add(txParallelism)
+		for i := range txParallelism {
+			go func(workerIdx int) {
+				defer workersWg.Done()
+				for idx := range do {
+					txStart := time.Now()
+					tx := block.Transactions[idx]
+					var txMeta *rpc.TransactionMeta
+					if int(idx) < len(rblock.TxMetas) {
+						txMeta = rblock.TxMetas[idx]
+					}
+					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[workerIdx])
+					txErr := errs[idx]
+					if txMeta != nil && txErr == nil && txMeta.Err != nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
+							CurrentRunID, block.Slot, tx.Signatures[0], txMeta.Err)
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was nil, but onchain err was %+v", tx.Signatures[0], txMeta.Err))
+					} else if txMeta != nil && txErr != nil && txMeta.Err == nil {
+						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s failed locally (%v) but succeeded onchain",
+							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
+						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
+					}
+					txDurations[workerIdx] += time.Since(txStart)
+					batchWg.Done()
+				}
+			}(i)
 		}
+
+		relaxIntraBatchAccountLocks := rblock.Features != nil &&
+			rblock.Features.IsActive(features.RelaxIntraBatchAccountLocks)
+		for _, entry := range rblock.Entries {
+			batches := lightbringerEntryExecutionBatches(rblock.Transactions, entry, relaxIntraBatchAccountLocks)
+			for _, batch := range batches {
+				batchWg.Add(len(batch))
+				for _, txIdx := range batch {
+					do <- txIdx
+				}
+				batchWg.Wait()
+			}
+		}
+		close(do)
+		workersWg.Wait()
 	} else {
 		panic("dependency planner unavailable for non-Lightbringer block")
 	}
@@ -2814,17 +2846,6 @@ func ProcessBlock(
 	if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
 	}
-
-	/*
-		// EAH workaround - see comment at top of replay loop for details
-		// Commented since it seems to be disabled but preserved for the curious?
-		if slotCtx.HasEahWorkaround {
-			slotCtx.FinalBankhash = slotCtx.EahWorkaroundBankhash
-			commitInProgress.Store(false)
-			commitSlot.Store(0)
-			return slotCtx, err
-		}
-	*/
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	setReplayStage("done")
