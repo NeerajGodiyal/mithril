@@ -30,10 +30,10 @@ func init() {
 }
 
 var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("85"))
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("85"))
 	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6c6c6c"))
 	valueStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 )
 

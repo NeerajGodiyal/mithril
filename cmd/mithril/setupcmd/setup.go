@@ -578,18 +578,27 @@ func (m *setupModel) advanceFromInput() {
 // ── View ────────────────────────────────────────────────────────────────
 
 func (m setupModel) View() string {
+	// Full logo on welcome screen, compact banner on all others, none on done
+	banner := ""
+	switch m.screen {
+	case scrDone:
+		// no banner on done screen
+	default:
+		banner = renderLogo()
+	}
+
 	switch m.screen {
 	case scrDone:
 		return "\n" + renderDone(m.configPath, m.err) + "\n"
 
 	case scrRPC:
-		return renderInput("RPC Endpoint",
+		return banner + "\n" + renderInput("RPC Endpoint",
 			"Solana RPC endpoint for fetching blocks and cluster data\n"+
 			"Public endpoint works to start · upgrade to private RPC for production",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrGossip:
-		return renderInput("Gossip Entrypoint",
+		return banner + "\n" + renderInput("Gossip Entrypoint",
 			"IP:port of a Solana validator running gossip\n"+
 			"Used to receive shreds from the network",
 			m.inputVal, m.inputErr, m.inputCur)
@@ -603,41 +612,41 @@ func (m setupModel) View() string {
 				desc += "› " + d.FormatDiskOption()
 			}
 		}
-		return renderInput("AccountsDB Path", desc, m.inputVal, m.inputErr, m.inputCur)
+		return banner + "\n" + renderInput("AccountsDB Path", desc, m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorageSnap:
-		return renderInput("Snapshots Path",
+		return banner + "\n" + renderInput("Snapshots Path",
 			"Downloaded snapshots for bootstrapping · ~100 GB for full + incremental\n"+
 			"Can be on a slower drive than AccountsDB",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorageLogs:
-		return renderInput("Logs Path",
+		return banner + "\n" + renderInput("Logs Path",
 			"Runtime logs, replay timings, and diagnostics\n"+
 			"Auto-rotated · each run gets its own directory",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrBlockTuning:
-		return renderInput("Max Requests Per Second",
+		return banner + "\n" + renderInput("Max Requests Per Second",
 			"How aggressively to fetch blocks from RPC\n"+
 			"Match your provider's rate limit · typical: 5–10 for public, 50+ for private",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrBlockInflight:
-		return renderInput("Max Inflight Workers",
+		return banner + "\n" + renderInput("Max Inflight Workers",
 			"Concurrent block fetch workers · should match max RPS\n"+
 			fmt.Sprintf("Current max RPS: %s", m.blockMaxRPS),
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrReplay:
 		rec := fmt.Sprintf("%d", m.cpuCores*2)
-		return renderInput("Transaction Parallelism",
+		return banner + "\n" + renderInput("Transaction Parallelism",
 			fmt.Sprintf("Parallel workers for block execution\n"+
 			"Your system: %d cores · recommended: %s workers (2× cores)", m.cpuCores, rec),
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrRPCPort:
-		return renderInput("Mithril RPC Port",
+		return banner + "\n" + renderInput("Mithril RPC Port",
 			"JSON-RPC interface for querying Mithril's state\n"+
 			"Default: 8899 · set to 0 to disable",
 			m.inputVal, m.inputErr, m.inputCur)
@@ -673,7 +682,7 @@ func (m setupModel) View() string {
 		review := renderReview("Configuration Review", rows)
 		items := m.currentItems()
 		menu := renderMenu("", "", items, m.cursor, m.width)
-		return "\n" + review + "\n\n" + menu + "\n"
+		return banner + "\n" + review + "\n\n" + menu + "\n"
 
 	default:
 		// Menu screens
@@ -684,8 +693,7 @@ func (m setupModel) View() string {
 			title = "Mithril Setup"
 			desc = ""
 			items := m.currentItems()
-			logo := renderLogo()
-			return "\n" + logo + "\n\n" + renderMenu(title, desc, items, m.cursor, m.width) + "\n"
+			return banner + "\n\n" + renderMenu(title, desc, items, m.cursor, m.width) + "\n"
 		case scrCluster:
 			title = "Solana Cluster"
 		case scrLightbringer:
@@ -704,7 +712,7 @@ func (m setupModel) View() string {
 			title = "Log Level"
 		}
 		items := m.currentItems()
-		return "\n" + renderMenu(title, desc, items, m.cursor, m.width) + "\n"
+		return banner + "\n" + renderMenu(title, desc, items, m.cursor, m.width) + "\n"
 	}
 }
 

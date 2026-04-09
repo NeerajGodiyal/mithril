@@ -250,6 +250,15 @@ func renderLogo() string {
 	return "\n" + art + "\n\n" + divider
 }
 
+// renderBanner returns a compact one-line banner for non-welcome screens.
+func renderBanner() string {
+	name := lipgloss.NewStyle().Foreground(mithrilTeal).Bold(true).Render("◎ MITHRIL")
+	divider := lipgloss.NewStyle().
+		Foreground(colorTextDisabled).
+		Render("  " + strings.Repeat("─", 50))
+	return "\n  " + name + "\n" + divider
+}
+
 // ── Done Screen ─────────────────────────────────────────────────────
 
 func renderDone(configPath string, err error) string {
