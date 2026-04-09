@@ -67,6 +67,8 @@ var FixAltBn128PairingLengthCheck = FeatureGate{Name: "FixAltBn128PairingLengthC
 var DeprecateRentExemptionThreshold = FeatureGate{Name: "DeprecateRentExemptionThreshold", Address: base58.MustDecodeFromString("rent6iVy6PDoViPBeJ6k5EJQrkj62h7DPyLbWGHwjrC")}
 var ProvideInstructionDataOffsetInVmR2 = FeatureGate{Name: "ProvideInstructionDataOffsetInVmR2", Address: base58.MustDecodeFromString("5xXZc66h4UdB6Yq7FzdBxBiRAFMMScMLwHxk2QZDaNZL")}
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
+var RelaxProgramdataAccountCheckMigration = FeatureGate{Name: "RelaxProgramdataAccountCheckMigration", Address: base58.MustDecodeFromString("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h")}
+var ReplaceSplTokenWithPToken = FeatureGate{Name: "ReplaceSplTokenWithPToken", Address: base58.MustDecodeFromString("ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -84,4 +86,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2,
-	VoteStateV4}
+	VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken}

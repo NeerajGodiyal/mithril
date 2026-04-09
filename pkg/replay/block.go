@@ -657,79 +657,6 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	return accts, parentAccts, nil
 }
 
-func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, slot uint64, startOfEpoch bool) (*features.Features, []*accounts.Account, []*accounts.Account) {
-	parentAccts := make([]*accounts.Account, 0)
-	modifiedAccts := make([]*accounts.Account, 0)
-
-	f := features.NewFeaturesDefault()
-
-	for _, featureGate := range features.AllFeatureGates {
-		acct, err := acctsDb.GetAccount(slot, featureGate.Address)
-		if err == nil {
-			if acct.Owner != a.FeatureAddr {
-				continue
-			}
-			parentAccts = append(parentAccts, acct.Clone())
-
-			featureAcct := features.UnmarshalFeatureAcct(acct.Data)
-
-			// already activated
-			if featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt {
-				f.EnableFeature(featureGate, *featureAcct.ActivatedAt)
-			}
-
-			if featureAcct.ActivatedAt == nil && startOfEpoch {
-				newFeatureAcct := &features.FeatureAcct{ActivatedAt: &slot}
-				newFeatureAcctBytes, err := features.MarshalFeatureAcct(newFeatureAcct)
-				if err != nil {
-					panic(err)
-				}
-
-				acct.Data = newFeatureAcctBytes
-				modifiedAccts = append(modifiedAccts, acct)
-
-				f.EnableFeature(featureGate, slot)
-			}
-		}
-	}
-
-	if len(modifiedAccts) != 0 {
-		err := acctsDb.StoreAccounts(modifiedAccts, slot, nil)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	for _, featureAcct := range modifiedAccts {
-		// Handle *SIMD-0194: Deprecate rent exemption threshold* feature activation by updating the Rent sysvar.
-		if f.IsActive(features.DeprecateRentExemptionThreshold) && featureAcct.Key == features.DeprecateRentExemptionThreshold.Address {
-			var rentSysvar sealevel.SysvarRent
-			rentSysvar.LamportsPerUint8Year = uint64(float64(sealevel.SysvarCache.Rent.Sysvar.LamportsPerUint8Year) * sealevel.SysvarCache.Rent.Sysvar.ExemptionThreshold)
-			rentSysvar.ExemptionThreshold = 1.0
-			rentSysvar.BurnPercent = sealevel.SysvarCache.Rent.Sysvar.BurnPercent
-
-			rentAcct, err := acctsDb.GetAccount(slot, sealevel.SysvarRentAddr)
-			if err != nil {
-				panic(err)
-			}
-			parentAccts = append(parentAccts, rentAcct.Clone())
-
-			newRentSysvarBytes := rentSysvar.MustMarshal()
-			copy(rentAcct.Data, newRentSysvarBytes)
-			err = acctsDb.StoreAccounts([]*accounts.Account{rentAcct}, slot, nil)
-			if err != nil {
-				panic(err)
-			}
-			modifiedAccts = append(modifiedAccts, rentAcct)
-
-			sealevel.SysvarCache.Rent.Sysvar = &rentSysvar
-			sealevel.SysvarCache.Rent.Acct = rentAcct
-		}
-	}
-
-	return f, modifiedAccts, parentAccts
-}
-
 // setupInitialVoteAcctsAndStakeAccts populates the vote and stake caches at startup.
 //
 // For stake accounts, we read ALL delegation fields from AccountsDB rather than trusting
@@ -1276,7 +1203,7 @@ func ReplayBlocks(
 	// Use state file for transaction count (required)
 	global.IncrTransactionCount(mithrilState.ManifestTransactionCount)
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
-	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, startSlot, isFirstSlotInEpoch)
+	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, replayCtx, startSlot, isFirstSlotInEpoch)
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	// Load epoch stakes - persisted stakes on resume, state file on fresh start
@@ -1816,7 +1743,7 @@ func ReplayBlocks(
 			mlog.Log.Infof("%d -> %d", currentEpoch, currentEpoch+1)
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
-			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, currentSlot, true)
+			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, replayCtx, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
 			currentEpoch = block.Epoch

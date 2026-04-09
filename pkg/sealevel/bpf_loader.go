@@ -396,12 +396,12 @@ func writeProgramData(execCtx *ExecutionCtx, programDataOffset uint64, bytes []b
 	return nil
 }
 
-func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, error) {
+func validateUpgradeableLoaderProgram(programData []byte, f *features.Features) (*sbpf.Program, error) {
 	syscallRegistry := sbpf.SyscallRegistry(func(u uint32) (sbpf.Syscall, bool) {
-		return Syscalls(&execCtx.Features, true, u)
+		return Syscalls(f, true, u)
 	})
 
-	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, &execCtx.Features)
+	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, true, f)
 	if err != nil {
 		//mlog.Log.Debugf("failed to create loader: %s", err)
 		return nil, err
@@ -420,6 +420,15 @@ func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, er
 	}
 
 	return program, nil
+}
+
+func ValidateUpgradeableLoaderProgram(programData []byte, f *features.Features) error {
+	_, err := validateUpgradeableLoaderProgram(programData, f)
+	return err
+}
+
+func deployProgram(execCtx *ExecutionCtx, programData []byte) (*sbpf.Program, error) {
+	return validateUpgradeableLoaderProgram(programData, &execCtx.Features)
 }
 
 const (
