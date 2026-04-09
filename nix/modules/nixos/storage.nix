@@ -10,7 +10,7 @@
     escaped = lib.replaceStrings ["-"] ["\\x2d"] stripped;
   in
     lib.replaceStrings ["/"] ["-"] escaped;
-  dataDir = cfg.storage.dataDir;
+  inherit (cfg.storage) dataDir;
   accountsMountUnit =
     if cfg.storage.accounts.mountPoint != null
     then "${escapeSystemdPath cfg.storage.accounts.mountPoint}.mount"
@@ -195,10 +195,10 @@ in {
             serviceConfig = formatServiceConfig;
             path = formatPath;
             script = mkFormatScript {
-              device = cfg.storage.singleDisk.device;
-              fsType = cfg.storage.singleDisk.fsType;
-              label = cfg.storage.singleDisk.format.label;
-              force = cfg.storage.singleDisk.format.force;
+              inherit (cfg.storage.singleDisk) device;
+              inherit (cfg.storage.singleDisk) fsType;
+              inherit (cfg.storage.singleDisk.format) label;
+              inherit (cfg.storage.singleDisk.format) force;
               diskLabel = "single-disk";
             };
           };
@@ -213,10 +213,10 @@ in {
             serviceConfig = formatServiceConfig;
             path = formatPath;
             script = mkFormatScript {
-              device = cfg.storage.accounts.device;
-              fsType = cfg.storage.accounts.fsType;
-              label = cfg.storage.accounts.format.label;
-              force = cfg.storage.accounts.format.force;
+              inherit (cfg.storage.accounts) device;
+              inherit (cfg.storage.accounts) fsType;
+              inherit (cfg.storage.accounts.format) label;
+              inherit (cfg.storage.accounts.format) force;
               diskLabel = "accounts";
             };
           };
@@ -231,10 +231,10 @@ in {
             serviceConfig = formatServiceConfig;
             path = formatPath;
             script = mkFormatScript {
-              device = cfg.storage.blocks.device;
-              fsType = cfg.storage.blocks.fsType;
-              label = cfg.storage.blocks.format.label;
-              force = cfg.storage.blocks.format.force;
+              inherit (cfg.storage.blocks) device;
+              inherit (cfg.storage.blocks) fsType;
+              inherit (cfg.storage.blocks.format) label;
+              inherit (cfg.storage.blocks.format) force;
               diskLabel = "blocks";
             };
           };

@@ -21,7 +21,6 @@
       if cfg.configSchema.storageSnapshots != null
       then cfg.configSchema.storageSnapshots
       else "${blocksRoot}/snapshots";
-    fileLoggingEnabled = cfg.configSchema.logTarget == "file" || cfg.configSchema.logTarget == "both";
     storageLogs =
       if cfg.configSchema.storageLogs != null
       then cfg.configSchema.storageLogs
