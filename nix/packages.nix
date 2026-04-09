@@ -47,7 +47,7 @@ in {
         version = "0.0.0";
         src = self;
         subPackages = ["cmd/mithril"];
-        vendorHash = "sha256-oNZKGlpNTKZl1b013Qg6pIRfyHR6kF/Y7oSUeGMQhX0=";
+        vendorHash = "sha256-zWKYbW9hgBV6f4nlLH2kMhR+6QVYBKf3PH9lQ8KYuhU=";
         nativeBuildInputs = [pkgs.pkg-config];
         buildInputs = [pkgs.zstd];
         env = {
