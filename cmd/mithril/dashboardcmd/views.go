@@ -604,29 +604,103 @@ func (m model) renderDoctorView() string {
 // ── Logs View ───────────────────────────────────────────────────────────
 
 func (m model) renderLogsView() string {
-	if len(m.logLines) == 0 {
-		muted := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
-		cmd := lipgloss.NewStyle().Foreground(tui.ColorTextSecondary)
-		return muted.Render("  Logs will appear here after starting the node.") + "\n\n" +
-			cmd.Render("    $ mithril run --config "+m.configFile) + "\n"
+	if len(m.mithrilLines) == 0 && len(m.lbLines) == 0 {
+		mutedStyle := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
+		cmdStyle := lipgloss.NewStyle().Foreground(tui.ColorTextSecondary)
+		return mutedStyle.Render("  Logs will appear here after starting the node.") + "\n\n" +
+			cmdStyle.Render("    $ mithril run --config "+m.configFile) + "\n"
 	}
 
-	var b strings.Builder
-	muted := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
+	titleStyle := lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true)
+	mutedStyle := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
+	hintStyle := lipgloss.NewStyle().Foreground(tui.ColorTextDisabled)
 
-	for _, line := range m.logLines {
-		if strings.TrimSpace(line) == "" {
-			continue
+	// Calculate column widths
+	rightPaneWidth := (m.width - 3) * 78 / 100
+	colGap := 3
+	colWidth := (rightPaneWidth - colGap) / 2
+
+	// Apply scroll offset
+	mLines := m.mithrilLines
+	lLines := m.lbLines
+	if m.logFocused && m.logScroll > 0 {
+		if m.logScroll < len(mLines) {
+			mLines = mLines[m.logScroll:]
+		} else {
+			mLines = nil
 		}
-		// Color WARN/ERROR lines
+		if m.logScroll < len(lLines) {
+			lLines = lLines[m.logScroll:]
+		} else {
+			lLines = nil
+		}
+	}
+
+	// Render column headers
+	mTitle := titleStyle.Render("mithril")
+	lTitle := titleStyle.Render("lightbringer")
+
+	// Render log lines with color coding
+	colorLine := func(line string) string {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			return ""
+		}
 		switch {
-		case strings.Contains(line, "WARN") || strings.Contains(line, "warn"):
-			b.WriteString(lipgloss.NewStyle().Foreground(tui.ColorWarn).Render(line) + "\n")
-		case strings.Contains(line, "ERROR") || strings.Contains(line, "error") || strings.Contains(line, "FATAL"):
-			b.WriteString(lipgloss.NewStyle().Foreground(tui.ColorError).Render(line) + "\n")
+		case strings.Contains(line, " WARN ") || strings.HasPrefix(trimmed, "WARN"):
+			return lipgloss.NewStyle().Foreground(tui.ColorWarn).Render(line)
+		case strings.Contains(line, " ERROR ") || strings.HasPrefix(trimmed, "ERROR") || strings.Contains(line, "FATAL"):
+			return lipgloss.NewStyle().Foreground(tui.ColorError).Render(line)
 		default:
-			b.WriteString(muted.Render(line) + "\n")
+			return mutedStyle.Render(line)
 		}
+	}
+
+	// Build side-by-side output
+	maxRows := len(mLines)
+	if len(lLines) > maxRows {
+		maxRows = len(lLines)
+	}
+	// Cap visible rows
+	availHeight := m.height - 22
+	if availHeight < 5 {
+		availHeight = 5
+	}
+	if maxRows > availHeight {
+		maxRows = availHeight
+	}
+
+	gap := strings.Repeat(" ", colGap)
+	truncStyle := lipgloss.NewStyle().MaxWidth(colWidth)
+
+	var b strings.Builder
+	b.WriteString(mTitle)
+	leftPad := colWidth - lipgloss.Width(mTitle)
+	if leftPad > 0 {
+		b.WriteString(strings.Repeat(" ", leftPad))
+	}
+	b.WriteString(gap + lTitle + "\n")
+
+	for i := 0; i < maxRows; i++ {
+		left := ""
+		right := ""
+		if i < len(mLines) {
+			left = truncStyle.Render(colorLine(mLines[i]))
+		}
+		if i < len(lLines) {
+			right = colorLine(lLines[i])
+		}
+		lPad := colWidth - lipgloss.Width(left)
+		if lPad > 0 {
+			left += strings.Repeat(" ", lPad)
+		}
+		b.WriteString(left + gap + right + "\n")
+	}
+
+	if m.logFocused {
+		b.WriteString("\n" + hintStyle.Render("  ↑↓ scroll  esc back") + "\n")
+	} else {
+		b.WriteString("\n" + hintStyle.Render("  ⏎ scroll logs") + "\n")
 	}
 
 	return b.String()

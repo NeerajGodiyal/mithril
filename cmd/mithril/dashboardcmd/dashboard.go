@@ -67,19 +67,20 @@ type editFieldDef struct {
 // ── Async data messages ─────────────────────────────────────────────────
 
 type dataRefreshedMsg struct {
-	hasConfig bool
-	cfg       *configData
-	state     *nodeState
-	services  []serviceStatus
-	checks    []checkResult
-	logLines  []string
+	hasConfig    bool
+	cfg          *configData
+	state        *nodeState
+	services     []serviceStatus
+	checks       []checkResult
+	mithrilLines []string
+	lbLines      []string
 }
 
 type diskRefreshedMsg struct {
 	disks []diskUsage
 }
 
-func fetchDataCmd(cfgFile, logFile string) tea.Cmd {
+func fetchDataCmd(cfgFile string) tea.Cmd {
 	return func() tea.Msg {
 		var cfg *configData
 		var state *nodeState
@@ -97,18 +98,20 @@ func fetchDataCmd(cfgFile, logFile string) tea.Cmd {
 		services := probeServices(cfg)
 		checks := runDoctorChecks(cfgFile, cfg)
 
-		var logLines []string
+		var mithrilLines, lbLines []string
 		if cfg != nil {
-			logLines = readLogTail(cfg.logsPath, logFile, 50)
+			mithrilLines = readLogTail(cfg.logsPath, "mithril.log", 50)
+			lbLines = readLogTail(cfg.logsPath, "lightbringer.log", 50)
 		}
 
 		return dataRefreshedMsg{
-			hasConfig: hasConfig,
-			cfg:       cfg,
-			state:     state,
-			services:  services,
-			checks:    checks,
-			logLines:  logLines,
+			hasConfig:    hasConfig,
+			cfg:          cfg,
+			state:        state,
+			services:     services,
+			checks:       checks,
+			mithrilLines: mithrilLines,
+			lbLines:      lbLines,
 		}
 	}
 }
@@ -169,9 +172,11 @@ type model struct {
 	state    *nodeState
 	services []serviceStatus
 	disks    []diskUsage
-	checks   []checkResult
-	logLines []string
-	logFile  string // "mithril.log" or "lightbringer.log"
+	checks        []checkResult
+	mithrilLines  []string
+	lbLines       []string
+	logScroll     int  // scroll offset for focused log pane
+	logFocused    bool // true when user is scrolling logs with ↑↓
 
 	// Menu
 	items []menuItem
@@ -181,7 +186,6 @@ func newModel(cf string) model {
 	return model{
 		configFile: cf,
 		screen:     screenOverview,
-		logFile:    "mithril.log",
 		items: []menuItem{
 			{label: "Overview", value: "overview"},
 			{label: "Config", value: "config"},
@@ -222,7 +226,7 @@ func newModel(cf string) model {
 func (m model) Init() tea.Cmd {
 	// Non-blocking: fetch data asynchronously on startup
 	return tea.Batch(
-		fetchDataCmd(m.configFile, m.logFile),
+		fetchDataCmd(m.configFile),
 		fetchDiskCmd(nil),
 		tickCmd(),
 		slowTickCmd(),
@@ -263,7 +267,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.mode = modeDashboard
 					m.childM = nil
 					return m, tea.Batch(
-						fetchDataCmd(m.configFile, m.logFile),
+						fetchDataCmd(m.configFile),
 						fetchDiskCmd(m.cfg),
 					)
 				}
@@ -299,7 +303,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = msg.state
 		m.services = msg.services
 		m.checks = msg.checks
-		m.logLines = msg.logLines
+		m.mithrilLines = msg.mithrilLines
+		m.lbLines = msg.lbLines
 		return m, nil
 
 	case diskRefreshedMsg:
@@ -310,12 +315,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeDashboard
 		m.childM = nil
 		return m, tea.Batch(
-			fetchDataCmd(m.configFile, m.logFile),
+			fetchDataCmd(m.configFile),
 			fetchDiskCmd(m.cfg),
 		)
 
 	case tickMsg:
-		return m, tea.Batch(tickCmd(), fetchDataCmd(m.configFile, m.logFile))
+		return m, tea.Batch(tickCmd(), fetchDataCmd(m.configFile))
 
 	case slowTickMsg:
 		return m, tea.Batch(slowTickCmd(), fetchDiskCmd(m.cfg))
@@ -336,6 +341,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "up", "k":
+			if m.logFocused {
+				m.logScroll--
+				if m.logScroll < 0 {
+					m.logScroll = 0
+				}
+				return m, nil
+			}
 			if m.screen == screenEdit && m.editMode == editMenu {
 				m.editOptCursor--
 				if m.editOptCursor < 0 {
@@ -348,6 +360,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
+			if m.logFocused {
+				m.logScroll++
+				return m, nil
+			}
 			if m.screen == screenEdit && m.editMode == editMenu {
 				m.editOptCursor++
 				if m.editOptCursor >= len(m.editOptions) {
@@ -360,6 +376,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
+			// Logs screen: Enter focuses logs for ↑↓ scrolling
+			if m.screen == screenLogs && !m.logFocused {
+				m.logFocused = true
+				return m, nil
+			}
 			if m.screen == screenEdit && m.editMode == editNone {
 				m.startEditField()
 				return m, nil
@@ -377,6 +398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			if m.logFocused {
+				m.logFocused = false
+				return m, nil
+			}
 			if m.editMode != editNone {
 				m.editMode = editNone
 				return m, nil
@@ -388,7 +413,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			return m, tea.Batch(
-				fetchDataCmd(m.configFile, m.logFile),
+				fetchDataCmd(m.configFile),
 				fetchDiskCmd(m.cfg),
 			)
 
@@ -436,17 +461,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rightScroll = 0
 			}
 
-		case "m":
-			if m.screen == screenLogs {
-				m.logFile = "mithril.log"
-				return m, fetchDataCmd(m.configFile, m.logFile)
-			}
-
-		case "l":
-			if m.screen == screenLogs {
-				m.logFile = "lightbringer.log"
-				return m, fetchDataCmd(m.configFile, m.logFile)
-			}
 
 		default:
 			// Text input for inline editing
@@ -485,7 +499,9 @@ func (m *model) selectCurrent() tea.Cmd {
 		return nil
 	}
 	item := m.items[m.cursor]
-	m.rightScroll = 0 // reset scroll on screen change
+	m.rightScroll = 0
+	m.logFocused = false
+	m.logScroll = 0
 	switch item.value {
 	case "overview":
 		m.screen = screenOverview
@@ -858,7 +874,7 @@ func (m model) rightPaneTitle() string {
 	case screenDoctor:
 		return "Health Check"
 	case screenLogs:
-		return "Logs (" + m.logFile + ")"
+		return "Logs"
 	case screenDisk:
 		return "Disk Usage"
 	}
@@ -874,11 +890,13 @@ func (m model) helpItems() []helpItem {
 
 	switch m.screen {
 	case screenLogs:
-		base = append(base, helpItem{key: "m", desc: "mithril"})
-		if m.cfg != nil && m.cfg.lbEnabled {
-			base = append(base, helpItem{key: "l", desc: "lightbringer"})
+		if m.logFocused {
+			return []helpItem{
+				{key: "↑↓", desc: "scroll"},
+				{key: "esc", desc: "back"},
+			}
 		}
-		base = append(base, helpItem{key: "pgdn", desc: "scroll"})
+		base = append(base, helpItem{key: "⏎", desc: "scroll logs"})
 	case screenConfig:
 		base = append(base, helpItem{key: "e", desc: "edit"}, helpItem{key: "pgdn", desc: "scroll"})
 	case screenOverview:
