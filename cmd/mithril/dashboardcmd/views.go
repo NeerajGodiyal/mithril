@@ -624,7 +624,7 @@ func (m model) renderLogsView() string {
 	mLines := wrapLogLines(m.mithrilLines, colWidth)
 	lLines := wrapLogLines(m.lbLines, colWidth)
 	if m.logFocused && m.logScroll > 0 {
-		if m.logPane == 0 {
+		if m.logPane == logPaneMithril {
 			if m.logScroll < len(mLines) {
 				mLines = mLines[m.logScroll:]
 			} else {
@@ -677,9 +677,9 @@ func (m model) renderLogsView() string {
 	var mTitle, lTitle string
 	mTitleStyle := titleStyle
 	lTitleStyle := titleStyle
-	if m.logFocused && m.logPane == 0 {
+	if m.logFocused && m.logPane == logPaneMithril {
 		mTitleStyle = lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
-	} else if m.logFocused && m.logPane == 1 {
+	} else if m.logFocused && m.logPane == logPaneLightbringer {
 		lTitleStyle = lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
 	}
 	mTitle = mTitleStyle.Render("mithril")
@@ -703,7 +703,7 @@ func (m model) renderLogsView() string {
 		right := ""
 
 		if i < len(mLines) {
-			if m.logFocused && m.logPane == 0 {
+			if m.logFocused && m.logPane == logPaneMithril {
 				// Active pane: brighter text
 				left = truncStyle.Render(activeLineStyle.Render(mLines[i]))
 			} else {
@@ -711,7 +711,7 @@ func (m model) renderLogsView() string {
 			}
 		}
 		if i < len(lLines) {
-			if m.logFocused && m.logPane == 1 {
+			if m.logFocused && m.logPane == logPaneLightbringer {
 				right = truncStyle.Render(activeLineStyle.Render(lLines[i]))
 			} else {
 				right = truncStyle.Render(colorLine(lLines[i]))

@@ -50,6 +50,12 @@ const (
 	editText        // typing free-form text
 )
 
+// Log pane selection
+const (
+	logPaneMithril      = 0
+	logPaneLightbringer = 1
+)
+
 type editOption struct {
 	label string
 	value string
@@ -365,7 +371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.logFocused {
 				// Cap scroll — use a generous limit since wrapped lines expand count
 				maxScroll := len(m.mithrilLines) * 3 // approximate: up to 3x after wrapping
-				if m.logPane == 1 {
+				if m.logPane == logPaneLightbringer {
 					maxScroll = len(m.lbLines) * 3
 				}
 				if m.logScroll < maxScroll {
@@ -444,7 +450,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "left":
 			if m.logFocused {
-				m.logPane = 0
+				m.logPane = logPaneMithril
 				m.logScroll = 0
 				return m, nil
 			}
@@ -455,7 +461,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "right":
 			if m.logFocused {
-				m.logPane = 1
+				m.logPane = logPaneLightbringer
 				m.logScroll = 0
 				return m, nil
 			}
@@ -912,7 +918,7 @@ func (m model) helpItems() []helpItem {
 	case screenLogs:
 		if m.logFocused {
 			pane := "mithril"
-			if m.logPane == 1 {
+			if m.logPane == logPaneLightbringer {
 				pane = "lightbringer"
 			}
 			return []helpItem{

@@ -17,13 +17,13 @@ var (
 	ColorTextDisabled  = lipgloss.Color("#606060") // hints, shortcuts — visible on dark bg
 
 	// Semantic
-	ColorSuccess = lipgloss.Color("85")
+	ColorSuccess = MithrilTeal             // teal doubles as success indicator
 	ColorError   = lipgloss.Color("196")
 	ColorWarn    = lipgloss.Color("214")
 
 	// Borders
 	ColorBorder       = lipgloss.Color("240") // unfocused
-	ColorBorderActive = lipgloss.Color("85")  // focused
+	ColorBorderActive = MithrilTeal           // focused
 )
 
 // Shared styles

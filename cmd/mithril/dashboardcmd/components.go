@@ -115,7 +115,7 @@ func renderSplitView(cfg splitViewConfig, width, height int) string {
 		return renderStackedView(cfg, width, height)
 	}
 
-	// oc-wallet style: bordered split view with focus indicator
+	// Bordered split view with focus indicator
 	innerWidth := width - 3 // left border + center divider + right border
 	leftWidth := innerWidth * 22 / 100
 	rightWidth := innerWidth - leftWidth
@@ -262,7 +262,7 @@ type menuItem struct {
 func renderLeftMenu(items []menuItem, cursor int, width int) string {
 	var b strings.Builder
 
-	// Full-row highlight style (twad-style selection bar)
+	// Full-row highlight for selected menu item
 	selectedStyle := lipgloss.NewStyle().
 		Background(tui.MithrilTeal).
 		Foreground(lipgloss.Color("#000000")).

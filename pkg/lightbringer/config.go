@@ -7,8 +7,10 @@ import (
 	"strings"
 )
 
+const configFileName = "Lightbringer.toml"
+
 // LightbringerTOML represents the Lightbringer.toml structure that Lightbringer expects.
-// This mirrors the Rust ConfigRaw struct in overcast/src/config.rs.
+// This mirrors the Rust ConfigRaw struct in the Lightbringer source.
 type LightbringerTOML struct {
 	GossipEntrypoint string
 	Storage          string
@@ -64,7 +66,7 @@ func (c *LightbringerTOML) GenerateTOML() string {
 // write pattern (write to temp file, then rename) to prevent partial writes.
 func (c *LightbringerTOML) WriteConfigFile(dir string) (string, error) {
 	content := c.GenerateTOML()
-	targetPath := filepath.Join(dir, "Lightbringer.toml")
+	targetPath := filepath.Join(dir, configFileName)
 
 	// Write to temp file in same directory (required for atomic rename on same filesystem).
 	// CreateTemp uses mode 0600; we keep this restrictive since the file may contain tokens.

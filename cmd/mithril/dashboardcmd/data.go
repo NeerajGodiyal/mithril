@@ -131,10 +131,17 @@ type serviceStatus struct {
 	up      bool
 }
 
+// Default service addresses (must match config template defaults).
+const (
+	defaultRPCPort  = "8899"
+	defaultLBGRPC   = "127.0.0.1:3001"
+	defaultLBHTTP   = "127.0.0.1:3000"
+)
+
 func probeServices(cfg *configData) []serviceStatus {
-	rpcPort := "8899"
-	grpcAddr := "127.0.0.1:3001"
-	httpAddr := "127.0.0.1:3000"
+	rpcPort := defaultRPCPort
+	grpcAddr := defaultLBGRPC
+	httpAddr := defaultLBHTTP
 
 	if cfg != nil {
 		if cfg.rpcPort != "" && cfg.rpcPort != "0" {
