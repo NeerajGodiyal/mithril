@@ -180,7 +180,8 @@ func (m model) renderConfigView() string {
 		if len(sections) > 0 {
 			if idx := strings.Index(trimmed, "="); idx > 0 {
 				k := strings.TrimSpace(trimmed[:idx])
-				v := stripTomlQuotes(strings.TrimSpace(trimmed[idx+1:]))
+				raw := strings.TrimSpace(trimmed[idx+1:])
+				v := stripTomlQuotes(stripInlineComment(raw))
 				s := &sections[len(sections)-1]
 				s.keys = append(s.keys, k)
 				s.vals = append(s.vals, v)
@@ -325,6 +326,22 @@ func (m model) renderConfigTwoColumns(sections []configSection, sectionStyle, ke
 	ks := lipgloss.NewStyle().Foreground(tui.MithrilTeal)
 	b.WriteString("  " + ks.Render("e") + hintStyle.Render(" edit") + "  " + ks.Render("r") + hintStyle.Render(" refresh") + "\n")
 	return b.String()
+}
+
+// stripInlineComment removes the inline comment from a TOML value.
+// e.g., `"auto"   # some comment` → `"auto"`
+func stripInlineComment(v string) string {
+	// Don't strip # inside quoted strings
+	inQuote := false
+	for i, c := range v {
+		if c == '"' {
+			inQuote = !inQuote
+		}
+		if c == '#' && !inQuote {
+			return strings.TrimSpace(v[:i])
+		}
+	}
+	return v
 }
 
 // stripTomlQuotes removes TOML string quotes and array brackets for display.
