@@ -363,12 +363,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.logFocused {
-				// Cap scroll at the active pane's line count
-				maxScroll := len(m.mithrilLines)
+				// Cap scroll — use a generous limit since wrapped lines expand count
+				maxScroll := len(m.mithrilLines) * 3 // approximate: up to 3x after wrapping
 				if m.logPane == 1 {
-					maxScroll = len(m.lbLines)
+					maxScroll = len(m.lbLines) * 3
 				}
-				if m.logScroll < maxScroll-1 {
+				if m.logScroll < maxScroll {
 					m.logScroll++
 				}
 				return m, nil

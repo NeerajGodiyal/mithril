@@ -620,9 +620,9 @@ func (m model) renderLogsView() string {
 	colGap := 3
 	colWidth := (rightPaneWidth - colGap) / 2
 
-	// Apply scroll offset to the ACTIVE pane only
-	mLines := m.mithrilLines
-	lLines := m.lbLines
+	// Wrap long lines within column width so full messages are readable
+	mLines := wrapLogLines(m.mithrilLines, colWidth)
+	lLines := wrapLogLines(m.lbLines, colWidth)
 	if m.logFocused && m.logScroll > 0 {
 		if m.logPane == 0 {
 			if m.logScroll < len(mLines) {
@@ -730,6 +730,34 @@ func (m model) renderLogsView() string {
 	}
 
 	return b.String()
+}
+
+// wrapLogLines wraps each line to fit within the given width.
+// Continuation lines are indented with 2 spaces for readability.
+func wrapLogLines(lines []string, width int) []string {
+	if width < 10 {
+		width = 10
+	}
+	var result []string
+	for _, line := range lines {
+		if len(line) <= width {
+			result = append(result, line)
+			continue
+		}
+		// First chunk at full width, continuations indented
+		result = append(result, line[:width])
+		remaining := line[width:]
+		contWidth := width - 2 // indent continuation
+		for len(remaining) > 0 {
+			if len(remaining) <= contWidth {
+				result = append(result, "  "+remaining)
+				break
+			}
+			result = append(result, "  "+remaining[:contWidth])
+			remaining = remaining[contWidth:]
+		}
+	}
+	return result
 }
 
 // ── Disk View ───────────────────────────────────────────────────────────
