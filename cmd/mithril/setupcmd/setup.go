@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
@@ -19,7 +20,7 @@ var (
 
 	SetupCmd = cobra.Command{
 		Use:   "setup",
-		Short: "Interactive setup wizard for Mithril configuration",
+		Short: "Interactive setup for Mithril configuration",
 		Run: func(cmd *cobra.Command, args []string) {
 			runSetup()
 		},
@@ -85,6 +86,7 @@ const (
 	scrLogLevel
 	scrRPCPort
 	scrReview
+	scrOverwrite // confirm overwrite existing config
 	scrDone
 )
 
@@ -122,10 +124,11 @@ type setupModel struct {
 	rpcPort       string
 
 	// System
-	cpuCores int
-	disks    []DiskInfo
+	cpuCores   int
+	disks      []DiskInfo
 	configPath string
-	err      error
+	embedded   bool // true when running inside dashboard (skip logo)
+	err        error
 }
 
 func newSetupModel() setupModel {
@@ -284,6 +287,13 @@ func (m setupModel) currentItems() []menuItem {
 			menuOption("Save config & exit", "save"),
 			menuOption("Go back", "back"),
 		}
+	case scrOverwrite:
+		return []menuItem{
+			menuOptionDesc("Overwrite", "overwrite", "Replace existing config with new one"),
+			menuOptionDesc("Go back", "back", "Return to review your settings"),
+			menuSeparator(),
+			menuOptionDesc("Exit", "exit", "Discard and go back"),
+		}
 	}
 	return nil
 }
@@ -409,6 +419,26 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 			return m.generateConfig()
 		case "back":
 			m.goBack()
+		}
+
+	case scrOverwrite:
+		switch value {
+		case "overwrite":
+			// User confirmed — proceed with save (scrOverwrite is set, so the
+			// existence check in generateConfig/generateManual will be skipped)
+			if m.mode == "manual" {
+				return m.generateManual()
+			}
+			return m.generateConfig()
+		case "back":
+			if m.mode == "manual" {
+				m.screen = scrMode // manual has no review screen
+			} else {
+				m.screen = scrReview
+			}
+			m.cursor = 0
+		case "exit":
+			return m, tea.Quit
 		}
 	}
 	return m, nil
@@ -578,13 +608,15 @@ func (m *setupModel) advanceFromInput() {
 // ── View ────────────────────────────────────────────────────────────────
 
 func (m setupModel) View() string {
-	// Full logo on welcome screen, compact banner on all others, none on done
+	// Skip logo when embedded in dashboard right pane
 	banner := ""
-	switch m.screen {
-	case scrDone:
-		// no banner on done screen
-	default:
-		banner = renderLogo()
+	if !m.embedded {
+		switch m.screen {
+		case scrDone:
+			// no banner on done screen
+		default:
+			banner = renderLogo()
+		}
 	}
 
 	switch m.screen {
@@ -684,6 +716,12 @@ func (m setupModel) View() string {
 		menu := renderMenu("", "", items, m.cursor, m.width)
 		return banner + "\n" + review + "\n\n" + menu + "\n"
 
+	case scrOverwrite:
+		msg := warnStyle.Render("  Config already exists: ") + m.configPath
+		items := m.currentItems()
+		menu := renderMenu("Overwrite config?", msg, items, m.cursor, m.width)
+		return banner + "\n" + menu + "\n"
+
 	default:
 		// Menu screens
 		title := ""
@@ -719,9 +757,10 @@ func (m setupModel) View() string {
 // ── Config Generation ───────────────────────────────────────────────────
 
 func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
-	if _, err := os.Stat(m.configPath); err == nil {
-		m.err = fmt.Errorf("%s already exists — delete it or use --output", m.configPath)
-		m.screen = scrDone
+	// If config exists and user hasn't confirmed overwrite yet, ask first
+	if _, err := os.Stat(m.configPath); err == nil && m.screen != scrOverwrite {
+		m.screen = scrOverwrite
+		m.cursor = 0
 		return m, nil
 	}
 
@@ -781,7 +820,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	cfg.WriteString("max_size_mb = 100\n")
 	cfg.WriteString("max_age_days = 7\n")
 
-	if err := os.WriteFile(m.configPath, []byte(cfg.String()), 0600); err != nil {
+	if err := tui.AtomicWriteFile(m.configPath, []byte(cfg.String()), 0600); err != nil {
 		m.err = err
 	}
 	m.screen = scrDone
@@ -789,9 +828,9 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 }
 
 func (m setupModel) generateManual() (tea.Model, tea.Cmd) {
-	if _, err := os.Stat(m.configPath); err == nil {
-		m.err = fmt.Errorf("%s already exists", m.configPath)
-		m.screen = scrDone
+	if _, err := os.Stat(m.configPath); err == nil && m.screen != scrOverwrite {
+		m.screen = scrOverwrite
+		m.cursor = 0
 		return m, nil
 	}
 
@@ -853,7 +892,7 @@ max_age_days = 7           # Delete logs older than this
 # See config.example.toml for: [tuning], [debug], [snapshot] tuning, [reporting]
 `, runtime.NumCPU()*2)
 
-	if err := os.WriteFile(m.configPath, []byte(template), 0600); err != nil {
+	if err := tui.AtomicWriteFile(m.configPath, []byte(template), 0600); err != nil {
 		m.err = err
 	}
 	m.screen = scrDone
@@ -866,4 +905,31 @@ func runSetup() {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// NewSetupModel creates a setup model for embedding in the dashboard.
+// configPath overrides the output path (pass "" for default).
+func NewSetupModel(configPath string) tea.Model {
+	m := newSetupModel()
+	if configPath != "" {
+		m.configPath = configPath
+	}
+	m.embedded = true // skip logo when inside dashboard
+	return m
+}
+
+// SetupIsDone returns true if the setup model has reached the done screen.
+func SetupIsDone(m tea.Model) bool {
+	if sm, ok := m.(setupModel); ok {
+		return sm.screen == scrDone
+	}
+	return false
+}
+
+// SetupIsFirstScreen returns true if the setup wizard is on the initial mode selection screen.
+func SetupIsFirstScreen(m tea.Model) bool {
+	if sm, ok := m.(setupModel); ok {
+		return sm.screen == scrMode
+	}
+	return false
 }

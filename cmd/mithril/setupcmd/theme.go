@@ -1,31 +1,28 @@
 package setupcmd
 
 import (
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Mithril Server Theme — matches oc-wallet's MithrilServerTheme exactly
-// Colors from: pkg/progress/progress.go (ANSI 85 teal), cmd/mithril-tui (ANSI 240 borders)
+// Re-export shared theme for use within setupcmd package.
 var (
-	mithrilTeal = lipgloss.Color("85") // Primary accent — THE Mithril color
+	mithrilTeal = tui.MithrilTeal
 
-	// Text hierarchy
-	colorTextPrimary   = lipgloss.Color("#e4e4e4")
-	colorTextSecondary = lipgloss.Color("#a8a8a8")
-	colorTextMuted     = lipgloss.Color("#6c6c6c")
-	colorTextDisabled  = lipgloss.Color("#4e4e4e")
+	colorTextPrimary   = tui.ColorTextPrimary
+	colorTextSecondary = tui.ColorTextSecondary
+	colorTextMuted     = tui.ColorTextMuted
+	colorTextDisabled  = tui.ColorTextDisabled
 
-	// Semantic
-	colorSuccess = lipgloss.Color("85")
-	colorError   = lipgloss.Color("196")
-	colorWarn    = lipgloss.Color("214")
+	colorSuccess = tui.ColorSuccess
+	colorError   = tui.ColorError
+	colorWarn    = tui.ColorWarn
 
-	// Borders
-	colorBorder       = lipgloss.Color("240") // unfocused
-	colorBorderActive = lipgloss.Color("85")  // focused
+	colorBorder       = tui.ColorBorder
+	colorBorderActive = tui.ColorBorderActive
 )
 
-// Shared styles
+// Shared styles (re-exported from tui package)
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -268,6 +270,7 @@ func fetchMetrics(url string) tea.Cmd {
 }
 
 // tailLog reads the last maxLogLines from a log file.
+// Only reads the last 64KB to avoid OOM on large log files.
 func tailLog(source, path string) tea.Cmd {
 	return func() tea.Msg {
 		f, err := os.Open(path)
@@ -276,17 +279,25 @@ func tailLog(source, path string) tea.Cmd {
 		}
 		defer f.Close()
 
-		var lines []string
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
+		stat, err := f.Stat()
+		if err != nil {
 			return logMsg{source: source, err: err}
 		}
 
-		// Keep only last maxLogLines
+		// Read only the tail of the file to avoid loading huge logs into memory
+		const tailSize = 64 * 1024
+		offset := stat.Size() - tailSize
+		if offset < 0 {
+			offset = 0
+		}
+
+		buf := make([]byte, stat.Size()-offset)
+		_, err = f.ReadAt(buf, offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return logMsg{source: source, err: err}
+		}
+
+		lines := strings.Split(string(buf), "\n")
 		if len(lines) > maxLogLines {
 			lines = lines[len(lines)-maxLogLines:]
 		}
@@ -331,14 +342,20 @@ func main() {
 	if *logDir != "" {
 		latestDir := filepath.Join(*logDir, "latest")
 		if target, err := os.Readlink(latestDir); err == nil {
-			runDir := filepath.Join(*logDir, target)
-			ml := filepath.Join(runDir, "mithril.log")
-			if _, err := os.Stat(ml); err == nil {
-				mithrilLogPath = ml
-			}
-			ll := filepath.Join(runDir, "lightbringer.log")
-			if _, err := os.Stat(ll); err == nil {
-				lightbringerLogPath = ll
+			// Validate symlink target — reject traversal and absolute paths
+			if !strings.Contains(target, "..") && !filepath.IsAbs(target) {
+				runDir := filepath.Clean(filepath.Join(*logDir, target))
+				cleanLogDir := filepath.Clean(*logDir) + string(os.PathSeparator)
+				if strings.HasPrefix(runDir+string(os.PathSeparator), cleanLogDir) {
+					ml := filepath.Join(runDir, "mithril.log")
+					if _, err := os.Stat(ml); err == nil {
+						mithrilLogPath = ml
+					}
+					ll := filepath.Join(runDir, "lightbringer.log")
+					if _, err := os.Stat(ll); err == nil {
+						lightbringerLogPath = ll
+					}
+				}
 			}
 		}
 	}

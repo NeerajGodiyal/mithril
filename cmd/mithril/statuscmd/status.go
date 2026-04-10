@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
@@ -30,10 +31,10 @@ func init() {
 }
 
 var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("85"))
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("85"))
-	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6c6c6c"))
+	titleStyle   = tui.TitleStyle
+	successStyle = tui.SuccessStyle
+	warnStyle    = tui.WarnStyle
+	dimStyle     = tui.DimStyle
 	valueStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 )
 

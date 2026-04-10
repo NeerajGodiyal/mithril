@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/dashboardcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/setupcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/statecmd"
@@ -49,12 +50,13 @@ func init() {
 	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
 
 	cmd.AddCommand(
-		&node.Run,              // Primary command for running Mithril
-		&configcmd.ConfigCmd,   // Config management (init, etc.)
-		&statecmd.StateCmd,     // State file inspection and management
-		&setupcmd.SetupCmd,     // Interactive setup wizard
-		&setupcmd.DoctorCmd,    // System health check
-		&statuscmd.StatusCmd,   // Node status
+		&node.Run,                    // Primary command for running Mithril
+		&configcmd.ConfigCmd,         // Config management (init, etc.)
+		&statecmd.StateCmd,           // State file inspection and management
+		&setupcmd.SetupCmd,           // Interactive setup wizard
+		&setupcmd.DoctorCmd,          // System health check
+		&statuscmd.StatusCmd,         // Node status
+		&dashboardcmd.DashboardCmd,   // Interactive dashboard
 	)
 }
 

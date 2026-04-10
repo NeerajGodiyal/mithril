@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 )
 
 // MigrateConfig checks if a config file is missing [lightbringer] or [consensus]
@@ -55,7 +57,7 @@ func MigrateConfig(configPath string) bool {
 
 	newContent := strings.TrimRight(content, "\n") + "\n" + additions
 
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil {
+	if err := tui.AtomicWriteFile(configPath, []byte(newContent), 0600); err != nil {
 		fmt.Printf("  %s Failed to update config: %v\n", errorStyle.Render("✗"), err)
 		return false
 	}

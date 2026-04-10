@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -98,7 +99,7 @@ func runConfigInit() {
 	config := generateStarterConfig()
 
 	// Write to file
-	if err := os.WriteFile(outputPath, []byte(config), 0600); err != nil {
+	if err := tui.AtomicWriteFile(outputPath, []byte(config), 0600); err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)
 	}
@@ -269,7 +270,7 @@ func runConfigSet(key, value string) {
 	}
 
 	// Write back
-	err = os.WriteFile(configFile, []byte(strings.Join(result, "\n")), 0600)
+	err = tui.AtomicWriteFile(configFile, []byte(strings.Join(result, "\n")), 0600)
 	if err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)

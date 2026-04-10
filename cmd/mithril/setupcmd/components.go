@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -233,30 +234,7 @@ func renderReview(title string, rows [][]string) string {
 // ── Logo ────────────────────────────────────────────────────────────
 
 func renderLogo() string {
-	art := lipgloss.NewStyle().Foreground(mithrilTeal).Render(
-		"     _______ __________________          _______ _________ _\n" +
-			"    (       )\\__   __/\\__   __/|\\     /|(  ____ )\\__   __/( \\\n" +
-			"    | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (\n" +
-			"    | || || |   | |      | |   | (___) || (____)|   | |   | |\n" +
-			"    | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |\n" +
-			"    | |   | |   | |      | |   | (   ) || (\\ (      | |   | |\n" +
-			"    | )   ( |___) (___   | |   | )   ( || ) \\ \\_____) (___| (____/\\\n" +
-			"    |/     \\|\\_______/   )_(   |/     \\||/   \\__/\\_______/(_______/")
-
-	divider := lipgloss.NewStyle().
-		Foreground(colorTextDisabled).
-		Render("  " + strings.Repeat("─", 62))
-
-	return "\n" + art + "\n\n" + divider
-}
-
-// renderBanner returns a compact one-line banner for non-welcome screens.
-func renderBanner() string {
-	name := lipgloss.NewStyle().Foreground(mithrilTeal).Bold(true).Render("◎ MITHRIL")
-	divider := lipgloss.NewStyle().
-		Foreground(colorTextDisabled).
-		Render("  " + strings.Repeat("─", 50))
-	return "\n  " + name + "\n" + divider
+	return tui.RenderLogo()
 }
 
 // ── Done Screen ─────────────────────────────────────────────────────

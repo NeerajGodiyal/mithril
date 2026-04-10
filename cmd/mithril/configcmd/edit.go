@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -31,13 +32,12 @@ func init() {
 // ── Theme (matches setupcmd theme) ──────────────────────────────────────
 
 var (
-	edTeal        = lipgloss.Color("85")
-	edTextPrimary = lipgloss.Color("#e4e4e4")
-	edTextSecond  = lipgloss.Color("#a8a8a8")
-	edTextMuted   = lipgloss.Color("#6c6c6c")
-	edTextDisable = lipgloss.Color("#4e4e4e")
-	edBorder      = lipgloss.Color("240")
-	edError       = lipgloss.Color("196")
+	edTeal        = tui.MithrilTeal
+	edTextPrimary = tui.ColorTextPrimary
+	edTextSecond  = tui.ColorTextSecondary
+	edTextMuted   = tui.ColorTextMuted
+	edTextDisable = tui.ColorTextDisabled
+	edError       = tui.ColorError
 )
 
 // ── Screen constants ────────────────────────────────────────────────────
@@ -610,7 +610,7 @@ func (m *editModel) saveConfig() {
 		content = setTomlValue(content, "log", "dir", fmt.Sprintf("%q", filepath.Clean(m.logsPath)))
 	}
 
-	if err := os.WriteFile(m.configFile, []byte(content), 0600); err != nil {
+	if err := tui.AtomicWriteFile(m.configFile, []byte(content), 0600); err != nil {
 		m.err = err
 		return
 	}
@@ -620,19 +620,7 @@ func (m *editModel) saveConfig() {
 // ── Banner ──────────────────────────────────────────────────────────────
 
 func edBanner() string {
-	art := lipgloss.NewStyle().Foreground(edTeal).Render(
-		"     _______ __________________          _______ _________ _\n" +
-			"    (       )\\__   __/\\__   __/|\\     /|(  ____ )\\__   __/( \\\n" +
-			"    | () () |   ) (      ) (   | )   ( || (    )|   ) (   | (\n" +
-			"    | || || |   | |      | |   | (___) || (____)|   | |   | |\n" +
-			"    | |(_)| |   | |      | |   |  ___  ||     __)   | |   | |\n" +
-			"    | |   | |   | |      | |   | (   ) || (\\ (      | |   | |\n" +
-			"    | )   ( |___) (___   | |   | )   ( || ) \\ \\_____) (___| (____/\\\n" +
-			"    |/     \\|\\_______/   )_(   |/     \\||/   \\__/\\_______/(_______/")
-	divider := lipgloss.NewStyle().
-		Foreground(edTextDisable).
-		Render("  " + strings.Repeat("─", 62))
-	return "\n" + art + "\n\n" + divider
+	return tui.RenderLogo()
 }
 
 // ── View ────────────────────────────────────────────────────────────────
@@ -859,6 +847,14 @@ func setTomlValue(content, section, key, value string) string {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "[[") {
+			if inSection {
+				// Section found but key missing — insert before next section header
+				result := make([]string, 0, len(lines)+1)
+				result = append(result, lines[:i]...)
+				result = append(result, key+" = "+value)
+				result = append(result, lines[i:]...)
+				return strings.Join(result, "\n")
+			}
 			sectionName := strings.Trim(trimmed, "[] ")
 			inSection = sectionName == section
 			continue
@@ -876,7 +872,14 @@ func setTomlValue(content, section, key, value string) string {
 			return strings.Join(lines, "\n")
 		}
 	}
-	return content
+	// If section was the last one (no next header), append key
+	if inSection {
+		lines = append(lines, key+" = "+value)
+		return strings.Join(lines, "\n")
+	}
+	// Section not found at all — append new section with key
+	lines = append(lines, "", "["+section+"]", key+" = "+value)
+	return strings.Join(lines, "\n")
 }
 
 func truncate(s string, max int) string {
