@@ -376,11 +376,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
-			// Logs screen: Enter focuses logs for ↑↓ scrolling
-			if m.screen == screenLogs && !m.logFocused {
-				m.logFocused = true
-				return m, nil
-			}
 			if m.screen == screenEdit && m.editMode == editNone {
 				m.startEditField()
 				return m, nil
@@ -510,6 +505,11 @@ func (m *model) selectCurrent() tea.Cmd {
 	case "doctor":
 		m.screen = screenDoctor
 	case "logs":
+		if m.screen == screenLogs {
+			// Already on Logs — toggle scroll focus
+			m.logFocused = !m.logFocused
+			return nil
+		}
 		m.screen = screenLogs
 	case "disk":
 		m.screen = screenDisk

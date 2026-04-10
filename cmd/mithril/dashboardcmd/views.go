@@ -656,12 +656,11 @@ func (m model) renderLogsView() string {
 		}
 	}
 
-	// Build side-by-side output
+	// Build side-by-side output with divider
 	maxRows := len(mLines)
 	if len(lLines) > maxRows {
 		maxRows = len(lLines)
 	}
-	// Cap visible rows
 	availHeight := m.height - 22
 	if availHeight < 5 {
 		availHeight = 5
@@ -670,16 +669,28 @@ func (m model) renderLogsView() string {
 		maxRows = availHeight
 	}
 
-	gap := strings.Repeat(" ", colGap)
+	divStyle := lipgloss.NewStyle().Foreground(tui.ColorBorder)
+	div := divStyle.Render("│")
 	truncStyle := lipgloss.NewStyle().MaxWidth(colWidth)
 
+	// Headers — highlight focused pane title
 	var b strings.Builder
+	if m.logFocused {
+		// Highlight both titles with active color to show focus mode
+		activeTitleStyle := lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
+		mTitle = activeTitleStyle.Render("mithril")
+		lTitle = activeTitleStyle.Render("lightbringer")
+	}
+
 	b.WriteString(mTitle)
 	leftPad := colWidth - lipgloss.Width(mTitle)
 	if leftPad > 0 {
 		b.WriteString(strings.Repeat(" ", leftPad))
 	}
-	b.WriteString(gap + lTitle + "\n")
+	b.WriteString(" " + div + " " + lTitle + "\n")
+
+	// Divider line under headers
+	b.WriteString(divStyle.Render(strings.Repeat("─", colWidth)) + " " + div + " " + divStyle.Render(strings.Repeat("─", colWidth)) + "\n")
 
 	for i := 0; i < maxRows; i++ {
 		left := ""
@@ -694,13 +705,11 @@ func (m model) renderLogsView() string {
 		if lPad > 0 {
 			left += strings.Repeat(" ", lPad)
 		}
-		b.WriteString(left + gap + right + "\n")
+		b.WriteString(left + " " + div + " " + right + "\n")
 	}
 
 	if m.logFocused {
 		b.WriteString("\n" + hintStyle.Render("  ↑↓ scroll  esc back") + "\n")
-	} else {
-		b.WriteString("\n" + hintStyle.Render("  ⏎ scroll logs") + "\n")
 	}
 
 	return b.String()
