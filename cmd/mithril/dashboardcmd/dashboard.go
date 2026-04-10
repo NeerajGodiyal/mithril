@@ -174,16 +174,16 @@ type model struct {
 	rightScroll int
 
 	// Data
-	cfg      *configData
-	state    *nodeState
-	services []serviceStatus
-	disks    []diskUsage
-	checks        []checkResult
-	mithrilLines  []string
-	lbLines       []string
-	logScroll     int  // scroll offset for focused log pane
-	logFocused    bool // true when user is scrolling logs with ↑↓
-	logPane       int  // 0=mithril (left), 1=lightbringer (right)
+	cfg          *configData
+	state        *nodeState
+	services     []serviceStatus
+	disks        []diskUsage
+	checks       []checkResult
+	mithrilLines []string
+	lbLines      []string
+	logScroll    int  // scroll offset for focused log pane
+	logFocused   bool // true when user is scrolling logs with ↑↓
+	logPane      int  // 0=mithril (left), 1=lightbringer (right)
 
 	// Menu
 	items []menuItem
@@ -480,7 +480,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.rightScroll < 0 {
 				m.rightScroll = 0
 			}
-
 
 		default:
 			// Text input for inline editing
@@ -814,6 +813,27 @@ func (m *model) applyMenuSelection() {
 		return
 	}
 
+	// Sync coupled fields: lightbringer.enabled ↔ block.source
+	// Only auto-sync when no external lightbringer_endpoint is configured
+	fullKey := f.section + "." + f.key
+	hasExternalEndpoint := m.cfg != nil && m.cfg.lbExternalEndpoint != ""
+	if fullKey == "lightbringer.enabled" {
+		if value == "true" {
+			_ = saveConfigValue(m.configFile, "block", "source", "lightbringer")
+			// Clear stale external endpoint so runtime uses managed sidecar
+			if hasExternalEndpoint {
+				_ = saveConfigValue(m.configFile, "block", "lightbringer_endpoint", "")
+			}
+		} else if !hasExternalEndpoint {
+			// Only force rpc when no external endpoint
+			_ = saveConfigValue(m.configFile, "block", "source", "rpc")
+		}
+	} else if fullKey == "block.source" {
+		if value == "lightbringer" && !hasExternalEndpoint {
+			_ = saveConfigValue(m.configFile, "lightbringer", "enabled", "true")
+		}
+	}
+
 	m.editMode = editNone
 	m.cfg = readConfig(m.configFile)
 }
@@ -837,9 +857,9 @@ func (m *model) applyEditField() {
 			return
 		}
 	case key == "tuning.txpar":
-		if value != "" { // empty = auto-detect
+		if value != "" { // empty = sequential (runtime default 0)
 			if _, err := strconv.Atoi(value); err != nil {
-				m.editErr = "Must be a number (or empty for auto)"
+				m.editErr = "Must be a number (or empty for sequential)"
 				return
 			}
 		}
@@ -870,8 +890,10 @@ func (m *model) applyEditField() {
 	}
 	m.editErr = ""
 
-	// Empty txpar means auto-detect — don't write invalid TOML
+	// Empty txpar means sequential mode (runtime default 0) — remove both keys
 	if key == "tuning.txpar" && value == "" {
+		_ = removeConfigKey(m.configFile, "tuning", "txpar")
+		_ = removeConfigKey(m.configFile, "replay", "txpar") // legacy fallback
 		m.editMode = editNone
 		m.cfg = readConfig(m.configFile)
 		return

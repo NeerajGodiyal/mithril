@@ -98,6 +98,10 @@ type editModel struct {
 	logLevel      string
 	bootstrapMode string
 
+	// Full RPC array (preserved on save to avoid destroying failover endpoints)
+	rpcFull     []string
+	txparWasSet bool // true if txpar was explicitly in the config
+
 	// Original viper for fallbacks
 	v *viper.Viper
 
@@ -116,13 +120,12 @@ func newEditModel(cf string, v *viper.Viper) editModel {
 	if len(rpcSlice) > 0 {
 		rpcEndpoint = rpcSlice[0]
 	}
+	// rpcFull stored in model to preserve failover endpoints on save
 	txpar := v.GetString("tuning.txpar")
 	if txpar == "" {
 		txpar = v.GetString("replay.txpar")
 	}
-	if txpar == "" {
-		txpar = fmt.Sprintf("%d", runtime.NumCPU()*2)
-	}
+	txparWasSet := txpar != "" // track if txpar was explicitly configured
 	blockMaxRPS := v.GetString("block.max_rps")
 	if blockMaxRPS == "" {
 		blockMaxRPS = "8"
@@ -154,6 +157,8 @@ func newEditModel(cf string, v *viper.Viper) editModel {
 		v:             v,
 		cluster:       cluster,
 		rpcEndpoint:   rpcEndpoint,
+		rpcFull:       rpcSlice,
+		txparWasSet:   txparWasSet,
 		lbEnabled:     v.GetBool("lightbringer.enabled"),
 		gossipEntry:   v.GetString("lightbringer.gossip_entrypoint"),
 		accountsPath:  v.GetString("storage.accounts"),
@@ -518,6 +523,7 @@ func (m *editModel) validateAndApplyInput() bool {
 			return false
 		}
 		m.txpar = val
+		m.txparWasSet = true
 
 	case edScrBlockRPS:
 		if _, err := strconv.Atoi(val); err != nil {
@@ -578,18 +584,34 @@ func (m *editModel) saveConfig() {
 
 	content := string(data)
 	content = setTomlValue(content, "network", "cluster", fmt.Sprintf("%q", m.cluster))
-	content = setTomlValue(content, "network", "rpc", fmt.Sprintf("[%q]", m.rpcEndpoint))
+	// Preserve failover RPC endpoints — update first, keep rest
+	rpcArray := m.rpcFull
+	if len(rpcArray) > 0 {
+		rpcArray[0] = m.rpcEndpoint
+	} else {
+		rpcArray = []string{m.rpcEndpoint}
+	}
+	var rpcParts []string
+	for _, ep := range rpcArray {
+		rpcParts = append(rpcParts, fmt.Sprintf("%q", ep))
+	}
+	content = setTomlValue(content, "network", "rpc", "["+strings.Join(rpcParts, ", ")+"]")
 	content = setTomlValue(content, "storage", "accounts", fmt.Sprintf("%q", filepath.Clean(m.accountsPath)))
 	content = setTomlValue(content, "storage", "snapshots", fmt.Sprintf("%q", filepath.Clean(m.snapshotsPath)))
 	content = setTomlValue(content, "block", "max_rps", m.blockMaxRPS)
 	content = setTomlValue(content, "block", "max_inflight", m.blockInflight)
-	content = setTomlValue(content, "tuning", "txpar", m.txpar)
+	// Only write txpar if it was originally in the config or user explicitly set a value
+	if m.txparWasSet && m.txpar != "" {
+		content = setTomlValue(content, "tuning", "txpar", m.txpar)
+	}
 	content = setTomlValue(content, "rpc", "port", m.rpcPort)
 	content = setTomlValue(content, "log", "level", fmt.Sprintf("%q", m.logLevel))
 	content = setTomlValue(content, "bootstrap", "mode", fmt.Sprintf("%q", m.bootstrapMode))
 
 	if m.lbEnabled {
 		content = setTomlValue(content, "block", "source", "\"lightbringer\"")
+		// Clear stale external endpoint so runtime uses managed sidecar's grpc_addr
+		content = setTomlValue(content, "block", "lightbringer_endpoint", "\"\"")
 		if !strings.Contains(content, "[lightbringer]") {
 			content += fmt.Sprintf("\n[lightbringer]\nenabled = true\nbinary_path = \"./lightbringer\"\ngossip_entrypoint = %q\ngrpc_addr = \"127.0.0.1:3001\"\nrpc_addr = \"127.0.0.1:3000\"\n", m.gossipEntry)
 		} else {
@@ -599,7 +621,11 @@ func (m *editModel) saveConfig() {
 			}
 		}
 	} else {
-		content = setTomlValue(content, "block", "source", "\"rpc\"")
+		// Only force block.source="rpc" if no external lightbringer_endpoint is configured.
+		// External LB mode (enabled=false + endpoint set) is a valid runtime config.
+		if m.v.GetString("block.lightbringer_endpoint") == "" {
+			content = setTomlValue(content, "block", "source", "\"rpc\"")
+		}
 		if strings.Contains(content, "[lightbringer]") {
 			content = setTomlValue(content, "lightbringer", "enabled", "false")
 		}

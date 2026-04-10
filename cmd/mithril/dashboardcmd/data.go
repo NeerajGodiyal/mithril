@@ -66,7 +66,9 @@ type configData struct {
 	lbEnabled     bool
 	lbGossip      string
 	lbGrpcAddr    string
-	lbRpcAddr     string
+	lbRpcAddr          string
+	lbExternalEndpoint string // block.lightbringer_endpoint for external LB mode
+	lbBinaryPath       string
 	accountsPath  string
 	snapshotsPath string
 	shredstorePath string
@@ -109,7 +111,9 @@ func readConfig(configFile string) *configData {
 		lbEnabled:      v.GetBool("lightbringer.enabled"),
 		lbGossip:       v.GetString("lightbringer.gossip_entrypoint"),
 		lbGrpcAddr:     v.GetString("lightbringer.grpc_addr"),
-		lbRpcAddr:      v.GetString("lightbringer.rpc_addr"),
+		lbRpcAddr:          v.GetString("lightbringer.rpc_addr"),
+		lbExternalEndpoint: v.GetString("block.lightbringer_endpoint"),
+		lbBinaryPath:       v.GetString("lightbringer.binary_path"),
 		accountsPath:   v.GetString("storage.accounts"),
 		snapshotsPath:  v.GetString("storage.snapshots"),
 		shredstorePath: v.GetString("storage.shredstore"),
@@ -155,11 +159,18 @@ func probeServices(cfg *configData) []serviceStatus {
 		}
 	}
 
-	services := []serviceStatus{
-		{name: "Mithril RPC", addr: "127.0.0.1:" + rpcPort},
+	var services []serviceStatus
+	// Skip RPC probe when port=0 (disabled)
+	if cfg == nil || cfg.rpcPort != "0" {
+		services = append(services, serviceStatus{name: "Mithril RPC", addr: "127.0.0.1:" + rpcPort})
 	}
-	// Only probe lightbringer services when enabled
-	if cfg != nil && cfg.lbEnabled {
+	// Probe lightbringer services based on the same mode matrix as runtime:
+	// - blockSource=lightbringer + enabled: managed sidecar → probe grpc + http
+	// - blockSource=lightbringer + endpoint: external → probe endpoint only
+	// - blockSource=rpc: no LB probes regardless of stale endpoint
+	if cfg != nil && cfg.blockSource == "lightbringer" && cfg.lbExternalEndpoint != "" && !cfg.lbEnabled {
+		services = append(services, serviceStatus{name: "LB External", addr: cfg.lbExternalEndpoint})
+	} else if cfg != nil && cfg.lbEnabled {
 		services = append(services,
 			serviceStatus{name: "LB gRPC", addr: grpcAddr},
 			serviceStatus{name: "LB HTTP", addr: httpAddr},
@@ -319,8 +330,11 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 
 	// Lightbringer
 	if cfg.lbEnabled {
-		// Check binary
-		binaryPath := "./lightbringer"
+		// Check binary — use config value or default
+		binaryPath := cfg.lbBinaryPath
+		if binaryPath == "" {
+			binaryPath = "./lightbringer"
+		}
 		if _, err := os.Stat(binaryPath); err == nil {
 			results = append(results, checkResult{"Lightbringer binary", "pass", binaryPath})
 		} else {
@@ -337,6 +351,12 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 		} else {
 			results = append(results, checkResult{"Gossip entrypoint", "fail", "not set"})
 		}
+	} else if cfg.blockSource == "lightbringer" && cfg.lbExternalEndpoint != "" {
+		// External Lightbringer mode — sidecar disabled but endpoint configured
+		results = append(results, checkResult{"Lightbringer", "pass", "external at " + cfg.lbExternalEndpoint})
+	} else if cfg.blockSource == "lightbringer" && cfg.lbExternalEndpoint == "" {
+		// Invalid: source=lightbringer but no sidecar and no endpoint
+		results = append(results, checkResult{"Lightbringer", "fail", "block.source=lightbringer requires enabled sidecar or endpoint"})
 	} else {
 		results = append(results, checkResult{"Lightbringer", "pass", "disabled"})
 	}
@@ -435,7 +455,22 @@ func saveConfigValue(configFile, section, key, value string) error {
 	case fullKey == "lightbringer.enabled":
 		tomlValue = value // boolean — no quoting
 	case fullKey == "network.rpc":
-		tomlValue = fmt.Sprintf("[%q]", value) // string array
+		// Preserve failover endpoints — read existing array, update first element
+		v := viper.New()
+		v.SetConfigFile(configFile)
+		if err := v.ReadInConfig(); err == nil {
+			existing := v.GetStringSlice("network.rpc")
+			if len(existing) > 1 {
+				existing[0] = value
+				var parts []string
+				for _, ep := range existing {
+					parts = append(parts, fmt.Sprintf("%q", ep))
+				}
+				tomlValue = "[" + strings.Join(parts, ", ") + "]"
+				break
+			}
+		}
+		tomlValue = fmt.Sprintf("[%q]", value)
 	default:
 		tomlValue = fmt.Sprintf("%q", value) // quoted string
 	}
@@ -448,6 +483,31 @@ func saveConfigValue(configFile, section, key, value string) error {
 }
 
 // setTomlValueInline replaces a value in a TOML file, preserving structure.
+// removeConfigKey removes a key from a TOML file (comments it out).
+func removeConfigKey(configFile, section, key string) error {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	inSection := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "[[") {
+			sectionName := strings.Trim(trimmed, "[] ")
+			inSection = sectionName == section
+			continue
+		}
+		if inSection && (strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=")) {
+			lines[i] = "# " + line // comment out instead of deleting
+			content := strings.Join(lines, "\n")
+			return tui.AtomicWriteFile(configFile, []byte(content), 0600)
+		}
+	}
+	return nil // key not found, nothing to remove
+}
+
 func setTomlValueInline(content, section, key, value string) string {
 	lines := strings.Split(content, "\n")
 	inSection := false

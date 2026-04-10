@@ -3,7 +3,6 @@ package dashboardcmd
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/tui"
@@ -416,7 +415,7 @@ func (m model) renderEditList() string {
 		displayVal := val
 		isAuto := val == "" && f.section == "tuning" && f.key == "txpar"
 		if isAuto {
-			displayVal = fmt.Sprintf("auto · %d", runtime.NumCPU()*2)
+			displayVal = "not set (sequential)"
 		}
 		if len(displayVal) > 35 {
 			displayVal = displayVal[:32] + "..."
@@ -522,7 +521,7 @@ func (m model) renderEditFocused() string {
 		currentVal := m.getFieldValue(f)
 		isAuto := currentVal == "" && f.section == "tuning" && f.key == "txpar"
 		if isAuto {
-			b.WriteString("  " + subtitleStyle.Render("Current: ") + hintStyle.Render(fmt.Sprintf("auto · %d", runtime.NumCPU()*2)) + "\n")
+			b.WriteString("  " + subtitleStyle.Render("Current: ") + hintStyle.Render("not set (sequential)") + "\n")
 		} else if currentVal != "" {
 			b.WriteString("  " + subtitleStyle.Render("Current: ") + valueStyle.Render(currentVal) + "\n")
 		}
@@ -552,7 +551,7 @@ func (m model) renderEditFocused() string {
 
 		// ── Contextual hint ──
 		if isAuto && m.editValue == "" {
-			b.WriteString("\n  " + hintStyle.Render(fmt.Sprintf("Leave empty for auto-detect (%d on this machine)", runtime.NumCPU()*2)) + "\n")
+			b.WriteString("\n  " + hintStyle.Render("Leave empty for sequential mode (0), or set worker count") + "\n")
 		}
 
 		b.WriteString("\n")

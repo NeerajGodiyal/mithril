@@ -41,7 +41,11 @@ func runDoctor() {
 	}
 
 	// Load config for further checks
-	_ = config.InitConfig()
+	if err := config.InitConfig(); err != nil {
+		fmt.Printf("  %s Failed to parse config: %v\n", errorStyle.Render("✗"), err)
+		fmt.Printf("\n  %d/%d checks passed\n", passed, total)
+		return
+	}
 
 	// 2. Cluster
 	total++
@@ -126,7 +130,19 @@ func runDoctor() {
 			total--
 		}
 	} else {
-		fmt.Printf("  %s Lightbringer: disabled\n", dimStyle.Render("-"))
+		// Check for invalid or external Lightbringer configs
+		blockSource := config.GetString("block.source")
+		lbEndpoint := config.GetString("block.lightbringer_endpoint")
+		if blockSource == "lightbringer" && lbEndpoint != "" {
+			fmt.Printf("  %s Lightbringer: external at %s\n", successStyle.Render("✓"), lbEndpoint)
+			passed++
+			total++
+		} else if blockSource == "lightbringer" {
+			fmt.Printf("  %s block.source=lightbringer but no sidecar enabled and no endpoint set\n", errorStyle.Render("✗"))
+			total++
+		} else {
+			fmt.Printf("  %s Lightbringer: disabled\n", dimStyle.Render("-"))
+		}
 	}
 
 	// 6. Logs directory

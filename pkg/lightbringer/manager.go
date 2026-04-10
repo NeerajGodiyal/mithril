@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -77,8 +78,20 @@ func (m *Manager) Start() error {
 
 	m.stopping.Store(false) // reset in case of previous Stop()
 
-	if _, err := os.Stat(m.binaryPath); err != nil {
-		return fmt.Errorf("binary not found at %s: %w", m.binaryPath, err)
+	// Resolve binary path to absolute before exec. Relative paths like
+	// ./lightbringer are validated from cwd but cmd.Dir causes chdir(configDir)
+	// before execve on Unix, so the binary would be looked up from configDir.
+	// Making the path absolute here ensures consistent resolution.
+	binaryAbs := m.binaryPath
+	if !filepath.IsAbs(binaryAbs) {
+		abs, err := filepath.Abs(binaryAbs)
+		if err != nil {
+			return fmt.Errorf("cannot resolve binary path %s: %w", m.binaryPath, err)
+		}
+		binaryAbs = abs
+	}
+	if _, err := os.Stat(binaryAbs); err != nil {
+		return fmt.Errorf("binary not found at %s: %w", binaryAbs, err)
 	}
 
 	// Spawn in a dedicated goroutine with LockOSThread to keep Pdeathsig valid.
@@ -98,7 +111,7 @@ func (m *Manager) Start() error {
 		runtime.LockOSThread()
 		// Do NOT defer UnlockOSThread here — we unlock only after Wait returns
 
-		cmd := exec.Command(m.binaryPath)
+		cmd := exec.Command(binaryAbs)
 		cmd.Dir = m.configDir
 		cmd.SysProcAttr = childSysProcAttr() // Pdeathsig on Linux, empty on other platforms
 
