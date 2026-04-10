@@ -247,6 +247,15 @@ func renderConfigColumn(secs []configSection, colWidth int, sectionStyle, keySty
 		lines = append(lines, sectionStyle.Render(s.name))
 		for j := range s.keys {
 			v := s.vals[j]
+			// Mask sensitive values (tokens, secrets, passwords)
+			k := strings.ToLower(s.keys[j])
+			if strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password") {
+				if len(v) > 4 {
+					v = v[:2] + strings.Repeat("*", len(v)-4) + v[len(v)-2:]
+				} else if len(v) > 0 {
+					v = "****"
+				}
+			}
 			if len(v) > maxVal {
 				v = v[:maxVal-3] + "..."
 			}

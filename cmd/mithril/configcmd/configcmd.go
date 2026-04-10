@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/tui"
@@ -279,14 +280,19 @@ func runConfigSet(key, value string) {
 	fmt.Printf("Set %s = %s\n", key, quotedValue)
 }
 
-// formatTOMLValue formats a value appropriately for TOML
+// formatTOMLValue formats a value appropriately for TOML.
+// Returns the canonical form of the parsed value to prevent injection
+// via newlines or other control characters in the raw input.
 func formatTOMLValue(value string) string {
-	// Check if it's a number
-	if _, err := fmt.Sscanf(value, "%d", new(int)); err == nil {
-		return value
+	// Check if it's an integer — return the parsed number, not raw input
+	var n int
+	if _, err := fmt.Sscanf(value, "%d", &n); err == nil && fmt.Sprintf("%d", n) == strings.TrimSpace(value) {
+		return fmt.Sprintf("%d", n)
 	}
-	if _, err := fmt.Sscanf(value, "%f", new(float64)); err == nil {
-		return value
+	// Check if it's a float — return the parsed number, not raw input
+	var f float64
+	if _, err := fmt.Sscanf(value, "%f", &f); err == nil && !strings.ContainsAny(value, "\n\r") {
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
 
 	// Check if it's a boolean
@@ -294,12 +300,12 @@ func formatTOMLValue(value string) string {
 		return value
 	}
 
-	// Check if it's already an array
-	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+	// Check if it's already an array (no newlines allowed)
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") && !strings.ContainsAny(value, "\n\r") {
 		return value
 	}
 
-	// Otherwise, quote it as a string
+	// Otherwise, quote it as a string (safe — %q escapes all control chars)
 	return fmt.Sprintf("%q", value)
 }
 
