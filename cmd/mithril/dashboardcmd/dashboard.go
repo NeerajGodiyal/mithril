@@ -177,6 +177,7 @@ type model struct {
 	lbLines       []string
 	logScroll     int  // scroll offset for focused log pane
 	logFocused    bool // true when user is scrolling logs with ↑↓
+	logPane       int  // 0=mithril (left), 1=lightbringer (right)
 
 	// Menu
 	items []menuItem
@@ -328,7 +329,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
-			if m.editMode == editNone {
+			if m.editMode == editNone && !m.logFocused {
 				return m, tea.Quit
 			}
 			// In text edit mode, insert 'q' as a character
@@ -337,6 +338,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editCursor++
 				return m, nil
 			}
+			// In editMenu or logFocused: ignore q (use esc to exit first)
 		case "ctrl+c":
 			return m, tea.Quit
 
@@ -361,7 +363,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.logFocused {
-				m.logScroll++
+				// Cap scroll at the active pane's line count
+				maxScroll := len(m.mithrilLines)
+				if m.logPane == 1 {
+					maxScroll = len(m.lbLines)
+				}
+				if m.logScroll < maxScroll-1 {
+					m.logScroll++
+				}
 				return m, nil
 			}
 			if m.screen == screenEdit && m.editMode == editMenu {
@@ -434,12 +443,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "left":
+			if m.logFocused {
+				m.logPane = 0
+				m.logScroll = 0
+				return m, nil
+			}
 			if m.editMode == editText && m.editCursor > 0 {
 				m.editCursor--
 				return m, nil
 			}
 
 		case "right":
+			if m.logFocused {
+				m.logPane = 1
+				m.logScroll = 0
+				return m, nil
+			}
 			if m.editMode == editText && m.editCursor < len(m.editValue) {
 				m.editCursor++
 				return m, nil
@@ -497,6 +516,7 @@ func (m *model) selectCurrent() tea.Cmd {
 	m.rightScroll = 0
 	m.logFocused = false
 	m.logScroll = 0
+	m.editMode = editNone
 	switch item.value {
 	case "overview":
 		m.screen = screenOverview
@@ -891,9 +911,15 @@ func (m model) helpItems() []helpItem {
 	switch m.screen {
 	case screenLogs:
 		if m.logFocused {
+			pane := "mithril"
+			if m.logPane == 1 {
+				pane = "lightbringer"
+			}
 			return []helpItem{
 				{key: "↑↓", desc: "scroll"},
+				{key: "←→", desc: "switch pane"},
 				{key: "esc", desc: "back"},
+				{key: "", desc: "(" + pane + ")"},
 			}
 		}
 		base = append(base, helpItem{key: "⏎", desc: "scroll logs"})

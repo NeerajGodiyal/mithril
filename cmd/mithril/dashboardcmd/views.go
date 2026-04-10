@@ -620,25 +620,24 @@ func (m model) renderLogsView() string {
 	colGap := 3
 	colWidth := (rightPaneWidth - colGap) / 2
 
-	// Apply scroll offset
+	// Apply scroll offset to the ACTIVE pane only
 	mLines := m.mithrilLines
 	lLines := m.lbLines
 	if m.logFocused && m.logScroll > 0 {
-		if m.logScroll < len(mLines) {
-			mLines = mLines[m.logScroll:]
+		if m.logPane == 0 {
+			if m.logScroll < len(mLines) {
+				mLines = mLines[m.logScroll:]
+			} else {
+				mLines = nil
+			}
 		} else {
-			mLines = nil
-		}
-		if m.logScroll < len(lLines) {
-			lLines = lLines[m.logScroll:]
-		} else {
-			lLines = nil
+			if m.logScroll < len(lLines) {
+				lLines = lLines[m.logScroll:]
+			} else {
+				lLines = nil
+			}
 		}
 	}
-
-	// Render column headers
-	mTitle := titleStyle.Render("mithril")
-	lTitle := titleStyle.Render("lightbringer")
 
 	// Render log lines with color coding
 	colorLine := func(line string) string {
@@ -673,14 +672,18 @@ func (m model) renderLogsView() string {
 	div := divStyle.Render("│")
 	truncStyle := lipgloss.NewStyle().MaxWidth(colWidth)
 
-	// Headers — highlight focused pane title
+	// Headers — underline the focused pane title
 	var b strings.Builder
-	if m.logFocused {
-		// Highlight both titles with active color to show focus mode
-		activeTitleStyle := lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
-		mTitle = activeTitleStyle.Render("mithril")
-		lTitle = activeTitleStyle.Render("lightbringer")
+	var mTitle, lTitle string
+	mTitleStyle := titleStyle
+	lTitleStyle := titleStyle
+	if m.logFocused && m.logPane == 0 {
+		mTitleStyle = lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
+	} else if m.logFocused && m.logPane == 1 {
+		lTitleStyle = lipgloss.NewStyle().Foreground(tui.MithrilTeal).Bold(true).Underline(true)
 	}
+	mTitle = mTitleStyle.Render("mithril")
+	lTitle = lTitleStyle.Render("lightbringer")
 
 	b.WriteString(mTitle)
 	leftPad := colWidth - lipgloss.Width(mTitle)
@@ -692,15 +695,29 @@ func (m model) renderLogsView() string {
 	// Divider line under headers
 	b.WriteString(divStyle.Render(strings.Repeat("─", colWidth)) + " " + div + " " + divStyle.Render(strings.Repeat("─", colWidth)) + "\n")
 
+	// Active pane line highlight style
+	activeLineStyle := lipgloss.NewStyle().Foreground(tui.ColorTextPrimary)
+
 	for i := 0; i < maxRows; i++ {
 		left := ""
 		right := ""
+
 		if i < len(mLines) {
-			left = truncStyle.Render(colorLine(mLines[i]))
+			if m.logFocused && m.logPane == 0 {
+				// Active pane: brighter text
+				left = truncStyle.Render(activeLineStyle.Render(mLines[i]))
+			} else {
+				left = truncStyle.Render(colorLine(mLines[i]))
+			}
 		}
 		if i < len(lLines) {
-			right = colorLine(lLines[i])
+			if m.logFocused && m.logPane == 1 {
+				right = truncStyle.Render(activeLineStyle.Render(lLines[i]))
+			} else {
+				right = truncStyle.Render(colorLine(lLines[i]))
+			}
 		}
+
 		lPad := colWidth - lipgloss.Width(left)
 		if lPad > 0 {
 			left += strings.Repeat(" ", lPad)
@@ -709,7 +726,7 @@ func (m model) renderLogsView() string {
 	}
 
 	if m.logFocused {
-		b.WriteString("\n" + hintStyle.Render("  ↑↓ scroll  esc back") + "\n")
+		b.WriteString("\n" + hintStyle.Render("  ↑↓ scroll  ←→ switch  esc back") + "\n")
 	}
 
 	return b.String()
@@ -720,8 +737,11 @@ func (m model) renderLogsView() string {
 func (m model) renderDiskView() string {
 	if len(m.disks) == 0 {
 		muted := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
-		return muted.Render("  Disk usage will appear once storage paths exist on this machine.") + "\n\n" +
-			muted.Render("  Configure paths in [storage] section of your config.") + "\n"
+		if m.cfg != nil && m.cfg.accountsPath != "" {
+			// Paths configured but data not loaded yet
+			return muted.Render("  Loading disk usage...") + "\n"
+		}
+		return muted.Render("  Disk usage will appear once storage paths are configured.") + "\n"
 	}
 
 	var b strings.Builder
