@@ -154,11 +154,18 @@ func (instrCtx *InstructionCtx) StackHeight() uint64 {
 
 func (instrCtx *InstructionCtx) CheckNumOfInstructionAccounts(num uint64) error {
 	if instrCtx.NumberOfInstructionAccounts() < num {
-		//mlog.Log.Debugf("InstrErrNotEnoughAccountKeys")
-		return InstrErrNotEnoughAccountKeys
+		return InstrErrMissingAccount
 	} else {
 		return nil
 	}
+}
+
+func (instrCtx *InstructionCtx) KeyOfInstructionAccount(txCtx *TransactionCtx, instrAcctIdx uint64) (solana.PublicKey, error) {
+	idxInTx, err := instrCtx.IndexOfInstructionAccountInTransaction(instrAcctIdx)
+	if err != nil {
+		return solana.PublicKey{}, err
+	}
+	return txCtx.KeyOfAccountAtIndex(idxInTx)
 }
 
 func (instrCtx *InstructionCtx) Signers(txCtx *TransactionCtx) ([]solana.PublicKey, error) {

@@ -6,9 +6,9 @@ import (
 	"errors"
 	"unicode/utf8"
 
-	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -30,6 +30,7 @@ const (
 	SystemProgramInstrTypeAssignWithSeed
 	SystemProgramInstrTypeTransferWithSeed
 	SystemProgramInstrTypeUpgradeNonceAccount
+	SystemProgramInstrTypeCreateAccountAllowPrefund
 )
 
 var (
@@ -96,6 +97,17 @@ type SystemInstrTransferWithSeed struct {
 	Lamports  uint64
 	FromSeed  string
 	FromOwner solana.PublicKey
+}
+
+type SystemInstrCreateAccountAllowPrefund struct {
+	Lamports uint64
+	Space    uint64
+	Owner    solana.PublicKey
+}
+
+type fromAndLamports struct {
+	fromIdx  uint64
+	lamports uint64
 }
 
 const (
@@ -460,6 +472,27 @@ func (instr *SystemInstrTransferWithSeed) UnmarshalWithDecoder(decoder *bin.Deco
 	return checkWithinDeserializationLimit(decoder)
 }
 
+func (instr *SystemInstrCreateAccountAllowPrefund) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	var err error
+	instr.Lamports, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	instr.Space, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	owner, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+
+	copy(instr.Owner[:], owner)
+	return checkWithinDeserializationLimit(decoder)
+}
+
 func (nonceStateVersions *NonceStateVersions) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	var err error
 	nonceStateVersions.Type, err = decoder.ReadUint32(bin.LE)
@@ -685,8 +718,6 @@ func extractAddressWithSeed(txCtx *TransactionCtx, instrCtx *InstructionCtx, ins
 }
 
 func SystemProgramExecute(execCtx *ExecutionCtx) error {
-	//mlog.Log.Debugf("System program")
-
 	err := execCtx.ComputeMeter.Consume(cu.CUSystemProgramDefaultComputeUnits)
 	if err != nil {
 		return InstrErrComputationalBudgetExceeded
@@ -1058,9 +1089,47 @@ func SystemProgramExecute(execCtx *ExecutionCtx) error {
 			err = SystemProgramUpgradeNonceAccount(execCtx, acct)
 		}
 
+	case SystemProgramInstrTypeCreateAccountAllowPrefund:
+		{
+			var createAccountAllowPrefund SystemInstrCreateAccountAllowPrefund
+			err = createAccountAllowPrefund.UnmarshalWithDecoder(decoder)
+			if err != nil {
+				return InstrErrInvalidInstructionData
+			}
+
+			if !execCtx.Features.IsActive(features.CreateAccountAllowPrefund) {
+				return InstrErrInvalidInstructionData
+			}
+
+			var fromIdx *uint64
+			var lamports *uint64
+
+			if createAccountAllowPrefund.Lamports > 0 {
+				err = instrCtx.CheckNumOfInstructionAccounts(2)
+				if err != nil {
+					return err
+				}
+				from := uint64(1)
+				fromIdx = &from
+				lamports = &createAccountAllowPrefund.Lamports
+			} else {
+				err = instrCtx.CheckNumOfInstructionAccounts(1)
+				if err != nil {
+					return err
+				}
+			}
+
+			var toAddr solana.PublicKey
+			toAddr, err = instrCtx.KeyOfInstructionAccount(txCtx, 0)
+			if err != nil {
+				return err
+			}
+
+			err = SystemProgramCreateAccountAllowPrefund(execCtx, instrCtx, 0, toAddr, fromIdx, lamports, createAccountAllowPrefund.Space, createAccountAllowPrefund.Owner, signers)
+		}
+
 	default:
 		{
-			//mlog.Log.Debugf("invalid instruction")
 			err = InstrErrInvalidInstructionData
 		}
 	}
@@ -1069,8 +1138,6 @@ func SystemProgramExecute(execCtx *ExecutionCtx) error {
 }
 
 func SystemProgramCreateAccount(execCtx *ExecutionCtx, toAddr solana.PublicKey, lamports uint64, space uint64, owner solana.PublicKey, signers []solana.PublicKey) error {
-	//mlog.Log.Debugf("CreateAccount")
-
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
@@ -1097,8 +1164,6 @@ func SystemProgramCreateAccount(execCtx *ExecutionCtx, toAddr solana.PublicKey, 
 }
 
 func SystemProgramAllocateAndAssign(execCtx *ExecutionCtx, toAcct *BorrowedAccount, toAddr solana.PublicKey, space uint64, owner solana.PublicKey, signers []solana.PublicKey) error {
-	//mlog.Log.Debugf("AllocateAndAssign")
-
 	err := SystemProgramAllocate(execCtx, toAcct, toAddr, space, signers)
 	if err != nil {
 		return err
@@ -1108,8 +1173,6 @@ func SystemProgramAllocateAndAssign(execCtx *ExecutionCtx, toAcct *BorrowedAccou
 }
 
 func SystemProgramAllocate(execCtx *ExecutionCtx, acct *BorrowedAccount, address solana.PublicKey, space uint64, signers []solana.PublicKey) error {
-	//mlog.Log.Debugf("SystemProgramAllocate")
-
 	var isSigner bool
 	for _, signer := range signers {
 		if address == signer {
@@ -1119,25 +1182,44 @@ func SystemProgramAllocate(execCtx *ExecutionCtx, acct *BorrowedAccount, address
 	}
 
 	if !isSigner {
-		//mlog.Log.Debugf("Allocate: 'to' account %s must sign", address)
 		return InstrErrMissingRequiredSignature
 	}
 
 	if len(acct.Data()) != 0 || acct.Owner() != a.SystemProgramAddr {
-		//mlog.Log.Debugf("Allocate: account %s already in use", address)
 		return SystemProgErrAccountAlreadyInUse
 	}
 
 	if space > SystemProgMaxPermittedDataLen {
-		//mlog.Log.Debugf("Allocate: requested %d, max allowed %d", space, SystemProgMaxPermittedDataLen)
 		return SystemProgErrInvalidAccountDataLength
 	}
 
 	return acct.SetDataLength(space, execCtx.Features)
 }
 
+func SystemProgramCreateAccountAllowPrefund(execCtx *ExecutionCtx, instrCtx *InstructionCtx, toAcctIdx uint64, toAddr solana.PublicKey, fromIdx *uint64, lamports *uint64, space uint64, owner solana.PublicKey, signers []solana.PublicKey) error {
+	to, err := instrCtx.BorrowInstructionAccount(execCtx.TransactionContext, toAcctIdx)
+	if err != nil {
+		return err
+	}
+
+	err = SystemProgramAllocateAndAssign(execCtx, to, toAddr, space, owner, signers)
+	if err != nil {
+		to.Drop()
+		return err
+	}
+	to.Drop()
+
+	if lamports != nil && *lamports > 0 {
+		err = SystemProgramTransfer(execCtx, *fromIdx, toAcctIdx, *lamports)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func SystemProgramAssign(execCtx *ExecutionCtx, acct *BorrowedAccount, address solana.PublicKey, owner solana.PublicKey, signers []solana.PublicKey) error {
-	//mlog.Log.Debugf("SystemProgramAssign %s to %s", acct.Key(), owner)
 	if acct.Owner() == owner {
 		return nil
 	}
@@ -1151,7 +1233,6 @@ func SystemProgramAssign(execCtx *ExecutionCtx, acct *BorrowedAccount, address s
 	}
 
 	if !isSigner {
-		//mlog.Log.Debugf("Assign: account %s must sign", address)
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -1159,8 +1240,6 @@ func SystemProgramAssign(execCtx *ExecutionCtx, acct *BorrowedAccount, address s
 }
 
 func SystemProgramTransfer(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx uint64, lamports uint64) error {
-	//mlog.Log.Debugf("SystemProgramTransfer")
-
 	instrCtx, err := execCtx.TransactionContext.CurrentInstructionCtx()
 	if err != nil {
 		return err
@@ -1172,7 +1251,6 @@ func SystemProgramTransfer(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx 
 	}
 
 	if !isSigner {
-		//mlog.Log.Debugf("'from' acct must be a signer")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -1180,8 +1258,6 @@ func SystemProgramTransfer(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx 
 }
 
 func SystemProgramTransferWithSeed(execCtx *ExecutionCtx, fromAcctIdx uint64, fromBaseAcctIdx uint64, fromSeed string, fromOwner solana.PublicKey, toAcctIdx uint64, lamports uint64) error {
-	//mlog.Log.Debugf("TransferWithSeed")
-
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
@@ -1193,7 +1269,6 @@ func SystemProgramTransferWithSeed(execCtx *ExecutionCtx, fromAcctIdx uint64, fr
 		return err
 	}
 	if !isSigner {
-		//mlog.Log.Debugf("Transfer: from account must sign")
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -1218,7 +1293,6 @@ func SystemProgramTransferWithSeed(execCtx *ExecutionCtx, fromAcctIdx uint64, fr
 	}
 
 	if fromAddr != addrFromSeed {
-		//mlog.Log.Debugf("Transfer: from address %s does not match derived address %s", fromAddr, addrFromSeed)
 		return SystemProgErrAddressWithSeedMismatch
 	}
 
@@ -1239,14 +1313,10 @@ func transferInternal(execCtx *ExecutionCtx, fromAcctIdx uint64, toAcctIdx uint6
 	defer from.Drop()
 
 	if len(from.Data()) != 0 {
-		//mlog.Log.Debugf("Transfer: 'from' must not carry data")
 		return InstrErrInvalidArgument
 	}
 
-	//mlog.Log.Debugf("transfer from %s\n", from.Key())
-
 	if lamports > from.Lamports() {
-		//mlog.Log.Debugf("Transfer: insufficient lamports %d, need %d", from.Lamports(), lamports)
 		return SystemProgErrResultWithNegativeLamports
 	}
 
@@ -1280,10 +1350,7 @@ func durableNonce(hash [32]byte) [32]byte {
 }
 
 func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount, nonceAuthority solana.PublicKey, rent *SysvarRent, recentBlockhashes *SysvarRecentBlockhashes) error {
-	//mlog.Log.Debugf("InitializeNonceAccount: acct %s", acct.Key())
-
 	if !acct.IsWritable() {
-		//mlog.Log.Debugf("Initialize nonce account: account %s must be writable", acct.Key())
 		return InstrErrInvalidArgument
 	}
 
@@ -1293,13 +1360,11 @@ func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAc
 	}
 
 	if nonceStateVersions.State().IsInitialized {
-		//mlog.Log.Debugf("Initialize nonce account: Account %s state is invalid. Already initialized.", acct.Key())
 		return InstrErrInvalidAccountData
 	}
 
 	minBalance := rent.MinimumBalance(uint64(len(acct.Data())))
 	if acct.Lamports() < minBalance {
-		//mlog.Log.Debugf("initialize nonce account: insufficient lamports %d, need %d", acct.Lamports(), minBalance)
 		return InstrErrInsufficientFunds
 	}
 
@@ -1324,7 +1389,6 @@ func SystemProgramInitializeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAc
 
 func SystemProgramAuthorizeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount, nonceAuthority solana.PublicKey, signers []solana.PublicKey) error {
 	if !acct.IsWritable() {
-		//mlog.Log.Debugf("Authorize nonce account: Account %s must be writeable", acct.Key())
 		return InstrErrInvalidArgument
 	}
 
@@ -1335,7 +1399,6 @@ func SystemProgramAuthorizeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAcc
 
 	nonceData := nonceStateVersions.State()
 	if !nonceData.IsInitialized {
-		//mlog.Log.Debugf("Authorize nonce account: account %s state invalid (uninitialized)", acct.Key())
 		return InstrErrInvalidAccountData
 	}
 
@@ -1353,8 +1416,6 @@ func SystemProgramAuthorizeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAcc
 }
 
 func SystemProgramUpgradeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount) error {
-	//mlog.Log.Debugf("UpgradeNonceAccount")
-
 	if acct.Owner() != a.SystemProgramAddr {
 		return InstrErrInvalidAccountOwner
 	}
@@ -1382,8 +1443,6 @@ func SystemProgramUpgradeNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccou
 }
 
 func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *InstructionCtx, fromAcctIdx uint64, lamports uint64, toAcctIdx uint64, rent *SysvarRent, signers []solana.PublicKey, recentBlockhashes *SysvarRecentBlockhashes) error {
-	//mlog.Log.Debugf("WithdrawNonceAccount")
-
 	from, err := instrCtx.BorrowInstructionAccount(execCtx.TransactionContext, fromAcctIdx)
 	if err != nil {
 		return err
@@ -1391,7 +1450,6 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 	defer from.Drop()
 
 	if !from.IsWritable() {
-		//mlog.Log.Debugf("withdraw nonce account: account %s must be writeable", from.Key())
 		return InstrErrInvalidArgument
 	}
 
@@ -1408,7 +1466,6 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 		if lamports == from.Lamports() {
 			durableNonce := durableNonce(execCtx.SlotCtx.LastBlockhash)
 			if durableNonce == state.DurableNonce {
-				//mlog.Log.Debugf("Withdraw nonce account: nonce can only advance once per slot")
 				return SystemProgErrNonceBlockhashNotExpired
 			}
 			nonceStateVersions.Deinitialize()
@@ -1424,17 +1481,14 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 			minBalance := rent.MinimumBalance(uint64(len(from.Data())))
 			amount, err := safemath.CheckedAddU64(lamports, minBalance)
 			if err != nil {
-				//mlog.Log.Debugf("Withdraw nonce account: integer overflow when calculating min balance + current balance")
 				return InstrErrInsufficientFunds
 			}
 			if amount > from.Lamports() {
-				//mlog.Log.Debugf("Withdraw nonce account: insufficient lamports %d, need %d", from.Lamports(), amount)
 				return InstrErrInsufficientFunds
 			}
 		}
 	} else {
 		if lamports > from.Lamports() {
-			//mlog.Log.Debugf("Withdraw nonce account: insufficient lamports %d, need %d", from.Lamports(), lamports)
 			return InstrErrInsufficientFunds
 		}
 		signer = from.Key()
@@ -1449,7 +1503,6 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 	}
 
 	if !isSigner {
-		//mlog.Log.Debugf("Withdraw nonce account: Account %s must sign", signer)
 		return InstrErrMissingRequiredSignature
 	}
 
@@ -1474,35 +1527,28 @@ func SystemProgramWithdrawNonceAccount(execCtx *ExecutionCtx, instrCtx *Instruct
 }
 
 func SystemProgramAdvanceNonceAccount(execCtx *ExecutionCtx, acct *BorrowedAccount, signers []solana.PublicKey, recentBlockhashes *SysvarRecentBlockhashes) error {
-	//mlog.Log.Debugf("AdvanceNonceAccount")
-
 	if !acct.IsWritable() {
-		//mlog.Log.Debugf("Advance nonce account: Account %s must be writeable", acct.Key())
 		return InstrErrInvalidArgument
 	}
 
 	nonceStateVersions, err := UnmarshalNonceStateVersions(acct.Data())
 	if err != nil {
-		//mlog.Log.Debugf("error unmarshaling NonceStateVersions acct data")
 		return err
 	}
 
 	state := nonceStateVersions.State()
 
 	if !state.IsInitialized {
-		//mlog.Log.Debugf("Advance nonce account: Account %s state is invalid (uninitialized)", acct.Key())
 		return InstrErrInvalidAccountData
 	}
 
 	if !state.IsSignerAuthority(signers) {
-		//mlog.Log.Debugf("Advance nonce account: Account %s must be a signer", state.Authority)
 		return InstrErrMissingRequiredSignature
 	}
 
 	rbh := execCtx.SlotCtx.LastBlockhash
 	nextDurableNonce := durableNonce(rbh)
 	if state.DurableNonce == nextDurableNonce {
-		//mlog.Log.Debugf("Advance nonce account: nonce can only advance once per slot")
 		return SystemProgErrNonceBlockhashNotExpired
 	}
 
