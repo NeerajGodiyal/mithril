@@ -773,9 +773,13 @@ func wrapLogLines(lines []string, width int) []string {
 func (m model) renderDiskView() string {
 	if len(m.disks) == 0 {
 		muted := lipgloss.NewStyle().Foreground(tui.ColorTextMuted)
-		if m.cfg != nil && m.cfg.accountsPath != "" {
-			// Paths configured but data not loaded yet
+		if !m.disksLoaded {
 			return muted.Render("  Loading disk usage...") + "\n"
+		}
+		if m.cfg != nil && m.cfg.accountsPath != "" {
+			return muted.Render("  No disk data available.") + "\n\n" +
+				muted.Render("  Storage paths may not exist on this machine yet.") + "\n" +
+				muted.Render("  Disk usage will appear once the node has been started.") + "\n"
 		}
 		return muted.Render("  Disk usage will appear once storage paths are configured.") + "\n"
 	}

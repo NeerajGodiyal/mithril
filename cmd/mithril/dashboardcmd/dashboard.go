@@ -184,6 +184,7 @@ type model struct {
 	logScroll    int  // scroll offset for focused log pane
 	logFocused   bool // true when user is scrolling logs with ↑↓
 	logPane      int  // 0=mithril (left), 1=lightbringer (right)
+	disksLoaded  bool // true after first disk fetch completes
 
 	// Menu
 	items []menuItem
@@ -234,7 +235,6 @@ func (m model) Init() tea.Cmd {
 	// Non-blocking: fetch data asynchronously on startup
 	return tea.Batch(
 		fetchDataCmd(m.configFile),
-		fetchDiskCmd(nil),
 		tickCmd(),
 		slowTickCmd(),
 	)
@@ -312,10 +312,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.checks = msg.checks
 		m.mithrilLines = msg.mithrilLines
 		m.lbLines = msg.lbLines
+		// Trigger disk fetch once config is loaded (first time only)
+		if !m.disksLoaded && m.cfg != nil {
+			return m, fetchDiskCmd(m.cfg)
+		}
 		return m, nil
 
 	case diskRefreshedMsg:
 		m.disks = msg.disks
+		// Only mark loaded when we had a real config to fetch from
+		if m.cfg != nil {
+			m.disksLoaded = true
+		}
 		return m, nil
 
 	case childExitMsg:
@@ -538,6 +546,8 @@ func (m *model) selectCurrent() tea.Cmd {
 		m.screen = screenLogs
 	case "disk":
 		m.screen = screenDisk
+		// Fetch disk data immediately when navigating to Disk screen
+		return fetchDiskCmd(m.cfg)
 	case "edit":
 		// Switch to inline config editing in the right pane
 		m.screen = screenEdit

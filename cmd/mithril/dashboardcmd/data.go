@@ -220,12 +220,36 @@ func getDiskUsage(cfg *configData) []diskUsage {
 		{"logs", cfg.logsPath},
 	}
 
-	var results []diskUsage
-	for _, p := range paths {
+	// Run df calls in parallel — each takes up to 2s on slow filesystems
+	type duResult struct {
+		idx int
+		du  *diskUsage
+	}
+	ch := make(chan duResult, len(paths))
+	count := 0
+	for i, p := range paths {
 		if p.path == "" {
 			continue
 		}
-		du := getDiskUsageForPath(p.label, p.path)
+		count++
+		go func(idx int, label, path string) {
+			defer func() {
+				if recover() != nil {
+					ch <- duResult{idx: idx, du: nil}
+				}
+			}()
+			ch <- duResult{idx: idx, du: getDiskUsageForPath(label, path)}
+		}(i, p.label, p.path)
+	}
+
+	collected := make([]*diskUsage, len(paths))
+	for range count {
+		r := <-ch
+		collected[r.idx] = r.du
+	}
+
+	var results []diskUsage
+	for _, du := range collected {
 		if du != nil {
 			results = append(results, *du)
 		}
