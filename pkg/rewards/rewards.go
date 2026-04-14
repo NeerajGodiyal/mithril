@@ -290,7 +290,8 @@ func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
 		return 0
 	}
 
-	if slotCtx.Features.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) {
+	if slotCtx.Features.IsActive(features.StakeRaiseMinimumDelegationTo1Sol) ||
+		slotCtx.Features.IsActive(features.UpgradeBpfStakeProgramToV5) {
 		return 1000000000
 	}
 
