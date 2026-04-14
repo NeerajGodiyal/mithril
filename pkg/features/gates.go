@@ -77,6 +77,7 @@ var AltBn128LittleEndian = FeatureGate{Name: "AltBn128LittleEndian", Address: ba
 var EnableAltBn128G2Syscalls = FeatureGate{Name: "EnableAltBn128G2Syscalls", Address: base58.MustDecodeFromString("bn1hKNURMGQaQoEVxahcEAcqiX3NwRs6hgKKNSLeKxH")}
 var EnableBls12_381Syscall = FeatureGate{Name: "EnableBls12_381Syscall", Address: base58.MustDecodeFromString("b1sgUiJ3qu7hYm3tNDyyqZNQd6gLGJmJppnLNa93PCQ")}
 var UpgradeBpfStakeProgramToV5 = FeatureGate{Name: "UpgradeBpfStakeProgramToV5", Address: base58.MustDecodeFromString("STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk")}
+var DelayCommissionUpdates = FeatureGate{Name: "DelayCommissionUpdates", Address: base58.MustDecodeFromString("76dHtohc2s5dR3ahJyBxs7eJJVipFkaPdih9CLgTTb4B")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -95,4 +96,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2, VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
 	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram, AltBn128LittleEndian, EnableAltBn128G2Syscalls,
-	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5}
+	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5, DelayCommissionUpdates}

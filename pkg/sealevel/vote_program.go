@@ -1214,33 +1214,25 @@ func isCommissionUpdateAllowed(slot uint64, epochSchedule SysvarEpochSchedule) b
 func VoteProgramUpdateCommission(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, commission byte, signers []solana.PublicKey, epochSchedule SysvarEpochSchedule, clock SysvarClock, f features.Features) error {
 	//mlog.Log.Debugf("UpdateCommission")
 
-	var voteState *VoteState
-
-	enforceCommissionUpdateRule := true
-	if f.IsActive(features.AllowCommissionDecreaseAtAnyTime) {
-		voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
-		if err != nil {
-			return err
-		}
-		voteState = voteStateVersioned.ConvertToCurrent()
-		enforceCommissionUpdateRule = commission > voteState.Commission
+	voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
+	if err != nil {
+		return err
 	}
+	voteState := voteStateVersioned.ConvertToCurrent()
 
-	if enforceCommissionUpdateRule && f.IsActive(features.CommissionUpdatesOnlyAllowedInFirstHalfOfEpoch) {
+	// Match current Agave behavior: before DelayCommissionUpdates activates,
+	// commission increases are restricted to the first half of the epoch while
+	// decreases are always allowed. The older feature gates are still
+	// registered for historical activation tracking but are no longer consulted.
+	enforceCommissionUpdateRule := !f.IsActive(features.DelayCommissionUpdates) &&
+		commission > voteState.Commission
+	if enforceCommissionUpdateRule {
 		if !isCommissionUpdateAllowed(clock.Slot, epochSchedule) {
 			return VoteErrCommissionUpdateTooLate
 		}
 	}
 
-	if voteState == nil {
-		voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
-		if err != nil {
-			return err
-		}
-		voteState = voteStateVersioned.ConvertToCurrent()
-	}
-
-	err := verifySigner(voteState.AuthorizedWithdrawer, signers)
+	err = verifySigner(voteState.AuthorizedWithdrawer, signers)
 	if err != nil {
 		return err
 	}

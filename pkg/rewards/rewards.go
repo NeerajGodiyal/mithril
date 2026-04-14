@@ -298,6 +298,52 @@ func minimumStakeDelegation(slotCtx *sealevel.SlotCtx) uint64 {
 	return 1
 }
 
+func selectCommissionVoteState(
+	votePubkey solana.PublicKey,
+	distributionVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions,
+	rewardedEpochVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions,
+	snapshotEpochVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions,
+) *sealevel.VoteStateVersions {
+	if snapshotEpochVoteStates != nil {
+		if voteState := snapshotEpochVoteStates[votePubkey]; voteState != nil {
+			return voteState
+		}
+	}
+
+	if rewardedEpochVoteStates != nil {
+		if voteState := rewardedEpochVoteStates[votePubkey]; voteState != nil {
+			return voteState
+		}
+	}
+
+	return distributionVoteStates[votePubkey]
+}
+
+func buildDelayedCommissionVoteStateCache(
+	distributionVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions,
+	rewardedEpoch uint64,
+) map[solana.PublicKey]*sealevel.VoteStateVersions {
+	if len(distributionVoteStates) == 0 {
+		return nil
+	}
+
+	rewardedEpochVoteStates := global.EpochVoteStateSnapshot(rewardedEpoch)
+	var snapshotEpochVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions
+	if rewardedEpoch > 0 {
+		snapshotEpochVoteStates = global.EpochVoteStateSnapshot(rewardedEpoch - 1)
+	}
+
+	commissionVoteStates := make(map[solana.PublicKey]*sealevel.VoteStateVersions, len(distributionVoteStates))
+	for votePubkey := range distributionVoteStates {
+		voteState := selectCommissionVoteState(votePubkey, distributionVoteStates, rewardedEpochVoteStates, snapshotEpochVoteStates)
+		if voteState != nil {
+			commissionVoteStates[votePubkey] = voteState
+		}
+	}
+
+	return commissionVoteStates
+}
+
 func CalculateRewardPartitionForPubkey(pubkey solana.PublicKey, blockhash [32]byte, numPartitions uint64) uint64 {
 	var data [64]byte
 	copy(data[:32], blockhash[:])
@@ -659,6 +705,10 @@ func CalculateRewardsStreaming(
 
 	// ==================== PHASE 2: Replay points spool → compute rewards → write temp spool ====================
 	pv := PointValue{Rewards: pointValue.Rewards, Points: totalPoints}
+	var commissionVoteStates map[solana.PublicKey]*sealevel.VoteStateVersions
+	if f.IsActive(features.DelayCommissionUpdates) {
+		commissionVoteStates = buildDelayedCommissionVoteStateCache(voteCache, rewardedEpoch)
+	}
 
 	tempWriter, err := NewTempSpoolWriter(spoolDir, slot)
 	if err != nil {
@@ -744,7 +794,13 @@ func CalculateRewardsStreaming(
 			phase2SkippedNilReward++
 			continue
 		}
-		splitResult := voteCommissionSplit(voteState, rewards)
+		commissionVoteState := voteState
+		if commissionVoteStates != nil {
+			if historicalVoteState := commissionVoteStates[rec.VotePubkey]; historicalVoteState != nil {
+				commissionVoteState = historicalVoteState
+			}
+		}
+		splitResult := voteCommissionSplit(commissionVoteState, rewards)
 		if splitResult.IsSplit && (splitResult.VoterPortion == 0 || splitResult.StakerPortion == 0) {
 			phase2SkippedNilReward++
 			continue

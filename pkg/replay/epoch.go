@@ -7,8 +7,8 @@ import (
 	"maps"
 	"path/filepath"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -216,6 +216,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t1 := time.Now()
 
 	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
+	global.PutEpochVoteStateSnapshot(newEpoch, global.VoteCacheSnapshot())
 	t2 := time.Now()
 
 	if global.ManageLeaderSchedule() {
