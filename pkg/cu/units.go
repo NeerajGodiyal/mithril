@@ -41,7 +41,9 @@ const (
 	CUBn128G2Compress                                            = 86
 	CUBn128G2Decompress                                          = 13610
 	CUBn128AdditionCost                                          = 334
+	CUBn128G2AdditionCost                                        = 535
 	CUBn128MultiplicationCost                                    = 3840
+	CUBn128G2MultiplicationCost                                  = 15670
 	CUBn128PairingOnePairCostFirst                               = 36364
 	CUBn128PairingOnePairCostOther                               = 12121
 	CUSysvarBaseCost                                             = 100

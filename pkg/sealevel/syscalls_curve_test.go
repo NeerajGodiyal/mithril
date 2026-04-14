@@ -422,6 +422,42 @@ func TestConformance_AltBn128_Add1_LittleEndianRequiresFullInput(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestConformance_AltBn128_G2_Add1(t *testing.T) {
+	inputLE, err := hex.DecodeString("75907828b6c6077fed48f8b412c648a11c27e8baa2b1d919e5fa940ec27e4a16ff18d97d6d5152c2560e836bdb448fc15adaff88daae13027bd2dbc30979630cae0afcd416890cf499f38a1c9dd98c24dc761e0939720751468cfcdba1435f02e7c706d64ca56cc6dc09f78899f081adf25a638edb4857ac750f64d70119de026d212bc9845c79af3cda4f191243f8bab0adff744313173ec87014337420b619b0c8bc35ea7a2cdd6ea078a28d4e7c9144ab7fa6957bdd59e925d890f13a92077acc0780761728716fcfd1e04803806ec0e02aeb4a229b82710276bb42ebe91549accfd07d5dd380c1dda614c7dc3c67e80283283a98d968c4115547cd8bee11")
+	assert.NoError(t, err)
+
+	expectedLE, err := hex.DecodeString("80197810e1f5a8973678409a84018fc5982b21aabd519457b7c19ff81570662e8af2d5669cb331b77d917085531126a86cb58f2551c2010090ca5c3cc07d5f262f1c76a375c0bcf1c4d1fe9d162d0c5fa459202567d2b2689081a1048344fe292281ab1db21e45d8d88c0ba4a2a2ee4c49fb360a7ac0a10297ea00fa87ac0816")
+	assert.NoError(t, err)
+
+	input := altbn128ReverseBytes(inputLE, 64)
+	expected := altbn128ReverseBytes(expectedLE, 64)
+
+	out, err := altbn128G2Addition(input)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_G2_Add1_LittleEndian(t *testing.T) {
+	input, err := hex.DecodeString("75907828b6c6077fed48f8b412c648a11c27e8baa2b1d919e5fa940ec27e4a16ff18d97d6d5152c2560e836bdb448fc15adaff88daae13027bd2dbc30979630cae0afcd416890cf499f38a1c9dd98c24dc761e0939720751468cfcdba1435f02e7c706d64ca56cc6dc09f78899f081adf25a638edb4857ac750f64d70119de026d212bc9845c79af3cda4f191243f8bab0adff744313173ec87014337420b619b0c8bc35ea7a2cdd6ea078a28d4e7c9144ab7fa6957bdd59e925d890f13a92077acc0780761728716fcfd1e04803806ec0e02aeb4a229b82710276bb42ebe91549accfd07d5dd380c1dda614c7dc3c67e80283283a98d968c4115547cd8bee11")
+	assert.NoError(t, err)
+
+	expected, err := hex.DecodeString("80197810e1f5a8973678409a84018fc5982b21aabd519457b7c19ff81570662e8af2d5669cb331b77d917085531126a86cb58f2551c2010090ca5c3cc07d5f262f1c76a375c0bcf1c4d1fe9d162d0c5fa459202567d2b2689081a1048344fe292281ab1db21e45d8d88c0ba4a2a2ee4c49fb360a7ac0a10297ea00fa87ac0816")
+	assert.NoError(t, err)
+
+	out, err := altbn128G2AdditionWithEndianness(input, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_G2_Add1_RequiresExactInput(t *testing.T) {
+	input, err := hex.DecodeString("75907828b6c6077fed48f8b412c648a11c27e8baa2b1d919e5fa940ec27e4a16ff18d97d6d5152c2560e836bdb448fc15adaff88daae13027bd2dbc30979630cae0afcd416890cf499f38a1c9dd98c24dc761e0939720751468cfcdba1435f02e7c706d64ca56cc6dc09f78899f081adf25a638edb4857ac750f64d70119de026d212bc9845c79af3cda4f191243f8bab0adff744313173ec87014337420b619b0c8bc35ea7a2cdd6ea078a28d4e7c9144ab7fa6957bdd59e925d890f13a92077acc0780761728716fcfd1e04803806ec0e02aeb4a229b82710276bb42ebe91549accfd07d5dd380c1dda614c7dc3c67e80283283a98d968c4115547cd8bee11")
+	assert.NoError(t, err)
+
+	beInput := altbn128ReverseBytes(input, 64)
+	_, err = altbn128G2Addition(beInput[:len(beInput)-1])
+	assert.Error(t, err)
+}
+
 func TestConformance_AltBn128_Mul1_LittleEndian(t *testing.T) {
 	input, err := hex.DecodeString("b79f0a1a8b26021de64856aed703474cd5b9e59cb4a75c4f9242b1f3d0e6d32b04b2fdce66ae0c39c819464aaddf492ece090930701d2f5e9185afa6e01c6121c215fa50e78c1311000000000000000000000000000000000000000000000000")
 	assert.NoError(t, err)
@@ -439,6 +475,47 @@ func TestConformance_AltBn128_Mul1_LittleEndianRequiresExactInput(t *testing.T) 
 	assert.NoError(t, err)
 
 	_, err = altbn128MultiplicationWithEndianness(input[:len(input)-1], 96, true)
+	assert.Error(t, err)
+}
+
+func TestConformance_AltBn128_G2_Mul1(t *testing.T) {
+	inputLE, err := hex.DecodeString("8678dbbd50a49a26f86014e418ce0a6143fec15c3e98d7d1bcafeb76cbe13f0725793123a093e1ecb81636290e394e6ea25866e53bef11d6cd6957d9a56eb9245ae8f5faeb0713a98ae2a560fa2e7f490b886c0397ec293c402e0fe3525a5a08b9f72530128b60052abd0fb4ccb5d6866f84f13425ce7770739463fe19678d0085953568803aa009b5122f9d3e5366035f689e2f45676c29b7e9d9892b9bea09")
+	assert.NoError(t, err)
+
+	expectedLE, err := hex.DecodeString("4252a0219a21132ff1cc3ded7029a2d407f265ae8a43fd6e924fa1d764c706272d95aec8d09a5cb2c3a246ea36ad6eb209994c8684bff4058f792d5fb01365101ef3c38ab35584ef42af994ff057d70bb5010f6729d609df89509c7a94f28a0e0db2c90493bff73a92ecb8fa71faa90d346e3328cc0d1b476ccdb0472d600a12")
+	assert.NoError(t, err)
+
+	input := make([]byte, len(inputLE))
+	copy(input[:Bn128G2Len], altbn128ReverseBytes(inputLE[:Bn128G2Len], 64))
+	copy(input[Bn128G2Len:], altbn128ReverseBytes(inputLE[Bn128G2Len:], 32))
+	expected := altbn128ReverseBytes(expectedLE, 64)
+
+	out, err := altbn128G2Multiplication(input)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_G2_Mul1_LittleEndian(t *testing.T) {
+	input, err := hex.DecodeString("8678dbbd50a49a26f86014e418ce0a6143fec15c3e98d7d1bcafeb76cbe13f0725793123a093e1ecb81636290e394e6ea25866e53bef11d6cd6957d9a56eb9245ae8f5faeb0713a98ae2a560fa2e7f490b886c0397ec293c402e0fe3525a5a08b9f72530128b60052abd0fb4ccb5d6866f84f13425ce7770739463fe19678d0085953568803aa009b5122f9d3e5366035f689e2f45676c29b7e9d9892b9bea09")
+	assert.NoError(t, err)
+
+	expected, err := hex.DecodeString("4252a0219a21132ff1cc3ded7029a2d407f265ae8a43fd6e924fa1d764c706272d95aec8d09a5cb2c3a246ea36ad6eb209994c8684bff4058f792d5fb01365101ef3c38ab35584ef42af994ff057d70bb5010f6729d609df89509c7a94f28a0e0db2c90493bff73a92ecb8fa71faa90d346e3328cc0d1b476ccdb0472d600a12")
+	assert.NoError(t, err)
+
+	out, err := altbn128G2MultiplicationWithEndianness(input, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_G2_Mul1_RequiresExactInput(t *testing.T) {
+	input, err := hex.DecodeString("8678dbbd50a49a26f86014e418ce0a6143fec15c3e98d7d1bcafeb76cbe13f0725793123a093e1ecb81636290e394e6ea25866e53bef11d6cd6957d9a56eb9245ae8f5faeb0713a98ae2a560fa2e7f490b886c0397ec293c402e0fe3525a5a08b9f72530128b60052abd0fb4ccb5d6866f84f13425ce7770739463fe19678d0085953568803aa009b5122f9d3e5366035f689e2f45676c29b7e9d9892b9bea09")
+	assert.NoError(t, err)
+
+	beInput := make([]byte, len(input))
+	copy(beInput[:Bn128G2Len], altbn128ReverseBytes(input[:Bn128G2Len], 64))
+	copy(beInput[Bn128G2Len:], altbn128ReverseBytes(input[Bn128G2Len:], 32))
+
+	_, err = altbn128G2Multiplication(beInput[:len(beInput)-1])
 	assert.Error(t, err)
 }
 
