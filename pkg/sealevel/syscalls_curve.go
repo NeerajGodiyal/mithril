@@ -100,6 +100,10 @@ const (
 func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
 
+	if isBls12_381CurveId(curveId) && !execCtx.Features.IsActive(features.EnableBls12_381Syscall) {
+		return syscallErrCustom("SyscallError::InvalidAttribute")
+	}
+
 	switch curveId {
 	case Curve25519Edwards:
 		{
@@ -140,6 +144,42 @@ func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint6
 			} else {
 				return syscallSuccess(0)
 			}
+		}
+
+	case Bls12_381G1LE, Bls12_381G1BE:
+		{
+			err := execCtx.ComputeMeter.Consume(cu.CUBls12_381G1ValidateCost)
+			if err != nil {
+				return syscallCuErr()
+			}
+
+			pointBytes, err := vm.Translate(pointAddr, Bls12_381G1Len, false)
+			if err != nil {
+				return syscallErr(err)
+			}
+
+			if bls12_381G1ValidateWithEndianness(pointBytes, curveId == Bls12_381G1LE) {
+				return syscallSuccess(0)
+			}
+			return syscallSuccess(1)
+		}
+
+	case Bls12_381G2LE, Bls12_381G2BE:
+		{
+			err := execCtx.ComputeMeter.Consume(cu.CUBls12_381G2ValidateCost)
+			if err != nil {
+				return syscallCuErr()
+			}
+
+			pointBytes, err := vm.Translate(pointAddr, Bls12_381G2Len, false)
+			if err != nil {
+				return syscallErr(err)
+			}
+
+			if bls12_381G2ValidateWithEndianness(pointBytes, curveId == Bls12_381G2LE) {
+				return syscallSuccess(0)
+			}
+			return syscallSuccess(1)
 		}
 
 	default:
@@ -617,6 +657,11 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 }
 
 func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, rightInputAddr, resultPointAddr uint64) (uint64, error) {
+	execCtx := executionCtx(vm)
+	if isBls12_381CurveId(curveId) && !execCtx.Features.IsActive(features.EnableBls12_381Syscall) {
+		return syscallErrCustom("SyscallError::InvalidAttribute")
+	}
+
 	switch curveId {
 	case Curve25519Edwards:
 		{
@@ -628,9 +673,18 @@ func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, right
 			return handleRistrettoCurveGroupOps(vm, groupOp, leftInputAddr, rightInputAddr, resultPointAddr)
 		}
 
+	case Bls12_381G1LE, Bls12_381G1BE:
+		{
+			return handleBls12_381G1GroupOps(vm, curveId == Bls12_381G1LE, groupOp, leftInputAddr, rightInputAddr, resultPointAddr)
+		}
+
+	case Bls12_381G2LE, Bls12_381G2BE:
+		{
+			return handleBls12_381G2GroupOps(vm, curveId == Bls12_381G2LE, groupOp, leftInputAddr, rightInputAddr, resultPointAddr)
+		}
+
 	default:
 		{
-			execCtx := executionCtx(vm)
 			if execCtx.Features.IsActive(features.AbortOnInvalidCurve) {
 				return syscallErrCustom("SyscallError::InvalidAttribute")
 			} else {
