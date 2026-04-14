@@ -400,3 +400,129 @@ func TestConformance_AltBn128_Pairing_Multiple(t *testing.T) {
 		assert.Equal(t, true, resultCorrect)
 	}
 }
+
+// test vectors from Agave
+func TestConformance_AltBn128_Add1_LittleEndian(t *testing.T) {
+	input, err := hex.DecodeString("c93d094e03743b5d0c61914612dd11b385718e361154db7602c3c2b4cf8ab1186672f39881280dfc2ed358968196577549a79ff5b94c13b50c8420479c903c06ed4e016a7c9e01883a96922cff207f181abbc02b9c0cf04561bd848af5b7c207d717fa788478d62b745c48a4061736df179a4cf7a30dd7f240e947c1204e6106")
+	assert.NoError(t, err)
+
+	expected, err := hex.DecodeString("03978302e2aeeea15fb6e64c0a835ed84dfea30cac453c3d9c4bfd5e5c52432215c995f1487d5eaeb97d533275ed0e1823479635cc21df09e5a86dbe331d1d30")
+	assert.NoError(t, err)
+
+	out, err := altbn128AdditionWithEndianness(input, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_Add1_LittleEndianRequiresFullInput(t *testing.T) {
+	input, err := hex.DecodeString("c93d094e03743b5d0c61914612dd11b385718e361154db7602c3c2b4cf8ab1186672f39881280dfc2ed358968196577549a79ff5b94c13b50c8420479c903c06ed4e016a7c9e01883a96922cff207f181abbc02b9c0cf04561bd848af5b7c207d717fa788478d62b745c48a4061736df179a4cf7a30dd7f240e947c1204e6106")
+	assert.NoError(t, err)
+
+	_, err = altbn128AdditionWithEndianness(input[:len(input)-1], true)
+	assert.Error(t, err)
+}
+
+func TestConformance_AltBn128_Mul1_LittleEndian(t *testing.T) {
+	input, err := hex.DecodeString("b79f0a1a8b26021de64856aed703474cd5b9e59cb4a75c4f9242b1f3d0e6d32b04b2fdce66ae0c39c819464aaddf492ece090930701d2f5e9185afa6e01c6121c215fa50e78c1311000000000000000000000000000000000000000000000000")
+	assert.NoError(t, err)
+
+	expected, err := hex.DecodeString("5c1ec3139c6c2aeea4f553a074b2478aeffae834d429bee4ca5321986a8d0a07fc1a98c6cec30e6915f3f0f44b074319f0b0d5cdf989b9ffa9a3eb14e98c1b03")
+	assert.NoError(t, err)
+
+	out, err := altbn128MultiplicationWithEndianness(input, 96, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, out)
+}
+
+func TestConformance_AltBn128_Mul1_LittleEndianRequiresExactInput(t *testing.T) {
+	input, err := hex.DecodeString("b79f0a1a8b26021de64856aed703474cd5b9e59cb4a75c4f9242b1f3d0e6d32b04b2fdce66ae0c39c819464aaddf492ece090930701d2f5e9185afa6e01c6121c215fa50e78c1311000000000000000000000000000000000000000000000000")
+	assert.NoError(t, err)
+
+	_, err = altbn128MultiplicationWithEndianness(input[:len(input)-1], 96, true)
+	assert.Error(t, err)
+}
+
+func TestConformance_AltBn128_Pairing1_LittleEndian(t *testing.T) {
+	input, err := hex.DecodeString("593fc42460c131dd64a6ad76aaa7ff813319a1bb7ed54145b94bef4d6f47761c41ef6aa7039b5ce494d2e9d3559b81fc4587671c81e2fe04e273f62029dd34307816a415634baf4940c08a4c11605990288d846135b4348bfa3b4801ca11bf04f75ba30320454a6b391435c6369632a799cf931ae588d84b6cd4f5bf5ed19d20507587dee4e55f1648b09b0c1fe6cca27ee039fec6205f84f91b0cf34c2a0a124d34be512a3c93bfad1fc47acd1aa7a20cfd5c441aada23735c9cff64a32b82b7cdfb6d149de22c3eacbf16f3c02a25bfacd0fc74a1cd4107709f11c9f121e1111f46b6acefa5338a77038b9853588a2fc42f22b46e96d28173c0e831ac63220edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e19aa7dfa6601cce64c7bd3430c69e7d1e38f40cb8d8071ab4aeb6d8cdba55ec8125b9722d1dcdaac55f38eb37033314bbc95330c69ad999eec75f05f58d0890609")
+	assert.NoError(t, err)
+
+	expected, err := hex.DecodeString("0100000000000000000000000000000000000000000000000000000000000000")
+	assert.NoError(t, err)
+
+	result, err := altbn128PairingWithEndianness(input, false, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, result)
+}
+
+func Test_AltBn128_Compress_G1(t *testing.T) {
+	test, _ := hex.DecodeString("1c76476f4def4bb94541d57ebba1193381ffa7aa76ada664dd31c16024c43f593034dd2920f673e204fee2811c678745fc819b55d3e9d294e45c9b03a76aef41209dd15ebff5d46c4bd888e51a93cf99a7329636c63514396b4a452003a35bf704bf11ca01483bfa8b34b43561848d28905960114c8ac04049af4b6315a416782bb8324af6cfc93537a2ad1a445cfd0ca2a71acd7ac41fadbf933c2a51be344d120a2a4cf30c1bf9845f20c6fe39e07ea2cce61f0c9bb048165fe5e4de877550111e129f1cf1097710d41c4ac70fcdfa5ba2023c6ff1cbeac322de49d1b6df7c2032c61a830e3c17286de9462bf242fca2883585b93870a73853face6a6bf411198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa")
+	testBytes := test[:64]
+	expected, _ := hex.DecodeString("9c76476f4def4bb94541d57ebba1193381ffa7aa76ada664dd31c16024c43f59")
+
+	resultBytes, err := g1Compress(testBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Decompress_G1(t *testing.T) {
+	testBytes, _ := hex.DecodeString("289f03cf118d03ea0afaf7eee88b43be51de13626d6a2985e40e664cef94e497")
+	expected, _ := hex.DecodeString("289f03cf118d03ea0afaf7eee88b43be51de13626d6a2985e40e664cef94e49708bfb9266f59fcbe9145d5f5fe53208581be9c57fd684db365c2ce7a58834508")
+
+	resultBytes, err := g1Decompress(testBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_AltBn128_Compress_G1_LittleEndian(t *testing.T) {
+	testBytes, _ := hex.DecodeString("593fc42460c131dd64a6ad76aaa7ff813319a1bb7ed54145b94bef4d6f47761c41ef6aa7039b5ce494d2e9d3559b81fc4587671c81e2fe04e273f62029dd3430")
+	expected, _ := hex.DecodeString("593fc42460c131dd64a6ad76aaa7ff813319a1bb7ed54145b94bef4d6f47769c")
+
+	resultBytes, err := g1CompressWithEndianness(testBytes, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Decompress_G1_LittleEndian(t *testing.T) {
+	testBytes, _ := hex.DecodeString("97e494ef4c660ee485296a6d6213de51be438be8eef7fa0aea038d11cf039f28")
+	expected, _ := hex.DecodeString("97e494ef4c660ee485296a6d6213de51be438be8eef7fa0aea038d11cf039f28084583587acec265b34d68fd579cbe81852053fef5d54591befc596f26b9bf08")
+
+	resultBytes, err := g1DecompressWithEndianness(testBytes, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Compress_G2(t *testing.T) {
+	testBytes, _ := hex.DecodeString("25f83c8b6ab9de74e7da488ef02645c5a16a6652c3c71a15dc37fe3a5dcb7cb122acdedd6308e3bb230d226d16a105295f523a8a02bfc5e8bd2da135ac4c245d065bbad92e7c4e31bf3757f1fe7362a63fbfee50e7dc68da116e67d600d9bf6806d302580dc0661002994e7cd3a7f224e7ddc27802777486bf80f40e4ca3cfdb")
+	expected, _ := hex.DecodeString("25f83c8b6ab9de74e7da488ef02645c5a16a6652c3c71a15dc37fe3a5dcb7cb122acdedd6308e3bb230d226d16a105295f523a8a02bfc5e8bd2da135ac4c245d")
+
+	resultBytes, err := g2Compress(testBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Compress_G2_LittleEndian(t *testing.T) {
+	testBytes, _ := hex.DecodeString("5d244cac35a12dbde8c5bf028a3a525f2905a1166d220d23bbe30863dddeac22b17ccb5d3afe37dc151ac7c352666aa1c54526f08e48dae774deb96a8b3cf825dbcfa34c0ef480bf8674770278c2dde724f2a7d37c4e99021066c00d5802d30668bfd900d6676e11da68dce750eebf3fa66273fef15737bf314e7c2ed9ba5b06")
+	expected, _ := hex.DecodeString("5d244cac35a12dbde8c5bf028a3a525f2905a1166d220d23bbe30863dddeac22b17ccb5d3afe37dc151ac7c352666aa1c54526f08e48dae774deb96a8b3cf825")
+
+	resultBytes, err := g2CompressWithEndianness(testBytes, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Decompress_G2_LittleEndian(t *testing.T) {
+	testBytes, _ := hex.DecodeString("2799b8554cef8e1c90ee5d705135229fc7d82bd98bdd0f6f91fd99a7f0323329a5f6bb16ea2021b7316a77ca61417bf5528d182be5e862c0d22c17ca78466e24")
+	expected, _ := hex.DecodeString("2799b8554cef8e1c90ee5d705135229fc7d82bd98bdd0f6f91fd99a7f0323329a5f6bb16ea2021b7316a77ca61417bf5528d182be5e862c0d22c17ca78466e24e0224c6e0ec3d5b62efc323d3974f44a01f5f0d7bdf58272c5e2798479ddc226a3648e50ff97ac143b7f0ce6d78929d51efaecad0e689ef906a91ef5cd5cf010")
+
+	resultBytes, err := g2DecompressWithEndianness(testBytes, true)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}
+
+func Test_Altbn128_Decompress_G2(t *testing.T) {
+	testBytes, _ := hex.DecodeString("246e4678ca172cd2c062e8e52b188d52f57b4161ca776a31b72120ea16bbf6a5293332f0a799fd916f0fdd8bd92bd8c79f223551705dee901c8eef4c55b89927")
+	expected, _ := hex.DecodeString("246e4678ca172cd2c062e8e52b188d52f57b4161ca776a31b72120ea16bbf6a5293332f0a799fd916f0fdd8bd92bd8c79f223551705dee901c8eef4c55b8992710f05ccdf51ea906f99e680eadecfa1ed52989d7e60c7f3b14ac97ff508e64a326c2dd798479e2c57282f5bdd7f0f5014af474393d32fc2eb6d5c30e6e4c22e0")
+
+	resultBytes, err := g2Decompress(testBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, resultBytes)
+}

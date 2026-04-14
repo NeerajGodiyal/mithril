@@ -73,6 +73,7 @@ var CreateAccountAllowPrefund = FeatureGate{Name: "CreateAccountAllowPrefund", A
 var RemoveSimpleVoteFromCostModel = FeatureGate{Name: "RemoveSimpleVoteFromCostModel", Address: base58.MustDecodeFromString("2GCrNXbzmt4xrwdcKS2RdsLzsgu4V5zHAemW57pcHT6a")}
 var DisableZkElgamalProofProgram = FeatureGate{Name: "DisableZkElgamalProofProgram", Address: base58.MustDecodeFromString("zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC")}
 var ReenableZkElgamalProofProgram = FeatureGate{Name: "ReenableZkElgamalProofProgram", Address: base58.MustDecodeFromString("zkexuyPRdyTVbZqEAREueqL2xvvoBhRgth9xGSc1tMN")}
+var AltBn128LittleEndian = FeatureGate{Name: "AltBn128LittleEndian", Address: base58.MustDecodeFromString("bn2oPgpkzQPT3tohMaAsMVGjhDmmDa4jCaVPqCFmtxM")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -90,4 +91,4 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2, VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
-	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram}
+	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram, AltBn128LittleEndian}

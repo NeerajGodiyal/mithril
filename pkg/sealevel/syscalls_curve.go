@@ -37,12 +37,21 @@ const (
 	CurveOpMul = 2
 )
 
-// alt bn128 compression operations
+// big-endian alt bn128 compression operations
 const (
 	AltBn128G1Compress   = 0
 	AltBn128G1Decompress = 1
 	AltBn128G2Compress   = 2
 	AltBn128G2Decompress = 3
+)
+
+// little-endian alt bn128 compression operations
+const (
+	AltBn128LittleEndianFlag = 0x80
+	AltBn128G1CompressLE     = AltBn128G1Compress | AltBn128LittleEndianFlag
+	AltBn128G1DecompressLE   = AltBn128G1Decompress | AltBn128LittleEndianFlag
+	AltBn128G2CompressLE     = AltBn128G2Compress | AltBn128LittleEndianFlag
+	AltBn128G2DecompressLE   = AltBn128G2Decompress | AltBn128LittleEndianFlag
 )
 
 const (
@@ -52,12 +61,20 @@ const (
 	Bn128G2CompressedLen = 64
 )
 
-// alt bn128 operations
+// big-endian alt bn128 operations
 const (
 	AltBn128Add     = 0
 	AltBn128Sub     = 1
 	AltBn128Mul     = 2
 	AltBn128Pairing = 3
+)
+
+// little-endian alt bn128 operations
+const (
+	AltBn128AddLE     = AltBn128Add | AltBn128LittleEndianFlag
+	AltBn128SubLE     = AltBn128Sub | AltBn128LittleEndianFlag
+	AltBn128MulLE     = AltBn128Mul | AltBn128LittleEndianFlag
+	AltBn128PairingLE = AltBn128Pairing | AltBn128LittleEndianFlag
 )
 
 // alt bn128 input/output lengths
@@ -71,8 +88,6 @@ const (
 )
 
 func SyscallCurveValidatePointImpl(vm sbpf.VM, curveId, pointAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallCurveValidatePoint")
-
 	execCtx := executionCtx(vm)
 
 	switch curveId {
@@ -227,8 +242,6 @@ func unmarshalRistrettoElements(elementsBytes []byte) ([]*ristretto255.Element, 
 }
 
 func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr, pointsAddr, pointsLen, resultPointAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallCurveMultiscalarMultiplication")
-
 	execCtx := executionCtx(vm)
 
 	if pointsLen > 512 {
@@ -594,8 +607,6 @@ func handleRistrettoCurveGroupOps(vm sbpf.VM, groupOp, leftInputAddr, rightInput
 }
 
 func SyscallCurveGroupOpsImpl(vm sbpf.VM, curveId, groupOp, leftInputAddr, rightInputAddr, resultPointAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallCurveGroupOps")
-
 	switch curveId {
 	case Curve25519Edwards:
 		{
@@ -625,9 +636,47 @@ var empty32Bytes [32]byte
 var empty64Bytes [64]byte
 var empty128Bytes [128]byte
 
-func g1Compress(input []byte) ([]byte, error) {
+func altbn128ReverseBytes(input []byte, chunkSize int) []byte {
+	output := make([]byte, len(input))
+
+	for offset := 0; offset+chunkSize <= len(input); offset += chunkSize {
+		for idx := 0; idx < chunkSize; idx++ {
+			output[offset+idx] = input[offset+chunkSize-1-idx]
+		}
+	}
+
+	if rem := len(input) % chunkSize; rem != 0 {
+		copy(output[len(input)-rem:], input[len(input)-rem:])
+	}
+
+	return output
+}
+
+func isAltBn128CompressionLittleEndianOp(op uint64) bool {
+	switch op {
+	case AltBn128G1CompressLE, AltBn128G1DecompressLE, AltBn128G2CompressLE, AltBn128G2DecompressLE:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAltBn128LittleEndianGroupOp(groupOp uint64) bool {
+	switch groupOp {
+	case AltBn128AddLE, AltBn128MulLE, AltBn128PairingLE, AltBn128SubLE:
+		return true
+	default:
+		return false
+	}
+}
+
+func g1CompressWithEndianness(input []byte, littleEndian bool) ([]byte, error) {
 	if len(input) != Bn128G1Len {
 		return nil, fmt.Errorf("wrong input length")
+	}
+
+	if littleEndian {
+		input = altbn128ReverseBytes(input, 32)
 	}
 
 	altbn128 := curves.Altbn128
@@ -637,16 +686,27 @@ func g1Compress(input []byte) ([]byte, error) {
 	}
 
 	compressedPointBytes := point.Marshal()
+	if littleEndian {
+		compressedPointBytes = altbn128ReverseBytes(compressedPointBytes, 32)
+	}
 	return compressedPointBytes, nil
 }
 
-func g1Decompress(input []byte) ([]byte, error) {
+func g1Compress(input []byte) ([]byte, error) {
+	return g1CompressWithEndianness(input, false)
+}
+
+func g1DecompressWithEndianness(input []byte, littleEndian bool) ([]byte, error) {
 	if len(input) != Bn128G1CompressedLen {
 		return nil, fmt.Errorf("wrong input length")
 	}
 
 	if bytes.Equal(input, empty32Bytes[:]) {
 		return empty64Bytes[:], nil
+	}
+
+	if littleEndian {
+		input = altbn128ReverseBytes(input, 32)
 	}
 
 	var g1 bn254.G1Affine
@@ -656,12 +716,23 @@ func g1Decompress(input []byte) ([]byte, error) {
 	}
 
 	decompressedPointBytes := g1.RawBytes()
+	if littleEndian {
+		return altbn128ReverseBytes(decompressedPointBytes[:], 32), nil
+	}
 	return decompressedPointBytes[:], nil
 }
 
-func g2Compress(input []byte) ([]byte, error) {
+func g1Decompress(input []byte) ([]byte, error) {
+	return g1DecompressWithEndianness(input, false)
+}
+
+func g2CompressWithEndianness(input []byte, littleEndian bool) ([]byte, error) {
 	if len(input) != Bn128G2Len {
 		return nil, fmt.Errorf("wrong input length")
+	}
+
+	if littleEndian {
+		input = altbn128ReverseBytes(input, 64)
 	}
 
 	altbn128 := curves.Altbn128
@@ -671,16 +742,27 @@ func g2Compress(input []byte) ([]byte, error) {
 	}
 
 	compressedPointBytes := point.Marshal()
+	if littleEndian {
+		compressedPointBytes = altbn128ReverseBytes(compressedPointBytes, 64)
+	}
 	return compressedPointBytes, nil
 }
 
-func g2Decompress(input []byte) ([]byte, error) {
+func g2Compress(input []byte) ([]byte, error) {
+	return g2CompressWithEndianness(input, false)
+}
+
+func g2DecompressWithEndianness(input []byte, littleEndian bool) ([]byte, error) {
 	if len(input) != Bn128G2CompressedLen {
 		return nil, fmt.Errorf("wrong input length")
 	}
 
 	if bytes.Equal(input, empty64Bytes[:]) {
 		return empty128Bytes[:], nil
+	}
+
+	if littleEndian {
+		input = altbn128ReverseBytes(input, 64)
 	}
 
 	var g2 bn254.G2Affine
@@ -690,35 +772,46 @@ func g2Decompress(input []byte) ([]byte, error) {
 	}
 
 	decompressedBytes := g2.RawBytes()
+	if littleEndian {
+		return altbn128ReverseBytes(decompressedBytes[:], 64), nil
+	}
 	return decompressedBytes[:], nil
 }
 
+func g2Decompress(input []byte) ([]byte, error) {
+	return g2DecompressWithEndianness(input, false)
+}
+
 func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallAltBn128Compression")
+	execCtx := executionCtx(vm)
+
+	if isAltBn128CompressionLittleEndianOp(op) && !execCtx.Features.IsActive(features.AltBn128LittleEndian) {
+		return syscallErrCustom("SyscallError::InvalidAttribute")
+	}
 
 	var cost uint64
 	var outputLen uint64
 
 	switch op {
-	case AltBn128G1Compress:
+	case AltBn128G1Compress, AltBn128G1CompressLE:
 		{
 			cost = cu.CUSyscallBaseCost + cu.CUBn128G1Compress
 			outputLen = Bn128G1CompressedLen
 		}
 
-	case AltBn128G1Decompress:
+	case AltBn128G1Decompress, AltBn128G1DecompressLE:
 		{
 			cost = cu.CUSyscallBaseCost + cu.CUBn128G1Decompress
 			outputLen = Bn128G1Len
 		}
 
-	case AltBn128G2Compress:
+	case AltBn128G2Compress, AltBn128G2CompressLE:
 		{
 			cost = cu.CUSyscallBaseCost + cu.CUBn128G2Compress
 			outputLen = Bn128G2CompressedLen
 		}
 
-	case AltBn128G2Decompress:
+	case AltBn128G2Decompress, AltBn128G2DecompressLE:
 		{
 			cost = cu.CUSyscallBaseCost + cu.CUBn128G2Decompress
 			outputLen = Bn128G2Len
@@ -730,7 +823,6 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 		}
 	}
 
-	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -747,13 +839,10 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 	}
 
 	switch op {
-	case AltBn128G1Compress:
+	case AltBn128G1Compress, AltBn128G1CompressLE:
 		{
-			//mlog.Log.Debugf("AltBn128G1Compress")
-
-			compressedPointBytes, err := g1Compress(inputSlice)
+			compressedPointBytes, err := g1CompressWithEndianness(inputSlice, op == AltBn128G1CompressLE)
 			if err != nil {
-				//mlog.Log.Debugf("G1 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -761,13 +850,10 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 			return syscallSuccess(0)
 		}
 
-	case AltBn128G1Decompress:
+	case AltBn128G1Decompress, AltBn128G1DecompressLE:
 		{
-			//mlog.Log.Debugf("AltBn128G1Decompress")
-
-			decompressedPointBytes, err := g1Decompress(inputSlice)
+			decompressedPointBytes, err := g1DecompressWithEndianness(inputSlice, op == AltBn128G1DecompressLE)
 			if err != nil {
-				//mlog.Log.Debugf("G1 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -775,13 +861,10 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 			return syscallSuccess(0)
 		}
 
-	case AltBn128G2Compress:
+	case AltBn128G2Compress, AltBn128G2CompressLE:
 		{
-			//mlog.Log.Debugf("AltBn128G2Compress")
-
-			compressedPointBytes, err := g2Compress(inputSlice)
+			compressedPointBytes, err := g2CompressWithEndianness(inputSlice, op == AltBn128G2CompressLE)
 			if err != nil {
-				//mlog.Log.Debugf("G2 compress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -789,13 +872,10 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 			return syscallSuccess(0)
 		}
 
-	case AltBn128G2Decompress:
+	case AltBn128G2Decompress, AltBn128G2DecompressLE:
 		{
-			//mlog.Log.Debugf("AltBn128G2Decompress")
-
-			decompressedPointBytes, err := g2Decompress(inputSlice)
+			decompressedPointBytes, err := g2DecompressWithEndianness(inputSlice, op == AltBn128G2DecompressLE)
 			if err != nil {
-				//mlog.Log.Debugf("G2 decompress error: %s", err)
 				return syscallSuccess(1)
 			}
 
@@ -812,14 +892,21 @@ func SyscallAltBn128CompressionImpl(vm sbpf.VM, op, inputAddr, inputLen, resultA
 
 var SyscallAltBn128Compression = sbpf.SyscallFunc4(SyscallAltBn128CompressionImpl)
 
-func altbn128Addition(input []byte) ([]byte, error) {
-	if len(input) > AltBn128AdditionInputLen {
-		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
-	}
+func altbn128AdditionWithEndianness(input []byte, littleEndian bool) ([]byte, error) {
+	if littleEndian {
+		if len(input) != AltBn128AdditionInputLen {
+			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+		}
+		input = altbn128ReverseBytes(input, 32)
+	} else {
+		if len(input) > AltBn128AdditionInputLen {
+			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+		}
 
-	paddedInput := make([]byte, AltBn128AdditionInputLen)
-	copy(paddedInput, input)
-	input = paddedInput
+		paddedInput := make([]byte, AltBn128AdditionInputLen)
+		copy(paddedInput, input)
+		input = paddedInput
+	}
 
 	point1 := new(bn256.G1)
 	point2 := new(bn256.G1)
@@ -837,13 +924,27 @@ func altbn128Addition(input []byte) ([]byte, error) {
 	resultPoint := new(bn256.G1)
 	resultPoint.Add(point1, point2)
 	resultBytes := resultPoint.Marshal()
+	if littleEndian {
+		resultBytes = altbn128ReverseBytes(resultBytes, 32)
+	}
 
 	return resultBytes, nil
 }
 
-func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
-	if uint64(len(input)) > expectedLen {
-		return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+func altbn128Addition(input []byte) ([]byte, error) {
+	return altbn128AdditionWithEndianness(input, false)
+}
+
+func altbn128MultiplicationWithEndianness(input []byte, expectedLen uint64, littleEndian bool) ([]byte, error) {
+	if littleEndian {
+		if uint64(len(input)) != expectedLen {
+			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+		}
+		input = altbn128ReverseBytes(input, 32)
+	} else {
+		if uint64(len(input)) > expectedLen {
+			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
+		}
 	}
 
 	paddedInput := make([]byte, 96)
@@ -859,11 +960,18 @@ func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
 	resultPoint := new(bn256.G1)
 	resultPoint.ScalarMult(point, scalar)
 	resultBytes := resultPoint.Marshal()
+	if littleEndian {
+		resultBytes = altbn128ReverseBytes(resultBytes, 32)
+	}
 
 	return resultBytes, nil
 }
 
-func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error) {
+func altbn128Multiplication(input []byte, expectedLen uint64) ([]byte, error) {
+	return altbn128MultiplicationWithEndianness(input, expectedLen, false)
+}
+
+func altbn128PairingWithEndianness(input []byte, enforceSimd0334LenCheck bool, littleEndian bool) ([]byte, error) {
 	if enforceSimd0334LenCheck {
 		if len(input)%AltBn128PairingElementLen != 0 {
 			return nil, fmt.Errorf("AltBn128Error::InvalidInputData")
@@ -878,12 +986,22 @@ func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error)
 		point1 := new(bn256.G1)
 		point2 := new(bn256.G2)
 
-		_, err := point1.Unmarshal(input[count*192 : (count*192)+64])
+		g1Input := input[count*192 : (count*192)+64]
+		if littleEndian {
+			g1Input = altbn128ReverseBytes(g1Input, 32)
+		}
+
+		_, err := point1.Unmarshal(g1Input)
 		if err != nil {
 			return nil, err
 		}
 
-		_, err = point2.Unmarshal(input[(count*192)+64 : (count*192)+64+128])
+		g2Input := input[(count*192)+64 : (count*192)+64+128]
+		if littleEndian {
+			g2Input = altbn128ReverseBytes(g2Input, 64)
+		}
+
+		_, err = point2.Unmarshal(g2Input)
 		if err != nil {
 			return nil, err
 		}
@@ -900,7 +1018,11 @@ func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error)
 	var callResult [32]byte
 
 	if isPaired || len(g1Vals) == 0 {
-		callResult[31] = 1
+		if littleEndian {
+			callResult[0] = 1
+		} else {
+			callResult[31] = 1
+		}
 	} else {
 		mlog.Log.Debugf("PairingCheck fail\n")
 	}
@@ -908,30 +1030,35 @@ func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error)
 	return callResult[:], nil
 }
 
+func altbn128Pairing(input []byte, enforceSimd0334LenCheck bool) ([]byte, error) {
+	return altbn128PairingWithEndianness(input, enforceSimd0334LenCheck, false)
+}
+
 func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallAltBn128")
+	execCtx := executionCtx(vm)
+
+	if isAltBn128LittleEndianGroupOp(groupOp) && !execCtx.Features.IsActive(features.AltBn128LittleEndian) {
+		return syscallErrCustom("SyscallError::InvalidAttribute")
+	}
 
 	var cost uint64
 	var outputLen uint64
 
 	switch groupOp {
-	case AltBn128Add:
+	case AltBn128Add, AltBn128AddLE:
 		{
-			//mlog.Log.Debugf("AltBn128Add. inputLen = %d", inputLen)
 			cost = cu.CUBn128AdditionCost
 			outputLen = AltBn128AdditionOutputLen
 		}
 
-	case AltBn128Mul:
+	case AltBn128Mul, AltBn128MulLE:
 		{
-			//mlog.Log.Debugf("AltBn128Mul. inputLen = %d", inputLen)
 			cost = cu.CUBn128MultiplicationCost
 			outputLen = AltBn128MultiplicationOutputLen
 		}
 
-	case AltBn128Pairing:
+	case AltBn128Pairing, AltBn128PairingLE:
 		{
-			//mlog.Log.Debugf("AltBn128Pairing. inputLen = %d", inputLen)
 			elementLen := inputLen / AltBn128PairingElementLen
 			cost = cu.CUBn128PairingOnePairCostFirst + cu.CUSha256BaseCost + AltBn128PairingOutputLen
 			cost = safemath.SaturatingAddU64(cost, safemath.SaturatingMulU64(cu.CUBn128PairingOnePairCostOther, safemath.SaturatingSubU64(elementLen, 1)))
@@ -945,7 +1072,6 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 		}
 	}
 
-	execCtx := executionCtx(vm)
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
@@ -962,9 +1088,9 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 	}
 
 	switch groupOp {
-	case AltBn128Add:
+	case AltBn128Add, AltBn128AddLE:
 		{
-			result, err := altbn128Addition(inputSlice)
+			result, err := altbn128AdditionWithEndianness(inputSlice, groupOp == AltBn128AddLE)
 			if err != nil {
 				mlog.Log.Debugf("altbn128 addition err: %s", err)
 				return syscallSuccess(1)
@@ -974,16 +1100,16 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 			}
 		}
 
-	case AltBn128Mul:
+	case AltBn128Mul, AltBn128MulLE:
 		{
 			var expectedSize uint64
-			if execCtx.Features.IsActive(features.FixAltBn128MultiplicationInputLength) {
+			if groupOp == AltBn128MulLE || execCtx.Features.IsActive(features.FixAltBn128MultiplicationInputLength) {
 				expectedSize = 96
 			} else {
 				expectedSize = 128
 			}
 
-			result, err := altbn128Multiplication(inputSlice, expectedSize)
+			result, err := altbn128MultiplicationWithEndianness(inputSlice, expectedSize, groupOp == AltBn128MulLE)
 			if err != nil {
 				mlog.Log.Debugf("altbn128 multiplication err: %s", err)
 				return syscallSuccess(1)
@@ -993,14 +1119,14 @@ func SyscallAltBn128Impl(vm sbpf.VM, groupOp, inputAddr, inputLen, resultAddr ui
 			}
 		}
 
-	case AltBn128Pairing:
+	case AltBn128Pairing, AltBn128PairingLE:
 		{
 			var enforceSimd0334LenCheck bool
-			if execCtx.Features.IsActive(features.FixAltBn128PairingLengthCheck) {
+			if groupOp == AltBn128PairingLE || execCtx.Features.IsActive(features.FixAltBn128PairingLengthCheck) {
 				enforceSimd0334LenCheck = true
 			}
 
-			result, err := altbn128Pairing(inputSlice, enforceSimd0334LenCheck)
+			result, err := altbn128PairingWithEndianness(inputSlice, enforceSimd0334LenCheck, groupOp == AltBn128PairingLE)
 			if err != nil {
 				mlog.Log.Debugf("altbn128 pairing err: %s", err)
 				return syscallSuccess(1)
