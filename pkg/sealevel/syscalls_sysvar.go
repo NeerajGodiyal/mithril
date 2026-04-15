@@ -18,8 +18,6 @@ import (
 
 // SyscallGetClockSysvarImpl is an implementation of the sol_get_clock_sysvar syscall
 func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetClock for addr %x, len = %d", addr, SysvarClockStructLen)
-
 	execCtx := executionCtx(vm)
 
 	cost := uint64(cu.CUSyscallBaseCost + SysvarClockStructLen)
@@ -53,8 +51,6 @@ var SyscallGetClockSysvar = sbpf.SyscallFunc1(SyscallGetClockSysvarImpl)
 
 // SyscallGetRentSysvarImpl is an implementation of the sol_get_rent_sysvar syscall
 func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Infof("SyscallGetRentSysvarImpl")
-
 	execCtx := executionCtx(vm)
 
 	cost := uint64(cu.CUSyscallBaseCost + SysvarRentStructLen)
@@ -84,8 +80,6 @@ var SyscallGetRentSysvar = sbpf.SyscallFunc1(SyscallGetRentSysvarImpl)
 
 // SyscallGetEpochScheduleSysvarImpl is an implementation of the sol_get_epoch_schedule_sysvar syscall
 func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetEpochSchedule")
-
 	execCtx := executionCtx(vm)
 
 	cost := uint64(cu.CUSyscallBaseCost + SysvarEpochScheduleStructLen)
@@ -104,18 +98,7 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 		return syscallErr(err)
 	}
 
-	var epochScheduleBytes [SysvarEpochScheduleStructLen]byte
-	binary.LittleEndian.PutUint64(epochScheduleBytes[0:8], epochSchedule.SlotsPerEpoch)
-	binary.LittleEndian.PutUint64(epochScheduleBytes[8:16], epochSchedule.LeaderScheduleSlotOffset)
-
-	if epochSchedule.Warmup {
-		epochScheduleBytes[16] = 1
-	} else {
-		epochScheduleBytes[16] = 0
-	}
-
-	binary.LittleEndian.PutUint64(epochScheduleBytes[17:25], epochSchedule.FirstNormalEpoch)
-	binary.LittleEndian.PutUint64(epochScheduleBytes[25:33], epochSchedule.FirstNormalSlot)
+	epochScheduleBytes := marshalEpochScheduleSysvar(epochSchedule)
 	copy(epochScheduleDst, epochScheduleBytes[:])
 
 	return syscallSuccess(0)
@@ -123,10 +106,26 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 
 var SyscallGetEpochScheduleSysvar = sbpf.SyscallFunc1(SyscallGetEpochScheduleSysvarImpl)
 
+func marshalEpochScheduleSysvar(epochSchedule SysvarEpochSchedule) [SysvarEpochScheduleStructLen]byte {
+	var epochScheduleBytes [SysvarEpochScheduleStructLen]byte
+
+	binary.LittleEndian.PutUint64(epochScheduleBytes[0:8], epochSchedule.SlotsPerEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleBytes[8:16], epochSchedule.LeaderScheduleSlotOffset)
+	if epochSchedule.Warmup {
+		epochScheduleBytes[16] = 1
+	}
+
+	// sol_get_epoch_schedule_sysvar needs to return a representation consistent with Rust's
+	// native `repr(C)` layout, which includes 7 bytes of padding after the bool, before the
+	// next u64 field
+	binary.LittleEndian.PutUint64(epochScheduleBytes[24:32], epochSchedule.FirstNormalEpoch)
+	binary.LittleEndian.PutUint64(epochScheduleBytes[32:40], epochSchedule.FirstNormalSlot)
+
+	return epochScheduleBytes
+}
+
 // SyscallGetEpochRewardsSysvarImpl is an implementation of the sol_get_epoch_rewards_sysvar syscall
 func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetEpochRewards")
-
 	execCtx := executionCtx(vm)
 
 	cost := uint64(cu.CUSyscallBaseCost + SysvarEpochRewardsStructLen)
@@ -169,8 +168,6 @@ var SyscallGetEpochRewardsSysvar = sbpf.SyscallFunc1(SyscallGetEpochRewardsSysva
 
 // SyscallGetLastRestartSlotSysvarImpl is an implementation of the sol_get_last_restart_slot_sysvar syscall
 func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetLastRestartSlotSysvar")
-
 	execCtx := executionCtx(vm)
 
 	cost := uint64(cu.CUSyscallBaseCost + SysvarLastRestartSlotStructLen)
@@ -226,8 +223,6 @@ func fetchSysvarBytesForPubkey(pubkey solana.PublicKey) ([]byte, error) {
 }
 
 func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offset uint64, length uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetSysvar")
-
 	execCtx := executionCtx(vm)
 
 	sysvarIdCost := uint64(32 / cu.CUCpiBytesPerUnit)
@@ -277,8 +272,6 @@ func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offse
 var SyscallGetSysvar = sbpf.SyscallFunc4(SyscallGetSysvarImpl)
 
 func SyscallGetEpochStakeImpl(vm sbpf.VM, varAddr uint64) (uint64, error) {
-	//mlog.Log.Debugf("SyscallGetEpochStake")
-
 	var err error
 	execCtx := executionCtx(vm)
 

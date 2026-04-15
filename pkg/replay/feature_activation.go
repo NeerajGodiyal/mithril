@@ -25,8 +25,9 @@ const (
 
 var splTokenProgramID = base58.MustDecodeFromString("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 var pTokenProgramBuffer = base58.MustDecodeFromString("ptok6rngomXrDbWf5v5Mkmu5CEbB51hzSCPDoj9DrvF")
+var stakeProgramV5Buffer = base58.MustDecodeFromString("4EBQBjw1kqF1dqUBb6fc5Ji4tCEQgNf9ESGGX3smwXwh")
 
-type loaderV2ProgramMigration struct {
+type programMigration struct {
 	modifiedAccts  []*accounts.Account
 	parentAccts    []*accounts.Account
 	lamportsToBurn uint64
@@ -101,6 +102,17 @@ func scanAndEnableFeatures(acctsDb *accountsdb.AccountsDb, replayCtx *ReplayCtx,
 			modifiedAccts = append(modifiedAccts, migratedAccts...)
 			parentAccts = append(parentAccts, parentMigratedAccts...)
 		}
+
+		if f.IsActive(features.UpgradeBpfStakeProgramToV5) && featureAcct.Key == features.UpgradeBpfStakeProgramToV5.Address {
+			upgradedAccts, parentUpgradedAccts, err := applyUpgradeBpfStakeProgramToV5Activation(acctsDb, replayCtx, slot, f)
+			if err != nil {
+				mlog.Log.Warnf("Failed to upgrade stake program with buffer '%s': %v", stakeProgramV5Buffer, err)
+				continue
+			}
+
+			modifiedAccts = append(modifiedAccts, upgradedAccts...)
+			parentAccts = append(parentAccts, parentUpgradedAccts...)
+		}
 	}
 
 	return f, modifiedAccts, parentAccts
@@ -169,7 +181,7 @@ func buildLoaderV2ProgramUpgradeToLoaderV3(
 	sourceBuffer *accounts.Account,
 	existingProgramData *accounts.Account,
 	allowPrefunded bool,
-) (*loaderV2ProgramMigration, error) {
+) (*programMigration, error) {
 	if rentSysvar == nil {
 		return nil, errors.New("rent sysvar unavailable for p-token migration")
 	}
@@ -274,7 +286,7 @@ func buildLoaderV2ProgramUpgradeToLoaderV3(
 		lamportsToBurn += existingProgramData.Lamports
 	}
 
-	return &loaderV2ProgramMigration{
+	return &programMigration{
 		modifiedAccts: []*accounts.Account{
 			newProgramAcct,
 			newProgramDataAcct,
@@ -287,6 +299,133 @@ func buildLoaderV2ProgramUpgradeToLoaderV3(
 		},
 		lamportsToBurn: lamportsToBurn,
 		lamportsToFund: newProgramAcct.Lamports + newProgramDataAcct.Lamports,
+	}, nil
+}
+
+func buildCoreBpfProgramUpgrade(
+	slot uint64,
+	rentSysvar *sealevel.SysvarRent,
+	targetProgram *accounts.Account,
+	targetProgramData *accounts.Account,
+	sourceBuffer *accounts.Account,
+	targetProgramName string,
+) (*programMigration, error) {
+	if rentSysvar == nil {
+		return nil, fmt.Errorf("rent sysvar unavailable for %s program upgrade", targetProgramName)
+	}
+	if targetProgram == nil {
+		return nil, fmt.Errorf("missing %s program account", targetProgramName)
+	}
+	if targetProgram.Owner != a.BpfLoaderUpgradeableAddr {
+		return nil, fmt.Errorf("%s program owner %s is not loader v3", targetProgramName, solana.PublicKeyFromBytes(targetProgram.Owner[:]))
+	}
+	if !targetProgram.Executable {
+		return nil, fmt.Errorf("%s program account is not executable", targetProgramName)
+	}
+	if targetProgramData == nil {
+		return nil, fmt.Errorf("missing %s programdata account", targetProgramName)
+	}
+	if targetProgramData.Owner != a.BpfLoaderUpgradeableAddr {
+		return nil, fmt.Errorf("%s programdata owner %s is not loader v3", targetProgramName, solana.PublicKeyFromBytes(targetProgramData.Owner[:]))
+	}
+	if sourceBuffer == nil {
+		return nil, fmt.Errorf("missing %s source buffer account", targetProgramName)
+	}
+	if sourceBuffer.Owner != a.BpfLoaderUpgradeableAddr {
+		return nil, fmt.Errorf("%s source buffer owner %s is not loader v3", targetProgramName, solana.PublicKeyFromBytes(sourceBuffer.Owner[:]))
+	}
+	if len(sourceBuffer.Data) < upgradeableLoaderBufferMetadataSize {
+		return nil, fmt.Errorf("%s source buffer data too short", targetProgramName)
+	}
+	if len(targetProgramData.Data) < upgradeableLoaderProgramDataMetadataSize {
+		return nil, fmt.Errorf("%s programdata account data too short", targetProgramName)
+	}
+
+	targetProgramState, err := sealevel.UnmarshalUpgradeableLoaderState(targetProgram.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode %s program account state: %w", targetProgramName, err)
+	}
+	if targetProgramState.Type != sealevel.UpgradeableLoaderStateTypeProgram {
+		return nil, fmt.Errorf("%s program account has invalid state type %d", targetProgramName, targetProgramState.Type)
+	}
+
+	programDataAddress, err := deriveUpgradeableLoaderProgramDataAddress(targetProgram.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive programdata address for %s: %w", targetProgram.Key, err)
+	}
+	if targetProgramState.Program.ProgramDataAddress != programDataAddress {
+		return nil, fmt.Errorf("%s program account points to unexpected programdata address %s", targetProgramName, targetProgramState.Program.ProgramDataAddress)
+	}
+	if targetProgramData.Key != programDataAddress {
+		return nil, fmt.Errorf("%s programdata account key %s does not match derived address %s", targetProgramName, targetProgramData.Key, programDataAddress)
+	}
+
+	targetProgramDataState, err := sealevel.UnmarshalUpgradeableLoaderState(targetProgramData.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode %s programdata account state: %w", targetProgramName, err)
+	}
+	if targetProgramDataState.Type != sealevel.UpgradeableLoaderStateTypeProgramData {
+		return nil, fmt.Errorf("%s programdata account has invalid state type %d", targetProgramName, targetProgramDataState.Type)
+	}
+
+	sourceBufferState, err := sealevel.UnmarshalUpgradeableLoaderState(sourceBuffer.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode %s source buffer state: %w", targetProgramName, err)
+	}
+	if sourceBufferState.Type != sealevel.UpgradeableLoaderStateTypeBuffer {
+		return nil, fmt.Errorf("%s source buffer has invalid state type %d", targetProgramName, sourceBufferState.Type)
+	}
+
+	upgradeAuthority := targetProgramDataState.ProgramData.UpgradeAuthorityAddress
+	if upgradeAuthority != nil {
+		if sourceBufferState.Buffer.AuthorityAddress == nil || *sourceBufferState.Buffer.AuthorityAddress != *upgradeAuthority {
+			return nil, fmt.Errorf("%s upgrade authority mismatch between programdata and source buffer", targetProgramName)
+		}
+	}
+
+	elfBytes := sourceBuffer.Data[upgradeableLoaderBufferMetadataSize:]
+	programDataStateBytes, err := marshalUpgradeableLoaderStateSized(&sealevel.UpgradeableLoaderState{
+		Type: sealevel.UpgradeableLoaderStateTypeProgramData,
+		ProgramData: sealevel.UpgradeableLoaderStateProgramData{
+			Slot:                    slot,
+			UpgradeAuthorityAddress: upgradeAuthority,
+		},
+	}, upgradeableLoaderProgramDataMetadataSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode upgraded %s programdata account state: %w", targetProgramName, err)
+	}
+
+	programDataBytes := make([]byte, upgradeableLoaderProgramDataMetadataSize+len(elfBytes))
+	copy(programDataBytes, programDataStateBytes)
+	copy(programDataBytes[upgradeableLoaderProgramDataMetadataSize:], elfBytes)
+
+	newProgramDataAcct := &accounts.Account{
+		Slot:       slot,
+		Key:        programDataAddress,
+		Lamports:   rentSysvar.MinimumBalance(uint64(len(programDataBytes))),
+		Data:       programDataBytes,
+		Owner:      a.BpfLoaderUpgradeableAddr,
+		Executable: false,
+		RentEpoch:  math.MaxUint64,
+	}
+
+	clearedSourceBuffer := &accounts.Account{
+		Slot:      slot,
+		Key:       sourceBuffer.Key,
+		RentEpoch: math.MaxUint64,
+	}
+
+	return &programMigration{
+		modifiedAccts: []*accounts.Account{
+			newProgramDataAcct,
+			clearedSourceBuffer,
+		},
+		parentAccts: []*accounts.Account{
+			targetProgramData.Clone(),
+			sourceBuffer.Clone(),
+		},
+		lamportsToBurn: targetProgramData.Lamports + sourceBuffer.Lamports,
+		lamportsToFund: newProgramDataAcct.Lamports,
 	}, nil
 }
 
@@ -343,6 +482,9 @@ func applyReplaceSplTokenWithPTokenActivation(
 		existingProgramData = nil
 	}
 
+	if len(sourceBuffer.Data) < upgradeableLoaderBufferMetadataSize {
+		return nil, nil, errors.New("p-token source buffer data too short")
+	}
 	if err := sealevel.ValidateUpgradeableLoaderProgram(sourceBuffer.Data[upgradeableLoaderBufferMetadataSize:], f); err != nil {
 		return nil, nil, fmt.Errorf("failed to validate p-token program bytes: %w", err)
 	}
@@ -364,6 +506,64 @@ func applyReplaceSplTokenWithPTokenActivation(
 	}
 
 	acctsDb.RemoveProgramFromCache(splTokenProgramID)
+
+	if err := acctsDb.StoreAccounts(migration.modifiedAccts, slot, nil); err != nil {
+		return nil, nil, err
+	}
+
+	return migration.modifiedAccts, migration.parentAccts, nil
+}
+
+func applyUpgradeBpfStakeProgramToV5Activation(
+	acctsDb *accountsdb.AccountsDb,
+	replayCtx *ReplayCtx,
+	slot uint64,
+	f *features.Features,
+) ([]*accounts.Account, []*accounts.Account, error) {
+	targetProgram, err := acctsDb.GetAccount(slot, a.StakeProgramAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	programDataAddress, err := deriveUpgradeableLoaderProgramDataAddress(a.StakeProgramAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	targetProgramData, err := acctsDb.GetAccount(slot, programDataAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sourceBuffer, err := acctsDb.GetAccount(slot, stakeProgramV5Buffer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(sourceBuffer.Data) < upgradeableLoaderBufferMetadataSize {
+		return nil, nil, errors.New("stake v5 source buffer data too short")
+	}
+	if err := sealevel.ValidateUpgradeableLoaderProgram(sourceBuffer.Data[upgradeableLoaderBufferMetadataSize:], f); err != nil {
+		return nil, nil, fmt.Errorf("failed to validate stake v5 program bytes: %w", err)
+	}
+
+	migration, err := buildCoreBpfProgramUpgrade(
+		slot,
+		sealevel.SysvarCache.Rent.Sysvar,
+		targetProgram,
+		targetProgramData,
+		sourceBuffer,
+		"Stake",
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := applyCapitalizationChange(replayCtx, migration.lamportsToBurn, migration.lamportsToFund); err != nil {
+		return nil, nil, err
+	}
+
+	acctsDb.RemoveProgramFromCache(programDataAddress)
 
 	if err := acctsDb.StoreAccounts(migration.modifiedAccts, slot, nil); err != nil {
 		return nil, nil, err

@@ -23,6 +23,8 @@ const (
 	hash_sol_curve_validate_point              = 0xaa2607ca
 	hash_sol_curve_multiscalar_mul             = 0x60a40880
 	hash_sol_curve_group_op                    = 0xdd1c41a6
+	hash_sol_curve_decompress                  = 0x80c98b0
+	hash_sol_curve_pairing_map                 = 0xf111a47e
 	hash_sol_alt_bn128_compression             = 0x334fd5ed
 	hash_sol_alt_bn128_group_op                = 0xae0c318b
 	hash_sol_memcpy_                           = 0x717cc4a3
@@ -83,6 +85,12 @@ func Syscalls(ft *features.Features, isDeploy bool, h uint32) (f sbpf.Syscall, o
 	case hash_sol_curve_group_op:
 		f = SyscallCurveGroupOps
 		ok = ft.IsActive(features.Curve25519SyscallEnabled)
+	case hash_sol_curve_decompress:
+		f = SyscallCurveDecompress
+		ok = ft.IsActive(features.EnableBls12_381Syscall)
+	case hash_sol_curve_pairing_map:
+		f = SyscallCurvePairingMap
+		ok = ft.IsActive(features.EnableBls12_381Syscall)
 	case hash_sol_alt_bn128_compression:
 		f = SyscallAltBn128Compression
 		ok = ft.IsActive(features.EnableAltbn128CompressionSyscall)

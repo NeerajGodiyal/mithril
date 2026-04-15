@@ -69,6 +69,15 @@ var ProvideInstructionDataOffsetInVmR2 = FeatureGate{Name: "ProvideInstructionDa
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
 var RelaxProgramdataAccountCheckMigration = FeatureGate{Name: "RelaxProgramdataAccountCheckMigration", Address: base58.MustDecodeFromString("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h")}
 var ReplaceSplTokenWithPToken = FeatureGate{Name: "ReplaceSplTokenWithPToken", Address: base58.MustDecodeFromString("ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP")}
+var CreateAccountAllowPrefund = FeatureGate{Name: "CreateAccountAllowPrefund", Address: base58.MustDecodeFromString("6sPDzwyARRExKH52LECxcGoqziH8G7SZofwuxi8Ja331")}
+var RemoveSimpleVoteFromCostModel = FeatureGate{Name: "RemoveSimpleVoteFromCostModel", Address: base58.MustDecodeFromString("2GCrNXbzmt4xrwdcKS2RdsLzsgu4V5zHAemW57pcHT6a")}
+var DisableZkElgamalProofProgram = FeatureGate{Name: "DisableZkElgamalProofProgram", Address: base58.MustDecodeFromString("zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC")}
+var ReenableZkElgamalProofProgram = FeatureGate{Name: "ReenableZkElgamalProofProgram", Address: base58.MustDecodeFromString("zkexuyPRdyTVbZqEAREueqL2xvvoBhRgth9xGSc1tMN")}
+var AltBn128LittleEndian = FeatureGate{Name: "AltBn128LittleEndian", Address: base58.MustDecodeFromString("bn2oPgpkzQPT3tohMaAsMVGjhDmmDa4jCaVPqCFmtxM")}
+var EnableAltBn128G2Syscalls = FeatureGate{Name: "EnableAltBn128G2Syscalls", Address: base58.MustDecodeFromString("bn1hKNURMGQaQoEVxahcEAcqiX3NwRs6hgKKNSLeKxH")}
+var EnableBls12_381Syscall = FeatureGate{Name: "EnableBls12_381Syscall", Address: base58.MustDecodeFromString("b1sgUiJ3qu7hYm3tNDyyqZNQd6gLGJmJppnLNa93PCQ")}
+var UpgradeBpfStakeProgramToV5 = FeatureGate{Name: "UpgradeBpfStakeProgramToV5", Address: base58.MustDecodeFromString("STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk")}
+var DelayCommissionUpdates = FeatureGate{Name: "DelayCommissionUpdates", Address: base58.MustDecodeFromString("76dHtohc2s5dR3ahJyBxs7eJJVipFkaPdih9CLgTTb4B")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -85,5 +94,6 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
-	ProvideInstructionDataOffsetInVmR2,
-	VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken}
+	ProvideInstructionDataOffsetInVmR2, VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
+	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram, AltBn128LittleEndian, EnableAltBn128G2Syscalls,
+	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5, DelayCommissionUpdates}

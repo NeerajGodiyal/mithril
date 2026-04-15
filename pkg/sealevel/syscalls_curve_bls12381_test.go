@@ -1,0 +1,436 @@
+package sealevel
+
+import (
+	"encoding/binary"
+	"encoding/hex"
+	"testing"
+
+	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/sbpf"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func mustDecodeHex(t *testing.T, value string) []byte {
+	t.Helper()
+
+	if len(value)%2 != 0 {
+		value = "0" + value
+	}
+
+	out, err := hex.DecodeString(value)
+	require.NoError(t, err)
+	return out
+}
+
+type bls12_381SyscallTestVM struct {
+	ctx  *ExecutionCtx
+	mem  []byte
+	heap uint64
+}
+
+func newBls12_381SyscallTestVM(memorySize int, activeFeatures ...features.FeatureGate) *bls12_381SyscallTestVM {
+	ft := features.NewFeaturesDefault()
+	for _, gate := range activeFeatures {
+		ft.EnableFeature(gate, 0)
+	}
+
+	computeMeter := cu.NewComputeMeter(1_000_000)
+	return &bls12_381SyscallTestVM{
+		ctx: &ExecutionCtx{
+			Log:          new(LogRecorder),
+			Features:     *ft,
+			ComputeMeter: computeMeter,
+		},
+		mem:  make([]byte, memorySize),
+		heap: uint64(memorySize),
+	}
+}
+
+func (vm *bls12_381SyscallTestVM) VMContext() any {
+	return vm.ctx
+}
+
+func (vm *bls12_381SyscallTestVM) HeapMax() uint64 {
+	return vm.heap
+}
+
+func (vm *bls12_381SyscallTestVM) HeapSize() uint64 {
+	return vm.heap
+}
+
+func (vm *bls12_381SyscallTestVM) UpdateHeapSize(size uint64) {
+	vm.heap = size
+	if size > uint64(len(vm.mem)) {
+		next := make([]byte, size)
+		copy(next, vm.mem)
+		vm.mem = next
+		return
+	}
+
+	vm.mem = vm.mem[:size]
+}
+
+func (vm *bls12_381SyscallTestVM) Translate(addr uint64, size uint64, write bool) ([]byte, error) {
+	end := addr + size
+	if end < addr || end > uint64(len(vm.mem)) {
+		return nil, sbpf.NewExcBadAccess(addr, size, write, "test memory out of bounds")
+	}
+
+	return vm.mem[addr:end], nil
+}
+
+func (vm *bls12_381SyscallTestVM) DueInstrCount() uint64 {
+	return 0
+}
+
+func (vm *bls12_381SyscallTestVM) PrevInstrMeter() uint64 {
+	return 0
+}
+
+func (vm *bls12_381SyscallTestVM) SetPrevInstrMeter(uint64) {}
+
+func (vm *bls12_381SyscallTestVM) ComputeMeter() *cu.ComputeMeter {
+	return &vm.ctx.ComputeMeter
+}
+
+func (vm *bls12_381SyscallTestVM) Read(addr uint64, p []byte) error {
+	mem, err := vm.Translate(addr, uint64(len(p)), false)
+	if err != nil {
+		return err
+	}
+
+	copy(p, mem)
+	return nil
+}
+
+func (vm *bls12_381SyscallTestVM) Read8(addr uint64) (uint8, error) {
+	mem, err := vm.Translate(addr, 1, false)
+	if err != nil {
+		return 0, err
+	}
+
+	return mem[0], nil
+}
+
+func (vm *bls12_381SyscallTestVM) Read16(addr uint64) (uint16, error) {
+	mem, err := vm.Translate(addr, 2, false)
+	if err != nil {
+		return 0, err
+	}
+
+	return binary.LittleEndian.Uint16(mem), nil
+}
+
+func (vm *bls12_381SyscallTestVM) Read32(addr uint64) (uint32, error) {
+	mem, err := vm.Translate(addr, 4, false)
+	if err != nil {
+		return 0, err
+	}
+
+	return binary.LittleEndian.Uint32(mem), nil
+}
+
+func (vm *bls12_381SyscallTestVM) Read64(addr uint64) (uint64, error) {
+	mem, err := vm.Translate(addr, 8, false)
+	if err != nil {
+		return 0, err
+	}
+
+	return binary.LittleEndian.Uint64(mem), nil
+}
+
+func (vm *bls12_381SyscallTestVM) Write(addr uint64, p []byte) error {
+	mem, err := vm.Translate(addr, uint64(len(p)), true)
+	if err != nil {
+		return err
+	}
+
+	copy(mem, p)
+	return nil
+}
+
+func (vm *bls12_381SyscallTestVM) Write8(addr uint64, x uint8) error {
+	mem, err := vm.Translate(addr, 1, true)
+	if err != nil {
+		return err
+	}
+
+	mem[0] = x
+	return nil
+}
+
+func (vm *bls12_381SyscallTestVM) Write16(addr uint64, x uint16) error {
+	mem, err := vm.Translate(addr, 2, true)
+	if err != nil {
+		return err
+	}
+
+	binary.LittleEndian.PutUint16(mem, x)
+	return nil
+}
+
+func (vm *bls12_381SyscallTestVM) Write32(addr uint64, x uint32) error {
+	mem, err := vm.Translate(addr, 4, true)
+	if err != nil {
+		return err
+	}
+
+	binary.LittleEndian.PutUint32(mem, x)
+	return nil
+}
+
+func (vm *bls12_381SyscallTestVM) Write64(addr uint64, x uint64) error {
+	mem, err := vm.Translate(addr, 8, true)
+	if err != nil {
+		return err
+	}
+
+	binary.LittleEndian.PutUint64(mem, x)
+	return nil
+}
+
+func TestConformance_Bls12_381_G1Add(t *testing.T) {
+	inputBE := mustDecodeHex(t, "0956a9d4ecf511657fb7380d6364b785396b60dcc6c502d7e1afd439a88f687f75f2b4c8a287489b589a3a5a3a2ef8b00ace1970f00139590a1ea55ea4fcdbe185d6a10476b17b353935e9ff7075f1f7b9c3e8247b1fdd0639b0fba3c32723af0d203dd7537cbabd52004ff443a7153230e5086b330f132f4b4df6b93f428f6dedd39992a3af4a4532c6ebda09aae12e16d37454207382e06afacd8fee734acfeec1e8103b8c14fc0722902f8938beaaebbdee2d613ac7ca2da48bc8bed7093b")
+	inputLE := mustDecodeHex(t, "b0f82e3a5a3a9a589b4887a2c8b4f2757f688fa839d4afe1d702c5c6dc606b3985b764630d38b77f6511f5ecd4a95609af2327c3a3fbb03906dd1f7b24e8c3b9f7f17570ffe93539357bb17604a1d685e1dbfca45ea51e0a593901f07019ce0a2ee1aa09daebc632454aafa39299d3ed6d8f423fb9f64d4b2f130f336b08e5303215a743f44f0052bdba7c53d73d200d3b09d7bec88ba42dcac73a612deebdebaabe38892f902207fc148c3b10e8c1eecf4a73ee8fcdfa6ae08273205474d316")
+	expectedBE := mustDecodeHex(t, "173eff899dbc6256c06688abbb319b53cc85d99089670f04744b7f411d59df9320a15b6860d3ef66e95f3082cf9a13bd127066912449111b2f60742d381910bf381556d885f5cf479e1f1d3354b9868a404437a13799d69bfa15e904037529ef")
+	expectedLE := mustDecodeHex(t, "bd139acf82305fe966efd360685ba12093df591d417f4b74040f678990d985cc539b31bbab8866c05662bc9d89ff3e17ef29750304e915fa9bd69937a13744408a86b954331d1f9e47cff585d8561538bf1019382d74602f1b11492491667012")
+
+	outputBE, err := bls12_381G1AdditionWithEndianness(inputBE[:Bls12_381G1Len], inputBE[Bls12_381G1Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G1AdditionWithEndianness(inputLE[:Bls12_381G1Len], inputLE[Bls12_381G1Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G2Add(t *testing.T) {
+	inputBE := mustDecodeHex(t, "0b53153e04ae7b83a3133ed8c03019b839cf5046fd3381a957b68e019466cb63566fcf37cc75528ac75983cf9ef4cc8b1297d6c99e2765fcbd35fbeccd1b98a3e86535c512eef146b6716ff9637a2adc377f37f7aca4b7a992e5dab990b056ae1584961df1f1d74d0c4bee67175abdbf5548b5d655fdb7969e08fab2dca9d7f392d5960c0628bcc538d22e7d57051107181ba01663720907f46cb3c9262199db0ad302d44a5f97dfc86079a60aba7a28de5722e331a6c38b25dd2ce35677be290e6eb4ae2e4a917d5e1c27cd6b7e35bc2445a262694f319488e50580c5bb00ea8dc9f6df674bb121024b5a218b989c59195b9e64140c8782bfb505295ec35924b56fee18bbb2b38f11b544cbb886b9c3b01b5a021da5d1108f0be0fb3fbcda2917475b5aca6c50a0c8c2a26dc86005669cf52bf7dd8b94fefdb7a153fdf71647855d247fa2f83140adc911d208d6124107de0b0478115531cd5f84d098885c13c3b088275acf11c30ed721bfe83b03564e4e95a5b391a1bef743f3fc89012747")
+	inputLE := mustDecodeHex(t, "ae56b090b9dae592a9b7a4acf7377f37dc2a7a63f96f71b646f1ee12c53565e8a3981bcdecfb35bdfc65279ec9d697128bccf49ecf8359c78a5275cc37cf6f5663cb6694018eb657a98133fd4650cf39b81930c0d83e13a3837bae043e15530b29be7756e32cdd258bc3a631e32257de287aba0aa67960c8df975f4ad402d30adb992126c9b36cf40709726316a01b18071105577d2ed238c5bc28060c96d592f3d7a9dcb2fa089e96b7fd55d6b54855bfbd5a1767ee4b0c4dd7f1f11d96841529dabc3ffbe00b8f10d1a51d025a1bb0c3b986b8cb44b5118fb3b2bb18ee6fb52459c35e2905b5bf82870c14649e5b19599c988b215a4b0221b14b67dff6c98dea00bbc58005e58894314f6962a24524bc357e6bcd271c5e7d914a2eaeb46e0e47270189fcf343f7bea191b3a5954e4e56033be8bf21d70ec311cf5a2788b0c3135c8898d0845fcd31551178040bde074112d608d211c9ad4031f8a27f245d854716f7fd53a1b7fdfe948bddf72bf59c660560c86da2c2c8a0506cca5a5b4717")
+	expectedBE := mustDecodeHex(t, "159d0afb9c3818ae185b62c92125444c29a10ca61080a11f6c1f5cd838c5c642d206406a9a608739aa77dcd2ee4962530f924a7a4628ba7bbf8b0bf9dd140c3e5125bf16f8714e7c1d9de4dcbb06fc0f3bec62c6fccdb0bec0c79ad55c7ebd37026d080f80be1f6ab48260d77d320b7c4777531c41d1802f072ed49de6c733628fdc9dfeb3cbba74294c231c7bcf361105f824f7c1c97476cac97dc9c80d44f427cf46ce0c75cec009e83e218958491079be8b5b9e5093cf7d17b15de3846759")
+	expectedLE := mustDecodeHex(t, "37bd7e5cd59ac7c0beb0cdfcc662ec3b0ffc06bbdce49d1d7c4e71f816bf25513e0c14ddf90b8bbf7bba28467a4a920f536249eed2dc77aa3987609a6a4006d242c6c538d85c1f6c1fa18010a60ca1294c442521c9625b18ae18389cfb0a9d15596784e35db1177dcf93509e5b8bbe7910495889213ee809c0ce750cce46cf27f4440dc8c97dc9ca7674c9c1f724f8051136cf7b1c234c2974bacbb3fe9ddc8f6233c7e69dd42e072f80d1411c5377477c0b327dd76082b46a1fbe800f086d02")
+
+	outputBE, err := bls12_381G2AdditionWithEndianness(inputBE[:Bls12_381G2Len], inputBE[Bls12_381G2Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G2AdditionWithEndianness(inputLE[:Bls12_381G2Len], inputLE[Bls12_381G2Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G1Sub(t *testing.T) {
+	inputBE := mustDecodeHex(t, "067e43b1dda8db9311206d70cc5fcfb3e3ca20fa762bc369b02fbc2bb5e27b7784f061ace1f7b44c3ae5bc79f71cf5c611805eefce0a0a1494bae2ca0cc44748a72c574018d6eeda06a671a5b208dd00159a48a09e462ef47f04fa9e1f0282980cad836a11aca92ecde45319ccd876df106634ebcaffb75b634e8da90ef4a11cf020d62e005d6a4929b0dca0fb25126e0f5643d2897247dca779b1e08e97981dce0c23062e3c357f544ee758315fdb24e0b600fd88733b0f50e588671bd3785a")
+	inputLE := mustDecodeHex(t, "c6f51cf779bce53a4cb4f7e1ac61f084777be2b52bbc2fb069c32b76fa20cae3b3cf5fcc706d201193dba8ddb1437e069882021f9efa047ff42e469ea0489a1500dd08b2a571a606daeed61840572ca74847c40ccae2ba94140a0aceef5e80116e1225fba0dcb029496a5d002ed620f01ca1f40ea98d4e635bb7ffcaeb346610df76d8cc1953e4cd2ea9ac116a83ad0c5a78d31b6788e5500f3b7388fd00b6e024db5f3158e74e547f353c2e06230cce1d98978ee0b179a7dc477289d243560f")
+	expectedBE := mustDecodeHex(t, "0d90837443e588a58792b5bfc5d7447e679ee732316908f335d1631027b1d36380a425658bba0ee154d27810cb73a0310af344f157c1bab357d658277b7e881fb286cbde7fcedaf087b75d918894aeee9f0075d4abf794c5ce07e151724a3fc9")
+	expectedLE := mustDecodeHex(t, "31a073cb1078d254e10eba8b6525a48063d3b1271063d135f308693132e79e677e44d7c5bfb59287a588e5437483900dc93f4a7251e107cec594f7abd475009feeae9488915db787f0dace7fdecb86b21f887e7b2758d657b3bac157f144f30a")
+
+	outputBE, err := bls12_381G1SubtractionWithEndianness(inputBE[:Bls12_381G1Len], inputBE[Bls12_381G1Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G1SubtractionWithEndianness(inputLE[:Bls12_381G1Len], inputLE[Bls12_381G1Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G2Sub(t *testing.T) {
+	inputBE := mustDecodeHex(t, "016f712aa580c21a828e3ac63df471401960c40cd337d5556dd2d3b160300f7a9bada610715ffd45c40fbbc9cfff51b00f4d18c74e8e17b137763ef87b29d548a9b105b0c59e3e0105dbbe5c242575a2ca09e7c70d486624f6f13444b92cee171701c01c3d67ec4a2e1c4043c2f3d0ba2ec98e07a68b72d765ea6cb85d873db09ad01c4fd2846015c70b49d228f16bd708cb9c02d321cbc47cac94e879746de20f0d93f114461c0a11338f8c237f6d07cadcd0610ba7775ec05ca5d7e6a010380e496559d3550573945152d88d9432ae1156f6922ae6b5fa2840f87906a775bedb6039507fea8db39a6d0552e9fe0730056cfdc41090518cfcb8ecc161c881df841c877981813c214d2bb5b43ce06c7fcf70364251b9a67836a937ee20dbacd418a56acf144482e9be4bb1119d70ae58bdb67edb7288430fa78532ac7c5e0895cbe823da908e4a965eb6216a6f78cb3b0a794ff876a5e839573c2adf62689eee44983b13ac5914ee3f31cc8a6cc30ae9514fd76b2bc5bee70f0efbcbb3cde0c3")
+	inputLE := mustDecodeHex(t, "17ee2cb94434f1f62466480dc7e709caa27525245cbedb05013e9ec5b005b1a948d5297bf83e7637b1178e4ec7184d0fb051ffcfc9bb0fc445fd5f7110a6ad9b7a0f3060b1d3d26d55d537d30cc460194071f43dc63a8e821ac280a52a716f013810a0e6d7a55cc05e77a70b61d0dcca076d7f238c8f33110a1c4614f1930d0fe26d7479e894ac7cc4cb21d3029ccb08d76bf128d2490bc7156084d24f1cd09ab03d875db86cea65d7728ba6078ec92ebad0f3c243401c2e4aec673d1cc00117d4acdb20ee37a93678a6b951423670cf7f6ce03cb4b52b4d213c818179871c84df81c861c1ecb8fc8c519010c4fd6c053007fee952056d9ab38dea7f503960dbbe75a70679f84028fab5e62a92f65611ae32948dd8525194730555d35965490ec3e0cdb3cbfb0e0fe7bec52b6bd74f51e90ac36c8acc313fee1459ac133b9844ee9e6862df2a3c5739e8a576f84f790a3bcb786f6a21b65e964a8e90da23e8cb95085e7cac3285a70f438872db7eb6bd58ae709d11b14bbee9824414cf6aa518")
+	expectedBE := mustDecodeHex(t, "0fc0dceaf67e8da36ba22b75ab9ec384c4d6ed85628570f8a19403a3141a3188a1f424b3edcc3a16336a0004eff4f259050e951f4ed54699932b5413df64eb3dac4288c90b51a888cf2ec6d0ab90bb234d3aba93bff3090ce016e62470f672130d74ba3e9eb0c996bb0d20878c6cb2ae5ad432b8ee11e5a7c368b39ca6fb6373851990652d4613565bf7ec5dfc0e6ad40f2a3e68a2d808b49c34feb31d5f5e10f5d7a5437332babee3d5477e1d51d92b9d0c6469d3ac65d4498c956dfcb46216")
+	expectedLE := mustDecodeHex(t, "1372f67024e616e00c09f3bf93ba3a4d23bb90abd0c62ecf88a8510bc98842ac3deb64df13542b939946d54e1f950e0559f2f4ef04006a33163accedb324f4a188311a14a30394a1f870856285edd6c484c39eab752ba26ba38d7ef6eadcc00f1662b4fc6d958c49d465acd369640c9d2bd9511d7e47d5e3beba327343a5d7f5105e5f1db3fe349cb408d8a2683e2a0fd46a0efc5decf75b5613462d659019857363fba69cb368c3a7e511eeb832d45aaeb26c8c87200dbb96c9b09e3eba740d")
+
+	outputBE, err := bls12_381G2SubtractionWithEndianness(inputBE[:Bls12_381G2Len], inputBE[Bls12_381G2Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G2SubtractionWithEndianness(inputLE[:Bls12_381G2Len], inputLE[Bls12_381G2Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G1Mul(t *testing.T) {
+	inputBE := mustDecodeHex(t, "1412e9c96ece3820082c8c7925c49d38b486a421b48293071aefb7a3db558fc5f7f375fcc9ab9c5ad2072b5c5982a5e005651836bd16494c9188633b33ff7c2b3d08791e765afe0c7e5c984e2ce77e38dc23367502afbe698abcca24ab0ce7e11dc06f97bb256d5b81dfbce1750378a26b429fff3d802920f25fe8ca6abc9a93")
+	inputLE := mustDecodeHex(t, "e0a582595c2b07d25a9cabc9fc75f3f7c58f55dba3b7ef1a079382b421a486b4389dc425798c2c082038ce6ec9e91214e1e70cab24cabc8a69beaf02753623dc387ee72c4e985c7e0cfe5a761e79083d2b7cff333b6388914c4916bd36186505939abc6acae85ff22029803dff9f426ba2780375e1bcdf815b6d25bb976fc01d")
+	expectedBE := mustDecodeHex(t, "166548ff03f727daea75d05b9e727e37a647e3cd067c37ffa7429aed538f08b362b9a2a4aa3e8d0401b329315fd48be3127df50aa9c9abac980169519fa0fcb8503ba5aab972f8d0e46fe5c8ddcc0978998e58f0e4a49d4f483777ef3868363a")
+	expectedLE := mustDecodeHex(t, "e38bd45f3129b301048d3eaaa4a2b962b3088f53ed9a42a7ff377c06cde347a6377e729e5bd075eada27f703ff4865163a366838ef7737484f9da4e4f0588e997809ccddc8e56fe4d0f872b9aaa53b50b8fca09f51690198acabc9a90af57d12")
+
+	outputBE, err := bls12_381G1MultiplicationWithEndianness(inputBE[:Bls12_381G1Len], inputBE[Bls12_381G1Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G1MultiplicationWithEndianness(inputLE[:Bls12_381G1Len], inputLE[Bls12_381G1Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G2Mul(t *testing.T) {
+	inputBE := mustDecodeHex(t, "015f105a75b9fd4c1944366f9aa17dcb79049a43cd9d4c0980e02551d6e2473be0bb9899c73e3a4a89f52e659b11d440058600b91384cd654dcc763f47acd01dd23d3304bebfd3af69f5cc393854d2b8eba9e7a18053fceae3ffa6dbc9b0a91014dacb26b562d559987be6c9045f2a561d8943e9e6a1cee7c9b04f0cc538d424ebd8a01bdd637cdc854c7bd1c84e7a2410ab12f76f6f8426f0b71b4c87d388ca375df6ebbf92b7a16e81043aee3b4df23858609692f789e68923096c5f7f4b4e1dc06f97bb256d5b81dfbce1750378a26b429fff3d802920f25fe8ca6abc9a93")
+	inputLE := mustDecodeHex(t, "10a9b0c9dba6ffe3eafc5380a1e7a9ebb8d2543839ccf569afd3bfbe04333dd21dd0ac473f76cc4d65cd8413b900860540d4119b652ef5894a3a3ec79998bbe03b47e2d65125e080094c9dcd439a0479cb7da19a6f3644194cfdb9755a105f014e4b7f5f6c092389e689f79296605838f24d3bee3a04816ea1b792bfebf65d37ca88d3874c1bb7f026846f6ff712ab10247a4ec8d17b4c85dc7c63dd1ba0d8eb24d438c50c4fb0c9e7cea1e6e943891d562a5f04c9e67b9859d562b526cbda14939abc6acae85ff22029803dff9f426ba2780375e1bcdf815b6d25bb976fc01d")
+	expectedBE := mustDecodeHex(t, "0a5c58c01ac82680bc94fe10ca27aefc216f2979d309d18a2b687ad604fb2251245c8f1397d56ff0640f214a7b8fb599066b52608d933fc80d1f4205b8871852bdf03afa303d840d17f01feefc21bff1265addc9a489625c94f6e116ef6361b314fb27720e9ca5b63ae96429223b776728ce32afdf7e9211a10e542b953ad4c5fa0fd07a210457db52c90c0b2c4c3bb6124c26b8af0bd30440852968b9993ff627912671a2b74d023386f3c44a6fb7a9dee4bf358135ba5e61901f75dacfd6bd")
+	expectedLE := mustDecodeHex(t, "b36163ef16e1f6945c6289a4c9dd5a26f1bf21fcee1ff0170d843d30fa3af0bd521887b805421f0dc83f938d60526b0699b58f7b4a210f64f06fd597138f5c245122fb04d67a682b8ad109d379296f21fcae27ca10fe94bc8026c81ac0585c0abdd6cfda751f90615eba358135bfe4dea9b76f4ac4f38633024db7a271269127f63f99b96829854004d30bafb8264c12b63b4c2c0b0cc952db5704217ad00ffac5d43a952b540ea111927edfaf32ce2867773b222964e93ab6a59c0e7227fb14")
+
+	outputBE, err := bls12_381G2MultiplicationWithEndianness(inputBE[:Bls12_381G2Len], inputBE[Bls12_381G2Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G2MultiplicationWithEndianness(inputLE[:Bls12_381G2Len], inputLE[Bls12_381G2Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G1Decompress(t *testing.T) {
+	inputBE := mustDecodeHex(t, "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb")
+	inputLE := mustDecodeHex(t, "bbc622db0af03afbef1a7af93fe8556c58ac1b173f3a4ea105b974974f8c68c30faca94f8c63952694d79731a7d3f197")
+	expectedBE := mustDecodeHex(t, "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1")
+	expectedLE := mustDecodeHex(t, "bbc622db0af03afbef1a7af93fe8556c58ac1b173f3a4ea105b974974f8c68c30faca94f8c63952694d79731a7d3f117e1e7c5462923aa0ce48a88a244c73cd0edb3042ccb18db00f60ad0d595e0f5fce48a1d74ed309ea0f1a0aae381f4b308")
+
+	outputBE, err := bls12_381G1DecompressWithEndianness(inputBE, false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G1DecompressWithEndianness(inputLE, true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_G2Decompress(t *testing.T) {
+	inputBE := mustDecodeHex(t, "93e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8")
+	inputLE := mustDecodeHex(t, "b8bd21c1c85680d4efbb05a82603ac0b77d1e37a640b51b4023b40fad47ae4c65110c52d27050826910a8ff0b2a24a027e2b045d057dace5575d941312f14c3349507fdcbb61dab51ab62099d0d06b59654f2788a0d3ac7d609f7152602be093")
+	expectedBE := mustDecodeHex(t, "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801")
+	expectedLE := mustDecodeHex(t, "b8bd21c1c85680d4efbb05a82603ac0b77d1e37a640b51b4023b40fad47ae4c65110c52d27050826910a8ff0b2a24a027e2b045d057dace5575d941312f14c3349507fdcbb61dab51ab62099d0d06b59654f2788a0d3ac7d609f7152602be0130128b808865493e189a2ac3bccc93a922cd16051699a426da7d3bd8caa9bfdad1a352edac6cdc98c116e7d7227d5e50cbe795ff05f07a9aaa11dec5c270d373fab992e57ab927426af63a7857e283ecb998bc22bb0d2ac32cc34a72ea0c40606")
+
+	outputBE, err := bls12_381G2DecompressWithEndianness(inputBE, false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedBE, outputBE)
+
+	outputLE, err := bls12_381G2DecompressWithEndianness(inputLE, true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedLE, outputLE)
+}
+
+func TestConformance_Bls12_381_Validation(t *testing.T) {
+	g1ValidBE := mustDecodeHex(t, "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1")
+	g1ValidLE := mustDecodeHex(t, "bbc622db0af03afbef1a7af93fe8556c58ac1b173f3a4ea105b974974f8c68c30faca94f8c63952694d79731a7d3f117e1e7c5462923aa0ce48a88a244c73cd0edb3042ccb18db00f60ad0d595e0f5fce48a1d74ed309ea0f1a0aae381f4b308")
+	g1InvalidBE := mustDecodeHex(t, "16a3fa43c5a867c98021aa604a282d5a69b5f47c806b1b8e9e60002e901b3dcd41268da5377172172469fc7393100c270b1335d76b805e44162e4ab3ece8dc1e30a9551046701a254968cbbd2a608d5aa7293d52b8505d70cc8ce1f56782b8c7")
+	g1InvalidLE := mustDecodeHex(t, "270c109373fc692417727137a58d2641cd3d1b902e00609e8e1b6b807cf4b5695a2d284a60aa2180c967a8c543faa316c7b88267f5e18ccc705d50b8523d29a75a8d602abdcb6849251a70461055a9301edce8ecb34a2e16445e806bd735130b")
+	g2InvalidBE := mustDecodeHex(t, "004fcf735b480050313bcbbdb2f0128ddf933e4f628393216797890ca00d4eb40ddd59efb2f98d0826891747d5021c0d18a8330622b8e416ad0be0a80e679a12a633ff9a2de6fd959110fb6bf83735962583858a9cc346ca8390a6a450fbb3a70836bc990aeb530ed35fd43678af9453fd6a35b29d76d06e00bb6f0e8cf68bc8cdb24824438c2764a3688c4e5b7b82c50cb04668412b68e866eee573fd3e3dcf74dff5cefaa31ec84c655d45d8f0bdc6fd1bc720d7e00c324ecc6a2875442c76")
+	g2InvalidLE := mustDecodeHex(t, "a7b3fb50a4a69083ca46c39c8a858325963537f86bfb109195fde62d9aff33a6129a670ea8e00bad16e4b8220633a8180d1c02d547178926088df9b2ef59dd0db44e0da00c899767219383624f3e93df8d12f0b2bdcb3b315000485b73cf4f00762c4475286acc4e320ce0d720c71bfdc6bdf0d8455d654cc81ea3facef5df74cf3d3efd73e5ee66e8682b416846b00cc5827b5b4e8c68a364278c432448b2cdc88bf68c0e6fbb006ed0769db2356afd5394af7836d45fd30e53eb0a99bc3608")
+
+	assert.True(t, bls12_381G1ValidateWithEndianness(g1ValidBE, false))
+	assert.True(t, bls12_381G1ValidateWithEndianness(g1ValidLE, true))
+	assert.False(t, bls12_381G1ValidateWithEndianness(g1InvalidBE, false))
+	assert.False(t, bls12_381G1ValidateWithEndianness(g1InvalidLE, true))
+	assert.False(t, bls12_381G2ValidateWithEndianness(g2InvalidBE, false))
+	assert.False(t, bls12_381G2ValidateWithEndianness(g2InvalidLE, true))
+}
+
+func TestConformance_Bls12_381_Pairing(t *testing.T) {
+	inputIdentityBE := mustDecodeHex(t, "")
+	inputIdentityLE := mustDecodeHex(t, "")
+	expectedIdentityBE := mustDecodeHex(t, "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001")
+	expectedIdentityLE := mustDecodeHex(t, "010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+
+	expectedIdentityBE = make([]byte, Bls12_381GtLen)
+	expectedIdentityBE[len(expectedIdentityBE)-1] = 1
+	expectedIdentityLE = make([]byte, Bls12_381GtLen)
+	expectedIdentityLE[0] = 1
+
+	outputIdentityBE, err := bls12_381PairingMapWithEndianness(inputIdentityBE, inputIdentityBE, false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedIdentityBE, outputIdentityBE)
+
+	outputIdentityLE, err := bls12_381PairingMapWithEndianness(inputIdentityLE, inputIdentityLE, true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedIdentityLE, outputIdentityLE)
+
+	inputOnePairBE := mustDecodeHex(t, "03a16836f27410320f712a266c0b7f402bf93285690885ee2206bd7799244b4157f95a6d85c8cb197f44fbf30ed2cc23127c950544b239e6fd9ac0a3059290640766094c43fb932d1b6fccd5db8d3a0beb6406dc4de6e8c8d2c803b80a5017a408f9da9ae87dfab9993c849bbc7732cd204cb8b5a49e400cb3b5965fe209af33a9b922b2f9a11ba4d26babcbf60b9e560e87c5e1072c5ef3d8c864c7760e6ab558cacf9ce3657eec2ebdee49dc769749fff96767ffb95b52d4946e13d46fc7c504901991c48ecdfc555530f3d13e39d42c955171ab3cc149280b2478133e021916e8e332234baccd02251b41b6064a2b01ef6981b862d7510f13ab27fc39b0abb5477cfb35cad5213aaf342959e6d9b1201852a6f0e8df188d46791933ad1e06")
+	inputOnePairLE := mustDecodeHex(t, "23ccd20ef3fb447f19cbc8856d5af957414b249977bd0622ee8508698532f92b407f0b6c262a710f321074f23668a103a417500ab803c8d2c8e8e64ddc0664eb0b3a8ddbd5cc6f1b2d93fb434c09660764909205a3c09afde639b24405957c12c5c76fd4136e94d4525bb9ff6767f9ff499776dc49eebd2eec7e65e39ccfca58b56a0e76c764c8d8f35e2c07e1c5870e569e0bf6cbab6bd2a41ba1f9b222b9a933af09e25f96b5b30c409ea4b5b84c20cd3277bc9b843c99b9fa7de89adaf908061ead331979468d18dfe8f0a6521820b1d9e6592934af3a21d5ca35fb7c47b5abb039fc27ab130f51d762b88169ef012b4a06b6411b2502cdac4b2332e3e81619023e1378240b2849c13cab7151952cd4393ed1f3305555fccd8ec491199004")
+	expectedOnePairBE := mustDecodeHex(t, "0e39a48076e53ac2a3b3079b131bc3b8f7f6534c3f4778488f8202c023fb24e8e57a447e36e4c5f970ea5d8285f64b290d1fe8e169dbb469e1b82b39b80ae493f5e32844d7d90fa40ee777867821d234402f272aabdde13af9f7cca11410670100a86d9ddf3c930b4c025f56ae04647d7ce21f9fc7a031624c7cdd6506d56f2c18ac4e2ad8895b44d328d2acf21d73dc0b9cf975760c3b3b5789d9be903ef967f4f79870ee1f7a88270931d716b4a478a6733e8204d8399b08d67409dea822f2132fb77cc4de3a874b61f2e7beeea2327ce6e5ac9c8cc4a3d5319990a7767aa746cb9178ed2e878200cc8b3d160af3e80f26a1926a8a56c608a7e57d5f1c783317a1fa697db1a9a8610500e78f8d165c8f945f42979a37a9005b6b053bfc088c00c34087c5e2ebaa7fb0d907b4ebde3ac3ddc082568f00c7e13539b5979851b7fcfb057c3da485a90e14ce243801c5d6170a20df8057a6213d1dbe5a9652796dffd34f2e3930d57d085d0a97a2898581ed654d27555eea2b5565f0e95d39ab0d12261f1d29a9c1316c77e782612d23fc957d7440a346288fa00e0f5ba8cf4d284ad072324077d8b660da00b94569c267138121ccfaedbf8f7a38ea3e08e001f26e0ac2b2c6dc97a7eaebcf945df9dd990f56594c311d124a00f62a8f593c306017add1d59c509a9fa10cb2e1e24d63f99af66e60b04f5a02be3fbd7baace778e8a0f5dbfe6649f8e3277cc9dc9e65d39037d60c3f7c34c18b06358ce563fcc25adb67433f00f9bc7c7c6b72cf1fbec23b224086b5299901c1de5969d25d86074")
+	expectedOnePairLE := mustDecodeHex(t, "7460d8259d96e51d1c9099526b0824b223ecfbf12cb7c6c7c79b0ff03374b6ad25cc3f56ce5863b0184cc3f7c3607d03395de6c99dcc77328e9f64e6bf5d0f8a8e77ceaa7bbd3fbe025a4fb0606ef69af9634de2e1b20ca19f9a509cd5d1ad1760303c598f2af6004a121d314c59560f99ddf95d94cfebeaa797dcc6b2c20a6ef201e0083eea387a8fbfedfacc21811367c26945b900da60b6d877403272d04a284dcfa85b0f0ea08f2846a340747d95fc232d6182e7776c31c1a9291d1f26120dab395de9f065552bea5e55274d65ed818589a2970a5d087dd530392e4fd3ff6d7952965abe1d3d21a65780df200a17d6c5013824ce140ea985a43d7c05fbfcb7519897b53935e1c7008f5682c0ddc33adeebb407d9b07faaebe2c58740c3008c08fc3b056b5b00a9379a97425f948f5c168d8fe7000561a8a9b17d69faa11733781c5f7de5a708c6568a6a92a1260fe8f30a163d8bcc0082872eed7891cb46a77a76a7909931d5a3c48c9cace5e67c32a2eebee7f2614b873adec47cb72f13f222a8de0974d6089b39d804823e73a678a4b416d7310927887a1fee7098f7f467f93e90bed989573b3b0c7675f99c0bdc731df2acd228d3445b89d82a4eac182c6fd50665dd7c4c6231a0c79f1fe27c7d6404ae565f024c0b933cdf9d6da80001671014a1ccf7f93ae1ddab2a272f4034d221788677e70ea40fd9d74428e3f593e40ab8392bb8e169b4db69e1e81f0d294bf685825dea70f9c5e4367e447ae5e824fb23c002828f4878473f4c53f6f7b8c31b139b07b3a3c23ae57680a4390e")
+
+	outputOnePairBE, err := bls12_381PairingMapWithEndianness(inputOnePairBE[:Bls12_381G1Len], inputOnePairBE[Bls12_381G1Len:], false)
+	require.NoError(t, err)
+	assert.Equal(t, expectedOnePairBE, outputOnePairBE)
+
+	outputOnePairLE, err := bls12_381PairingMapWithEndianness(inputOnePairLE[:Bls12_381G1Len], inputOnePairLE[Bls12_381G1Len:], true)
+	require.NoError(t, err)
+	assert.Equal(t, expectedOnePairLE, outputOnePairLE)
+}
+
+func TestSyscall_Bls12_381ValidateRequiresFeature(t *testing.T) {
+	point := mustDecodeHex(t, "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1")
+
+	vmWithoutFeature := newBls12_381SyscallTestVM(Bls12_381G1Len, features.Curve25519SyscallEnabled)
+	copy(vmWithoutFeature.mem, point)
+
+	_, err := SyscallCurveValidatePointImpl(vmWithoutFeature, Bls12_381G1BE, 0)
+	require.EqualError(t, err, "SyscallError::InvalidAttribute")
+
+	vmWithFeature := newBls12_381SyscallTestVM(Bls12_381G1Len, features.Curve25519SyscallEnabled, features.EnableBls12_381Syscall)
+	copy(vmWithFeature.mem, point)
+
+	result, err := SyscallCurveValidatePointImpl(vmWithFeature, Bls12_381G1BE, 0)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), result)
+}
+
+func TestSyscall_Bls12_381GroupOpRequiresFeature(t *testing.T) {
+	input := mustDecodeHex(t, "0956a9d4ecf511657fb7380d6364b785396b60dcc6c502d7e1afd439a88f687f75f2b4c8a287489b589a3a5a3a2ef8b00ace1970f00139590a1ea55ea4fcdbe185d6a10476b17b353935e9ff7075f1f7b9c3e8247b1fdd0639b0fba3c32723af0d203dd7537cbabd52004ff443a7153230e5086b330f132f4b4df6b93f428f6dedd39992a3af4a4532c6ebda09aae12e16d37454207382e06afacd8fee734acfeec1e8103b8c14fc0722902f8938beaaebbdee2d613ac7ca2da48bc8bed7093b")
+	expected := mustDecodeHex(t, "173eff899dbc6256c06688abbb319b53cc85d99089670f04744b7f411d59df9320a15b6860d3ef66e95f3082cf9a13bd127066912449111b2f60742d381910bf381556d885f5cf479e1f1d3354b9868a404437a13799d69bfa15e904037529ef")
+
+	vmWithoutFeature := newBls12_381SyscallTestVM(Bls12_381G1Len*3, features.Curve25519SyscallEnabled)
+	copy(vmWithoutFeature.mem[:Bls12_381G1Len*2], input)
+
+	_, err := SyscallCurveGroupOpsImpl(vmWithoutFeature, Bls12_381G1BE, CurveOpAdd, 0, Bls12_381G1Len, Bls12_381G1Len*2)
+	require.EqualError(t, err, "SyscallError::InvalidAttribute")
+
+	vmWithFeature := newBls12_381SyscallTestVM(Bls12_381G1Len*3, features.Curve25519SyscallEnabled, features.EnableBls12_381Syscall)
+	copy(vmWithFeature.mem[:Bls12_381G1Len*2], input)
+
+	result, err := SyscallCurveGroupOpsImpl(vmWithFeature, Bls12_381G1BE, CurveOpAdd, 0, Bls12_381G1Len, Bls12_381G1Len*2)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), result)
+	assert.Equal(t, expected, vmWithFeature.mem[Bls12_381G1Len*2:Bls12_381G1Len*3])
+}
+
+func TestSyscall_Bls12_381PairingMap(t *testing.T) {
+	input := mustDecodeHex(t, "03a16836f27410320f712a266c0b7f402bf93285690885ee2206bd7799244b4157f95a6d85c8cb197f44fbf30ed2cc23127c950544b239e6fd9ac0a3059290640766094c43fb932d1b6fccd5db8d3a0beb6406dc4de6e8c8d2c803b80a5017a408f9da9ae87dfab9993c849bbc7732cd204cb8b5a49e400cb3b5965fe209af33a9b922b2f9a11ba4d26babcbf60b9e560e87c5e1072c5ef3d8c864c7760e6ab558cacf9ce3657eec2ebdee49dc769749fff96767ffb95b52d4946e13d46fc7c504901991c48ecdfc555530f3d13e39d42c955171ab3cc149280b2478133e021916e8e332234baccd02251b41b6064a2b01ef6981b862d7510f13ab27fc39b0abb5477cfb35cad5213aaf342959e6d9b1201852a6f0e8df188d46791933ad1e06")
+	expected := mustDecodeHex(t, "0e39a48076e53ac2a3b3079b131bc3b8f7f6534c3f4778488f8202c023fb24e8e57a447e36e4c5f970ea5d8285f64b290d1fe8e169dbb469e1b82b39b80ae493f5e32844d7d90fa40ee777867821d234402f272aabdde13af9f7cca11410670100a86d9ddf3c930b4c025f56ae04647d7ce21f9fc7a031624c7cdd6506d56f2c18ac4e2ad8895b44d328d2acf21d73dc0b9cf975760c3b3b5789d9be903ef967f4f79870ee1f7a88270931d716b4a478a6733e8204d8399b08d67409dea822f2132fb77cc4de3a874b61f2e7beeea2327ce6e5ac9c8cc4a3d5319990a7767aa746cb9178ed2e878200cc8b3d160af3e80f26a1926a8a56c608a7e57d5f1c783317a1fa697db1a9a8610500e78f8d165c8f945f42979a37a9005b6b053bfc088c00c34087c5e2ebaa7fb0d907b4ebde3ac3ddc082568f00c7e13539b5979851b7fcfb057c3da485a90e14ce243801c5d6170a20df8057a6213d1dbe5a9652796dffd34f2e3930d57d085d0a97a2898581ed654d27555eea2b5565f0e95d39ab0d12261f1d29a9c1316c77e782612d23fc957d7440a346288fa00e0f5ba8cf4d284ad072324077d8b660da00b94569c267138121ccfaedbf8f7a38ea3e08e001f26e0ac2b2c6dc97a7eaebcf945df9dd990f56594c311d124a00f62a8f593c306017add1d59c509a9fa10cb2e1e24d63f99af66e60b04f5a02be3fbd7baace778e8a0f5dbfe6649f8e3277cc9dc9e65d39037d60c3f7c34c18b06358ce563fcc25adb67433f00f9bc7c7c6b72cf1fbec23b224086b5299901c1de5969d25d86074")
+
+	vm := newBls12_381SyscallTestVM(Bls12_381G1Len+Bls12_381G2Len+Bls12_381GtLen, features.EnableBls12_381Syscall)
+	copy(vm.mem[:Bls12_381G1Len+Bls12_381G2Len], input)
+
+	result, err := SyscallCurvePairingMapImpl(vm, Bls12_381BE, 1, 0, Bls12_381G1Len, Bls12_381G1Len+Bls12_381G2Len)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), result)
+	assert.Equal(t, expected, vm.mem[Bls12_381G1Len+Bls12_381G2Len:Bls12_381G1Len+Bls12_381G2Len+Bls12_381GtLen])
+}
+
+func TestSyscalls_RegisterBls12_381Surface(t *testing.T) {
+	ft := features.NewFeaturesDefault()
+
+	_, ok := Syscalls(ft, false, sbpf.SymbolHash("sol_curve_decompress"))
+	assert.False(t, ok)
+
+	_, ok = Syscalls(ft, false, sbpf.SymbolHash("sol_curve_pairing_map"))
+	assert.False(t, ok)
+
+	ft.EnableFeature(features.EnableBls12_381Syscall, 0)
+
+	_, ok = Syscalls(ft, false, sbpf.SymbolHash("sol_curve_decompress"))
+	assert.True(t, ok)
+
+	_, ok = Syscalls(ft, false, sbpf.SymbolHash("sol_curve_pairing_map"))
+	assert.True(t, ok)
+
+	_, ok = Syscalls(ft, false, sbpf.SymbolHash("sol_curve_validate_point"))
+	assert.False(t, ok)
+
+	ft.EnableFeature(features.Curve25519SyscallEnabled, 0)
+
+	_, ok = Syscalls(ft, false, sbpf.SymbolHash("sol_curve_validate_point"))
+	assert.True(t, ok)
+}

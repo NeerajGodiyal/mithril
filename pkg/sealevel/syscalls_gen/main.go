@@ -32,6 +32,8 @@ func main() {
 		{"sol_curve_validate_point", "SyscallValidatePoint", "ft.IsActive(features.Curve25519SyscallEnabled)"},
 		{"sol_curve_multiscalar_mul", "SyscallCurveMultiscalarMultiplication", "ft.IsActive(features.Curve25519SyscallEnabled)"},
 		{"sol_curve_group_op", "SyscallCurveGroupOps", "ft.IsActive(features.Curve25519SyscallEnabled)"},
+		{"sol_curve_decompress", "SyscallCurveDecompress", "ft.IsActive(features.EnableBls12_381Syscall)"},
+		{"sol_curve_pairing_map", "SyscallCurvePairingMap", "ft.IsActive(features.EnableBls12_381Syscall)"},
 		{"sol_alt_bn128_compression", "SyscallAltBn128Compression", "ft.IsActive(features.EnableAltbn128CompressionSyscall)"},
 		{"sol_alt_bn128_group_op", "SyscallAltBn128", "ft.IsActive(features.EnableAltBn128Syscall)"},
 		{"sol_memcpy_", "SyscallMemcpy", ""},
