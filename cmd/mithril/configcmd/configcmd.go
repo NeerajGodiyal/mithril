@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -41,17 +43,17 @@ If config.toml already exists, this command will not overwrite it.`,
 
 Examples:
   mithril config set storage.accounts /mnt/accounts
-  mithril config set storage.blockstore /mnt/blockstore
+  mithril config set storage.shredstore /mnt/shredstore
   mithril config set storage.snapshots /mnt/snapshots
   mithril config set bootstrap.mode auto
-  mithril config set replay.txpar 48
+  mithril config set tuning.txpar 48
 
 Common keys:
   storage.accounts    - Path to AccountsDB directory
-  storage.blockstore  - Path to blockstore directory
+  storage.shredstore  - Path to shredstore directory
   storage.snapshots   - Path to snapshots directory
   bootstrap.mode      - Startup mode: auto, snapshot, or accountsdb
-  replay.txpar        - Transaction parallelism (recommended: 2x CPU cores)
+  tuning.txpar        - Transaction parallelism (recommended: 2x CPU cores)
   network.rpc         - RPC endpoint(s)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -98,7 +100,7 @@ func runConfigInit() {
 	config := generateStarterConfig()
 
 	// Write to file
-	if err := os.WriteFile(outputPath, []byte(config), 0644); err != nil {
+	if err := tui.AtomicWriteFile(outputPath, []byte(config), 0600); err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)
 	}
@@ -125,8 +127,9 @@ mode = "auto"   # "auto" | "snapshot" | "new-snapshot" | "accountsdb"
 
 [storage]
 accounts = "/mnt/mithril-accounts"           # AccountsDB (~500GB, use fastest NVMe)
-blockstore = "/mnt/mithril-ledger/blockstore" # NOTE: block persistence temporarily disabled
+shredstore = "/mnt/mithril-ledger/shredstore" # Lightbringer shred storage
 snapshots = "/mnt/mithril-ledger/snapshots"  # ~100GB for full + incremental
+logs = "/mnt/mithril-logs"                   # Log files (created if missing)
 
 [network]
 cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
@@ -136,7 +139,16 @@ rpc = ["https://api.mainnet-beta.solana.com"]
 source = "rpc"   # "rpc" | "lightbringer"
 # lightbringer_endpoint = "localhost:9000"
 
-[replay]
+# [lightbringer]
+# enabled = false
+# binary_path = "./lightbringer"
+# gossip_entrypoint = "1.2.3.4:8000"
+# shredstore stored in [storage] section
+# rpc_addr = "127.0.0.1:3000"
+# grpc_addr = "127.0.0.1:3001"
+# See config.example.toml for full Lightbringer sidecar options.
+
+[tuning]
 txpar = 24   # Recommended: 2x your CPU core count
 
 [rpc]
@@ -259,7 +271,7 @@ func runConfigSet(key, value string) {
 	}
 
 	// Write back
-	err = os.WriteFile(configFile, []byte(strings.Join(result, "\n")), 0644)
+	err = tui.AtomicWriteFile(configFile, []byte(strings.Join(result, "\n")), 0600)
 	if err != nil {
 		fmt.Printf("Error writing config file: %v\n", err)
 		os.Exit(1)
@@ -268,14 +280,19 @@ func runConfigSet(key, value string) {
 	fmt.Printf("Set %s = %s\n", key, quotedValue)
 }
 
-// formatTOMLValue formats a value appropriately for TOML
+// formatTOMLValue formats a value appropriately for TOML.
+// Returns the canonical form of the parsed value to prevent injection
+// via newlines or other control characters in the raw input.
 func formatTOMLValue(value string) string {
-	// Check if it's a number
-	if _, err := fmt.Sscanf(value, "%d", new(int)); err == nil {
-		return value
+	// Check if it's an integer — return the parsed number, not raw input
+	var n int
+	if _, err := fmt.Sscanf(value, "%d", &n); err == nil && fmt.Sprintf("%d", n) == strings.TrimSpace(value) {
+		return fmt.Sprintf("%d", n)
 	}
-	if _, err := fmt.Sscanf(value, "%f", new(float64)); err == nil {
-		return value
+	// Check if it's a float — return the parsed number, not raw input
+	var f float64
+	if _, err := fmt.Sscanf(value, "%f", &f); err == nil && !strings.ContainsAny(value, "\n\r") {
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
 
 	// Check if it's a boolean
@@ -283,13 +300,13 @@ func formatTOMLValue(value string) string {
 		return value
 	}
 
-	// Check if it's already an array
-	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+	// Check if it's already an array (no newlines allowed)
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") && !strings.ContainsAny(value, "\n\r") {
 		return value
 	}
 
-	// Otherwise, quote it as a string
-	return fmt.Sprintf(`"%s"`, value)
+	// Otherwise, quote it as a string (safe — %q escapes all control chars)
+	return fmt.Sprintf("%q", value)
 }
 
 // runConfigGet reads a key from the config file

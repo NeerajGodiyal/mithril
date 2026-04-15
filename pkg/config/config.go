@@ -131,6 +131,28 @@ type SnapshotConfig struct {
 	MinIncrementalSpeedMBs float64 `toml:"min_incremental_speed_mbs" mapstructure:"min_incremental_speed_mbs"`
 }
 
+// LightbringerConfig holds Lightbringer sidecar configuration.
+// When Enabled, Mithril manages Lightbringer's lifecycle: generates its config,
+// spawns the process, captures logs, and shuts it down on exit.
+type LightbringerConfig struct {
+	Enabled          bool   `toml:"enabled" mapstructure:"enabled"`                     // Enable managed Lightbringer sidecar
+	BinaryPath       string `toml:"binary_path" mapstructure:"binary_path"`             // Path to lightbringer binary
+	GossipEntrypoint string `toml:"gossip_entrypoint" mapstructure:"gossip_entrypoint"` // Solana gossip entrypoint (required when enabled)
+	Storage          string `toml:"storage" mapstructure:"storage"`                     // Shred storage directory
+	RpcAddr          string `toml:"rpc_addr" mapstructure:"rpc_addr"`                   // Debug HTTP endpoint
+	GrpcAddr         string `toml:"grpc_addr" mapstructure:"grpc_addr"`                 // gRPC stream endpoint (auto-synced to block.lightbringer_endpoint)
+	ConfigDir        string `toml:"config_dir" mapstructure:"config_dir"`               // Directory to write Lightbringer.toml
+
+	// Optional: InfluxDB metrics — written as [influxdb] section in generated Lightbringer.toml
+	InfluxdbHost     string `toml:"influxdb_host" mapstructure:"influxdb_host"`
+	InfluxdbDatabase string `toml:"influxdb_database" mapstructure:"influxdb_database"`
+	InfluxdbToken    string `toml:"influxdb_token" mapstructure:"influxdb_token"`
+
+	// Optional: Block confirmation — written as [block_confirmation] section in generated Lightbringer.toml
+	BlockConfirmRpcHTTP string `toml:"block_confirmation_rpc_http" mapstructure:"block_confirmation_rpc_http"`
+	BlockConfirmRpcWS   string `toml:"block_confirmation_rpc_websocket" mapstructure:"block_confirmation_rpc_websocket"`
+}
+
 // LogConfig holds logging configuration
 type LogConfig struct {
 	Dir        string `toml:"dir" mapstructure:"dir"`                 // Log directory (default: /mnt/mithril-logs)
@@ -155,15 +177,16 @@ type Config struct {
 	ScratchDirectory string `toml:"scratch_directory" mapstructure:"scratch_directory"` // was: scratchdir
 
 	// Sections
-	Ledger      LedgerConfig      `toml:"ledger" mapstructure:"ledger"`
-	Rpc         RpcConfig         `toml:"rpc" mapstructure:"rpc"`
-	Replay      ReplayConfig      `toml:"replay" mapstructure:"replay"`
-	Block       BlockConfig       `toml:"block" mapstructure:"block"`
-	Consensus   ConsensusConfig   `toml:"consensus" mapstructure:"consensus"`
-	Snapshot    SnapshotConfig    `toml:"snapshot" mapstructure:"snapshot"`
-	Development DevelopmentConfig `toml:"development" mapstructure:"development"`
-	Reporting   ReportingConfig   `toml:"reporting" mapstructure:"reporting"`
-	Log         LogConfig         `toml:"log" mapstructure:"log"`
+	Ledger       LedgerConfig       `toml:"ledger" mapstructure:"ledger"`
+	Rpc          RpcConfig          `toml:"rpc" mapstructure:"rpc"`
+	Replay       ReplayConfig       `toml:"replay" mapstructure:"replay"`
+	Block        BlockConfig        `toml:"block" mapstructure:"block"`
+	Consensus    ConsensusConfig    `toml:"consensus" mapstructure:"consensus"`
+	Lightbringer LightbringerConfig `toml:"lightbringer" mapstructure:"lightbringer"`
+	Snapshot     SnapshotConfig     `toml:"snapshot" mapstructure:"snapshot"`
+	Development  DevelopmentConfig  `toml:"development" mapstructure:"development"`
+	Reporting    ReportingConfig    `toml:"reporting" mapstructure:"reporting"`
+	Log          LogConfig          `toml:"log" mapstructure:"log"`
 }
 
 // ConfigFile holds the path to the config file (set via --config flag)

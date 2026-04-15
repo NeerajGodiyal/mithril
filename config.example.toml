@@ -54,18 +54,14 @@ name = "mithril"
 #     Periodic dumps of account state from the network. Mithril downloads
 #     one on first run to bootstrap AccountsDB.
 #
-#   Blockstore (varies)
-#     Incoming blocks from RPC/Lightbringer. Size depends on how much history
-#     you want to keep (0 to hundreds of GB).
-#     NOTE: Block download to disk is TEMPORARILY DISABLED. Blocks are
-#     currently streamed directly from RPC and not persisted to disk.
-#     This path is reserved for future use when block persistence is
-#     re-implemented.
+#   Shredstore (varies)
+#     Lightbringer stores received shreds here for block streaming
+#     and potential repair serving. Size depends on retention settings.
 #
 # Recommended setup (two NVMe drives):
 #   /mnt/mithril-accounts/     <- Fast NVMe (~500GB for AccountsDB)
 #   /mnt/mithril-ledger/       <- Larger NVMe for everything else
-#       ├── blockstore/
+#       ├── shredstore/
 #       └── snapshots/
 #
 # See scripts/disk-setup.sh for automated setup.
@@ -75,12 +71,9 @@ name = "mithril"
     # Put this on your fastest NVMe due to heavy random I/O.
     accounts = "/mnt/mithril-accounts"
 
-    # Blockstore - incoming blocks from RPC/Lightbringer
-    # Size depends on how much block history you keep.
-    # NOTE: Block persistence is temporarily disabled. Blocks are streamed
-    # directly from RPC without saving to disk. This setting is reserved
-    # for when block persistence is re-implemented.
-    blockstore = "/mnt/mithril-ledger/blockstore"
+    # Shredstore - Lightbringer stores received shreds here
+    # Used for block streaming and potential repair serving.
+    shredstore = "/mnt/mithril-ledger/shredstore"
 
     # Snapshots - downloaded on first run (~100GB for full + incremental)
     snapshots = "/mnt/mithril-ledger/snapshots"
@@ -117,15 +110,16 @@ name = "mithril"
     rpc = ["https://api.mainnet-beta.solana.com"]
 
 # ============================================================================
-# [block] - Block Streaming
+# [block] - Block Source & Streaming
 # ============================================================================
+#
+# Block source configuration. See also [lightbringer] below for sidecar settings.
 
 [block]
     # Where to stream new blocks from:
-    #   "rpc"          - Fetch blocks via RPC (uses endpoints from [network].rpc)
-    #   "lightbringer" - Stream blocks from a Lightbringer endpoint (faster, lower latency)
-    #                    Mithril will use RPC for catchup and hand off to the
-    #                    live Lightbringer stream near the tip.
+    #   "rpc"          - Fetch blocks via getBlock RPC calls
+    #   "lightbringer" - Stream via Lightbringer sidecar (see [lightbringer] section)
+    #                    Uses RPC for catchup, hands off to live stream near tip.
     source = "rpc"
 
     # Lightbringer endpoint address (only used when source = "lightbringer")
@@ -191,22 +185,6 @@ name = "mithril"
     near_tip_lookahead = 2
 
 # ============================================================================
-# [replay] - Block Replay
-# ============================================================================
-#
-# Controls how Mithril processes and verifies blocks.
-
-[replay]
-    # Transaction parallelism. Set to 0 for sequential execution,
-    # or >0 to execute a topsort tx plan with the given number of workers.
-    # Recommended: 2x your CPU core count (e.g., 192 for a 96-core machine)
-    txpar = 24
-
-    # Finite replay: stop after N slots or at a specific slot (optional)
-    # num_slots = 0
-    # end_slot = -1
-
-# ============================================================================
 # [consensus] - Vote-Anchored Consensus
 # ============================================================================
 #
@@ -236,6 +214,60 @@ name = "mithril"
 
 
 # ============================================================================
+# [lightbringer] - Lightbringer Sidecar (block.source = "lightbringer")
+# ============================================================================
+#
+# Lightbringer is a Turbine sidecar that receives and caches shreds,
+# streaming assembled blocks to Mithril via gRPC. Lower latency than
+# RPC polling.
+#
+# When enabled, Mithril manages Lightbringer's full lifecycle:
+#   1. Generates Lightbringer.toml from these settings
+#   2. Spawns the Lightbringer process
+#   3. Captures its logs to lightbringer.log in the run directory
+#   4. Shuts it down gracefully when Mithril stops
+#
+# Enabling this automatically sets block.source = "lightbringer" and
+# block.lightbringer_endpoint to match grpc_addr below.
+#
+# Requirements:
+#   - Lightbringer binary must be available at binary_path
+#   - A Solana gossip entrypoint is required when enabled
+
+[lightbringer]
+    # Enable managed Lightbringer sidecar (default: false)
+    enabled = false
+
+    # Path to the Lightbringer binary
+    binary_path = "./lightbringer"
+
+    # Solana gossip entrypoint (REQUIRED when enabled)
+    # This is the IP:port of a Solana validator or RPC node running gossip.
+    # gossip_entrypoint = "1.2.3.4:8000"
+
+    # Lightbringer's debug HTTP endpoint (for inspecting stored shreds)
+    rpc_addr = "127.0.0.1:3000"
+
+    # Lightbringer's gRPC stream endpoint (Mithril connects here for blocks)
+    # This value is automatically used as block.lightbringer_endpoint.
+    grpc_addr = "127.0.0.1:3001"
+
+    # Directory where Mithril writes the generated Lightbringer.toml
+    # Defaults to current working directory.
+    config_dir = "."
+
+    # Optional: InfluxDB metrics for Lightbringer
+    # (written as [influxdb] section in generated Lightbringer.toml)
+    # influxdb_host = "http://localhost:8181"
+    # influxdb_database = "test"
+    # influxdb_token = "xyz"
+
+    # Optional: Block confirmation via Solana RPC
+    # (written as [block_confirmation] section in generated Lightbringer.toml)
+    # block_confirmation_rpc_http = "http://localhost:8899"
+    # block_confirmation_rpc_websocket = "ws://localhost:8899"
+
+# ============================================================================
 # [rpc] - Mithril RPC Server
 # ============================================================================
 #
@@ -257,6 +289,11 @@ name = "mithril"
 # The defaults work well for most deployments.
 
 [tuning]
+    # Transaction parallelism for block execution.
+    # Set to 0 for sequential execution, or >0 for parallel workers.
+    # Recommended: 2x your CPU core count (e.g., 192 for a 96-core machine)
+    txpar = 24
+
     # Zstd decoder concurrency (defaults to NumCPU)
     # zstd_decoder_concurrency = 16
 

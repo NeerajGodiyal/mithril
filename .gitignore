@@ -10,7 +10,8 @@
 # Data
 *.car
 *.sst
-LOG*
+LOG
+LOG.*
 LOCK
 CURRENT
 MANIFEST-*

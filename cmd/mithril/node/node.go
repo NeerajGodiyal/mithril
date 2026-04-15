@@ -22,6 +22,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
@@ -93,6 +94,20 @@ var (
 	borrowedAccountArenaSize uint64
 
 	rpcPort int
+
+	// Lightbringer sidecar config
+	lightbringerEnabled          bool
+	lightbringerBinaryPath       string
+	lightbringerGossipEntrypoint string
+	lightbringerStorage          string
+	lightbringerRpcAddr          string
+	lightbringerGrpcAddr         string
+	lightbringerConfigDir        string
+	lightbringerInfluxdbHost     string
+	lightbringerInfluxdbDatabase string
+	lightbringerInfluxdbToken    string
+	lightbringerBlockConfirmHTTP string
+	lightbringerBlockConfirmWS   string
 )
 
 func init() {
@@ -304,10 +319,17 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		bootstrapMode = "auto" // default: use existing AccountsDB if valid, else download snapshot
 	}
 
-	// [replay] section
+	// [replay] section (txpar moved to [tuning], with backwards-compatible fallback)
 	numReplaySlots = getInt64("num-slots", "replay.num_slots")
 	endSlot = getInt64("end-slot", "replay.end_slot")
-	txParallelism = getInt64("txpar", "replay.txpar")
+	if config.IsSet("tuning.txpar") {
+		txParallelism = getInt64("txpar", "tuning.txpar")
+	} else if config.IsSet("replay.txpar") {
+		txParallelism = getInt64("txpar", "replay.txpar")
+		mlog.Log.Warnf("config: replay.txpar is deprecated, move to tuning.txpar")
+	} else {
+		txParallelism = getInt64("txpar", "tuning.txpar") // CLI flag or default
+	}
 
 	// [storage] section (with fallback to legacy [ledger] keys for backwards compatibility)
 	// snapshotArchivePath: CLI flags --snapshot/--snapshot-archive-path ONLY (explicit file path)
@@ -328,7 +350,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if err := checkDirWritable(accountsPath, "AccountsDB"); err != nil {
 		return err
 	}
-	blockstorePath = getString("ledger-path", "storage.blockstore")
+	blockstorePath = getString("ledger-path", "storage.shredstore")
+	if blockstorePath == "" && config.IsSet("storage.blockstore") {
+		blockstorePath = getString("ledger-path", "storage.blockstore")
+		mlog.Log.Warnf("config: storage.blockstore is deprecated, use storage.shredstore")
+	}
 	if blockstorePath == "" {
 		blockstorePath = getString("ledger-path", "ledger.path")
 	}
@@ -365,14 +391,68 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
 
+	// [lightbringer] section — sidecar management
+	lightbringerEnabled = config.GetBool("lightbringer.enabled")
+	lightbringerBinaryPath = config.GetString("lightbringer.binary_path")
+	if lightbringerBinaryPath == "" {
+		lightbringerBinaryPath = "./lightbringer"
+	}
+	lightbringerGossipEntrypoint = config.GetString("lightbringer.gossip_entrypoint")
+	lightbringerStorage = getString("ledger-path", "storage.shredstore")
+	if lightbringerStorage == "" && config.IsSet("lightbringer.storage") {
+		lightbringerStorage = getString("ledger-path", "lightbringer.storage")
+		mlog.Log.Warnf("config: lightbringer.storage is deprecated, use storage.shredstore")
+	}
+	if lightbringerStorage == "" {
+		lightbringerStorage = "./shred-store"
+	}
+	lightbringerRpcAddr = config.GetString("lightbringer.rpc_addr")
+	if lightbringerRpcAddr == "" {
+		lightbringerRpcAddr = "127.0.0.1:3000"
+	}
+	lightbringerGrpcAddr = config.GetString("lightbringer.grpc_addr")
+	if lightbringerGrpcAddr == "" {
+		lightbringerGrpcAddr = "127.0.0.1:3001"
+	}
+	lightbringerConfigDir = config.GetString("lightbringer.config_dir")
+	if lightbringerConfigDir == "" {
+		lightbringerConfigDir = "."
+	}
+	lightbringerInfluxdbHost = config.GetString("lightbringer.influxdb_host")
+	lightbringerInfluxdbDatabase = config.GetString("lightbringer.influxdb_database")
+	lightbringerInfluxdbToken = config.GetString("lightbringer.influxdb_token")
+	lightbringerBlockConfirmHTTP = config.GetString("lightbringer.block_confirmation_rpc_http")
+	lightbringerBlockConfirmWS = config.GetString("lightbringer.block_confirmation_rpc_websocket")
+
+	// Auto-sync: when lightbringer is enabled, override block source settings
+	if lightbringerEnabled {
+		if lightbringerGossipEntrypoint == "" {
+			return fmt.Errorf("lightbringer.enabled=true but lightbringer.gossip_entrypoint is empty")
+		}
+		// Default block.source to "lightbringer" if not explicitly configured
+		if blockSource == "rpc" && !flagChanged("block-source") {
+			blockSource = "lightbringer"
+		} else if blockSource == "rpc" && flagChanged("block-source") {
+			mlog.Log.Warnf("lightbringer.enabled=true but --block-source=rpc was set explicitly; sidecar will start but will not be used for block delivery")
+		}
+		// Auto-sync grpc_addr to lightbringer_endpoint
+		if lightbringerEndpoint == "" {
+			lightbringerEndpoint = lightbringerGrpcAddr
+		} else if lightbringerEndpoint != lightbringerGrpcAddr {
+			mlog.Log.Warnf("lightbringer.grpc_addr (%s) differs from block.lightbringer_endpoint (%s) — using block.lightbringer_endpoint",
+				lightbringerGrpcAddr, lightbringerEndpoint)
+		}
+	}
+
+	// Validate block source requirements
 	switch blockSource {
 	case "rpc":
 		if len(rpcEndpoints) == 0 {
 			return fmt.Errorf("block.source=rpc but no RPC endpoints provided (set network.rpc)")
 		}
 	case "lightbringer":
-		if lightbringerEndpoint == "" {
-			return fmt.Errorf("block.source=lightbringer but no block.lightbringer_endpoint provided")
+		if lightbringerEndpoint == "" && !lightbringerEnabled {
+			return fmt.Errorf("block.source=lightbringer requires either lightbringer.enabled=true or block.lightbringer_endpoint")
 		}
 		if len(rpcEndpoints) == 0 {
 			return fmt.Errorf("block.source=lightbringer requires RPC endpoints for catchup (set network.rpc)")
@@ -639,9 +719,67 @@ func runLive(c *cobra.Command, args []string) {
 	// Now start the metrics server (after banner so errors don't appear first)
 	statsd.StartMetricsServer()
 
+	// Lightbringer sidecar management
+	var lbManager *lightbringer.Manager
 	useLightbringer := blockSource == "lightbringer"
-	if useLightbringer {
-		mlog.Log.Infof("block.source=lightbringer enabled: RPC catchup will hand off to Lightbringer live stream at %s", lightbringerEndpoint)
+
+	if lightbringerEnabled {
+		lbLogWriter := mlog.Log.CreateSubprocessWriter("lightbringer")
+
+		lbManager = lightbringer.NewManager(lightbringer.ManagerConfig{
+			BinaryPath: lightbringerBinaryPath,
+			ConfigDir:  lightbringerConfigDir,
+			GrpcAddr:   lightbringerGrpcAddr,
+			TOML: lightbringer.LightbringerTOML{
+				GossipEntrypoint:    lightbringerGossipEntrypoint,
+				Storage:             lightbringerStorage,
+				RpcAddr:             lightbringerRpcAddr,
+				GrpcAddr:            lightbringerGrpcAddr,
+				InfluxdbHost:        lightbringerInfluxdbHost,
+				InfluxdbDatabase:    lightbringerInfluxdbDatabase,
+				InfluxdbToken:       lightbringerInfluxdbToken,
+				BlockConfirmRpcHTTP: lightbringerBlockConfirmHTTP,
+				BlockConfirmRpcWS:   lightbringerBlockConfirmWS,
+			},
+			LogWriter: lbLogWriter,
+		})
+
+		configPath, err := lbManager.WriteConfig()
+		if err != nil {
+			klog.Fatalf("failed to write Lightbringer config: %v", err)
+		}
+		mlog.Log.Infof("lightbringer: wrote config to %s", configPath)
+
+		if err := lbManager.Start(); err != nil {
+			mlog.Log.Warnf("lightbringer: failed to start: %v — falling back to RPC", err)
+			useLightbringer = false
+			if len(rpcEndpoints) == 0 {
+				klog.Fatalf("lightbringer failed to start and no RPC endpoints configured for fallback (set network.rpc)")
+			}
+		} else {
+			defer func() {
+				if err := lbManager.Stop(10 * time.Second); err != nil {
+					mlog.Log.Warnf("lightbringer: shutdown error: %v", err)
+				}
+			}()
+
+			// Monitor for crashes and auto-restart in background
+			lbStopMonitor := make(chan struct{})
+			go lbManager.MonitorAndRestart(lbStopMonitor, 5)
+			defer close(lbStopMonitor)
+
+			if err := lbManager.WaitReady(30 * time.Second); err != nil {
+				mlog.Log.Warnf("lightbringer: %v — falling back to RPC", err)
+				useLightbringer = false
+				if len(rpcEndpoints) == 0 {
+					lbManager.Stop(5 * time.Second) // stop before fatal exit since klog.Fatalf bypasses defers
+					klog.Fatalf("lightbringer not ready and no RPC endpoints configured for fallback (set network.rpc)")
+				}
+			}
+		}
+	} else if useLightbringer {
+		// block.source=lightbringer but lightbringer.enabled=false — standalone Lightbringer mode
+		mlog.Log.Infof("block.source=lightbringer with external Lightbringer at %s", lightbringerEndpoint)
 	}
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
@@ -1654,9 +1792,12 @@ func printStartupInfo(commandName string) {
 
 	// Block source
 	fmt.Printf("  Block source: %s%s%s", gold, blockSource, reset)
-	if blockSource == "lightbringer" {
-		fmt.Printf(" %s(rpc catchup -> live stream)%s\n", dim, reset)
-	} else {
+	switch {
+	case blockSource == "lightbringer" && lightbringerEnabled:
+		fmt.Printf(" %s(managed sidecar)%s\n", dim, reset)
+	case blockSource == "lightbringer":
+		fmt.Printf(" %s(external)%s\n", dim, reset)
+	default:
 		fmt.Println()
 	}
 
