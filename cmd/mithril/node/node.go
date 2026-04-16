@@ -16,6 +16,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -763,16 +764,23 @@ func runLive(c *cobra.Command, args []string) {
 				}
 			}()
 
-			// Monitor for crashes and auto-restart in background
+			// Monitor for crashes and auto-restart in background.
+			// Use sync.Once for safe channel close from both the fallback path and the defer.
 			lbStopMonitor := make(chan struct{})
+			var lbStopOnce sync.Once
+			stopMonitor := func() { lbStopOnce.Do(func() { close(lbStopMonitor) }) }
 			go lbManager.MonitorAndRestart(lbStopMonitor, 5)
-			defer close(lbStopMonitor)
+			defer stopMonitor()
 
 			if err := lbManager.WaitReady(30 * time.Second); err != nil {
 				mlog.Log.Warnf("lightbringer: %v — falling back to RPC", err)
 				useLightbringer = false
+				// Stop the monitor and Lightbringer immediately so they don't run unused during replay.
+				stopMonitor()
+				if stopErr := lbManager.Stop(5 * time.Second); stopErr != nil {
+					mlog.Log.Warnf("lightbringer: stop on fallback: %v", stopErr)
+				}
 				if len(rpcEndpoints) == 0 {
-					lbManager.Stop(5 * time.Second) // stop before fatal exit since klog.Fatalf bypasses defers
 					klog.Fatalf("lightbringer not ready and no RPC endpoints configured for fallback (set network.rpc)")
 				}
 			}

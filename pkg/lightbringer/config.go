@@ -2,8 +2,10 @@ package lightbringer
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -26,13 +28,43 @@ type LightbringerTOML struct {
 	BlockConfirmRpcWS   string
 }
 
-// Validate checks that required fields are non-empty.
+// Validate checks that required fields are present and well-formed.
 func (c *LightbringerTOML) Validate() error {
 	if c.GossipEntrypoint == "" {
 		return fmt.Errorf("gossip_entrypoint is required")
 	}
+	if err := validateHostPort(c.GossipEntrypoint, "gossip_entrypoint"); err != nil {
+		return err
+	}
 	if c.GrpcAddr == "" {
 		return fmt.Errorf("grpc_addr is required")
+	}
+	if err := validateHostPort(c.GrpcAddr, "grpc_addr"); err != nil {
+		return err
+	}
+	if c.RpcAddr != "" {
+		if err := validateHostPort(c.RpcAddr, "rpc_addr"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateHostPort checks that addr is a valid host:port with a numeric port in range.
+func validateHostPort(addr, field string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s %q is not valid host:port: %w", field, addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("%s has empty host", field)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fmt.Errorf("%s port %q is not numeric", field, portStr)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s port %d is out of range 1-65535", field, port)
 	}
 	return nil
 }

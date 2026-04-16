@@ -2,6 +2,7 @@ package setupcmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -527,10 +528,16 @@ func (m *setupModel) validateAndApplyInput() bool {
 		}
 
 	case scrGossip:
-		if !m.requireNonEmpty(val) || !strings.Contains(val, ":") {
-			if m.inputErr == "" {
-				m.inputErr = "must be IP:port (e.g., 1.2.3.4:8000)"
-			}
+		if !m.requireNonEmpty(val) {
+			return false
+		}
+		host, portStr, err := net.SplitHostPort(val)
+		if err != nil || host == "" {
+			m.inputErr = "must be IP:port (e.g., 1.2.3.4:8000)"
+			return false
+		}
+		if p, perr := strconv.Atoi(portStr); perr != nil || p < 1 || p > 65535 {
+			m.inputErr = "port must be 1-65535"
 			return false
 		}
 		m.gossipEntry = val

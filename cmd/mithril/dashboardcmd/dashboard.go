@@ -887,8 +887,13 @@ func (m *model) applyEditField() {
 		value = filepath.Clean(value)
 	case key == "lightbringer.gossip_entrypoint" || key == "lightbringer.grpc_addr" || key == "lightbringer.rpc_addr":
 		if value != "" {
-			if _, _, err := net.SplitHostPort(value); err != nil {
+			host, portStr, err := net.SplitHostPort(value)
+			if err != nil || host == "" {
 				m.editErr = "Format: host:port (e.g., 127.0.0.1:3001)"
+				return
+			}
+			if p, perr := strconv.Atoi(portStr); perr != nil || p < 1 || p > 65535 {
+				m.editErr = "Port must be 1-65535"
 				return
 			}
 		}
