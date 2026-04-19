@@ -187,35 +187,31 @@ func appendRunsLogEntry(runsLogPath string, ts time.Time, runID, commit, runDir 
 	}
 }
 
-// CreateSubprocessWriter creates a lumberjack-backed log writer for a named subprocess
-// (e.g., "lightbringer") in the current run directory. Returns os.Stderr if file
-// logging is not initialized.
+// CreateSubprocessWriter returns a writer for a named subprocess (e.g. "lightbringer")
+// that routes output to a dedicated log file in the current run directory. Subprocess
+// output is not mirrored to the terminal, keeping Mithril's own output readable.
+// When file logging is not initialized, output falls back to stderr with a
+// "[name] " prefix so developers running without a log directory can still see it.
 func (l *logger) CreateSubprocessWriter(name string) io.Writer {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if !l.initialized || l.runDir == "" {
-		// No file logging — at least prefix the output so it's identifiable in interleaved stderr
 		return newPrefixWriter(os.Stderr, "["+name+"] ")
 	}
 
-	logPath := filepath.Join(l.runDir, name+".log")
-	fileWriter := &lumberjack.Logger{
-		Filename:   logPath,
-		MaxSize:    100,   // 100MB default
+	return &lumberjack.Logger{
+		Filename:   filepath.Join(l.runDir, name+".log"),
+		MaxSize:    100, // MB
 		MaxAge:     7,
 		MaxBackups: 5,
 		LocalTime:  false,
 		Compress:   true,
 	}
-
-	if l.toStdout {
-		return io.MultiWriter(newPrefixWriter(os.Stderr, "["+name+"] "), fileWriter)
-	}
-	return fileWriter
 }
 
 // prefixWriter wraps an io.Writer and prepends a prefix to each line.
+// Used only as a fallback when subprocess file logging is not available.
 type prefixWriter struct {
 	w      io.Writer
 	prefix string
@@ -228,8 +224,9 @@ func newPrefixWriter(w io.Writer, prefix string) *prefixWriter {
 func (pw *prefixWriter) Write(p []byte) (int, error) {
 	lines := bytes.Split(p, []byte("\n"))
 	for i, line := range lines {
+		// Skip the trailing empty element produced by bytes.Split when input ends in '\n'.
 		if len(line) == 0 && i == len(lines)-1 {
-			continue // skip trailing empty line from split
+			continue
 		}
 		if _, err := fmt.Fprintf(pw.w, "%s%s\n", pw.prefix, line); err != nil {
 			return 0, err

@@ -209,7 +209,8 @@ func (m model) View() string {
 
 func fetchMetrics(url string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := http.Get(url)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(url)
 		if err != nil {
 			return metricsMsg{err: err}
 		}

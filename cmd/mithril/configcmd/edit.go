@@ -2,6 +2,7 @@ package configcmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -490,8 +491,17 @@ func (m *editModel) validateAndApplyInput() bool {
 		m.rpcEndpoint = val
 
 	case edScrGossip:
-		if val == "" || !strings.Contains(val, ":") {
-			m.inputErr = "Format: IP:port (e.g., 198.13.130.58:8001)"
+		if val == "" {
+			m.inputErr = "Format: IP:port (e.g., 1.2.3.4:8000)"
+			return false
+		}
+		host, portStr, err := net.SplitHostPort(val)
+		if err != nil || host == "" {
+			m.inputErr = "Format: IP:port (e.g., 1.2.3.4:8000)"
+			return false
+		}
+		if p, perr := strconv.Atoi(portStr); perr != nil || p < 1 || p > 65535 {
+			m.inputErr = "Port must be 1-65535"
 			return false
 		}
 		m.gossipEntry = val
@@ -518,30 +528,34 @@ func (m *editModel) validateAndApplyInput() bool {
 		m.logsPath = filepath.Clean(val)
 
 	case edScrTuning:
-		if _, err := strconv.Atoi(val); err != nil {
-			m.inputErr = "Must be a number"
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 0 {
+			m.inputErr = "Must be 0 (sequential) or a positive integer"
 			return false
 		}
 		m.txpar = val
 		m.txparWasSet = true
 
 	case edScrBlockRPS:
-		if _, err := strconv.Atoi(val); err != nil {
-			m.inputErr = "Must be a number"
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 1 {
+			m.inputErr = "Must be a positive integer"
 			return false
 		}
 		m.blockMaxRPS = val
 
 	case edScrBlockInflight:
-		if _, err := strconv.Atoi(val); err != nil {
-			m.inputErr = "Must be a number"
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 1 {
+			m.inputErr = "Must be a positive integer"
 			return false
 		}
 		m.blockInflight = val
 
 	case edScrRPCPort:
-		if _, err := strconv.Atoi(val); err != nil {
-			m.inputErr = "Must be a number"
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 0 || n > 65535 {
+			m.inputErr = "Must be 0 (disabled) or a port number (1-65535)"
 			return false
 		}
 		m.rpcPort = val
@@ -596,8 +610,12 @@ func (m *editModel) saveConfig() {
 		rpcParts = append(rpcParts, fmt.Sprintf("%q", ep))
 	}
 	content = setTomlValue(content, "network", "rpc", "["+strings.Join(rpcParts, ", ")+"]")
-	content = setTomlValue(content, "storage", "accounts", fmt.Sprintf("%q", filepath.Clean(m.accountsPath)))
-	content = setTomlValue(content, "storage", "snapshots", fmt.Sprintf("%q", filepath.Clean(m.snapshotsPath)))
+	if m.accountsPath != "" {
+		content = setTomlValue(content, "storage", "accounts", fmt.Sprintf("%q", filepath.Clean(m.accountsPath)))
+	}
+	if m.snapshotsPath != "" {
+		content = setTomlValue(content, "storage", "snapshots", fmt.Sprintf("%q", filepath.Clean(m.snapshotsPath)))
+	}
 	content = setTomlValue(content, "block", "max_rps", m.blockMaxRPS)
 	content = setTomlValue(content, "block", "max_inflight", m.blockInflight)
 	// Only write txpar if it was originally in the config or user explicitly set a value
