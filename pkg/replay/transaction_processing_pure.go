@@ -27,6 +27,8 @@ type LoadAndExecuteTransactionInput struct {
 	Arena *arena.Arena[sealevel.BorrowedAccount]
 	// TxMeta is the on-chain transaction metadata (optional, used for fee calculation)
 	TxMeta *rpc.TransactionMeta
+	// IsSimulation indicates this is a simulation (no side effects on shared state)
+	IsSimulation bool
 }
 
 // LoadAndExecuteTransaction is a pure function that loads and executes a transaction.
@@ -135,6 +137,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	execCtx.TransactionContext.AllInstructions = instrs
 	execCtx.TransactionContext.Signature = tx.Signatures[0]
 	execCtx.TransactionContext.BorrowedAccountArena = input.Arena
+	execCtx.IsSimulation = input.IsSimulation
 
 	// Capture pre-balance lamports (before fee deduction)
 	preBalances := make([]uint64, len(tx.Message.AccountKeys))

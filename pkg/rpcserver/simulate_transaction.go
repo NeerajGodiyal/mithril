@@ -117,9 +117,10 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 
 	// Execute transaction using the pure function
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
-		SlotCtx:     slotCtx,
-		Transaction: tx,
-		TxMeta:      nil,
+		SlotCtx:      slotCtx,
+		Transaction:  tx,
+		TxMeta:       nil,
+		IsSimulation: true,
 	})
 
 	// Extract logs from ExecCtx if available

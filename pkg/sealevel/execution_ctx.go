@@ -26,6 +26,7 @@ type ExecutionCtx struct {
 	PrevLamportsPerSignature uint64
 	SlotCtx                  *SlotCtx
 	ModifiedVoteStates       map[solana.PublicKey]*VoteStateVersions
+	IsSimulation             bool
 }
 
 type SlotBank struct {
