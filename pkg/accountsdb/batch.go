@@ -18,11 +18,7 @@ func (db *AccountsDb) GetAccountsBatch(ctx context.Context, slot uint64, pks []s
 		return nil, nil
 	}
 	var out []*accounts.Account
-	if StoreAsync {
-		out = db.getStoreInProgressAccounts(pks)
-	} else {
-		out = make([]*accounts.Account, n)
-	}
+	out = db.getStoreInProgressAccounts(pks)
 
 	// Use a bounded semaphore so we don’t spawn unbounded I/O.
 	maxWorkers := runtime.NumCPU() * 2

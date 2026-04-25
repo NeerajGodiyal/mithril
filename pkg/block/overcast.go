@@ -9,6 +9,7 @@ import (
 func FromLightbringerStreamMsg(resp *overcast.SlotResponse) *Block {
 	block := new(Block)
 	block.Slot = resp.Slot
+	block.SourceParentSlot = resp.GetParentSlot()
 	block.Transactions = make([]*solana.Transaction, 0, 2000)
 
 	for _, entry := range resp.Entries {

@@ -7,8 +7,8 @@ import (
 	"maps"
 	"path/filepath"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -216,6 +216,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t1 := time.Now()
 
 	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
+	global.PutEpochVoteStateSnapshot(newEpoch, global.VoteCacheSnapshot())
 	t2 := time.Now()
 
 	if global.ManageLeaderSchedule() {
@@ -272,6 +273,11 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
 	}
 
+	// Rebuild authorized voters cache from vote accounts for the new epoch.
+	// This ensures forkchoice vote parsing uses current authorities, not stale manifest data.
+	newEpoch := b.Epoch
+	rebuildAuthorizedVotersFromVoteCache(newEpoch)
+
 	// Skip epoch stakes storage if already cached (resume)
 	if hasEpochStakes {
 		mlog.Log.Infof("already had EpochStakes for epoch %d", leaderScheduleEpoch)
@@ -290,4 +296,36 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 
 	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
 	b.TotalEpochStake = scanResult.TotalEffectiveStake
+}
+
+// rebuildAuthorizedVotersFromVoteCache rebuilds the epoch authorized voters cache
+// using vote states already loaded in the global VoteCache. This avoids re-reading
+// AccountsDB since RebuildVoteCacheFromAccountsDB already populated the cache.
+func rebuildAuthorizedVotersFromVoteCache(epoch uint64) {
+	voteCache := global.VoteCache()
+	newCache := epochstakes.NewEpochAuthorizedVotersCache()
+
+	for voteAcct, voteState := range voteCache {
+		if voteState == nil {
+			continue
+		}
+		switch voteState.Type {
+		case sealevel.VoteStateVersionV0_23_5:
+			// V0_23_5 has a single authorized voter
+			newCache.PutEntry(voteAcct, voteState.V0_23_5.AuthorizedVoter)
+		case sealevel.VoteStateVersionV1_14_11:
+			voter, _, err := voteState.V1_14_11.AuthorizedVoters.GetOrCalculateAuthorizedVoterForEpoch(epoch)
+			if err == nil {
+				newCache.PutEntry(voteAcct, voter)
+			}
+		case sealevel.VoteStateVersionCurrent:
+			voter, _, err := voteState.Current.AuthorizedVoters.GetOrCalculateAuthorizedVoterForEpoch(epoch)
+			if err == nil {
+				newCache.PutEntry(voteAcct, voter)
+			}
+		}
+	}
+
+	global.SetEpochAuthorizedVoters(newCache)
+	mlog.Log.Infof("forkchoice: rebuilt authorized voters cache for epoch %d (%d entries)", epoch, newCache.Len())
 }

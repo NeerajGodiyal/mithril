@@ -11,6 +11,7 @@ import (
 // relocate applies ELF relocations (for syscalls and position-independent code).
 func (l *Loader) relocate() error {
 	l.funcs = make(map[uint32]int64)
+	l.funcName = make(map[uint32]int64)
 	if err := l.fixupRelativeCalls(); err != nil {
 		return err
 	}
@@ -56,14 +57,13 @@ func (l *Loader) fixupRelativeCalls() error {
 func (l *Loader) registerFunc(target uint64) (uint32, error) {
 	hash := sbpf.PCHash(target)
 
-	// check for collision with syscall
 	if l.syscalls != nil && l.syscalls.ExistsByHash(hash) {
 		return 0, fmt.Errorf("symbol hash collision with syscall")
 	}
 
-	//if _, ok := l.funcs[hash]; ok {
-	//	return 0, fmt.Errorf("symbol hash collision for func at=%d hash=%#08x", target, hash)
-	//}
+	if existing, ok := l.funcs[hash]; ok && existing != int64(target) {
+		return 0, fmt.Errorf("symbol hash collision for func at=%d hash=%#08x", target, hash)
+	}
 
 	l.funcs[hash] = int64(target)
 	return hash, nil
@@ -84,11 +84,14 @@ func (l *Loader) applyDynamicRelocs() error {
 }
 
 func (l *Loader) applyReloc(reloc *elf.Rel64) error {
-	// TODO rOff is not checked
-	// Need to have a virtual write target here
 	rOff := reloc.Off
 	rType := R_BPF(elf.R_TYPE64(reloc.Info))
 	rSym := elf.R_SYM64(reloc.Info)
+
+	progLen := uint64(len(l.program))
+	if rOff > progLen || progLen-rOff < 16 {
+		return fmt.Errorf("relocation offset out of bounds")
+	}
 
 	switch rType {
 	case R_BPF_64_64:
@@ -154,6 +157,13 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 				return fmt.Errorf("out-of-bounds R_BPF_64_32 function ref")
 			}
 			target := (sym.Value - l.textRange.min) / 8
+
+			nameHash := sbpf.SymbolHash(name)
+			if existing, ok := l.funcName[nameHash]; ok && existing != int64(target) {
+				return fmt.Errorf("symbol hash collision for %s", name)
+			}
+			l.funcName[nameHash] = int64(target)
+
 			hash, err = l.registerFunc(target)
 			if err != nil {
 				return fmt.Errorf("R_BPF_64_32 function ref: %w", err)

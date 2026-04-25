@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime/trace"
 	"sync"
-	"time"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -41,7 +40,6 @@ type AccountsDb struct {
 	inProgressStoreRequests   *list.List
 	storeRequestChan          chan *list.Element
 	storeWorkerDone           chan struct{}
-
 }
 
 type storeRequest struct {
@@ -49,6 +47,15 @@ type storeRequest struct {
 	slot  uint64
 	m     map[solana.PublicKey]*accounts.Account
 	cb    func()
+}
+
+func (accountsDb *AccountsDb) StoreQueueLen() int {
+	if accountsDb.inProgressStoreRequests == nil {
+		return 0
+	}
+	accountsDb.inProgressStoreRequestsMu.Lock()
+	defer accountsDb.inProgressStoreRequestsMu.Unlock()
+	return accountsDb.inProgressStoreRequests.Len()
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -62,8 +69,20 @@ var (
 	ErrNoAccount = errors.New("ErrNoAccount")
 
 	StoreAccountsWorkers = 128
-	StoreAsync           = false
 )
+
+const (
+	indexPebbleMemTableSize                = 64 << 20
+	indexPebbleMemTableStopWritesThreshold = 4
+)
+
+func NewAccountsIndexPebbleOptions(logger pebble.Logger) *pebble.Options {
+	return &pebble.Options{
+		Logger:                      logger,
+		MemTableSize:                indexPebbleMemTableSize,
+		MemTableStopWritesThreshold: indexPebbleMemTableStopWritesThreshold,
+	}
+}
 
 func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	// check for existence of the 'accounts' directory, which holds the appendvecs
@@ -94,7 +113,7 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	largestFileId := binary.LittleEndian.Uint64(largestFileIdBytes)
 
 	indexDir := filepath.Join(accountsDbDir, "mithril_db")
-	db, err := pebble.Open(indexDir, &pebble.Options{Logger: silentLogger{}})
+	db, err := pebble.Open(indexDir, NewAccountsIndexPebbleOptions(silentLogger{}))
 	if err != nil {
 		return nil, fmt.Errorf("opening indexDir=%s: %w", indexDir, err)
 	}
@@ -108,41 +127,17 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	accountsDb := &AccountsDb{Index: db, BankHashStore: bankhashDb, AcctsDir: appendVecsDir}
 	accountsDb.LargestFileId.Store(largestFileId)
 
-	mlog.Log.Infof("StoreAsync=%t", StoreAsync)
-	if StoreAsync {
-		accountsDb.inProgressStoreRequests = list.New()
-		accountsDb.storeRequestChan = make(chan *list.Element)
-		accountsDb.storeWorkerDone = make(chan struct{})
-		go accountsDb.storeWorker()
-	}
+	accountsDb.inProgressStoreRequests = list.New()
+	accountsDb.storeRequestChan = make(chan *list.Element)
+	accountsDb.storeWorkerDone = make(chan struct{})
+	go accountsDb.storeWorker()
 
 	return accountsDb, nil
 }
 
-// DrainStoreQueue waits until all queued async store requests have completed.
-// Unlike WaitForStoreWorker, this does NOT shut down the worker — it just
-// spins until the in-progress list is empty.
-func (accountsDb *AccountsDb) DrainStoreQueue() {
-	if !StoreAsync {
-		return
-	}
-	for {
-		accountsDb.inProgressStoreRequestsMu.Lock()
-		empty := accountsDb.inProgressStoreRequests.Len() == 0
-		accountsDb.inProgressStoreRequestsMu.Unlock()
-		if empty {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// Turns down the store worker. AccountsDb cannot accept writes after this if StoreAsync.
+// Turns down the store worker. AccountsDb cannot accept writes after this.
 // Should not be called concurrently.
 func (accountsDb *AccountsDb) WaitForStoreWorker() {
-	if !StoreAsync {
-		return
-	}
 	if accountsDb.storeWorkerDone == nil {
 		mlog.Log.Infof("AccountsDb: async store worker already done.")
 		return
@@ -214,11 +209,9 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
-	if StoreAsync {
-		accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
-		if accts[0] != nil {
-			return accts[0], nil
-		}
+	accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
+	if accts[0] != nil {
+		return accts[0], nil
 	}
 	return accountsDb.getStoredAccount(slot, pubkey)
 }
@@ -323,27 +316,19 @@ func (accountsDb *AccountsDb) StoreAccounts(
 		acct.Slot = slot
 	}
 
-	if StoreAsync {
-		m := make(map[solana.PublicKey]*accounts.Account, len(accts))
-		for _, a := range accts {
-			if a == nil {
-				continue
-			}
-			m[a.Key] = a
+	m := make(map[solana.PublicKey]*accounts.Account, len(accts))
+	for _, a := range accts {
+		if a == nil {
+			continue
 		}
-		// Must not hold lock during channel send to avoid deadlock with storeWorker.
-		accountsDb.inProgressStoreRequestsMu.Lock()
-		element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts, slot, m, cb})
-		accountsDb.inProgressStoreRequestsMu.Unlock()
-		accountsDb.storeRequestChan <- element
-		return nil
-	} else {
-		accountsDb.storeAccountsSync(accts, slot)
-		if cb != nil {
-			cb()
-		}
-		return nil
+		m[a.Key] = a
 	}
+	// Must not hold lock during channel send to avoid deadlock with storeWorker.
+	accountsDb.inProgressStoreRequestsMu.Lock()
+	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts, slot, m, cb})
+	accountsDb.inProgressStoreRequestsMu.Unlock()
+	accountsDb.storeRequestChan <- element
+	return nil
 }
 
 func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot uint64) {
@@ -358,11 +343,26 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		if acct == nil {
 			continue
 		}
-		owner := solana.PublicKeyFromBytes(acct.Owner[:])
-		if owner == addresses.VoteProgramAddr {
-			accountsDb.VoteAcctCache.Set(acct.Key, acct)
+
+		// If the account has been deleted (lamports == 0), remove the old version from
+		// the cache, if it exists. This is essential for vote accounts because after
+		// deletion (such as via a VoteWithdraw instruction) the account no longer has
+		// the vote program as its owner, so this logic is necessary to prevent stale
+		// versions of now deleted vote accounts from remaining in the vote cache and
+		// thereafter being served up as invalid account state.
+		if acct.Lamports == 0 {
+			if accountsDb.CommonAcctsCache.Has(acct.Key) {
+				accountsDb.CommonAcctsCache.Delete(acct.Key)
+			} else if accountsDb.VoteAcctCache.Has(acct.Key) {
+				accountsDb.VoteAcctCache.Delete(acct.Key)
+			}
 		} else {
-			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			owner := solana.PublicKeyFromBytes(acct.Owner[:])
+			if owner == addresses.VoteProgramAddr {
+				accountsDb.VoteAcctCache.Set(acct.Key, acct)
+			} else {
+				accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			}
 		}
 	}
 }

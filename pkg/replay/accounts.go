@@ -14,9 +14,13 @@ import (
 
 // Account clone tracking for profiling copy-on-write optimization potential
 var (
-	// Per-transaction account clone stats (loaded in loadAndValidateTxAcctsSimd186)
-	TxAcctsCloned      atomic.Uint64 // Total accounts cloned across all txs
-	TxAcctsClonedBytes atomic.Uint64 // Total bytes of account data cloned
+	// Per-transaction account load stats (accounts referenced by tx execution)
+	TxAcctsLoaded      atomic.Uint64 // Total accounts loaded into tx contexts
+	TxAcctsLoadedBytes atomic.Uint64 // Total bytes referenced by tx contexts
+
+	// Per-transaction copy-on-write clone stats (first write in TransactionAccounts.Touch)
+	TxAcctsCloned      atomic.Uint64 // Total accounts cloned on first write
+	TxAcctsClonedBytes atomic.Uint64 // Total bytes cloned on first write
 
 	// Per-transaction modification stats (touched in handleModifiedAccounts)
 	TxAcctsTouched      atomic.Uint64 // Total accounts actually modified
@@ -28,22 +32,31 @@ var (
 
 // CloneStats holds account clone/modify metrics for reporting
 type CloneStats struct {
-	AcctsCloned      uint64 // Accounts loaded (cloned)
-	AcctsClonedBytes uint64 // Bytes cloned
-	AcctsTouched     uint64 // Accounts modified
+	AcctsLoaded       uint64 // Accounts loaded into tx contexts
+	AcctsLoadedBytes  uint64 // Bytes referenced by tx contexts
+	AcctsCloned       uint64 // Accounts loaded (cloned)
+	AcctsClonedBytes  uint64 // Bytes cloned
+	AcctsTouched      uint64 // Accounts modified
 	AcctsTouchedBytes uint64 // Bytes of modified accounts
-	TxCount          uint64 // Number of transactions
+	TxCount           uint64 // Number of transactions
 }
 
 // GetAndResetCloneStats returns current clone stats and resets counters
 func GetAndResetCloneStats() CloneStats {
 	return CloneStats{
-		AcctsCloned:      TxAcctsCloned.Swap(0),
-		AcctsClonedBytes: TxAcctsClonedBytes.Swap(0),
-		AcctsTouched:     TxAcctsTouched.Swap(0),
+		AcctsLoaded:       TxAcctsLoaded.Swap(0),
+		AcctsLoadedBytes:  TxAcctsLoadedBytes.Swap(0),
+		AcctsCloned:       TxAcctsCloned.Swap(0),
+		AcctsClonedBytes:  TxAcctsClonedBytes.Swap(0),
+		AcctsTouched:      TxAcctsTouched.Swap(0),
 		AcctsTouchedBytes: TxAcctsTouchedBytes.Swap(0),
-		TxCount:          TxCount.Swap(0),
+		TxCount:           TxCount.Swap(0),
 	}
+}
+
+func recordTxAcctCowClone(acct *accounts.Account) {
+	TxAcctsCloned.Add(1)
+	TxAcctsClonedBytes.Add(uint64(len(acct.Data)))
 }
 
 func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, []*solana.AccountMeta, error) {
@@ -63,29 +76,34 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 		}
 	}
 
-	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
+	acctsForTx := make([]*accounts.Account, 0, len(txAcctMetas))
+	acctsShared := make([]bool, 0, len(txAcctMetas))
 	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
 	var loadedBytesAccumulator uint32
+	var loadedAcctCount uint64
+	var loadedAcctBytes uint64
 
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
 		var isInstructionsSysvarAcct bool
+		var isSharedAcct bool
 
 		_, instrContainsAcctMeta := instructionAcctPubkeys[acctMeta.PublicKey]
 		if acctMeta.PublicKey == sealevel.SysvarInstructionsAddr {
 			acct = instrsAcct
 			isInstructionsSysvarAcct = true
 		} else if !slotCtx.Features.IsActive(features.DisableAccountLoaderSpecialCase) && slices.Contains(programIdIdxs, uint64(idx)) && !acctMeta.IsWritable && !instrContainsAcctMeta {
-			tmp, err := slotCtx.GetAccount(acctMeta.PublicKey)
+			tmp, err := slotCtx.GetAccountShared(acctMeta.PublicKey)
 			if err != nil {
 				return nil, nil, err
 			}
 			acct = &accounts.Account{Key: acctMeta.PublicKey, Owner: tmp.Owner, Executable: true, IsDummy: true}
 		} else {
-			acct, err = slotCtx.GetAccount(acctMeta.PublicKey)
+			acct, err = slotCtx.GetAccountShared(acctMeta.PublicKey)
 			if err != nil {
 				return nil, nil, err
 			}
+			isSharedAcct = true
 		}
 
 		if !isInstructionsSysvarAcct {
@@ -95,13 +113,21 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 			}
 		}
 
-		acctsForTx = append(acctsForTx, *acct)
+		acctsForTx = append(acctsForTx, acct)
+		acctsShared = append(acctsShared, isSharedAcct)
 		convertedAcctMeta := &sealevel.AccountMeta{Pubkey: acctMeta.PublicKey, IsSigner: acctMeta.IsSigner, IsWritable: acctMeta.IsWritable}
 		convertedAcctMetas = append(convertedAcctMetas, convertedAcctMeta)
+		if isSharedAcct {
+			loadedAcctCount++
+			loadedAcctBytes += uint64(len(acct.Data))
+		}
 	}
 
-	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
+	transactionAccts := sealevel.NewTransactionAccountsFromRefs(acctsForTx, acctsShared)
 	transactionAccts.AcctMetas = convertedAcctMetas
+	transactionAccts.OnFirstWriteClone = recordTxAcctCowClone
+	TxAcctsLoaded.Add(loadedAcctCount)
+	TxAcctsLoadedBytes.Add(loadedAcctBytes)
 
 	removeAcctsExecutableFlagChecks := slotCtx.Features.IsActive(features.RemoveAccountsExecutableFlagChecks)
 	validatedLoaders := make(map[solana.PublicKey]struct{}, 4) // Usually ≤4 loaders
@@ -111,7 +137,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 			continue
 		}
 
-		programAcct, err := slotCtx.GetAccount(instr.ProgramId)
+		programAcct, err := slotCtx.GetAccountShared(instr.ProgramId)
 		if err != nil {
 			return nil, nil, TxErrProgramAccountNotFound
 		}
@@ -132,7 +158,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 		_, exists := validatedLoaders[owner]
 		if !exists {
 			var ownerAcct *accounts.Account
-			ownerAcct, err = slotCtx.GetAccount(owner)
+			ownerAcct, err = slotCtx.GetAccountShared(owner)
 			if err != nil {
 				ownerAcct, err = slotCtx.GetAccountFromAccountsDb(owner)
 				if err != nil {
@@ -216,7 +242,7 @@ func (accum *loadedAcctSizeAccumulatorSimd186) collectAcct(acct *accounts.Accoun
 		if err == nil && acctState.Type == sealevel.UpgradeableLoaderStateTypeProgram {
 			if !accum.wasAlreadyCounted(programDataAddr) {
 				// program data account not being found is not an error. Agave instead ignores it.
-				programDataAcct, err := accum.slotCtx.GetAccount(programDataAddr)
+				programDataAcct, err := accum.slotCtx.GetAccountShared(programDataAddr)
 				if err != nil {
 					programDataAcct, err = accum.slotCtx.GetAccountFromAccountsDb(programDataAddr)
 					if err != nil {
@@ -254,27 +280,26 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		return nil, nil, err
 	}
 
-	// Memoize accounts loaded in Pass 1 to avoid re-cloning in Pass 2
+	// Memoize accounts loaded in Pass 1
 	// Use slice indexed by account position (same ordering as txAcctMetas)
 	acctCache := make([]*accounts.Account, len(acctKeys))
 
-	var clonedBytes uint64
 	for i, pubkey := range acctKeys {
-		acct, err := slotCtx.GetAccount(pubkey)
-		if err != nil {
-			panic("should be impossible - programming error")
+		var acct *accounts.Account
+		if pubkey == sealevel.SysvarInstructionsAddr {
+			acct = instrsAcct
+		} else {
+			acct, err = slotCtx.GetAccountShared(pubkey)
+			if err != nil {
+				panic("should be impossible - programming error")
+			}
 		}
 		acctCache[i] = acct // Cache by index for reuse in Pass 2
-		clonedBytes += uint64(len(acct.Data))
 		err = accumulator.collectAcct(acct)
 		if err != nil {
 			return nil, nil, err
 		}
 	}
-
-	// Track clone stats for profiling
-	TxAcctsCloned.Add(uint64(len(acctKeys)))
-	TxAcctsClonedBytes.Add(clonedBytes)
 
 	txAcctMetas, err := tx.AccountMetaList()
 	if err != nil {
@@ -296,11 +321,15 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		}
 	}
 
-	acctsForTx := make([]accounts.Account, 0, len(txAcctMetas))
+	acctsForTx := make([]*accounts.Account, 0, len(txAcctMetas))
+	acctsShared := make([]bool, 0, len(txAcctMetas))
 	convertedAcctMetas := make([]*sealevel.AccountMeta, 0, len(txAcctMetas))
+	var loadedAcctCount uint64
+	var loadedAcctBytes uint64
 
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
+		var isSharedAcct bool
 		cached := acctCache[idx] // Reuse account from Pass 1
 
 		_, instrContainsAcctMeta := instructionAcctPubkeys[acctMeta.PublicKey]
@@ -312,15 +341,24 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		} else {
 			// Normal case - use cached account directly
 			acct = cached
+			isSharedAcct = true
 		}
 
-		acctsForTx = append(acctsForTx, *acct)
+		acctsForTx = append(acctsForTx, acct)
+		acctsShared = append(acctsShared, isSharedAcct)
 		convertedAcctMeta := &sealevel.AccountMeta{Pubkey: acctMeta.PublicKey, IsSigner: acctMeta.IsSigner, IsWritable: acctMeta.IsWritable}
 		convertedAcctMetas = append(convertedAcctMetas, convertedAcctMeta)
+		if isSharedAcct {
+			loadedAcctCount++
+			loadedAcctBytes += uint64(len(acct.Data))
+		}
 	}
 
-	transactionAccts := sealevel.NewTransactionAccounts(acctsForTx)
+	transactionAccts := sealevel.NewTransactionAccountsFromRefs(acctsForTx, acctsShared)
 	transactionAccts.AcctMetas = convertedAcctMetas
+	transactionAccts.OnFirstWriteClone = recordTxAcctCowClone
+	TxAcctsLoaded.Add(loadedAcctCount)
+	TxAcctsLoadedBytes.Add(loadedAcctBytes)
 
 	removeAcctsExecutableFlagChecks := slotCtx.Features.IsActive(features.RemoveAccountsExecutableFlagChecks)
 
@@ -339,7 +377,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		// Fallback if not in cache or out of bounds
 		if programAcct == nil {
 			var err error
-			programAcct, err = slotCtx.GetAccount(instr.ProgramId)
+			programAcct, err = slotCtx.GetAccountShared(instr.ProgramId)
 			if err != nil {
 				programAcct, err = slotCtx.GetAccountFromAccountsDb(instr.ProgramId)
 				if err != nil {

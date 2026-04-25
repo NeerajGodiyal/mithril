@@ -10,7 +10,8 @@
 # Data
 *.car
 *.sst
-LOG*
+LOG
+LOG.*
 LOCK
 CURRENT
 MANIFEST-*
@@ -46,3 +47,4 @@ docs/snapshot-integration-handoff*.txt
 
 # Claude Code settings
 .claude/
+.direnv

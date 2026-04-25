@@ -44,6 +44,7 @@ var (
 	TxErrProgramAccountNotFound            = errors.New("TxErrProgramAccountNotFound")
 	TxErrInvalidProgramForExecution        = errors.New("TxErrInvalidProgramForExecution")
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
+	TxErrSanitizeFailure                   = errors.New("TxErrSanitizeFailure")
 )
 
 func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
@@ -68,34 +69,47 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	return execCtx
 }
 
-func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, map[solana.PublicKey]struct{}, error) {
+func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
 	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
 
-	// Build programIDSet once for O(1) lookups in isWritable
+	// "write-demote" program IDs unless the upgradeable loader is present
+	// in the transaction.
 	programIDs, err := tx.GetProgramIDs()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	programIDSet := make(map[solana.PublicKey]struct{}, len(programIDs))
 	for _, pid := range programIDs {
 		programIDSet[pid] = struct{}{}
 	}
+	upgradeableLoaderPresent := false
+	for _, key := range tx.Message.AccountKeys {
+		if key == a.BpfLoaderUpgradeableAddr {
+			upgradeableLoaderPresent = true
+			break
+		}
+	}
+	demoteProgramIDs := !upgradeableLoaderPresent
 
 	for _, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
 		ams, err := compiledInstr.ResolveInstructionAccounts(&tx.Message)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
 		acctMetas := make([]sealevel.AccountMeta, 0, len(ams))
 		for _, am := range ams {
-			acctMeta := sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: isWritable(am, f, programIDSet)}
+			acctMeta := sealevel.AccountMeta{
+				Pubkey:     am.PublicKey,
+				IsSigner:   am.IsSigner,
+				IsWritable: isWritableForInstr(am, programIDSet, demoteProgramIDs, f),
+			}
 			acctMetas = append(acctMetas, acctMeta)
 		}
 
@@ -104,7 +118,7 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 		acctMetasPerInstr = append(acctMetasPerInstr, acctMetas)
 	}
 
-	return instrs, acctMetasPerInstr, programIDSet, nil
+	return instrs, acctMetasPerInstr, nil
 }
 
 func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16) error {
@@ -122,29 +136,25 @@ func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16
 	return nil
 }
 
-func isWritable(am *solana.AccountMeta, f *features.Features, programIDSet map[solana.PublicKey]struct{}) bool {
-	if !am.IsWritable {
+func isWritable(am *solana.AccountMeta, f *features.Features) bool {
+	acctMeta := sealevel.AccountMeta{
+		Pubkey:     am.PublicKey,
+		IsSigner:   am.IsSigner,
+		IsWritable: am.IsWritable,
+	}
+	return sealevel.IsWritable(&acctMeta, f)
+}
+
+func isWritableForInstr(am *solana.AccountMeta, programIDSet map[solana.PublicKey]struct{}, demoteProgramIDs bool, f *features.Features) bool {
+	// writability checks (native programs, sysvars, reserved keys, etc.)
+	if !isWritable(am, f) {
 		return false
 	}
 
-	if isNativeProgram(am.PublicKey) || isSysvar(am.PublicKey) {
-		return false
-	}
-
-	if f.IsActive(features.AddNewReservedAccountKeys) {
-		if _, isReserved := sealevel.NewReservedAcctsSet[am.PublicKey]; isReserved {
+	if demoteProgramIDs {
+		if _, isProgramID := programIDSet[am.PublicKey]; isProgramID {
 			return false
 		}
-	}
-
-	if f.IsActive(features.EnableSecp256r1Precompile) {
-		if am.PublicKey == a.Secp256r1PrecompileAddr {
-			return false
-		}
-	}
-
-	if _, isProgramID := programIDSet[am.PublicKey]; isProgramID {
-		return false
 	}
 
 	return true
@@ -213,6 +223,9 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 
 	case sealevel.VoteStateVersionV1_14_11:
 		timestamp = voteStateVersioned.V1_14_11.LastTimestamp
+
+	case sealevel.VoteStateVersionV4:
+		timestamp = voteStateVersioned.V4.LastTimestamp
 	}
 
 	slotCtx.VoteTimestampMu.Lock()
@@ -284,14 +297,137 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 	return txFeeInfo, relevantErr
 }
 
-func verifySignatures(tx *solana.Transaction, slot uint64, sigverifyWg *sync.WaitGroup) {
+type sigverifySnapshot struct {
+	slot             uint64
+	txSig            string
+	version          solana.MessageVersion
+	resolved         bool
+	requiredSigs     uint8
+	readonlySigned   uint8
+	readonlyUnsigned uint8
+	staticKeys       int
+	totalKeys        int
+	lookups          int
+	firstSigners     []string
+	firstKeys        []string
+	signers          []solana.PublicKey
+	signatures       []solana.Signature
+	message          []byte
+}
+
+func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnapshot, error) {
+	message, err := tx.Message.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	txSig := "<missing>"
+	if len(tx.Signatures) > 0 {
+		txSig = tx.Signatures[0].String()
+	}
+
+	numStaticKeys := len(tx.Message.AccountKeys)
+	if tx.Message.IsResolved() {
+		numStaticKeys -= tx.Message.AddressTableLookups.NumLookups()
+	}
+
+	signers := tx.Message.Signers()
+	maxSigners := min(4, len(signers))
+	firstSigners := make([]string, 0, maxSigners)
+	for i := 0; i < maxSigners; i++ {
+		firstSigners = append(firstSigners, signers[i].String())
+	}
+
+	maxItems := min(6, len(tx.Message.AccountKeys))
+	firstKeys := make([]string, 0, maxItems)
+	for i := 0; i < maxItems; i++ {
+		firstKeys = append(firstKeys, tx.Message.AccountKeys[i].String())
+	}
+
+	snapshot := &sigverifySnapshot{
+		slot:             slot,
+		txSig:            txSig,
+		version:          tx.Message.GetVersion(),
+		resolved:         tx.Message.IsResolved(),
+		requiredSigs:     tx.Message.Header.NumRequiredSignatures,
+		readonlySigned:   tx.Message.Header.NumReadonlySignedAccounts,
+		readonlyUnsigned: tx.Message.Header.NumReadonlyUnsignedAccounts,
+		staticKeys:       numStaticKeys,
+		totalKeys:        len(tx.Message.AccountKeys),
+		lookups:          tx.Message.AddressTableLookups.NumLookups(),
+		firstSigners:     firstSigners,
+		firstKeys:        firstKeys,
+		signers:          append([]solana.PublicKey(nil), signers...),
+		signatures:       append([]solana.Signature(nil), tx.Signatures...),
+		message:          message,
+	}
+
+	return snapshot, nil
+}
+
+func verifySignatures(snapshot *sigverifySnapshot, sigverifyWg *sync.WaitGroup) {
 	defer sigverifyWg.Done()
 	start := time.Now()
-	err := tx.VerifySignatures()
-	if err != nil {
-		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: %s", tx.Signatures[0], tx.Message.GetVersion(), err))
+
+	if len(snapshot.signers) != len(snapshot.signatures) {
+		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
+			snapshot.slot,
+			snapshot.txSig,
+			snapshot.version,
+			snapshot.resolved,
+			snapshot.requiredSigs,
+			snapshot.readonlySigned,
+			snapshot.readonlyUnsigned,
+			snapshot.staticKeys,
+			snapshot.totalKeys,
+			snapshot.lookups,
+			snapshot.firstSigners,
+			snapshot.firstKeys,
+		)
+		panic(fmt.Sprintf("error - tx %s (version = %d) had mismatched signers/signatures: got %d signers, but %d signatures",
+			snapshot.txSig, snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
+	}
+
+	for i, sig := range snapshot.signatures {
+		if snapshot.signers[i].Verify(snapshot.message, sig) {
+			continue
+		}
+		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
+			snapshot.slot,
+			snapshot.txSig,
+			snapshot.version,
+			snapshot.resolved,
+			snapshot.requiredSigs,
+			snapshot.readonlySigned,
+			snapshot.readonlyUnsigned,
+			snapshot.staticKeys,
+			snapshot.totalKeys,
+			snapshot.lookups,
+			snapshot.firstSigners,
+			snapshot.firstKeys,
+		)
+		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: invalid signature by %s",
+			snapshot.txSig, snapshot.version, snapshot.signers[i]))
 	}
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
+}
+
+func cloneTransaction(tx *solana.Transaction) (*solana.Transaction, error) {
+	if tx == nil {
+		return nil, nil
+	}
+
+	raw, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	cloned, err := solana.TransactionFromBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return cloned, nil
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
@@ -314,8 +450,19 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		}
 	}
 
+	if slotCtx.Features.IsActive(features.StaticInstructionLimit) {
+		if len(tx.Message.Instructions) > maxInstrTraceCapacity {
+			return nil, TxErrSanitizeFailure
+		}
+	}
+
+	start := time.Now()
+	sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
+	if err != nil {
+		return nil, err
+	}
 	sigverifyWg.Add(1)
-	go verifySignatures(tx, slotCtx.Slot, sigverifyWg)
+	go verifySignatures(sigverifySnapshot, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
@@ -337,7 +484,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	computeBudgetLimits := output.ComputeBudgetLimits
 
 	// Pre-balance divergence check (uses pre-fee-deduction lamports from pure function output)
-	start := time.Now()
+	start = time.Now()
 	if txMeta != nil && output.PreBalances != nil && execCtx != nil {
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct := execCtx.TransactionContext.Accounts.Accounts[count]

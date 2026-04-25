@@ -1061,7 +1061,6 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 }
 
 func VoteProgramInitializeAccount(execCtx *ExecutionCtx, voteAccount *BorrowedAccount, voteInit VoteInstrVoteInit, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
-	//mlog.Log.Debugf("InitializeAccount")
 	if uint64(len(voteAccount.Data())) != sizeOfVersionedVoteState(f) {
 		return InstrErrInvalidAccountData
 	}
@@ -1085,8 +1084,6 @@ func VoteProgramInitializeAccount(execCtx *ExecutionCtx, voteAccount *BorrowedAc
 }
 
 func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, authorized solana.PublicKey, voteAuthorize uint32, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
-	//mlog.Log.Debugf("VoteAuthorize")
-
 	voteStateVersions, err := UnmarshalVersionedVoteState(voteAcct.Data())
 	if err != nil {
 		return err
@@ -1108,7 +1105,7 @@ func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, auth
 				} else {
 					return verifySigner(epochAuthorizedVoter, signers)
 				}
-			})
+			}, f)
 			if err != nil {
 				return err
 			}
@@ -1134,8 +1131,6 @@ func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, auth
 }
 
 func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCtx, voteAcct *BorrowedAccount, newAuthority solana.PublicKey, authorizationType uint32, currentAuthorityDerivedKeyOwner solana.PublicKey, currentAuthorityDerivedKeySeed string) error {
-	//mlog.Log.Debugf("AuthorizeWithSeed")
-
 	txCtx := execCtx.TransactionContext
 
 	err := checkAcctForClockSysvar(txCtx, instrCtx, 1)
@@ -1176,8 +1171,6 @@ func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCt
 }
 
 func VoteProgramUpdateValidatorIdentity(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, nodePubkey solana.PublicKey, signers []solana.PublicKey, f features.Features) error {
-	//mlog.Log.Debugf("UpdateValidatorIdentity")
-
 	voteStateVersions, err := UnmarshalVersionedVoteState(voteAcct.Data())
 	if err != nil {
 		return err
@@ -1212,46 +1205,35 @@ func isCommissionUpdateAllowed(slot uint64, epochSchedule SysvarEpochSchedule) b
 }
 
 func VoteProgramUpdateCommission(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, commission byte, signers []solana.PublicKey, epochSchedule SysvarEpochSchedule, clock SysvarClock, f features.Features) error {
-	//mlog.Log.Debugf("UpdateCommission")
-
-	var voteState *VoteState
-
-	enforceCommissionUpdateRule := true
-	if f.IsActive(features.AllowCommissionDecreaseAtAnyTime) {
-		voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
-		if err != nil {
-			return err
-		}
-		voteState = voteStateVersioned.ConvertToCurrent()
-		enforceCommissionUpdateRule = commission > voteState.Commission
+	voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
+	if err != nil {
+		return err
 	}
+	voteState := voteStateVersioned.ConvertToCurrent()
 
-	if enforceCommissionUpdateRule && f.IsActive(features.CommissionUpdatesOnlyAllowedInFirstHalfOfEpoch) {
+	enforceCommissionUpdateRule := !f.IsActive(features.DelayCommissionUpdates) &&
+		commission > voteState.Commission
+	if enforceCommissionUpdateRule {
 		if !isCommissionUpdateAllowed(clock.Slot, epochSchedule) {
 			return VoteErrCommissionUpdateTooLate
 		}
 	}
 
-	if voteState == nil {
-		voteStateVersioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
-		if err != nil {
-			return err
-		}
-		voteState = voteStateVersioned.ConvertToCurrent()
-	}
-
-	err := verifySigner(voteState.AuthorizedWithdrawer, signers)
+	err = verifySigner(voteState.AuthorizedWithdrawer, signers)
 	if err != nil {
 		return err
 	}
 
 	voteState.Commission = commission
+	if voteState.wasV4 {
+		voteState.v4InflationRewardsCommBps = uint16(commission) * 100
+	}
 	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 
 	return err
 }
 
-func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers []solana.PublicKey) (*VoteState, error) {
+func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers []solana.PublicKey, f features.Features) (*VoteState, error) {
 	versioned, err := UnmarshalVersionedVoteState(voteAcct.Data())
 	if err != nil {
 		return nil, err
@@ -1262,7 +1244,7 @@ func verifyAndGetVoteState(voteAcct *BorrowedAccount, clock SysvarClock, signers
 	}
 
 	voteState := versioned.ConvertToCurrent()
-	authVoter, err := voteState.GetAndUpdateAuthorizedVoter(clock.Epoch)
+	authVoter, err := voteState.GetAndUpdateAuthorizedVoter(clock.Epoch, f)
 	if err != nil {
 		return nil, err
 	}
@@ -1329,7 +1311,6 @@ func checkSlotsAreValid(voteState *VoteState, voteSlots []uint64, voteHash [32]b
 		return VoteErrSlotsMismatch
 	}
 
-	//mlog.Log.Debugf("Slothashes.Hash = %v", slotHashes[j].Hash)
 	if slotHashes[j].Hash != voteHash {
 		mlog.Log.Infof("%s dropped vote slots. failed to match hash %#v vs. %#v (prev slot)", voteState.NodePubkey, voteHash, slotHashes[j].Hash[:])
 		return VoteErrSlotHashMismatch
@@ -1376,9 +1357,7 @@ func processVote(voteState *VoteState, vote *VoteInstrVote, slotHashes SysvarSlo
 }
 
 func VoteProgramProcessVote(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, vote *VoteInstrVote, signers []solana.PublicKey, f features.Features) error {
-	//mlog.Log.Debugf("Vote / VoteSwitch")
-
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}
@@ -1425,7 +1404,6 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 		lastLandedVote := voteState.Votes.Back()
 		lastVoteSlot := lastLandedVote.Lockout.Slot
 		if lastVoteStateUpdateSlot <= lastVoteSlot {
-			//mlog.Log.Debugf("lastVoteStateUpdateSlot (%d) <= lastVoteSlot (%d)", lastVoteStateUpdateSlot, lastVoteSlot)
 			return VoteErrVoteTooOld
 		}
 	}
@@ -1437,11 +1415,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	earliestSlotHashInHistory := slotHashes[len(slotHashes)-1].Slot
 
 	if lastVoteStateUpdateSlot < earliestSlotHashInHistory {
-		//mlog.Log.Debugf("lastVoteStateUpdateSlot (%d) < earliestSlotHashInHistory (%d)", lastVoteStateUpdateSlot, earliestSlotHashInHistory)
 		return VoteErrVoteTooOld
 	}
 
-	if proposedRoot != nil {
+	if proposedRoot != nil && *proposedRoot != nil {
 		pRoot := **proposedRoot
 		if pRoot < earliestSlotHashInHistory {
 			*proposedRoot = voteState.RootSlot
@@ -1458,7 +1435,10 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 		}
 	}
 
-	rootToCheck := *proposedRoot
+	var rootToCheck *uint64
+	if proposedRoot != nil {
+		rootToCheck = *proposedRoot
+	}
 	voteStateUpdateIndex := uint64(0)
 	slotHashesIndex := uint64(len(slotHashes))
 	var voteStateUpdateIndicesToFilter []uint64
@@ -1549,8 +1529,6 @@ func checkUpdateVoteStateAndSlotsAreValid(voteState *VoteState, proposedLockouts
 	if lastVoteStateUpdateSlot != slotHashes[slotHashesIndex].Slot {
 		panic("lastVoteStateUpdateSlot != slotHashes[slotHashesIndex].Slot not true")
 	}
-
-	//mlog.Log.Debugf("SlotHashes.Hash = %s, SlotHashes.Slot = %d", solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]), slotHashes[slotHashesIndex].Slot)
 
 	if slotHashes[slotHashesIndex].Hash != proposedHash {
 		mlog.Log.Infof("%s dropped vote. failed to match hash %s vs. %s", voteState.NodePubkey, solana.HashFromBytes(proposedHash[:]), solana.HashFromBytes(slotHashes[slotHashesIndex].Hash[:]))
@@ -1767,9 +1745,7 @@ func processNewVoteState(voteState *VoteState, newState *deque.Deque[LandedVote]
 }
 
 func VoteProgramProcessVoteStateUpdate(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, voteStateUpdate *VoteInstrUpdateVoteState, signers []solana.PublicKey, f features.Features) error {
-	//mlog.Log.Debugf("VoteStateUpdate")
-
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}
@@ -1796,8 +1772,6 @@ func VoteProgramProcessVoteStateUpdate(execCtx *ExecutionCtx, voteAcct *Borrowed
 }
 
 func VoteProgramWithdraw(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrCtx *InstructionCtx, voteAcctIdx uint64, lamports uint64, toAcctIdx uint64, signers []solana.PublicKey, rent SysvarRent, clock SysvarClock, f features.Features) error {
-	//mlog.Log.Debugf("VoteProgramWithdraw")
-
 	voteAcct, err := instrCtx.BorrowInstructionAccount(txCtx, voteAcctIdx)
 	if err != nil {
 		return err
@@ -1877,7 +1851,7 @@ var (
 )
 
 func VoteProgramProcessTowerSync(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, slotHashes SysvarSlotHashes, clock SysvarClock, towerSync *VoteInstrTowerSync, signers []solana.PublicKey, f features.Features) error {
-	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers)
+	voteState, err := verifyAndGetVoteState(voteAcct, clock, signers, f)
 	if err != nil {
 		return err
 	}

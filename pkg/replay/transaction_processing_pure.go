@@ -43,7 +43,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Parse instructions and account metas
 	start := time.Now()
-	instrs, acctMetasPerInstr, programIDSet, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
+	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{
@@ -68,7 +68,6 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 				},
 			},
 			Instrs:       instrs,
-			ProgramIDSet: programIDSet,
 		}
 	}
 	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)
@@ -83,7 +82,6 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 			},
 			Instrs:              instrs,
 			ComputeBudgetLimits: computeBudgetLimits,
-			ProgramIDSet:        programIDSet,
 		}
 	}
 
@@ -103,7 +101,6 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	baseFields := func(out *LoadAndExecuteTransactionOutput) {
 		out.Instrs = instrs
 		out.ComputeBudgetLimits = computeBudgetLimits
-		out.ProgramIDSet = programIDSet
 	}
 
 	if err == TxErrMaxLoadedAccountsDataSizeExceeded || err == TxErrInvalidProgramForExecution || err == TxErrProgramAccountNotFound {
@@ -177,7 +174,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	// Set rent-exempt rent epoch max and compute pre-tx rent states
 	start = time.Now()
 	rent.MaybeSetRentExemptRentEpochMax(slotCtx, &rentSysvar, &execCtx.Features, &execCtx.TransactionContext.Accounts)
-	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	preTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features)
 	metrics.GlobalBlockReplay.PreTxRentStates.AddTimingSince(start)
 
 	// Execute all instructions
@@ -229,7 +226,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Check rent state transitions
 	start = time.Now()
-	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features, programIDSet)
+	postTxRentStates := rent.NewRentStateInfo(&rentSysvar, execCtx.TransactionContext, &execCtx.Features)
 	rentStateErr := rent.VerifyRentStateChanges(preTxRentStates, postTxRentStates, execCtx.TransactionContext)
 	metrics.GlobalBlockReplay.PostTxRentStates.AddTimingSince(start)
 
@@ -263,7 +260,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	// Success path: collect all writable accounts
 	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
 	for _, txAcctMeta := range txAcctMetas {
-		if isWritable(txAcctMeta, &execCtx.Features, programIDSet) {
+		if isWritable(txAcctMeta, &execCtx.Features) {
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
 			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
 		}

@@ -42,12 +42,12 @@ func rentStateFromAcct(acct *accounts.Account, rent *sealevel.SysvarRent) *RentS
 	}
 }
 
-func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, f *features.Features, programIDSet map[solana.PublicKey]struct{}) []*RentStateInfo {
+func NewRentStateInfo(rent *sealevel.SysvarRent, txCtx *sealevel.TransactionCtx, f *features.Features) []*RentStateInfo {
 	rentStateInfos := make([]*RentStateInfo, 0, len(txCtx.Accounts.Accounts))
 	acctsMetas := txCtx.Accounts.AcctMetas
 
 	for idx, acct := range txCtx.Accounts.Accounts {
-		if sealevel.IsWritable(acctsMetas[idx], f, programIDSet) {
+		if sealevel.IsWritable(acctsMetas[idx], f) {
 			rentStateInfo := rentStateFromAcct(acct, rent)
 			rentStateInfos = append(rentStateInfos, rentStateInfo)
 		} else {
@@ -113,8 +113,11 @@ func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateI
 func MaybeSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, f *features.Features, txAccts *sealevel.TransactionAccounts) {
 	for idx := range txAccts.Accounts {
 		if ShouldSetRentExemptRentEpochMax(slotCtx, rent, f, txAccts.Accounts[idx]) {
-			txAccts.Accounts[idx].RentEpoch = math.MaxUint64
-			txAccts.Touch(uint64(idx))
+			touchedAcct, err := txAccts.Touch(uint64(idx))
+			if err != nil {
+				panic("unable to mark rent-exempt account as touched")
+			}
+			touchedAcct.RentEpoch = math.MaxUint64
 		}
 	}
 }

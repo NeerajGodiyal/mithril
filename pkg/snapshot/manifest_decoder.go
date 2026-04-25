@@ -410,6 +410,12 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 					voteAcct.NodePubkey = voteState.V1_14_11.NodePubkey
 				}
 
+			case sealevel.VoteStateVersionV4:
+				{
+					voteTimestamp = voteState.V4.LastTimestamp
+					voteAcct.NodePubkey = voteState.V4.NodePubkey
+				}
+
 			default:
 				{
 					panic("shouldn't be possible - programming error")

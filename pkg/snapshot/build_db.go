@@ -609,7 +609,7 @@ func (p *snapshotWorkerPools) Release() {
 
 // Ingest SSTs into a fresh pebble DB and return it.
 func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
-	db, err := pebble.Open(indexDir, &pebble.Options{})
+	db, err := pebble.Open(indexDir, accountsdb.NewAccountsIndexPebbleOptions(nil))
 	if err != nil {
 		return nil, fmt.Errorf("pebble.Open(%s): %w", indexDir, err)
 	}
@@ -629,4 +629,3 @@ func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
 	}
 	return db, nil
 }
-

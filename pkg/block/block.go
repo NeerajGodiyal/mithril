@@ -12,6 +12,7 @@ import (
 type Block struct {
 	Slot                                uint64
 	ParentSlot                          uint64
+	SourceParentSlot                    uint64 // Ingress parent slot from the block source; replay may later rewrite ParentSlot.
 	BlockHeight                         uint64
 	Epoch                               uint64
 	Transactions                        []*solana.Transaction

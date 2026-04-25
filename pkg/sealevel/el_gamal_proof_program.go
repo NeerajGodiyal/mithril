@@ -10,6 +10,7 @@ import (
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gtank/merlin"
 	"github.com/gtank/ristretto255"
@@ -663,6 +664,10 @@ func consumeElGamalCus(instrType ElGamalProofInstruction, execCtx *ExecutionCtx)
 }
 
 func ElGamalProofProgramExecute(execCtx *ExecutionCtx) error {
+	if execCtx.Features.IsActive(features.DisableZkElgamalProofProgram) && !execCtx.Features.IsActive(features.ReenableZkElgamalProofProgram) {
+		return InstrErrInvalidInstructionData
+	}
+
 	txCtx := execCtx.TransactionContext
 
 	instrCtx, err := txCtx.CurrentInstructionCtx()

@@ -15,7 +15,70 @@ import (
 type acct int
 type tx int
 
+func canDeriveAccountsFromMessage(t *solana.Transaction) bool {
+	if t.Message.IsResolved() {
+		return true
+	}
+	if len(t.Message.AccountKeys) == 0 {
+		return false
+	}
+	return !t.Message.IsVersioned() || t.Message.AddressTableLookups.NumLookups() == 0
+}
+
+func messageWritableAccounts(msg *solana.Message) []solana.PublicKey {
+	numStaticAccounts := len(msg.AccountKeys)
+	numWritableLookupAccounts := 0
+	if msg.IsResolved() {
+		numStaticAccounts -= msg.NumLookups()
+		numWritableLookupAccounts = msg.GetAddressTableLookups().NumWritableLookups()
+	}
+	accounts := make([]solana.PublicKey, 0, len(msg.AccountKeys))
+
+	for idx, account := range msg.AccountKeys {
+		isWritable := false
+		switch {
+		case idx >= numStaticAccounts:
+			isWritable = idx-numStaticAccounts < numWritableLookupAccounts
+		case idx >= int(msg.Header.NumRequiredSignatures):
+			numUnsignedWritable := (numStaticAccounts - int(msg.Header.NumRequiredSignatures)) - int(msg.Header.NumReadonlyUnsignedAccounts)
+			isWritable = idx-int(msg.Header.NumRequiredSignatures) < numUnsignedWritable
+		default:
+			isWritable = idx < int(msg.Header.NumRequiredSignatures-msg.Header.NumReadonlySignedAccounts)
+		}
+
+		if isWritable {
+			accounts = append(accounts, account)
+		}
+	}
+
+	return util.DedupePubkeys(accounts)
+}
+
+func messageReadonlyAccounts(msg *solana.Message) []solana.PublicKey {
+	writable := make(map[solana.PublicKey]struct{}, len(msg.AccountKeys))
+	for _, account := range messageWritableAccounts(msg) {
+		writable[account] = struct{}{}
+	}
+
+	accounts := make([]solana.PublicKey, 0, len(msg.AccountKeys))
+	for _, account := range msg.AccountKeys {
+		if _, isWritable := writable[account]; isWritable {
+			continue
+		}
+		accounts = append(accounts, account)
+	}
+
+	return util.DedupePubkeys(accounts)
+}
+
 func getAllAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solana.PublicKey {
+	if tm == nil && canDeriveAccountsFromMessage(t) {
+		return util.DedupePubkeys(append([]solana.PublicKey(nil), t.Message.AccountKeys...))
+	}
+	if tm == nil {
+		panic("unresolved transaction requires txmeta to derive all accounts")
+	}
+
 	accounts := make([]solana.PublicKey, 0, len(t.Message.AccountKeys)+len(tm.LoadedAddresses.ReadOnly)+len(tm.LoadedAddresses.Writable))
 	accounts = append(accounts, t.Message.AccountKeys...)
 	accounts = append(accounts, tm.LoadedAddresses.ReadOnly...)
@@ -24,8 +87,11 @@ func getAllAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solana.Pub
 }
 
 func getReadonlyAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solana.PublicKey {
-	if t.Message.IsResolved() {
-		panic("account calculations assume tx is unresolved, and use txmeta for lookup table addresses")
+	if tm == nil && canDeriveAccountsFromMessage(t) {
+		return messageReadonlyAccounts(&t.Message)
+	}
+	if tm == nil {
+		panic("unresolved transaction requires txmeta to derive readonly accounts")
 	}
 	msg := t.Message
 	hdr := msg.Header
@@ -43,8 +109,11 @@ func getReadonlyAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solan
 }
 
 func getWritableAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solana.PublicKey {
-	if t.Message.IsResolved() {
-		panic("account calculations assume tx is unresolved, and use txmeta for lookup table addresses")
+	if tm == nil && canDeriveAccountsFromMessage(t) {
+		return messageWritableAccounts(&t.Message)
+	}
+	if tm == nil {
+		panic("unresolved transaction requires txmeta to derive writable accounts")
 	}
 	msg := t.Message
 	hdr := msg.Header
@@ -61,14 +130,31 @@ func getWritableAccounts(t *solana.Transaction, tm *rpc.TransactionMeta) []solan
 	return util.DedupePubkeys(accounts)
 }
 
+func canUseDependencyPlanner(b *block.Block) bool {
+	for i, tx := range b.Transactions {
+		if i < len(b.TxMetas) && b.TxMetas[i] != nil {
+			continue
+		}
+		if canDeriveAccountsFromMessage(tx) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func blockToDependencyGraph(b *block.Block) (adjacencyList [][]tx, inDegree []int) {
 	//start := time.Now()
 	// Map between pubkeys and account indices
 	var acctToPk []solana.PublicKey
 	pkToAcct := make(map[solana.PublicKey]acct, len(b.Transactions)*4)
 
-	for i, txMeta := range b.TxMetas {
-		tx := b.Transactions[i]
+	for i, tx := range b.Transactions {
+		var txMeta *rpc.TransactionMeta
+		if i < len(b.TxMetas) {
+			txMeta = b.TxMetas[i]
+		}
+
 		accounts := getAllAccounts(tx, txMeta)
 		for _, acctPk := range accounts {
 			if _, exists := pkToAcct[acctPk]; !exists {
@@ -80,9 +166,9 @@ func blockToDependencyGraph(b *block.Block) (adjacencyList [][]tx, inDegree []in
 
 	acctToReaderTxs := make(map[acct][]tx, len(acctToPk))
 	acctToWriterTxs := make(map[acct][]tx, len(acctToPk))
-	adjacencyList = make([][]tx, len(b.TxMetas))
-	inDegree = make([]int, len(b.TxMetas))
-	for txIdx, txMeta := range b.TxMetas {
+	adjacencyList = make([][]tx, len(b.Transactions))
+	inDegree = make([]int, len(b.Transactions))
+	for txIdx := range b.Transactions {
 		/* Given S < T (S occurs before T) in a sequential execution, we
 		   use these restrictions on the parallel execution to reproduce
 		   the sequential execution
@@ -94,6 +180,10 @@ func blockToDependencyGraph(b *block.Block) (adjacencyList [][]tx, inDegree []in
 		   writes | writes | S < T
 		*/
 		t := tx(txIdx)
+		var txMeta *rpc.TransactionMeta
+		if txIdx < len(b.TxMetas) {
+			txMeta = b.TxMetas[txIdx]
+		}
 
 		//txSig := b.Transactions[txIdx].Signatures[0]
 		////mlog.Log.Debugf("printing input accounts for txIdx=%d txSig=%s", txIdx, txSig)
@@ -171,7 +261,7 @@ func TopsortPlanner(b *block.Block) [][]int {
 			roots = append(roots, t)
 		}
 	}
-	for topSorted < len(b.TxMetas) {
+	for topSorted < len(b.Transactions) {
 		topSortLevels = append(topSortLevels, roots)
 		topSorted += len(roots)
 		// Remove roots from graph.

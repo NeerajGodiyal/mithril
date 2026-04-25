@@ -1,7 +1,7 @@
 package mlog
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -38,11 +38,12 @@ type LogConfig struct {
 
 type logger struct {
 	mu            sync.Mutex
+	fileMu        sync.Mutex
 	enableVerbose *atomic.Bool
 	level         LogLevel
 	toStdout      bool
-	writer        io.Writer // combined writer (file + optional stdout)
-	bufWriter     *bufio.Writer
+	writer        io.Writer // console writer (stderr) or fallback writer in stderr-only mode
+	fileBuffer    bytes.Buffer
 	fileWriter    *lumberjack.Logger
 	logPath       string
 	runDir        string // per-run directory (e.g., mithril-logs/20250104-120000Z_abc123_12345678/)
@@ -141,15 +142,13 @@ func Initialize(cfg LogConfig, runID string) error {
 		Compress:   true,  // gzip old logs
 	}
 
-	// Create multi-writer if console output is enabled (use stderr to share stream with progress bars)
+	// Keep console output and file output independent. A slow or wedged file
+	// writer must not stall live stderr progress reporting or replay itself.
 	if cfg.ToStdout {
-		Log.writer = io.MultiWriter(os.Stderr, Log.fileWriter)
+		Log.writer = os.Stderr
 	} else {
-		Log.writer = Log.fileWriter
+		Log.writer = nil
 	}
-
-	// Wrap with buffered writer for performance
-	Log.bufWriter = bufio.NewWriterSize(Log.writer, 16*1024) // 16KB buffer
 
 	// Create symlink to latest run directory
 	symlinkPath := filepath.Join(cfg.Dir, "latest")
@@ -188,6 +187,54 @@ func appendRunsLogEntry(runsLogPath string, ts time.Time, runID, commit, runDir 
 	}
 }
 
+// CreateSubprocessWriter returns a writer for a named subprocess (e.g. "lightbringer")
+// that routes output to a dedicated log file in the current run directory. Subprocess
+// output is not mirrored to the terminal, keeping Mithril's own output readable.
+// When file logging is not initialized, output falls back to stderr with a
+// "[name] " prefix so developers running without a log directory can still see it.
+func (l *logger) CreateSubprocessWriter(name string) io.Writer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.initialized || l.runDir == "" {
+		return newPrefixWriter(os.Stderr, "["+name+"] ")
+	}
+
+	return &lumberjack.Logger{
+		Filename:   filepath.Join(l.runDir, name+".log"),
+		MaxSize:    100, // MB
+		MaxAge:     7,
+		MaxBackups: 5,
+		LocalTime:  false,
+		Compress:   true,
+	}
+}
+
+// prefixWriter wraps an io.Writer and prepends a prefix to each line.
+// Used only as a fallback when subprocess file logging is not available.
+type prefixWriter struct {
+	w      io.Writer
+	prefix string
+}
+
+func newPrefixWriter(w io.Writer, prefix string) *prefixWriter {
+	return &prefixWriter{w: w, prefix: prefix}
+}
+
+func (pw *prefixWriter) Write(p []byte) (int, error) {
+	lines := bytes.Split(p, []byte("\n"))
+	for i, line := range lines {
+		// Skip the trailing empty element produced by bytes.Split when input ends in '\n'.
+		if len(line) == 0 && i == len(lines)-1 {
+			continue
+		}
+		if _, err := fmt.Fprintf(pw.w, "%s%s\n", pw.prefix, line); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
 // flushLoop periodically flushes the buffer and syncs to disk
 func (l *logger) flushLoop() {
 	defer l.wg.Done()
@@ -211,11 +258,7 @@ func (l *logger) flushLoop() {
 
 // flush flushes the buffer without syncing
 func (l *logger) flush() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.bufWriter != nil {
-		l.bufWriter.Flush()
-	}
+	l.writePending(l.drainPending())
 }
 
 // Flush flushes the log buffer to ensure all pending messages are written.
@@ -226,42 +269,40 @@ func Flush() {
 
 // flushAndSync flushes and syncs to disk
 func (l *logger) flushAndSync() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.bufWriter != nil {
-		l.bufWriter.Flush()
-	}
-	// lumberjack doesn't expose Sync, but flush is sufficient for most cases
+	l.writePending(l.drainPending())
+	// lumberjack doesn't expose Sync, but draining the in-memory buffer is
+	// sufficient for most cases.
 }
 
 // Shutdown flushes all pending writes and closes the log file
 func Shutdown() {
 	Log.mu.Lock()
-	defer Log.mu.Unlock()
-
 	if !Log.initialized {
+		Log.mu.Unlock()
 		return
 	}
 
 	// Stop the flush goroutine
-	if Log.stopCh != nil {
-		close(Log.stopCh)
-		Log.mu.Unlock()
+	stopCh := Log.stopCh
+	Log.stopCh = nil
+	Log.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
 		Log.wg.Wait()
-		Log.mu.Lock()
 	}
 
-	// Final flush
-	if Log.bufWriter != nil {
-		Log.bufWriter.Flush()
-	}
+	Log.writePending(Log.drainPending())
 
-	// Close lumberjack
+	Log.fileMu.Lock()
 	if Log.fileWriter != nil {
 		Log.fileWriter.Close()
 	}
+	Log.fileMu.Unlock()
 
+	Log.mu.Lock()
 	Log.initialized = false
+	Log.mu.Unlock()
 }
 
 // GetLogPath returns the path to the current log file
@@ -377,30 +418,35 @@ func relativePrefixPrecise() string {
 func (l *logger) write(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.writeLocked(msg)
+}
 
-	if l.bufWriter != nil {
-		l.bufWriter.WriteString(msg)
-	} else if l.writer != nil {
+func (l *logger) writeLocked(msg string) {
+	wrote := false
+
+	if l.writer != nil {
 		l.writer.Write([]byte(msg))
-	} else {
+		wrote = true
+	}
+
+	if l.fileWriter != nil {
+		l.fileBuffer.WriteString(msg)
+		wrote = true
+	}
+
+	if !wrote {
 		// Fallback to stderr if not initialized
 		fmt.Fprint(os.Stderr, msg)
 	}
 }
 
-// writeImmediate outputs a log message and immediately flushes (for errors)
+// writeImmediate outputs a log message with immediate terminal visibility.
+// File persistence is handled by the background flush loop so hot-path logs
+// cannot stall replay on slow disk writes.
 func (l *logger) writeImmediate(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	if l.bufWriter != nil {
-		l.bufWriter.WriteString(msg)
-		l.bufWriter.Flush()
-	} else if l.writer != nil {
-		l.writer.Write([]byte(msg))
-	} else {
-		fmt.Fprint(os.Stderr, msg)
-	}
+	l.writeLocked(msg)
 }
 
 // writeFileOnly outputs a log message only to the file, not to stdout/stderr.
@@ -409,11 +455,36 @@ func (l *logger) writeFileOnly(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Write only to file writer, bypassing the multi-writer
 	if l.fileWriter != nil {
-		l.fileWriter.Write([]byte(msg))
+		l.fileBuffer.WriteString(msg)
 	}
 	// If no file writer, silently discard (file-only logging disabled)
+}
+
+func (l *logger) drainPending() []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.drainPendingLocked()
+}
+
+func (l *logger) drainPendingLocked() []byte {
+	if l.fileBuffer.Len() == 0 {
+		return nil
+	}
+	pending := append([]byte(nil), l.fileBuffer.Bytes()...)
+	l.fileBuffer.Reset()
+	return pending
+}
+
+func (l *logger) writePending(pending []byte) {
+	if len(pending) == 0 || l.fileWriter == nil {
+		return
+	}
+	l.fileMu.Lock()
+	defer l.fileMu.Unlock()
+	if _, err := l.fileWriter.Write(pending); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to write mithril log: %v\n", err)
+	}
 }
 
 func (l *logger) Debugf(format string, args ...interface{}) {
@@ -442,8 +513,8 @@ func (l *logger) FileOnlyf(format string, args ...interface{}) {
 	l.writeFileOnly(msg)
 }
 
-// InfofPrecise logs with millisecond precision timing (for block replay)
-// Flushes immediately to ensure real-time output during replay
+// InfofPrecise logs with millisecond precision timing (for block replay).
+// Terminal visibility is immediate; file persistence is buffered.
 func (l *logger) InfofPrecise(format string, args ...interface{}) {
 	if l.level > LevelInfo {
 		return

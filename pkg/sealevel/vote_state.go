@@ -20,6 +20,7 @@ const (
 	VoteStateVersionV0_23_5 = iota
 	VoteStateVersionV1_14_11
 	VoteStateVersionCurrent
+	VoteStateVersionV4
 )
 
 const (
@@ -118,6 +119,32 @@ type VoteState struct {
 	PriorVoters          PriorVoters
 	EpochCredits         []EpochCredits
 	LastTimestamp        BlockTimestamp
+
+	// V4-specific fields preserved through the processing loop.
+	// Populated by ConvertToCurrent when source is V4; used by newVoteState4FromCurrent.
+	wasV4                         bool
+	v4InflationRewardsCollector   solana.PublicKey
+	v4BlockRevenueCollector       solana.PublicKey
+	v4InflationRewardsCommBps     uint16
+	v4BlockRevenueCommBps         uint16
+	v4PendingDelegatorRewards     uint64
+	v4BlsPubkeyCompressed         *[48]byte
+}
+
+type VoteState4 struct {
+	NodePubkey                    solana.PublicKey
+	AuthorizedWithdrawer          solana.PublicKey
+	InflationRewardsCollector     solana.PublicKey
+	BlockRevenueCollector         solana.PublicKey
+	InflationRewardsCommissionBps uint16
+	BlockRevenueCommissionBps     uint16
+	PendingDelegatorRewards       uint64
+	BlsPubkeyCompressed           *[48]byte // Option<[u8;48]>, nil = None
+	Votes                         deque.Deque[LandedVote]
+	RootSlot                      *uint64
+	AuthorizedVoters              AuthorizedVoters
+	EpochCredits                  []EpochCredits
+	LastTimestamp                  BlockTimestamp
 }
 
 type VoteStateVersions struct {
@@ -125,6 +152,7 @@ type VoteStateVersions struct {
 	V0_23_5  VoteState0_23_5
 	V1_14_11 VoteState1_14_11
 	Current  VoteState
+	V4       VoteState4
 }
 
 func (priorVoter *PriorVoter) UnmarshalWithDecoder(decoder *bin.Decoder, isVersion0_23_5 bool) error {
@@ -990,13 +1018,231 @@ func (voteState *VoteState) MarshalWithEncoder(encoder *bin.Encoder) error {
 	return err
 }
 
-func (voteState *VoteState) GetAndUpdateAuthorizedVoter(currentEpoch uint64) (solana.PublicKey, error) {
+func (voteState *VoteState4) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	nodePk, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteState.NodePubkey[:], nodePk)
+
+	authWithdrawer, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteState.AuthorizedWithdrawer[:], authWithdrawer)
+
+	inflationCollector, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteState.InflationRewardsCollector[:], inflationCollector)
+
+	blockCollector, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteState.BlockRevenueCollector[:], blockCollector)
+
+	voteState.InflationRewardsCommissionBps, err = decoder.ReadUint16(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	voteState.BlockRevenueCommissionBps, err = decoder.ReadUint16(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	voteState.PendingDelegatorRewards, err = decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	// Option<[u8; 48]>
+	hasBls, err := ReadBool(decoder)
+	if err != nil {
+		return err
+	}
+	if hasBls {
+		blsBytes, err := decoder.ReadBytes(48)
+		if err != nil {
+			return err
+		}
+		var bls [48]byte
+		copy(bls[:], blsBytes)
+		voteState.BlsPubkeyCompressed = &bls
+	} else {
+		voteState.BlsPubkeyCompressed = nil
+	}
+
+	numLockouts, err := decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	voteState.Votes.Clear()
+	voteState.Votes.SetBaseCap(int(numLockouts))
+	for count := uint64(0); count < numLockouts; count++ {
+		var landedVote LandedVote
+		err = landedVote.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		voteState.Votes.PushBack(landedVote)
+	}
+
+	hasRootSlot, err := ReadBool(decoder)
+	if err != nil {
+		return err
+	}
+
+	if hasRootSlot {
+		rootSlot, err := decoder.ReadUint64(bin.LE)
+		if err != nil {
+			return err
+		}
+		voteState.RootSlot = &rootSlot
+	}
+
+	err = voteState.AuthorizedVoters.UnmarshalWithDecoder(decoder)
+	if err != nil {
+		return err
+	}
+
+	numEpochCredits, err := decoder.ReadUint64(bin.LE)
+	if err != nil {
+		return err
+	}
+
+	voteState.EpochCredits = slices.Grow(voteState.EpochCredits, int(numEpochCredits))
+	for count := uint64(0); count < numEpochCredits; count++ {
+		var epochCredits EpochCredits
+		err = epochCredits.UnmarshalWithDecoder(decoder)
+		if err != nil {
+			return err
+		}
+		voteState.EpochCredits = append(voteState.EpochCredits, epochCredits)
+	}
+
+	err = voteState.LastTimestamp.UnmarshalWithDecoder(decoder)
+	return err
+}
+
+func (voteState *VoteState4) MarshalWithEncoder(encoder *bin.Encoder) error {
+	err := encoder.WriteBytes(voteState.NodePubkey[:], false)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteBytes(voteState.AuthorizedWithdrawer[:], false)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteBytes(voteState.InflationRewardsCollector[:], false)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteBytes(voteState.BlockRevenueCollector[:], false)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteUint16(voteState.InflationRewardsCommissionBps, bin.LE)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteUint16(voteState.BlockRevenueCommissionBps, bin.LE)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteUint64(voteState.PendingDelegatorRewards, bin.LE)
+	if err != nil {
+		return err
+	}
+
+	// Option<[u8; 48]>
+	if voteState.BlsPubkeyCompressed != nil {
+		err = encoder.WriteBool(true)
+		if err != nil {
+			return err
+		}
+		err = encoder.WriteBytes(voteState.BlsPubkeyCompressed[:], false)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = encoder.WriteBool(false)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = encoder.WriteUint64(uint64(voteState.Votes.Len()), bin.LE)
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < voteState.Votes.Len(); i++ {
+		landedVote := voteState.Votes.At(i)
+		err = landedVote.MarshalWithEncoder(encoder)
+		if err != nil {
+			break
+		}
+	}
+
+	if voteState.RootSlot != nil {
+		err = encoder.WriteBool(true)
+		if err != nil {
+			return err
+		}
+
+		err = encoder.WriteUint64(*voteState.RootSlot, bin.LE)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = encoder.WriteBool(false)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = voteState.AuthorizedVoters.MarshalWithEncoder(encoder)
+	if err != nil {
+		return err
+	}
+
+	err = encoder.WriteUint64(uint64(len(voteState.EpochCredits)), bin.LE)
+	if err != nil {
+		return err
+	}
+
+	for _, epochCredits := range voteState.EpochCredits {
+		err = epochCredits.MarshalWithEncoder(encoder)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = voteState.LastTimestamp.MarshalWithEncoder(encoder)
+	return err
+}
+
+func (voteState *VoteState) GetAndUpdateAuthorizedVoter(currentEpoch uint64, f features.Features) (solana.PublicKey, error) {
 	pubkey, err := voteState.AuthorizedVoters.GetAndCacheAuthorizedVoterForEpoch(currentEpoch)
 	if err != nil {
 		return pubkey, InstrErrInvalidAccountData
 	}
 
-	voteState.AuthorizedVoters.PurgeAuthorizedVoters(currentEpoch)
+	purgeEpoch := currentEpoch
+	if f.IsActive(features.VoteStateV4) {
+		purgeEpoch = safemath.SaturatingSubU64(currentEpoch, 1)
+	}
+	voteState.AuthorizedVoters.PurgeAuthorizedVoters(purgeEpoch)
 	return pubkey, nil
 }
 
@@ -1008,8 +1254,8 @@ func (voteState *VoteState) Credits() uint64 {
 	}
 }
 
-func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, currentEpoch uint64, targetEpoch uint64, verify func(epochAuthorizedVoter solana.PublicKey) error) error {
-	epochAuthorizedVoter, err := voteState.GetAndUpdateAuthorizedVoter(currentEpoch)
+func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, currentEpoch uint64, targetEpoch uint64, verify func(epochAuthorizedVoter solana.PublicKey) error, f features.Features) error {
+	epochAuthorizedVoter, err := voteState.GetAndUpdateAuthorizedVoter(currentEpoch, f)
 	if err != nil {
 		return err
 	}
@@ -1034,19 +1280,22 @@ func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, c
 	latestAuthPubkey := iter.Value()
 
 	if latestAuthPubkey != authorized {
-		var epochOfLastAuthorizedSwitch uint64
-		last := voteState.PriorVoters.Last()
-		if last != nil {
-			epochOfLastAuthorizedSwitch = last.EpochEnd
-		} else {
-			epochOfLastAuthorizedSwitch = 0
+		// V4: skip PriorVoters tracking entirely (V4 has no PriorVoters field)
+		if !f.IsActive(features.VoteStateV4) {
+			var epochOfLastAuthorizedSwitch uint64
+			last := voteState.PriorVoters.Last()
+			if last != nil {
+				epochOfLastAuthorizedSwitch = last.EpochEnd
+			} else {
+				epochOfLastAuthorizedSwitch = 0
+			}
+
+			voteState.PriorVoters.Append(PriorVoter{Pubkey: latestAuthPubkey, EpochStart: epochOfLastAuthorizedSwitch, EpochEnd: targetEpoch})
 		}
 
 		if targetEpoch <= latestEpoch {
 			return InstrErrInvalidAccountData
 		}
-
-		voteState.PriorVoters.Append(PriorVoter{Pubkey: latestAuthPubkey, EpochStart: epochOfLastAuthorizedSwitch, EpochEnd: targetEpoch})
 	}
 
 	voteState.AuthorizedVoters.AuthorizedVoters.Set(targetEpoch, authorized)
@@ -1235,6 +1484,10 @@ func (voteStateVersions *VoteStateVersions) UnmarshalWithDecoder(decoder *bin.De
 		{
 			err = voteStateVersions.Current.UnmarshalWithDecoder(decoder)
 		}
+	case VoteStateVersionV4:
+		{
+			err = voteStateVersions.V4.UnmarshalWithDecoder(decoder)
+		}
 	default:
 		{
 			//mlog.Log.Debugf("invalid vote state type: %d", voteStateVersions.Type)
@@ -1263,6 +1516,10 @@ func (voteStateVersions *VoteStateVersions) MarshalWithEncoder(encoder *bin.Enco
 		{
 			err = voteStateVersions.Current.MarshalWithEncoder(encoder)
 		}
+	case VoteStateVersionV4:
+		{
+			err = voteStateVersions.V4.MarshalWithEncoder(encoder)
+		}
 	}
 
 	return err
@@ -1281,6 +1538,10 @@ func (voteStateVersions *VoteStateVersions) IsInitialized() bool {
 	case VoteStateVersionCurrent:
 		{
 			return voteStateVersions.Current.AuthorizedVoters.AuthorizedVoters.Len() != 0
+		}
+	case VoteStateVersionV4:
+		{
+			return voteStateVersions.V4.AuthorizedVoters.AuthorizedVoters.Len() != 0
 		}
 	default:
 		{
@@ -1346,6 +1607,34 @@ func (voteStateVersions *VoteStateVersions) ConvertToCurrent() *VoteState {
 			return &voteStateVersions.Current
 		}
 
+	case VoteStateVersionV4:
+		{
+			state := &voteStateVersions.V4
+
+			newVoteState := &VoteState{
+				NodePubkey:           state.NodePubkey,
+				AuthorizedWithdrawer: state.AuthorizedWithdrawer,
+				Commission:           byte(state.InflationRewardsCommissionBps / 100),
+				RootSlot:             state.RootSlot,
+				AuthorizedVoters:     state.AuthorizedVoters,
+				PriorVoters:          PriorVoters{Index: 31, IsEmpty: true},
+				EpochCredits:         state.EpochCredits,
+				LastTimestamp:        state.LastTimestamp,
+				Votes:                state.Votes,
+
+				// Preserve V4-specific fields for the write path
+				wasV4:                       true,
+				v4InflationRewardsCollector: state.InflationRewardsCollector,
+				v4BlockRevenueCollector:     state.BlockRevenueCollector,
+				v4InflationRewardsCommBps:   state.InflationRewardsCommissionBps,
+				v4BlockRevenueCommBps:       state.BlockRevenueCommissionBps,
+				v4PendingDelegatorRewards:   state.PendingDelegatorRewards,
+				v4BlsPubkeyCompressed:       state.BlsPubkeyCompressed,
+			}
+
+			return newVoteState
+		}
+
 	default:
 		{
 			panic("vote account in invalid state - potential programming error")
@@ -1370,6 +1659,11 @@ func (voteStateVersions *VoteStateVersions) LastTimestamp() *BlockTimestamp {
 			return &voteStateVersions.Current.LastTimestamp
 		}
 
+	case VoteStateVersionV4:
+		{
+			return &voteStateVersions.V4.LastTimestamp
+		}
+
 	default:
 		{
 			panic("vote account in invalid state - potential programming error")
@@ -1390,6 +1684,8 @@ func (voteStateVersions *VoteStateVersions) NodePubkey() solana.PublicKey {
 		return voteStateVersions.V1_14_11.NodePubkey
 	case VoteStateVersionCurrent:
 		return voteStateVersions.Current.NodePubkey
+	case VoteStateVersionV4:
+		return voteStateVersions.V4.NodePubkey
 	default:
 		// Log unknown version once to avoid flooding hot paths
 		unknownVoteStateVersionOnce.Do(func() {
@@ -1470,9 +1766,70 @@ func newVoteStateFromVoteInit(voteInit VoteInstrVoteInit, clock SysvarClock) *Vo
 	return voteState
 }
 
+func newVoteState4FromCurrent(vs *VoteState, votePubkey solana.PublicKey) *VoteState4 {
+	vs4 := &VoteState4{
+		NodePubkey:           vs.NodePubkey,
+		AuthorizedWithdrawer: vs.AuthorizedWithdrawer,
+		Votes:                vs.Votes,
+		RootSlot:             vs.RootSlot,
+		AuthorizedVoters:     vs.AuthorizedVoters,
+		EpochCredits:         vs.EpochCredits,
+		LastTimestamp:         vs.LastTimestamp,
+	}
+
+	if vs.wasV4 {
+		// Preserve V4-specific fields from the original V4 account
+		vs4.InflationRewardsCollector = vs.v4InflationRewardsCollector
+		vs4.BlockRevenueCollector = vs.v4BlockRevenueCollector
+		vs4.InflationRewardsCommissionBps = vs.v4InflationRewardsCommBps
+		vs4.BlockRevenueCommissionBps = vs.v4BlockRevenueCommBps
+		vs4.PendingDelegatorRewards = vs.v4PendingDelegatorRewards
+		vs4.BlsPubkeyCompressed = vs.v4BlsPubkeyCompressed
+	} else {
+		// First-time V3/V1_14_11 → V4 conversion: use Agave defaults
+		vs4.InflationRewardsCollector = votePubkey
+		vs4.BlockRevenueCollector = vs.NodePubkey
+		vs4.InflationRewardsCommissionBps = uint16(vs.Commission) * 100
+		vs4.BlockRevenueCommissionBps = 10000
+		vs4.PendingDelegatorRewards = 0
+		vs4.BlsPubkeyCompressed = nil
+	}
+
+	return vs4
+}
+
 func setVoteAccountState(execCtx *ExecutionCtx, acct *BorrowedAccount, voteState *VoteState, f features.Features) error {
 	var err error
-	if f.IsActive(features.VoteStateAddVoteLatency) {
+	if f.IsActive(features.VoteStateV4) {
+		vsz := VoteStateV3Size
+		resizeNeeded := len(acct.Data()) < vsz
+
+		resizeRentExempt := acct.IsRentExemptAtDataLength(uint64(vsz))
+		resizeFailed := false
+
+		if resizeNeeded && resizeRentExempt {
+			err = acct.SetDataLength(VoteStateV3Size, f)
+			if err != nil {
+				resizeFailed = true
+			}
+		}
+
+		// V4: NO V1_14_11 fallback — error on resize failure (per SIMD-0185)
+		if resizeNeeded && (!resizeRentExempt || resizeFailed) {
+			return InstrErrAccountNotRentExempt
+		}
+
+		vs4 := newVoteState4FromCurrent(voteState, acct.Key())
+		newVersioned := &VoteStateVersions{Type: VoteStateVersionV4}
+		newVersioned.V4 = *vs4
+		execCtx.AddModifiedVoteState(acct.Key(), newVersioned)
+		voteStateBytes, err := marshalVersionedVoteState(newVersioned)
+		defer voteStateBufPool.Put(voteStateBytes)
+		if err != nil {
+			return err
+		}
+		return acct.SetState(f, voteStateBytes)
+	} else if f.IsActive(features.VoteStateAddVoteLatency) {
 		vsz := VoteStateV3Size
 		resizeNeeded := len(acct.Data()) < vsz
 

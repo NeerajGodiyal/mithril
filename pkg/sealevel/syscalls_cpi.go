@@ -18,10 +18,12 @@ import (
 )
 
 const (
-	MaxSigners                = 16
-	MaxCpiInstructionDataLen  = 10 * 1024
-	MaxCpiInstructionAccounts = 255
-	MaxCpiAccountInfos        = 128
+	MaxSigners                 = 16
+	MaxCpiInstructionDataLen   = 10 * 1024
+	MaxCpiInstructionAccounts  = 255
+	MaxCpiAccountInfos         = 128
+	MaxCpiAccountInfosSimd0339 = 255
+	AccountInfoByteSize        = 80
 )
 
 func checkInstructionSize(execCtx *ExecutionCtx, numAccounts uint64, dataLen uint64) error {
@@ -91,7 +93,14 @@ func translateInstructionC(vm sbpf.VM, addr uint64) (Instruction, error) {
 
 	execCtx := executionCtx(vm)
 	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
-		err = execCtx.ComputeMeter.Consume(ix.DataLen / cu.CUCpiBytesPerUnit)
+		totalCuTranslationCost := ix.DataLen / cu.CUCpiBytesPerUnit
+
+		if execCtx.Features.IsActive(features.IncreaseCpiAccountInfoLimit) {
+			acctMetaTranslationCost := safemath.SaturatingMulU64(ix.AccountsLen, AccountMetaSize) / cu.CUCpiBytesPerUnit
+			totalCuTranslationCost = safemath.SaturatingAddU64(totalCuTranslationCost, acctMetaTranslationCost)
+		}
+
+		err = execCtx.ComputeMeter.Consume(totalCuTranslationCost)
 		if err != nil {
 			return Instruction{}, err
 		}
@@ -168,7 +177,14 @@ func translateInstructionRust(vm sbpf.VM, addr uint64) (Instruction, error) {
 
 	execCtx := executionCtx(vm)
 	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
-		err = execCtx.ComputeMeter.Consume(ix.Data.Len / cu.CUCpiBytesPerUnit)
+		totalCuTranslationCost := ix.Data.Len / cu.CUCpiBytesPerUnit
+
+		if execCtx.Features.IsActive(features.IncreaseCpiAccountInfoLimit) {
+			acctMetaTranslationCost := safemath.SaturatingMulU64(ix.Accounts.Len, AccountMetaSize) / cu.CUCpiBytesPerUnit
+			totalCuTranslationCost = safemath.SaturatingAddU64(totalCuTranslationCost, acctMetaTranslationCost)
+		}
+
+		err = execCtx.ComputeMeter.Consume(totalCuTranslationCost)
 		if err != nil {
 			return Instruction{}, err
 		}
@@ -294,7 +310,9 @@ func checkAuthorizedProgram(execCtx *ExecutionCtx, programId solana.PublicKey, i
 func checkAccountInfos(execCtx *ExecutionCtx, numAccountInfos uint64) error {
 	if execCtx.Features.IsActive(features.LoosenCpiSizeRestriction) {
 		var maxAccountInfos uint64
-		if execCtx.Features.IsActive(features.IncreaseTxAccountLockLimit) {
+		if execCtx.Features.IsActive(features.IncreaseCpiAccountInfoLimit) {
+			maxAccountInfos = MaxCpiAccountInfosSimd0339
+		} else if execCtx.Features.IsActive(features.IncreaseTxAccountLockLimit) {
 			maxAccountInfos = MaxCpiAccountInfos
 		} else {
 			maxAccountInfos = 64
@@ -309,6 +327,13 @@ func checkAccountInfos(execCtx *ExecutionCtx, numAccountInfos uint64) error {
 		}
 	}
 	return nil
+}
+
+func cpiInvokeUnits(f *features.Features) uint64 {
+	if f != nil && f.IsActive(features.IncreaseCpiAccountInfoLimit) {
+		return cu.CUInvokeUnitsSimd0339
+	}
+	return cu.CUInvokeUnits
 }
 
 func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64) ([]SolAccountInfoC, []solana.PublicKey, error) {
@@ -330,9 +355,18 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 		accountInfos = append(accountInfos, acctInfo)
 	}
 
-	err = checkAccountInfos(executionCtx(vm), uint64(len(accountInfos)))
+	execCtx := executionCtx(vm)
+	err = checkAccountInfos(execCtx, uint64(len(accountInfos)))
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if execCtx.Features.IsActive(features.IncreaseCpiAccountInfoLimit) {
+		acctInfosBytes := safemath.SaturatingMulU64(uint64(len(accountInfos)), AccountInfoByteSize)
+		err = execCtx.ComputeMeter.Consume(acctInfosBytes / cu.CUCpiBytesPerUnit)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	accountInfoKeys := make([]solana.PublicKey, 0, len(accountInfos))
@@ -367,9 +401,18 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 		accountInfos = append(accountInfos, acctInfo)
 	}
 
-	err = checkAccountInfos(executionCtx(vm), uint64(len(accountInfos)))
+	execCtx := executionCtx(vm)
+	err = checkAccountInfos(execCtx, uint64(len(accountInfos)))
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if execCtx.Features.IsActive(features.IncreaseCpiAccountInfoLimit) {
+		acctInfosBytes := safemath.SaturatingMulU64(uint64(len(accountInfos)), AccountInfoByteSize)
+		err = execCtx.ComputeMeter.Consume(acctInfosBytes / cu.CUCpiBytesPerUnit)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	accountInfoKeys := make([]solana.PublicKey, 0, len(accountInfos))
@@ -752,7 +795,7 @@ func translateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, pr
 // SyscallInvokeSignedCImpl is an implementation of the sol_invoke_signed_c syscall
 func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, accountInfosLen, signerSeedsAddr, signerSeedsLen uint64) (uint64, error) {
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cpiInvokeUnits(&execCtx.Features))
 	if err != nil {
 		return syscallCuErr()
 	}
@@ -830,7 +873,7 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 	//mlog.Log.Debugf("SyscallInvokeSignedRust")
 
 	execCtx := executionCtx(vm)
-	err := execCtx.ComputeMeter.Consume(cu.CUInvokeUnits)
+	err := execCtx.ComputeMeter.Consume(cpiInvokeUnits(&execCtx.Features))
 	if err != nil {
 		return syscallCuErr()
 	}

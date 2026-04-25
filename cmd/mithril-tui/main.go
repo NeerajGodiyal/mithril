@@ -2,36 +2,57 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 const (
-	FilterAll = iota
-	FilterMachine
-	FilterMithril
+	ViewMetricsAll = iota
+	ViewMetricsMachine
+	ViewMetricsMithril
+	ViewMithrilLogs
+	ViewLightbringerLogs
+	viewCount // sentinel for modular cycling
 )
+
+const maxLogLines = 5000
 
 var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
 type model struct {
+	// Metrics view
 	table      table.Model
 	url        string
 	err        error
 	lastUpdate time.Time
 	allRows    []table.Row
-	filterMode int
+
+	// Log views
+	mithrilLogPath      string
+	lightbringerLogPath string
+	mithrilLogLines     []string
+	lightbringerLogLines []string
+	logViewport         viewport.Model
+
+	// State
+	viewMode int
+	width    int
+	height   int
 }
 
 type tickMsg time.Time
@@ -41,23 +62,54 @@ type metricsMsg struct {
 	err  error
 }
 
+type logMsg struct {
+	source string // "mithril" or "lightbringer"
+	lines  []string
+	err    error
+}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		fetchMetrics(m.url),
 		tickCmd(),
-	)
+	}
+	if m.mithrilLogPath != "" {
+		cmds = append(cmds, tailLog("mithril", m.mithrilLogPath))
+	}
+	if m.lightbringerLogPath != "" {
+		cmds = append(cmds, tailLog("lightbringer", m.lightbringerLogPath))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.logViewport.Width = msg.Width - 2
+		m.logViewport.Height = msg.Height - 4
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			m.filterMode = (m.filterMode + 1) % 3
-			m.table.SetRows(m.filterRows())
+			m.viewMode = (m.viewMode + 1) % viewCount
+			// Skip unavailable log views (single loop with bound to prevent infinite cycling)
+			for i := 0; i < viewCount; i++ {
+				if (m.viewMode == ViewMithrilLogs && m.mithrilLogPath == "") ||
+					(m.viewMode == ViewLightbringerLogs && m.lightbringerLogPath == "") {
+					m.viewMode = (m.viewMode + 1) % viewCount
+				} else {
+					break
+				}
+			}
+			if m.viewMode <= ViewMetricsMithril {
+				m.table.SetRows(m.filterRows())
+			} else {
+				m.updateLogViewport()
+			}
 		}
 	case metricsMsg:
 		if msg.err != nil {
@@ -66,45 +118,99 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.allRows = msg.rows
-		m.table.SetRows(m.filterRows())
+		if m.viewMode <= ViewMetricsMithril {
+			m.table.SetRows(m.filterRows())
+		}
 		m.lastUpdate = time.Now()
+	case logMsg:
+		if msg.err == nil {
+			switch msg.source {
+			case "mithril":
+				m.mithrilLogLines = msg.lines
+			case "lightbringer":
+				m.lightbringerLogLines = msg.lines
+			}
+			if (msg.source == "mithril" && m.viewMode == ViewMithrilLogs) ||
+				(msg.source == "lightbringer" && m.viewMode == ViewLightbringerLogs) {
+				m.updateLogViewport()
+			}
+		}
 	case tickMsg:
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			fetchMetrics(m.url),
 			tickCmd(),
-		)
+		}
+		if m.mithrilLogPath != "" {
+			cmds = append(cmds, tailLog("mithril", m.mithrilLogPath))
+		}
+		if m.lightbringerLogPath != "" {
+			cmds = append(cmds, tailLog("lightbringer", m.lightbringerLogPath))
+		}
+		return m, tea.Batch(cmds...)
 	}
-	m.table, cmd = m.table.Update(msg)
+
+	// Route input to the right component
+	if m.viewMode <= ViewMetricsMithril {
+		m.table, cmd = m.table.Update(msg)
+	} else {
+		m.logViewport, cmd = m.logViewport.Update(msg)
+	}
 	return m, cmd
 }
 
-func (m model) View() string {
-	if m.err != nil {
-		return fmt.Sprintf("Error fetching metrics: %v\n\nPress q to quit.", m.err)
+func (m *model) updateLogViewport() {
+	var lines []string
+	switch m.viewMode {
+	case ViewMithrilLogs:
+		lines = m.mithrilLogLines
+	case ViewLightbringerLogs:
+		lines = m.lightbringerLogLines
 	}
+	content := strings.Join(lines, "\n")
+	m.logViewport.SetContent(content)
+	m.logViewport.GotoBottom()
+}
 
-	filterName := "All Metrics"
-	switch m.filterMode {
-	case FilterMachine:
-		filterName = "Machine Metrics (Go/Process)"
-	case FilterMithril:
-		filterName = "Mithril Custom Metrics"
+func (m model) View() string {
+	viewName := ""
+	switch m.viewMode {
+	case ViewMetricsAll:
+		viewName = "All Metrics"
+	case ViewMetricsMachine:
+		viewName = "Machine Metrics (Go/Process)"
+	case ViewMetricsMithril:
+		viewName = "Mithril Custom Metrics"
+	case ViewMithrilLogs:
+		viewName = "Mithril Logs"
+	case ViewLightbringerLogs:
+		viewName = "Lightbringer Logs"
 	}
 
 	header := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("205")).
 		Bold(true).
-		Render(filterName)
+		Render(viewName)
 
-	return fmt.Sprintf("%s (Tab to switch metrics)\n%s\nLast updated: %s | q to quit",
+	if m.viewMode <= ViewMetricsMithril {
+		if m.err != nil {
+			return fmt.Sprintf("Error fetching metrics: %v\n\nPress q to quit.", m.err)
+		}
+		return fmt.Sprintf("%s (Tab to switch)\n%s\nLast updated: %s | q to quit",
+			header,
+			baseStyle.Render(m.table.View()),
+			m.lastUpdate.Format(time.TimeOnly))
+	}
+
+	// Log view
+	return fmt.Sprintf("%s (Tab to switch) | scroll: up/down/pgup/pgdn\n%s\nq to quit",
 		header,
-		baseStyle.Render(m.table.View()),
-		m.lastUpdate.Format(time.TimeOnly))
+		baseStyle.Render(m.logViewport.View()))
 }
 
 func fetchMetrics(url string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := http.Get(url)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(url)
 		if err != nil {
 			return metricsMsg{err: err}
 		}
@@ -122,14 +228,10 @@ func fetchMetrics(url string) tea.Cmd {
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 
-			// Skip comments and empty lines
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
 
-			// Expected format:
-			// metric_name{label="value"} 123.45
-			// metric_name 123.45
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
 				continue
@@ -157,7 +259,6 @@ func fetchMetrics(url string) tea.Cmd {
 			return metricsMsg{err: err}
 		}
 
-		// Stable ordering for TUI
 		sort.Slice(rows, func(i, j int) bool {
 			if rows[i][0] == rows[j][0] {
 				return rows[i][2] < rows[j][2]
@@ -169,6 +270,43 @@ func fetchMetrics(url string) tea.Cmd {
 	}
 }
 
+// tailLog reads the last maxLogLines from a log file.
+// Only reads the last 64KB to avoid OOM on large log files.
+func tailLog(source, path string) tea.Cmd {
+	return func() tea.Msg {
+		f, err := os.Open(path)
+		if err != nil {
+			return logMsg{source: source, err: err}
+		}
+		defer f.Close()
+
+		stat, err := f.Stat()
+		if err != nil {
+			return logMsg{source: source, err: err}
+		}
+
+		// Read only the tail of the file to avoid loading huge logs into memory
+		const tailSize = 64 * 1024
+		offset := stat.Size() - tailSize
+		if offset < 0 {
+			offset = 0
+		}
+
+		buf := make([]byte, stat.Size()-offset)
+		_, err = f.ReadAt(buf, offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return logMsg{source: source, err: err}
+		}
+
+		lines := strings.Split(string(buf), "\n")
+		if len(lines) > maxLogLines {
+			lines = lines[len(lines)-maxLogLines:]
+		}
+
+		return logMsg{source: source, lines: lines}
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -176,7 +314,7 @@ func tickCmd() tea.Cmd {
 }
 
 func (m model) filterRows() []table.Row {
-	if m.filterMode == FilterAll {
+	if m.viewMode == ViewMetricsAll {
 		return m.allRows
 	}
 
@@ -185,9 +323,9 @@ func (m model) filterRows() []table.Row {
 		name := row[0]
 		isMachine := strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_") || strings.HasPrefix(name, "promhttp_")
 
-		if m.filterMode == FilterMachine && isMachine {
+		if m.viewMode == ViewMetricsMachine && isMachine {
 			filtered = append(filtered, row)
-		} else if m.filterMode == FilterMithril && !isMachine {
+		} else if m.viewMode == ViewMetricsMithril && !isMachine {
 			filtered = append(filtered, row)
 		}
 	}
@@ -196,7 +334,32 @@ func (m model) filterRows() []table.Row {
 
 func main() {
 	url := flag.String("url", "http://localhost:9090/metrics", "Prometheus metrics URL")
+	logDir := flag.String("log-dir", "", "Mithril log directory (uses 'latest' symlink to find current run)")
 	flag.Parse()
+
+	// Resolve log paths from the log directory
+	mithrilLogPath := ""
+	lightbringerLogPath := ""
+	if *logDir != "" {
+		latestDir := filepath.Join(*logDir, "latest")
+		if target, err := os.Readlink(latestDir); err == nil {
+			// Validate symlink target — reject traversal and absolute paths
+			if !strings.Contains(target, "..") && !filepath.IsAbs(target) {
+				runDir := filepath.Clean(filepath.Join(*logDir, target))
+				cleanLogDir := filepath.Clean(*logDir) + string(os.PathSeparator)
+				if strings.HasPrefix(runDir+string(os.PathSeparator), cleanLogDir) {
+					ml := filepath.Join(runDir, "mithril.log")
+					if _, err := os.Stat(ml); err == nil {
+						mithrilLogPath = ml
+					}
+					ll := filepath.Join(runDir, "lightbringer.log")
+					if _, err := os.Stat(ll); err == nil {
+						lightbringerLogPath = ll
+					}
+				}
+			}
+		}
+	}
 
 	columns := []table.Column{
 		{Title: "Metric", Width: 40},
@@ -222,12 +385,17 @@ func main() {
 		Bold(false)
 	t.SetStyles(s)
 
+	vp := viewport.New(80, 20)
+
 	m := model{
-		table: t,
-		url:   *url,
+		table:               t,
+		url:                 *url,
+		mithrilLogPath:      mithrilLogPath,
+		lightbringerLogPath: lightbringerLogPath,
+		logViewport:         vp,
 	}
 
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
 	}

@@ -1,6 +1,9 @@
 package sbpf
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 type Verifier struct {
 	Program       *Program
@@ -31,16 +34,36 @@ const (
 func (v *Verifier) VerifyProgram() error {
 	v.buildValidationMap()
 
-	// TODO: static syscalls logic
-	functionStart := uint64(0)
-	functionNext := uint64(0)
-
 	text := v.Program.Text
 	if len(text) == 0 {
 		return fmt.Errorf("empty text")
 	}
 
+	var funcStarts []int64
+	if v.Program.SbpfVersion.EnableStaticSyscalls() {
+		for _, pc := range v.Program.Funcs {
+			funcStarts = append(funcStarts, pc)
+		}
+		sort.Slice(funcStarts, func(i, j int) bool { return funcStarts[i] < funcStarts[j] })
+	}
+
+	functionStart := int64(0)
+	functionNext := int64(len(text))
+	funcIdx := 0
+
 	for pc := 0; pc < len(text); pc++ {
+		if v.Program.SbpfVersion.EnableStaticSyscalls() {
+			for funcIdx < len(funcStarts) && int64(pc) >= funcStarts[funcIdx] {
+				functionStart = funcStarts[funcIdx]
+				if funcIdx+1 < len(funcStarts) {
+					functionNext = funcStarts[funcIdx+1]
+				} else {
+					functionNext = int64(len(text))
+				}
+				funcIdx++
+			}
+		}
+
 		ins := text[pc]
 
 		if ins.Src() > 10 {
@@ -70,7 +93,7 @@ func (v *Verifier) VerifyProgram() error {
 		case verifyCheckJmpV3:
 			{
 				dst := int64(pc) + int64(ins.Off()) + 1
-				if dst < int64(functionStart) || dst >= int64(functionNext) {
+				if dst < functionStart || dst >= functionNext {
 					return fmt.Errorf("jump out of code")
 				}
 			}

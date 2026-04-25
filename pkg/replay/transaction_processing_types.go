@@ -29,8 +29,6 @@ type LoadAndExecuteTransactionOutput struct {
 	Instrs []sealevel.Instruction
 	// ComputeBudgetLimits contains the compute budget limits computed from instructions.
 	ComputeBudgetLimits *sealevel.ComputeBudgetLimits
-	// ProgramIDSet contains the set of program IDs from the transaction.
-	ProgramIDSet map[solana.PublicKey]struct{}
 }
 
 // TransactionProcessingResult represents the result of processing a transaction

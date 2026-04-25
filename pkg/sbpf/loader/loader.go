@@ -61,7 +61,8 @@ type Loader struct {
 	entrypoint uint64 // program counter
 
 	// Symbols
-	funcs map[uint32]int64
+	funcs    map[uint32]int64
+	funcName map[uint32]int64
 }
 
 // Bounds checks

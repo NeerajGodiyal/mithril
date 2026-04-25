@@ -8,6 +8,7 @@ import (
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/iden3/go-iden3-crypto/poseidon"
@@ -268,14 +269,18 @@ func SwapEndianness(xs []byte) []byte {
 	return ys
 }
 
-func PoseidonHash(input [][]byte, isBigEndian bool) ([]byte, error) {
-	//mlog.Log.Debugf("PoseidonHash: len(input) = %d, isBigEndian = %t", len(input), isBigEndian)
+func PoseidonHash(input [][]byte, isBigEndian bool, enforceSimd0359 bool) ([]byte, error) {
 	inputBigInts := make([]*big.Int, 0, len(input))
 
 	for _, inputSlice := range input {
 		if len(inputSlice) > 32 {
 			return nil, fmt.Errorf("input too long")
 		}
+
+		if enforceSimd0359 && len(inputSlice) < 32 {
+			return nil, fmt.Errorf("input too short")
+		}
+
 		var bigInt *big.Int
 		if isBigEndian {
 			bigInt = new(big.Int).SetBytes(inputSlice)
@@ -366,7 +371,8 @@ func SyscallPoseidonImpl(vm sbpf.VM, parameters, endianness, valsAddr, valsLen, 
 
 	isBigEndian := endianness == 0
 
-	hash, err := PoseidonHash(inputs, isBigEndian)
+	enforceSimd0359 := execCtx.Features.IsActive(features.PoseidonEnforcePadding)
+	hash, err := PoseidonHash(inputs, isBigEndian, enforceSimd0359)
 	if err != nil {
 		return syscallSuccess(1)
 	}

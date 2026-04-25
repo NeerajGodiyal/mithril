@@ -5,10 +5,14 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/Overclock-Validator/mithril/cmd/mithril/configcmd"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/dashboardcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/setupcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/statecmd"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/statuscmd"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -46,14 +50,18 @@ func init() {
 	cmd.PersistentFlags().StringVar(&config.ConfigFile, "config", "", "Path to TOML config file")
 
 	cmd.AddCommand(
-		&node.Run,            // Primary command for running Mithril
-		&configcmd.ConfigCmd, // Config management (init, etc.)
-		&statecmd.StateCmd,   // State file inspection and management
+		&node.Run,                    // Primary command for running Mithril
+		&configcmd.ConfigCmd,         // Config management (init, etc.)
+		&statecmd.StateCmd,           // State file inspection and management
+		&setupcmd.SetupCmd,           // Interactive setup wizard
+		&setupcmd.DoctorCmd,          // System health check
+		&statuscmd.StatusCmd,         // Node status
+		&dashboardcmd.DashboardCmd,   // Interactive dashboard
 	)
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	cobra.CheckErr(cmd.ExecuteContext(ctx))
 }

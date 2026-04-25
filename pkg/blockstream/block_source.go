@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,9 +17,13 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/overcast"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go/rpc"
 	"golang.org/x/time/rate"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type BlockSourceType int
@@ -28,11 +35,16 @@ const (
 )
 
 type BlockSourceOpts struct {
-	RpcClient  *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
-	SourceType BlockSourceType
-	StartSlot    uint64
-	EndSlot      uint64
-	BlockDir     string
+	RpcClient            *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
+	SourceType           BlockSourceType
+	LightbringerEndpoint string
+	StartSlot            uint64
+	EndSlot              uint64
+	BlockDir             string
+	// When enabled, an active near-tip Lightbringer stream is delivered to replay
+	// as an observation feed for consensus buffering instead of requiring the
+	// block source to resolve every local gap before delivery.
+	ConsensusManagedLightbringer bool
 
 	// Backup RPC endpoints for failover (optional)
 	// These are tried in order if the primary fails with hard connectivity errors
@@ -73,11 +85,21 @@ type fetchResult struct {
 	block     *b.Block
 	err       error
 	skipped   bool  // true if SlotSkipped error
+	absentOK  bool  // true if a secondary confirmed-RPC probe verified the slot is absent
 	rpcIdx    int32 // which RPC endpoint produced this result (for error attribution)
 	latencyMs int64 // fetch latency in milliseconds (for stall diagnostics)
 }
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
+
+type blockSourceStopReason uint32
+
+const (
+	blockSourceStopReasonNone blockSourceStopReason = iota
+	blockSourceStopReasonCompleted
+	blockSourceStopReasonStalled
+	blockSourceStopReasonUnexpectedLiveEnd
+)
 
 // slotErrorInfo tracks error history for a specific slot (for stall diagnostics)
 type slotErrorInfo struct {
@@ -161,42 +183,46 @@ type BlockSourceStats struct {
 }
 
 type BlockSource struct {
-	rpcClients []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
-	streamChan chan *b.Block
-	startSlot    uint64
-	endSlot      uint64
-	currentSlot  uint64
-	blockDir     string
-	sourceType   BlockSourceType
+	rpcClients  []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
+	streamChan  chan *b.Block
+	startSlot   uint64
+	endSlot     uint64
+	currentSlot uint64
+	blockDir    string
+	sourceType  BlockSourceType
 
 	// RPC failover tracking
-	activeRpcIdx         atomic.Int32  // Currently active RPC index (0 = primary)
-	slotsSinceFailover   atomic.Uint64 // Slots emitted since failover (for retry timing)
-	failoverCount        atomic.Uint64 // Total failovers (for stats)
-	hardErrCount         atomic.Uint64 // Consecutive hard connectivity errors (reset on success)
-	lastHardErrTime      atomic.Int64  // Unix timestamp of last hard error (for time-windowing)
+	activeRpcIdx       atomic.Int32  // Currently active RPC index (0 = primary)
+	slotsSinceFailover atomic.Uint64 // Slots emitted since failover (for retry timing)
+	failoverCount      atomic.Uint64 // Total failovers (for stats)
+	hardErrCount       atomic.Uint64 // Consecutive hard connectivity errors (reset on success)
+	lastHardErrTime    atomic.Int64  // Unix timestamp of last hard error (for time-windowing)
 
 	// Rate limiting
 	rateLimiter *rate.Limiter
 	maxInflight int
 
 	// Tip tracking
-	confirmedTip        atomic.Uint64
-	processedTip        atomic.Uint64 // Processed commitment tip (super tip)
-	tipAtSlot           atomic.Uint64 // What slot we had executed when tip was measured
-	lastExecutedSlot    atomic.Uint64 // Last slot fully executed by replay (set by SetLastExecutedSlot)
-	tipSafetyMargin     uint64
-	tipPollInterval     time.Duration
-	lastTipUpdate       atomic.Int64  // Unix timestamp of last successful tip poll
-	tipPollFailures     atomic.Uint64 // Consecutive tip poll failures
-	totalTipPollFails   atomic.Uint64 // Total tip poll failures (for stats)
+	confirmedTip      atomic.Uint64
+	processedTip      atomic.Uint64 // Processed commitment tip (super tip)
+	tipAtSlot         atomic.Uint64 // What slot we had executed when tip was measured
+	lastExecutedSlot  atomic.Uint64 // Last slot fully executed by replay (set by SetLastExecutedSlot)
+	tipSafetyMargin   uint64
+	tipPollInterval   time.Duration
+	lastTipUpdate     atomic.Int64  // Unix timestamp of last successful tip poll
+	tipPollFailures   atomic.Uint64 // Consecutive tip poll failures
+	totalTipPollFails atomic.Uint64 // Total tip poll failures (for stats)
 
 	// Reorder buffer
-	reorderMu      sync.Mutex
-	reorderBuffer  map[uint64]*b.Block
-	skippedSlots   map[uint64]bool
-	nextSlotToSend uint64
-	maxPending     int
+	reorderMu     sync.Mutex
+	reorderBuffer map[uint64]*b.Block
+	skippedSlots  map[uint64]bool
+	// Tracks skipped slots inferred from a reconnecting Lightbringer descendant.
+	// These are not provisional RPC skip results and must not be discarded at handoff.
+	lightbringerSynthesizedSkips map[uint64]bool
+	nextSlotToSend               uint64
+	lastEmittedBlockSlot         uint64 // Last non-skipped block emitted to replay; used to validate Lightbringer ancestry at handoff.
+	maxPending                   int
 
 	// Slot state tracking (prevents duplicates)
 	slotStateMu   sync.Mutex
@@ -219,11 +245,12 @@ type BlockSource struct {
 	stallError   atomic.Bool // Set when stall timeout triggers
 
 	// Stall diagnostics
-	waitingSlotErrorsMu     sync.Mutex
-	waitingSlotErrors       map[uint64]*slotErrorInfo // Per-slot error tracking
-	lastStallHeartbeat      atomic.Int64              // Unix timestamp of last stall heartbeat log
-	lastFailoverTime        atomic.Int64              // Unix timestamp of last RPC failover
-	lastPriorityBlockedLog  atomic.Int64              // Unix timestamp of last "priority slot blocked" log
+	waitingSlotErrorsMu    sync.Mutex
+	waitingSlotErrors      map[uint64]*slotErrorInfo // Per-slot error tracking
+	lastStallHeartbeat     atomic.Int64              // Unix timestamp of last stall heartbeat log
+	lastFailoverTime       atomic.Int64              // Unix timestamp of last RPC failover
+	lastPriorityBlockedLog atomic.Int64              // Unix timestamp of last "priority slot blocked" log
+	lastReorderGapLog      atomic.Int64              // Unix timestamp of last buffered-gap warning log
 
 	// Near-tip mode tracking
 	isNearTip        atomic.Bool // True when close to confirmed tip
@@ -236,9 +263,44 @@ type BlockSource struct {
 	nearTipPollInterval time.Duration // Faster poll in near-tip mode
 	nearTipLookahead    uint64        // Slots ahead to schedule in near-tip
 
+	// Lightbringer live-stream handoff
+	lightbringerEndpoint           string
+	lightbringerStarted            atomic.Bool
+	lightbringerConnected          atomic.Bool
+	lightbringerLastStreamSlot     atomic.Uint64
+	lightbringerLastRecvUnix       atomic.Int64
+	lightbringerReconnectRequested atomic.Bool
+	lightbringerCancelMu           sync.Mutex
+	lightbringerCancel             context.CancelFunc
+	lightbringerHandoffSlot        atomic.Uint64 // First slot from the active stream connection, 0 = no active handoff
+	lightbringerForceRPCUntil      atomic.Uint64 // While set, ignore Lightbringer and use RPC until this slot is executed
+	lightbringerCooldownUntil      atomic.Uint64 // After a missing-slot recovery, keep RPC active until this slot executes
+	lightbringerNeedRPCResume      atomic.Bool   // Set when a live handoff disconnects and RPC must fill the gap again
+	lightbringerActive             atomic.Bool   // True once emitted blocks are being sourced from Lightbringer
+	lightbringerGapSlot            atomic.Uint64 // Waiting slot currently being watched for a Lightbringer gap
+	lightbringerGapSinceUnix       atomic.Int64  // UnixNano when the current Lightbringer gap was first observed
+	lightbringerGapLastLogUnix     atomic.Int64  // UnixNano of the last active-gap wait log
+	lightbringerGapReconnectSlot   atomic.Uint64 // Waiting slot that already triggered a Lightbringer reconnect
+	lightbringerRepairSlot         atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
+	lightbringerWg                 sync.WaitGroup
+	lightbringerBufferMu           sync.Mutex
+	lightbringerBuffer             map[uint64]*b.Block
+	lightbringerBufferOrder        []uint64
+	consensusManagedLightbringer   bool
+
 	// Stats tracking
 	stats          BlockSourceStats
 	statsResetTime atomic.Int64 // Unix timestamp when stats were last reset
+
+	// Rare safety probe used before finalizing a skipped slot.
+	// Tests can override this to avoid live RPC calls.
+	confirmSlotAbsent func(slot uint64) bool
+
+	// Shutdown tracking so replay can distinguish normal finite completion
+	// from an unexpected live-stream termination.
+	stopReason  atomic.Uint32
+	stopSlot    atomic.Uint64
+	stopEndSlot atomic.Uint64
 }
 
 // Default values
@@ -269,11 +331,37 @@ const (
 	// Stall diagnostics thresholds
 	stallHeartbeatThreshold = 2 * time.Minute  // Start logging heartbeats when stall exceeds this
 	stallHeartbeatInterval  = 30 * time.Second // Log heartbeat every this interval
+	reorderGapWarnInterval  = 5 * time.Second  // Rate-limit buffered-gap warnings
+	reorderGapWarnThreshold = 16               // Warn once buffered blocks pile up behind a missing slot
+	staleBackupResendEvery  = 5 * time.Second  // Re-send speculative backup fetches for slots that stay inflight
+	staleWaitingSlotRetry   = 15 * time.Second // Reset and retry a waiting slot if it stays inflight with no result
 
 	// Tip gate threshold: only apply tip safety margin when gap > this
 	// When gap <= 128, the gate causes more harm than good (bt storms, buffer drain)
 	// because headroom becomes too small (e.g., gap=70, margin=64 → only 6 slots headroom)
 	defaultTipGateThreshold = 128
+
+	// Lightbringer stream settings
+	lightbringerDialTimeout       = 10 * time.Second
+	lightbringerRetryBackoff      = 2 * time.Second
+	lightbringerMaxRetryBackoff   = 15 * time.Second
+	lightbringerBufferSlots       = 256
+	lightbringerFirstSlotWarn     = 10 * time.Second
+	lightbringerIdleReconnect     = 30 * time.Second
+	lightbringerNoEmitReconnect   = 30 * time.Second
+	lightbringerGapReconnectAfter = 30 * time.Second
+	lightbringerDeepGapReconnect  = 15 * time.Second
+	lightbringerMinHandoffRun     = 8
+	lightbringerGapFallbackWait   = 8 * time.Second
+	lightbringerGapBufferDepth    = 32
+	lightbringerRecoverySlots     = 0
+
+	// RPC getBlock can transiently report SlotSkipped or "block not available"
+	// for slots that later turn out to have real blocks. Never emit a skipped
+	// slot based on getBlock alone. Only finalize a skip after a separate
+	// confirmed-RPC slot-listing probe shows the slot is genuinely absent and
+	// the slot is safely behind confirmed tip.
+	rpcSkipConfirmDepth = 64
 )
 
 func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
@@ -333,28 +421,32 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	bs := &BlockSource{
-		rpcClients: rpcClients,
-		streamChan: make(chan *b.Block, streamChanBuffer),
-		startSlot:       opts.StartSlot,
-		endSlot:         opts.EndSlot,
-		currentSlot:     opts.StartSlot,
-		blockDir:        opts.BlockDir,
-		sourceType:      opts.SourceType,
-		rateLimiter:     rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
-		maxInflight:     maxInflight,
-		tipSafetyMargin: tipSafetyMargin,
-		tipPollInterval: time.Duration(tipPollMs) * time.Millisecond,
-		reorderBuffer:   make(map[uint64]*b.Block),
-		skippedSlots:    make(map[uint64]bool),
-		nextSlotToSend:  opts.StartSlot,
-		maxPending:      defaultMaxPending,
-		slotState:       make(map[uint64]slotStatus),
-		inflightStart:   make(map[uint64]time.Time),
-		workQueue:        make(chan uint64, maxInflight*2),
-		resultQueue:      make(chan fetchResult, maxInflight*2),
-		stopChan:         make(chan struct{}),
-		stallTimeout:     defaultStallTimeout,
-		catchupTipSafety: tipSafetyMargin, // Store original for switching back to catchup
+		rpcClients:                   rpcClients,
+		streamChan:                   make(chan *b.Block, streamChanBuffer),
+		startSlot:                    opts.StartSlot,
+		endSlot:                      opts.EndSlot,
+		currentSlot:                  opts.StartSlot,
+		blockDir:                     opts.BlockDir,
+		sourceType:                   opts.SourceType,
+		rateLimiter:                  rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
+		maxInflight:                  maxInflight,
+		tipSafetyMargin:              tipSafetyMargin,
+		tipPollInterval:              time.Duration(tipPollMs) * time.Millisecond,
+		reorderBuffer:                make(map[uint64]*b.Block),
+		skippedSlots:                 make(map[uint64]bool),
+		lightbringerSynthesizedSkips: make(map[uint64]bool),
+		nextSlotToSend:               opts.StartSlot,
+		maxPending:                   defaultMaxPending,
+		slotState:                    make(map[uint64]slotStatus),
+		inflightStart:                make(map[uint64]time.Time),
+		workQueue:                    make(chan uint64, maxInflight*2),
+		resultQueue:                  make(chan fetchResult, maxInflight*2),
+		stopChan:                     make(chan struct{}),
+		stallTimeout:                 defaultStallTimeout,
+		catchupTipSafety:             tipSafetyMargin, // Store original for switching back to catchup
+		lightbringerEndpoint:         opts.LightbringerEndpoint,
+		lightbringerBuffer:           make(map[uint64]*b.Block),
+		consensusManagedLightbringer: opts.ConsensusManagedLightbringer,
 
 		// Configurable mode thresholds
 		nearTipThreshold:    uint64(nearTipThreshold),
@@ -372,14 +464,32 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 
 	// Initialize stats reset time for RPS calculation
 	bs.statsResetTime.Store(time.Now().Unix())
+	bs.confirmSlotAbsent = bs.confirmSlotAbsentViaRPC
 
 	// Log RPC configuration
 	if len(rpcClients) > 1 {
 		mlog.Log.Infof("Block fetching configured with %d RPC endpoints (primary + %d backups)",
 			len(rpcClients), len(rpcClients)-1)
 	}
+	if opts.SourceType == BlockSourceLightbringer && opts.LightbringerEndpoint != "" {
+		mlog.Log.Infof("Lightbringer live handoff configured for %s (RPC catchup remains enabled)", opts.LightbringerEndpoint)
+	}
 
 	return bs
+}
+
+func (bs *BlockSource) setStopReason(reason blockSourceStopReason, slot uint64) {
+	if reason == blockSourceStopReasonNone {
+		return
+	}
+	if bs.stopReason.CompareAndSwap(uint32(blockSourceStopReasonNone), uint32(reason)) {
+		bs.stopSlot.Store(slot)
+		bs.stopEndSlot.Store(bs.endSlot)
+	}
+}
+
+func (bs *BlockSource) stopReasonEnum() blockSourceStopReason {
+	return blockSourceStopReason(bs.stopReason.Load())
 }
 
 // updateMode checks the gap to tip and switches between catchup and near-tip mode.
@@ -409,6 +519,7 @@ func (bs *BlockSource) updateMode() {
 			bs.isNearTip.Store(false)
 			mlog.Log.Infof("MODE SWITCH: near-tip → CATCHUP | gap=%d (threshold=%d) | exec_slot=%d | tip=%d",
 				gap, bs.catchupThreshold, lastExecuted, tip)
+			bs.forceRPCForCatchup(gap)
 		}
 	} else {
 		// Currently in catchup mode - switch to near-tip if gap is small
@@ -416,6 +527,14 @@ func (bs *BlockSource) updateMode() {
 			bs.isNearTip.Store(true)
 			mlog.Log.Infof("MODE SWITCH: catchup → NEAR-TIP | gap=%d (threshold=%d) | exec_slot=%d | tip=%d",
 				gap, bs.nearTipThreshold, lastExecuted, tip)
+			bs.logLightbringerModeState("near-tip", gap)
+		}
+	}
+
+	if bs.sourceType == BlockSourceLightbringer && bs.lightbringerEndpoint != "" {
+		bs.maybeStartLightbringerStream()
+		if bs.isNearTip.Load() {
+			bs.maybePrepareLightbringerHandoff()
 		}
 	}
 }
@@ -427,6 +546,1282 @@ func (bs *BlockSource) effectiveTipSafetyMargin() uint64 {
 		return 0 // Near-tip mode: no safety margin, rely on retries
 	}
 	return bs.catchupTipSafety
+}
+
+func (bs *BlockSource) currentModeString() string {
+	if bs.isNearTip.Load() {
+		return "near-tip"
+	}
+	return "catchup"
+}
+
+func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+
+	bs.lightbringerForceRPCUntil.Store(0)
+	bs.lightbringerCooldownUntil.Store(0)
+	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
+	wasActive := bs.lightbringerActive.Swap(false)
+	bs.lightbringerNeedRPCResume.Store(false)
+	bs.clearLightbringerGapWatch()
+	bs.resetLightbringerRepairSlot()
+	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	removedSlots := make([]uint64, 0)
+	for slot, blk := range bs.reorderBuffer {
+		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
+			delete(bs.reorderBuffer, slot)
+			removedSlots = append(removedSlots, slot)
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	if len(removedSlots) > 0 {
+		bs.slotStateMu.Lock()
+		for _, slot := range removedSlots {
+			delete(bs.slotState, slot)
+			delete(bs.inflightStart, slot)
+		}
+		bs.slotStateMu.Unlock()
+	}
+	if bs.consensusManagedLightbringer {
+		bs.slotStateMu.Lock()
+		for slot := range bs.slotState {
+			if slot >= waitingSlot {
+				delete(bs.slotState, slot)
+				delete(bs.inflightStart, slot)
+			}
+		}
+		bs.slotStateMu.Unlock()
+
+		bs.retryMu.Lock()
+		if len(bs.retrySlots) > 0 {
+			filtered := bs.retrySlots[:0]
+			for _, slot := range bs.retrySlots {
+				if slot < waitingSlot {
+					filtered = append(filtered, slot)
+				}
+			}
+			bs.retrySlots = filtered
+		}
+		bs.retryMu.Unlock()
+	}
+
+	if wasActive {
+		mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | reason=lost_tip | gap=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
+			waitingSlot, gap, len(removedSlots), clearedPrefetched)
+		return
+	}
+	if oldHandoff != 0 || len(removedSlots) > 0 || clearedPrefetched > 0 {
+		mlog.Log.Warnf("BLOCK SOURCE STATUS: abandoning pending Lightbringer handoff and forcing RPC catchup | waiting_slot=%d | gap=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
+			waitingSlot, gap, len(removedSlots), clearedPrefetched)
+		return
+	}
+	mlog.Log.Infof("BLOCK SOURCE STATUS: catchup mode is using RPC | waiting_slot=%d | gap=%d",
+		waitingSlot, gap)
+}
+
+func (bs *BlockSource) clearLightbringerGapWatch() {
+	bs.lightbringerGapSlot.Store(0)
+	bs.lightbringerGapSinceUnix.Store(0)
+	bs.lightbringerGapLastLogUnix.Store(0)
+	bs.lightbringerGapReconnectSlot.Store(0)
+}
+
+func (bs *BlockSource) setLightbringerCancel(cancel context.CancelFunc) {
+	bs.lightbringerCancelMu.Lock()
+	bs.lightbringerCancel = cancel
+	bs.lightbringerCancelMu.Unlock()
+}
+
+func (bs *BlockSource) clearLightbringerCancel() {
+	bs.lightbringerCancelMu.Lock()
+	bs.lightbringerCancel = nil
+	bs.lightbringerCancelMu.Unlock()
+}
+
+func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
+	if !bs.lightbringerConnected.Load() {
+		return false
+	}
+	mlog.Log.Warnf("in requestLightbringerReconnect")
+	if !bs.lightbringerReconnectRequested.CompareAndSwap(false, true) {
+		return false
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	lastEmitted := bs.lastEmittedBlockSlot
+	bs.reorderMu.Unlock()
+	latestStreamed := bs.lightbringerLastStreamSlot.Load()
+
+	mlog.Log.Warnf("Lightbringer stream reconnect requested: %s | waiting_slot=%d | last_emitted=%d | latest_streamed=%d",
+		reason, waitingSlot, lastEmitted, latestStreamed)
+
+	bs.lightbringerCancelMu.Lock()
+	cancel := bs.lightbringerCancel
+	bs.lightbringerCancelMu.Unlock()
+	if cancel == nil {
+		bs.lightbringerReconnectRequested.Store(false)
+		return false
+	}
+	cancel()
+	return true
+}
+
+func isLightbringerReconnectCancel(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return status.Code(err) == codes.Canceled
+}
+
+func (bs *BlockSource) maybeReconnectActiveLightbringerForNoProgress(stallDuration time.Duration) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+	if !bs.lightbringerActive.Load() || !bs.isNearTip.Load() {
+		return
+	}
+	if stallDuration < lightbringerNoEmitReconnect {
+		return
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	waitingReady := bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot]
+	lastEmitted := bs.lastEmittedBlockSlot
+	firstBufferedSlot := uint64(0)
+	bufferedLightbringer := 0
+	foundBuffered := false
+	for slot, blk := range bs.reorderBuffer {
+		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+			continue
+		}
+		bufferedLightbringer++
+		if !foundBuffered || slot < firstBufferedSlot {
+			firstBufferedSlot = slot
+			foundBuffered = true
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	if waitingReady || len(bs.streamChan) > 0 {
+		return
+	}
+
+	reason := fmt.Sprintf("no block emitted for %s while Lightbringer is active and replay is waiting on slot %d",
+		stallDuration.Round(time.Second), waitingSlot)
+	if foundBuffered {
+		reason = fmt.Sprintf("no block emitted for %s while waiting on slot %d (first_buffered=%d buffered_lightbringer=%d last_emitted=%d)",
+			stallDuration.Round(time.Second), waitingSlot, firstBufferedSlot, bufferedLightbringer, lastEmitted)
+	}
+
+	bs.requestLightbringerReconnect(reason)
+}
+
+func (bs *BlockSource) isLightbringerRepairSlot(slot uint64) bool {
+	return slot != 0 && bs.lightbringerRepairSlot.Load() == slot
+}
+
+func (bs *BlockSource) clearLightbringerRepairSlot(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	bs.lightbringerRepairSlot.CompareAndSwap(slot, 0)
+}
+
+func (bs *BlockSource) resetLightbringerRepairSlot() {
+	bs.lightbringerRepairSlot.Store(0)
+}
+
+func (bs *BlockSource) lightbringerBlockConnectsLocked(blk *b.Block) bool {
+	if blk == nil || !blk.FromLightbringer {
+		return true
+	}
+	if bs.lastEmittedBlockSlot == 0 {
+		return true
+	}
+	if blk.SourceParentSlot == 0 {
+		return false
+	}
+	return blk.SourceParentSlot == bs.lastEmittedBlockSlot
+}
+
+func (bs *BlockSource) shouldPreferIncomingLightbringerBlockLocked(existing, incoming *b.Block) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	if !existing.FromLightbringer || !incoming.FromLightbringer {
+		return false
+	}
+	if existing.Slot != incoming.Slot {
+		return false
+	}
+	return !bs.lightbringerBlockConnectsLocked(existing) && bs.lightbringerBlockConnectsLocked(incoming)
+}
+
+func (bs *BlockSource) waitingLightbringerParentMismatchLocked() (waitingSlot uint64, observedParentSlot uint64, expectedParentSlot uint64, mismatch bool) {
+	if bs.consensusManagedLightbringer && bs.lightbringerActive.Load() {
+		return 0, 0, 0, false
+	}
+	blk := bs.reorderBuffer[bs.nextSlotToSend]
+	if blk == nil || !blk.FromLightbringer {
+		return 0, 0, 0, false
+	}
+	if bs.lightbringerBlockConnectsLocked(blk) {
+		return 0, 0, 0, false
+	}
+	return blk.Slot, blk.SourceParentSlot, bs.lastEmittedBlockSlot, true
+}
+
+func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+	if !bs.lightbringerActive.Load() {
+		bs.forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+		return
+	}
+
+	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
+	gapAge := time.Duration(0)
+	if gapSinceUnix != 0 {
+		gapAge = time.Since(time.Unix(0, gapSinceUnix))
+	}
+
+	waitReason := fmt.Sprintf("first buffered Lightbringer block %d still depends on parent slot %d", firstBufferedSlot, firstBufferedParentSlot)
+	switch {
+	case firstBufferedParentSlot == waitingSlot:
+		waitReason = fmt.Sprintf("waiting on live Lightbringer slot %d; later buffered block %d still depends on it", waitingSlot, firstBufferedSlot)
+	case firstBufferedParentSlot > waitingSlot:
+		waitReason = fmt.Sprintf("waiting on missing Lightbringer ancestry range %d-%d; later buffered block %d still depends on slot %d",
+			waitingSlot, firstBufferedParentSlot, firstBufferedSlot, firstBufferedParentSlot)
+	case firstBufferedParentSlot == bs.lastEmittedBlockSlot:
+		waitReason = fmt.Sprintf("later buffered block %d points back to anchor %d, but that only proves an observed alternate branch and is not treated as a canonical skipped run", firstBufferedSlot, bs.lastEmittedBlockSlot)
+	}
+
+	now := time.Now()
+	lastLog := time.Unix(0, bs.lightbringerGapLastLogUnix.Load())
+	if lastLog.IsZero() || now.Sub(lastLog) >= reorderGapWarnInterval {
+		bs.lightbringerGapLastLogUnix.Store(now.UnixNano())
+		mlog.Log.Warnf("BLOCK SOURCE STATUS: waiting for missing Lightbringer slot %d from live stream while keeping Lightbringer active | first_buffered=%d | first_parent_slot=%d | buffered_lightbringer=%d | reason=%s | mode=%s",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString())
+	}
+
+	shouldReconnect := false
+	reconnectReason := ""
+	switch {
+	case firstBufferedParentSlot != waitingSlot:
+		if firstBufferedParentSlot <= waitingSlot {
+			// A reconnect only helps when later buffered Lightbringer blocks still
+			// depend on an unseen ancestor beyond the current anchor.
+			break
+		}
+		switch {
+		case bufferedCount >= reorderGapWarnThreshold && gapAge >= lightbringerDeepGapReconnect:
+			shouldReconnect = true
+			reconnectReason = fmt.Sprintf("waiting %s for Lightbringer ancestry range %d-%d while later buffered block %d still depends on slot %d",
+				gapAge.Round(time.Second), waitingSlot, firstBufferedParentSlot, firstBufferedSlot, firstBufferedParentSlot)
+		case gapAge >= lightbringerGapReconnectAfter:
+			shouldReconnect = true
+			reconnectReason = fmt.Sprintf("waiting %s for Lightbringer ancestry range %d-%d while later buffered block %d still depends on slot %d",
+				gapAge.Round(time.Second), waitingSlot, firstBufferedParentSlot, firstBufferedSlot, firstBufferedParentSlot)
+		}
+	case bufferedCount >= reorderGapWarnThreshold && gapAge >= lightbringerDeepGapReconnect:
+		shouldReconnect = true
+		reconnectReason = fmt.Sprintf("waiting %s for live Lightbringer slot %d while %d later buffered blocks still depend on it",
+			gapAge.Round(time.Second), waitingSlot, bufferedCount)
+	case gapAge >= lightbringerGapReconnectAfter:
+		shouldReconnect = true
+		reconnectReason = fmt.Sprintf("waiting %s for live Lightbringer slot %d while later buffered blocks still depend on it",
+			gapAge.Round(time.Second), waitingSlot)
+	}
+
+	if shouldReconnect && bs.lightbringerGapReconnectSlot.CompareAndSwap(0, waitingSlot) {
+		bs.requestLightbringerReconnect(reconnectReason)
+	}
+}
+
+func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+
+	recoveryUntil := waitingSlot + lightbringerRecoverySlots
+	if recoveryUntil < waitingSlot {
+		recoveryUntil = ^uint64(0)
+	}
+
+	bs.lightbringerForceRPCUntil.Store(waitingSlot)
+	bs.lightbringerCooldownUntil.Store(recoveryUntil)
+	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
+	wasActive := bs.lightbringerActive.Swap(false)
+	bs.lightbringerNeedRPCResume.Store(true)
+	bs.clearLightbringerGapWatch()
+	bs.resetLightbringerRepairSlot()
+	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+
+	bs.reorderMu.Lock()
+	removedSlots := make([]uint64, 0)
+	for slot, blk := range bs.reorderBuffer {
+		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
+			delete(bs.reorderBuffer, slot)
+			removedSlots = append(removedSlots, slot)
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	if len(removedSlots) > 0 {
+		bs.slotStateMu.Lock()
+		for _, slot := range removedSlots {
+			delete(bs.slotState, slot)
+			delete(bs.inflightStart, slot)
+		}
+		bs.slotStateMu.Unlock()
+	}
+
+	if wasActive || oldHandoff != 0 {
+		mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | reason=missing_lightbringer_slot | first_buffered=%d | first_parent_slot=%d | buffered_lightbringer=%d | cleared_prefetched_lightbringer=%d | rpc_forced_until=%d | rpc_cooldown_until=%d | mode=%s",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, clearedPrefetched, waitingSlot, recoveryUntil, bs.currentModeString())
+		return
+	}
+
+	mlog.Log.Warnf("BLOCK SOURCE STATUS: forcing RPC because Lightbringer skipped waiting slot %d | first_buffered=%d | first_parent_slot=%d | buffered_lightbringer=%d | cleared_prefetched_lightbringer=%d | rpc_forced_until=%d | rpc_cooldown_until=%d | mode=%s",
+		waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, clearedPrefetched, waitingSlot, recoveryUntil, bs.currentModeString())
+}
+
+func (bs *BlockSource) handleDetectedLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+	if bs.lightbringerActive.Load() {
+		bs.repairLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+		return
+	}
+	bs.forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+}
+
+func (bs *BlockSource) forceRPCForLightbringerParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot uint64) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+
+	recoveryUntil := waitingSlot + lightbringerRecoverySlots
+	if recoveryUntil < waitingSlot {
+		recoveryUntil = ^uint64(0)
+	}
+
+	bs.lightbringerForceRPCUntil.Store(waitingSlot)
+	bs.lightbringerCooldownUntil.Store(recoveryUntil)
+	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
+	wasActive := bs.lightbringerActive.Swap(false)
+	bs.lightbringerNeedRPCResume.Store(true)
+	bs.clearLightbringerGapWatch()
+	bs.resetLightbringerRepairSlot()
+	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+
+	bs.reorderMu.Lock()
+	removedSlots := make([]uint64, 0)
+	for slot, blk := range bs.reorderBuffer {
+		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
+			delete(bs.reorderBuffer, slot)
+			removedSlots = append(removedSlots, slot)
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	if len(removedSlots) > 0 {
+		bs.slotStateMu.Lock()
+		for _, slot := range removedSlots {
+			delete(bs.slotState, slot)
+			delete(bs.inflightStart, slot)
+		}
+		bs.slotStateMu.Unlock()
+	}
+
+	reason := "parent_slot_mismatch"
+	if observedParentSlot == 0 {
+		reason = "missing_parent_slot"
+	}
+
+	if wasActive || oldHandoff != 0 {
+		mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | reason=%s | observed_parent_slot=%d | expected_parent_slot=%d | cleared_prefetched_lightbringer=%d | rpc_forced_until=%d | rpc_cooldown_until=%d | mode=%s",
+			waitingSlot, reason, observedParentSlot, expectedParentSlot, clearedPrefetched, waitingSlot, recoveryUntil, bs.currentModeString())
+		return
+	}
+
+	mlog.Log.Warnf("BLOCK SOURCE STATUS: rejecting Lightbringer handoff at slot %d | reason=%s | observed_parent_slot=%d | expected_parent_slot=%d | cleared_prefetched_lightbringer=%d | rpc_forced_until=%d | rpc_cooldown_until=%d | mode=%s",
+		waitingSlot, reason, observedParentSlot, expectedParentSlot, clearedPrefetched, waitingSlot, recoveryUntil, bs.currentModeString())
+}
+
+func (bs *BlockSource) logLightbringerModeState(mode string, gap uint64) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+
+	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	active := bs.lightbringerActive.Load()
+	cooldownUntil := bs.lightbringerCooldownUntil.Load()
+	connected := bs.lightbringerConnected.Load()
+	lastSlot := bs.lightbringerLastStreamSlot.Load()
+	started := bs.lightbringerStarted.Load()
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	bs.reorderMu.Unlock()
+
+	switch mode {
+	case "near-tip":
+		if active {
+			mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained and blocks are already arriving from LIGHTBRINGER | waiting_slot=%d | handoff_slot=%d | gap=%d",
+				waitingSlot, handoffSlot, gap)
+			return
+		}
+		if cooldownUntil != 0 {
+			if connected && lastSlot != 0 {
+				mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; staying on RPC until slot %d after a Lightbringer gap (latest streamed slot %d) | waiting_slot=%d | gap=%d",
+					cooldownUntil, lastSlot, waitingSlot, gap)
+				return
+			}
+			mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; staying on RPC until slot %d after a Lightbringer gap | waiting_slot=%d | gap=%d",
+				cooldownUntil, waitingSlot, gap)
+			return
+		}
+		if handoffSlot != 0 {
+			mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; waiting to switch block receipt from RPC to LIGHTBRINGER at handoff slot %d | waiting_slot=%d | gap=%d",
+				handoffSlot, waitingSlot, gap)
+			return
+		}
+		if connected {
+			if lastSlot != 0 {
+				mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; Lightbringer stream is connected (latest streamed slot %d) and waiting to arm handoff | waiting_slot=%d | gap=%d",
+					lastSlot, waitingSlot, gap)
+				return
+			}
+			mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; Lightbringer stream is connected and waiting for its first streamed slot | waiting_slot=%d | gap=%d",
+				waitingSlot, gap)
+			return
+		}
+		if started {
+			mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; waiting for Lightbringer stream connection before handoff | waiting_slot=%d | gap=%d",
+				waitingSlot, gap)
+			return
+		}
+		mlog.Log.Infof("BLOCK SOURCE STATUS: near-tip regained; preparing to switch block receipt from RPC to LIGHTBRINGER | waiting_slot=%d | gap=%d",
+			waitingSlot, gap)
+	}
+}
+
+func (bs *BlockSource) maybeStartLightbringerStream() {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return
+	}
+	if bs.lightbringerStarted.CompareAndSwap(false, true) {
+		bs.lightbringerWg.Add(1)
+		go bs.runLightbringerStream()
+	}
+}
+
+func (bs *BlockSource) bufferLightbringerBlock(blk *b.Block) {
+	if blk == nil {
+		return
+	}
+
+	bs.lightbringerBufferMu.Lock()
+	defer bs.lightbringerBufferMu.Unlock()
+
+	if _, exists := bs.lightbringerBuffer[blk.Slot]; exists {
+		return
+	}
+
+	bs.lightbringerBuffer[blk.Slot] = blk
+	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, blk.Slot)
+
+	for len(bs.lightbringerBufferOrder) > lightbringerBufferSlots {
+		oldest := bs.lightbringerBufferOrder[0]
+		bs.lightbringerBufferOrder = bs.lightbringerBufferOrder[1:]
+		delete(bs.lightbringerBuffer, oldest)
+	}
+}
+
+func (bs *BlockSource) clearBufferedLightbringerBlocks() int {
+	bs.lightbringerBufferMu.Lock()
+	defer bs.lightbringerBufferMu.Unlock()
+
+	cleared := len(bs.lightbringerBuffer)
+	if cleared == 0 {
+		return 0
+	}
+
+	bs.lightbringerBuffer = make(map[uint64]*b.Block)
+	bs.lightbringerBufferOrder = nil
+	return cleared
+}
+
+func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
+	if slot == 0 {
+		return
+	}
+
+	bs.reorderMu.Lock()
+	for bufferedSlot, blk := range bs.reorderBuffer {
+		if bufferedSlot < slot {
+			continue
+		}
+		if blk == nil || !blk.FromLightbringer {
+			delete(bs.reorderBuffer, bufferedSlot)
+		}
+	}
+	for skippedSlot := range bs.skippedSlots {
+		if skippedSlot >= slot {
+			delete(bs.skippedSlots, skippedSlot)
+			delete(bs.lightbringerSynthesizedSkips, skippedSlot)
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	bs.slotStateMu.Lock()
+	for trackedSlot := range bs.slotState {
+		if trackedSlot >= slot && !bs.isLightbringerRepairSlot(trackedSlot) {
+			delete(bs.slotState, trackedSlot)
+			delete(bs.inflightStart, trackedSlot)
+		}
+	}
+	bs.slotStateMu.Unlock()
+
+	bs.retryMu.Lock()
+	if len(bs.retrySlots) > 0 {
+		filtered := bs.retrySlots[:0]
+		for _, retrySlot := range bs.retrySlots {
+			if retrySlot < slot || bs.isLightbringerRepairSlot(retrySlot) {
+				filtered = append(filtered, retrySlot)
+			}
+		}
+		bs.retrySlots = filtered
+	}
+	bs.retryMu.Unlock()
+}
+
+func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, bool) {
+	if !bs.isNearTip.Load() {
+		return nil, 0, false
+	}
+	if handoffSlot := bs.lightbringerHandoffSlot.Load(); handoffSlot != 0 {
+		return nil, handoffSlot, false
+	}
+
+	bs.lightbringerBufferMu.Lock()
+	defer bs.lightbringerBufferMu.Unlock()
+
+	runwayBlocks, coveredUntil, _, _, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
+	if !ok {
+		return nil, 0, false
+	}
+
+	requiredLastSlot := waitingSlot + uint64(lightbringerMinHandoffRun) - 1
+	if requiredLastSlot < waitingSlot {
+		requiredLastSlot = math.MaxUint64
+	}
+	if coveredUntil < requiredLastSlot {
+		return nil, 0, false
+	}
+
+	handoffSlot := waitingSlot
+	if !bs.lightbringerHandoffSlot.CompareAndSwap(0, handoffSlot) {
+		return nil, bs.lightbringerHandoffSlot.Load(), false
+	}
+
+	bs.lightbringerNeedRPCResume.Store(false)
+	bs.purgeRPCStateAtOrBeyondSlot(handoffSlot)
+
+	blocks := append([]*b.Block(nil), runwayBlocks...)
+
+	bs.lightbringerBuffer = make(map[uint64]*b.Block)
+	bs.lightbringerBufferOrder = nil
+
+	return blocks, handoffSlot, true
+}
+
+func (bs *BlockSource) connectedLightbringerRunwayLocked(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, uint64, uint64, bool) {
+	candidates := make([]*b.Block, 0, len(bs.lightbringerBuffer))
+	var firstBufferedSlot uint64
+	var maxBufferedSlot uint64
+	foundFirstBuffered := false
+	for slot, blk := range bs.lightbringerBuffer {
+		if blk == nil || slot < waitingSlot {
+			continue
+		}
+		candidates = append(candidates, blk)
+		if !foundFirstBuffered || slot < firstBufferedSlot {
+			firstBufferedSlot = slot
+			foundFirstBuffered = true
+		}
+		if slot > maxBufferedSlot {
+			maxBufferedSlot = slot
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, 0, 0, 0, false
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Slot == candidates[j].Slot {
+			return candidates[i].SourceParentSlot < candidates[j].SourceParentSlot
+		}
+		return candidates[i].Slot < candidates[j].Slot
+	})
+
+	currentAnchor := anchorSlot
+	minSlot := waitingSlot
+	coveredUntil := waitingSlot - 1
+	if waitingSlot == 0 {
+		coveredUntil = 0
+	}
+
+	runway := make([]*b.Block, 0, len(candidates))
+	used := make(map[uint64]bool, len(candidates))
+	for {
+		var next *b.Block
+		for _, blk := range candidates {
+			if blk == nil || used[blk.Slot] || blk.Slot < minSlot {
+				continue
+			}
+			if blk.SourceParentSlot != currentAnchor {
+				continue
+			}
+			next = blk
+			break
+		}
+		if next == nil {
+			break
+		}
+
+		runway = append(runway, next)
+		used[next.Slot] = true
+		coveredUntil = next.Slot
+		currentAnchor = next.Slot
+		minSlot = next.Slot + 1
+	}
+
+	return runway, coveredUntil, firstBufferedSlot, maxBufferedSlot, len(runway) != 0
+}
+
+func (bs *BlockSource) lightbringerHandoffWaitReason(waitingSlot uint64, anchorSlot uint64) string {
+	bs.lightbringerBufferMu.Lock()
+	defer bs.lightbringerBufferMu.Unlock()
+
+	runway, coveredUntil, firstBufferedSlot, maxBufferedSlot, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
+	if !ok {
+		if len(bs.lightbringerBuffer) == 0 {
+			return "waiting for first buffered Lightbringer slot"
+		}
+		return fmt.Sprintf("no buffered Lightbringer slot at or beyond waiting slot %d", waitingSlot)
+	}
+
+	requiredLastSlot := waitingSlot + uint64(lightbringerMinHandoffRun) - 1
+	if requiredLastSlot < waitingSlot {
+		requiredLastSlot = math.MaxUint64
+	}
+	if coveredUntil >= requiredLastSlot {
+		return fmt.Sprintf("handoff-ready runway buffered through slot %d", coveredUntil)
+	}
+
+	firstRunwaySlot := runway[0].Slot
+	if firstRunwaySlot > waitingSlot {
+		return fmt.Sprintf("waiting for slot %d or skipped-slot inference; first buffered Lightbringer block is slot %d (parent %d), connected runway covers through slot %d, latest buffered slot %d",
+			waitingSlot, firstRunwaySlot, runway[0].SourceParentSlot, coveredUntil, maxBufferedSlot)
+	}
+
+	if firstBufferedSlot != 0 && firstRunwaySlot != firstBufferedSlot {
+		return fmt.Sprintf("earliest buffered slot %d is not on the current connected runway; connected runway covers through slot %d, latest buffered slot %d",
+			firstBufferedSlot, coveredUntil, maxBufferedSlot)
+	}
+
+	return fmt.Sprintf("connected runway only covers through slot %d; need through slot %d before handoff", coveredUntil, requiredLastSlot)
+}
+
+func (bs *BlockSource) enqueueLightbringerBlocks(blocks []*b.Block) {
+	if len(blocks) == 0 {
+		return
+	}
+
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].Slot < blocks[j].Slot
+	})
+
+	for _, blk := range blocks {
+		if blk == nil {
+			continue
+		}
+
+		select {
+		case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1}:
+		case <-bs.stopChan:
+			return
+		}
+	}
+}
+
+func (bs *BlockSource) maybePrepareLightbringerHandoff() {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" || !bs.isNearTip.Load() {
+		return
+	}
+	if bs.lightbringerForceRPCUntil.Load() != 0 {
+		return
+	}
+	if bs.lightbringerCooldownUntil.Load() != 0 {
+		return
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	anchorSlot := bs.lastEmittedBlockSlot
+	bs.reorderMu.Unlock()
+
+	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(waitingSlot, anchorSlot)
+	if !prepared {
+		return
+	}
+
+	runwayCoveredUntil := handoffSlot - 1
+	if len(blocks) > 0 {
+		runwayCoveredUntil = blocks[len(blocks)-1].Slot
+	}
+	mlog.Log.Infof("Lightbringer handoff ready at slot %d (connected runway buffered through slot %d; RPC catchup continues until then)",
+		handoffSlot, runwayCoveredUntil)
+	bs.enqueueLightbringerBlocks(blocks)
+}
+
+func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
+	if bs.lightbringerForceRPCUntil.Load() != 0 {
+		return false
+	}
+	if bs.lightbringerCooldownUntil.Load() != 0 {
+		return false
+	}
+	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	if handoffSlot == 0 {
+		return bs.isNearTip.Load()
+	}
+	return bs.isNearTip.Load() && slot >= handoffSlot
+}
+
+func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return true
+	}
+	if bs.lightbringerForceRPCUntil.Load() != 0 {
+		return true
+	}
+	if bs.lightbringerCooldownUntil.Load() != 0 {
+		return true
+	}
+	if bs.isLightbringerRepairSlot(slot) {
+		return true
+	}
+	if !bs.isNearTip.Load() {
+		return true
+	}
+
+	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	if handoffSlot == 0 {
+		return true
+	}
+
+	return slot < handoffSlot
+}
+
+func (bs *BlockSource) shouldDiscardRPCResultAfterHandoff(slot uint64, blk *b.Block) bool {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return false
+	}
+	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	if handoffSlot == 0 || slot < handoffSlot {
+		return false
+	}
+	if bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+	return blk == nil || !blk.FromLightbringer
+}
+
+func (bs *BlockSource) shouldDiscardSkippedSlotAfterHandoff(slot uint64) bool {
+	if !bs.shouldDiscardRPCResultAfterHandoff(slot, nil) {
+		return false
+	}
+	return !bs.lightbringerSynthesizedSkips[slot]
+}
+
+// inspectLaterLightbringerBlocksLocked summarizes later buffered Lightbringer
+// traffic for the currently waiting slot so diagnostics can distinguish
+// "we have later stream traffic" from "we have a descendant that reconnects
+// directly to the current anchor". Reconnecting descendants are diagnostic
+// only; in live forked traffic they do not prove the intervening slots were
+// skipped on the canonical path.
+func (bs *BlockSource) inspectLaterLightbringerBlocksLocked(waitingSlot uint64) (firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, firstConnectedSlot uint64, firstConnectedParentSlot uint64, foundConnected bool) {
+	for slot, blk := range bs.reorderBuffer {
+		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+			continue
+		}
+		bufferedCount++
+		if firstBufferedSlot == 0 || slot < firstBufferedSlot {
+			firstBufferedSlot = slot
+			firstBufferedParentSlot = blk.SourceParentSlot
+		}
+		if blk.SourceParentSlot != bs.lastEmittedBlockSlot {
+			continue
+		}
+		if !foundConnected || slot < firstConnectedSlot {
+			firstConnectedSlot = slot
+			firstConnectedParentSlot = blk.SourceParentSlot
+			foundConnected = true
+		}
+	}
+	return firstBufferedSlot, firstBufferedParentSlot, bufferedCount, firstConnectedSlot, firstConnectedParentSlot, foundConnected
+}
+
+func (bs *BlockSource) synthesizeLightbringerSkipsLocked() bool {
+	// Stream-only skip inference is intentionally disabled. A later Lightbringer
+	// block reconnecting to the current anchor proves only that one observed fork
+	// skipped the gap; it does not prove the canonical path skipped those slots.
+	// Real slots can still arrive later for the same range, so marking them
+	// skipped here can create false-positive path jumps and forkchoice halts.
+	return false
+}
+
+func (bs *BlockSource) waitForStopOrTimeout(delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-bs.stopChan:
+			return true
+		default:
+			return false
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-bs.stopChan:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (bs *BlockSource) runLightbringerStream() {
+	defer bs.lightbringerWg.Done()
+
+	backoff := lightbringerRetryBackoff
+
+	for {
+		if bs.stopped.Load() {
+			return
+		}
+
+		bs.lightbringerConnected.Store(false)
+
+		conn, err := grpc.NewClient(bs.lightbringerEndpoint, grpc.WithInsecure())
+		if err != nil {
+			mlog.Log.Warnf("Lightbringer dial failed for %s: %v", bs.lightbringerEndpoint, err)
+			if bs.waitForStopOrTimeout(backoff) {
+				return
+			}
+			backoff *= 2
+			if backoff > lightbringerMaxRetryBackoff {
+				backoff = lightbringerMaxRetryBackoff
+			}
+			continue
+		}
+
+		streamCtx, cancelStream := context.WithCancel(context.Background())
+		bs.setLightbringerCancel(cancelStream)
+		streamDone := make(chan struct{})
+		go func() {
+			defer close(streamDone)
+			select {
+			case <-bs.stopChan:
+				cancelStream()
+			case <-streamCtx.Done():
+			}
+		}()
+
+		client := overcast.NewSlotStreamClient(conn)
+		stream, err := client.StreamSlots(streamCtx, &overcast.SlotStreamRequest{})
+		if err != nil {
+			cancelStream()
+			<-streamDone
+			bs.clearLightbringerCancel()
+			_ = conn.Close()
+			mlog.Log.Warnf("Lightbringer stream setup failed for %s: %v", bs.lightbringerEndpoint, err)
+			if bs.waitForStopOrTimeout(backoff) {
+				return
+			}
+			backoff *= 2
+			if backoff > lightbringerMaxRetryBackoff {
+				backoff = lightbringerMaxRetryBackoff
+			}
+			continue
+		}
+
+		mlog.Log.Infof("Lightbringer stream connected to %s", bs.lightbringerEndpoint)
+		bs.lightbringerConnected.Store(true)
+		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+		backoff = lightbringerRetryBackoff
+		firstSlotReceived := make(chan struct{})
+		firstSlotOnce := sync.Once{}
+		connectionClosed := make(chan struct{})
+		connectionClosedOnce := sync.Once{}
+		go func(endpoint string) {
+			ticker := time.NewTicker(lightbringerFirstSlotWarn)
+			defer ticker.Stop()
+
+			connectedAt := time.Now()
+			for {
+				select {
+				case <-bs.stopChan:
+					return
+				case <-connectionClosed:
+					return
+				case <-firstSlotReceived:
+					return
+				case <-ticker.C:
+					bs.reorderMu.Lock()
+					waitingSlot := bs.nextSlotToSend
+					bs.reorderMu.Unlock()
+					mlog.Log.Warnf("Lightbringer stream connected to %s but has not delivered its first slot after %s | mode=%s | waiting_slot=%d",
+						endpoint, time.Since(connectedAt).Round(time.Second), bs.currentModeString(), waitingSlot)
+				}
+			}
+		}(bs.lightbringerEndpoint)
+		go func(endpoint string) {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-bs.stopChan:
+					return
+				case <-connectionClosed:
+					return
+				case <-ticker.C:
+					if !bs.lightbringerActive.Load() || !bs.isNearTip.Load() {
+						continue
+					}
+					lastRecvUnix := bs.lightbringerLastRecvUnix.Load()
+					if lastRecvUnix == 0 {
+						continue
+					}
+					idleFor := time.Since(time.Unix(lastRecvUnix, 0))
+					if idleFor < lightbringerIdleReconnect {
+						// The stream may still be delivering some traffic while failing to
+						// make useful forward progress on the next slot Mithril needs. If
+						// we've emitted nothing for a while and the next slot is still not
+						// available to replay, reconnect the Lightbringer stream anyway.
+						lastProgressUnix := bs.lastProgress.Load()
+						if lastProgressUnix == 0 {
+							continue
+						}
+						noEmitFor := time.Since(time.Unix(lastProgressUnix, 0))
+						if noEmitFor < lightbringerNoEmitReconnect {
+							continue
+						}
+
+						bs.reorderMu.Lock()
+						waitingSlot := bs.nextSlotToSend
+						waitingReady := bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot]
+						bs.reorderMu.Unlock()
+						if waitingReady || len(bs.streamChan) > 0 {
+							continue
+						}
+
+						bs.requestLightbringerReconnect(fmt.Sprintf("no block emitted for %s while Lightbringer is active and replay is waiting on slot %d",
+							noEmitFor.Round(time.Second), waitingSlot))
+						continue
+					}
+					bs.requestLightbringerReconnect(fmt.Sprintf("live stream idle for %s while near-tip replay is active",
+						idleFor.Round(time.Second)))
+				}
+			}
+		}(bs.lightbringerEndpoint)
+
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				connectionClosedOnce.Do(func() {
+					close(connectionClosed)
+				})
+				bs.lightbringerConnected.Store(false)
+				bs.clearLightbringerCancel()
+				clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+				if bs.lightbringerHandoffSlot.Load() != 0 {
+					bs.reorderMu.Lock()
+					waitingSlot := bs.nextSlotToSend
+					bs.reorderMu.Unlock()
+					mlog.Log.Warnf("Lightbringer handoff interrupted; replay will resume RPC fallback from slot %d until the stream recovers | dropped_prefetched_lightbringer=%d",
+						waitingSlot, clearedPrefetched)
+					bs.lightbringerNeedRPCResume.Store(true)
+				}
+				bs.lightbringerHandoffSlot.Store(0)
+				cancelStream()
+				<-streamDone
+				_ = conn.Close()
+
+				reconnectRequested := bs.lightbringerReconnectRequested.Swap(false)
+				canceledByReconnect := reconnectRequested && isLightbringerReconnectCancel(err)
+
+				if bs.stopped.Load() || isLightbringerReconnectCancel(err) || errors.Is(err, io.EOF) {
+					if bs.stopped.Load() {
+						return
+					}
+					if reconnectRequested {
+						if canceledByReconnect {
+							mlog.Log.Warnf("Lightbringer stream reconnecting after watchdog request")
+						} else {
+							mlog.Log.Warnf("Lightbringer stream reconnecting after watchdog request (recv err: %v)", err)
+						}
+					} else if isLightbringerReconnectCancel(err) {
+						return
+					}
+					if !reconnectRequested {
+						mlog.Log.Warnf("Lightbringer stream closed, retrying: %v", err)
+					}
+				} else {
+					if reconnectRequested {
+						mlog.Log.Warnf("Lightbringer stream reconnecting after watchdog request (recv err: %v)", err)
+					} else {
+						mlog.Log.Warnf("Lightbringer stream receive failed, retrying: %v", err)
+					}
+				}
+
+				if bs.waitForStopOrTimeout(backoff) {
+					return
+				}
+				backoff *= 2
+				if backoff > lightbringerMaxRetryBackoff {
+					backoff = lightbringerMaxRetryBackoff
+				}
+				break
+			}
+
+			if resp == nil {
+				continue
+			}
+
+			firstSlotOnce.Do(func() {
+				close(firstSlotReceived)
+			})
+			bs.lightbringerLastStreamSlot.Store(resp.Slot)
+			bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+
+			if len(resp.Entries) == 0 {
+				mlog.Log.Warnf("Lightbringer delivered slot %d with no entries; ignoring", resp.Slot)
+				continue
+			}
+
+			if !bs.shouldDecodeLightbringerSlot(resp.Slot) {
+				continue
+			}
+
+			blk := block.FromLightbringerStreamMsg(resp)
+
+			if bs.lightbringerHandoffSlot.Load() == 0 {
+				// Keep the stream warm during catchup, but do not buffer live blocks until
+				// we are actually in near-tip mode. Buffering catchup-time stream traffic
+				// can create a large backlog that blocks this recv loop at handoff time.
+				if !bs.isNearTip.Load() {
+					continue
+				}
+				bs.bufferLightbringerBlock(blk)
+				bs.maybePrepareLightbringerHandoff()
+				continue
+			}
+
+			if !bs.isNearTip.Load() || blk.Slot < bs.lightbringerHandoffSlot.Load() {
+				continue
+			}
+
+			select {
+			case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1}:
+			case <-bs.stopChan:
+				cancelStream()
+				<-streamDone
+				_ = conn.Close()
+				return
+			}
+		}
+	}
+}
+
+func (bs *BlockSource) maybeLogReorderGapLocked() {
+	waitingSlot := bs.nextSlotToSend
+	if len(bs.reorderBuffer) < reorderGapWarnThreshold {
+		return
+	}
+	if bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot] {
+		return
+	}
+
+	now := time.Now()
+	lastLogUnix := bs.lastReorderGapLog.Load()
+	if lastLogUnix != 0 && now.Sub(time.Unix(lastLogUnix, 0)) < reorderGapWarnInterval {
+		return
+	}
+	bs.lastReorderGapLog.Store(now.Unix())
+
+	var minSlot uint64
+	var maxSlot uint64
+	var lightbringerCount int
+	first := true
+	for slot, blk := range bs.reorderBuffer {
+		if first || slot < minSlot {
+			minSlot = slot
+		}
+		if first || slot > maxSlot {
+			maxSlot = slot
+		}
+		if blk != nil && blk.FromLightbringer {
+			lightbringerCount++
+		}
+		first = false
+	}
+	if first {
+		return
+	}
+
+	waitingState := "missing"
+	bs.slotStateMu.Lock()
+	if state, exists := bs.slotState[waitingSlot]; exists {
+		switch state {
+		case slotInflight:
+			waitingState = "inflight"
+		case slotDone:
+			waitingState = "done"
+		case slotPending:
+			waitingState = "pending"
+		}
+	}
+	bs.slotStateMu.Unlock()
+
+	var gapToFirst uint64
+	if minSlot > waitingSlot {
+		gapToFirst = minSlot - waitingSlot
+	}
+
+	firstLightbringerSlot, firstLightbringerParentSlot, _, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLightbringerBlocksLocked(waitingSlot)
+
+	firstLightbringerDesc := "none"
+	if firstLightbringerSlot != 0 {
+		firstLightbringerDesc = fmt.Sprintf("%d(parent=%d)", firstLightbringerSlot, firstLightbringerParentSlot)
+	}
+
+	firstConnectedDesc := "none"
+	if foundConnected {
+		firstConnectedDesc = fmt.Sprintf("%d(parent=%d gap_span=%d)", firstConnectedSlot, firstConnectedParentSlot, firstConnectedSlot-waitingSlot)
+	}
+
+	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d lightbringer) | buffered_range=%d-%d | gap_to_first_buffered=%d | first_lightbringer=%s | first_connected_to_anchor=%s | mode=%s",
+		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString())
+}
+
+func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, shouldFallback bool) {
+	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
+		return 0, 0, 0, 0, false
+	}
+	if bs.lightbringerForceRPCUntil.Load() != 0 {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	lightbringerActive := bs.lightbringerActive.Load()
+	if handoffSlot == 0 && !lightbringerActive {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+	if bs.consensusManagedLightbringer && lightbringerActive {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+
+	waitingSlot = bs.nextSlotToSend
+	if !lightbringerActive && handoffSlot != 0 && waitingSlot < handoffSlot {
+		// RPC still owns slots before the pending handoff boundary. Buffered
+		// Lightbringer blocks beyond that boundary are expected and must not be
+		// treated as evidence that the current RPC-owned waiting slot is missing.
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+	if bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot] {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+	if lightbringerActive && bs.isLightbringerRepairSlot(waitingSlot) {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+
+	first := true
+	for slot, blk := range bs.reorderBuffer {
+		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+			continue
+		}
+		bufferedCount++
+		if first || slot < firstBufferedSlot {
+			firstBufferedSlot = slot
+			firstBufferedParentSlot = blk.SourceParentSlot
+			first = false
+		}
+	}
+
+	if bufferedCount == 0 || first {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
+
+	now := time.Now()
+	gapSlot := bs.lightbringerGapSlot.Load()
+	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
+	if gapSlot != waitingSlot || gapSinceUnix == 0 {
+		bs.lightbringerGapSlot.Store(waitingSlot)
+		bs.lightbringerGapSinceUnix.Store(now.UnixNano())
+		bs.lightbringerGapLastLogUnix.Store(0)
+		bs.lightbringerGapReconnectSlot.Store(0)
+		return 0, 0, 0, 0, false
+	}
+
+	if bufferedCount >= lightbringerGapBufferDepth {
+		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, true
+	}
+	if now.Sub(time.Unix(0, gapSinceUnix)) < lightbringerGapFallbackWait {
+		return 0, 0, 0, 0, false
+	}
+
+	return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, true
+}
+
+func (bs *BlockSource) shouldDeliverLightbringerObservationDirectLocked(slot uint64, blk *b.Block) bool {
+	if !bs.consensusManagedLightbringer || bs.sourceType != BlockSourceLightbringer {
+		return false
+	}
+	if blk == nil || !blk.FromLightbringer {
+		return false
+	}
+	if !bs.isNearTip.Load() || !bs.lightbringerActive.Load() {
+		return false
+	}
+	if bs.lightbringerForceRPCUntil.Load() != 0 {
+		return false
+	}
+	if slot < bs.nextSlotToSend {
+		return false
+	}
+	return true
 }
 
 // classifyError returns a string classification for an error
@@ -506,6 +1901,94 @@ func (bs *BlockSource) clearSlotErrors(slot uint64) {
 	bs.waitingSlotErrorsMu.Lock()
 	delete(bs.waitingSlotErrors, slot)
 	bs.waitingSlotErrorsMu.Unlock()
+}
+
+func (bs *BlockSource) shouldLogDetailedRPCOutcome(slot uint64) bool {
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	bs.reorderMu.Unlock()
+
+	if slot < waitingSlot {
+		return false
+	}
+	return slot <= waitingSlot+2
+}
+
+func (bs *BlockSource) rpcEndpointForIndex(rpcIdx int32) string {
+	if rpcIdx < 0 || int(rpcIdx) >= len(bs.rpcClients) {
+		if len(bs.rpcClients) == 0 {
+			return "unknown"
+		}
+		return bs.rpcClients[0].Endpoint()
+	}
+	return bs.rpcClients[rpcIdx].Endpoint()
+}
+
+func (bs *BlockSource) shouldProbeAbsentConfirmation(slot uint64) bool {
+	return bs.confirmedTip.Load() >= slot+rpcSkipConfirmDepth
+}
+
+func (bs *BlockSource) shouldFinalizeSkippedSlot(slot uint64, absentOK bool) bool {
+	if !absentOK || !bs.shouldProbeAbsentConfirmation(slot) {
+		return false
+	}
+
+	bs.waitingSlotErrorsMu.Lock()
+	info, exists := bs.waitingSlotErrors[slot]
+	bs.waitingSlotErrorsMu.Unlock()
+	if !exists {
+		return false
+	}
+	return info.lastErrorClass == "skipped" || info.lastErrorClass == "slot_not_available"
+}
+
+func (bs *BlockSource) confirmSlotAbsentViaRPC(slot uint64) bool {
+	if len(bs.rpcClients) == 0 {
+		return false
+	}
+
+	activeIdx := int(bs.activeRpcIdx.Load())
+	if activeIdx < 0 || activeIdx >= len(bs.rpcClients) {
+		activeIdx = 0
+	}
+
+	probeOrder := make([]int, 0, len(bs.rpcClients))
+	probeOrder = append(probeOrder, activeIdx)
+	for idx := range bs.rpcClients {
+		if idx != activeIdx {
+			probeOrder = append(probeOrder, idx)
+		}
+	}
+
+	confirmedAbsent := false
+	shouldLog := bs.shouldLogDetailedRPCOutcome(slot)
+	for _, idx := range probeOrder {
+		slots, err := bs.rpcClients[idx].GetBlocksWithLimitConfirmed(slot, 1)
+		if shouldLog {
+			switch {
+			case err != nil:
+				mlog.Log.Warnf("RPC omission probe: slot %d via %s | err=%v",
+					slot, bs.rpcClients[idx].Endpoint(), err)
+			case len(slots) == 0:
+				mlog.Log.Warnf("RPC omission probe: slot %d via %s | returned no confirmed slots",
+					slot, bs.rpcClients[idx].Endpoint())
+			default:
+				mlog.Log.Warnf("RPC omission probe: slot %d via %s | first_confirmed_slot=%d",
+					slot, bs.rpcClients[idx].Endpoint(), slots[0])
+			}
+		}
+		if err != nil || len(slots) == 0 {
+			continue
+		}
+		if slots[0] == slot {
+			return false
+		}
+		if slots[0] > slot {
+			confirmedAbsent = true
+		}
+	}
+
+	return confirmedAbsent
 }
 
 // collectStallDiagnostics gathers comprehensive state for stall analysis
@@ -848,6 +2331,65 @@ func (bs *BlockSource) pollTip() {
 // - Immediately retries N+1 if it failed (don't wait for 200ms ticker)
 func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
 	bs.lastExecutedSlot.Store(slot)
+
+	advancedFrontier := false
+	bs.reorderMu.Lock()
+	if slot+1 > bs.nextSlotToSend {
+		bs.nextSlotToSend = slot + 1
+		advancedFrontier = true
+	}
+	if advancedFrontier {
+		for bufferedSlot := range bs.reorderBuffer {
+			if bufferedSlot <= slot {
+				delete(bs.reorderBuffer, bufferedSlot)
+			}
+		}
+		for skippedSlot := range bs.skippedSlots {
+			if skippedSlot <= slot {
+				delete(bs.skippedSlots, skippedSlot)
+				delete(bs.lightbringerSynthesizedSkips, skippedSlot)
+			}
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	if advancedFrontier {
+		bs.slotStateMu.Lock()
+		for trackedSlot := range bs.slotState {
+			if trackedSlot <= slot {
+				delete(bs.slotState, trackedSlot)
+				delete(bs.inflightStart, trackedSlot)
+			}
+		}
+		bs.slotStateMu.Unlock()
+
+		bs.retryMu.Lock()
+		if len(bs.retrySlots) > 0 {
+			filtered := bs.retrySlots[:0]
+			for _, retrySlot := range bs.retrySlots {
+				if retrySlot > slot {
+					filtered = append(filtered, retrySlot)
+				}
+			}
+			bs.retrySlots = filtered
+		}
+		bs.retryMu.Unlock()
+	}
+
+	if forcedUntil := bs.lightbringerForceRPCUntil.Load(); forcedUntil != 0 && slot >= forcedUntil {
+		if bs.lightbringerForceRPCUntil.CompareAndSwap(forcedUntil, 0) {
+			if cooldownUntil := bs.lightbringerCooldownUntil.Load(); cooldownUntil != 0 && cooldownUntil > slot {
+				mlog.Log.Infof("BLOCK SOURCE STATUS: missing Lightbringer slot recovered at slot %d; staying on RPC until slot %d before re-arming Lightbringer", slot, cooldownUntil)
+			} else {
+				mlog.Log.Infof("BLOCK SOURCE STATUS: RPC recovery for missing Lightbringer slot complete at slot %d; Lightbringer handoff may resume", slot)
+			}
+		}
+	}
+	if cooldownUntil := bs.lightbringerCooldownUntil.Load(); cooldownUntil != 0 && slot >= cooldownUntil {
+		if bs.lightbringerCooldownUntil.CompareAndSwap(cooldownUntil, 0) {
+			mlog.Log.Infof("BLOCK SOURCE STATUS: Lightbringer recovery window complete at slot %d; handoff may resume", slot)
+		}
+	}
 	bs.updateMode() // React to replay progress immediately
 
 	// Near-tip: schedule N+2 and flush N+1 retry
@@ -885,6 +2427,10 @@ func (bs *BlockSource) flushRetrySlot(slot uint64) {
 
 // tryScheduleSlot schedules a slot if not already scheduled/done/buffered
 func (bs *BlockSource) tryScheduleSlot(slot uint64) {
+	if !bs.shouldUseRPCForSlot(slot) {
+		return
+	}
+
 	// Check slotState
 	bs.slotStateMu.Lock()
 	state, exists := bs.slotState[slot]
@@ -1059,6 +2605,16 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		// Wait for rate limiter
 		bs.rateLimiter.Wait(context.Background())
 
+		// Lightbringer handoff may have become active after this slot was queued.
+		// If so, skip the RPC fetch and let the stream source satisfy the slot.
+		if !bs.shouldUseRPCForSlot(slot) {
+			bs.slotStateMu.Lock()
+			delete(bs.slotState, slot)
+			delete(bs.inflightStart, slot)
+			bs.slotStateMu.Unlock()
+			continue
+		}
+
 		// Tip safety gate strategy:
 		// - Near-tip mode: No gate - rely on RPC "slot not available" + 200ms retries
 		// - Catchup mode with large gap: Apply tip safety margin to avoid "slot not available"
@@ -1115,7 +2671,14 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		}
 
 		skipped := err == rpcclient.SlotSkipped
-		bs.resultQueue <- fetchResult{slot: slot, block: blk, err: err, skipped: skipped, rpcIdx: rpcIdx, latencyMs: fetchLatency.Milliseconds()}
+		bs.resultQueue <- fetchResult{
+			slot:      slot,
+			block:     blk,
+			err:       err,
+			skipped:   skipped,
+			rpcIdx:    rpcIdx,
+			latencyMs: fetchLatency.Milliseconds(),
+		}
 	}
 }
 
@@ -1123,6 +2686,28 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
 		bs.reorderMu.Lock()
+		var gapWaitingSlot uint64
+		var gapFirstBufferedSlot uint64
+		var gapFirstBufferedParentSlot uint64
+		var gapBufferedCount int
+		var shouldFallbackToRPC bool
+		var emitObservationDirect bool
+
+		if result.block != nil && result.block.FromLightbringer {
+			handoffSlot := bs.lightbringerHandoffSlot.Load()
+			if handoffSlot != 0 && result.slot >= handoffSlot {
+				if existing := bs.reorderBuffer[result.slot]; existing != nil && !existing.FromLightbringer {
+					delete(bs.reorderBuffer, result.slot)
+				}
+				if bs.skippedSlots[result.slot] {
+					delete(bs.skippedSlots, result.slot)
+					delete(bs.lightbringerSynthesizedSkips, result.slot)
+				}
+			}
+			if existing := bs.reorderBuffer[result.slot]; bs.shouldPreferIncomingLightbringerBlockLocked(existing, result.block) {
+				delete(bs.reorderBuffer, result.slot)
+			}
+		}
 
 		// Check if this is a duplicate result (from backup request)
 		// If slot is already done or we already have the block, discard this result
@@ -1132,6 +2717,28 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		if isDuplicate || bs.reorderBuffer[result.slot] != nil || bs.skippedSlots[result.slot] {
 			bs.reorderMu.Unlock()
 			continue
+		}
+
+		if bs.shouldDiscardRPCResultAfterHandoff(result.slot, result.block) {
+			bs.slotStateMu.Lock()
+			delete(bs.slotState, result.slot)
+			delete(bs.inflightStart, result.slot)
+			bs.slotStateMu.Unlock()
+			bs.clearSlotErrors(result.slot)
+			bs.reorderMu.Unlock()
+			continue
+		}
+
+		if result.block != nil && result.block.FromLightbringer {
+			handoffSlot := bs.lightbringerHandoffSlot.Load()
+			if !bs.isNearTip.Load() {
+				bs.reorderMu.Unlock()
+				continue
+			}
+			if !bs.lightbringerActive.Load() && (handoffSlot == 0 || result.slot < handoffSlot) {
+				bs.reorderMu.Unlock()
+				continue
+			}
 		}
 
 		// Track error buckets
@@ -1181,25 +2788,29 @@ func (bs *BlockSource) emitOrderedBlocks() {
 
 		// Handle result
 		// CRITICAL: All errors except SlotSkipped are retriable.
-		// Never skip a non-skipped slot - that causes silent state divergence.
-		// If we truly can't fetch a block, we'll stall and eventually timeout.
 		isRetriable := result.err != nil && !result.skipped
 
-		// Track error for stall diagnostics
-		if isRetriable {
+		if result.err != nil {
 			bs.trackSlotError(result.slot, result.err, result.rpcIdx, result.latencyMs)
 		}
 
 		if result.skipped {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
-			bs.hardErrCount.Store(0) // Reset on progress
+			delete(bs.lightbringerSynthesizedSkips, result.slot)
+			bs.hardErrCount.Store(0)        // Reset on progress
 			bs.clearSlotErrors(result.slot) // Clear stall diagnostics for this slot
+			isRetriable = false
 		} else if result.block != nil {
 			// Success! This takes priority over any pending error results.
-			bs.stats.FetchSuccesses.Add(1)
-			bs.reorderBuffer[result.slot] = result.block
-			bs.hardErrCount.Store(0) // Reset error count on success
+			if !result.block.FromLightbringer {
+				bs.stats.FetchSuccesses.Add(1)
+			}
+			emitObservationDirect = bs.shouldDeliverLightbringerObservationDirectLocked(result.slot, result.block)
+			if !emitObservationDirect {
+				bs.reorderBuffer[result.slot] = result.block
+			}
+			bs.hardErrCount.Store(0)        // Reset error count on success
 			bs.clearSlotErrors(result.slot) // Clear stall diagnostics for this slot
 			// Track max buffered slot
 			if result.slot > bs.stats.MaxBufferedSlot.Load() {
@@ -1222,7 +2833,9 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			delete(bs.slotState, result.slot)
 			delete(bs.inflightStart, result.slot)
 			bs.slotStateMu.Unlock()
-			bs.scheduleRetry(result.slot)
+			if bs.shouldUseRPCForSlot(result.slot) {
+				bs.scheduleRetry(result.slot)
+			}
 		}
 		// Note: if result.block == nil && result.err == nil && !result.skipped,
 		// that's a bug in the worker, but we don't skip - it will stall and be detected.
@@ -1235,11 +2848,54 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			bs.slotStateMu.Unlock()
 		}
 
+		if emitObservationDirect {
+			blk := result.block
+			bs.reorderMu.Unlock()
+			bs.streamChan <- blk
+			bs.lastProgress.Store(time.Now().Unix())
+			bs.reorderMu.Lock()
+		}
+
 		// Emit consecutive blocks
 		for {
-			if blk, ok := bs.reorderBuffer[bs.nextSlotToSend]; ok {
-				delete(bs.reorderBuffer, bs.nextSlotToSend)
+			if bs.synthesizeLightbringerSkipsLocked() {
+				continue
+			}
+
+			if waitingSlot, observedParentSlot, expectedParentSlot, mismatch := bs.waitingLightbringerParentMismatchLocked(); mismatch {
 				bs.reorderMu.Unlock()
+				bs.forceRPCForLightbringerParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot)
+				bs.reorderMu.Lock()
+				continue
+			}
+
+			if blk, ok := bs.reorderBuffer[bs.nextSlotToSend]; ok {
+				if bs.shouldDiscardRPCResultAfterHandoff(blk.Slot, blk) {
+					delete(bs.reorderBuffer, bs.nextSlotToSend)
+					continue
+				}
+
+				delete(bs.reorderBuffer, bs.nextSlotToSend)
+				bs.lastEmittedBlockSlot = blk.Slot
+				bs.reorderMu.Unlock()
+
+				repairingSlot := bs.isLightbringerRepairSlot(blk.Slot)
+				if bs.sourceType == BlockSourceLightbringer {
+					if blk.FromLightbringer {
+						if repairingSlot {
+							bs.clearLightbringerRepairSlot(blk.Slot)
+						}
+						if !bs.lightbringerActive.Swap(true) {
+							mlog.Log.Infof("BLOCK SOURCE SWITCH: RPC -> LIGHTBRINGER at slot %d | mode=%s", blk.Slot, bs.currentModeString())
+						}
+					} else if repairingSlot {
+						bs.clearLightbringerRepairSlot(blk.Slot)
+						mlog.Log.Infof("BLOCK SOURCE STATUS: missing Lightbringer slot recovered via RPC at slot %d; staying on Lightbringer stream", blk.Slot)
+					} else if bs.lightbringerActive.Swap(false) {
+						mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | mode=%s", blk.Slot, bs.currentModeString())
+					}
+				}
+
 				bs.streamChan <- blk
 				// Update progress timestamp for stall detection
 				bs.lastProgress.Store(time.Now().Unix())
@@ -1257,9 +2913,16 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
+				if bs.shouldDiscardSkippedSlotAfterHandoff(bs.nextSlotToSend) {
+					delete(bs.skippedSlots, bs.nextSlotToSend)
+					delete(bs.lightbringerSynthesizedSkips, bs.nextSlotToSend)
+					continue
+				}
+
 				// Slot was skipped (SlotSkipped from RPC) - emit a skip marker block
 				skippedSlot := bs.nextSlotToSend
 				delete(bs.skippedSlots, skippedSlot)
+				delete(bs.lightbringerSynthesizedSkips, skippedSlot)
 				bs.nextSlotToSend++
 				bs.reorderMu.Unlock()
 
@@ -1267,6 +2930,13 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				skipBlock := &b.Block{
 					Slot:      skippedSlot,
 					IsSkipped: true,
+				}
+
+				if bs.sourceType == BlockSourceLightbringer {
+					if bs.isLightbringerRepairSlot(skippedSlot) {
+						bs.clearLightbringerRepairSlot(skippedSlot)
+						mlog.Log.Infof("BLOCK SOURCE STATUS: missing Lightbringer slot %d was confirmed skipped via RPC; staying on Lightbringer stream", skippedSlot)
+					}
 				}
 				bs.streamChan <- skipBlock
 
@@ -1287,7 +2957,12 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 		}
 
+		gapWaitingSlot, gapFirstBufferedSlot, gapFirstBufferedParentSlot, gapBufferedCount, shouldFallbackToRPC = bs.detectLightbringerGapLocked()
+		bs.maybeLogReorderGapLocked()
 		bs.reorderMu.Unlock()
+		if shouldFallbackToRPC {
+			bs.handleDetectedLightbringerGap(gapWaitingSlot, gapFirstBufferedSlot, gapFirstBufferedParentSlot, gapBufferedCount)
+		}
 	}
 }
 
@@ -1312,6 +2987,10 @@ func (bs *BlockSource) getRetrySlots() []uint64 {
 // In near-tip mode: allow scheduling a small lookahead (bs.nearTipLookahead slots)
 // to hide RPC latency behind execution time.
 func (bs *BlockSource) canScheduleMore(slot uint64) bool {
+	if !bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+
 	if bs.isNearTip.Load() {
 		// Near-tip mode: allow scheduling up to nearTipLookahead slots ahead
 		// This provides enough buffer to hide RPC latency (~300ms) behind execution (~100ms)
@@ -1353,6 +3032,10 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 
 // scheduleSlot schedules a slot if not already scheduled
 func (bs *BlockSource) scheduleSlot(slot uint64) bool {
+	if !bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+
 	bs.slotStateMu.Lock()
 	if _, exists := bs.slotState[slot]; exists {
 		bs.slotStateMu.Unlock()
@@ -1373,6 +3056,10 @@ func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 // scheduleBackupRequest sends a backup request for a slow slot (bypasses slotState check)
 // Returns true only if the request was actually queued.
 func (bs *BlockSource) scheduleBackupRequest(slot uint64) bool {
+	if !bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+
 	select {
 	case bs.workQueue <- slot:
 		bs.stats.SpeculativeRetries.Add(1) // Only count if actually queued
@@ -1404,6 +3091,35 @@ func (bs *BlockSource) getStaleSlots(threshold time.Duration) []uint64 {
 	return stale
 }
 
+// rescueStaleWaitingSlot clears and retries the currently waiting slot if it has
+// remained inflight for too long without producing any result. This prevents a
+// lost or hung fetch from pinning ordered emission forever.
+func (bs *BlockSource) rescueStaleWaitingSlot(slot uint64, threshold time.Duration) bool {
+	bs.slotStateMu.Lock()
+	state, exists := bs.slotState[slot]
+	start, hasStart := bs.inflightStart[slot]
+	if !exists || state != slotInflight || !hasStart || time.Since(start) < threshold {
+		bs.slotStateMu.Unlock()
+		return false
+	}
+	delete(bs.slotState, slot)
+	delete(bs.inflightStart, slot)
+	bs.slotStateMu.Unlock()
+
+	bs.waitingSlotErrorsMu.Lock()
+	info := bs.waitingSlotErrors[slot]
+	bs.waitingSlotErrorsMu.Unlock()
+	bs.scheduleRetry(slot)
+	if info != nil {
+		mlog.Log.Warnf("rescuing stale inflight waiting slot %d after %v without a result; scheduling fresh retry | last_err_class=%s | last_err=%s | retries=%d",
+			slot, time.Since(start).Round(time.Second), info.lastErrorClass, info.lastError, info.retryCount)
+	} else {
+		mlog.Log.Warnf("rescuing stale inflight waiting slot %d after %v without a result; scheduling fresh retry | no prior RPC error history",
+			slot, time.Since(start).Round(time.Second))
+	}
+	return true
+}
+
 // scheduler feeds slots to the work queue
 func (bs *BlockSource) scheduler() {
 	nextToSchedule := bs.startSlot
@@ -1427,6 +3143,8 @@ func (bs *BlockSource) scheduler() {
 		// Check for stall timeout - if no progress for too long, trigger graceful shutdown
 		lastProgressTime := time.Unix(bs.lastProgress.Load(), 0)
 		stallDuration := time.Since(lastProgressTime)
+
+		bs.maybeReconnectActiveLightbringerForNoProgress(stallDuration)
 
 		// Periodic heartbeat logging when stall exceeds 2 minutes (but before shutdown)
 		if stallDuration > stallHeartbeatThreshold && stallDuration <= bs.stallTimeout {
@@ -1462,17 +3180,36 @@ func (bs *BlockSource) scheduler() {
 			mlog.Log.Errorf("This indicates persistent network issues or RPC unavailability.")
 			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
 
+			bs.setStopReason(blockSourceStopReasonStalled, waitingSlot)
 			bs.stallError.Store(true)
 			return // Exit scheduler, which triggers shutdown
 		}
 
 		// Check if all slots are done
 		bs.reorderMu.Lock()
-		allDone := bs.nextSlotToSend >= bs.endSlot
+		waitingSlot := bs.nextSlotToSend
+		allDone := waitingSlot >= bs.endSlot
 		bs.reorderMu.Unlock()
 
 		if allDone {
+			if bs.endSlot == uint64(math.MaxUint64) {
+				bs.setStopReason(blockSourceStopReasonUnexpectedLiveEnd, waitingSlot)
+				mlog.Log.Errorf("FATAL: block source reached terminal completion in live mode at slot %d (start=%d end=%d)",
+					waitingSlot, bs.startSlot, bs.endSlot)
+				return
+			}
+			bs.setStopReason(blockSourceStopReasonCompleted, waitingSlot)
 			return
+		}
+
+		if bs.lightbringerNeedRPCResume.CompareAndSwap(true, false) {
+			nextToSchedule = waitingSlot
+		}
+
+		// Keep the scheduler aligned with actual replay progress so RPC fallback
+		// resumes from the current gap if Lightbringer disconnects.
+		if nextToSchedule < waitingSlot {
+			nextToSchedule = waitingSlot
 		}
 
 		// Process retry slots, backup requests, and primary probes on tickers
@@ -1493,10 +3230,14 @@ func (bs *BlockSource) scheduler() {
 			// buffer fills with N+1..N+100, slot N keeps failing, can't reschedule N
 			// because buffer is full, buffer can't drain because waiting for N.
 			bs.reorderMu.Lock()
-			waitingSlot := bs.nextSlotToSend
+			waitingSlot = bs.nextSlotToSend
 			bs.reorderMu.Unlock()
 
 			for _, slot := range bs.getRetrySlots() {
+				if !bs.shouldUseRPCForSlot(slot) {
+					continue
+				}
+
 				// Always allow scheduling the slot we're waiting for (breaks deadlock)
 				isPrioritySlot := slot == waitingSlot
 				if isPrioritySlot || bs.canScheduleMore(slot) {
@@ -1515,7 +3256,9 @@ func (bs *BlockSource) scheduler() {
 					// This makes the retry path lossless even if scheduleSlot fails for
 					// other reasons (work queue full, stopChan closed, etc.)
 					if !bs.scheduleSlot(slot) {
-						bs.scheduleRetry(slot)
+						if bs.shouldUseRPCForSlot(slot) {
+							bs.scheduleRetry(slot)
+						}
 					}
 				} else {
 					bs.scheduleRetry(slot) // Put back
@@ -1571,8 +3314,18 @@ func (bs *BlockSource) scheduler() {
 		default:
 		}
 
+		if nextToSchedule >= bs.endSlot {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		if !bs.shouldUseRPCForSlot(nextToSchedule) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
 		// Schedule new slots if we have capacity
-		if bs.canScheduleMore(nextToSchedule) && nextToSchedule < bs.endSlot {
+		if bs.canScheduleMore(nextToSchedule) {
 			if bs.scheduleSlot(nextToSchedule) {
 				nextToSchedule++
 			} else {
@@ -1594,10 +3347,15 @@ func (bs *BlockSource) DownloadInitialBlocks() {
 
 // Start begins parallel block fetching
 func (bs *BlockSource) Start() {
-	// For non-RPC sources, use the old sequential approach
-	if bs.sourceType != BlockSourceRpc {
+	// File-backed blocks still use the old sequential approach.
+	// Lightbringer uses the parallel RPC fetcher for catchup plus a live stream handoff.
+	if bs.sourceType == BlockSourceFile {
 		bs.startSequential()
 		return
+	}
+
+	if bs.sourceType == BlockSourceLightbringer && bs.lightbringerEndpoint != "" {
+		bs.maybeStartLightbringerStream()
 	}
 
 	// Start tip poller
@@ -1623,11 +3381,19 @@ func (bs *BlockSource) Start() {
 	// Start scheduler (runs until all slots done)
 	bs.scheduler()
 
+	if bs.stopReasonEnum() == blockSourceStopReasonNone {
+		bs.reorderMu.Lock()
+		waitingSlot := bs.nextSlotToSend
+		bs.reorderMu.Unlock()
+		bs.setStopReason(blockSourceStopReasonUnexpectedLiveEnd, waitingSlot)
+	}
+
 	// Shutdown
 	bs.stopped.Store(true)
 	close(bs.stopChan)
 	close(bs.workQueue)
 	wg.Wait()
+	bs.lightbringerWg.Wait()
 	close(bs.resultQueue)
 	<-emitterDone
 	close(bs.streamChan)
@@ -1674,15 +3440,26 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			blk = block.FromBlockResult(blockResult, slot, rpc)
 		}
 	} else if bs.sourceType == BlockSourceLightbringer {
-		// NOTE: BlockSourceLightbringer is TEMPORARILY NON-FUNCTIONAL.
-		// The background block downloader that populated files for this path was removed.
-		// This code path will return SlotSkipped for every slot until Lightbringer streaming
-		// is re-implemented as a push-based source feeding directly into the reorder buffer.
-		// TODO: Implement Lightbringer as a streaming source (gRPC stream -> reorder buffer)
-		blk, err = bs.tryGetBlockFromFile(slot)
-		if err != nil {
-			return nil, rpcclient.SlotSkipped
+		// Legacy sequential mode does not support the live stream handoff.
+		// If this path is ever used, fall back to the RPC catchup fetcher.
+		rpc := bs.getActiveRpc()
+		for {
+			blockResult, err = rpc.GetBlockConfirmedOnce(slot)
+			if err == nil {
+				break
+			} else if err == rpcclient.SlotSkipped {
+				return nil, err
+			} else if isSlotNotAvailableErr(err) {
+				time.Sleep(500 * time.Millisecond)
+			} else if isRateLimitedErr(err) {
+				time.Sleep(2 * time.Second)
+			} else if isHardConnectivityErr(err) || isTransientNetworkErr(err) {
+				time.Sleep(1 * time.Second)
+			} else {
+				return nil, fmt.Errorf("error fetching block: %w", err)
+			}
 		}
+		blk = block.FromBlockResult(blockResult, slot, rpc)
 	}
 
 	return blk, nil
@@ -1706,6 +3483,28 @@ func (bs *BlockSource) Stalled() bool {
 // StallTimeout returns the configured stall timeout duration.
 func (bs *BlockSource) StallTimeout() time.Duration {
 	return bs.stallTimeout
+}
+
+// Completed returns true when the block source reached a finite configured end slot.
+func (bs *BlockSource) Completed() bool {
+	return bs.stopReasonEnum() == blockSourceStopReasonCompleted
+}
+
+// StopReason returns a human-readable explanation for why the block source ended.
+func (bs *BlockSource) StopReason() string {
+	stopSlot := bs.stopSlot.Load()
+	endSlot := bs.stopEndSlot.Load()
+
+	switch bs.stopReasonEnum() {
+	case blockSourceStopReasonCompleted:
+		return fmt.Sprintf("completed finite replay at slot %d (endSlot=%d)", stopSlot, endSlot)
+	case blockSourceStopReasonStalled:
+		return fmt.Sprintf("block fetch stalled while waiting for slot %d", stopSlot)
+	case blockSourceStopReasonUnexpectedLiveEnd:
+		return fmt.Sprintf("scheduler terminated unexpectedly in live mode at slot %d (endSlot=%d)", stopSlot, endSlot)
+	default:
+		return "stream closed without an explicit block-source stop reason"
+	}
 }
 
 // FetchStatsSnapshot returns a snapshot of fetch stats for logging
@@ -1745,6 +3544,58 @@ type FetchStatsSnapshot struct {
 	WaitingSlotRetries int    // How many times the waiting slot has been retried
 	InflightCount      int    // Number of slots currently being fetched
 	RetryQueueLen      int    // Number of slots waiting to be retried
+	CurrentSource      string // "rpc", "lightbringer", or "file"
+	SourceStatus       string // Human-readable description of current source state
+	HandoffSlot        uint64 // First slot at which Lightbringer can take over (0 = none pending)
+}
+
+func (bs *BlockSource) currentSourceSnapshot() (string, string, uint64) {
+	switch bs.sourceType {
+	case BlockSourceFile:
+		return "file", "file playback", 0
+	case BlockSourceRpc:
+		return "rpc", "rpc", 0
+	case BlockSourceLightbringer:
+		handoffSlot := bs.lightbringerHandoffSlot.Load()
+		cooldownUntil := bs.lightbringerCooldownUntil.Load()
+		connected := bs.lightbringerConnected.Load()
+		lastStreamSlot := bs.lightbringerLastStreamSlot.Load()
+		if bs.lightbringerActive.Load() {
+			return "lightbringer", "lightbringer live stream", handoffSlot
+		}
+		if cooldownUntil != 0 {
+			if connected && lastStreamSlot != 0 {
+				return "rpc", fmt.Sprintf("rpc, stabilising after lightbringer gap until slot %d (latest streamed slot %d)", cooldownUntil, lastStreamSlot), 0
+			}
+			return "rpc", fmt.Sprintf("rpc, stabilising after lightbringer gap until slot %d", cooldownUntil), 0
+		}
+		if bs.isNearTip.Load() {
+			if handoffSlot != 0 {
+				return "rpc", fmt.Sprintf("rpc, waiting for lightbringer handoff at slot %d", handoffSlot), handoffSlot
+			}
+			if connected {
+				bs.reorderMu.Lock()
+				waitingSlot := bs.nextSlotToSend
+				anchorSlot := bs.lastEmittedBlockSlot
+				bs.reorderMu.Unlock()
+				waitReason := bs.lightbringerHandoffWaitReason(waitingSlot, anchorSlot)
+				if lastStreamSlot != 0 {
+					return "rpc", fmt.Sprintf("rpc, lightbringer connected (latest streamed slot %d); %s", lastStreamSlot, waitReason), 0
+				}
+				return "rpc", fmt.Sprintf("rpc, lightbringer connected; %s", waitReason), 0
+			}
+			if bs.lightbringerStarted.Load() {
+				return "rpc", "rpc, waiting for lightbringer stream connection", 0
+			}
+			return "rpc", "rpc, starting lightbringer stream", 0
+		}
+		if connected && lastStreamSlot != 0 {
+			return "rpc", fmt.Sprintf("rpc catchup (lightbringer connected, latest streamed slot %d)", lastStreamSlot), 0
+		}
+		return "rpc", "rpc catchup", 0
+	default:
+		return "rpc", "rpc", 0
+	}
 }
 
 // GetFetchStats returns a snapshot of current fetch statistics
@@ -1828,6 +3679,8 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		successRate = float64(successes) / float64(totalCompleted) * 100
 	}
 
+	currentSource, sourceStatus, handoffSlot := bs.currentSourceSnapshot()
+
 	return FetchStatsSnapshot{
 		Attempts:           attempts,
 		Successes:          successes,
@@ -1861,6 +3714,9 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		WaitingSlotRetries: waitingSlotRetries,
 		InflightCount:      inflightCount,
 		RetryQueueLen:      retryQueueLen,
+		CurrentSource:      currentSource,
+		SourceStatus:       sourceStatus,
+		HandoffSlot:        handoffSlot,
 	}
 }
 
