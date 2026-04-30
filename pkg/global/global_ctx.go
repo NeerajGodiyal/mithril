@@ -43,7 +43,6 @@ type GlobalCtx struct {
 	leaderSchedule             *leaderschedule.LeaderSchedule
 	calcUnixTimeForClockSysvar bool
 	manageLeaderSchedule       bool
-	manageBlockHeight          bool
 	pendingStakeMutex          sync.Mutex // Protects pendingNewStakePubkeys
 	voteCacheMutex             sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
@@ -322,14 +321,6 @@ func SetManageLeaderSchedule(manageLeaderSchedule bool) {
 
 func ManageLeaderSchedule() bool {
 	return instance.manageLeaderSchedule
-}
-
-func SetManageBlockHeight(manageBlockHeight bool) {
-	instance.manageBlockHeight = true
-}
-
-func ManageBlockHeight() bool {
-	return instance.manageBlockHeight
 }
 
 func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {

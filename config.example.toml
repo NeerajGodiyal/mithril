@@ -354,6 +354,11 @@ name = "mithril"
     # Account pubkeys to enable debug logging of transactions that modify them
     # account_writes = ["pubkey1", "pubkey2"]
 
+    # Write epoch-boundary reward artifacts, including a JSON comparison of
+    # local voting rewards against block/RPC data plus a CSV dump of all
+    # locally calculated rewards.
+    # dump_epoch_voting_reward_diff = true
+
 # ============================================================================
 # [reporting] - Metrics & Reporting
 # ============================================================================

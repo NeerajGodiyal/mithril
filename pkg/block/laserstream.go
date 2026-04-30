@@ -29,7 +29,6 @@ func FromLaserStream(lsBlock *proto.SubscribeUpdateBlock, rpcc *rpcclient.RpcCli
 	block.Blockhash = solana.MustHashFromBase58(lsBlock.Blockhash)
 	block.LastBlockhash = solana.MustHashFromBase58(lsBlock.ParentBlockhash)
 	block.UnixTimestamp = lsBlock.BlockTime.Timestamp
-	block.BlockHeight = lsBlock.BlockHeight.BlockHeight
 
 	// rewards
 	for _, r := range lsBlock.Rewards.Rewards {

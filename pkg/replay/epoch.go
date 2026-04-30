@@ -18,6 +18,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	bin "github.com/gagliardetto/binary"
@@ -184,7 +185,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	return &stakeHistory
 }
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64) *rewards.PartitionedRewardDistributionInfo {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions) *rewards.PartitionedRewardDistributionInfo {
 	// Flush any pending stake pubkeys to the index file before scanning.
 	// The async StoreAccounts callback from the previous block may not have
 	// run yet, so flush here to ensure the index is complete for the scan.
@@ -239,7 +240,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t3 := time.Now()
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts)
 	} else {
 		panic("only partitioned rewards supported")
 	}

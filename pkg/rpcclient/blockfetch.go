@@ -143,15 +143,26 @@ func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, e
 }
 
 func (fetcher *RpcClient) GetRewardsForSlot(slot uint64) ([]rpc.BlockReward, error) {
+	return fetcher.GetRewardsForSlotWithCommitment(slot, rpc.CommitmentFinalized, 0)
+}
+
+func (fetcher *RpcClient) GetRewardsForSlotWithCommitment(slot uint64, commitment rpc.CommitmentType, timeout time.Duration) ([]rpc.BlockReward, error) {
 	includeRewards := true
 	maxSupportedTxVer := uint64(0)
 
+	ctx := context.TODO()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+	}
+
 	result, err := fetcher.client.GetBlockWithOpts(
-		context.TODO(),
+		ctx,
 		slot,
 		&rpc.GetBlockOpts{
 			MaxSupportedTransactionVersion: &maxSupportedTxVer,
-			Commitment:                     rpc.CommitmentFinalized,
+			Commitment:                     commitment,
 			TransactionDetails:             rpc.TransactionDetailsNone,
 			Rewards:                        &includeRewards,
 		},

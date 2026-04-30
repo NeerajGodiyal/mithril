@@ -87,9 +87,10 @@ var (
 	blockstorePath string
 	txParallelism  int64
 
-	debugTxs        []string
-	debugAcctWrites []string
-	cpuprofPath     string
+	debugTxs                       []string
+	debugAcctWrites                []string
+	debugDumpEpochVotingRewardDiff bool
+	cpuprofPath                    string
 
 	paramArenaSizeMB         uint64
 	borrowedAccountArenaSize uint64
@@ -148,6 +149,7 @@ func init() {
 	// [debug] section flags
 	Run.Flags().StringSliceVar(&debugTxs, "transaction-signatures", []string{}, "Pass tx signature strings to enable debug logging during that transaction's execution")
 	Run.Flags().StringSliceVar(&debugAcctWrites, "account-writes", []string{}, "Pass account pubkeys to enable debug logging of transactions that modify the account")
+	Run.Flags().BoolVar(&debugDumpEpochVotingRewardDiff, "dump-epoch-voting-reward-diff", false, "Write epoch-boundary reward artifacts, including a voting diff and a full dump of locally calculated rewards")
 
 	// Top-level flags
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
@@ -534,6 +536,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if len(debugAcctWrites) == 0 {
 		debugAcctWrites = getStringSlice("account-writes", "development.debug.account_writes")
 	}
+	debugDumpEpochVotingRewardDiff = getBool("dump-epoch-voting-reward-diff", "debug.dump_epoch_voting_reward_diff")
+	if !flagChanged("dump-epoch-voting-reward-diff") && !config.IsSet("debug.dump_epoch_voting_reward_diff") {
+		debugDumpEpochVotingRewardDiff = getBool("dump-epoch-voting-reward-diff", "development.debug.dump_epoch_voting_reward_diff")
+	}
 
 	// [tuning] section (with fallback to legacy [development])
 	paramArenaSizeMB = getUint64("param-arena-size-mb", "tuning.param_arena_size_mb")
@@ -790,7 +796,7 @@ func runLive(c *cobra.Command, args []string) {
 		mlog.Log.Infof("block.source=lightbringer with external Lightbringer at %s", lightbringerEndpoint)
 	}
 
-	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites)
+	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites, debugDumpEpochVotingRewardDiff)
 	if err != nil {
 		klog.Fatalf("failed to parse --transaction-signatures or --account-writes values: %v", err)
 	}
@@ -1248,6 +1254,7 @@ postBootstrap:
 
 				resumeState = &replay.ResumeState{
 					ParentSlot:               mithrilState.LastSlot,
+					ParentBlockHeight:        mithrilState.LastBlockHeight,
 					ParentBankhash:           parentBankhash,
 					AcctsLtHash:              ltHash,
 					LamportsPerSignature:     mithrilState.LastLamportsPerSignature,
@@ -1445,6 +1452,7 @@ postBootstrap:
 				WriterBranch:   getBranch(),
 				ShutdownReason: shutdownReason,
 				Epoch:          lastEpoch,
+				BlockHeight:    result.LastBlockHeight,
 
 				// LtHash and fee state
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(result.LastAcctsLtHash.Hash()),
@@ -2309,6 +2317,7 @@ func runReplayWithRecovery(
 				WriterBranch:   getBranch(),
 				ShutdownReason: state.ShutdownReasonNormal, // This is always a cancel (Ctrl+C)
 				Epoch:          lastEpoch,
+				BlockHeight:    r.LastBlockHeight,
 
 				// LtHash and fee state
 				AcctsLtHash:          base64.StdEncoding.EncodeToString(r.LastAcctsLtHash.Hash()),
