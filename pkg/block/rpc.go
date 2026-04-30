@@ -32,7 +32,6 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 	} else {
 		block.UnixTimestamp = int64(*blockResult.BlockTime)
 	}
-	block.BlockHeight = *blockResult.BlockHeight
 
 	block.Rewards = blockResult.Rewards
 	if blockResult.NumRewardPartitions != nil {
