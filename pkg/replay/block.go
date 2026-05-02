@@ -123,6 +123,8 @@ type ReplayResult struct {
 	LastPersistedSlot uint64
 	// LastPersistedBankhash is the bankhash of the last persisted slot
 	LastPersistedBankhash []byte
+	// LastBlockHeight is the block height of the last persisted slot.
+	LastBlockHeight uint64
 	// WasCancelled indicates whether replay was interrupted by context cancellation
 	WasCancelled bool
 	// Error contains any error that occurred during replay
@@ -166,6 +168,8 @@ type OnCancelWriteState func(result *ReplayResult) error
 type ResumeState struct {
 	// ParentSlot is the slot of the last successfully replayed block (= state.LastSlot)
 	ParentSlot uint64
+	// ParentBlockHeight is the block height of the last successfully replayed block.
+	ParentBlockHeight uint64
 	// ParentBankhash is the bankhash of the parent slot
 	ParentBankhash []byte
 	// AcctsLtHash is the cumulative LtHash at the end of the parent slot
@@ -870,9 +874,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		}
 	}
 
-	if global.ManageBlockHeight() {
-		block.BlockHeight = global.BlockHeight()
-	}
+	setBlockHeight(block)
 
 	return nil
 }
@@ -933,9 +935,7 @@ func configureBlock(block *b.Block,
 		}
 	}
 
-	if global.ManageBlockHeight() {
-		block.BlockHeight = global.BlockHeight()
-	}
+	setBlockHeight(block)
 	return nil
 }
 
@@ -1017,9 +1017,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		}
 	}
 
-	if global.ManageBlockHeight() {
-		block.BlockHeight = global.BlockHeight()
-	}
+	setBlockHeight(block)
 
 	// Restore blockhash context from ResumeState (required because appendvec writes are not fsynced)
 	if resumeState.RecentBlockhashes != nil && len(*resumeState.RecentBlockhashes) > 0 {
@@ -1068,7 +1066,43 @@ func configureGlobalCtx(block *b.Block) {
 	global.SetSlot(block.Slot)
 	global.SetEpoch(block.Epoch)
 	global.SetLatestBlockHash(block.LastBlockhash)
-	global.SetBlockHeight(block.BlockHeight)
+}
+
+func setBlockHeight(block *b.Block) {
+	block.BlockHeight = global.BlockHeight() + 1
+}
+
+func initializeBlockHeight(rpcc *rpcclient.RpcClient, mithrilState *state.MithrilState, resumeState *ResumeState) error {
+	switch {
+	case resumeState != nil:
+		if resumeState.ParentSlot > 0 && resumeState.ParentBlockHeight == 0 {
+			mlog.Log.Warnf("resume state missing last block height for slot %d; fetching from RPC", resumeState.ParentSlot)
+			blockResult, err := rpcc.GetBlockConfirmed(resumeState.ParentSlot)
+			if err != nil {
+				return fmt.Errorf("failed to fetch block height for resume slot %d: %w", resumeState.ParentSlot, err)
+			}
+			if blockResult == nil || blockResult.BlockHeight == nil {
+				return fmt.Errorf("RPC returned no block height for resume slot %d", resumeState.ParentSlot)
+			}
+			resumeState.ParentBlockHeight = *blockResult.BlockHeight
+		}
+		global.SetBlockHeight(resumeState.ParentBlockHeight)
+	case mithrilState != nil:
+		if mithrilState.ManifestParentSlot > 0 && mithrilState.ManifestBlockHeight == 0 {
+			mlog.Log.Warnf("state file missing manifest block height for snapshot slot %d; fetching from RPC", mithrilState.ManifestParentSlot)
+			blockResult, err := rpcc.GetBlockConfirmed(mithrilState.ManifestParentSlot)
+			if err != nil {
+				return fmt.Errorf("failed to fetch block height for snapshot slot %d: %w", mithrilState.ManifestParentSlot, err)
+			}
+			if blockResult == nil || blockResult.BlockHeight == nil {
+				return fmt.Errorf("RPC returned no block height for snapshot slot %d", mithrilState.ManifestParentSlot)
+			}
+			mithrilState.ManifestBlockHeight = *blockResult.BlockHeight
+		}
+		global.SetBlockHeight(mithrilState.ManifestBlockHeight)
+	}
+
+	return nil
 }
 
 // buildInitialEpochStakesCache seeds the epoch stakes cache from state file or manifest.
@@ -1185,7 +1219,6 @@ func ReplayBlocks(
 	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 
 	global.SetCalcUnixTimeForClockSysvar(true)
-	global.SetManageBlockHeight(true)
 	global.SetManageLeaderSchedule(true)
 
 	var err error
@@ -1273,6 +1306,10 @@ func ReplayBlocks(
 			result.Error = err
 			return result
 		}
+	}
+	if err := initializeBlockHeight(rpcc, mithrilState, resumeState); err != nil {
+		result.Error = err
+		return result
 	}
 	// Resolve consensus config defaults before forkchoice init so we can
 	// check whether enforcement requires authorized voters.
@@ -1749,7 +1786,7 @@ func ReplayBlocks(
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, replayCtx, currentSlot, true)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch)
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch, rpcc, dbgOpts)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 
@@ -1850,6 +1887,7 @@ func ReplayBlocks(
 			global.ClearPendingStakePubkeys()
 			break
 		}
+		global.SetBlockHeight(block.BlockHeight)
 
 		if rpcServer != nil {
 			rpcServer.SetSlotCtx(lastSlotCtx)
@@ -1907,6 +1945,7 @@ func ReplayBlocks(
 
 			// Populate result immediately for state write
 			result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
+			result.LastBlockHeight = global.BlockHeight()
 
 			// Capture resume context from the last slot context
 			if lastSlotCtx != nil {
@@ -2238,6 +2277,7 @@ func ReplayBlocks(
 
 	acctsDb.WaitForStoreWorker()
 	result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
+	result.LastBlockHeight = global.BlockHeight()
 
 	// Capture resume context from the last slot context (if available)
 	// This enables proper resume from Ctrl+C shutdown

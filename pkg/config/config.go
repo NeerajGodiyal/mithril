@@ -10,15 +10,15 @@ import (
 
 // LedgerConfig holds ledger-related configuration (matches Firedancer [ledger] section)
 type LedgerConfig struct {
-	Path                string `toml:"path" mapstructure:"path"`                                 // was: blockdir
-	AccountsPath        string `toml:"accounts_path" mapstructure:"accounts_path"`               // was: out
+	Path                string `toml:"path" mapstructure:"path"`                                   // was: blockdir
+	AccountsPath        string `toml:"accounts_path" mapstructure:"accounts_path"`                 // was: out
 	SnapshotArchivePath string `toml:"snapshot_archive_path" mapstructure:"snapshot_archive_path"` // was: path
-	IncrementalSnapshot string `toml:"incremental_snapshot" mapstructure:"incremental_snapshot"` // was: incremental-snapshot-filename
+	IncrementalSnapshot string `toml:"incremental_snapshot" mapstructure:"incremental_snapshot"`   // was: incremental-snapshot-filename
 }
 
 // RpcConfig holds RPC-related configuration (matches Firedancer [rpc] section)
 type RpcConfig struct {
-	Rpc  []string `toml:"rpc" mapstructure:"rpc"` // List of RPC endpoints
+	Rpc  []string `toml:"rpc" mapstructure:"rpc"`   // List of RPC endpoints
 	Port int      `toml:"port" mapstructure:"port"` // was: rpc-server-port
 }
 
@@ -31,23 +31,24 @@ type ReplayConfig struct {
 
 // PprofConfig holds pprof-related configuration
 type PprofConfig struct {
-	Port           int64  `toml:"port" mapstructure:"port"`                       // was: pprofport
+	Port           int64  `toml:"port" mapstructure:"port"`                         // was: pprofport
 	CpuProfilePath string `toml:"cpu_profile_path" mapstructure:"cpu_profile_path"` // was: cpuprof-filename
 }
 
 // DebugConfig holds debug-related configuration
 type DebugConfig struct {
-	TransactionSignatures []string `toml:"transaction_signatures" mapstructure:"transaction_signatures"` // was: debugtx
-	AccountWrites         []string `toml:"account_writes" mapstructure:"account_writes"`                 // was: debugacctwrites
+	TransactionSignatures     []string `toml:"transaction_signatures" mapstructure:"transaction_signatures"` // was: debugtx
+	AccountWrites             []string `toml:"account_writes" mapstructure:"account_writes"`                 // was: debugacctwrites
+	DumpEpochVotingRewardDiff bool     `toml:"dump_epoch_voting_reward_diff" mapstructure:"dump_epoch_voting_reward_diff"`
 }
 
 // DevelopmentConfig holds development/tuning configuration (matches Firedancer [development] section)
 type DevelopmentConfig struct {
-	ZstdDecoderConcurrency   int         `toml:"zstd_decoder_concurrency" mapstructure:"zstd_decoder_concurrency"`     // was: zstd-decoder-concurrency
-	MaxConcurrentFlushers    int         `toml:"max_concurrent_flushers" mapstructure:"max_concurrent_flushers"`       // was: max-concurrent-flushers
-	ParamArenaSizeMB         uint64      `toml:"param_arena_size_mb" mapstructure:"param_arena_size_mb"`               // was: param-arena-size-mb
+	ZstdDecoderConcurrency   int         `toml:"zstd_decoder_concurrency" mapstructure:"zstd_decoder_concurrency"`       // was: zstd-decoder-concurrency
+	MaxConcurrentFlushers    int         `toml:"max_concurrent_flushers" mapstructure:"max_concurrent_flushers"`         // was: max-concurrent-flushers
+	ParamArenaSizeMB         uint64      `toml:"param_arena_size_mb" mapstructure:"param_arena_size_mb"`                 // was: param-arena-size-mb
 	BorrowedAccountArenaSize uint64      `toml:"borrowed_account_arena_size" mapstructure:"borrowed_account_arena_size"` // was: borrowed-account-arena-size
-	UsePool                  bool        `toml:"use_pool" mapstructure:"use_pool"`                                     // was: use-pool
+	UsePool                  bool        `toml:"use_pool" mapstructure:"use_pool"`                                       // was: use-pool
 	Pprof                    PprofConfig `toml:"pprof" mapstructure:"pprof"`
 	Debug                    DebugConfig `toml:"debug" mapstructure:"debug"`
 }
@@ -59,14 +60,14 @@ type ReportingConfig struct {
 
 // BlockConfig holds block source configuration
 type BlockConfig struct {
-	Source              string `toml:"source" mapstructure:"source"`                             // "rpc" or "lightbringer"
+	Source               string `toml:"source" mapstructure:"source"`                               // "rpc" or "lightbringer"
 	LightbringerEndpoint string `toml:"lightbringer_endpoint" mapstructure:"lightbringer_endpoint"` // Lightbringer endpoint (optional)
 
 	// Global fetch tuning
-	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                       // Rate limit (requests per second)
-	MaxInflight     int `toml:"max_inflight" mapstructure:"max_inflight"`             // Max concurrent workers
+	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                           // Rate limit (requests per second)
+	MaxInflight     int `toml:"max_inflight" mapstructure:"max_inflight"`                 // Max concurrent workers
 	TipPollMs       int `toml:"tip_poll_interval_ms" mapstructure:"tip_poll_interval_ms"` // Tip poll interval in ms
-	TipSafetyMargin int `toml:"tip_safety_margin" mapstructure:"tip_safety_margin"`   // Don't fetch within N slots of tip
+	TipSafetyMargin int `toml:"tip_safety_margin" mapstructure:"tip_safety_margin"`       // Don't fetch within N slots of tip
 
 	// Mode thresholds (hysteresis)
 	NearTipThreshold int `toml:"near_tip_threshold" mapstructure:"near_tip_threshold"` // Enter near-tip when gap <= this
@@ -155,12 +156,12 @@ type LightbringerConfig struct {
 
 // LogConfig holds logging configuration
 type LogConfig struct {
-	Dir        string `toml:"dir" mapstructure:"dir"`                 // Log directory (default: /mnt/mithril-logs)
-	Level      string `toml:"level" mapstructure:"level"`             // Log level: debug, info, warn, error
-	ToStdout   bool   `toml:"to_stdout" mapstructure:"to_stdout"`     // Also write to stdout (default: true)
-	MaxSizeMB  int    `toml:"max_size_mb" mapstructure:"max_size_mb"` // Max log file size in MB before rotation
+	Dir        string `toml:"dir" mapstructure:"dir"`                   // Log directory (default: /mnt/mithril-logs)
+	Level      string `toml:"level" mapstructure:"level"`               // Log level: debug, info, warn, error
+	ToStdout   bool   `toml:"to_stdout" mapstructure:"to_stdout"`       // Also write to stdout (default: true)
+	MaxSizeMB  int    `toml:"max_size_mb" mapstructure:"max_size_mb"`   // Max log file size in MB before rotation
 	MaxAgeDays int    `toml:"max_age_days" mapstructure:"max_age_days"` // Delete logs older than this many days
-	MaxBackups int    `toml:"max_backups" mapstructure:"max_backups"` // Keep up to N old log files
+	MaxBackups int    `toml:"max_backups" mapstructure:"max_backups"`   // Keep up to N old log files
 }
 
 // ConsensusConfig holds vote-anchored consensus configuration

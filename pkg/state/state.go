@@ -43,16 +43,16 @@ type MithrilState struct {
 	// =========================================================================
 	// AccountsDB Origin (snapshot info - set once, never changes)
 	// =========================================================================
-	Stage          string        `json:"stage"`                       // "ready", "downloading", "building", "corrupted"
-	SnapshotSlot   uint64        `json:"snapshot_slot"`               // Slot of the snapshot used to build AccountsDB
-	SnapshotEpoch  uint64        `json:"snapshot_epoch,omitempty"`    // Epoch of the snapshot
-	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`     // Full snapshot file info
-	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`     // Incremental snapshot file info
+	Stage          string        `json:"stage"`                        // "ready", "downloading", "building", "corrupted"
+	SnapshotSlot   uint64        `json:"snapshot_slot"`                // Slot of the snapshot used to build AccountsDB
+	SnapshotEpoch  uint64        `json:"snapshot_epoch,omitempty"`     // Epoch of the snapshot
+	FullSnapshot   *SnapshotInfo `json:"full_snapshot,omitempty"`      // Full snapshot file info
+	IncrSnapshot   *SnapshotInfo `json:"incr_snapshot,omitempty"`      // Incremental snapshot file info
 	BuildCompleted time.Time     `json:"build_completed_at,omitempty"` // When AccountsDB build finished
-	BuildStartedAt time.Time     `json:"build_started_at,omitempty"`  // When bootstrap started
-	BuildMode      string        `json:"build_mode,omitempty"`        // "auto", "snapshot", "new-snapshot", "accountsdb"
-	Cluster        string        `json:"cluster,omitempty"`           // "mainnet-beta", "testnet", "devnet"
-	GenesisHash    string        `json:"genesis_hash,omitempty"`      // Base58 genesis hash from RPC
+	BuildStartedAt time.Time     `json:"build_started_at,omitempty"`   // When bootstrap started
+	BuildMode      string        `json:"build_mode,omitempty"`         // "auto", "snapshot", "new-snapshot", "accountsdb"
+	Cluster        string        `json:"cluster,omitempty"`            // "mainnet-beta", "testnet", "devnet"
+	GenesisHash    string        `json:"genesis_hash,omitempty"`       // Base58 genesis hash from RPC
 
 	// Corruption tracking - set when integrity check fails
 	CorruptionReason     string    `json:"corruption_reason,omitempty"`
@@ -66,7 +66,8 @@ type MithrilState struct {
 	// Block configuration seed
 	ManifestParentSlot     uint64 `json:"manifest_parent_slot,omitempty"`
 	ManifestParentBankhash string `json:"manifest_parent_bankhash,omitempty"` // base58
-	ManifestAcctsLtHash    string `json:"manifest_accts_lt_hash,omitempty"`   // base64
+	ManifestBlockHeight    uint64 `json:"manifest_block_height,omitempty"`
+	ManifestAcctsLtHash    string `json:"manifest_accts_lt_hash,omitempty"` // base64
 
 	// Fee rate governor seed (static fields only)
 	ManifestFeeRateGovernor *ManifestFeeRateGovernorSeed `json:"manifest_fee_rate_governor,omitempty"`
@@ -107,9 +108,10 @@ type MithrilState struct {
 	// =========================================================================
 	// Current Position (where we left off)
 	// =========================================================================
-	LastSlot     uint64 `json:"last_slot,omitempty"`     // Last successfully replayed slot
-	LastEpoch    uint64 `json:"last_epoch,omitempty"`    // Epoch of last replayed slot
-	LastBankhash string `json:"last_bankhash,omitempty"` // Bankhash of last replayed slot (base58)
+	LastSlot        uint64 `json:"last_slot,omitempty"`         // Last successfully replayed slot
+	LastEpoch       uint64 `json:"last_epoch,omitempty"`        // Epoch of last replayed slot
+	LastBankhash    string `json:"last_bankhash,omitempty"`     // Bankhash of last replayed slot (base58)
+	LastBlockHeight uint64 `json:"last_block_height,omitempty"` // Block height of last replayed slot
 
 	// =========================================================================
 	// Resume Context (everything needed to continue replay from LastSlot)
@@ -131,9 +133,9 @@ type MithrilState struct {
 	LastSlotHashes []SlotHashEntry `json:"last_slot_hashes,omitempty"` // up to 512 entries, newest first
 
 	// ReplayCtx fields - so resume uses fresh values instead of stale manifest
-	LastCapitalization          uint64  `json:"last_capitalization,omitempty"`           // Total lamports in circulation
-	LastSlotsPerYear            float64 `json:"last_slots_per_year,omitempty"`           // Slots per year for inflation calc
-	LastInflationInitial        float64 `json:"last_inflation_initial,omitempty"`        // Inflation parameters
+	LastCapitalization          uint64  `json:"last_capitalization,omitempty"`    // Total lamports in circulation
+	LastSlotsPerYear            float64 `json:"last_slots_per_year,omitempty"`    // Slots per year for inflation calc
+	LastInflationInitial        float64 `json:"last_inflation_initial,omitempty"` // Inflation parameters
 	LastInflationTerminal       float64 `json:"last_inflation_terminal,omitempty"`
 	LastInflationTaper          float64 `json:"last_inflation_taper,omitempty"`
 	LastInflationFoundation     float64 `json:"last_inflation_foundation,omitempty"`
@@ -148,9 +150,9 @@ type MithrilState struct {
 	// Legacy fields - kept for backwards compatibility
 	// =========================================================================
 	// TODO: Remove after v1.0 release
-	LastCommit string    `json:"last_commit,omitempty"`  // Deprecated: use last_writer_commit
-	LastRunID  string    `json:"last_run_id,omitempty"`  // Deprecated: use current_run_id
-	LastRunAt  time.Time `json:"last_run_at,omitempty"`  // Deprecated: tracked via last_shutdown_at
+	LastCommit string    `json:"last_commit,omitempty"` // Deprecated: use last_writer_commit
+	LastRunID  string    `json:"last_run_id,omitempty"` // Deprecated: use current_run_id
+	LastRunAt  time.Time `json:"last_run_at,omitempty"` // Deprecated: tracked via last_shutdown_at
 }
 
 // Shutdown reason constants - these are stored in the state file and should be
@@ -159,7 +161,7 @@ const (
 	ShutdownReasonNormal         = "graceful shutdown (Ctrl+C)"
 	ShutdownReasonStall          = "block fetch stalled - no RPC progress for 5+ minutes"
 	ShutdownReasonLeaderSchedule = "leader schedule fetch failed from all RPC endpoints"
-	ShutdownReasonError          = "replay error"       // Will be suffixed with actual error
+	ShutdownReasonError          = "replay error" // Will be suffixed with actual error
 	ShutdownReasonCompleted      = "replay completed - reached end slot"
 )
 
@@ -278,6 +280,8 @@ type ShutdownContext struct {
 
 	// Epoch of the last replayed slot
 	Epoch uint64
+	// Block height of the last replayed slot
+	BlockHeight uint64
 
 	// LtHash and fee state
 	AcctsLtHash          string // base64 encoded
@@ -321,6 +325,9 @@ func (s *MithrilState) UpdateLastSlot(accountsDbDir string, slot uint64, bankhas
 func (s *MithrilState) UpdateOnShutdown(accountsDbDir string, slot uint64, bankhash []byte, ctx *ShutdownContext) error {
 	s.LastSlot = slot
 	s.LastBankhash = base58.Encode(bankhash)
+	if ctx != nil {
+		s.LastBlockHeight = ctx.BlockHeight
+	}
 
 	if ctx != nil {
 		// Update run lineage:
@@ -350,6 +357,7 @@ func (s *MithrilState) UpdateOnShutdown(accountsDbDir string, slot uint64, bankh
 
 		// Position and epoch
 		s.LastEpoch = ctx.Epoch
+		s.LastBlockHeight = ctx.BlockHeight
 
 		// Resume context - LtHash and fee state
 		s.LastAcctsLtHash = ctx.AcctsLtHash

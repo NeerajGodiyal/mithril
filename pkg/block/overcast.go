@@ -1,7 +1,6 @@
 package block
 
 import (
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/overcast"
 	"github.com/gagliardetto/solana-go"
 )
@@ -39,7 +38,6 @@ func FromLightbringerStreamMsg(resp *overcast.SlotResponse) *Block {
 	}
 
 	block.Blockhash = solana.HashFromBytes(resp.Entries[len(resp.Entries)-1].Hash[:])
-	block.BlockHeight = global.BlockHeight()
 	block.FromLightbringer = true
 
 	return block
