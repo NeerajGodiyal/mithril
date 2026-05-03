@@ -110,6 +110,7 @@ var (
 	lightbringerInfluxdbToken    string
 	lightbringerBlockConfirmHTTP string
 	lightbringerBlockConfirmWS   string
+	lightbringerQuiet            bool
 )
 
 func init() {
@@ -426,6 +427,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	lightbringerInfluxdbToken = config.GetString("lightbringer.influxdb_token")
 	lightbringerBlockConfirmHTTP = config.GetString("lightbringer.block_confirmation_rpc_http")
 	lightbringerBlockConfirmWS = config.GetString("lightbringer.block_confirmation_rpc_websocket")
+	lightbringerQuiet = config.GetBool("lightbringer.quiet")
 
 	// Auto-sync: when lightbringer is enabled, override block source settings
 	if lightbringerEnabled {
@@ -747,6 +749,7 @@ func runLive(c *cobra.Command, args []string) {
 				InfluxdbToken:       lightbringerInfluxdbToken,
 				BlockConfirmRpcHTTP: lightbringerBlockConfirmHTTP,
 				BlockConfirmRpcWS:   lightbringerBlockConfirmWS,
+				Quiet:               lightbringerQuiet,
 			},
 			LogWriter: lbLogWriter,
 		})

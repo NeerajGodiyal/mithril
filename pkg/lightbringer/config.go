@@ -26,6 +26,9 @@ type LightbringerTOML struct {
 
 	BlockConfirmRpcHTTP string
 	BlockConfirmRpcWS   string
+
+	// Quiet emits [log] quiet = true so Lightbringer logs at Warn level only.
+	Quiet bool
 }
 
 // Validate checks that required fields are present and well-formed.
@@ -89,6 +92,12 @@ func (c *LightbringerTOML) GenerateTOML() string {
 		b.WriteString("\n[block_confirmation]\n")
 		fmt.Fprintf(&b, "rpc_http = %q\n", c.BlockConfirmRpcHTTP)
 		fmt.Fprintf(&b, "rpc_websocket = %q\n", c.BlockConfirmRpcWS)
+	}
+
+	// Emit [log] section only when quiet mode is enabled.
+	// Lightbringer's default (info) applies when the section is absent, preserving backward compatibility.
+	if c.Quiet {
+		b.WriteString("\n[log]\nquiet = true\n")
 	}
 
 	return b.String()

@@ -104,6 +104,61 @@ func TestGenerateTOML_WithBlockConfirmation(t *testing.T) {
 	assert.NotContains(t, toml, "[influxdb]")
 }
 
+func TestGenerateTOML_QuietOmittedByDefault(t *testing.T) {
+	cfg := LightbringerTOML{
+		GossipEntrypoint: "1.2.3.4:8000",
+		Storage:          "/data/shreds",
+		RpcAddr:          "127.0.0.1:3000",
+		GrpcAddr:         "127.0.0.1:3001",
+	}
+
+	toml := cfg.GenerateTOML()
+
+	// When Quiet is false (zero value), no [log] section should be emitted.
+	// This preserves backward compatibility with older Lightbringer binaries.
+	assert.NotContains(t, toml, "[log]")
+	assert.NotContains(t, toml, "quiet")
+}
+
+func TestGenerateTOML_QuietEmitsLogSection(t *testing.T) {
+	cfg := LightbringerTOML{
+		GossipEntrypoint: "1.2.3.4:8000",
+		Storage:          "/data/shreds",
+		RpcAddr:          "127.0.0.1:3000",
+		GrpcAddr:         "127.0.0.1:3001",
+		Quiet:            true,
+	}
+
+	toml := cfg.GenerateTOML()
+
+	assert.Contains(t, toml, "[log]")
+	assert.Contains(t, toml, "quiet = true")
+}
+
+func TestGenerateTOML_QuietWithOtherOptionalSections(t *testing.T) {
+	cfg := LightbringerTOML{
+		GossipEntrypoint:    "1.2.3.4:8000",
+		Storage:             "./shreds",
+		RpcAddr:             "127.0.0.1:3000",
+		GrpcAddr:            "127.0.0.1:3001",
+		InfluxdbHost:        "http://localhost:8181",
+		InfluxdbDatabase:    "db",
+		InfluxdbToken:       "tok",
+		BlockConfirmRpcHTTP: "http://localhost:8899",
+		BlockConfirmRpcWS:   "ws://localhost:8899",
+		Quiet:               true,
+	}
+
+	toml := cfg.GenerateTOML()
+
+	// All three optional sections should be present and ordered consistently.
+	assert.Contains(t, toml, "[influxdb]")
+	assert.Contains(t, toml, "[block_confirmation]")
+	assert.Contains(t, toml, "[log]")
+	assert.Less(t, strings.Index(toml, "[influxdb]"), strings.Index(toml, "[block_confirmation]"))
+	assert.Less(t, strings.Index(toml, "[block_confirmation]"), strings.Index(toml, "[log]"))
+}
+
 func TestGenerateTOML_BothOptionalSections(t *testing.T) {
 	cfg := LightbringerTOML{
 		GossipEntrypoint:    "1.2.3.4:8000",

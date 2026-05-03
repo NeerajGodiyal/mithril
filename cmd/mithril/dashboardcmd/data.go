@@ -69,6 +69,7 @@ type configData struct {
 	lbRpcAddr          string
 	lbExternalEndpoint string // block.lightbringer_endpoint for external LB mode
 	lbBinaryPath       string
+	lbQuiet            bool
 	accountsPath  string
 	snapshotsPath string
 	shredstorePath string
@@ -112,6 +113,7 @@ func readConfig(configFile string) *configData {
 		lbGossip:       v.GetString("lightbringer.gossip_entrypoint"),
 		lbGrpcAddr:     v.GetString("lightbringer.grpc_addr"),
 		lbRpcAddr:          v.GetString("lightbringer.rpc_addr"),
+		lbQuiet:            v.GetBool("lightbringer.quiet"),
 		lbExternalEndpoint: v.GetString("block.lightbringer_endpoint"),
 		lbBinaryPath:       v.GetString("lightbringer.binary_path"),
 		accountsPath:   v.GetString("storage.accounts"),
@@ -375,6 +377,13 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 		} else {
 			results = append(results, checkResult{"Gossip entrypoint", "fail", "not set"})
 		}
+
+		// Quiet mode (informational)
+		if cfg.lbQuiet {
+			results = append(results, checkResult{"Lightbringer logs", "pass", "quiet (warn/error only)"})
+		} else {
+			results = append(results, checkResult{"Lightbringer logs", "pass", "normal (info)"})
+		}
 	} else if cfg.blockSource == "lightbringer" && cfg.lbExternalEndpoint != "" {
 		// External Lightbringer mode — sidecar disabled but endpoint configured
 		results = append(results, checkResult{"Lightbringer", "pass", "external at " + cfg.lbExternalEndpoint})
@@ -476,7 +485,7 @@ func saveConfigValue(configFile, section, key, value string) error {
 	case fullKey == "block.max_rps" || fullKey == "block.max_inflight" ||
 		fullKey == "tuning.txpar" || fullKey == "rpc.port":
 		tomlValue = value // numeric — no quoting
-	case fullKey == "lightbringer.enabled":
+	case fullKey == "lightbringer.enabled" || fullKey == "lightbringer.quiet":
 		tomlValue = value // boolean — no quoting
 	case fullKey == "network.rpc":
 		// Preserve failover endpoints — read existing array, update first element

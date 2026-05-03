@@ -75,6 +75,7 @@ const (
 	scrRPC
 	scrLightbringer
 	scrGossip
+	scrLightbringerQuiet // log verbosity for managed Lightbringer (only shown when Lightbringer enabled)
 	scrStorage         // accountsPath
 	scrStorageSnap     // snapshotsPath
 	scrStorageLogs     // logsPath
@@ -112,9 +113,11 @@ type setupModel struct {
 	rpcEndpoint   string
 	enableLB      bool
 	gossipEntry   string
-	accountsPath  string
-	snapshotsPath string
-	logsPath      string
+	lbQuiet       bool // suppress Lightbringer info/debug logs
+	accountsPath   string
+	snapshotsPath  string
+	logsPath       string
+	shredstorePath string
 	bootstrapMode string
 	blockMaxRPS   string
 	blockInflight string
@@ -134,15 +137,17 @@ type setupModel struct {
 
 func newSetupModel() setupModel {
 	absPath, _ := filepath.Abs(outputPath)
+	storage := config.DefaultStoragePaths()
 	return setupModel{
-		screen:        scrMode,
-		cpuCores:      runtime.NumCPU(),
-		disks:         DetectDisks(),
-		cluster:       "mainnet-beta",
-		rpcEndpoint:   "https://api.mainnet-beta.solana.com",
-		accountsPath:  "/mnt/mithril-accounts",
-		snapshotsPath: "/mnt/mithril-ledger/snapshots",
-		logsPath:      "/mnt/mithril-logs",
+		screen:         scrMode,
+		cpuCores:       runtime.NumCPU(),
+		disks:          DetectDisks(),
+		cluster:        "mainnet-beta",
+		rpcEndpoint:    "https://api.mainnet-beta.solana.com",
+		accountsPath:   storage.Accounts,
+		snapshotsPath:  storage.Snapshots,
+		logsPath:       storage.Logs,
+		shredstorePath: storage.Shredstore,
 		bootstrapMode: "auto",
 		blockMaxRPS:   "8",
 		blockInflight: "8",
@@ -274,6 +279,13 @@ func (m setupModel) currentItems() []menuItem {
 			menuSeparator(),
 			menuBack(),
 		}
+	case scrLightbringerQuiet:
+		return []menuItem{
+			menuOptionDesc("Normal logs", "false", "Show all info messages (default)"),
+			menuOptionDesc("Quiet mode", "true", "Only warnings and errors — recommended for long runs"),
+			menuSeparator(),
+			menuBack(),
+		}
 	case scrLogLevel:
 		return []menuItem{
 			menuOption("debug", "debug"),
@@ -390,6 +402,9 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 
 	case scrLightbringer:
 		m.enableLB = value == "enable"
+		if !m.enableLB {
+			m.lbQuiet = false // Reset dependent state so disable→re-enable starts clean.
+		}
 		if m.enableLB {
 			m.pushInput(scrGossip)
 		} else if m.mode == "quick" {
@@ -409,6 +424,10 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 	case scrSnapshot:
 		m.snapshotKeep = value
 		m.pushMenu(scrLogLevel)
+
+	case scrLightbringerQuiet:
+		m.lbQuiet = value == "true"
+		m.pushInput(scrStorage)
 
 	case scrLogLevel:
 		m.logLevel = value
@@ -593,7 +612,7 @@ func (m *setupModel) advanceFromInput() {
 		if m.mode == "quick" {
 			m.pushMenu(scrReview)
 		} else {
-			m.pushInput(scrStorage)
+			m.pushMenu(scrLightbringerQuiet)
 		}
 	case scrStorage:
 		m.pushInput(scrStorageSnap)
@@ -645,6 +664,16 @@ func (m setupModel) View() string {
 	case scrStorage:
 		desc := "AccountsDB stores all ~500M on-chain accounts · needs fastest NVMe\n" +
 			"Heavy random I/O — put this on your best drive"
+		if config.IsProductionLayout(config.StoragePaths{
+			Accounts:   m.accountsPath,
+			Snapshots:  m.snapshotsPath,
+			Logs:       m.logsPath,
+			Shredstore: m.shredstorePath,
+		}) {
+			desc += "\nDefault: production /mnt/* paths (run scripts/disk-setup.sh first)"
+		} else {
+			desc += "\nDefault: home directory (no /mnt setup detected) — see scripts/disk-setup.sh for production NVMe layout"
+		}
 		if len(m.disks) > 0 {
 			desc += "\n"
 			for _, d := range m.disks {
@@ -696,7 +725,11 @@ func (m setupModel) View() string {
 			{"RPC", m.rpcEndpoint},
 		}
 		if m.enableLB {
-			rows = append(rows, []string{"Lightbringer", "enabled (gossip: " + m.gossipEntry + ")"})
+			summary := "enabled (gossip: " + m.gossipEntry + ")"
+			if m.lbQuiet {
+				summary += " · quiet logs"
+			}
+			rows = append(rows, []string{"Lightbringer", summary})
 		} else {
 			rows = append(rows, []string{"Lightbringer", "disabled"})
 		}
@@ -705,6 +738,7 @@ func (m setupModel) View() string {
 			rows = append(rows, []string{"Parallelism", m.txpar + " workers (auto)"})
 		} else {
 			rows = append(rows, []string{"AccountsDB", m.accountsPath})
+			rows = append(rows, []string{"Shredstore", m.shredstorePath})
 			rows = append(rows, []string{"Snapshots", m.snapshotsPath})
 			rows = append(rows, []string{"Logs", m.logsPath})
 			rows = append(rows, []string{"Parallelism", m.txpar + " workers"})
@@ -744,6 +778,9 @@ func (m setupModel) View() string {
 		case scrLightbringer:
 			title = "Lightbringer Sidecar"
 			desc = "Lightbringer sidecar for lower-latency block streaming."
+		case scrLightbringerQuiet:
+			title = "Lightbringer Log Verbosity"
+			desc = "Quiet mode suppresses Lightbringer info/debug logs (only warnings and errors)."
 		case scrBootstrap:
 			title = "Bootstrap Mode"
 			desc = "How Mithril initializes on startup."
@@ -781,7 +818,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 
 	cfg.WriteString("[storage]\n")
 	fmt.Fprintf(&cfg, "accounts = %q\n", filepath.Clean(m.accountsPath))
-	cfg.WriteString("shredstore = \"/mnt/mithril-ledger/shredstore\"\n")
+	fmt.Fprintf(&cfg, "shredstore = %q\n", filepath.Clean(m.shredstorePath))
 	fmt.Fprintf(&cfg, "snapshots = %q\n", filepath.Clean(m.snapshotsPath))
 	fmt.Fprintf(&cfg, "logs = %q\n\n", filepath.Clean(m.logsPath))
 
@@ -804,7 +841,11 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("binary_path = \"./lightbringer\"\n")
 		fmt.Fprintf(&cfg, "gossip_entrypoint = %q\n", m.gossipEntry)
 		cfg.WriteString("grpc_addr = \"127.0.0.1:3001\"\n")
-		cfg.WriteString("rpc_addr = \"127.0.0.1:3000\"\n\n")
+		cfg.WriteString("rpc_addr = \"127.0.0.1:3000\"\n")
+		if m.lbQuiet {
+			cfg.WriteString("quiet = true\n")
+		}
+		cfg.WriteString("\n")
 	}
 
 	cfg.WriteString("[tuning]\n")
