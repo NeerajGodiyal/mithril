@@ -49,6 +49,7 @@ const (
 	edScrRPC
 	edScrLightbringer
 	edScrGossip
+	edScrLightbringerQuiet
 	edScrStorage
 	edScrAccountsPath
 	edScrSnapshotsPath
@@ -89,6 +90,7 @@ type editModel struct {
 	rpcEndpoint   string
 	lbEnabled     bool
 	gossipEntry   string
+	lbQuiet       bool
 	accountsPath  string
 	snapshotsPath string
 	logsPath      string
@@ -162,6 +164,7 @@ func newEditModel(cf string, v *viper.Viper) editModel {
 		txparWasSet:   txparWasSet,
 		lbEnabled:     v.GetBool("lightbringer.enabled"),
 		gossipEntry:   v.GetString("lightbringer.gossip_entrypoint"),
+		lbQuiet:       v.GetBool("lightbringer.quiet"),
 		accountsPath:  v.GetString("storage.accounts"),
 		snapshotsPath: v.GetString("storage.snapshots"),
 		logsPath:      logsPath,
@@ -253,6 +256,9 @@ func (m editModel) currentItems() []edItem {
 		lbStatus := "disabled"
 		if m.lbEnabled {
 			lbStatus = "enabled"
+			if m.lbQuiet {
+				lbStatus += ", quiet"
+			}
 		}
 		return []edItem{
 			{label: "Network", value: "network", desc: fmt.Sprintf("cluster=%s  rpc=%s", m.cluster, truncate(m.rpcEndpoint, 35))},
@@ -275,9 +281,23 @@ func (m editModel) currentItems() []edItem {
 			{label: "← Back", value: "_back"},
 		}
 	case edScrLightbringer:
-		return []edItem{
+		items := []edItem{
 			{label: "Disable", value: "disable", desc: "Use RPC only"},
 			{label: "Enable", value: "enable", desc: "Sidecar for lower-latency block streaming"},
+		}
+		if m.lbEnabled {
+			quietDesc := "off"
+			if m.lbQuiet {
+				quietDesc = "on (only warn/error in lightbringer.log)"
+			}
+			items = append(items, edItem{label: "Quiet logs", value: "quiet", desc: quietDesc})
+		}
+		items = append(items, edItem{isSep: true}, edItem{label: "← Back", value: "_back"})
+		return items
+	case edScrLightbringerQuiet:
+		return []edItem{
+			{label: "Normal logs", value: "false", desc: "Show all info messages (default)"},
+			{label: "Quiet mode", value: "true", desc: "Only warnings and errors — recommended for long runs"},
 			{isSep: true},
 			{label: "← Back", value: "_back"},
 		}
@@ -415,12 +435,21 @@ func (m *editModel) handleSelect(value string) {
 		m.pushInput(edScrRPC)
 
 	case edScrLightbringer:
-		m.lbEnabled = value == "enable"
-		if m.lbEnabled {
+		switch value {
+		case "enable":
+			m.lbEnabled = true
 			m.pushInput(edScrGossip)
-		} else {
+		case "disable":
+			m.lbEnabled = false
+			m.lbQuiet = false // Reset dependent state so disable→re-enable starts clean.
 			m.goBack()
+		case "quiet":
+			m.pushMenu(edScrLightbringerQuiet)
 		}
+
+	case edScrLightbringerQuiet:
+		m.lbQuiet = value == "true"
+		m.goBack()
 
 	case edScrStorage:
 		switch value {
@@ -638,6 +667,11 @@ func (m *editModel) saveConfig() {
 				content = setTomlValue(content, "lightbringer", "gossip_entrypoint", fmt.Sprintf("%q", m.gossipEntry))
 			}
 		}
+		if m.lbQuiet {
+			content = setTomlValue(content, "lightbringer", "quiet", "true")
+		} else {
+			content = setTomlValue(content, "lightbringer", "quiet", "false")
+		}
 	} else {
 		// Only force block.source="rpc" if no external lightbringer_endpoint is configured.
 		// External LB mode (enabled=false + endpoint set) is a valid runtime config.
@@ -693,6 +727,8 @@ func (m editModel) menuTitleDesc() (string, string) {
 		return "Solana Cluster", ""
 	case edScrLightbringer:
 		return "Lightbringer Sidecar", ""
+	case edScrLightbringerQuiet:
+		return "Lightbringer Log Verbosity", "Quiet mode suppresses Lightbringer info/debug logs (only warnings and errors)."
 	case edScrStorage:
 		return "Storage Paths", ""
 	case edScrLogLevel:

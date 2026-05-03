@@ -152,6 +152,10 @@ type LightbringerConfig struct {
 	// Optional: Block confirmation — written as [block_confirmation] section in generated Lightbringer.toml
 	BlockConfirmRpcHTTP string `toml:"block_confirmation_rpc_http" mapstructure:"block_confirmation_rpc_http"`
 	BlockConfirmRpcWS   string `toml:"block_confirmation_rpc_websocket" mapstructure:"block_confirmation_rpc_websocket"`
+
+	// Quiet suppresses Lightbringer info/debug logs when true. Written as
+	// [log] quiet = true in the generated Lightbringer.toml.
+	Quiet bool `toml:"quiet" mapstructure:"quiet"`
 }
 
 // LogConfig holds logging configuration

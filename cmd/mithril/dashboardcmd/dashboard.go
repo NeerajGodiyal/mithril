@@ -221,6 +221,7 @@ func newModel(cf string) model {
 			{section: "lightbringer", key: "gossip_entrypoint", label: "Gossip Entrypoint"},
 			{section: "lightbringer", key: "grpc_addr", label: "LB gRPC Address"},
 			{section: "lightbringer", key: "rpc_addr", label: "LB HTTP Address"},
+			{section: "lightbringer", key: "quiet", label: "LB Quiet Logs"},
 			{isSep: true},
 			{section: "tuning", key: "txpar", label: "TX Parallelism"},
 			{section: "rpc", key: "port", label: "RPC Port"},
@@ -728,6 +729,11 @@ func (m model) getFieldValue(f editFieldDef) string {
 		return m.cfg.lbGrpcAddr
 	case "lightbringer.rpc_addr":
 		return m.cfg.lbRpcAddr
+	case "lightbringer.quiet":
+		if m.cfg.lbQuiet {
+			return "true"
+		}
+		return "false"
 	case "tuning.txpar":
 		return m.cfg.txpar
 	case "rpc.port":
@@ -758,6 +764,11 @@ func menuOptionsFor(section, key string) []editOption {
 		return []editOption{
 			{label: "false", value: "false", desc: "Disabled"},
 			{label: "true", value: "true", desc: "Enabled"},
+		}
+	case "lightbringer.quiet":
+		return []editOption{
+			{label: "false", value: "false", desc: "Show all info messages (default)"},
+			{label: "true", value: "true", desc: "Only warnings and errors — recommended for long runs"},
 		}
 	case "log.level":
 		return []editOption{

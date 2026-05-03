@@ -58,7 +58,7 @@ func runStatus() {
 	searchPaths := []string{accountsPath}
 	if accountsPath == "" {
 		searchPaths = []string{
-			"/mnt/mithril-accounts",
+			config.DefaultStoragePaths().Accounts,
 			"./data/accounts",
 			".",
 		}
@@ -170,6 +170,9 @@ func runStatus() {
 				fmt.Printf("  %s Lightbringer HTTP responding on %s\n", successStyle.Render("✓"), lbHTTP)
 			} else {
 				fmt.Printf("  %s Lightbringer HTTP not responding on %s\n", dimStyle.Render("-"), lbHTTP)
+			}
+			if config.GetBool("lightbringer.quiet") {
+				fmt.Printf("  %s Lightbringer quiet mode: enabled (warn/error only)\n", dimStyle.Render("·"))
 			}
 		}
 	}
