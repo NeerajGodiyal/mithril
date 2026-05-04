@@ -104,7 +104,7 @@ func ReadRentSysvar(execCtx *ExecutionCtx) (SysvarRent, error) {
 	accts := addrObjectForLookup(execCtx)
 	rentAcct, err := (*accts).GetAccount(&SysvarRentAddr)
 	if err != nil {
-		panic("failed to read rent sysvar account")
+		return SysvarRent{}, err
 	}
 
 	dec := bin.NewBinDecoder(rentAcct.Data)

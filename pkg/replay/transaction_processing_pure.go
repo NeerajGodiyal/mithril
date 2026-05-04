@@ -35,12 +35,51 @@ type LoadAndExecuteTransactionInput struct {
 // It takes all required state as input and returns all state changes as output without
 // modifying the input SlotCtx. This function can be used for both actual execution
 // and simulation.
+// sanitizeFailureOutput returns the canonical SanitizeFailure response.
+// InstructionError is left nil so the RPC renderer falls back to
+// ErrorType.String() and emits Agave-format "SanitizeFailure".
+func sanitizeFailureOutput() LoadAndExecuteTransactionOutput {
+	return LoadAndExecuteTransactionOutput{
+		ProcessingResult: TransactionProcessingResult{
+			TransactionError: &TransactionError{
+				ErrorType: TransactionErrorSanitizeFailure,
+			},
+		},
+	}
+}
+
 func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExecuteTransactionOutput {
 	tx := input.Transaction
 	slotCtx := input.SlotCtx
 
 	if input.Arena != nil {
 		input.Arena.Reset()
+	}
+
+	// Agave-style sanitize: reject malformed user txs before they
+	// reach downstream index panics.
+	hdr := tx.Message.Header
+	numKeys := len(tx.Message.AccountKeys)
+	if hdr.NumReadonlySignedAccounts >= hdr.NumRequiredSignatures ||
+		int(hdr.NumRequiredSignatures) > len(tx.Signatures) ||
+		len(tx.Signatures) > numKeys {
+		return sanitizeFailureOutput()
+	}
+	// Mirror block-replay's StaticInstructionLimit cap so pre-activation
+	// clusters fail mid-execution like Agave instead of SanitizeFailure.
+	if slotCtx.Features.IsActive(features.StaticInstructionLimit) &&
+		len(tx.Message.Instructions) > maxInstrTraceCapacity {
+		return sanitizeFailureOutput()
+	}
+	for _, ci := range tx.Message.Instructions {
+		if int(ci.ProgramIDIndex) >= numKeys {
+			return sanitizeFailureOutput()
+		}
+		for _, idx := range ci.Accounts {
+			if int(idx) >= numKeys {
+				return sanitizeFailureOutput()
+			}
+		}
 	}
 
 	// Parse instructions and account metas
@@ -148,7 +187,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Calculate and deduct fees
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features, input.IsSimulation)
 	if err != nil {
 		out := LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{
@@ -170,7 +209,18 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	start = time.Now()
 	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
 	if err != nil {
-		panic("failed to get and deserialize rent sysvar")
+		// Rent sysvar unreadable; return cleanly so the RPC worker
+		// doesn't crash on local-state corruption.
+		return LoadAndExecuteTransactionOutput{
+			ProcessingResult: TransactionProcessingResult{
+				TransactionError: &TransactionError{
+					ErrorType:        TransactionErrorAccountNotFound,
+					InstructionError: err,
+				},
+			},
+			Instrs:              instrs,
+			ComputeBudgetLimits: computeBudgetLimits,
+		}
 	}
 	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
 

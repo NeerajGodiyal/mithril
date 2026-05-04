@@ -1,6 +1,9 @@
 package replay
 
 import (
+	"encoding/json"
+	"strings"
+
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -132,6 +135,91 @@ const (
 	// TransactionErrorProgramCacheHitMaxLimit - Program cache hit max limit
 	TransactionErrorProgramCacheHitMaxLimit
 )
+
+// String returns the Agave-compatible TransactionError variant name (the
+// const name with the TransactionError prefix stripped). Used by simulate
+// callers that need a wire-format string when no InstructionError is set.
+func (t TransactionErrorType) String() string {
+	switch t {
+	case TransactionErrorAccountInUse:
+		return "AccountInUse"
+	case TransactionErrorAccountLoadedTwice:
+		return "AccountLoadedTwice"
+	case TransactionErrorAccountNotFound:
+		return "AccountNotFound"
+	case TransactionErrorProgramAccountNotFound:
+		return "ProgramAccountNotFound"
+	case TransactionErrorInsufficientFundsForFee:
+		return "InsufficientFundsForFee"
+	case TransactionErrorInvalidAccountForFee:
+		return "InvalidAccountForFee"
+	case TransactionErrorAlreadyProcessed:
+		return "AlreadyProcessed"
+	case TransactionErrorBlockhashNotFound:
+		return "BlockhashNotFound"
+	case TransactionErrorInstructionError:
+		return "InstructionError"
+	case TransactionErrorCallChainTooDeep:
+		return "CallChainTooDeep"
+	case TransactionErrorMissingSignatureForFee:
+		return "MissingSignatureForFee"
+	case TransactionErrorInvalidAccountIndex:
+		return "InvalidAccountIndex"
+	case TransactionErrorSignatureFailure:
+		return "SignatureFailure"
+	case TransactionErrorInvalidProgramForExecution:
+		return "InvalidProgramForExecution"
+	case TransactionErrorSanitizeFailure:
+		return "SanitizeFailure"
+	case TransactionErrorClusterMaintenance:
+		return "ClusterMaintenance"
+	case TransactionErrorAccountBorrowOutstanding:
+		return "AccountBorrowOutstanding"
+	case TransactionErrorWouldExceedMaxBlockCostLimit:
+		return "WouldExceedMaxBlockCostLimit"
+	case TransactionErrorUnsupportedVersion:
+		return "UnsupportedVersion"
+	case TransactionErrorInvalidWritableAccount:
+		return "InvalidWritableAccount"
+	case TransactionErrorWouldExceedMaxAccountCostLimit:
+		return "WouldExceedMaxAccountCostLimit"
+	case TransactionErrorWouldExceedAccountDataBlockLimit:
+		return "WouldExceedAccountDataBlockLimit"
+	case TransactionErrorTooManyAccountLocks:
+		return "TooManyAccountLocks"
+	case TransactionErrorAddressLookupTableNotFound:
+		return "AddressLookupTableNotFound"
+	case TransactionErrorInvalidAddressLookupTableOwner:
+		return "InvalidAddressLookupTableOwner"
+	case TransactionErrorInvalidAddressLookupTableData:
+		return "InvalidAddressLookupTableData"
+	case TransactionErrorInvalidAddressLookupTableIndex:
+		return "InvalidAddressLookupTableIndex"
+	case TransactionErrorInvalidRentPayingAccount:
+		return "InvalidRentPayingAccount"
+	case TransactionErrorWouldExceedMaxVoteCostLimit:
+		return "WouldExceedMaxVoteCostLimit"
+	case TransactionErrorWouldExceedAccountDataTotalLimit:
+		return "WouldExceedAccountDataTotalLimit"
+	case TransactionErrorDuplicateInstruction:
+		return "DuplicateInstruction"
+	case TransactionErrorInsufficientFundsForRent:
+		return "InsufficientFundsForRent"
+	case TransactionErrorMaxLoadedAccountsDataSizeExceeded:
+		return "MaxLoadedAccountsDataSizeExceeded"
+	case TransactionErrorInvalidLoadedAccountsDataSizeLimit:
+		return "InvalidLoadedAccountsDataSizeLimit"
+	case TransactionErrorResanitizationNeeded:
+		return "ResanitizationNeeded"
+	case TransactionErrorProgramExecutionTemporarilyRestricted:
+		return "ProgramExecutionTemporarilyRestricted"
+	case TransactionErrorUnbalancedTransaction:
+		return "UnbalancedTransaction"
+	case TransactionErrorProgramCacheHitMaxLimit:
+		return "ProgramCacheHitMaxLimit"
+	}
+	return "Unknown"
+}
 
 // ProcessedTransaction represents a transaction that was processed, either executed or fees-only
 type ProcessedTransaction struct {
@@ -302,4 +390,72 @@ type TransactionExecutionResult struct {
 	ModifiedStakeAccounts []solana.PublicKey
 	// ModifiedVoteAccounts contains vote accounts that were modified
 	ModifiedVoteAccounts map[solana.PublicKey]*sealevel.VoteStateVersions
+}
+
+// agaveInstrErrName converts a Mithril InstrErr*/TxErr* sentinel into the
+// Agave-format JSON value (bare string for unit variants, object for
+// Custom and BorshIoError).
+func agaveInstrErrName(err error) interface{} {
+	if err == nil {
+		return nil
+	}
+	// TODO: propagate the program-defined u32 through InstructionError
+	// rather than emitting 0 as a placeholder.
+	if err == sealevel.InstrErrCustom {
+		return map[string]uint32{"Custom": 0}
+	}
+	if err == sealevel.InstrErrBorshIoError {
+		return map[string]string{"BorshIoError": err.Error()}
+	}
+	name := err.Error()
+	switch {
+	case strings.HasPrefix(name, "InstrErr"):
+		return strings.TrimPrefix(name, "InstrErr")
+	case strings.HasPrefix(name, "TxErr"):
+		return strings.TrimPrefix(name, "TxErr")
+	}
+	return name
+}
+
+// MarshalJSON renders TransactionError in Agave's wire format: bare string
+// for unit variants, single-key object for tuple variants such as
+// {"InstructionError":[idx, inner]}.
+func (e *TransactionError) MarshalJSON() ([]byte, error) {
+	if e == nil {
+		return []byte("null"), nil
+	}
+	switch e.ErrorType {
+	case TransactionErrorInstructionError:
+		var idx uint8
+		if e.InstructionIndex != nil {
+			idx = *e.InstructionIndex
+		}
+		return json.Marshal(map[string]interface{}{
+			"InstructionError": []interface{}{idx, agaveInstrErrName(e.InstructionError)},
+		})
+	case TransactionErrorInsufficientFundsForRent:
+		var ai uint8
+		if e.AccountIndex != nil {
+			ai = *e.AccountIndex
+		}
+		return json.Marshal(map[string]interface{}{
+			"InsufficientFundsForRent": map[string]uint8{"account_index": ai},
+		})
+	case TransactionErrorProgramExecutionTemporarilyRestricted:
+		var ai uint8
+		if e.AccountIndex != nil {
+			ai = *e.AccountIndex
+		}
+		return json.Marshal(map[string]interface{}{
+			"ProgramExecutionTemporarilyRestricted": map[string]uint8{"account_index": ai},
+		})
+	case TransactionErrorDuplicateInstruction:
+		var idx uint8
+		if e.InstructionIndex != nil {
+			idx = *e.InstructionIndex
+		}
+		return json.Marshal(map[string]uint8{"DuplicateInstruction": idx})
+	default:
+		return json.Marshal(e.ErrorType.String())
+	}
 }

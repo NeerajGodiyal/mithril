@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"math"
 	"slices"
 	"sync/atomic"
 
@@ -290,8 +291,21 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 			acct = instrsAcct
 		} else {
 			acct, err = slotCtx.GetAccountShared(pubkey)
+			if err != nil && slotCtx.AccountsDb != nil {
+				// Fall back to full accountsdb so native programs
+				// (System, BPF Loader, etc.) and other always-on
+				// accounts are loaded even when the per-slot
+				// MemAccounts didn't reference them.
+				acct, err = slotCtx.GetAccountFromAccountsDb(pubkey)
+			}
 			if err != nil {
-				panic("should be impossible - programming error")
+				// Empty default for genuinely absent pubkeys; matches
+				// Agave load_transaction_account (rent_epoch = SIMD-0267).
+				acct = &accounts.Account{
+					Key:       pubkey,
+					Owner:     addresses.SystemProgramAddr,
+					RentEpoch: math.MaxUint64,
+				}
 			}
 		}
 		acctCache[i] = acct // Cache by index for reuse in Pass 2
