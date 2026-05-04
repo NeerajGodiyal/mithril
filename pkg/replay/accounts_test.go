@@ -27,9 +27,9 @@ func newSimd186SlotCtx() *sealevel.SlotCtx {
 }
 
 // TestLoadAndValidateTxAcctsSimd186_FabricatesDefaultForMissingAccount
-// verifies the simulate-path fix: a tx that references a pubkey absent
-// from local state must not panic. The loader fabricates an empty
-// System-owned default (matching Agave's load_transaction_account).
+// asserts that the SIMD-186 loader returns an empty System-owned default
+// for a pubkey absent from local state instead of panicking, matching
+// Agave's load_transaction_account behavior.
 func TestLoadAndValidateTxAcctsSimd186_FabricatesDefaultForMissingAccount(t *testing.T) {
 	slotCtx := newSimd186SlotCtx()
 
