@@ -291,11 +291,16 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 			acct = instrsAcct
 		} else {
 			acct, err = slotCtx.GetAccountShared(pubkey)
+			if err != nil && slotCtx.AccountsDb != nil {
+				// Fall back to full accountsdb so native programs
+				// (System, BPF Loader, etc.) and other always-on
+				// accounts are loaded even when the per-slot
+				// MemAccounts didn't reference them.
+				acct, err = slotCtx.GetAccountFromAccountsDb(pubkey)
+			}
 			if err != nil {
-				// Mirror Agave's load_transaction_account: fabricate an
-				// empty System-owned default with rent-exempt epoch
-				// (SIMD-0267) so simulate can model accounts the tx
-				// itself creates.
+				// Empty default for genuinely absent pubkeys; matches
+				// Agave load_transaction_account (rent_epoch = SIMD-0267).
 				acct = &accounts.Account{
 					Key:       pubkey,
 					Owner:     addresses.SystemProgramAddr,

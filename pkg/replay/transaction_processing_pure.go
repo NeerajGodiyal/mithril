@@ -56,10 +56,8 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		input.Arena.Reset()
 	}
 
-	// Sanitize per Agave's Message::sanitize. Prevents index panics on
-	// tx.Signatures[0], AccountKeys[0], and the unchecked metas[acct]
-	// inside solana-go's ResolveInstructionAccounts for malformed
-	// user-submitted txs.
+	// Agave-style sanitize: reject malformed user txs before they
+	// reach downstream index panics.
 	hdr := tx.Message.Header
 	numKeys := len(tx.Message.AccountKeys)
 	if hdr.NumReadonlySignedAccounts >= hdr.NumRequiredSignatures ||
@@ -189,7 +187,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Calculate and deduct fees
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features, input.IsSimulation)
 	if err != nil {
 		out := LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{

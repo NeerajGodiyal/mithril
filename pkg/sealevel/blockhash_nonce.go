@@ -153,6 +153,13 @@ func IsTransactionAgeValid(tx *solana.Transaction, instrs []Instruction, slotCtx
 
 	noncePk := instr.Accounts[0].Pubkey
 	nonceAcct, err := slotCtx.GetAccount(noncePk)
+	if err != nil && slotCtx.AccountsDb != nil {
+		// Per-slot MemAccounts only holds accounts referenced by the
+		// current block's txs. On the simulate path the nonce account
+		// is usually absent there — fall back to accountsdb so durable
+		// nonce txs validate against on-chain state.
+		nonceAcct, err = slotCtx.GetAccountFromAccountsDb(noncePk)
+	}
 	if err != nil {
 		return false
 	}

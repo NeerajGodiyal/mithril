@@ -100,12 +100,18 @@ func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, comp
 }
 
 // TODO: implement new fee model
-func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) (*TxFeeInfo, uint64, error) {
+func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features, isSimulation bool) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {
-		// Defensive: sanitize guarantees AccountKeys[0]; return cleanly
-		// rather than crash if a future caller bypasses the guard.
-		return nil, 0, err
+		if isSimulation {
+			// RPC simulate must not crash the validator on user-submitted
+			// input; surface the error to the client instead.
+			return nil, 0, err
+		}
+		// Block-replay invariant: sanitize + loader guarantee feePayer at
+		// AccountKeys[0] is loadable. Reaching here means our local state
+		// or sanitize is broken — keep the loud signal.
+		panic(fmt.Sprintf("CalculateAndDeductTxFees: feePayer GetAccount(0) failed: %v", err))
 	}
 	////mlog.Log.Debugf("feePayerAcct=%+v", feePayerAcct)
 
