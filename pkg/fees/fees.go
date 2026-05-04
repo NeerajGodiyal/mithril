@@ -103,7 +103,9 @@ func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, comp
 func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {
-		panic("no fee payer")
+		// Defensive: sanitize guarantees AccountKeys[0]; return cleanly
+		// rather than crash if a future caller bypasses the guard.
+		return nil, 0, err
 	}
 	////mlog.Log.Debugf("feePayerAcct=%+v", feePayerAcct)
 

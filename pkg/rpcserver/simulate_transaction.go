@@ -115,6 +115,21 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		return SimulateTransactionResp{}, fmt.Errorf("node is not ready for simulation")
 	}
 
+	// Resolve address-table lookups for versioned txs before the loader
+	// runs. ALT misses surface as AddressLookupTableNotFound in-band.
+	if err := replay.ResolveAddrTableLookupsForTx(ctx, rpcServer.acctsDb, slotCtx.Slot, tx); err != nil {
+		return SimulateTransactionResp{
+			Context: SimulateTransactionRespContext{
+				ApiVersion: "mithril 0.1",
+				Slot:       global.Slot(),
+			},
+			Value: SimulateTransactionRespValue{
+				Err:                  "AddressLookupTableNotFound",
+				ReplacementBlockhash: replacementBlockhash,
+			},
+		}, nil
+	}
+
 	// Execute transaction using the pure function
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
 		SlotCtx:      slotCtx,
@@ -143,10 +158,9 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		},
 	}
 
-	// Check processing result
+	// TransactionError.MarshalJSON renders the Agave wire format.
 	if output.ProcessingResult.TransactionError != nil {
-		txErr := output.ProcessingResult.TransactionError
-		resp.Value.Err = txErr.InstructionError.Error()
+		resp.Value.Err = output.ProcessingResult.TransactionError
 		return resp, nil
 	}
 

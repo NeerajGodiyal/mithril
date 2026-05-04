@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"math"
 	"slices"
 	"sync/atomic"
 
@@ -291,7 +292,15 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		} else {
 			acct, err = slotCtx.GetAccountShared(pubkey)
 			if err != nil {
-				panic("should be impossible - programming error")
+				// Mirror Agave's load_transaction_account: fabricate an
+				// empty System-owned default with rent-exempt epoch
+				// (SIMD-0267) so simulate can model accounts the tx
+				// itself creates.
+				acct = &accounts.Account{
+					Key:       pubkey,
+					Owner:     addresses.SystemProgramAddr,
+					RentEpoch: math.MaxUint64,
+				}
 			}
 		}
 		acctCache[i] = acct // Cache by index for reuse in Pass 2
