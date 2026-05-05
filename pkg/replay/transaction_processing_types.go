@@ -26,6 +26,11 @@ type LoadAndExecuteTransactionOutput struct {
 	// PreBalances contains lamport balances for each account BEFORE fee deduction.
 	// Used by ProcessTransaction for pre-balance divergence checks.
 	PreBalances []uint64
+	// PreAccountSnapshots holds clones of every transaction account
+	// captured before fee deduction and execution. The simulate handler
+	// uses these to decode pre-execution token balances; block-replay
+	// callers leave it nil.
+	PreAccountSnapshots []*accounts.Account
 	// FeeInfo contains the calculated fee info. Set whenever fees were calculated.
 	FeeInfo *fees.TxFeeInfo
 	// Instrs contains the parsed instructions from the transaction.
@@ -356,7 +361,9 @@ type InnerInstructionsList struct {
 	Instructions []CompiledInstruction
 }
 
-// CompiledInstruction represents a compiled instruction
+// CompiledInstruction represents a compiled instruction.
+// StackHeight is set for inner instructions to mirror Agave's
+// UiCompiledInstruction; top-level top-level captures leave it zero.
 type CompiledInstruction struct {
 	// ProgramIdIndex is the index into the transaction's account keys of the program
 	ProgramIdIndex uint8
@@ -364,6 +371,9 @@ type CompiledInstruction struct {
 	Accounts []uint8
 	// Data is the instruction data
 	Data []byte
+	// StackHeight is the depth at which this instruction executed.
+	// 1 = top-level; >=2 = CPI invoked from within another instruction.
+	StackHeight uint8
 }
 
 // TransactionReturnData represents data returned from a program

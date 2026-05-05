@@ -35,10 +35,14 @@ func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16) *RpcServer {
 		panic(err)
 	}
 
-	rpcServer.rpcService = jsonrpc.NewServer(jsonrpc.WithServerMethodNameFormatter(
-		func(namespace, method string) string {
-			return strings.ToLower(string(method[0])) + method[1:]
-		}))
+	rpcErrors := rpcErrorRegistry()
+	rpcServer.rpcService = jsonrpc.NewServer(
+		jsonrpc.WithServerMethodNameFormatter(
+			func(namespace, method string) string {
+				return strings.ToLower(string(method[0])) + method[1:]
+			}),
+		jsonrpc.WithServerErrors(rpcErrors),
+	)
 
 	rpcServer.rpcService.Register("MithrilRpc", rpcServer)
 	rpcServer.acctsDb = acctsDb
