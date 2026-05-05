@@ -81,3 +81,33 @@ type BlockReplay struct {
 }
 
 var GlobalBlockReplay = BlockReplay{}
+
+// Counter is a monotonic atomic counter for events. Operations are
+// lock-free; use it for high-frequency increments where Timing's
+// nanosecond accumulator is unnecessary.
+type Counter struct {
+	value uint64
+}
+
+func (c *Counter) Inc() {
+	atomic.AddUint64(&c.value, 1)
+}
+
+func (c *Counter) Get() uint64 {
+	return atomic.LoadUint64(&c.value)
+}
+
+// Simulate tracks RPC simulateTransaction handler events. Counters are
+// surfaced through the standard metrics endpoint; latency uses the same
+// Timing type as block replay so dashboards can reuse existing rendering.
+type Simulate struct {
+	TotalCalls           Counter
+	SanitizeFailures     Counter
+	AddressLookupFails   Counter
+	NonceFallbackHits    Counter
+	Errors               Counter
+	Successes            Counter
+	HandlerLatency       Timing
+}
+
+var GlobalSimulate = Simulate{}

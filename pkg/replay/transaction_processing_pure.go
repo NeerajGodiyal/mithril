@@ -29,6 +29,9 @@ type LoadAndExecuteTransactionInput struct {
 	TxMeta *rpc.TransactionMeta
 	// IsSimulation indicates this is a simulation (no side effects on shared state)
 	IsSimulation bool
+	// RecordInnerInstructions enables CPI recording. The simulate handler
+	// sets this when the RPC request asks for innerInstructions.
+	RecordInnerInstructions bool
 }
 
 // LoadAndExecuteTransaction is a pure function that loads and executes a transaction.
@@ -177,12 +180,28 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	execCtx.TransactionContext.Signature = tx.Signatures[0]
 	execCtx.TransactionContext.BorrowedAccountArena = input.Arena
 	execCtx.IsSimulation = input.IsSimulation
+	execCtx.RecordInnerInstructions = input.RecordInnerInstructions
 
 	// Capture pre-balance lamports (before fee deduction)
 	preBalances := make([]uint64, len(tx.Message.AccountKeys))
 	for i := range tx.Message.AccountKeys {
 		acct := execCtx.TransactionContext.Accounts.Accounts[i]
 		preBalances[i] = acct.Lamports
+	}
+
+	// Snapshot accounts so the simulate response can decode pre-state
+	// token balances. Cloning is required because execution mutates
+	// transactionAccts in place. Only the simulate handler reads this;
+	// block-replay callers leave it nil and ignore.
+	var preAccountSnapshots []*accounts.Account
+	if input.IsSimulation {
+		preAccountSnapshots = make([]*accounts.Account, len(execCtx.TransactionContext.Accounts.Accounts))
+		for i, acct := range execCtx.TransactionContext.Accounts.Accounts {
+			if acct == nil {
+				continue
+			}
+			preAccountSnapshots[i] = acct.Clone()
+		}
 	}
 
 	// Calculate and deduct fees
@@ -196,9 +215,10 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 					InstructionError: err,
 				},
 			},
-			ExecCtx:     execCtx,
-			PreBalances: preBalances,
-			FeeInfo:     txFeeInfo,
+			ExecCtx:             execCtx,
+			PreBalances:         preBalances,
+			PreAccountSnapshots: preAccountSnapshots,
+			FeeInfo:             txFeeInfo,
 		}
 		baseFields(&out)
 		return out
@@ -236,6 +256,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	start = time.Now()
 	for instrIdx, instr := range tx.Message.Instructions {
+		execCtx.SetCurrentTopLevelInstr(uint8(instrIdx))
 		ixStart := time.Now()
 		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
 		if err != nil {
@@ -302,9 +323,10 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 					InstructionError: relevantErr,
 				},
 			},
-			ExecCtx:     execCtx,
-			PreBalances: preBalances,
-			FeeInfo:     txFeeInfo,
+			ExecCtx:             execCtx,
+			PreBalances:         preBalances,
+			PreAccountSnapshots: preAccountSnapshots,
+			FeeInfo:             txFeeInfo,
 		}
 		baseFields(&out)
 		return out
@@ -384,6 +406,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	executionDetails := TransactionExecutionDetails{
 		Status:               nil,
 		LogMessages:          log.Logs,
+		InnerInstructions:    AssembleInnerInstructions(execCtx),
 		ReturnData:           returnData,
 		ExecutedUnits:        execCtx.ComputeMeter.Used(),
 		AccountsDataLenDelta: accountsDataLenDelta,
@@ -412,10 +435,11 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		ProcessingResult: TransactionProcessingResult{
 			ProcessedTransaction: &processedTx,
 		},
-		ExecutionResult: executionResult,
-		ExecCtx:         execCtx,
-		PreBalances:     preBalances,
-		FeeInfo:         txFeeInfo,
+		ExecutionResult:     executionResult,
+		ExecCtx:             execCtx,
+		PreBalances:         preBalances,
+		PreAccountSnapshots: preAccountSnapshots,
+		FeeInfo:             txFeeInfo,
 	}
 	baseFields(&out)
 	return out
@@ -433,6 +457,44 @@ func mapLoadErrorType(err error) TransactionErrorType {
 	default:
 		return TransactionErrorAccountNotFound
 	}
+}
+
+// AssembleInnerInstructions groups CPI captures from execCtx by their
+// top-level instruction index and converts them into the response shape.
+// Returns nil when no captures were recorded (e.g. simulate without
+// innerInstructions=true, or block-replay).
+//
+// Exported so the simulate RPC handler can reach into a partially-executed
+// execCtx on the InstructionError path — Agave wire format keeps captured
+// CPIs on tx failure even though Mithril's bifurcated processing-result
+// type discards them via the TransactionError early-return.
+func AssembleInnerInstructions(execCtx *sealevel.ExecutionCtx) []InnerInstructionsList {
+	if len(execCtx.InnerInstrs) == 0 {
+		return nil
+	}
+
+	byTopLevel := make(map[uint8][]CompiledInstruction)
+	order := make([]uint8, 0)
+	for _, r := range execCtx.InnerInstrs {
+		if _, seen := byTopLevel[r.TopLevelIdx]; !seen {
+			order = append(order, r.TopLevelIdx)
+		}
+		byTopLevel[r.TopLevelIdx] = append(byTopLevel[r.TopLevelIdx], CompiledInstruction{
+			ProgramIdIndex: r.ProgramIdIndex,
+			Accounts:       append([]uint8{}, r.Accounts...),
+			Data:           append([]byte{}, r.Data...),
+			StackHeight:    r.StackHeight,
+		})
+	}
+
+	result := make([]InnerInstructionsList, 0, len(order))
+	for _, idx := range order {
+		result = append(result, InnerInstructionsList{
+			Index:        idx,
+			Instructions: byTopLevel[idx],
+		})
+	}
+	return result
 }
 
 // collectAccountUpdates collects all modified accounts from the execution context
