@@ -619,7 +619,9 @@ func LoaderV4ProcessDeploy(execCtx *ExecutionCtx) error {
 	}
 
 	entry := &accountsdb.ProgramCacheEntry{Program: programObj, DeploymentSlot: currentSlot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(program.Key(), entry)
+	if !execCtx.IsSimulation {
+		execCtx.SlotCtx.AccountsDb.AddProgramToCache(program.Key(), entry)
+	}
 
 	return nil
 }
@@ -669,7 +671,9 @@ func LoaderV4ProcessRetract(execCtx *ExecutionCtx) error {
 		return err
 	}
 
-	execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(program.Key())
+	if !execCtx.IsSimulation {
+		execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(program.Key())
+	}
 	return nil
 }
 

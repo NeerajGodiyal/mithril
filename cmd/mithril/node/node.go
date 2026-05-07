@@ -1417,7 +1417,11 @@ postBootstrap:
 		EnforceOnSource:  consensusEnforceSource,
 	}
 
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, rpcServer, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+	var slotCtxSetter replay.SlotCtxSetter
+	if rpcServer != nil {
+		slotCtxSetter = rpcServer
+	}
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
 
 	if result.Error != nil && result.LastPersistedSlot == 0 {
 		mlog.Log.Errorf("Replay stopped before persisting the first post-start slot: %v", result.Error)
@@ -2289,7 +2293,7 @@ func runReplayWithRecovery(
 	useLightbringer bool,
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
-	rpcServer *rpcserver.RpcServer,
+	rpcServer replay.SlotCtxSetter,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,

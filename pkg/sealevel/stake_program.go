@@ -803,6 +803,9 @@ func StakeProgramExecute(execCtx *ExecutionCtx) error {
 
 			var rent SysvarRent
 			rent, err = ReadRentSysvar(execCtx)
+			if err != nil {
+				return err
+			}
 			err = checkAcctForRentSysvar(txCtx, instrCtx, 1)
 			if err != nil {
 				return err

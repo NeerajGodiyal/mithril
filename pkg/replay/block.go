@@ -38,7 +38,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rent"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
-	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
@@ -47,6 +46,11 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
 )
+
+// SlotCtxSetter is implemented by types that accept a SlotCtx update (e.g. RpcServer).
+type SlotCtxSetter interface {
+	SetSlotCtx(slotCtx *sealevel.SlotCtx)
+}
 
 // BlockFetchOpts contains options for parallel block fetching
 type BlockFetchOpts struct {
@@ -276,6 +280,41 @@ txResolveLoop:
 	}
 
 	return nil
+}
+
+// ResolveAddrTableLookupsForTx resolves a single tx's address-table lookups
+// against accountsdb at the given slot.
+//
+// No-op for legacy or empty-lookup versioned txs. Returns wrapped errors so
+// callers can map missing/invalid tables to AddressLookupTableNotFound or
+// InvalidAddressLookupTableData.
+func ResolveAddrTableLookupsForTx(ctx context.Context, accountsDb *accountsdb.AccountsDb, slot uint64, tx *solana.Transaction) error {
+	if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
+		return nil
+	}
+
+	tableIDs := tx.Message.GetAddressTableLookups().GetTableIDs()
+	accts, err := accountsDb.GetAccountsBatch(ctx, slot, tableIDs)
+	if err != nil {
+		return err
+	}
+
+	tables := make(map[solana.PublicKey]solana.PublicKeySlice, len(tableIDs))
+	for i, key := range tableIDs {
+		if accts[i] == nil || len(accts[i].Data) == 0 {
+			return fmt.Errorf("address lookup table %s not found", key)
+		}
+		addrLookupTable, err := sealevel.UnmarshalAddressLookupTable(accts[i].Data)
+		if err != nil {
+			return fmt.Errorf("address lookup table %s: invalid data: %w", key, err)
+		}
+		tables[key] = addrLookupTable.Addresses
+	}
+
+	if err := tx.Message.SetAddressTables(tables); err != nil {
+		return err
+	}
+	return tx.Message.ResolveLookups()
 }
 
 func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
@@ -1177,7 +1216,7 @@ func ReplayBlocks(
 	useLightbringer bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
-	rpcServer *rpcserver.RpcServer,
+	rpcServer SlotCtxSetter,
 	blockFetchOpts *BlockFetchOpts,
 	consensusOpts *ConsensusOpts, // nil = use defaults (max_depth=64, policy="halt")
 	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
@@ -1884,6 +1923,10 @@ func ReplayBlocks(
 			break
 		}
 		global.SetBlockHeight(block.BlockHeight)
+
+		if rpcServer != nil {
+			rpcServer.SetSlotCtx(lastSlotCtx)
+		}
 
 		if consensusBufferedExecutionActive {
 			observeConsensusAnchor()

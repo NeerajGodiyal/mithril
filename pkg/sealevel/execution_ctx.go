@@ -26,6 +26,31 @@ type ExecutionCtx struct {
 	PrevLamportsPerSignature uint64
 	SlotCtx                  *SlotCtx
 	ModifiedVoteStates       map[solana.PublicKey]*VoteStateVersions
+	IsSimulation             bool
+
+	// RecordInnerInstructions enables capture of CPI instructions into
+	// InnerInstrs. Off by default; the simulate handler enables it when
+	// the caller requests innerInstructions in the RPC response.
+	RecordInnerInstructions bool
+	currentTopLevelInstrIdx uint8
+	InnerInstrs             []RecordedInnerInstr
+}
+
+// RecordedInnerInstr is a CPI invocation captured during execution.
+// Replay-layer code groups records by TopLevelIdx into the response shape.
+type RecordedInnerInstr struct {
+	TopLevelIdx    uint8
+	StackHeight    uint8
+	ProgramIdIndex uint8
+	Accounts       []uint8
+	Data           []byte
+}
+
+// SetCurrentTopLevelInstr is called by the replay loop before dispatching
+// each top-level instruction so subsequent CPI captures know which entry
+// in the response's innerInstructions array to belong to.
+func (execCtx *ExecutionCtx) SetCurrentTopLevelInstr(idx uint8) {
+	execCtx.currentTopLevelInstrIdx = idx
 }
 
 type SlotBank struct {
@@ -183,6 +208,25 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 	start = time.Now()
 	nextInstrCtx.Configure(programIndices, instructionAccts, instrData)
 	metrics.GlobalBlockReplay.NextIxCtxConfigure.AddTimingSince(start)
+
+	// Capture this invocation as an inner instruction when nested under
+	// an active top-level frame and recording is enabled. Stack height
+	// before Push reflects parent depth: 0 = top-level, >=1 = CPI.
+	if execCtx.RecordInnerInstructions && len(programIndices) > 0 && execCtx.StackHeight() >= 1 {
+		acctIdxs := make([]uint8, 0, len(instructionAccts))
+		for _, ia := range instructionAccts {
+			acctIdxs = append(acctIdxs, uint8(ia.IndexInTransaction))
+		}
+		dataCopy := make([]byte, len(instrData))
+		copy(dataCopy, instrData)
+		execCtx.InnerInstrs = append(execCtx.InnerInstrs, RecordedInnerInstr{
+			TopLevelIdx:    execCtx.currentTopLevelInstrIdx,
+			StackHeight:    uint8(execCtx.StackHeight() + 1),
+			ProgramIdIndex: uint8(programIndices[0]),
+			Accounts:       acctIdxs,
+			Data:           dataCopy,
+		})
+	}
 
 	start = time.Now()
 	err = execCtx.Push()

@@ -547,7 +547,7 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 	size += solana.PublicKeyLength     // program id
 
 	var serializedData []byte
-	if execCtx.SlotCtx.SerializedParameterArena != nil {
+	if !execCtx.IsSimulation && execCtx.SlotCtx.SerializedParameterArena != nil {
 		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
 		serializedData = arenaData[:0]
 	} else {
@@ -824,7 +824,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 	size += solana.PublicKeyLength     // program id
 
 	var serializedData []byte
-	if execCtx.SlotCtx.SerializedParameterArena != nil {
+	if !execCtx.IsSimulation && execCtx.SlotCtx.SerializedParameterArena != nil {
 		arenaData, _ := execCtx.SlotCtx.SerializedParameterArena.AllocN(size)
 		serializedData = arenaData[:0] // Use arena slice with zero length but full capacity
 	} else {
@@ -1100,7 +1100,9 @@ func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey
 	}
 
 	entry := &accountsdb.ProgramCacheEntry{Program: program}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+	if !execCtx.IsSimulation {
+		execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+	}
 
 	metrics.GlobalBlockReplay.AddProgramToCache.AddTimingSince(start)
 
