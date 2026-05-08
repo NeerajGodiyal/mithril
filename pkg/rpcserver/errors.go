@@ -11,14 +11,12 @@ import (
 const (
 	// -32602 is the JSON-RPC standard "Invalid params" code.
 	rpcCodeInvalidParams jsonrpc.ErrorCode = -32602
+	// -32002 matches Agave's SendTransactionPreflightFailure.
+	rpcCodeSendTransactionPreflightFailure jsonrpc.ErrorCode = -32002
 	// -32016 is Agave's reserved code for MinContextSlotNotReached.
 	rpcCodeMinContextSlotNotReached jsonrpc.ErrorCode = -32016
 )
 
-// MinContextSlotNotReachedError is returned when the caller demands a
-// minimum context slot we have not yet reached. The structured payload
-// is emitted as the JSON-RPC error's `data` field (Agave-compatible),
-// matching the shape `{"contextSlot": N}` that Solana clients consume.
 type MinContextSlotNotReachedError struct {
 	ContextSlot uint64
 }
@@ -57,9 +55,6 @@ func (e *MinContextSlotNotReachedError) FromJSONRPCError(rpcErr jsonrpc.JSONRPCE
 	return nil
 }
 
-// InvalidParamsError maps a Mithril-side argument-validation failure to
-// the standard JSON-RPC -32602. Use for shape and conflict checks like
-// "sigVerify may not be used with replaceRecentBlockhash".
 type InvalidParamsError struct {
 	Message string
 }
@@ -81,11 +76,44 @@ func (e *InvalidParamsError) FromJSONRPCError(rpcErr jsonrpc.JSONRPCError) error
 	return nil
 }
 
-// rpcErrorRegistry returns an Errors set with Mithril's custom codes
-// registered. Pass to jsonrpc.NewServer via WithServerErrors.
+type SendTransactionPreflightFailureError struct {
+	Message string
+	Result  SimulateTransactionRespValue
+}
+
+func (e *SendTransactionPreflightFailureError) Error() string { return e.Message }
+
+func (e *SendTransactionPreflightFailureError) ToJSONRPCError() (jsonrpc.JSONRPCError, error) {
+	return jsonrpc.JSONRPCError{
+		Code:    rpcCodeSendTransactionPreflightFailure,
+		Message: e.Message,
+		Data:    e.Result,
+	}, nil
+}
+
+func (e *SendTransactionPreflightFailureError) FromJSONRPCError(rpcErr jsonrpc.JSONRPCError) error {
+	if rpcErr.Code != rpcCodeSendTransactionPreflightFailure {
+		return fmt.Errorf("unexpected code %d for SendTransactionPreflightFailureError", rpcErr.Code)
+	}
+	e.Message = rpcErr.Message
+	if rpcErr.Data == nil {
+		e.Result = SimulateTransactionRespValue{}
+		return nil
+	}
+	raw, err := json.Marshal(rpcErr.Data)
+	if err != nil {
+		return fmt.Errorf("re-encoding SendTransactionPreflightFailureError data: %w", err)
+	}
+	if err := json.Unmarshal(raw, &e.Result); err != nil {
+		return fmt.Errorf("decoding SendTransactionPreflightFailureError data: %w", err)
+	}
+	return nil
+}
+
 func rpcErrorRegistry() jsonrpc.Errors {
 	errs := jsonrpc.NewErrors()
 	errs.Register(rpcCodeInvalidParams, new(*InvalidParamsError))
+	errs.Register(rpcCodeSendTransactionPreflightFailure, new(*SendTransactionPreflightFailureError))
 	errs.Register(rpcCodeMinContextSlotNotReached, new(*MinContextSlotNotReachedError))
 	return errs
 }
