@@ -11,26 +11,20 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-const (
-	defaultAirdropLamports  = 20_000_000
-	defaultTransferLamports = 1_000_000
-	defaultCluster          = "testnet"
-)
+const defaultCluster = "mainnet-beta"
 
 type config struct {
-	mithrilRPC        string
-	cluster           string
-	clusterRPC        string
-	airdropLamports   uint64
-	transferLamports  uint64
-	skipPreflight     bool
-	timeout           time.Duration
-	pollInterval      time.Duration
-	postAirdropSettle time.Duration
+	mithrilRPC       string
+	cluster          string
+	clusterRPC       string
+	senderPrivateKey string
+	memoText         string
+	skipPreflight    bool
+	timeout          time.Duration
+	pollInterval     time.Duration
 }
 
 func main() {
@@ -53,24 +47,20 @@ func parseFlags() (config, error) {
 	cfg := config{}
 
 	flag.StringVar(&cfg.mithrilRPC, "mithril-rpc", "", "HTTP URL for the Mithril RPC endpoint to exercise")
-	flag.StringVar(&cfg.cluster, "cluster", defaultCluster, "Public Solana cluster for funding/confirmation: testnet or devnet")
-	flag.StringVar(&cfg.clusterRPC, "cluster-rpc", "", "Override the public cluster RPC URL used for airdrop and confirmation")
-	flag.Uint64Var(&cfg.airdropLamports, "airdrop-lamports", defaultAirdropLamports, "Lamports to request from the public faucet")
-	flag.Uint64Var(&cfg.transferLamports, "transfer-lamports", defaultTransferLamports, "Lamports to send through Mithril")
+	flag.StringVar(&cfg.cluster, "cluster", defaultCluster, "Cluster for confirmation: mainnet-beta, mainnet, testnet, or devnet")
+	flag.StringVar(&cfg.clusterRPC, "cluster-rpc", "", "Override the public cluster RPC URL used for confirmation")
+	flag.StringVar(&cfg.senderPrivateKey, "sender-private-key", "", "Base58 sender private key used to sign the probe transaction")
+	flag.StringVar(&cfg.memoText, "memo", "", "Optional memo payload; defaults to a generated probe string")
 	flag.BoolVar(&cfg.skipPreflight, "skip-preflight", false, "Pass skipPreflight=true to Mithril sendTransaction")
-	flag.DurationVar(&cfg.timeout, "timeout", 3*time.Minute, "Max time to wait for the airdrop and transfer confirmations")
+	flag.DurationVar(&cfg.timeout, "timeout", 3*time.Minute, "Max time to wait for transaction confirmation")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval", 2*time.Second, "Polling interval for signature confirmation")
-	flag.DurationVar(&cfg.postAirdropSettle, "post-airdrop-settle", 5*time.Second, "Extra wait after the airdrop confirms before submitting via Mithril")
 	flag.Parse()
 
 	if cfg.mithrilRPC == "" {
 		return config{}, errors.New("must provide -mithril-rpc")
 	}
-	if cfg.transferLamports == 0 {
-		return config{}, errors.New("-transfer-lamports must be greater than zero")
-	}
-	if cfg.airdropLamports <= cfg.transferLamports {
-		return config{}, fmt.Errorf("-airdrop-lamports (%d) must be greater than -transfer-lamports (%d)", cfg.airdropLamports, cfg.transferLamports)
+	if cfg.senderPrivateKey == "" {
+		return config{}, errors.New("must provide -sender-private-key")
 	}
 	if cfg.timeout <= 0 {
 		return config{}, errors.New("-timeout must be greater than zero")
@@ -78,6 +68,13 @@ func parseFlags() (config, error) {
 	if cfg.pollInterval <= 0 {
 		return config{}, errors.New("-poll-interval must be greater than zero")
 	}
+
+	cluster, err := canonicalClusterName(cfg.cluster)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.cluster = cluster
+
 	if cfg.clusterRPC == "" {
 		clusterRPC, err := clusterRPCFor(cfg.cluster)
 		if err != nil {
@@ -96,44 +93,21 @@ func run(ctx context.Context, cfg config) error {
 	mithrilClient := rpc.New(cfg.mithrilRPC)
 	defer mithrilClient.Close()
 
-	sender := solana.NewWallet()
-	recipient := solana.NewWallet()
-
-	fmt.Printf("Mithril RPC: %s\n", cfg.mithrilRPC)
-	fmt.Printf("Cluster RPC: %s\n", cfg.clusterRPC)
-	fmt.Printf("Sender: %s\n", sender.PublicKey())
-	fmt.Printf("Recipient: %s\n", recipient.PublicKey())
-
-	fmt.Printf("Requesting airdrop of %d lamports for sender...\n", cfg.airdropLamports)
-	airdropSig, err := clusterClient.RequestAirdrop(ctx, sender.PublicKey(), cfg.airdropLamports, rpc.CommitmentConfirmed)
+	sender, err := loadSenderWallet(cfg.senderPrivateKey)
 	if err != nil {
-		return formatAirdropError(cfg.cluster, cfg.clusterRPC, err)
-	}
-	fmt.Printf("Airdrop signature: %s\n", airdropSig)
-
-	if err := waitForSignature(ctx, clusterClient, airdropSig, cfg.timeout, cfg.pollInterval, "airdrop"); err != nil {
 		return err
 	}
 
-	senderBalance, err := clusterClient.GetBalance(ctx, sender.PublicKey(), rpc.CommitmentConfirmed)
+	fmt.Printf("Mithril RPC: %s\n", cfg.mithrilRPC)
+	fmt.Printf("Cluster: %s\n", cfg.cluster)
+	fmt.Printf("Cluster RPC: %s\n", cfg.clusterRPC)
+	fmt.Printf("Sender: %s\n", sender.PublicKey())
+
+	preBalance, err := clusterClient.GetBalance(ctx, sender.PublicKey(), rpc.CommitmentConfirmed)
 	if err != nil {
 		return fmt.Errorf("get sender balance from %s: %w", cfg.clusterRPC, err)
 	}
-	fmt.Printf("Sender confirmed balance: %d lamports\n", senderBalance.Value)
-	if senderBalance.Value < cfg.transferLamports {
-		return fmt.Errorf("sender balance %d is lower than transfer amount %d", senderBalance.Value, cfg.transferLamports)
-	}
-
-	if cfg.postAirdropSettle > 0 {
-		fmt.Printf("Waiting %s for Mithril to catch up with the airdrop...\n", cfg.postAirdropSettle)
-		timer := time.NewTimer(cfg.postAirdropSettle)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	fmt.Printf("Sender balance before submit: %d lamports\n", preBalance.Value)
 
 	latestBlockhash, err := mithrilClient.GetLatestBlockhash(ctx, rpc.CommitmentConfirmed)
 	if err != nil {
@@ -144,14 +118,13 @@ func run(ctx context.Context, cfg config) error {
 	}
 	fmt.Printf("Mithril latest blockhash: %s\n", latestBlockhash.Value.Blockhash)
 
-	instruction, err := system.NewTransferInstruction(
-		cfg.transferLamports,
-		sender.PublicKey(),
-		recipient.PublicKey(),
-	).ValidateAndBuild()
-	if err != nil {
-		return fmt.Errorf("build transfer instruction: %w", err)
+	memoText := cfg.memoText
+	if memoText == "" {
+		memoText = fmt.Sprintf("mithril sendtxprobe %s", time.Now().UTC().Format(time.RFC3339Nano))
 	}
+	fmt.Printf("Memo payload: %q\n", memoText)
+
+	instruction := buildMemoInstruction(sender.PublicKey(), memoText)
 
 	tx, err := solana.NewTransaction(
 		[]solana.Instruction{instruction},
@@ -181,32 +154,67 @@ func run(ctx context.Context, cfg config) error {
 	}
 	fmt.Printf("Submitted via Mithril sendTransaction: %s\n", txSig)
 
-	if err := waitForSignature(ctx, clusterClient, txSig, cfg.timeout, cfg.pollInterval, "transfer"); err != nil {
+	if err := waitForSignature(ctx, clusterClient, txSig, cfg.timeout, cfg.pollInterval, "memo"); err != nil {
 		return err
 	}
 
-	recipientBalance, err := clusterClient.GetBalance(ctx, recipient.PublicKey(), rpc.CommitmentConfirmed)
+	postBalance, err := clusterClient.GetBalance(ctx, sender.PublicKey(), rpc.CommitmentConfirmed)
 	if err != nil {
-		return fmt.Errorf("get recipient balance from %s: %w", cfg.clusterRPC, err)
+		return fmt.Errorf("get sender post-submit balance from %s: %w", cfg.clusterRPC, err)
 	}
-	fmt.Printf("Recipient confirmed balance: %d lamports\n", recipientBalance.Value)
-	if recipientBalance.Value < cfg.transferLamports {
-		return fmt.Errorf("recipient balance %d is lower than transfer amount %d", recipientBalance.Value, cfg.transferLamports)
+	fmt.Printf("Sender balance after submit: %d lamports\n", postBalance.Value)
+	if postBalance.Value > preBalance.Value {
+		fmt.Printf("Balance delta: +%d lamports\n", postBalance.Value-preBalance.Value)
+	} else {
+		fmt.Printf("Balance delta: -%d lamports\n", preBalance.Value-postBalance.Value)
 	}
 
 	fmt.Printf("sendTransaction flow succeeded through Mithril.\n")
 	return nil
 }
 
-func clusterRPCFor(cluster string) (string, error) {
+func canonicalClusterName(cluster string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(cluster)) {
+	case "mainnet", "mainnet-beta":
+		return "mainnet-beta", nil
+	case "testnet":
+		return "testnet", nil
+	case "devnet":
+		return "devnet", nil
+	default:
+		return "", fmt.Errorf("unsupported -cluster %q; expected mainnet-beta, mainnet, testnet, or devnet", cluster)
+	}
+}
+
+func clusterRPCFor(cluster string) (string, error) {
+	switch cluster {
+	case "mainnet-beta":
+		return rpc.MainNetBeta_RPC, nil
 	case "testnet":
 		return rpc.TestNet_RPC, nil
 	case "devnet":
 		return rpc.DevNet_RPC, nil
 	default:
-		return "", fmt.Errorf("unsupported -cluster %q; expected testnet or devnet", cluster)
+		return "", fmt.Errorf("unsupported -cluster %q; expected mainnet-beta, mainnet, testnet, or devnet", cluster)
 	}
+}
+
+func loadSenderWallet(privateKey string) (*solana.Wallet, error) {
+	wallet, err := solana.WalletFromPrivateKeyBase58(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("load sender private key: %w", err)
+	}
+	return wallet, nil
+}
+
+func buildMemoInstruction(sender solana.PublicKey, memoText string) solana.Instruction {
+	return solana.NewInstruction(
+		solana.MemoProgramID,
+		solana.AccountMetaSlice{
+			solana.Meta(sender).SIGNER(),
+		},
+		[]byte(memoText),
+	)
 }
 
 func waitForSignature(
@@ -269,9 +277,3 @@ func signatureConfirmed(status *rpc.SignatureStatusesResult) bool {
 	}
 }
 
-func formatAirdropError(cluster string, endpoint string, err error) error {
-	if strings.EqualFold(cluster, "testnet") {
-		return fmt.Errorf("request airdrop via %s: %w (testnet faucet/public RPC can be flaky; retry, override -cluster-rpc, or try -cluster devnet)", endpoint, err)
-	}
-	return fmt.Errorf("request airdrop via %s: %w", endpoint, err)
-}
