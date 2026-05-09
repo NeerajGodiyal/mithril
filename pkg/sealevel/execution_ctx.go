@@ -235,6 +235,13 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 	}
 	metrics.GlobalBlockReplay.IxPush.AddTimingSince(start)
 
+	if len(programIndices) > 0 {
+		programKey, keyErr := execCtx.TransactionContext.KeyOfAccountAtIndex(programIndices[len(programIndices)-1])
+		if keyErr == nil {
+			execCtx.TransactionContext.SetReturnData(programKey, []byte{})
+		}
+	}
+
 	err1 := execCtx.ExecuteInstruction()
 
 	start = time.Now()
