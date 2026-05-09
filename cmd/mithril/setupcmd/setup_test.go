@@ -23,8 +23,8 @@ func TestHandleSelect_ScrLightbringerQuiet_False(t *testing.T) {
 }
 
 // TestHandleSelect_DisableLB_ResetsQuiet verifies that picking "disable" on
-// Lightbringer clears m.lbQuiet so a later re-enable starts clean.
-func TestHandleSelect_DisableLB_ResetsQuiet(t *testing.T) {
+// Lightbringer resets m.lbQuiet to the default so a later re-enable starts clean.
+func TestHandleSelect_DisableLB_ResetsQuietDefault(t *testing.T) {
 	m := setupModel{
 		screen:   scrLightbringer,
 		mode:     "full",
@@ -34,7 +34,7 @@ func TestHandleSelect_DisableLB_ResetsQuiet(t *testing.T) {
 	out, _ := m.handleSelect("disable")
 	model := out.(setupModel)
 	assert.False(t, model.enableLB, "disable should set enableLB=false")
-	assert.False(t, model.lbQuiet, "disable should reset lbQuiet=false to avoid stale state on re-enable")
+	assert.True(t, model.lbQuiet, "disable should reset lbQuiet to the default to avoid stale state on re-enable")
 }
 
 // TestHandleSelect_EnableLB_DoesNotChangeQuiet ensures picking "enable"

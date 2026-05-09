@@ -267,8 +267,9 @@ name = "mithril"
     # block_confirmation_rpc_http = "http://localhost:8899"
     # block_confirmation_rpc_websocket = "ws://localhost:8899"
 
-    # Suppress Lightbringer info/debug log lines (only warn/error). Default: false.
-    # quiet = true
+    # Suppress Lightbringer info/debug log lines (only warn/error). Default: true.
+    # Set quiet = false to show all info messages.
+    quiet = true
 
 # ============================================================================
 # [rpc] - Mithril RPC Server

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/tui"
 	"github.com/spf13/viper"
 )
@@ -60,30 +61,31 @@ func readState(accountsPath string) *nodeState {
 // ── Config reading ──────────────────────────────────────────────────────
 
 type configData struct {
-	cluster       string
-	rpcEndpoints  []string
-	blockSource   string
-	lbEnabled     bool
-	lbGossip      string
-	lbGrpcAddr    string
+	cluster            string
+	rpcEndpoints       []string
+	blockSource        string
+	lbEnabled          bool
+	lbGossip           string
+	lbGrpcAddr         string
 	lbRpcAddr          string
 	lbExternalEndpoint string // block.lightbringer_endpoint for external LB mode
 	lbBinaryPath       string
 	lbQuiet            bool
-	accountsPath  string
-	snapshotsPath string
-	shredstorePath string
-	logsPath      string
-	txpar         string
-	blockMaxRPS   string
-	blockInflight string
-	rpcPort       string
-	logLevel      string
-	bootstrapMode string
+	accountsPath       string
+	snapshotsPath      string
+	shredstorePath     string
+	logsPath           string
+	txpar              string
+	blockMaxRPS        string
+	blockInflight      string
+	rpcPort            string
+	logLevel           string
+	bootstrapMode      string
 }
 
 func readConfig(configFile string) *configData {
 	v := viper.New()
+	config.ApplyDefaults(v)
 	v.SetConfigFile(configFile)
 	if err := v.ReadInConfig(); err != nil {
 		return nil
@@ -106,42 +108,42 @@ func readConfig(configFile string) *configData {
 	}
 
 	return &configData{
-		cluster:        cluster,
-		rpcEndpoints:   v.GetStringSlice("network.rpc"),
-		blockSource:    v.GetString("block.source"),
-		lbEnabled:      v.GetBool("lightbringer.enabled"),
-		lbGossip:       v.GetString("lightbringer.gossip_entrypoint"),
-		lbGrpcAddr:     v.GetString("lightbringer.grpc_addr"),
+		cluster:            cluster,
+		rpcEndpoints:       v.GetStringSlice("network.rpc"),
+		blockSource:        v.GetString("block.source"),
+		lbEnabled:          v.GetBool("lightbringer.enabled"),
+		lbGossip:           v.GetString("lightbringer.gossip_entrypoint"),
+		lbGrpcAddr:         v.GetString("lightbringer.grpc_addr"),
 		lbRpcAddr:          v.GetString("lightbringer.rpc_addr"),
 		lbQuiet:            v.GetBool("lightbringer.quiet"),
 		lbExternalEndpoint: v.GetString("block.lightbringer_endpoint"),
 		lbBinaryPath:       v.GetString("lightbringer.binary_path"),
-		accountsPath:   v.GetString("storage.accounts"),
-		snapshotsPath:  v.GetString("storage.snapshots"),
-		shredstorePath: v.GetString("storage.shredstore"),
-		logsPath:       logsPath,
-		txpar:          txpar,
-		blockMaxRPS:    v.GetString("block.max_rps"),
-		blockInflight:  v.GetString("block.max_inflight"),
-		rpcPort:        v.GetString("rpc.port"),
-		logLevel:       v.GetString("log.level"),
-		bootstrapMode:  v.GetString("bootstrap.mode"),
+		accountsPath:       v.GetString("storage.accounts"),
+		snapshotsPath:      v.GetString("storage.snapshots"),
+		shredstorePath:     v.GetString("storage.shredstore"),
+		logsPath:           logsPath,
+		txpar:              txpar,
+		blockMaxRPS:        v.GetString("block.max_rps"),
+		blockInflight:      v.GetString("block.max_inflight"),
+		rpcPort:            v.GetString("rpc.port"),
+		logLevel:           v.GetString("log.level"),
+		bootstrapMode:      v.GetString("bootstrap.mode"),
 	}
 }
 
 // ── Service probing ─────────────────────────────────────────────────────
 
 type serviceStatus struct {
-	name    string
-	addr    string
-	up      bool
+	name string
+	addr string
+	up   bool
 }
 
 // Default service addresses (must match config template defaults).
 const (
-	defaultRPCPort  = "8899"
-	defaultLBGRPC   = "127.0.0.1:3001"
-	defaultLBHTTP   = "127.0.0.1:3000"
+	defaultRPCPort = "8899"
+	defaultLBGRPC  = "127.0.0.1:3001"
+	defaultLBHTTP  = "127.0.0.1:3000"
 )
 
 func probeServices(cfg *configData) []serviceStatus {
@@ -490,6 +492,7 @@ func saveConfigValue(configFile, section, key, value string) error {
 	case fullKey == "network.rpc":
 		// Preserve failover endpoints — read existing array, update first element
 		v := viper.New()
+		config.ApplyDefaults(v)
 		v.SetConfigFile(configFile)
 		if err := v.ReadInConfig(); err == nil {
 			existing := v.GetStringSlice("network.rpc")
