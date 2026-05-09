@@ -2018,19 +2018,16 @@ func ReplayBlocks(
 
 		slotReplayDuration := time.Since(start)
 
-		// Calculate slot stats: vote/non-vote tx counts and total CU
+		// Calculate slot stats: vote/non-vote tx counts and locally replayed CU.
 		var voteTxCount, nonVoteTxCount int
-		var totalCU uint64
-		for i, tx := range block.Transactions {
+		for _, tx := range block.Transactions {
 			if tx.IsVote() {
 				voteTxCount++
 			} else {
 				nonVoteTxCount++
 			}
-			if i < len(block.TxMetas) && block.TxMetas[i] != nil && block.TxMetas[i].ComputeUnitsConsumed != nil {
-				totalCU += *block.TxMetas[i].ComputeUnitsConsumed
-			}
 		}
+		totalCU := lastSlotCtx.TotalComputeUnitsConsumed
 
 		// Get leader from block (set by configureBlock in live mode, or by block source in verify mode)
 		leaderStr := "unknown"
@@ -2439,15 +2436,17 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	var totalComputeUnitsConsumed uint64
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
 		var txMeta *rpc.TransactionMeta
 		if block.TxMetas != nil {
 			txMeta = block.TxMetas[idx]
 		}
-		txFeeInfo, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
+		txFeeInfo, txComputeUnitsConsumed, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
+		totalComputeUnitsConsumed += txComputeUnitsConsumed
 
 		if txMeta == nil {
 			if txFeeInfo == nil {
@@ -2481,7 +2480,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		}
 		txFeeAccumulator.Add(txFeeInfo)
 	}
-	return txFeeAccumulator
+	return txFeeAccumulator, totalComputeUnitsConsumed
 }
 
 func lightbringerEntryExecutionBatches(transactions []*solana.Transaction, entry *b.TxEntry, relaxIntraBatchAccountLocks bool) [][]uint64 {
@@ -2557,9 +2556,10 @@ func lightbringerEntryExecutionBatches(transactions []*solana.Transaction, entry
 	return batches
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) fees.TxFeeInfoAccumulator {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
+	txComputeUnitsConsumed := make([]uint64, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
 	txDurations := make([]time.Duration, txParallelism)
 
@@ -2585,7 +2585,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 					if idx < len(rblock.TxMetas) {
 						txMeta = rblock.TxMetas[idx]
 					}
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[i])
+					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[i])
 					txErr := errs[idx]
 					// check for success-failure return value divergences
 					if txMeta != nil && txErr == nil && txMeta.Err != nil {
@@ -2621,7 +2621,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 					if int(idx) < len(rblock.TxMetas) {
 						txMeta = rblock.TxMetas[idx]
 					}
-					txFeeInfos[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[workerIdx])
+					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[workerIdx])
 					txErr := errs[idx]
 					if txMeta != nil && txErr == nil && txMeta.Err != nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
@@ -2656,7 +2656,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		panic("dependency planner unavailable for non-Lightbringer block")
 	}
 
+	var totalComputeUnitsConsumed uint64
 	for idx, txFeeInfo := range txFeeInfos {
+		totalComputeUnitsConsumed += txComputeUnitsConsumed[idx]
 		if txFeeInfo == nil {
 			// This happens when IsTransactionAgeValid returns false (blockhash not found)
 			tx := block.Transactions[idx]
@@ -2675,7 +2677,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		txFeeAccumulator.Add(txFeeInfo)
 	}
 
-	return txFeeAccumulator
+	return txFeeAccumulator, totalComputeUnitsConsumed
 }
 
 func ProcessBlock(
@@ -2773,15 +2775,17 @@ func ProcessBlock(
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
 	slotCtx.TraceCtx = ctx
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
+	var totalComputeUnitsConsumed uint64
 	start = time.Now()
 
 	setReplayStage("tx_loop")
 	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
 	if txParallelism > 0 {
-		txFeeAccumulator = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
+		txFeeAccumulator, totalComputeUnitsConsumed = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
 	} else {
-		txFeeAccumulator = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
+		txFeeAccumulator, totalComputeUnitsConsumed = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
 	}
+	slotCtx.TotalComputeUnitsConsumed = totalComputeUnitsConsumed
 	txLoopRegion.End()
 	metrics.GlobalBlockReplay.TxLoop.AddTimingSince(start)
 
