@@ -76,17 +76,18 @@ type SlotCtx struct {
 	Features        *features.Features
 	VoteTimestampMu *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
-	VoteTimestamps         map[solana.PublicKey]BlockTimestamp
-	VoteAccts              map[solana.PublicKey]uint64
-	TotalEpochStake        uint64
-	FinalBankhash          []byte
-	AcctsLtHash            *lthash.LtHash
-	EpochsAcctHash         []byte
-	Replay                 bool
-	LamportsBurnt          uint64
-	EahWorkaroundBankhash  []byte
-	HasEahWorkaround       bool
-	LatestEvictedBlockhash [32]byte
+	VoteTimestamps            map[solana.PublicKey]BlockTimestamp
+	VoteAccts                 map[solana.PublicKey]uint64
+	TotalEpochStake           uint64
+	FinalBankhash             []byte
+	AcctsLtHash               *lthash.LtHash
+	EpochsAcctHash            []byte
+	Replay                    bool
+	LamportsBurnt             uint64
+	TotalComputeUnitsConsumed uint64
+	EahWorkaroundBankhash     []byte
+	HasEahWorkaround          bool
+	LatestEvictedBlockhash    [32]byte
 
 	SerializedParameterArena *arena.Arena[byte]
 
@@ -234,6 +235,13 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 		return err
 	}
 	metrics.GlobalBlockReplay.IxPush.AddTimingSince(start)
+
+	if len(programIndices) > 0 {
+		programKey, keyErr := execCtx.TransactionContext.KeyOfAccountAtIndex(programIndices[len(programIndices)-1])
+		if keyErr == nil {
+			execCtx.TransactionContext.SetReturnData(programKey, []byte{})
+		}
+	}
 
 	err1 := execCtx.ExecuteInstruction()
 

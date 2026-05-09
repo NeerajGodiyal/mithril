@@ -19,9 +19,9 @@ func TestEditor_ScrLightbringerQuiet_False(t *testing.T) {
 	assert.False(t, m.lbQuiet, "picking 'false' should set lbQuiet=false")
 }
 
-// TestEditor_DisableLB_ResetsQuiet verifies that "disable" resets m.lbQuiet
-// so a later re-enable starts clean (no stale quiet state carried over).
-func TestEditor_DisableLB_ResetsQuiet(t *testing.T) {
+// TestEditor_DisableLB_ResetsQuiet verifies that "disable" resets m.lbQuiet to
+// the default so a later re-enable starts clean (no stale quiet state carried over).
+func TestEditor_DisableLB_ResetsQuietDefault(t *testing.T) {
 	m := &editModel{
 		screen:    edScrLightbringer,
 		lbEnabled: true,
@@ -29,7 +29,7 @@ func TestEditor_DisableLB_ResetsQuiet(t *testing.T) {
 	}
 	m.handleSelect("disable")
 	assert.False(t, m.lbEnabled, "disable should set lbEnabled=false")
-	assert.False(t, m.lbQuiet, "disable should reset lbQuiet to avoid stale state on re-enable")
+	assert.True(t, m.lbQuiet, "disable should reset lbQuiet to the default to avoid stale state on re-enable")
 }
 
 // TestEditor_EnableLB_PreservesQuiet ensures enable does not clobber quiet.

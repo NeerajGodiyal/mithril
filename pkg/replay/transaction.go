@@ -430,7 +430,14 @@ func cloneTransaction(tx *solana.Transaction) (*solana.Transaction, error) {
 	return cloned, nil
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, error) {
+func processTransactionComputeUnits(execCtx *sealevel.ExecutionCtx) uint64 {
+	if execCtx == nil {
+		return 0
+	}
+	return execCtx.ComputeMeter.Used()
+}
+
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, uint64, error) {
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
 		regionType := "ProcessTransaction"
 		if tx.IsVote() {
@@ -452,14 +459,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	if slotCtx.Features.IsActive(features.StaticInstructionLimit) {
 		if len(tx.Message.Instructions) > maxInstrTraceCapacity {
-			return nil, TxErrSanitizeFailure
+			return nil, 0, TxErrSanitizeFailure
 		}
 	}
 
 	start := time.Now()
 	sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sigverifyWg.Add(1)
 	go verifySignatures(sigverifySnapshot, sigverifyWg)
@@ -510,28 +517,31 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 		switch txErr.ErrorType {
 		case TransactionErrorSanitizeFailure:
-			return nil, txErr.InstructionError
+			return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
 
 		case TransactionErrorBlockhashNotFound:
-			return nil, TxErrInvalidBlockhash
+			return nil, processTransactionComputeUnits(execCtx), TxErrInvalidBlockhash
 
 		case TransactionErrorMaxLoadedAccountsDataSizeExceeded,
 			TransactionErrorInvalidProgramForExecution,
 			TransactionErrorProgramAccountNotFound:
-			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+			txFeeInfo, err := handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		case TransactionErrorInsufficientFundsForFee:
 			// CalculateAndDeductTxFees failed - return fee info with nil error (matches original behavior)
-			return output.FeeInfo, nil
+			return output.FeeInfo, processTransactionComputeUnits(execCtx), nil
 
 		case TransactionErrorInstructionError:
-			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+			txFeeInfo, err := handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
+			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		case TransactionErrorInsufficientFundsForRent:
-			return handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, nil, txErr.InstructionError)
+			txFeeInfo, err := handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, nil, txErr.InstructionError)
+			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		default:
-			return nil, txErr.InstructionError
+			return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
 		}
 	}
 
@@ -610,5 +620,5 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeySet)
 	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 
-	return txFeeInfo, nil
+	return txFeeInfo, processTransactionComputeUnits(execCtx), nil
 }

@@ -8,6 +8,12 @@ import (
 	"github.com/spf13/viper"
 )
 
+const LightbringerQuietDefault = true
+
+func ApplyDefaults(v *viper.Viper) {
+	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
+}
+
 // LedgerConfig holds ledger-related configuration (matches Firedancer [ledger] section)
 type LedgerConfig struct {
 	Path                string `toml:"path" mapstructure:"path"`                                   // was: blockdir
@@ -153,7 +159,7 @@ type LightbringerConfig struct {
 	BlockConfirmRpcHTTP string `toml:"block_confirmation_rpc_http" mapstructure:"block_confirmation_rpc_http"`
 	BlockConfirmRpcWS   string `toml:"block_confirmation_rpc_websocket" mapstructure:"block_confirmation_rpc_websocket"`
 
-	// Quiet suppresses Lightbringer info/debug logs when true. Written as
+	// Quiet suppresses Lightbringer info/debug logs when true. Defaults to true. Written as
 	// [log] quiet = true in the generated Lightbringer.toml.
 	Quiet bool `toml:"quiet" mapstructure:"quiet"`
 }
@@ -201,6 +207,8 @@ var ConfigFile string
 // If no --config flag is provided, defaults to "config.toml" in current directory.
 // CLI flag precedence is handled separately in initConfigAndBindFlags.
 func InitConfig() error {
+	ApplyDefaults(viper.GetViper())
+
 	configPath := ConfigFile
 	if configPath == "" {
 		configPath = "config.toml" // Default config file

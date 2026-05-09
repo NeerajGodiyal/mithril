@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/tui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -296,8 +297,8 @@ func (m editModel) currentItems() []edItem {
 		return items
 	case edScrLightbringerQuiet:
 		return []edItem{
-			{label: "Normal logs", value: "false", desc: "Show all info messages (default)"},
-			{label: "Quiet mode", value: "true", desc: "Only warnings and errors — recommended for long runs"},
+			{label: "Quiet mode", value: "true", desc: "Only warnings and errors — default and recommended for long runs"},
+			{label: "Normal logs", value: "false", desc: "Show all info messages"},
 			{isSep: true},
 			{label: "← Back", value: "_back"},
 		}
@@ -441,7 +442,7 @@ func (m *editModel) handleSelect(value string) {
 			m.pushInput(edScrGossip)
 		case "disable":
 			m.lbEnabled = false
-			m.lbQuiet = false // Reset dependent state so disable→re-enable starts clean.
+			m.lbQuiet = config.LightbringerQuietDefault // Reset dependent state so disable→re-enable starts clean.
 			m.goBack()
 		case "quiet":
 			m.pushMenu(edScrLightbringerQuiet)
@@ -906,6 +907,7 @@ func runConfigEdit() {
 	}
 
 	v := viper.New()
+	config.ApplyDefaults(v)
 	v.SetConfigFile(configFile)
 	if err := v.ReadInConfig(); err != nil {
 		fmt.Printf("Error reading config: %v\n", err)

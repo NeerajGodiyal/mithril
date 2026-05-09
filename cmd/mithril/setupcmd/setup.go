@@ -76,12 +76,12 @@ const (
 	scrLightbringer
 	scrGossip
 	scrLightbringerQuiet // log verbosity for managed Lightbringer (only shown when Lightbringer enabled)
-	scrStorage         // accountsPath
-	scrStorageSnap     // snapshotsPath
-	scrStorageLogs     // logsPath
+	scrStorage           // accountsPath
+	scrStorageSnap       // snapshotsPath
+	scrStorageLogs       // logsPath
 	scrBootstrap
-	scrBlockTuning     // maxRPS
-	scrBlockInflight   // maxInflight
+	scrBlockTuning   // maxRPS
+	scrBlockInflight // maxInflight
 	scrReplay
 	scrConsensus
 	scrSnapshot
@@ -102,30 +102,30 @@ type setupModel struct {
 	height    int
 
 	// Input mode
-	editing   bool
-	inputVal  string
-	inputCur  int // cursor position within input
-	inputErr  string
+	editing  bool
+	inputVal string
+	inputCur int // cursor position within input
+	inputErr string
 
 	// Config values
-	mode          string // quick, full, manual
-	cluster       string
-	rpcEndpoint   string
-	enableLB      bool
-	gossipEntry   string
-	lbQuiet       bool // suppress Lightbringer info/debug logs
-	accountsPath   string
-	snapshotsPath  string
-	logsPath       string
-	shredstorePath string
-	bootstrapMode string
-	blockMaxRPS   string
-	blockInflight string
-	txpar         string
+	mode            string // quick, full, manual
+	cluster         string
+	rpcEndpoint     string
+	enableLB        bool
+	gossipEntry     string
+	lbQuiet         bool // suppress Lightbringer info/debug logs
+	accountsPath    string
+	snapshotsPath   string
+	logsPath        string
+	shredstorePath  string
+	bootstrapMode   string
+	blockMaxRPS     string
+	blockInflight   string
+	txpar           string
 	consensusPolicy string
-	snapshotKeep  string
-	logLevel      string
-	rpcPort       string
+	snapshotKeep    string
+	logLevel        string
+	rpcPort         string
 
 	// System
 	cpuCores   int
@@ -139,24 +139,25 @@ func newSetupModel() setupModel {
 	absPath, _ := filepath.Abs(outputPath)
 	storage := config.DefaultStoragePaths()
 	return setupModel{
-		screen:         scrMode,
-		cpuCores:       runtime.NumCPU(),
-		disks:          DetectDisks(),
-		cluster:        "mainnet-beta",
-		rpcEndpoint:    "https://api.mainnet-beta.solana.com",
-		accountsPath:   storage.Accounts,
-		snapshotsPath:  storage.Snapshots,
-		logsPath:       storage.Logs,
-		shredstorePath: storage.Shredstore,
-		bootstrapMode: "auto",
-		blockMaxRPS:   "8",
-		blockInflight: "8",
-		txpar:         fmt.Sprintf("%d", runtime.NumCPU()*2),
+		screen:          scrMode,
+		cpuCores:        runtime.NumCPU(),
+		disks:           DetectDisks(),
+		cluster:         "mainnet-beta",
+		rpcEndpoint:     "https://api.mainnet-beta.solana.com",
+		lbQuiet:         config.LightbringerQuietDefault,
+		accountsPath:    storage.Accounts,
+		snapshotsPath:   storage.Snapshots,
+		logsPath:        storage.Logs,
+		shredstorePath:  storage.Shredstore,
+		bootstrapMode:   "auto",
+		blockMaxRPS:     "8",
+		blockInflight:   "8",
+		txpar:           fmt.Sprintf("%d", runtime.NumCPU()*2),
 		consensusPolicy: "halt",
-		snapshotKeep:  "1",
-		logLevel:      "info",
-		rpcPort:       "8899",
-		configPath:    absPath,
+		snapshotKeep:    "1",
+		logLevel:        "info",
+		rpcPort:         "8899",
+		configPath:      absPath,
 	}
 }
 
@@ -281,8 +282,8 @@ func (m setupModel) currentItems() []menuItem {
 		}
 	case scrLightbringerQuiet:
 		return []menuItem{
-			menuOptionDesc("Normal logs", "false", "Show all info messages (default)"),
-			menuOptionDesc("Quiet mode", "true", "Only warnings and errors — recommended for long runs"),
+			menuOptionDesc("Quiet mode", "true", "Only warnings and errors — default and recommended for long runs"),
+			menuOptionDesc("Normal logs", "false", "Show all info messages"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -403,7 +404,7 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 	case scrLightbringer:
 		m.enableLB = value == "enable"
 		if !m.enableLB {
-			m.lbQuiet = false // Reset dependent state so disable→re-enable starts clean.
+			m.lbQuiet = config.LightbringerQuietDefault // Reset dependent state so disable→re-enable starts clean.
 		}
 		if m.enableLB {
 			m.pushInput(scrGossip)
@@ -562,38 +563,52 @@ func (m *setupModel) validateAndApplyInput() bool {
 		m.gossipEntry = val
 
 	case scrStorage:
-		if !m.requireNonEmpty(val) { return false }
+		if !m.requireNonEmpty(val) {
+			return false
+		}
 		m.accountsPath = filepath.Clean(val)
 
 	case scrStorageSnap:
-		if !m.requireNonEmpty(val) { return false }
+		if !m.requireNonEmpty(val) {
+			return false
+		}
 		m.snapshotsPath = filepath.Clean(val)
 
 	case scrStorageLogs:
-		if !m.requireNonEmpty(val) { return false }
+		if !m.requireNonEmpty(val) {
+			return false
+		}
 		m.logsPath = filepath.Clean(val)
 
 	case scrBlockTuning:
 		if val != "" {
-			if !m.requirePositiveInt(val) { return false }
+			if !m.requirePositiveInt(val) {
+				return false
+			}
 			m.blockMaxRPS = val
 		}
 
 	case scrBlockInflight:
 		if val != "" {
-			if !m.requirePositiveInt(val) { return false }
+			if !m.requirePositiveInt(val) {
+				return false
+			}
 			m.blockInflight = val
 		}
 
 	case scrReplay:
 		if val != "" {
-			if !m.requirePositiveInt(val) { return false }
+			if !m.requirePositiveInt(val) {
+				return false
+			}
 			m.txpar = val
 		}
 
 	case scrRPCPort:
 		if val != "" {
-			if !m.requirePort(val) { return false }
+			if !m.requirePort(val) {
+				return false
+			}
 			m.rpcPort = val
 		}
 	}
@@ -652,13 +667,13 @@ func (m setupModel) View() string {
 	case scrRPC:
 		return banner + "\n" + renderInput("RPC Endpoint",
 			"Solana RPC endpoint for fetching blocks and cluster data\n"+
-			"Public endpoint works to start · upgrade to private RPC for production",
+				"Public endpoint works to start · upgrade to private RPC for production",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrGossip:
 		return banner + "\n" + renderInput("Gossip Entrypoint",
 			"IP:port of a Solana validator running gossip\n"+
-			"Used to receive shreds from the network",
+				"Used to receive shreds from the network",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorage:
@@ -685,38 +700,38 @@ func (m setupModel) View() string {
 	case scrStorageSnap:
 		return banner + "\n" + renderInput("Snapshots Path",
 			"Downloaded snapshots for bootstrapping · ~100 GB for full + incremental\n"+
-			"Can be on a slower drive than AccountsDB",
+				"Can be on a slower drive than AccountsDB",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorageLogs:
 		return banner + "\n" + renderInput("Logs Path",
 			"Runtime logs, replay timings, and diagnostics\n"+
-			"Auto-rotated · each run gets its own directory",
+				"Auto-rotated · each run gets its own directory",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrBlockTuning:
 		return banner + "\n" + renderInput("Max Requests Per Second",
 			"How aggressively to fetch blocks from RPC\n"+
-			"Match your provider's rate limit · typical: 5–10 for public, 50+ for private",
+				"Match your provider's rate limit · typical: 5–10 for public, 50+ for private",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrBlockInflight:
 		return banner + "\n" + renderInput("Max Inflight Workers",
 			"Concurrent block fetch workers · should match max RPS\n"+
-			fmt.Sprintf("Current max RPS: %s", m.blockMaxRPS),
+				fmt.Sprintf("Current max RPS: %s", m.blockMaxRPS),
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrReplay:
 		rec := fmt.Sprintf("%d", m.cpuCores*2)
 		return banner + "\n" + renderInput("Transaction Parallelism",
 			fmt.Sprintf("Parallel workers for block execution\n"+
-			"Your system: %d cores · recommended: %s workers (2× cores)", m.cpuCores, rec),
+				"Your system: %d cores · recommended: %s workers (2× cores)", m.cpuCores, rec),
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrRPCPort:
 		return banner + "\n" + renderInput("Mithril RPC Port",
 			"JSON-RPC interface for querying Mithril's state\n"+
-			"Default: 8899 · set to 0 to disable",
+				"Default: 8899 · set to 0 to disable",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrReview:
@@ -842,9 +857,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		fmt.Fprintf(&cfg, "gossip_entrypoint = %q\n", m.gossipEntry)
 		cfg.WriteString("grpc_addr = \"127.0.0.1:3001\"\n")
 		cfg.WriteString("rpc_addr = \"127.0.0.1:3000\"\n")
-		if m.lbQuiet {
-			cfg.WriteString("quiet = true\n")
-		}
+		fmt.Fprintf(&cfg, "quiet = %t\n", m.lbQuiet)
 		cfg.WriteString("\n")
 	}
 

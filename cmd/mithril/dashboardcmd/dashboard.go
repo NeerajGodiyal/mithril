@@ -767,8 +767,8 @@ func menuOptionsFor(section, key string) []editOption {
 		}
 	case "lightbringer.quiet":
 		return []editOption{
-			{label: "false", value: "false", desc: "Show all info messages (default)"},
-			{label: "true", value: "true", desc: "Only warnings and errors — recommended for long runs"},
+			{label: "true", value: "true", desc: "Only warnings and errors — default and recommended for long runs"},
+			{label: "false", value: "false", desc: "Show all info messages"},
 		}
 	case "log.level":
 		return []editOption{
