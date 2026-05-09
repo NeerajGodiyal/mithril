@@ -38,7 +38,7 @@ const (
 	maxBase58TxSize                         = 1683
 	maxBase64TxSize                         = 1644
 	packetDataSize                          = 1232
-	sendTransactionLeaderForwardCount       = 5
+	sendTransactionLeaderForwardCount       = 10
 	sendTransactionTargetCount              = sendTransactionLeaderForwardCount + 1
 	sendTransactionLeaderLookahead          = 64
 	sendTransactionClusterNodesRefreshEvery = 10 * time.Minute
