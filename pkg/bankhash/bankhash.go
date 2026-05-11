@@ -3,16 +3,13 @@ package bankhash
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"sort"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
-	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/zeebo/blake3"
@@ -67,12 +64,7 @@ func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Acco
 		finalHasher.Write(acctsLtHashBytes)
 		bankHash = finalHasher.Sum(nil)
 	} else {
-		epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
-		if shouldIncludeEah(epochSchedule, slotCtx) {
-			panic("EAH no longer supported by mithril")
-		} else {
-			bankHash = hasher.Sum(nil)
-		}
+		bankHash = hasher.Sum(nil)
 	}
 
 	return bankHash
@@ -112,31 +104,6 @@ func calculateSingleAcctHash(acct accounts.Account) acctHash {
 	_, _ = hasher.Write(acct.Key[:])
 
 	return newAcctHash(acct.Key, hasher.Sum(nil))
-}
-
-func calculateSingleAcctHashOnly(acct accounts.Account) []byte {
-	hasher := blake3.New()
-
-	var lamportBytes [8]byte
-	binary.LittleEndian.PutUint64(lamportBytes[:], acct.Lamports)
-	_, _ = hasher.Write(lamportBytes[:])
-
-	var rentEpochBytes [8]byte
-	binary.LittleEndian.PutUint64(rentEpochBytes[:], acct.RentEpoch)
-	_, _ = hasher.Write(rentEpochBytes[:])
-
-	_, _ = hasher.Write(acct.Data)
-
-	if acct.Executable {
-		_, _ = hasher.Write([]byte{1})
-	} else {
-		_, _ = hasher.Write([]byte{0})
-	}
-
-	_, _ = hasher.Write(acct.Owner[:])
-	_, _ = hasher.Write(acct.Key[:])
-
-	return hasher.Sum(nil)
 }
 
 func calculateAccountHashes(accts []*accounts.Account) []acctHash {
@@ -179,54 +146,4 @@ func calculateAcctsDeltaHash(accts []*accounts.Account) []byte {
 	}
 
 	return computeMerkleRootLoop(hashes)
-}
-
-func calculateEpochAcctsHash(acctsDb *accountsdb.AccountsDb) []byte {
-	mlog.Log.Infof("computing EAH")
-
-	// get all pubkeys in acctsdb
-	allKeys := acctsDb.AllKeys()
-
-	// compute acct hashes
-	hashes := make([][]byte, len(allKeys))
-	for i, pk := range allKeys {
-		pkObj := solana.PublicKeyFromBytes(pk)
-
-		acct, err := acctsDb.GetAccount(0, pkObj)
-		if err != nil {
-			panic(fmt.Sprintf("unable to fetch acct in EAH calculation: %s", pkObj))
-		}
-		if acct.Lamports != 0 {
-			hashes[i] = calculateSingleAcctHashOnly(*acct)
-		}
-	}
-
-	// merkel root loop
-	return computeMerkleRootLoop(hashes)
-}
-
-const maxLockoutHistory = 31
-const calculateIntervalBuffer = 150
-const minimumCalculationInterval = maxLockoutHistory + calculateIntervalBuffer
-
-func isEnabledThisEpoch(epochSchedule *sealevel.SysvarEpochSchedule, epoch uint64) bool {
-	slotsPerEpoch := epochSchedule.SlotsInEpoch(epoch)
-	calculationOffsetStart := slotsPerEpoch / 4
-	calculationOffsetStop := (slotsPerEpoch / 4) * 3
-	calculationInterval := safemath.SaturatingSubU64(calculationOffsetStop, calculationOffsetStart)
-
-	return calculationInterval >= minimumCalculationInterval
-}
-
-func shouldIncludeEah(epochSchedule *sealevel.SysvarEpochSchedule, slotCtx *sealevel.SlotCtx) bool {
-	if !isEnabledThisEpoch(epochSchedule, slotCtx.Epoch) {
-		return false
-	}
-
-	slotsPerEpoch := epochSchedule.SlotsInEpoch(slotCtx.Epoch)
-	calculationOffsetStop := (slotsPerEpoch / 4) * 3
-	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(slotCtx.Epoch)
-	stopSlot := safemath.SaturatingAddU64(firstSlotInEpoch, calculationOffsetStop)
-
-	return slotCtx.ParentSlot < stopSlot && slotCtx.Slot >= stopSlot
 }

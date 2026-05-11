@@ -2,7 +2,6 @@ package bankhash
 
 import "crypto/sha256"
 
-const maxMerkleHeight = 16
 const merkleFanout = 16
 
 func divCeil(x uint64, y uint64) uint64 {

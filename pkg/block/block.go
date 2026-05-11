@@ -19,7 +19,6 @@ type Block struct {
 	Versions                            []uint8
 	Entries                             []*TxEntry
 	BankHash                            [32]byte
-	EpochAcctsHash                      []byte
 	EahWorkaroundBankhash               []byte
 	HasEahWorkaround                    bool
 	ParentBankhash                      [32]byte

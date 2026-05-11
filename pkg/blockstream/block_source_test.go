@@ -634,6 +634,60 @@ func TestSetLastExecutedSlotAdvancesDeferredLightbringerFrontier(t *testing.T) {
 	}
 }
 
+func TestForceRPCForCatchupRewindsConsensusManagedFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.lastExecutedSlot.Store(120)
+	bs.nextSlotToSend = 150
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.slotState[121] = slotDone
+	bs.slotState[149] = slotDone
+	bs.slotState[151] = slotInflight
+	bs.retrySlots = []uint64{119, 121, 149, 151}
+
+	bs.forceRPCForCatchup(64)
+
+	if got := bs.nextSlotToSend; got != 121 {
+		t.Fatalf("expected RPC catchup frontier to rewind to replay's next slot 121, got %d", got)
+	}
+	if bs.lightbringerActive.Load() {
+		t.Fatalf("expected Lightbringer to be marked inactive")
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected scheduler to be told to resume RPC from the rewound frontier")
+	}
+	if _, exists := bs.reorderBuffer[121]; exists {
+		t.Fatalf("expected Lightbringer slot 121 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[149]; exists {
+		t.Fatalf("expected Lightbringer slot 149 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[151]; !exists {
+		t.Fatalf("expected RPC buffered slot 151 to remain")
+	}
+	if _, exists := bs.slotState[121]; exists {
+		t.Fatalf("expected slot state 121 to be cleared")
+	}
+	if _, exists := bs.slotState[149]; exists {
+		t.Fatalf("expected slot state 149 to be cleared")
+	}
+	if _, exists := bs.slotState[151]; exists {
+		t.Fatalf("expected consensus-managed catchup to clear future RPC slot state for rescheduling")
+	}
+	if len(bs.retrySlots) != 1 || bs.retrySlots[0] != 119 {
+		t.Fatalf("expected only retries before the replay frontier to remain, got %+v", bs.retrySlots)
+	}
+}
+
 func TestEmitOrderedBlocksDirectlyStreamsConsensusManagedLightbringerObservations(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:                   BlockSourceLightbringer,

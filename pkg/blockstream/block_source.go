@@ -555,6 +555,25 @@ func (bs *BlockSource) currentModeString() string {
 	return "catchup"
 }
 
+func (bs *BlockSource) rewindConsensusManagedFrontierForRPCFallbackLocked() (waitingSlot uint64, previousWaitingSlot uint64) {
+	waitingSlot = bs.nextSlotToSend
+	previousWaitingSlot = waitingSlot
+	if !bs.consensusManagedLightbringer {
+		return waitingSlot, previousWaitingSlot
+	}
+
+	replayNextSlot := bs.startSlot
+	if lastExecuted := bs.lastExecutedSlot.Load(); lastExecuted != 0 {
+		replayNextSlot = lastExecuted + 1
+	}
+	if replayNextSlot == 0 || replayNextSlot >= waitingSlot {
+		return waitingSlot, previousWaitingSlot
+	}
+
+	bs.nextSlotToSend = replayNextSlot
+	return replayNextSlot, previousWaitingSlot
+}
+
 func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 	if bs.sourceType != BlockSourceLightbringer || bs.lightbringerEndpoint == "" {
 		return
@@ -564,13 +583,13 @@ func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 	bs.lightbringerCooldownUntil.Store(0)
 	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
 	wasActive := bs.lightbringerActive.Swap(false)
-	bs.lightbringerNeedRPCResume.Store(false)
+	bs.lightbringerNeedRPCResume.Store(true)
 	bs.clearLightbringerGapWatch()
 	bs.resetLightbringerRepairSlot()
 	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
 
 	bs.reorderMu.Lock()
-	waitingSlot := bs.nextSlotToSend
+	waitingSlot, previousWaitingSlot := bs.rewindConsensusManagedFrontierForRPCFallbackLocked()
 	removedSlots := make([]uint64, 0)
 	for slot, blk := range bs.reorderBuffer {
 		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
@@ -612,11 +631,21 @@ func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 	}
 
 	if wasActive {
+		if previousWaitingSlot != waitingSlot {
+			mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | reason=lost_tip | gap=%d | rewound_emission_frontier_from=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
+				waitingSlot, gap, previousWaitingSlot, len(removedSlots), clearedPrefetched)
+			return
+		}
 		mlog.Log.Warnf("BLOCK SOURCE SWITCH: LIGHTBRINGER -> RPC at slot %d | reason=lost_tip | gap=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
 			waitingSlot, gap, len(removedSlots), clearedPrefetched)
 		return
 	}
 	if oldHandoff != 0 || len(removedSlots) > 0 || clearedPrefetched > 0 {
+		if previousWaitingSlot != waitingSlot {
+			mlog.Log.Warnf("BLOCK SOURCE STATUS: abandoning pending Lightbringer handoff and forcing RPC catchup | waiting_slot=%d | gap=%d | rewound_emission_frontier_from=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
+				waitingSlot, gap, previousWaitingSlot, len(removedSlots), clearedPrefetched)
+			return
+		}
 		mlog.Log.Warnf("BLOCK SOURCE STATUS: abandoning pending Lightbringer handoff and forcing RPC catchup | waiting_slot=%d | gap=%d | cleared_buffered_lightbringer=%d | dropped_prefetched_lightbringer=%d",
 			waitingSlot, gap, len(removedSlots), clearedPrefetched)
 		return

@@ -359,18 +359,6 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 	}
 }
 
-func isSysvar(pubkey solana.PublicKey) bool {
-	if pubkey == sealevel.SysvarClockAddr || pubkey == sealevel.SysvarEpochScheduleAddr ||
-		pubkey == sealevel.SysvarFeesAddr || pubkey == sealevel.SysvarInstructionsAddr ||
-		pubkey == sealevel.SysvarRecentBlockHashesAddr || pubkey == sealevel.SysvarRentAddr ||
-		pubkey == a.SysvarRewardsAddr || pubkey == sealevel.SysvarSlotHashesAddr ||
-		pubkey == sealevel.SysvarSlotHistoryAddr || pubkey == sealevel.SysvarStakeHistoryAddr {
-		return true
-	} else {
-		return false
-	}
-}
-
 func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochScheduleAddr)
@@ -849,10 +837,7 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 	block *b.Block,
 	mithrilState *state.MithrilState,
-	epochCtx *ReplayCtx,
-	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient,
-	auxBackupEndpoints []string) error {
+	epochSchedule *sealevel.SysvarEpochSchedule) error {
 
 	// Read from state file manifest_* fields (required)
 	if mithrilState.ManifestParentBankhash == "" {
@@ -890,8 +875,6 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 		return fmt.Errorf("corrupted state file: failed to decode manifest_evicted_blockhash: %w", err)
 	}
 	block.LatestEvictedBlockhash = evictedHash
-
-	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 
 	setupInitialVoteAcctsAndStakeAccts(acctsDb, block)
 	configureGlobalCtx(block)
@@ -931,11 +914,8 @@ func reconstructFeeRateGovernor(s *state.MithrilState) *sealevel.FeeRateGovernor
 }
 
 func configureBlock(block *b.Block,
-	epochCtx *ReplayCtx,
 	lastSlotCtx *sealevel.SlotCtx,
-	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient,
-	auxBackupEndpoints []string) error {
+	epochSchedule *sealevel.SysvarEpochSchedule) error {
 
 	copy(block.ParentBankhash[:], lastSlotCtx.FinalBankhash)
 	block.AcctsLtHash = lastSlotCtx.AcctsLtHash
@@ -943,7 +923,6 @@ func configureBlock(block *b.Block,
 	block.EpochStakesPerVoteAcct = lastSlotCtx.VoteAccts
 	block.ParentSlot = lastSlotCtx.Slot
 	block.LatestEvictedBlockhash = lastSlotCtx.LatestEvictedBlockhash
-	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 	block.PrevFeeRateGovernor = lastSlotCtx.FeeRateGovernor
 	block.PrevNumSignatures = lastSlotCtx.NumSignatures
 	block.TotalEpochStake = lastSlotCtx.TotalEpochStake
@@ -1005,16 +984,12 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	block *b.Block,
 	resumeState *ResumeState,
 	mithrilState *state.MithrilState,
-	epochCtx *ReplayCtx,
-	epochSchedule *sealevel.SysvarEpochSchedule,
-	rpcClient *rpcclient.RpcClient,
-	auxBackupEndpoints []string) error {
+	epochSchedule *sealevel.SysvarEpochSchedule) error {
 
 	// Use resume state for parent info (the actual last replayed slot)
 	copy(block.ParentBankhash[:], resumeState.ParentBankhash)
 	block.ParentSlot = resumeState.ParentSlot
 	block.AcctsLtHash = resumeState.AcctsLtHash
-	block.EpochAcctsHash = epochCtx.EpochAcctsHash
 
 	// Reconstruct PrevFeeRateGovernor from state file static fields + resume dynamic fields
 	prevFeeRateGovernor := reconstructFeeRateGovernor(mithrilState)
@@ -1416,7 +1391,6 @@ func ReplayBlocks(
 
 	var readyConsensusPath *pendingConsensusPath
 	observedConsensusBlocks := make(map[uint64]*b.Block)
-	consensusCatchupHoldLogged := false
 
 	var opts *blockstream.BlockSourceOpts
 	if useLightbringer {
@@ -1549,26 +1523,18 @@ func ReplayBlocks(
 		stats := blockStream.GetFetchStats()
 		if consensusBufferedExecutionActive && !stats.IsNearTip {
 			anchorSlot := currentConsensusAnchorSlot()
-			hasObservedBlocks := len(observedConsensusBlocks) > 0
-			hasReadyDecisions := readyConsensusPath != nil && len(readyConsensusPath.decisions) > 0
-			hasUnresolvedGapAhead := stats.NextSlot > anchorSlot+1
-
-			if hasObservedBlocks || hasReadyDecisions || hasUnresolvedGapAhead {
-				if !consensusCatchupHoldLogged {
-					mlog.Log.Warnf("forkchoice: retaining buffered execution across catchup fallback at slot %d because anchor %d still has unresolved slots before next emitted slot %d",
-						triggerSlot, anchorSlot, stats.NextSlot)
-					consensusCatchupHoldLogged = true
-				}
-				return
+			discardedObservedBlocks := len(observedConsensusBlocks)
+			readyDecisionCount := 0
+			if readyConsensusPath != nil {
+				readyDecisionCount = len(readyConsensusPath.decisions)
 			}
 
 			consensusBufferedExecutionActive = false
 			readyConsensusPath = nil
 			clearObservedConsensusBlocks()
 			observeConsensusAnchor()
-			mlog.Log.Warnf("forkchoice: suspending buffered execution at slot %d because block source left near-tip mode (anchor=%d)",
-				triggerSlot, currentConsensusAnchorSlot())
-			consensusCatchupHoldLogged = false
+			mlog.Log.Warnf("forkchoice: suspending buffered execution at slot %d because block source left near-tip mode; RPC catchup will continue from anchor %d (discarded_observed_blocks=%d discarded_ready_decisions=%d next_emitted_slot=%d)",
+				triggerSlot, anchorSlot, discardedObservedBlocks, readyDecisionCount, stats.NextSlot)
 		}
 	}
 
@@ -1582,7 +1548,6 @@ func ReplayBlocks(
 				return nil
 			}
 			consensusBufferedExecutionActive = true
-			consensusCatchupHoldLogged = false
 			readyConsensusPath = nil
 			observeConsensusAnchor()
 			pruneObservedConsensusBlocks(currentConsensusAnchorSlot())
@@ -1702,6 +1667,19 @@ func ReplayBlocks(
 
 			syncConsensusBufferedExecutionMode(block.Slot)
 
+			if block.FromLightbringer {
+				stats := blockStream.GetFetchStats()
+				if shouldDiscardLightbringerObservationAfterFallback(isLive, useLightbringer, block, stats) {
+					modeStr := "catchup"
+					if stats.IsNearTip {
+						modeStr = "near-tip"
+					}
+					mlog.Log.Warnf("forkchoice: discarding stale Lightbringer observation for slot %d after source fallback (mode=%s current_source=%s anchor=%d next_emitted_slot=%d)",
+						block.Slot, modeStr, stats.CurrentSource, currentConsensusAnchorSlot(), stats.NextSlot)
+					continue
+				}
+			}
+
 			if err := observeBlockForConsensus(block); err != nil {
 				if errors.Is(err, forkchoice.ErrEquivocation) {
 					result.Error = fmt.Errorf("forkchoice: equivocation detected at slot %d", block.Slot)
@@ -1729,7 +1707,6 @@ func ReplayBlocks(
 						mlog.Log.Warnf("forkchoice: failed to resolve a confirmed path from anchor %d after observing slot %d: %v",
 							currentConsensusAnchorSlot(), block.Slot, err)
 						result.Error = err
-						break
 					}
 				}
 				if result.Error != nil {
@@ -1790,13 +1767,13 @@ func ReplayBlocks(
 		if lastSlotCtx == nil {
 			if resumeState != nil {
 				// RESUME: Use resume state + state file (for static fields)
-				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, mithrilState, replayCtx, epochSchedule, rpcc, rpcBackups)
+				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, mithrilState, epochSchedule)
 			} else {
 				// FRESH START: Use state file manifest_* fields
-				configErr = configureInitialBlock(acctsDb, block, mithrilState, replayCtx, epochSchedule, rpcc, rpcBackups)
+				configErr = configureInitialBlock(acctsDb, block, mithrilState, epochSchedule)
 			}
 		} else {
-			configErr = configureBlock(block, replayCtx, lastSlotCtx, epochSchedule, rpcc, rpcBackups)
+			configErr = configureBlock(block, lastSlotCtx, epochSchedule)
 		}
 		if configErr != nil {
 			mlog.Log.Errorf("FATAL: block configuration failed: %v", configErr)
@@ -2425,7 +2402,6 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		VoteTimestamps:  block.VoteTimestamps,
 		TotalEpochStake: block.TotalEpochStake,
 
-		EpochsAcctHash:        block.EpochAcctsHash,
 		EahWorkaroundBankhash: block.EahWorkaroundBankhash,
 
 		HasEahWorkaround: block.HasEahWorkaround,
