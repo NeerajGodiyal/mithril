@@ -2,9 +2,9 @@
 
 Mithril uses a lightweight confirmed-block fork-choice heuristic when replaying recent blocks from Lightbringer.
 
-The goal is to decide which locally observed blocks should be executed before Mithril commits to executing them. This helps Mithril rely less on RPC providers for recent blocks: Lightbringer supplies the block data from Turbine and Repair, while Mithril uses confirmed-block information and observed parent links to choose the execution path.
+The goal is to decide which locally observed blocks should be executed before Mithril commits to executing them. This allows Mithril be independent of RPC providers for recent blocks (except for catch-up purposes): Lightbringer supplies the block data from Turbine and Repair, and Mithril parses vote transactions in received blocks to derive confirmed-block information, in addition to observing parent links to decide upon the correct execution path.
 
-This heuristic does **not** replace Mithril’s execution engine or bankhash verification. It only selects a PoH-consistent path of blocks and skipped slots. Mithril still executes the selected blocks and verifies the resulting bankhash separately.
+These heuristics allow Mithril to select a PoH-consistent path of blocks and skipped slots. Mithril then executes selected blocks and verifies the resulting bankhash for consistency against the one expected based on vote tallies.
 
 ## What Problem It Solves
 
