@@ -1,0 +1,144 @@
+## Mithril's Confirmed Fork Choice Heuristic
+```
+                     PoH at slot (n-1)
+                           │
+                           ▼
+                     +--------------+
+                     |   pohPrev    |
+                     +--------------+
+                               |
+                --------------------------------
+                |                              |
+         empty_poh()                      blockHash(block_n)
+                |                              |
+                v                              v
+          Slot n empty                    Slot n uses block
+        (decision = false)              (decision = true)
+                |                              |
+         ---------------                 ---------------
+         |             |                 |             |
+ empty_poh()     blockHash()      empty_poh()     blockHash()
+    on H0            on H0            on H1           on H1
+  (slot n+1)       (slot n+1)       (slot n+1)     (slot n+1)
+     |                |                |              |
+     ·                ·                ·              ·
+     ·   (binary branching continues across slots)   ·
+     ·                ·                ·              ·
+     |                |                |              |
+     ---------------------------------------------------
+                               |
+                               ▼
+                    All possible PoH hashes at slot n+k
+                               |
+                -----------------------------------------
+                |                                       |
+        (Non-matching hash)                   (MATCHES targetBlockHash)
+                |                                       |
+         discarded path                             FOUND PATH
+                                                        |
+                                                        ▼
+                      skipPath returns boolean list:
+
+              path = [ p_n, p_{n+1}, ..., p_{n+k} ]
+
+          where p_i = true  → use block at slot i
+                p_i = false → slot i is empty
+
+Example:
+    Slot n:       true
+    Slot n+1:     false
+    Slot n+2:     false
+    Slot n+3:     true   ← this sequence produced the committed hash
+```
+
+## Pseudo Golang
+```
+func emptyPoH(prev Hash) Hash 
+func blockHash(prev Hash, blk *Block) Hash 
+
+// candidate represents one possible PoH state and the decisions that led there.
+type candidate struct {
+    hash Hash   // PoH at current slot
+    path []bool // decisions from startSlot..currentSlot (inclusive)
+}
+
+
+// skipPath tries to find a sequence of decisions (empty vs block) from
+// startSlot to endSlot such that, starting from pohPrev (PoH at startSlot-1),
+// we end up with targetBlockHash at endSlot.
+//
+// blocksBySlot should contain any known blocks between startSlot and endSlot,
+// including the committed block at endSlot.
+//
+// Returns (path, true) on success, or (nil, false) if no path exists.
+//
+// path[i] corresponds to slot (startSlot + i):
+//   true  -> use the block at that slot
+//   false -> slot is empty
+
+func skipPath(
+    startSlot uint64,
+    endSlot   uint64,
+    pohPrev   Hash,
+    blocksBySlot map[uint64]*Block,
+    targetBlockHash Hash,
+) ([]bool, bool) {
+
+    if endSlot < startSlot {
+        return nil, false
+    }
+
+    // We conceptually start at slot (startSlot - 1) with PoH = pohPrev
+    // and no decisions taken yet.
+    candidates := []candidate{
+        { hash: pohPrev, path: nil },
+    }
+
+    // Move forward one slot at a time.
+    for slot := startSlot; slot <= endSlot; slot++ {
+        blk := blocksBySlot[slot] // may be nil if we have no block for this slot
+
+        var next []candidate
+
+        // For each current candidate state, branch on:
+        //   - slot is empty
+        //   - slot contains a block (if we have one)
+        for _, cand := range candidates {
+            
+            // slot is empty
+            {
+                h := emptyPoH(cand.hash)
+                // copy path and append decision "false" (empty)
+                newPath := append(append([]bool(nil), cand.path...), false)
+                next = append(next, candidate{
+                    hash: h,
+                    path: newPath,
+                })
+            }
+
+            // slot contains a block (if present)
+            if blk != nil {
+                h := blockHash(cand.hash, blk)
+                // copy path and append decision "true" (use block)
+                newPath := append(append([]bool(nil), cand.path...), true)
+                next = append(next, candidate{
+                    hash: h,
+                    path: newPath,
+                })
+            }
+        }
+
+        candidates = next
+    }
+
+    // Look for a candidate whose PoH equals targetBlockHash.
+    for _, cand := range candidates {
+        if string(cand.hash) == string(targetBlockHash) {
+            return cand.path, true
+        }
+    }
+
+    // No valid path from startSlot..endSlot that produces targetBlockHash.
+    return nil, false
+}
+```
