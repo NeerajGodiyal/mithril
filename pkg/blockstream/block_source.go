@@ -589,7 +589,11 @@ func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
 
 	bs.reorderMu.Lock()
-	waitingSlot, previousWaitingSlot := bs.rewindConsensusManagedFrontierForRPCFallbackLocked()
+	waitingSlot := bs.nextSlotToSend
+	previousWaitingSlot := waitingSlot
+	if wasActive {
+		waitingSlot, previousWaitingSlot = bs.rewindConsensusManagedFrontierForRPCFallbackLocked()
+	}
 	removedSlots := make([]uint64, 0)
 	for slot, blk := range bs.reorderBuffer {
 		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
@@ -2722,6 +2726,16 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		var shouldFallbackToRPC bool
 		var emitObservationDirect bool
 
+		if result.slot < bs.nextSlotToSend {
+			bs.slotStateMu.Lock()
+			delete(bs.slotState, result.slot)
+			delete(bs.inflightStart, result.slot)
+			bs.slotStateMu.Unlock()
+			bs.clearSlotErrors(result.slot)
+			bs.reorderMu.Unlock()
+			continue
+		}
+
 		if result.block != nil && result.block.FromLightbringer {
 			handoffSlot := bs.lightbringerHandoffSlot.Load()
 			if handoffSlot != 0 && result.slot >= handoffSlot {
@@ -3019,6 +3033,9 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 	if !bs.shouldUseRPCForSlot(slot) {
 		return false
 	}
+	if bs.slotBeforeEmissionFrontier(slot) {
+		return false
+	}
 
 	if bs.isNearTip.Load() {
 		// Near-tip mode: allow scheduling up to nearTipLookahead slots ahead
@@ -3059,9 +3076,19 @@ func (bs *BlockSource) canScheduleMore(slot uint64) bool {
 	return pending < defaultMaxPending
 }
 
+func (bs *BlockSource) slotBeforeEmissionFrontier(slot uint64) bool {
+	bs.reorderMu.Lock()
+	nextToSend := bs.nextSlotToSend
+	bs.reorderMu.Unlock()
+	return nextToSend != 0 && slot < nextToSend
+}
+
 // scheduleSlot schedules a slot if not already scheduled
 func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 	if !bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+	if bs.slotBeforeEmissionFrontier(slot) {
 		return false
 	}
 
@@ -3086,6 +3113,9 @@ func (bs *BlockSource) scheduleSlot(slot uint64) bool {
 // Returns true only if the request was actually queued.
 func (bs *BlockSource) scheduleBackupRequest(slot uint64) bool {
 	if !bs.shouldUseRPCForSlot(slot) {
+		return false
+	}
+	if bs.slotBeforeEmissionFrontier(slot) {
 		return false
 	}
 
@@ -3263,6 +3293,9 @@ func (bs *BlockSource) scheduler() {
 			bs.reorderMu.Unlock()
 
 			for _, slot := range bs.getRetrySlots() {
+				if waitingSlot != 0 && slot < waitingSlot {
+					continue
+				}
 				if !bs.shouldUseRPCForSlot(slot) {
 					continue
 				}

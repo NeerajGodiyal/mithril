@@ -1665,6 +1665,12 @@ func ReplayBlocks(
 				break
 			}
 
+			if anchorSlot := currentConsensusAnchorSlot(); anchorSlot != 0 && block.Slot <= anchorSlot {
+				mlog.Log.Warnf("replay: discarding stale block source emission for slot %d; already executed through slot %d",
+					block.Slot, anchorSlot)
+				continue
+			}
+
 			syncConsensusBufferedExecutionMode(block.Slot)
 
 			if block.FromLightbringer {

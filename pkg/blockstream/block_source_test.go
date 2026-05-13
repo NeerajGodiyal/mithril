@@ -688,6 +688,42 @@ func TestForceRPCForCatchupRewindsConsensusManagedFrontier(t *testing.T) {
 	}
 }
 
+func TestForceRPCForCatchupKeepsPendingHandoffEmissionFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerHandoffSlot.Store(121)
+	bs.lastExecutedSlot.Store(120)
+	bs.nextSlotToSend = 150
+	bs.reorderBuffer[150] = &b.Block{Slot: 150, FromLightbringer: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.slotState[150] = slotDone
+	bs.slotState[151] = slotInflight
+
+	bs.forceRPCForCatchup(64)
+
+	if got := bs.nextSlotToSend; got != 150 {
+		t.Fatalf("expected pending handoff fallback to keep emitted RPC frontier 150, got %d", got)
+	}
+	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+		t.Fatalf("expected pending handoff to be cleared, got %d", got)
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected scheduler to resume RPC from the current emission frontier")
+	}
+	if _, exists := bs.reorderBuffer[150]; exists {
+		t.Fatalf("expected pending Lightbringer slot 150 to be dropped")
+	}
+	if _, exists := bs.reorderBuffer[151]; !exists {
+		t.Fatalf("expected buffered RPC slot 151 to remain")
+	}
+}
+
 func TestEmitOrderedBlocksDirectlyStreamsConsensusManagedLightbringerObservations(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:                   BlockSourceLightbringer,
@@ -724,6 +760,41 @@ func TestEmitOrderedBlocksDirectlyStreamsConsensusManagedLightbringerObservation
 	}
 	if got := bs.nextSlotToSend; got != 101 {
 		t.Fatalf("expected direct observation to leave nextSlotToSend at 101 until replay resolves it, got %d", got)
+	}
+}
+
+func TestEmitOrderedBlocksDropsResultsBehindEmissionFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  100,
+		EndSlot:    200,
+	})
+
+	bs.nextSlotToSend = 105
+	bs.slotState[103] = slotInflight
+	bs.inflightStart[103] = time.Now()
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+
+	bs.resultQueue <- fetchResult{
+		slot:  103,
+		block: &b.Block{Slot: 103},
+	}
+	close(bs.resultQueue)
+	<-done
+
+	if len(bs.streamChan) != 0 {
+		t.Fatalf("expected stale result to be dropped without emission")
+	}
+	if _, exists := bs.reorderBuffer[103]; exists {
+		t.Fatalf("expected stale result not to enter reorder buffer")
+	}
+	if _, exists := bs.slotState[103]; exists {
+		t.Fatalf("expected stale slot state to be cleared")
 	}
 }
 
