@@ -2,7 +2,7 @@ package sealevel
 
 import (
 	"bytes"
-
+	"errors"
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -16,6 +16,10 @@ const MaxSeedLen = 32
 func translateAndValidateSeeds(vm sbpf.VM, seedsAddr, seedsLen uint64) ([][]byte, error) {
 	if seedsLen > MaxSeeds {
 		return nil, SyscallErrMaxSeedLengthExceeded
+	}
+
+	if syscallAddressRequiresAlignment(executionCtx(vm), seedsAddr, 8) {
+		return nil, errors.New("SyscallError::UnalignedPointer")
 	}
 
 	seedsData, err := vm.Translate(seedsAddr, seedsLen*16, false)

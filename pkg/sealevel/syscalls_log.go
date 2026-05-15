@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"unicode/utf8"
 
 	//"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -26,6 +27,9 @@ func SyscallLogImpl(vm sbpf.VM, ptr, strlen uint64) (uint64, error) {
 	buf := make([]byte, strlen)
 	if err = vm.Read(ptr, buf); err != nil {
 		return syscallErr(err)
+	}
+	if !utf8.Valid(buf) {
+		return syscallErr(SyscallErrInvalidString)
 	}
 
 	execCtx.Log.Log("Program log: " + string(buf))

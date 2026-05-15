@@ -3,7 +3,6 @@ package sealevel
 import (
 	"bytes"
 	"encoding/binary"
-	"unsafe"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
@@ -24,6 +23,9 @@ const (
 	MaxCpiAccountInfos         = 128
 	MaxCpiAccountInfosSimd0339 = 255
 	AccountInfoByteSize        = 80
+
+	solAccountInfoCDataLenOffset    = 16
+	solAccountInfoRustDataLenOffset = 32
 )
 
 func checkInstructionSize(execCtx *ExecutionCtx, numAccounts uint64, dataLen uint64) error {
@@ -336,8 +338,82 @@ func cpiInvokeUnits(f *features.Features) uint64 {
 	return cu.CUInvokeUnits
 }
 
+func syscallParameterAddressRangeRestricted(execCtx *ExecutionCtx, addr, size uint64) bool {
+	return execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) &&
+		safemath.SaturatingAddU64(addr, size) >= sbpf.VaddrInput
+}
+
+func currentSerializedAccountMetadata(execCtx *ExecutionCtx, indexInCaller uint64) (serializedAcctMetadata, error) {
+	if len(execCtx.serializedAccountMetadataStack) == 0 {
+		return serializedAcctMetadata{}, InstrErrMissingAccount
+	}
+	accountMetadatas := execCtx.serializedAccountMetadataStack[len(execCtx.serializedAccountMetadataStack)-1]
+	if indexInCaller >= uint64(len(accountMetadatas)) {
+		return serializedAcctMetadata{}, InstrErrMissingAccount
+	}
+	return accountMetadatas[indexInCaller], nil
+}
+
+func checkAccountInfoPointer(vmAddr, expectedVmAddr uint64) error {
+	if vmAddr != expectedVmAddr {
+		return SyscallErrInvalidPointer
+	}
+	return nil
+}
+
+func accountDataLenForCpi(execCtx *ExecutionCtx, refToLenInVm []byte, fallbackLen uint64) uint64 {
+	if execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		return binary.LittleEndian.Uint64(refToLenInVm)
+	}
+	return fallbackLen
+}
+
+func checkCpiDataLength(execCtx *ExecutionCtx, dataLen, originalDataLen uint64, isLoaderDeprecated bool) error {
+	if !execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		return nil
+	}
+
+	reserved := originalDataLen
+	if !isLoaderDeprecated {
+		reserved = safemath.SaturatingAddU64(reserved, MaxPermittedDataIncrease)
+	}
+	if dataLen > reserved {
+		return InstrErrInvalidRealloc
+	}
+	return nil
+}
+
+type inputBackingTranslator interface {
+	TranslateInput(addr uint64, size uint64) ([]byte, error)
+}
+
+type inputRegionLengthUpdater interface {
+	SetInputRegionLength(addr uint64, length uint64, writable bool) bool
+}
+
+type inputRegionDataUpdater interface {
+	SetInputRegionData(addr uint64, data []byte, length uint64, writable bool) bool
+}
+
+func translateSerializedAccountData(vm sbpf.VM, execCtx *ExecutionCtx, addr, size uint64) ([]byte, error) {
+	if accountDataDirectMappingActive(execCtx) {
+		return nil, nil
+	}
+	if execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) {
+		if translator, ok := vm.(inputBackingTranslator); ok {
+			return translator.TranslateInput(addr, size)
+		}
+	}
+	return vm.Translate(addr, size, true)
+}
+
 func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64) ([]SolAccountInfoC, []solana.PublicKey, error) {
 	size := safemath.SaturatingMulU64(accountInfosLen, SolAccountInfoCSize)
+	execCtx := executionCtx(vm)
+	if syscallParameterAddressRangeRestricted(execCtx, accountInfosAddr, size) {
+		return nil, nil, SyscallErrInvalidPointer
+	}
+
 	accountInfosData, err := vm.Translate(accountInfosAddr, size, false)
 	if err != nil {
 		return nil, nil, err
@@ -355,7 +431,6 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 		accountInfos = append(accountInfos, acctInfo)
 	}
 
-	execCtx := executionCtx(vm)
 	err = checkAccountInfos(execCtx, uint64(len(accountInfos)))
 	if err != nil {
 		return nil, nil, err
@@ -384,6 +459,11 @@ func translateAccountInfosC(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64
 
 func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uint64) ([]SolAccountInfoRust, []solana.PublicKey, error) {
 	size := safemath.SaturatingMulU64(accountInfosLen, SolAccountInfoRustSize)
+	execCtx := executionCtx(vm)
+	if syscallParameterAddressRangeRestricted(execCtx, accountInfosAddr, size) {
+		return nil, nil, SyscallErrInvalidPointer
+	}
+
 	accountInfosData, err := vm.Translate(accountInfosAddr, size, false)
 	if err != nil {
 		return nil, nil, err
@@ -401,7 +481,6 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 		accountInfos = append(accountInfos, acctInfo)
 	}
 
-	execCtx := executionCtx(vm)
 	err = checkAccountInfos(execCtx, uint64(len(accountInfos)))
 	if err != nil {
 		return nil, nil, err
@@ -428,7 +507,33 @@ func translateAccountInfosRust(vm sbpf.VM, accountInfosAddr, accountInfosLen uin
 	return accountInfos, accountInfoKeys, nil
 }
 
-func callerAccountFromAccountInfoC(vm sbpf.VM, execCtx *ExecutionCtx, callerAcctIdx uint64, accountInfo SolAccountInfoC, accountInfosAddr uint64) (CallerAccount, error) {
+func callerAccountFromAccountInfoC(vm sbpf.VM, execCtx *ExecutionCtx, indexInCaller, callerAcctIdx uint64, accountInfo SolAccountInfoC, accountInfosAddr uint64, isLoaderDeprecated bool) (CallerAccount, error) {
+	originalDataLen := accountInfo.DataLen
+	var accountMetadata serializedAcctMetadata
+	var err error
+	usesSerializedAccountMetadata := execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) ||
+		execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	if usesSerializedAccountMetadata {
+		accountMetadata, err = currentSerializedAccountMetadata(execCtx, indexInCaller)
+		if err != nil {
+			return CallerAccount{}, err
+		}
+		originalDataLen = accountMetadata.originalDataLen
+	}
+	if execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		if err = checkAccountInfoPointer(accountInfo.KeyAddr, accountMetadata.vmKeyAddr); err != nil {
+			return CallerAccount{}, err
+		}
+		if err = checkAccountInfoPointer(accountInfo.OwnerAddr, accountMetadata.vmOwnerAddr); err != nil {
+			return CallerAccount{}, err
+		}
+		if err = checkAccountInfoPointer(accountInfo.LamportsAddr, accountMetadata.vmLamportsAddr); err != nil {
+			return CallerAccount{}, err
+		}
+		if err = checkAccountInfoPointer(accountInfo.DataAddr, accountMetadata.vmDataAddr); err != nil {
+			return CallerAccount{}, err
+		}
+	}
 
 	lamports, err := vm.Translate(accountInfo.LamportsAddr, 8, true)
 	if err != nil {
@@ -440,31 +545,61 @@ func callerAccountFromAccountInfoC(vm sbpf.VM, execCtx *ExecutionCtx, callerAcct
 		return CallerAccount{}, err
 	}
 
-	cost := accountInfo.DataLen / cu.CUCpiBytesPerUnit
-	err = execCtx.ComputeMeter.Consume(cost)
-	if err != nil {
-		return CallerAccount{}, err
+	dataLenVmAddr := accountInfosAddr + (callerAcctIdx * SolAccountInfoCSize) + solAccountInfoCDataLenOffset
+	if syscallParameterAddressRestricted(execCtx, dataLenVmAddr) {
+		return CallerAccount{}, SyscallErrInvalidPointer
 	}
-
-	serializedData, err := vm.Translate(accountInfo.DataAddr, accountInfo.DataLen, true)
-	if err != nil {
-		return CallerAccount{}, err
-	}
-
-	dataLenVmAddr := (accountInfosAddr + (callerAcctIdx * SolAccountInfoCSize)) + uint64(uintptr(unsafe.Pointer(&accountInfo.DataLen))) - uint64(uintptr(unsafe.Pointer(&accountInfo)))
 
 	refToLenInVm, err := vm.Translate(dataLenVmAddr, 8, true)
 	if err != nil {
 		return CallerAccount{}, err
 	}
 
-	callerAcct := CallerAccount{Lamports: lamports, Owner: owner, OriginalDataLen: accountInfo.DataLen,
+	dataLen := accountDataLenForCpi(execCtx, refToLenInVm, accountInfo.DataLen)
+	err = checkCpiDataLength(execCtx, dataLen, originalDataLen, isLoaderDeprecated)
+	if err != nil {
+		return CallerAccount{}, err
+	}
+
+	cost := dataLen / cu.CUCpiBytesPerUnit
+	err = execCtx.ComputeMeter.Consume(cost)
+	if err != nil {
+		return CallerAccount{}, err
+	}
+
+	serializedData, err := translateSerializedAccountData(vm, execCtx, accountInfo.DataAddr, dataLen)
+	if err != nil {
+		return CallerAccount{}, err
+	}
+
+	callerAcct := CallerAccount{Lamports: lamports, Owner: owner, OriginalDataLen: originalDataLen,
 		SerializedData: serializedData, VmDataAddr: accountInfo.DataAddr, RefToLenInVm: refToLenInVm}
 
 	return callerAcct, nil
 }
 
-func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, accountInfo SolAccountInfoRust) (CallerAccount, error) {
+func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, indexInCaller uint64, accountInfo SolAccountInfoRust, isLoaderDeprecated bool) (CallerAccount, error) {
+	var accountMetadata serializedAcctMetadata
+	var err error
+	usesSerializedAccountMetadata := execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) ||
+		execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	if usesSerializedAccountMetadata {
+		accountMetadata, err = currentSerializedAccountMetadata(execCtx, indexInCaller)
+		if err != nil {
+			return CallerAccount{}, err
+		}
+	}
+	if execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		if err = checkAccountInfoPointer(accountInfo.PubkeyAddr, accountMetadata.vmKeyAddr); err != nil {
+			return CallerAccount{}, err
+		}
+		if err = checkAccountInfoPointer(accountInfo.OwnerAddr, accountMetadata.vmOwnerAddr); err != nil {
+			return CallerAccount{}, err
+		}
+		if syscallParameterAddressRestricted(execCtx, accountInfo.LamportsBoxAddr) {
+			return CallerAccount{}, SyscallErrInvalidPointer
+		}
+	}
 
 	lamportsBoxData, err := vm.Translate(accountInfo.LamportsBoxAddr, RefCellRustSize, false)
 	if err != nil {
@@ -479,14 +614,24 @@ func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, account
 		return CallerAccount{}, err
 	}
 
+	if execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		if err = checkAccountInfoPointer(lamportsBox.Addr, accountMetadata.vmLamportsAddr); err != nil {
+			return CallerAccount{}, err
+		}
+	}
+
 	lamports, err := vm.Translate(lamportsBox.Addr, 8, true)
 	if err != nil {
 		return CallerAccount{}, err
 	}
 
-	owner, err := vm.Translate(accountInfo.OwnerAddr, solana.PublicKeyLength, false)
+	owner, err := vm.Translate(accountInfo.OwnerAddr, solana.PublicKeyLength, true)
 	if err != nil {
 		return CallerAccount{}, err
+	}
+
+	if syscallParameterAddressRestricted(execCtx, accountInfo.DataBoxAddr) {
+		return CallerAccount{}, SyscallErrInvalidPointer
 	}
 
 	dataBoxBytes, err := vm.Translate(accountInfo.DataBoxAddr, RefCellVecRustSize, false)
@@ -502,85 +647,149 @@ func callerAccountFromAccountInfoRust(vm sbpf.VM, execCtx *ExecutionCtx, account
 		return CallerAccount{}, err
 	}
 
-	cost := dataBox.Len / cu.CUCpiBytesPerUnit
+	originalDataLen := dataBox.Len
+	if usesSerializedAccountMetadata {
+		originalDataLen = accountMetadata.originalDataLen
+	}
+	if execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions) {
+		if err = checkAccountInfoPointer(dataBox.Addr, accountMetadata.vmDataAddr); err != nil {
+			return CallerAccount{}, err
+		}
+	}
+
+	dataLenVmAddr := safemath.SaturatingAddU64(accountInfo.DataBoxAddr, solAccountInfoRustDataLenOffset)
+	if syscallParameterAddressRestricted(execCtx, dataLenVmAddr) {
+		return CallerAccount{}, SyscallErrInvalidPointer
+	}
+
+	refToLenInVm, err := vm.Translate(dataLenVmAddr, 8, true)
+	if err != nil {
+		return CallerAccount{}, err
+	}
+
+	dataLen := accountDataLenForCpi(execCtx, refToLenInVm, dataBox.Len)
+	err = checkCpiDataLength(execCtx, dataLen, originalDataLen, isLoaderDeprecated)
+	if err != nil {
+		return CallerAccount{}, err
+	}
+
+	cost := dataLen / cu.CUCpiBytesPerUnit
 	err = execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return CallerAccount{}, err
 	}
 
-	serializedData, err := vm.Translate(dataBox.Addr, dataBox.Len, false)
+	serializedData, err := translateSerializedAccountData(vm, execCtx, dataBox.Addr, dataLen)
 	if err != nil {
 		return CallerAccount{}, err
 	}
 
-	refToLenInVm, err := vm.Translate(safemath.SaturatingAddU64(accountInfo.DataBoxAddr, 32), 8, true)
-	if err != nil {
-		return CallerAccount{}, err
-	}
-
-	callerAcct := CallerAccount{Lamports: lamports, Owner: owner, OriginalDataLen: dataBox.Len,
+	callerAcct := CallerAccount{Lamports: lamports, Owner: owner, OriginalDataLen: originalDataLen,
 		SerializedData: serializedData, VmDataAddr: dataBox.Addr, RefToLenInVm: refToLenInVm}
 
 	return callerAcct, nil
 }
 
-func updateCalleeAccount(execCtx *ExecutionCtx, callerAccount CallerAccount, calleeAccount *BorrowedAccount) error {
+func updateCalleeAccount(vm sbpf.VM, execCtx *ExecutionCtx, callerAccount CallerAccount, calleeAccount *BorrowedAccount) (bool, error) {
 	var err error
+	mustUpdateCaller := false
 
 	callerLamports := binary.LittleEndian.Uint64(callerAccount.Lamports)
 	if calleeAccount.Account.Lamports != callerLamports {
 		err = calleeAccount.SetLamports(callerLamports, execCtx.Features)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	err1 := calleeAccount.CanDataBeResized(uint64(len(callerAccount.SerializedData)))
-	err2 := calleeAccount.DataCanBeChanged(execCtx.Features)
-
-	if err1 != nil {
-		err = err1
-	} else if err2 != nil {
-		err = err2
-	}
-
-	// can't change data
-	if err != nil {
-		if !bytes.Equal(callerAccount.SerializedData, calleeAccount.Data()) {
-			return err
+	if execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) {
+		directMapping := accountDataDirectMappingActive(execCtx)
+		prevLen := uint64(len(calleeAccount.Data()))
+		postLen := binary.LittleEndian.Uint64(callerAccount.RefToLenInVm)
+		if prevLen != postLen {
+			if !directMapping && postLen < prevLen {
+				previousSerializedData, translateErr := translateSerializedAccountData(vm, execCtx, callerAccount.VmDataAddr, prevLen)
+				if translateErr != nil {
+					return false, translateErr
+				}
+				if uint64(len(previousSerializedData)) < prevLen {
+					return false, InstrErrAccountDataTooSmall
+				}
+				for i := postLen; i < prevLen; i++ {
+					previousSerializedData[i] = 0
+				}
+			}
+			err = calleeAccount.SetDataLength(postLen, execCtx.Features)
+			if err != nil {
+				return false, err
+			}
+			mustUpdateCaller = true
 		}
-		err = nil
+
+		if !directMapping && calleeAccount.DataCanBeChanged(execCtx.Features) == nil {
+			if uint64(len(callerAccount.SerializedData)) < postLen {
+				return false, InstrErrAccountDataTooSmall
+			}
+			err = calleeAccount.SetData(execCtx.Features, callerAccount.SerializedData[:postLen])
+			if err != nil {
+				return false, err
+			}
+		}
 	} else {
-		err = calleeAccount.SetData(execCtx.Features, callerAccount.SerializedData)
+		err1 := calleeAccount.CanDataBeResized(uint64(len(callerAccount.SerializedData)))
+		err2 := calleeAccount.DataCanBeChanged(execCtx.Features)
+
+		if err1 != nil {
+			err = err1
+		} else if err2 != nil {
+			err = err2
+		}
+
+		// can't change data
 		if err != nil {
-			return err
+			if !bytes.Equal(callerAccount.SerializedData, calleeAccount.Data()) {
+				return false, err
+			}
+			err = nil
+		} else {
+			err = calleeAccount.SetData(execCtx.Features, callerAccount.SerializedData)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
 
 	if calleeAccount.Owner() != solana.PublicKeyFromBytes(callerAccount.Owner) {
 		err = calleeAccount.SetOwner(execCtx.Features, solana.PublicKeyFromBytes(callerAccount.Owner))
+		if err == nil {
+			mustUpdateCaller = true
+		}
 	}
 
-	return err
+	return mustUpdateCaller, err
 }
 
-func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *BorrowedAccount) error {
+func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *BorrowedAccount, isLoaderDeprecated bool) error {
 	binary.LittleEndian.PutUint64(callerAcct.Lamports, calleeAcct.Lamports())
 	copy(callerAcct.Owner, calleeAcct.Account.Owner[:])
 
 	prevLen := binary.LittleEndian.Uint64(callerAcct.RefToLenInVm)
 	postLen := uint64(len(calleeAcct.Data()))
+	execCtx := executionCtx(vm)
+	syscallParameterAddressRestrictions := execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions)
+	directMapping := accountDataDirectMappingActive(execCtx)
+	maxPermittedIncrease := uint64(MaxPermittedDataIncrease)
+	if syscallParameterAddressRestrictions && isLoaderDeprecated {
+		maxPermittedIncrease = 0
+	}
+	addressSpaceReservedForAccount := safemath.SaturatingAddU64(callerAcct.OriginalDataLen, maxPermittedIncrease)
+
+	if postLen > addressSpaceReservedForAccount && (syscallParameterAddressRestrictions || prevLen != postLen) {
+		return InstrErrInvalidRealloc
+	}
 
 	if prevLen != postLen {
-		// TODO: use constant
-		maxPermittedIncrease := uint64(10240)
-
-		// account data size increased by too much
-		if postLen > safemath.SaturatingAddU64(callerAcct.OriginalDataLen, maxPermittedIncrease) {
-			return InstrErrInvalidRealloc
-		}
-
-		if postLen < prevLen {
+		if !directMapping && postLen < prevLen {
 			if uint64(len(callerAcct.SerializedData)) < postLen {
 				return InstrErrAccountDataTooSmall
 			}
@@ -589,12 +798,14 @@ func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *Borr
 			}
 		}
 
-		sd, err := vm.Translate(callerAcct.VmDataAddr, postLen, true)
-		if err != nil {
-			return err
+		if !directMapping {
+			sd, err := translateSerializedAccountData(vm, execCtx, callerAcct.VmDataAddr, postLen)
+			if err != nil {
+				return err
+			}
+			callerAcct.SerializedData = sd
 		}
 
-		callerAcct.SerializedData = sd
 		binary.LittleEndian.PutUint64(callerAcct.RefToLenInVm, postLen)
 
 		ptrAddr := safemath.SaturatingSubU64(callerAcct.VmDataAddr, 8)
@@ -604,6 +815,10 @@ func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *Borr
 		}
 
 		binary.LittleEndian.PutUint64(serializedLenSlice, postLen)
+	}
+
+	if directMapping {
+		return nil
 	}
 
 	toSlice := callerAcct.SerializedData
@@ -624,9 +839,40 @@ func updateCallerAccount(vm sbpf.VM, callerAcct *CallerAccount, calleeAcct *Borr
 	return nil
 }
 
+func updateCallerAccountRegion(vm sbpf.VM, execCtx *ExecutionCtx, callerAcct *CallerAccount, calleeAcct *BorrowedAccount, isLoaderDeprecated bool) error {
+	reserved := callerAcct.OriginalDataLen
+	if !isLoaderDeprecated {
+		reserved = safemath.SaturatingAddU64(reserved, MaxPermittedDataIncrease)
+	}
+	if reserved == 0 {
+		return nil
+	}
+
+	writable := calleeAcct.DataCanBeChanged(execCtx.Features) == nil
+	if accountDataDirectMappingActive(execCtx) {
+		updater, ok := vm.(inputRegionDataUpdater)
+		if !ok {
+			return nil
+		}
+		if !updater.SetInputRegionData(callerAcct.VmDataAddr, calleeAcct.Data(), uint64(len(calleeAcct.Data())), writable) {
+			return InstrErrMissingAccount
+		}
+	} else {
+		updater, ok := vm.(inputRegionLengthUpdater)
+		if !ok {
+			return nil
+		}
+		if !updater.SetInputRegionLength(callerAcct.VmDataAddr, uint64(len(calleeAcct.Data())), writable) {
+			return InstrErrMissingAccount
+		}
+	}
+	return nil
+}
+
 func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccount, programIndices []uint64, accountInfoKeys []solana.PublicKey, accountInfos []SolAccountInfoC, accountInfosAddr uint64, isLoaderDeprecated bool) (TranslatedAccounts, error) {
 	execCtx := executionCtx(vm)
 	txCtx := execCtx.TransactionContext
+	syscallParameterAddressRestrictions := execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions)
 
 	ixCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
@@ -647,52 +893,85 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 		if uint64(instructionAcctIdx) != instructionAcct.IndexInCallee {
 			continue
 		}
-		calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, instructionAcct.IndexInCaller)
-		if err != nil {
-			return nil, err
-		}
-		defer calleeAcct.Drop()
 
-		accountKey, err := txCtx.KeyOfAccountAtIndex(instructionAcct.IndexInTransaction)
-		if err != nil {
-			return nil, err
-		}
-
-		if calleeAcct.IsExecutable() {
-			cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
-			err = execCtx.ComputeMeter.Consume(cost)
+		err := func() error {
+			calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, instructionAcct.IndexInCaller)
 			if err != nil {
-				return nil, InstrErrComputationalBudgetExceeded
+				return err
 			}
-			accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: nil})
-		} else {
-			var found bool
-			for index, accountInfoKey := range accountInfoKeys {
-				if accountKey == accountInfoKey {
-					accountInfo := accountInfos[index]
-					callerAcct, err := callerAccountFromAccountInfoC(vm, execCtx, uint64(index), accountInfo, accountInfosAddr)
-					if err != nil {
-						return nil, err
-					}
-					err = updateCalleeAccount(execCtx, callerAcct, calleeAcct)
-					if err != nil {
-						return nil, err
-					}
+			defer calleeAcct.Drop()
 
-					var c *CallerAccount
-					if instructionAcct.IsWritable {
-						c = &callerAcct
-					} else {
-						c = nil
-					}
-					accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: c})
-					found = true
-					break
+			accountKey, err := txCtx.KeyOfAccountAtIndex(instructionAcct.IndexInTransaction)
+			if err != nil {
+				return err
+			}
+
+			if calleeAcct.IsExecutable() {
+				cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
+				err = execCtx.ComputeMeter.Consume(cost)
+				if err != nil {
+					return InstrErrComputationalBudgetExceeded
 				}
+				accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: nil})
+				return nil
 			}
-			if !found {
-				return nil, InstrErrMissingAccount
+
+			for index, accountInfoKey := range accountInfoKeys {
+				if accountKey != accountInfoKey {
+					continue
+				}
+
+				accountInfo := accountInfos[index]
+				callerAcct, err := callerAccountFromAccountInfoC(vm, execCtx, instructionAcct.IndexInCaller, uint64(index), accountInfo, accountInfosAddr, isLoaderDeprecated)
+				if err != nil {
+					return err
+				}
+
+				mustUpdateCaller := false
+				if !syscallParameterAddressRestrictions {
+					mustUpdateCaller, err = updateCalleeAccount(vm, execCtx, callerAcct, calleeAcct)
+					if err != nil {
+						return err
+					}
+				}
+
+				var c *CallerAccount
+				if instructionAcct.IsWritable || syscallParameterAddressRestrictions {
+					c = &callerAcct
+				}
+				accounts = append(accounts, TranslatedAccount{
+					IndexOfAccount:      instructionAcct.IndexInCaller,
+					CallerAccount:       c,
+					UpdateCallerAccount: instructionAcct.IsWritable,
+					UpdateCallerRegion:  instructionAcct.IsWritable || mustUpdateCaller || syscallParameterAddressRestrictions,
+				})
+				return nil
 			}
+
+			return InstrErrMissingAccount
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if syscallParameterAddressRestrictions {
+		for accountIdx := range accounts {
+			account := &accounts[accountIdx]
+			if account.CallerAccount == nil {
+				continue
+			}
+
+			calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, account.IndexOfAccount)
+			if err != nil {
+				return nil, err
+			}
+			mustUpdateCaller, err := updateCalleeAccount(vm, execCtx, *account.CallerAccount, calleeAcct)
+			calleeAcct.Drop()
+			if err != nil {
+				return nil, err
+			}
+			account.UpdateCallerRegion = account.UpdateCallerAccount || mustUpdateCaller
 		}
 	}
 
@@ -702,6 +981,7 @@ func translateAndUpdateAccountsC(vm sbpf.VM, instructionAccts []InstructionAccou
 func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAccount, programIndices []uint64, accountInfoKeys []solana.PublicKey, accountInfos []SolAccountInfoRust, accountInfosAddr uint64, isLoaderDeprecated bool) (TranslatedAccounts, error) {
 	execCtx := executionCtx(vm)
 	txCtx := execCtx.TransactionContext
+	syscallParameterAddressRestrictions := execCtx.Features.IsActive(features.SyscallParameterAddressRestrictions)
 
 	ixCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
@@ -722,52 +1002,84 @@ func translateAndUpdateAccountsRust(vm sbpf.VM, instructionAccts []InstructionAc
 			continue
 		}
 
-		calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, instructionAcct.IndexInCaller)
-		if err != nil {
-			return nil, err
-		}
-		defer calleeAcct.Drop()
-
-		accountKey, err := txCtx.KeyOfAccountAtIndex(instructionAcct.IndexInTransaction)
-		if err != nil {
-			return nil, err
-		}
-
-		if calleeAcct.IsExecutable() {
-			cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
-			err = execCtx.ComputeMeter.Consume(cost)
+		err := func() error {
+			calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, instructionAcct.IndexInCaller)
 			if err != nil {
-				return nil, InstrErrComputationalBudgetExceeded
+				return err
 			}
-			accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: nil})
-		} else {
-			var found bool
-			for index, accountInfoKey := range accountInfoKeys {
-				if accountKey == accountInfoKey {
-					accountInfo := accountInfos[index]
-					callerAcct, err := callerAccountFromAccountInfoRust(vm, execCtx, accountInfo)
-					if err != nil {
-						return nil, err
-					}
-					err = updateCalleeAccount(execCtx, callerAcct, calleeAcct)
-					if err != nil {
-						return nil, err
-					}
+			defer calleeAcct.Drop()
 
-					var c *CallerAccount
-					if instructionAcct.IsWritable {
-						c = &callerAcct
-					} else {
-						c = nil
-					}
-					accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: c})
-					found = true
-					break
+			accountKey, err := txCtx.KeyOfAccountAtIndex(instructionAcct.IndexInTransaction)
+			if err != nil {
+				return err
+			}
+
+			if calleeAcct.IsExecutable() {
+				cost := uint64(len(calleeAcct.Data()) / cu.CUCpiBytesPerUnit)
+				err = execCtx.ComputeMeter.Consume(cost)
+				if err != nil {
+					return InstrErrComputationalBudgetExceeded
 				}
+				accounts = append(accounts, TranslatedAccount{IndexOfAccount: instructionAcct.IndexInCaller, CallerAccount: nil})
+				return nil
 			}
-			if !found {
-				return nil, InstrErrMissingAccount
+
+			for index, accountInfoKey := range accountInfoKeys {
+				if accountKey != accountInfoKey {
+					continue
+				}
+
+				accountInfo := accountInfos[index]
+				callerAcct, err := callerAccountFromAccountInfoRust(vm, execCtx, instructionAcct.IndexInCaller, accountInfo, isLoaderDeprecated)
+				if err != nil {
+					return err
+				}
+
+				mustUpdateCaller := false
+				if !syscallParameterAddressRestrictions {
+					mustUpdateCaller, err = updateCalleeAccount(vm, execCtx, callerAcct, calleeAcct)
+					if err != nil {
+						return err
+					}
+				}
+
+				var c *CallerAccount
+				if instructionAcct.IsWritable || syscallParameterAddressRestrictions {
+					c = &callerAcct
+				}
+				accounts = append(accounts, TranslatedAccount{
+					IndexOfAccount:      instructionAcct.IndexInCaller,
+					CallerAccount:       c,
+					UpdateCallerAccount: instructionAcct.IsWritable,
+					UpdateCallerRegion:  instructionAcct.IsWritable || mustUpdateCaller || syscallParameterAddressRestrictions,
+				})
+				return nil
 			}
+
+			return InstrErrMissingAccount
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if syscallParameterAddressRestrictions {
+		for accountIdx := range accounts {
+			account := &accounts[accountIdx]
+			if account.CallerAccount == nil {
+				continue
+			}
+
+			calleeAcct, err := ixCtx.BorrowInstructionAccount(txCtx, account.IndexOfAccount)
+			if err != nil {
+				return nil, err
+			}
+			mustUpdateCaller, err := updateCalleeAccount(vm, execCtx, *account.CallerAccount, calleeAcct)
+			calleeAcct.Drop()
+			if err != nil {
+				return nil, err
+			}
+			account.UpdateCallerRegion = account.UpdateCallerAccount || mustUpdateCaller
 		}
 	}
 
@@ -851,14 +1163,32 @@ func SyscallInvokeSignedCImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, acc
 	}
 
 	for _, acct := range accounts {
-		if acct.CallerAccount != nil {
+		if acct.CallerAccount != nil && acct.UpdateCallerAccount {
 			var calleeAcct *BorrowedAccount
 			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
 			if err != nil {
 				return syscallErr(err)
 			}
-			defer calleeAcct.Drop()
-			err = updateCallerAccount(vm, acct.CallerAccount, calleeAcct)
+			err = updateCallerAccount(vm, acct.CallerAccount, calleeAcct, isLoaderDeprecated)
+			calleeAcct.Drop()
+			if err != nil {
+				return syscallErr(err)
+			}
+		}
+	}
+
+	if execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) {
+		for _, acct := range accounts {
+			if acct.CallerAccount == nil || !acct.UpdateCallerRegion {
+				continue
+			}
+			var calleeAcct *BorrowedAccount
+			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
+			if err != nil {
+				return syscallErr(err)
+			}
+			err = updateCallerAccountRegion(vm, execCtx, acct.CallerAccount, calleeAcct, isLoaderDeprecated)
+			calleeAcct.Drop()
 			if err != nil {
 				return syscallErr(err)
 			}
@@ -929,14 +1259,32 @@ func SyscallInvokeSignedRustImpl(vm sbpf.VM, instructionAddr, accountInfosAddr, 
 	}
 
 	for _, acct := range accounts {
-		if acct.CallerAccount != nil {
+		if acct.CallerAccount != nil && acct.UpdateCallerAccount {
 			var calleeAcct *BorrowedAccount
 			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
 			if err != nil {
 				return syscallErr(err)
 			}
-			defer calleeAcct.Drop()
-			err = updateCallerAccount(vm, acct.CallerAccount, calleeAcct)
+			err = updateCallerAccount(vm, acct.CallerAccount, calleeAcct, isLoaderDeprecated)
+			calleeAcct.Drop()
+			if err != nil {
+				return syscallErr(err)
+			}
+		}
+	}
+
+	if execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) {
+		for _, acct := range accounts {
+			if acct.CallerAccount == nil || !acct.UpdateCallerRegion {
+				continue
+			}
+			var calleeAcct *BorrowedAccount
+			calleeAcct, err = instructionCtx.BorrowInstructionAccount(txCtx, acct.IndexOfAccount)
+			if err != nil {
+				return syscallErr(err)
+			}
+			err = updateCallerAccountRegion(vm, execCtx, acct.CallerAccount, calleeAcct, isLoaderDeprecated)
+			calleeAcct.Drop()
 			if err != nil {
 				return syscallErr(err)
 			}

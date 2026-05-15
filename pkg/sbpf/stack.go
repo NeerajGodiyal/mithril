@@ -35,6 +35,7 @@ type Stack struct {
 	sp                 uint64
 	shadow             []Frame
 	dynamicStackFrames bool
+	stackFrameGaps     bool
 }
 
 // Frame is an entry on the shadow stack.
@@ -79,7 +80,7 @@ var (
 	}}
 )
 
-func NewStack(sbpfVer sbpfver.SbpfVersion) Stack {
+func NewStack(sbpfVer sbpfver.SbpfVersion, disableStackFrameGaps bool) Stack {
 	var m []byte
 	var sh []Frame
 	if UsePool {
@@ -102,6 +103,7 @@ func NewStack(sbpfVer sbpfver.SbpfVersion) Stack {
 		s.dynamicStackFrames = true
 	} else {
 		sz = StackFrameSize
+		s.stackFrameGaps = sbpfVer.StackFrameGaps() && !disableStackFrameGaps
 	}
 
 	s.shadow[0] = Frame{
@@ -132,14 +134,16 @@ func (s *Stack) GetFrame(addr uint32) []byte {
 	off := uint64(addr & math.MaxUint32)
 
 	if !s.dynamicStackFrames {
-		// disallow addressing a gap
-		hi := addr / StackFrameSize
-		if hi%2 == 1 {
-			return nil
-		}
+		if s.stackFrameGaps {
+			// disallow addressing a gap
+			hi := addr / StackFrameSize
+			if hi%2 == 1 {
+				return nil
+			}
 
-		// account for gapping in virtual addr space but not in the underlying memory
-		off = ((off & GapMask) >> 1) | (off & ^GapMask)
+			// account for gapping in virtual addr space but not in the underlying memory
+			off = ((off & GapMask) >> 1) | (off & ^GapMask)
+		}
 	}
 
 	if off > StackMax {
@@ -166,7 +170,11 @@ func (s *Stack) Push(regs []uint64, ret int64) bool {
 	s.shadow = append(s.shadow, frame)
 
 	if !s.dynamicStackFrames {
-		regs[10] += StackFrameSize * 2
+		if s.stackFrameGaps {
+			regs[10] += StackFrameSize * 2
+		} else {
+			regs[10] += StackFrameSize
+		}
 	}
 
 	return true

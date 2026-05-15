@@ -50,15 +50,18 @@ type Loader struct {
 
 	// Program section/segment mappings
 	// Uses physical addressing
-	rodatas   []addrRange
-	textRange addrRange
-	progRange addrRange
+	rodatas     []addrRange
+	rodataRange addrRange
+	textRange   addrRange
+	progRange   addrRange
+	textAddr    uint64
 
 	// Contains most of ELF (.text and rodata-like)
 	// Non-loaded sections are zeroed
-	program    []byte
-	text       []byte
-	entrypoint uint64 // program counter
+	program        []byte
+	text           []byte
+	rodataMappings []sectionMapping
+	entrypoint     uint64 // program counter
 
 	// Symbols
 	funcs    map[uint32]int64
@@ -109,6 +112,27 @@ func NewLoaderWithSyscalls(buf []byte, syscalls sbpf.SyscallRegistry, elfDeployC
 	return l, nil
 }
 
+func (l *Loader) sbpfVersion() sbpfver.SbpfVersion {
+	return sbpfver.SbpfVersion{Version: l.eh.Flags}
+}
+
+func (l *Loader) enableStaticSyscalls() bool {
+	ver := l.sbpfVersion()
+	return ver.EnableStaticSyscalls()
+}
+
+func (l *Loader) enableStricterElfHeaders() bool {
+	ver := l.sbpfVersion()
+	return ver.EnableStricterElfHeaders()
+}
+
+func (l *Loader) textVA() uint64 {
+	if l.enableStricterElfHeaders() {
+		return l.textAddr
+	}
+	return sbpf.VaddrProgram + l.textRange.min
+}
+
 // Load parses, loads, and relocates an SBF program.
 //
 // This loader differs from rbpf in a few ways:
@@ -140,10 +164,11 @@ func parseSlots(bs []byte) []sbpf.Slot {
 func (l *Loader) getProgram() *sbpf.Program {
 	return &sbpf.Program{
 		RO:          l.program,
+		TextBytes:   l.text,
 		Text:        parseSlots(l.text),
-		TextVA:      sbpf.VaddrProgram + l.textRange.min,
+		TextVA:      l.textVA(),
 		Entrypoint:  l.entrypoint,
 		Funcs:       l.funcs,
-		SbpfVersion: sbpfver.SbpfVersion{Version: l.eh.Flags},
+		SbpfVersion: l.sbpfVersion(),
 	}
 }

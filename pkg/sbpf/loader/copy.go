@@ -8,6 +8,11 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 )
 
+type sectionMapping struct {
+	src addrRange
+	dst addrRange
+}
+
 // The following ELF loading rules seem mostly arbitrary.
 // For the sake of cleanliness, this loader doesn't process
 // some badly malformed ELFs that would pass on Solana mainnet.
@@ -15,8 +20,13 @@ import (
 
 // copy allocates program buffers and copies ELF contents.
 func (l *Loader) copy() error {
+	if l.enableStricterElfHeaders() {
+		return l.copyStrict()
+	}
+
 	l.progRange = newAddrRange()
 	l.rodatas = make([]addrRange, 0, 4)
+	l.rodataMappings = make([]sectionMapping, 0, 4)
 	if err := l.getText(); err != nil {
 		return err
 	}
@@ -26,6 +36,26 @@ func (l *Loader) copy() error {
 	if err := l.copySections(); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (l *Loader) copyStrict() error {
+	l.progRange = addrRange{min: 0, max: l.rodataRange.len()}
+	l.rodatas = nil
+	l.rodataMappings = nil
+
+	l.program = make([]byte, l.rodataRange.len())
+	if l.rodataRange.len() != 0 {
+		if err := l.readSection(l.rodataRange, l.program); err != nil {
+			return err
+		}
+	}
+
+	l.text = make([]byte, l.textRange.len())
+	if err := l.readSection(l.textRange, l.text); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -65,21 +95,28 @@ func (l *Loader) mapSections() error {
 		}
 
 		// Section overlap check & bounds tracking
-		section := addrRange{min: sh.Off, max: sh.Off + sh.Size}
-		if section.len() == 0 {
+		src := addrRange{min: sh.Off, max: sh.Off + sh.Size}
+		dst := l.sectionProgramRange(sectionName, &sh)
+		if dst.len() == 0 {
 			continue
 		}
-		if l.progRange.containsRange(section) {
+		if l.progRange.containsRange(dst) {
 			// TODO rbpf probably doesn't have this restriction
 			return fmt.Errorf("rodata section %d overlaps with other section", i)
 		}
-		l.progRange.insert(section)
+		l.progRange.insert(dst)
 
-		if section.min != l.textRange.min {
-			l.rodatas = append(l.rodatas, section)
+		if sectionName != ".text" {
+			l.rodatas = append(l.rodatas, dst)
+			l.rodataMappings = append(l.rodataMappings, sectionMapping{src: src, dst: dst})
 		}
 	}
 	return iter.Err()
+}
+
+func (l *Loader) sectionProgramRange(sectionName string, sh *elf.Section64) addrRange {
+	src := addrRange{min: sh.Off, max: sh.Off + sh.Size}
+	return src
 }
 
 func (l *Loader) checkSectionAddrs(sh *elf.Section64) error {
@@ -109,28 +146,36 @@ func (l *Loader) copySections() error {
 	l.progRange.extendToFit(0)
 
 	// Allocate!
-	l.program = make([]byte, l.fileSize)
+	programSize := l.fileSize
+	if l.progRange.max > programSize {
+		programSize = l.progRange.max
+	}
+	l.program = make([]byte, programSize)
 
 	// Read data from ELF file
-	for _, section := range l.rodatas {
-		if err := l.copySection(section); err != nil {
+	for _, section := range l.rodataMappings {
+		if err := l.copySection(section.src, section.dst); err != nil {
 			return err
 		}
 	}
-	if err := l.copySection(l.textRange); err != nil {
-		return err
-	}
 
 	// Special sub-slice for text
+	if err := l.copySection(l.textRange, l.textRange); err != nil {
+		return err
+	}
 	l.text = l.getRange(l.textRange)
 
 	return nil
 }
 
-func (l *Loader) copySection(section addrRange) (err error) {
-	off, size := int64(section.min), int64(section.len())
+func (l *Loader) copySection(src addrRange, dst addrRange) error {
+	return l.readSection(src, l.program[dst.min:dst.max])
+}
+
+func (l *Loader) readSection(src addrRange, dst []byte) (err error) {
+	off, size := int64(src.min), int64(src.len())
 	rd := io.NewSectionReader(l.rd, off, size)
-	_, err = io.ReadFull(rd, l.program[section.min:section.max])
+	_, err = io.ReadFull(rd, dst)
 	return
 }
 

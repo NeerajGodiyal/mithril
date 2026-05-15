@@ -26,6 +26,7 @@ var RelaxAuthoritySignerCheckForLookupTableCreation = FeatureGate{Name: "RelaxAu
 var DedupeConfigProgramSigners = FeatureGate{Name: "DedupeConfigProgramSigners", Address: base58.MustDecodeFromString("8kEuAshXLsgkUEdcFVLqrjCGGHVWFW99ZZpxvAzzMtBp")}
 var Ed25519PrecompileVerifyStrict = FeatureGate{Name: "Ed25519PrecompileVerifyStrict", Address: base58.MustDecodeFromString("ed9tNscbWLYBooxWA7FE2B5KHWs8A6sxfY8EzezEcoo")}
 var AbortOnInvalidCurve = FeatureGate{Name: "AbortOnInvalidCurve", Address: base58.MustDecodeFromString("FuS3FPfJDKSNot99ECLXtp3rueq36hMNStJkPJwWodLh")}
+var Blake3SyscallEnabled = FeatureGate{Name: "Blake3SyscallEnabled", Address: base58.MustDecodeFromString("HTW2pSyErTj4BV6KBM9NZ9VBUJVxt7sacNWcf76wtzb3")}
 var Curve25519SyscallEnabled = FeatureGate{Name: "Curve25519SyscallEnabled", Address: base58.MustDecodeFromString("7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri")}
 var SimplifyAltBn128SyscallErrorCodes = FeatureGate{Name: "SimplityAltBn128SyscallErrorCodes", Address: base58.MustDecodeFromString("JDn5q3GBeqzvUa7z67BbmVHVdE3EbUAjvFep3weR3jxX")}
 var EnableAltbn128CompressionSyscall = FeatureGate{Name: "EnableAltbn128CompressionSyscall", Address: base58.MustDecodeFromString("EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn")}
@@ -56,7 +57,7 @@ var RemoveAccountsDeltaHash = FeatureGate{Name: "RemoveAccountsDeltaHash", Addre
 var EnableLoaderV4 = FeatureGate{Name: "EnableLoaderV4", Address: base58.MustDecodeFromString("2aQJYqER2aKyb3cZw22v4SL2xMX7vwXBRWfvS4pTrtED")}
 var EnableSbpfV1DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV1DeploymentAndExecution", Address: base58.MustDecodeFromString("JE86WkYvTrzW8HgNmrHY7dFYpCmSptUpKupbo2AdQ9cG")}
 var EnableSbpfV2DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV2DeploymentAndExecution", Address: base58.MustDecodeFromString("F6UVKh1ujTEFK3en2SyAL3cdVnqko1FVEXWhmdLRu6WP")}
-var EnableSbpfV3DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV3DeploymentAndExecution", Address: base58.MustDecodeFromString("C8XZNs1bfzaiT3YDeXZJ7G5swQWQv7tVzDnCxtHvnSpw")}
+var EnableSbpfV3DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV3DeploymentAndExecution", Address: base58.MustDecodeFromString("5cC3foj77CWun58pC51ebHFUWavHWKarWyR5UUik7dnC")}
 var DisableSbpfV0Execution = FeatureGate{Name: "DisableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature11111111111111111111111111111111")}
 var ReenableSbpfV0Execution = FeatureGate{Name: "ReenableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature21111111111111111111111111111111")}
 var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTransactionDataSize", Address: base58.MustDecodeFromString("DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8")}
@@ -66,6 +67,9 @@ var PoseidonEnforcePadding = FeatureGate{Name: "PoseidonEnforcePadding", Address
 var FixAltBn128PairingLengthCheck = FeatureGate{Name: "FixAltBn128PairingLengthCheck", Address: base58.MustDecodeFromString("bnYzodLwmybj7e1HAe98yZrdJTd7we69eMMLgCXqKZm")}
 var DeprecateRentExemptionThreshold = FeatureGate{Name: "DeprecateRentExemptionThreshold", Address: base58.MustDecodeFromString("rent6iVy6PDoViPBeJ6k5EJQrkj62h7DPyLbWGHwjrC")}
 var ProvideInstructionDataOffsetInVmR2 = FeatureGate{Name: "ProvideInstructionDataOffsetInVmR2", Address: base58.MustDecodeFromString("5xXZc66h4UdB6Yq7FzdBxBiRAFMMScMLwHxk2QZDaNZL")}
+var SyscallParameterAddressRestrictions = FeatureGate{Name: "SyscallParameterAddressRestrictions", Address: base58.MustDecodeFromString("EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF")}
+var VirtualAddressSpaceAdjustments = FeatureGate{Name: "VirtualAddressSpaceAdjustments", Address: base58.MustDecodeFromString("7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz")}
+var AccountDataDirectMapping = FeatureGate{Name: "AccountDataDirectMapping", Address: base58.MustDecodeFromString("CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE")}
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
 var RelaxProgramdataAccountCheckMigration = FeatureGate{Name: "RelaxProgramdataAccountCheckMigration", Address: base58.MustDecodeFromString("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h")}
 var ReplaceSplTokenWithPToken = FeatureGate{Name: "ReplaceSplTokenWithPToken", Address: base58.MustDecodeFromString("ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP")}
@@ -78,6 +82,8 @@ var EnableAltBn128G2Syscalls = FeatureGate{Name: "EnableAltBn128G2Syscalls", Add
 var EnableBls12_381Syscall = FeatureGate{Name: "EnableBls12_381Syscall", Address: base58.MustDecodeFromString("b1sgUiJ3qu7hYm3tNDyyqZNQd6gLGJmJppnLNa93PCQ")}
 var UpgradeBpfStakeProgramToV5 = FeatureGate{Name: "UpgradeBpfStakeProgramToV5", Address: base58.MustDecodeFromString("STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk")}
 var DelayCommissionUpdates = FeatureGate{Name: "DelayCommissionUpdates", Address: base58.MustDecodeFromString("76dHtohc2s5dR3ahJyBxs7eJJVipFkaPdih9CLgTTb4B")}
+var ValidateChainedBlockId = FeatureGate{Name: "ValidateChainedBlockId", Address: base58.MustDecodeFromString("vcmrbYbiMVKaq1snKP6eCacNDcr6qZvpCNUjmk6gxvZ")}
+var DiscardUnexpectedDataCompleteShreds = FeatureGate{Name: "DiscardUnexpectedDataCompleteShreds", Address: base58.MustDecodeFromString("dcomRRWHXP1FVWPqi9Mm4oxJhF4ehC795SvAtUdA9os")}
 
 var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnablePartitionedEpochReward, EnablePartitionedEpochRewardsSuperfeature,
 	LastRestartSlotSysvar, Libsecp256k1FailOnBadCount, Libsecp256k1FailOnBadCount2, EnableBpfLoaderSetAuthorityCheckedIx,
@@ -85,7 +91,7 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	CommissionUpdatesOnlyAllowedInFirstHalfOfEpoch, TimelyVoteCredits, ReduceStakeWarmupCooldown,
 	StakeRaiseMinimumDelegationTo1Sol, StakeRedelegateInstruction, RequireRentExemptSplitDestination,
 	DeprecateExecutableMetaUpdateInBpfLoader, RelaxAuthoritySignerCheckForLookupTableCreation, DedupeConfigProgramSigners,
-	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
+	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Blake3SyscallEnabled, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
 	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
@@ -94,6 +100,7 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
-	ProvideInstructionDataOffsetInVmR2, VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
+	ProvideInstructionDataOffsetInVmR2, SyscallParameterAddressRestrictions, VirtualAddressSpaceAdjustments, AccountDataDirectMapping,
+	VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
 	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram, AltBn128LittleEndian, EnableAltBn128G2Syscalls,
-	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5, DelayCommissionUpdates}
+	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5, DelayCommissionUpdates, ValidateChainedBlockId, DiscardUnexpectedDataCompleteShreds}

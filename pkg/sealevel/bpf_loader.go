@@ -3,6 +3,7 @@ package sealevel
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -472,21 +473,116 @@ type serializedAcctMetadata struct {
 	vmOwnerAddr     uint64
 }
 
-func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, error) {
+const bpfAlignOfU128 = 8
+
+func appendVasaMetadataRegion(regions *[]sbpf.InputRegion, vmStart, vmEnd, hostStart uint64) {
+	if vmEnd <= vmStart {
+		return
+	}
+	*regions = append(*regions, sbpf.InputRegion{
+		Offset:               vmStart,
+		HostOffset:           hostStart,
+		RegionSize:           vmEnd - vmStart,
+		AddressSpaceReserved: vmEnd - vmStart,
+		Writable:             true,
+		AccountIndex:         -1,
+	})
+}
+
+func appendVasaAccountDataRegion(regions *[]sbpf.InputRegion, offset, hostOffset, regionSize, reserved uint64, writable bool, accountIndex int, data []byte, onWrite func(*sbpf.InputRegion, uint64) error) {
+	if reserved == 0 {
+		return
+	}
+	*regions = append(*regions, sbpf.InputRegion{
+		Offset:               offset,
+		HostOffset:           hostOffset,
+		RegionSize:           regionSize,
+		AddressSpaceReserved: reserved,
+		Writable:             writable,
+		AccountIndex:         accountIndex,
+		Data:                 data,
+		OnWrite:              onWrite,
+	})
+}
+
+func accountDataRegionWritable(acct *BorrowedAccount, f features.Features) bool {
+	return acct.DataCanBeChanged(f) == nil
+}
+
+func accountDataDirectMappingActive(execCtx *ExecutionCtx) bool {
+	return execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) &&
+		execCtx.Features.IsActive(features.AccountDataDirectMapping)
+}
+
+func directMappedAccountData(execCtx *ExecutionCtx, acct *BorrowedAccount, reserved uint64) ([]byte, bool, func(*sbpf.InputRegion, uint64) error, error) {
+	canChange := acct.DataCanBeChanged(execCtx.Features) == nil
+	data := acct.Data()
+	writable := false
+
+	onWrite := func(region *sbpf.InputRegion, requestedLen uint64) error {
+		if !canChange {
+			return InstrErrReadonlyDataModified
+		}
+		if requestedLen > reserved {
+			return InstrErrInvalidRealloc
+		}
+
+		touchedAcct, err := acct.TxCtx.Accounts.Touch(acct.IndexInTransaction)
+		if err != nil {
+			return err
+		}
+		acct.Account = touchedAcct
+
+		oldLen := uint64(len(touchedAcct.Data))
+		if requestedLen > oldLen {
+			newLen := reserved
+			if newLen > MaxPermittedDataLength {
+				newLen = MaxPermittedDataLength
+			}
+			if requestedLen > newLen {
+				return InstrErrInvalidRealloc
+			}
+			acct.UpdateAccountsResizeDelta(newLen)
+			touchedAcct.Resize(newLen, 0)
+		}
+
+		region.Data = touchedAcct.Data
+		region.RegionSize = uint64(len(touchedAcct.Data))
+		region.Writable = true
+		return nil
+	}
+
+	if canChange {
+		if acct.TxCtx != nil && int(acct.IndexInTransaction) < len(acct.TxCtx.Accounts.Shared) && !acct.TxCtx.Accounts.Shared[acct.IndexInTransaction] {
+			touchedAcct, err := acct.TxCtx.Accounts.Touch(acct.IndexInTransaction)
+			if err != nil {
+				return nil, false, nil, err
+			}
+			acct.Account = touchedAcct
+			data = touchedAcct.Data
+			writable = true
+		}
+		return data, writable, onWrite, nil
+	}
+
+	return data, false, nil, nil
+}
+
+func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, []serializedAcctMetadata, []sbpf.InputRegion, error) {
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, nil, err
 	}
 
 	numIxAccts := instrCtx.NumberOfInstructionAccounts()
 	if numIxAccts > MaxInstructionAccounts {
-		return nil, nil, 0, InstrErrMaxAccountsExceeded
+		return nil, nil, 0, nil, nil, InstrErrMaxAccountsExceeded
 	}
 
 	programAcct, err := instrCtx.BorrowLastProgramAccount(txCtx)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, nil, err
 	}
 	programId := programAcct.Key()
 	programAcct.Drop()
@@ -504,19 +600,22 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, 0, nil, nil, err
 		}
 		if isDupe {
 			accts[int(instrAcctIdx)] = serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
 		} else {
 			acct, err := instrCtx.BorrowInstructionAccount(txCtx, instrAcctIdx)
 			if err != nil {
-				return nil, nil, 0, err
+				return nil, nil, 0, nil, nil, err
 			}
 
 			accts[int(instrAcctIdx)] = serializeAcct{indexOfAcct: instrAcctIdx, acct: acct}
 		}
 	}
+
+	vasa := execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	directMapping := accountDataDirectMappingActive(execCtx)
 
 	size := uint64(8)
 
@@ -537,9 +636,13 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 			size += solana.PublicKeyLength // owner
 			size += 8                      // lamports
 			size += 8                      // data len
-			size += MaxPermittedDataIncrease
+			if directMapping {
+				size += bpfAlignOfU128
+			} else {
+				size += MaxPermittedDataIncrease
+				size += alignedDataLen
+			}
 			size += 8 // rent epoch
-			size += alignedDataLen
 		}
 	}
 
@@ -556,25 +659,37 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
 
 	preLens := make([]uint64, len(accts))
+	accountMetadatas := make([]serializedAcctMetadata, len(accts))
+	var inputRegions []sbpf.InputRegion
+	var regionStart uint64
+	var hostRegionStart uint64
+	virtualOffset := uint64(8)
 	for i, acct := range accts {
 		borrowedAcct := acct.acct
 		l := len(serializedData)
+		vmAcctOffset := virtualOffset
 		if acct.isDuplicate { // duplicate
 			serializedData = serializedData[:l+8]
 			position := acct.indexOfAcct
 			serializedData[l] = byte(position)
 			preLens[i] = preLens[position]
+			accountMetadatas[i] = accountMetadatas[position]
+			virtualOffset += 8
 		} else { // not a duplicate
 			dataLen := uint64(len(borrowedAcct.Data()))
-			numPaddingBytes := ReallocSpace + util.AlignUp(dataLen, 8) - dataLen
+			alignmentOffset := util.AlignUp(dataLen, 8) - dataLen
+			reserved := safemath.SaturatingAddU64(dataLen, MaxPermittedDataIncrease)
+			payloadLen := dataLen + MaxPermittedDataIncrease + alignmentOffset
+			if directMapping {
+				payloadLen = bpfAlignOfU128
+			}
 			serializedData = serializedData[:l+
 				8+ /*not duplicate, signer, writable, executable, 4 bytes padding*/
 				32+ /*account pubkey*/
 				32+ /*owner pubkey*/
 				8+ /*lamports*/
 				8+ /*acct data len*/
-				len(borrowedAcct.Data())+ /*acct data*/
-				int(numPaddingBytes)+
+				int(payloadLen)+
 				8 /*rent epoch*/]
 			serializedData[l] = 0xff
 			if borrowedAcct.IsSigner() {
@@ -611,14 +726,42 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 			// acct data len
 			preLens[i] = dataLen
 			binary.LittleEndian.PutUint64(serializedData[l+80:l+88], dataLen)
+			accountMetadatas[i] = serializedAcctMetadata{
+				originalDataLen: dataLen,
+				vmDataAddr:      sbpf.VaddrInput + vmAcctOffset + 88,
+				vmKeyAddr:       sbpf.VaddrInput + vmAcctOffset + 8,
+				vmLamportsAddr:  sbpf.VaddrInput + vmAcctOffset + 72,
+				vmOwnerAddr:     sbpf.VaddrInput + vmAcctOffset + 40,
+			}
 
-			// data in account
-			copy(serializedData[l+88:l+88+len(borrowedAcct.Data())], borrowedAcct.Data())
+			if vasa {
+				dataStart := vmAcctOffset + 88
+				appendVasaMetadataRegion(&inputRegions, regionStart, dataStart, hostRegionStart)
+				if directMapping {
+					data, writable, onWrite, err := directMappedAccountData(execCtx, borrowedAcct, reserved)
+					if err != nil {
+						return nil, nil, 0, nil, nil, err
+					}
+					appendVasaAccountDataRegion(&inputRegions, dataStart, 0, dataLen, reserved, writable, int(acct.indexOfAcct), data, onWrite)
+					hostRegionStart = uint64(l) + 88 + (bpfAlignOfU128 - alignmentOffset)
+				} else {
+					appendVasaAccountDataRegion(&inputRegions, dataStart, uint64(l)+88, dataLen, reserved, accountDataRegionWritable(borrowedAcct, execCtx.Features), int(acct.indexOfAcct), nil, nil)
+					hostRegionStart = uint64(l) + 88 + reserved
+				}
+				regionStart = safemath.SaturatingAddU64(dataStart, reserved)
+			}
 
-			// zero the padding
-			paddingStart := l + 88 + len(borrowedAcct.Data())
-			paddingEnd := l + 88 + len(borrowedAcct.Data()) + int(numPaddingBytes)
-			clear(serializedData[paddingStart:paddingEnd])
+			if directMapping {
+				clear(serializedData[l+88 : l+88+bpfAlignOfU128])
+			} else {
+				// data in account
+				copy(serializedData[l+88:l+88+len(borrowedAcct.Data())], borrowedAcct.Data())
+
+				// zero the padding
+				paddingStart := l + 88 + len(borrowedAcct.Data())
+				paddingEnd := l + 88 + len(borrowedAcct.Data()) + int(MaxPermittedDataIncrease+alignmentOffset)
+				clear(serializedData[paddingStart:paddingEnd])
+			}
 
 			// rent epoch
 			var rentEpoch uint64
@@ -628,11 +771,12 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 				rentEpoch = borrowedAcct.RentEpoch()
 			}
 			binary.LittleEndian.PutUint64(serializedData[len(serializedData)-8:], rentEpoch)
+			virtualOffset += 88 + reserved + alignmentOffset + 8
 		}
 	}
 
 	l := len(serializedData)
-	instructionDataOffset := uint64(l) + 8 // offset of actual instruction data bytes (past length prefix)
+	instructionDataOffset := virtualOffset + 8 // offset of actual instruction data bytes (past length prefix)
 	serializedData = serializedData[:len(serializedData)+
 		8+ /*instr data len*/
 		len(instrData)+ /*instr data*/
@@ -641,13 +785,18 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 	binary.LittleEndian.PutUint64(serializedData[l:l+8], uint64(len(instrData)))
 	copy(serializedData[l+8:l+8+len(instrData)], instrData)
 	copy(serializedData[len(serializedData)-32:], programId[:])
+	virtualOffset += 8 + uint64(len(instrData)) + solana.PublicKeyLength
+
+	if vasa {
+		appendVasaMetadataRegion(&inputRegions, regionStart, virtualOffset, hostRegionStart)
+	}
 
 	// sanity check for expected len vs. serialized data size
 	if uint64(len(serializedData)) != size {
 		panic(fmt.Sprintf("mismatch between serialized data and expected length: len(serializedData) = %d, expected size = %d", uint64(len(serializedData)), size))
 	}
 
-	return serializedData, preLens, instructionDataOffset, nil
+	return serializedData, preLens, instructionDataOffset, accountMetadatas, inputRegions, nil
 }
 
 func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, preLens []uint64) error {
@@ -656,6 +805,8 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 	if err != nil {
 		return err
 	}
+	vasa := execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	directMapping := accountDataDirectMappingActive(execCtx)
 
 	var off uint64
 
@@ -718,30 +869,55 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 			//alignmentMask := uint64(7) // (alignment - 1)
 			alignmentOffset := util.AlignUp(preLen, 8) - preLen
 
-			if uint64(len(parameterBytes)) < (off + postLen) {
-				return InstrErrInvalidArgument
-			}
-			data := parameterBytes[off : off+postLen]
-
-			resizeErr := borrowedAcct.CanDataBeResized(postLen)
-			changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
-
-			if resizeErr != nil || changedErr != nil {
-				acctBytes := borrowedAcct.Data()
-				if !bytes.Equal(acctBytes, data) {
-					return fmt.Errorf("data cannot be changed, but did anyway")
+			var data []byte
+			if !directMapping {
+				if uint64(len(parameterBytes)) < (off + postLen) {
+					return InstrErrInvalidArgument
 				}
-			} else {
+				data = parameterBytes[off : off+postLen]
+			}
+
+			if !vasa {
+				resizeErr := borrowedAcct.CanDataBeResized(postLen)
+				changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
+
+				if resizeErr != nil || changedErr != nil {
+					acctBytes := borrowedAcct.Data()
+					if !bytes.Equal(acctBytes, data) {
+						return fmt.Errorf("data cannot be changed, but did anyway")
+					}
+				} else {
+					err = borrowedAcct.SetData(execCtx.Features, data)
+					if err != nil {
+						return err
+					}
+				}
+			} else if directMapping {
+				if uint64(len(borrowedAcct.Data())) != postLen {
+					err = borrowedAcct.SetDataLength(postLen, execCtx.Features)
+					if err != nil {
+						return err
+					}
+				}
+			} else if borrowedAcct.DataCanBeChanged(execCtx.Features) == nil {
 				err = borrowedAcct.SetData(execCtx.Features, data)
+				if err != nil {
+					return err
+				}
+			} else if uint64(len(borrowedAcct.Data())) != postLen {
+				err = borrowedAcct.SetDataLength(postLen, execCtx.Features)
 				if err != nil {
 					return err
 				}
 			}
 
-			off += preLen
-
-			off += MaxPermittedDataIncrease
-			off += alignmentOffset
+			if directMapping {
+				off += bpfAlignOfU128
+			} else {
+				off += preLen
+				off += MaxPermittedDataIncrease
+				off += alignmentOffset
+			}
 			off += 8 // rent epoch
 
 			ownerPk := solana.PublicKeyFromBytes(owner)
@@ -757,21 +933,21 @@ func deserializeParametersAligned(execCtx *ExecutionCtx, parameterBytes []byte, 
 	return nil
 }
 
-func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, error) {
+func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64, []serializedAcctMetadata, []sbpf.InputRegion, error) {
 	txCtx := execCtx.TransactionContext
 	instrCtx, err := txCtx.CurrentInstructionCtx()
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, nil, err
 	}
 
 	numIxAccts := instrCtx.NumberOfInstructionAccounts()
 	if numIxAccts > MaxInstructionAccounts {
-		return nil, nil, 0, InstrErrMaxAccountsExceeded
+		return nil, nil, 0, nil, nil, InstrErrMaxAccountsExceeded
 	}
 
 	programAcct, err := instrCtx.BorrowLastProgramAccount(txCtx)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, nil, err
 	}
 	programId := programAcct.Key()
 	programAcct.Drop()
@@ -783,7 +959,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 	for instrAcctIdx := uint64(0); instrAcctIdx < instrCtx.NumberOfInstructionAccounts(); instrAcctIdx++ {
 		isDupe, idxInCallee, err := instrCtx.IsInstructionAccountDuplicate(instrAcctIdx)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, 0, nil, nil, err
 		}
 		if isDupe {
 			sa := serializeAcct{isDuplicate: true, indexOfAcct: idxInCallee}
@@ -791,7 +967,7 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 		} else {
 			acct, err := instrCtx.BorrowInstructionAccount(txCtx, instrAcctIdx)
 			if err != nil {
-				return nil, nil, 0, err
+				return nil, nil, 0, nil, nil, err
 			}
 			defer acct.Drop()
 
@@ -799,6 +975,9 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 			accts = append(accts, sa)
 		}
 	}
+
+	vasa := execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	directMapping := accountDataDirectMappingActive(execCtx)
 
 	size := uint64(8)
 
@@ -816,7 +995,9 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 			size += solana.PublicKeyLength // owner
 			size += 1                      // executable
 			size += 8                      // rent epoch
-			size += dataLen
+			if !directMapping {
+				size += dataLen
+			}
 		}
 	}
 
@@ -831,13 +1012,22 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 		serializedData = make([]byte, 0, size) // No arena configured
 	}
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(accts)))
+	accountMetadatas := make([]serializedAcctMetadata, 0, len(accts))
+	var inputRegions []sbpf.InputRegion
+	var regionStart uint64
+	var hostRegionStart uint64
+	virtualOffset := uint64(8)
 
 	for _, acct := range accts {
 		borrowedAcct := acct.acct
+		l := len(serializedData)
+		vmAcctOffset := virtualOffset
 		if acct.isDuplicate { // duplicate
 			position := acct.indexOfAcct
 			serializedData = append(serializedData, byte(position))
 			preLens = append(preLens, preLens[position])
+			accountMetadatas = append(accountMetadatas, accountMetadatas[position])
+			virtualOffset++
 		} else { // not a duplicate
 			serializedData = append(serializedData, 0xff)
 
@@ -865,9 +1055,35 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 			dataLen := uint64(len(borrowedAcct.Data()))
 			preLens = append(preLens, dataLen)
 			serializedData = binary.LittleEndian.AppendUint64(serializedData, dataLen)
+			accountMetadatas = append(accountMetadatas, serializedAcctMetadata{
+				originalDataLen: dataLen,
+				vmDataAddr:      sbpf.VaddrInput + vmAcctOffset + 51,
+				vmKeyAddr:       sbpf.VaddrInput + vmAcctOffset + 3,
+				vmLamportsAddr:  sbpf.VaddrInput + vmAcctOffset + 35,
+				vmOwnerAddr:     sbpf.VaddrInput + vmAcctOffset + 51 + dataLen,
+			})
 
-			// data in account
-			serializedData = append(serializedData, borrowedAcct.Data()...)
+			if vasa {
+				dataStart := vmAcctOffset + 51
+				appendVasaMetadataRegion(&inputRegions, regionStart, dataStart, hostRegionStart)
+				if directMapping {
+					data, writable, onWrite, err := directMappedAccountData(execCtx, borrowedAcct, dataLen)
+					if err != nil {
+						return nil, nil, 0, nil, nil, err
+					}
+					appendVasaAccountDataRegion(&inputRegions, dataStart, 0, dataLen, dataLen, writable, int(acct.indexOfAcct), data, onWrite)
+					hostRegionStart = uint64(l) + 51
+				} else {
+					appendVasaAccountDataRegion(&inputRegions, dataStart, uint64(l)+51, dataLen, dataLen, accountDataRegionWritable(borrowedAcct, execCtx.Features), int(acct.indexOfAcct), nil, nil)
+					hostRegionStart = uint64(l) + 51 + dataLen
+				}
+				regionStart = safemath.SaturatingAddU64(dataStart, dataLen)
+			}
+
+			if !directMapping {
+				// data in account
+				serializedData = append(serializedData, borrowedAcct.Data()...)
+			}
 
 			// owner
 			owner := [32]byte(borrowedAcct.Owner())
@@ -888,11 +1104,12 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 				rentEpoch = borrowedAcct.RentEpoch()
 			}
 			serializedData = binary.LittleEndian.AppendUint64(serializedData, rentEpoch)
+			virtualOffset += 51 + dataLen + solana.PublicKeyLength + 1 + 8
 		}
 	}
 
 	// instr data len
-	instructionDataOffset := uint64(len(serializedData)) + 8 // offset of actual instruction data bytes (past length prefix)
+	instructionDataOffset := virtualOffset + 8 // offset of actual instruction data bytes (past length prefix)
 	serializedData = binary.LittleEndian.AppendUint64(serializedData, uint64(len(instrData)))
 
 	// instr data
@@ -901,13 +1118,18 @@ func serializeParametersUnaligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint
 	// program id
 	programIdSlice := programId[:]
 	serializedData = append(serializedData, programIdSlice...)
+	virtualOffset += 8 + uint64(len(instrData)) + solana.PublicKeyLength
+
+	if vasa {
+		appendVasaMetadataRegion(&inputRegions, regionStart, virtualOffset, hostRegionStart)
+	}
 
 	// sanity check for expected len vs. serialized data size
 	if uint64(len(serializedData)) != size {
 		panic("mismatch between serialized data and expected length")
 	}
 
-	return serializedData, preLens, instructionDataOffset, nil
+	return serializedData, preLens, instructionDataOffset, accountMetadatas, inputRegions, nil
 }
 
 func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte, preLens []uint64) error {
@@ -916,6 +1138,8 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 	if err != nil {
 		return err
 	}
+	vasa := execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments)
+	directMapping := accountDataDirectMappingActive(execCtx)
 
 	var off uint64
 
@@ -951,32 +1175,56 @@ func deserializeParametersUnaligned(execCtx *ExecutionCtx, parameterBytes []byte
 
 			off += 8 // data length
 
-			if uint64(len(parameterBytes)) < (off + preLen) {
-				return InstrErrInvalidArgument
-			}
-			data := parameterBytes[off : off+preLen]
-
-			resizeErr := borrowedAcct.CanDataBeResized(uint64(len(data)))
-			changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
-
-			if resizeErr != nil || changedErr != nil {
-				acctBytes := borrowedAcct.Data()
-				if len(acctBytes) != len(data) {
-					return fmt.Errorf("data cannot be changed, but did anyway")
+			var data []byte
+			if !directMapping {
+				if uint64(len(parameterBytes)) < (off + preLen) {
+					return InstrErrInvalidArgument
 				}
-				for count := range acctBytes {
-					if acctBytes[count] != data[count] {
+				data = parameterBytes[off : off+preLen]
+			}
+
+			if !vasa {
+				resizeErr := borrowedAcct.CanDataBeResized(uint64(len(data)))
+				changedErr := borrowedAcct.DataCanBeChanged(execCtx.Features)
+
+				if resizeErr != nil || changedErr != nil {
+					acctBytes := borrowedAcct.Data()
+					if len(acctBytes) != len(data) {
 						return fmt.Errorf("data cannot be changed, but did anyway")
 					}
+					for count := range acctBytes {
+						if acctBytes[count] != data[count] {
+							return fmt.Errorf("data cannot be changed, but did anyway")
+						}
+					}
+				} else {
+					err = borrowedAcct.SetData(execCtx.Features, data)
+					if err != nil {
+						return err
+					}
 				}
-			} else {
+			} else if directMapping {
+				if uint64(len(borrowedAcct.Data())) != preLen {
+					err = borrowedAcct.SetDataLength(preLen, execCtx.Features)
+					if err != nil {
+						return err
+					}
+				}
+			} else if borrowedAcct.DataCanBeChanged(execCtx.Features) == nil {
 				err = borrowedAcct.SetData(execCtx.Features, data)
+				if err != nil {
+					return err
+				}
+			} else if uint64(len(borrowedAcct.Data())) != preLen {
+				err = borrowedAcct.SetDataLength(preLen, execCtx.Features)
 				if err != nil {
 					return err
 				}
 			}
 
-			off += preLen
+			if !directMapping {
+				off += preLen
+			}
 
 			off += solana.PublicKeyLength // owner
 			off += 1                      // executable
@@ -1013,18 +1261,25 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	var parameterBytes []byte
 	var preLens []uint64
 	var instrDataOffset uint64
+	var accountMetadatas []serializedAcctMetadata
+	var inputRegions []sbpf.InputRegion
 
 	if isLoaderDeprecated {
-		parameterBytes, preLens, instrDataOffset, err = serializeParametersUnaligned(execCtx)
+		parameterBytes, preLens, instrDataOffset, accountMetadatas, inputRegions, err = serializeParametersUnaligned(execCtx)
 		if err != nil {
 			return err
 		}
 	} else {
-		parameterBytes, preLens, instrDataOffset, err = serializeParametersAligned(execCtx)
+		parameterBytes, preLens, instrDataOffset, accountMetadatas, inputRegions, err = serializeParametersAligned(execCtx)
 		if err != nil {
 			return err
 		}
 	}
+
+	execCtx.serializedAccountMetadataStack = append(execCtx.serializedAccountMetadataStack, accountMetadatas)
+	defer func() {
+		execCtx.serializedAccountMetadataStack = execCtx.serializedAccountMetadataStack[:len(execCtx.serializedAccountMetadataStack)-1]
+	}()
 
 	var inputDataVaddr uint64
 	if execCtx.Features.IsActive(features.ProvideInstructionDataOffsetInVmR2) {
@@ -1041,8 +1296,10 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 		Context:        execCtx,
 		TxSignature:    execCtx.TransactionContext.Signature,
 		ProgramId:      programId,
+		InputRegions:   inputRegions,
+		DisableStackFrameGaps: execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) ||
+			!program.SbpfVersion.StackFrameGaps(),
 	}
-
 	start := time.Now()
 	interpreter := sbpf.NewInterpreter(program, opts)
 	defer interpreter.Finish()
@@ -1051,62 +1308,129 @@ func executeLoadedProgram(execCtx *ExecutionCtx, program *sbpf.Program, syscallR
 	ret, _, runErr := interpreter.Run()
 	metrics.GlobalBlockReplay.SbpfInterpreterRun.AddTimingSince(start)
 
+	if execCtx.Features.IsActive(features.VirtualAddressSpaceAdjustments) {
+		runErr = mapVirtualAddressSpaceRunErr(execCtx, runErr, inputRegions)
+	}
+
 	if runErr != nil {
 		//mlog.Log.Debugf("program execution result: %s", runErr)
 	} else if ret != 0 {
-		runErr = fmt.Errorf("program execution (%s) returned failure: %d", programId, ret)
-		//mlog.Log.Debugf("program execution (%s) returned failure: %d", programId, ret)
-	} else {
-		//mlog.Log.Debugf("program execution (%s) returned success", programId)
+		runErr = instrErrFromProgramStatus(ret)
 	}
-
-	/*
-		_, returnData := execCtx.TransactionContext.ReturnData()
-		if len(returnData) != 0 {
-			base64.StdEncoding.EncodeToString(returnData)
-			mlog.Log.Debugf("Program return %s %s", returnedDataProgId, encodedStr)
-		}*/
 
 	// deserialize data
 	if runErr == nil {
 		if isLoaderDeprecated {
 			err = deserializeParametersUnaligned(execCtx, parameterBytes, preLens)
 			if err != nil {
-				//mlog.Log.Debugf("failed to deserialize (unaligned), %s", err)
 				return InstrErrInvalidArgument
 			}
 		} else {
 			err = deserializeParametersAligned(execCtx, parameterBytes, preLens)
 			if err != nil {
-				//mlog.Log.Debugf("failed to deserialize (aligned), %s", err)
 				return InstrErrInvalidArgument
 			}
 		}
 	}
 
-	return runErr
+	return normalizeProgramRunErr(runErr)
 }
 
 func executeProgramFromBytes(execCtx *ExecutionCtx, programAddr solana.PublicKey, programData []byte, syscallRegistry sbpf.SyscallRegistry) error {
 	start := time.Now()
 	loader, err := loader.NewLoaderWithSyscalls(programData, syscallRegistry, false, &execCtx.Features)
 	if err != nil {
-		return err
+		return InstrErrUnsupportedProgramId
 	}
 
 	program, err := loader.Load()
 	if err != nil {
-		return err
+		return InstrErrUnsupportedProgramId
+	}
+	if err := program.Verify(); err != nil {
+		return InstrErrUnsupportedProgramId
 	}
 
 	entry := &accountsdb.ProgramCacheEntry{Program: program}
 	if !execCtx.IsSimulation {
-		execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+		addProgramToCache(execCtx, programAddr, entry)
 	}
 
 	metrics.GlobalBlockReplay.AddProgramToCache.AddTimingSince(start)
 
 	return executeLoadedProgram(execCtx, program, syscallRegistry)
+}
+
+func addProgramToCache(execCtx *ExecutionCtx, programAddr solana.PublicKey, entry *accountsdb.ProgramCacheEntry) {
+	if execCtx.SlotCtx == nil || execCtx.SlotCtx.AccountsDb == nil {
+		return
+	}
+	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+}
+
+func mapVirtualAddressSpaceRunErr(execCtx *ExecutionCtx, err error, inputRegions []sbpf.InputRegion) error {
+	if err == nil {
+		return nil
+	}
+
+	var badAccess sbpf.ExcBadAccess
+	if !errors.As(err, &badAccess) {
+		return err
+	}
+
+	for _, region := range inputRegions {
+		if region.AccountIndex < 0 {
+			continue
+		}
+
+		regionStart := sbpf.VaddrInput + region.Offset
+		regionEnd := safemath.SaturatingAddU64(regionStart, region.AddressSpaceReserved)
+		if badAccess.Addr < regionStart || badAccess.Addr >= regionEnd {
+			continue
+		}
+		accessEnd := safemath.SaturatingAddU64(badAccess.Addr, badAccess.Size)
+		if accessEnd > regionEnd {
+			return err
+		}
+
+		txCtx := execCtx.TransactionContext
+		instrCtx, borrowErr := txCtx.CurrentInstructionCtx()
+		if borrowErr != nil {
+			return borrowErr
+		}
+		account, borrowErr := instrCtx.BorrowInstructionAccount(txCtx, uint64(region.AccountIndex))
+		if borrowErr != nil {
+			return borrowErr
+		}
+		changeErr := account.DataCanBeChanged(execCtx.Features)
+		account.Drop()
+
+		if badAccess.Write {
+			if changeErr != nil {
+				return changeErr
+			}
+			return InstrErrInvalidRealloc
+		}
+		if changeErr != nil {
+			return InstrErrAccountDataTooSmall
+		}
+		return InstrErrInvalidRealloc
+	}
+
+	return err
+}
+
+func normalizeProgramRunErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := solanaErrCode(err); ok {
+		return err
+	}
+	if IsCustomErr(err) {
+		return err
+	}
+	return InstrErrProgramFailedToComplete
 }
 
 func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
@@ -1155,7 +1479,9 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 	}
 
 	if !programAcct.IsExecutable() {
-		//mlog.Log.Debugf("program %s is not executable", programAcct)
+		return InstrErrUnsupportedProgramId
+	}
+	if programAcct.Lamports() == 0 {
 		return InstrErrUnsupportedProgramId
 	}
 
@@ -1244,8 +1570,8 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			if programDataAcctState.Type == UpgradeableLoaderStateTypeUninitialized {
-				return InstrErrInvalidAccountData
+			if programDataAcctState.Type != UpgradeableLoaderStateTypeProgramData {
+				return InstrErrUnsupportedProgramId
 			}
 
 			programDataSlot := programDataAcctState.ProgramData.Slot
@@ -1253,6 +1579,9 @@ func BpfLoaderProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrInvalidAccountData
 			}
 
+			if len(programDataAcct.Data) < upgradeableLoaderSizeOfProgramDataMetaData {
+				return InstrErrUnsupportedProgramId
+			}
 			programAcctKey = programAcctState.Program.ProgramDataAddress
 			programBytes = programDataAcct.Data[upgradeableLoaderSizeOfProgramDataMetaData:]
 			metrics.GlobalBlockReplay.GetProgramDataUncachedMarshal.AddTimingSince(start)
@@ -1479,8 +1808,8 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 		return InstrErrInvalidArgument
 	}
 
-	if bufferAcctState.Buffer.AuthorityAddress != nil && authorityKey != nil &&
-		*bufferAcctState.Buffer.AuthorityAddress != *authorityKey {
+	if (bufferAcctState.Buffer.AuthorityAddress == nil) != (authorityKey == nil) ||
+		(bufferAcctState.Buffer.AuthorityAddress != nil && *bufferAcctState.Buffer.AuthorityAddress != *authorityKey) {
 		return InstrErrIncorrectAuthority
 	}
 
@@ -1656,7 +1985,7 @@ func UpgradeableLoaderDeployWithMaxDataLen(execCtx *ExecutionCtx, txCtx *Transac
 	//mlog.Log.Debugf("deployed program: %s", newProgramId)
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataKey, entry)
+	addProgramToCache(execCtx, programDataKey, entry)
 
 	return nil
 }
@@ -1908,7 +2237,7 @@ func UpgradeableLoaderUpgrade(execCtx *ExecutionCtx, txCtx *TransactionCtx, inst
 	//mlog.Log.Debugf("upgraded program %s", program.Key())
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programData.Key(), entry)
+	addProgramToCache(execCtx, programData.Key(), entry)
 
 	return nil
 }
@@ -2558,7 +2887,7 @@ func UpgradeableLoaderExtendProgram(execCtx *ExecutionCtx, txCtx *TransactionCtx
 	//mlog.Log.Debugf("Extended ProgramData account by %d bytes", additionalBytes)
 
 	entry := &accountsdb.ProgramCacheEntry{Program: loadedProgram, DeploymentSlot: clock.Slot}
-	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programDataAcct.Key(), entry)
+	addProgramToCache(execCtx, programDataAcct.Key(), entry)
 
 	return nil
 }

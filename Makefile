@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSI
            -X github.com/Overclock-Validator/mithril/pkg/version.GitBranch=$(GIT_BRANCH) \
            -X github.com/Overclock-Validator/mithril/pkg/version.BuildDate=$(BUILD_DATE)
 
-.PHONY: build release clean server-setup disk-setup tune test-conformance-elf
+.PHONY: build release clean server-setup disk-setup tune test-conformance-elf test-conformance-vm-programs test-conformance-sbpf
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o mithril ./cmd/mithril
@@ -31,3 +31,9 @@ tune:
 
 test-conformance-elf:
 	go test ./conformance/ -run TestConformance_ElfLoader_Firedancer -v
+
+test-conformance-vm-programs:
+	go test ./conformance/ -run TestConformance_VMPrograms_Firedancer -v
+
+test-conformance-sbpf:
+	go test ./conformance/ -run '^(TestConformance_ElfLoader_Firedancer|TestConformance_VMPrograms_Firedancer)$$' -v

@@ -34,6 +34,8 @@ type ExecutionCtx struct {
 	RecordInnerInstructions bool
 	currentTopLevelInstrIdx uint8
 	InnerInstrs             []RecordedInnerInstr
+
+	serializedAccountMetadataStack [][]serializedAcctMetadata
 }
 
 // RecordedInnerInstr is a CPI invocation captured during execution.

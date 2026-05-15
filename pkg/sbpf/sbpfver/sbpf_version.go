@@ -14,7 +14,11 @@ type SbpfVersion struct {
 }
 
 func (ver *SbpfVersion) DynamicStackFrames() bool {
-	return ver.Version >= SbpfVersionV1
+	return ver.Version == SbpfVersionV1 || ver.Version == SbpfVersionV2
+}
+
+func (ver *SbpfVersion) StackFrameGaps() bool {
+	return ver.Version == SbpfVersionV0
 }
 
 func (ver *SbpfVersion) RejectRodataStackOverlap() bool {
@@ -26,39 +30,70 @@ func (ver *SbpfVersion) EnableElfVAddr() bool {
 }
 
 func (ver *SbpfVersion) EnablePqr() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) ExplicitSignExtensionOfResults() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) SwapSubRegImmOperands() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) DisableNeg() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) CallXUsesSrcReg() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
+}
+
+func (ver *SbpfVersion) CallXUsesDstReg() bool {
+	return ver.Version >= SbpfVersionV3
 }
 
 func (ver *SbpfVersion) DisableLe() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) DisableLddw() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) MoveMemoryInstructionClasses() bool {
-	return ver.Version >= SbpfVersionV2
+	return ver.Version == SbpfVersionV2
 }
 
 func (ver *SbpfVersion) EnableStaticSyscalls() bool {
 	return ver.Version >= SbpfVersionV3
+}
+
+func (ver *SbpfVersion) EnableStricterElfHeaders() bool {
+	return ver.Version >= SbpfVersionV3
+}
+
+func (ver *SbpfVersion) EnableStricterVerification() bool {
+	return false
+}
+
+func (ver *SbpfVersion) EnableLowerRodataVaddr() bool {
+	return ver.Version >= SbpfVersionV3
+}
+
+func (ver *SbpfVersion) EnableLowerBytecodeVaddr() bool {
+	return false
+}
+
+func (ver *SbpfVersion) EnableJmp32() bool {
+	return ver.Version >= SbpfVersionV3
+}
+
+func (ver *SbpfVersion) CalculateCallImmTargetPC(pc int64, imm int32) int64 {
+	if ver.EnableStaticSyscalls() {
+		return pc + int64(imm) + 1
+	}
+	return int64(uint32(imm))
 }
 
 func GetMinAndMaxSbpfVersions(f *features.Features) (uint32, uint32) {
@@ -67,7 +102,7 @@ func GetMinAndMaxSbpfVersions(f *features.Features) (uint32, uint32) {
 	enableSbpfV0 := !disableSbpfV0 || reenableSbpfV0
 	enableSbpfV1 := f.IsActive(features.EnableSbpfV1DeploymentAndExecution)
 	enableSbpfV2 := f.IsActive(features.EnableSbpfV2DeploymentAndExecution)
-	enableSbpfV3 := f.IsActive(features.EnableSbpfV3DeploymentAndExecution)
+	enableSbpfV3 := f.IsSbpfV3DeploymentAndExecutionActive()
 
 	var maxVer, minVer uint32
 

@@ -21,12 +21,14 @@ import (
 
 // Interpreter implements the SBF core in pure Go.
 type Interpreter struct {
-	textVA uint64
-	text   []Slot
-	ro     []byte
-	stack  Stack
-	heap   []byte
+	textVA         uint64
+	textBytes      []byte
+	text           []Slot
+	ro             []byte
+	stack          Stack
+	heap           []byte
 	input          []byte
+	inputRegions   []InputRegion
 	inputDataVaddr uint64
 
 	entry    uint64
@@ -81,11 +83,13 @@ func NewInterpreter(p *Program, opts *VMOpts) *Interpreter {
 
 	return &Interpreter{
 		textVA:            p.TextVA,
+		textBytes:         p.TextBytes,
 		text:              p.Text,
 		ro:                p.RO,
-		stack:             NewStack(p.SbpfVersion),
+		stack:             NewStack(p.SbpfVersion, opts.DisableStackFrameGaps),
 		heap:              heap,
 		input:             opts.Input,
+		inputRegions:      opts.InputRegions,
 		inputDataVaddr:    opts.InputDataVaddr,
 		entry:             p.Entrypoint,
 		syscalls:          opts.Syscalls,
@@ -107,6 +111,89 @@ func (ip *Interpreter) Finish() {
 		heapPool.Put(ip.heap)
 	}
 	ip.stack.Finish()
+}
+
+func (ip *Interpreter) executeJmp32(ins Slot, pc int64, r *[11]uint64) (int64, error) {
+	var taken bool
+	dst := uint32(r[ins.Dst()])
+	src := uint32(r[ins.Src()])
+	imm := ins.Uimm()
+
+	switch ins.Op() & 0xf0 {
+	case JumpEq:
+		if ins.Op()&SrcX != 0 {
+			taken = dst == src
+		} else {
+			taken = dst == imm
+		}
+	case JumpGt:
+		if ins.Op()&SrcX != 0 {
+			taken = dst > src
+		} else {
+			taken = dst > imm
+		}
+	case JumpGe:
+		if ins.Op()&SrcX != 0 {
+			taken = dst >= src
+		} else {
+			taken = dst >= imm
+		}
+	case JumpLt:
+		if ins.Op()&SrcX != 0 {
+			taken = dst < src
+		} else {
+			taken = dst < imm
+		}
+	case JumpLe:
+		if ins.Op()&SrcX != 0 {
+			taken = dst <= src
+		} else {
+			taken = dst <= imm
+		}
+	case JumpSet:
+		if ins.Op()&SrcX != 0 {
+			taken = dst&src != 0
+		} else {
+			taken = dst&imm != 0
+		}
+	case JumpNe:
+		if ins.Op()&SrcX != 0 {
+			taken = dst != src
+		} else {
+			taken = dst != imm
+		}
+	case JumpSgt:
+		if ins.Op()&SrcX != 0 {
+			taken = int32(dst) > int32(src)
+		} else {
+			taken = int32(dst) > ins.Imm()
+		}
+	case JumpSge:
+		if ins.Op()&SrcX != 0 {
+			taken = int32(dst) >= int32(src)
+		} else {
+			taken = int32(dst) >= ins.Imm()
+		}
+	case JumpSlt:
+		if ins.Op()&SrcX != 0 {
+			taken = int32(dst) < int32(src)
+		} else {
+			taken = int32(dst) < ins.Imm()
+		}
+	case JumpSle:
+		if ins.Op()&SrcX != 0 {
+			taken = int32(dst) <= int32(src)
+		} else {
+			taken = int32(dst) <= ins.Imm()
+		}
+	default:
+		return pc, ExcUnsupportedInstruction
+	}
+
+	if taken {
+		pc += int64(ins.Off())
+	}
+	return pc + 1, nil
 }
 
 // Run executes the program.
@@ -135,7 +222,7 @@ mainLoop:
 		if pc < 0 || pc >= int64(len(ip.text)) {
 			return 0, 0, &Exception{
 				PC:     pc,
-				Detail: fmt.Errorf("tx: %s, programId: %s - %s:", ip.txSignature, ip.programId, ExcExecutionOverrun),
+				Detail: fmt.Errorf("tx: %s, programId: %s - %w:", ip.txSignature, ip.programId, ExcExecutionOverrun),
 			}
 		}
 		ins := ip.getSlot(pc)
@@ -152,6 +239,10 @@ mainLoop:
 		}
 
 		// Execute
+		if ip.sbpfVersion.EnableJmp32() && ins.Op()&0x07 == ClassPqr {
+			pc, err = ip.executeJmp32(ins, pc, &r)
+			goto postExecute
+		}
 		switch ins.Op() {
 		case OpLdxb:
 			if ip.sbpfVersion.MoveMemoryInstructionClasses() {
@@ -933,39 +1024,68 @@ mainLoop:
 			}
 			pc++
 		case OpCall:
-			if sc, ok := ip.syscalls(ins.Uimm()); ok {
-				r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
-				if err != nil {
-					err = ExcSyscallError{Err: err}
+			if ip.sbpfVersion.EnableStaticSyscalls() {
+				if ins.Src() == 0 {
+					sc, ok := ip.syscalls(ins.Uimm())
+					if !ok {
+						err = ExcCallDest{ins.Uimm()}
+						break
+					}
+					r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
+					if err != nil {
+						err = ExcSyscallError{Err: err}
+					}
+					pc++
+				} else if ins.Src() == 1 {
+					targetPC := ip.sbpfVersion.CalculateCallImmTargetPC(pc, ins.Imm())
+					if targetPC < 0 || targetPC >= int64(len(ip.text)) {
+						err = ExcCallDest{uint32(targetPC)}
+						break
+					}
+					if ok := ip.stack.Push(r[:], pc+1); !ok {
+						err = ExcCallDepth
+					}
+					pc = targetPC
+				} else {
+					err = ExcUnsupportedInstruction
 				}
-				pc++
-			} else if target, ok := ip.funcs[ins.Uimm()]; ok {
-				ok = ip.stack.Push(r[:], pc+1)
-				if !ok {
-					err = ExcCallDepth
-				}
-				pc = target
 			} else {
-				err = ExcCallDest{ins.Uimm()}
+				if sc, ok := ip.syscalls(ins.Uimm()); ok {
+					r[0], err = sc.Invoke(ip, r[1], r[2], r[3], r[4], r[5])
+					if err != nil {
+						err = ExcSyscallError{Err: err}
+					}
+					pc++
+				} else if target, ok := ip.funcs[ins.Uimm()]; ok {
+					ok = ip.stack.Push(r[:], pc+1)
+					if !ok {
+						err = ExcCallDepth
+					}
+					pc = target
+				} else {
+					err = ExcCallDest{ins.Uimm()}
+				}
 			}
 		case OpCallx:
 			var target uint64
 			if ip.sbpfVersion.CallXUsesSrcReg() {
 				target = r[ins.Src()]
+			} else if ip.sbpfVersion.CallXUsesDstReg() {
+				target = r[ins.Dst()]
 			} else {
 				target = r[ins.Uimm()]
 			}
-			target &= ^(uint64(0x7))
 
 			if target < ip.textVA || target >= VaddrStack || target >= ip.textVA+uint64(len(ip.text)*8) {
 				err = NewExcBadAccess(target, 8, false, "jump out-of-bounds")
 				break
 			}
+			targetPC := int64((target - ip.textVA) / 8)
 			if ok := ip.stack.Push(r[:], pc+1); !ok {
 				err = ExcCallDepth
 				break
 			}
-			pc = int64((target - ip.textVA) / 8)
+			pc = targetPC
 		case OpExit:
 			var ok bool
 			pc, ok = ip.stack.Pop(r[:])
@@ -979,6 +1099,7 @@ mainLoop:
 		}
 
 		// Post execute
+	postExecute:
 		if err == cu.ErrComputeExceeded {
 			err = ExcOutOfCU
 		}
@@ -986,7 +1107,7 @@ mainLoop:
 		if err != nil {
 			exc := &Exception{
 				PC:     pc,
-				Detail: fmt.Errorf("tx: %s, programId: %s - %s:", ip.txSignature, ip.programId, err),
+				Detail: fmt.Errorf("tx: %s, programId: %s - %w:", ip.txSignature, ip.programId, err),
 			}
 			if IsLongIns(ins.Op()) {
 				exc.PC-- // fix reported PC
@@ -1035,7 +1156,30 @@ var emptySlice = reflect.ValueOf(emptyArray[:]).UnsafePointer()
 func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (unsafe.Pointer, error) {
 	hi, lo := addr>>32, addr&math.MaxUint32
 	switch hi {
+	case 0:
+		if !ip.sbpfVersion.EnableLowerRodataVaddr() {
+			if size == 0 {
+				return emptySlice, nil
+			}
+			return nil, NewExcBadAccess(addr, size, write, "unmapped region")
+		}
+		if write {
+			return nil, NewExcBadAccess(addr, size, write, "write to program")
+		}
+		if size == 0 {
+			return emptySlice, nil
+		}
+		if addr+size < addr || addr+size > uint64(len(ip.ro)) {
+			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds program read")
+		}
+		return unsafe.Pointer(&ip.ro[addr]), nil
 	case VaddrProgram >> 32:
+		if ip.sbpfVersion.EnableLowerRodataVaddr() {
+			if size == 0 {
+				return emptySlice, nil
+			}
+			return nil, NewExcBadAccess(addr, size, write, "unmapped region")
+		}
 		if write {
 			return nil, NewExcBadAccess(addr, size, write, "write to program")
 		}
@@ -1067,6 +1211,9 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		if size == 0 {
 			return emptySlice, nil
 		}
+		if len(ip.inputRegions) != 0 {
+			return ip.translateInputRegion(lo, size, write)
+		}
 		if lo+size > uint64(len(ip.input)) {
 			return nil, NewExcBadAccess(addr, size, write, "out-of-bounds input access")
 		}
@@ -1077,6 +1224,122 @@ func (ip *Interpreter) translateInternal(addr uint64, size uint64, write bool) (
 		}
 		return nil, NewExcBadAccess(addr, size, write, "unmapped region")
 	}
+}
+
+func (ip *Interpreter) inputRegionIndex(offset uint64) int {
+	idx, found := slices.BinarySearchFunc(ip.inputRegions, offset, func(region InputRegion, target uint64) int {
+		if target < region.Offset {
+			return 1
+		}
+		if target >= region.Offset+region.AddressSpaceReserved {
+			return -1
+		}
+		return 0
+	})
+	if !found {
+		return -1
+	}
+	return idx
+}
+
+func (ip *Interpreter) translateInputRegion(offset, size uint64, write bool) (unsafe.Pointer, error) {
+	idx := ip.inputRegionIndex(offset)
+	if idx < 0 {
+		return nil, NewExcBadAccess(VaddrInput+offset, size, write, "unmapped input region")
+	}
+
+	region := &ip.inputRegions[idx]
+	regionOffset := offset - region.Offset
+	requestedLen := regionOffset + size
+	if requestedLen < regionOffset || requestedLen > region.AddressSpaceReserved {
+		return nil, NewExcBadAccess(VaddrInput+offset, size, write, "out-of-bounds input access")
+	}
+	if write && (!region.Writable || requestedLen > region.RegionSize) && region.OnWrite != nil {
+		if err := region.OnWrite(region, requestedLen); err != nil {
+			return nil, err
+		}
+	}
+	if requestedLen > region.RegionSize {
+		if !write || !region.Writable {
+			return nil, NewExcBadAccess(VaddrInput+offset, size, write, "out-of-bounds input access")
+		}
+		region.RegionSize = region.AddressSpaceReserved
+	}
+	if write && !region.Writable {
+		return nil, NewExcBadAccess(VaddrInput+offset, size, write, "write to readonly input region")
+	}
+	if region.Data != nil {
+		if requestedLen > uint64(len(region.Data)) {
+			return nil, NewExcBadAccess(VaddrInput+offset, size, write, "out-of-bounds input access")
+		}
+		return unsafe.Pointer(&region.Data[regionOffset]), nil
+	}
+
+	hostOffset := region.HostOffset + regionOffset
+	if hostOffset < region.HostOffset || hostOffset+size < hostOffset || hostOffset+size > uint64(len(ip.input)) {
+		return nil, NewExcBadAccess(VaddrInput+offset, size, write, "out-of-bounds input access")
+	}
+	return unsafe.Pointer(&ip.input[hostOffset]), nil
+}
+
+func (ip *Interpreter) TranslateInput(addr uint64, size uint64) ([]byte, error) {
+	if size == 0 {
+		return nil, nil
+	}
+	if addr < VaddrInput {
+		return nil, NewExcBadAccess(addr, size, false, "unmapped input region")
+	}
+	offset := addr - VaddrInput
+	if len(ip.inputRegions) != 0 {
+		idx := ip.inputRegionIndex(offset)
+		if idx < 0 {
+			return nil, NewExcBadAccess(addr, size, false, "unmapped input region")
+		}
+		region := ip.inputRegions[idx]
+		regionOffset := offset - region.Offset
+		if regionOffset+size < regionOffset || regionOffset+size > region.AddressSpaceReserved {
+			return nil, NewExcBadAccess(addr, size, false, "out-of-bounds input access")
+		}
+		if region.Data != nil {
+			if regionOffset+size > uint64(len(region.Data)) {
+				return nil, NewExcBadAccess(addr, size, false, "out-of-bounds input access")
+			}
+			return region.Data[regionOffset : regionOffset+size], nil
+		}
+		hostOffset := region.HostOffset + regionOffset
+		if hostOffset < region.HostOffset || hostOffset+size < hostOffset || hostOffset+size > uint64(len(ip.input)) {
+			return nil, NewExcBadAccess(addr, size, false, "out-of-bounds input access")
+		}
+		return ip.input[hostOffset : hostOffset+size], nil
+	}
+	if offset+size < offset || offset+size > uint64(len(ip.input)) {
+		return nil, NewExcBadAccess(addr, size, false, "out-of-bounds input access")
+	}
+	return ip.input[offset : offset+size], nil
+}
+
+func (ip *Interpreter) SetInputRegionData(addr uint64, data []byte, length uint64, writable bool) bool {
+	if addr < VaddrInput || len(ip.inputRegions) == 0 {
+		return false
+	}
+	idx := ip.inputRegionIndex(addr - VaddrInput)
+	if idx < 0 {
+		return false
+	}
+	region := &ip.inputRegions[idx]
+	if addr != VaddrInput+region.Offset || length > region.AddressSpaceReserved {
+		return false
+	}
+	if data != nil {
+		region.Data = data
+	}
+	region.RegionSize = length
+	region.Writable = writable
+	return true
+}
+
+func (ip *Interpreter) SetInputRegionLength(addr uint64, length uint64, writable bool) bool {
+	return ip.SetInputRegionData(addr, nil, length, writable)
 }
 
 func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, error) {

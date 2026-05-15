@@ -2,6 +2,8 @@ package features
 
 import (
 	"fmt"
+
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 )
 
 type FeatureGate struct {
@@ -37,6 +39,10 @@ func (f *Features) IsActive(gate FeatureGate) bool {
 	}
 }
 
+func (f *Features) IsSbpfV3DeploymentAndExecutionActive() bool {
+	return f.IsActive(EnableSbpfV3DeploymentAndExecution)
+}
+
 func (f *Features) ActivationSlot(gate FeatureGate) (uint64, bool) {
 	if !f.IsActive(gate) {
 		return 0, false
@@ -48,7 +54,7 @@ func (f *Features) AllEnabled() []string {
 	enabledFeatureStrs := make([]string, 0)
 	for feat, enabled := range *f {
 		if enabled.Enabled {
-			enabledFeatureStrs = append(enabledFeatureStrs, fmt.Sprintf("feature %s (%s) enabled", feat.Name, feat.Address))
+			enabledFeatureStrs = append(enabledFeatureStrs, fmt.Sprintf("feature %s (%s) enabled", feat.Name, base58.Encode(feat.Address[:])))
 		}
 	}
 	return enabledFeatureStrs

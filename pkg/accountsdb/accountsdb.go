@@ -163,6 +163,9 @@ func (accountsDb *AccountsDb) CloseDb() {
 
 func (accountsDb *AccountsDb) InitCaches() {
 	var err error
+	if accountsDb.inProgressStoreRequests == nil {
+		accountsDb.inProgressStoreRequests = list.New()
+	}
 	accountsDb.VoteAcctCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](2500).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
@@ -197,6 +200,9 @@ type ProgramCacheEntry struct {
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {
+	if accountsDb == nil {
+		return nil, false
+	}
 	return accountsDb.ProgramCache.Get(pubkey)
 }
 
@@ -209,6 +215,9 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 }
 
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	if accountsDb == nil {
+		return nil, ErrNoAccount
+	}
 	accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
 	if accts[0] != nil {
 		return accts[0], nil
@@ -217,6 +226,9 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 }
 
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	if accountsDb.Index == nil {
+		return nil, ErrNoAccount
+	}
 	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
 	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
 	if hasAcct {

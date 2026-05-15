@@ -22,6 +22,10 @@ func IsLongIns(op uint8) bool {
 	return op == OpLddw
 }
 
+func IsFunctionStartMarker(slot Slot) bool {
+	return slot.Op() == OpAdd64Imm && slot.Dst() == 10
+}
+
 // Slot holds the content of one instruction slot.
 type Slot uint64
 

@@ -1,6 +1,83 @@
 package sealevel
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
+
+type InstrErrCustomCode struct {
+	Code uint32
+}
+
+func (err InstrErrCustomCode) Error() string {
+	return fmt.Sprintf("InstrErrCustom(%d)", err.Code)
+}
+
+const programErrorBuiltinBitShift = 32
+
+func instrErrFromProgramStatus(status uint64) error {
+	const customZero = uint64(1) << programErrorBuiltinBitShift
+
+	switch status {
+	case customZero:
+		return InstrErrCustomCode{Code: 0}
+	case uint64(2) << programErrorBuiltinBitShift:
+		return InstrErrInvalidArgument
+	case uint64(3) << programErrorBuiltinBitShift:
+		return InstrErrInvalidInstructionData
+	case uint64(4) << programErrorBuiltinBitShift:
+		return InstrErrInvalidAccountData
+	case uint64(5) << programErrorBuiltinBitShift:
+		return InstrErrAccountDataTooSmall
+	case uint64(6) << programErrorBuiltinBitShift:
+		return InstrErrInsufficientFunds
+	case uint64(7) << programErrorBuiltinBitShift:
+		return InstrErrIncorrectProgramId
+	case uint64(8) << programErrorBuiltinBitShift:
+		return InstrErrMissingRequiredSignature
+	case uint64(9) << programErrorBuiltinBitShift:
+		return InstrErrAccountAlreadyInitialized
+	case uint64(10) << programErrorBuiltinBitShift:
+		return InstrErrUninitializedAccount
+	case uint64(11) << programErrorBuiltinBitShift:
+		return InstrErrNotEnoughAccountKeys
+	case uint64(12) << programErrorBuiltinBitShift:
+		return InstrErrAccountBorrowFailed
+	case uint64(13) << programErrorBuiltinBitShift:
+		return InstrErrMaxSeedLengthExceeded
+	case uint64(14) << programErrorBuiltinBitShift:
+		return InstrErrInvalidSeeds
+	case uint64(15) << programErrorBuiltinBitShift:
+		return InstrErrBorshIoError
+	case uint64(16) << programErrorBuiltinBitShift:
+		return InstrErrAccountNotRentExempt
+	case uint64(17) << programErrorBuiltinBitShift:
+		return InstrErrUnsupportedSysvar
+	case uint64(18) << programErrorBuiltinBitShift:
+		return InstrErrIllegalOwner
+	case uint64(19) << programErrorBuiltinBitShift:
+		return InstrErrMaxAccountsDataAllocationsExceeded
+	case uint64(20) << programErrorBuiltinBitShift:
+		return InstrErrInvalidRealloc
+	case uint64(21) << programErrorBuiltinBitShift:
+		return InstrErrMaxInstructionTraceLengthExceeded
+	case uint64(22) << programErrorBuiltinBitShift:
+		return InstrErrBuiltinProgramsMustConsumeComputeUnits
+	case uint64(23) << programErrorBuiltinBitShift:
+		return InstrErrInvalidAccountOwner
+	case uint64(24) << programErrorBuiltinBitShift:
+		return InstrErrArithmeticOverflow
+	case uint64(25) << programErrorBuiltinBitShift:
+		return InstrErrImmutable
+	case uint64(26) << programErrorBuiltinBitShift:
+		return InstrErrIncorrectAuthority
+	default:
+		if status>>programErrorBuiltinBitShift == 0 {
+			return InstrErrCustomCode{Code: uint32(status)}
+		}
+		return InstrErrInvalidError
+	}
+}
 
 // instruction errors
 var (
@@ -79,6 +156,7 @@ var (
 	SyscallErrInstructionTooLarge                = errors.New("SyscallErrInstructionTooLarge")
 	SyscallErrMaxInstructionAccountInfosExceeded = errors.New("SyscallErrMaxInstructionAccountInfosExceeded")
 	SyscallErrTooManyAccounts                    = errors.New("SyscallErrTooManyAccounts")
+	SyscallErrInvalidPointer                     = errors.New("SyscallError::InvalidPointer")
 )
 
 var (
@@ -331,14 +409,92 @@ var customErrs = map[error]bool{
 }
 
 func IsCustomErr(err error) bool {
+	var custom InstrErrCustomCode
+	if errors.As(err, &custom) {
+		return true
+	}
 	return customErrs[err]
+}
+
+var instructionErrTargets = []error{
+	InstrErrGenericError,
+	InstrErrInvalidArgument,
+	InstrErrInvalidInstructionData,
+	InstrErrInvalidAccountData,
+	InstrErrAccountDataTooSmall,
+	InstrErrInsufficientFunds,
+	InstrErrIncorrectProgramId,
+	InstrErrMissingRequiredSignature,
+	InstrErrAccountAlreadyInitialized,
+	InstrErrUninitializedAccount,
+	InstrErrUnbalancedInstruction,
+	InstrErrModifiedProgramId,
+	InstrErrExternalAccountLamportSpend,
+	InstrErrExternalAccountDataModified,
+	InstrErrReadonlyLamportChange,
+	InstrErrReadonlyDataModified,
+	InstrErrDuplicateAccountIndex,
+	InstrErrExecutableModified,
+	InstrErrRentEpochModified,
+	InstrErrNotEnoughAccountKeys,
+	InstrErrAccountDataSizeChanged,
+	InstrErrAccountNotExecutable,
+	InstrErrAccountBorrowFailed,
+	InstrErrAccountBorrowOutstanding,
+	InstrErrDuplicateAccountOutOfSync,
+	InstrErrCustom,
+	InstrErrInvalidError,
+	InstrErrExecutableDataModified,
+	InstrErrExecutableLamportChange,
+	InstrErrExecutableAccountNotRentExempt,
+	InstrErrUnsupportedProgramId,
+	InstrErrCallDepth,
+	InstrErrMissingAccount,
+	InstrErrReentrancyNotAllowed,
+	InstrErrMaxSeedLengthExceeded,
+	InstrErrInvalidSeeds,
+	InstrErrInvalidRealloc,
+	InstrErrComputationalBudgetExceeded,
+	InstrErrPrivilegeEscalation,
+	InstrErrProgramEnvironmentSetupFailure,
+	InstrErrProgramFailedToComplete,
+	InstrErrProgramFailedToCompile,
+	InstrErrImmutable,
+	InstrErrIncorrectAuthority,
+	InstrErrBorshIoError,
+	InstrErrAccountNotRentExempt,
+	InstrErrInvalidAccountOwner,
+	InstrErrArithmeticOverflow,
+	InstrErrUnsupportedSysvar,
+	InstrErrIllegalOwner,
+	InstrErrMaxAccountsDataAllocationsExceeded,
+	InstrErrMaxAccountsExceeded,
+	InstrErrMaxInstructionTraceLengthExceeded,
+	InstrErrBuiltinProgramsMustConsumeComputeUnits,
+}
+
+func solanaErrCode(err error) (int, bool) {
+	if err == nil {
+		return InstrErrCodeSuccess, true
+	}
+	if code, ok := solanaNumericalErrCodes[err]; ok {
+		return code, true
+	}
+	for _, instructionErr := range instructionErrTargets {
+		if errors.Is(err, instructionErr) {
+			return solanaNumericalErrCodes[instructionErr], true
+		}
+	}
+	return 0, false
 }
 
 // TODO: add additional error conversions
 func TranslateErrToErrCode(err error) int {
-	if err == nil {
-		return InstrErrCodeSuccess
+	var custom InstrErrCustomCode
+	if errors.As(err, &custom) {
+		return int(custom.Code)
 	}
 
-	return solanaNumericalErrCodes[err]
+	code, _ := solanaErrCode(err)
+	return code
 }
