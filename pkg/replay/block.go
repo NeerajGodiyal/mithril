@@ -69,14 +69,6 @@ type BlockFetchOpts struct {
 	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
 }
 
-// ConsensusOpts contains vote-anchored consensus configuration.
-// Nil means use defaults (max_depth=64, policy="halt").
-type ConsensusOpts struct {
-	SkipPathMaxDepth int    // Max slots for skip-path solver (default: 64)
-	UnresolvedPolicy string // "halt" or "warn" (default: "halt")
-	EnforceOnSource  string // "lightbringer" or "all" (default: "lightbringer")
-}
-
 var SerializedParameterArena *arena.Arena[byte]
 
 // Commit state tracking for panic recovery
@@ -409,7 +401,7 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block) (accounts.Accounts, accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
 		return nil, nil, err
@@ -465,7 +457,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to unmarshal clock sysvar")
 			}
 
-			err = updateClockSysvar(&clock, block)
+			err = updateClockSysvar(&clock, block, epochSchedule)
 			if err != nil {
 				panic(fmt.Sprintf("failed to update clock sysvar: %s", err))
 			}
@@ -793,6 +785,7 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 	if err := RebuildVoteCacheFromAccountsDB(acctsDb, block.Slot, voteAcctStakes, 0); err != nil {
 		mlog.Log.Warnf("vote cache rebuild had errors: %v", err)
 	}
+	rebuildAuthorizedVotersFromVoteCache(block.Epoch)
 
 	// Seed EpochStakesPerVoteAcct and TotalEpochStake from the epoch stakes cache,
 	// loaded by buildInitialEpochStakesCache() from the manifest. These are
@@ -1115,19 +1108,29 @@ func initializeBlockHeight(rpcc *rpcclient.RpcClient, mithrilState *state.Mithri
 	return nil
 }
 
-// buildInitialEpochStakesCache seeds the epoch stakes cache from state file or manifest.
-// Priority: 1) State file ManifestEpochStakes, 2) Direct manifest (backwards compat)
-func buildInitialEpochStakesCache(mithrilState *state.MithrilState) error {
-	// Require state file ManifestEpochStakes (PersistedEpochStakes JSON format)
-	if mithrilState == nil || len(mithrilState.ManifestEpochStakes) == 0 {
-		return fmt.Errorf("state file missing manifest_epoch_stakes - delete AccountsDB and rebuild from snapshot")
+// buildInitialEpochStakesCache seeds the epoch stakes cache from state file manifest data.
+func buildInitialEpochStakesCache(mithrilState *state.MithrilState, currentEpoch uint64, snapshotEpoch uint64) error {
+	seeds, rebased, err := prepareManifestEpochStakesForRuntime(mithrilState, currentEpoch, snapshotEpoch)
+	if err != nil {
+		return err
+	}
+	if rebased {
+		sourceEpochs := make([]uint64, 0, len(seeds))
+		runtimeEpochs := make([]uint64, 0, len(seeds))
+		for _, seed := range seeds {
+			sourceEpochs = append(sourceEpochs, seed.sourceEpoch)
+			runtimeEpochs = append(runtimeEpochs, seed.runtimeEpoch)
+		}
+		mlog.Log.Warnf("rebasing manifest epoch stakes from snapshot epochs %v to runtime epochs %v (snapshot epoch %d)",
+			sourceEpochs, runtimeEpochs, snapshotEpoch)
 	}
 
-	for epoch, data := range mithrilState.ManifestEpochStakes {
-		if loadedEpoch, err := global.DeserializeAndLoadEpochStakes([]byte(data)); err != nil {
-			return fmt.Errorf("failed to load manifest epoch %d stakes from state file: %w", epoch, err)
+	for _, seed := range seeds {
+		if loadedEpoch, err := global.DeserializeAndLoadEpochStakes(seed.data); err != nil {
+			return fmt.Errorf("failed to load manifest epoch %d stakes from state file: %w", seed.sourceEpoch, err)
 		} else {
-			mlog.Log.Debugf("loaded epoch %d stakes from state file manifest_epoch_stakes", loadedEpoch)
+			mlog.Log.Debugf("loaded manifest epoch %d stakes as runtime epoch %d from state file manifest_epoch_stakes",
+				seed.sourceEpoch, loadedEpoch)
 		}
 	}
 
@@ -1226,12 +1229,21 @@ func ReplayBlocks(
 	}
 
 	cacheConstantSysvars(acctsDb)
-	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+	epochSchedule, usingManifestEpochSchedule, err := bankEpochScheduleForReplay(mithrilState)
+	if err != nil {
+		result.Error = err
+		return result
+	}
+	if usingManifestEpochSchedule && !epochSchedulesEqual(epochSchedule, sealevel.SysvarCache.EpochSchedule.Sysvar) {
+		sysvarSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+		mlog.Log.Warnf("bank epoch schedule differs from SysvarEpochSchedule account; using manifest bank schedule for replay | bank_slots_per_epoch=%d bank_leader_offset=%d bank_first_normal_epoch=%d bank_first_normal_slot=%d | sysvar_slots_per_epoch=%d sysvar_leader_offset=%d sysvar_first_normal_epoch=%d sysvar_first_normal_slot=%d",
+			epochSchedule.SlotsPerEpoch, epochSchedule.LeaderScheduleSlotOffset, epochSchedule.FirstNormalEpoch, epochSchedule.FirstNormalSlot,
+			sysvarSchedule.SlotsPerEpoch, sysvarSchedule.LeaderScheduleSlotOffset, sysvarSchedule.FirstNormalEpoch, sysvarSchedule.FirstNormalSlot)
+	}
 
 	global.SetCalcUnixTimeForClockSysvar(true)
 	global.SetManageLeaderSchedule(true)
 
-	var err error
 	var currentSlot uint64
 	currentEpoch := epochSchedule.GetEpoch(startSlot)
 	var lastSlotCtx *sealevel.SlotCtx
@@ -1305,14 +1317,14 @@ func ReplayBlocks(
 			}
 		} else {
 			// Resume in same epoch as snapshot, no boundaries crossed - state file epoch stakes still valid
-			if err := buildInitialEpochStakesCache(mithrilState); err != nil {
+			if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
 				result.Error = err
 				return result
 			}
 		}
 	} else {
 		// Fresh start: load all epochs from state file
-		if err := buildInitialEpochStakesCache(mithrilState); err != nil {
+		if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
 			result.Error = err
 			return result
 		}
@@ -1323,34 +1335,13 @@ func ReplayBlocks(
 	}
 	// Resolve consensus config defaults before forkchoice init so we can
 	// check whether enforcement requires authorized voters.
-	consensusMaxDepth := 64
-	consensusPolicy := "halt"
-	consensusEnforceSource := "lightbringer"
-	if consensusOpts != nil {
-		if consensusOpts.SkipPathMaxDepth > 0 {
-			consensusMaxDepth = consensusOpts.SkipPathMaxDepth
-		}
-		if consensusOpts.UnresolvedPolicy != "" {
-			consensusPolicy = consensusOpts.UnresolvedPolicy
-		}
-		if consensusOpts.EnforceOnSource != "" {
-			consensusEnforceSource = consensusOpts.EnforceOnSource
-		}
-	}
-	switch consensusEnforceSource {
-	case "lightbringer", "all":
-	default:
-		mlog.Log.Warnf("forkchoice: invalid EnforceOnSource=%q, defaulting to \"lightbringer\"", consensusEnforceSource)
-		consensusEnforceSource = "lightbringer"
-	}
-
-	consensusEnforceActive := consensusEnforceSource == "all" || useLightbringer
+	consensusCfg := resolveConsensusConfig(consensusOpts, useLightbringer, isLive)
 
 	epochAuthVoters := global.EpochAuthorizedVoters()
 	if epochAuthVoters == nil {
 		// Without authorized voters, forkchoice can't parse votes → no supermajority → enforcement is blind.
 		// If consensus enforcement is active, this is a fatal misconfiguration.
-		if consensusEnforceActive && consensusPolicy == "halt" {
+		if consensusCfg.enforceActive && consensusCfg.policy == "halt" {
 			result.Error = fmt.Errorf("forkchoice: EpochAuthorizedVoters is nil — cannot enforce consensus without vote parsing (check snapshot/state file)")
 			return result
 		}
@@ -1364,8 +1355,8 @@ func ReplayBlocks(
 	// Instantiate the consensus coordinator for skip-path resolution and policy.
 	// In Lightbringer mode this now resolves a pre-execution block/skip path from
 	// the current anchor to a vote-confirmed leaf.
-	consensusCoordinator := forkchoice.NewConsensusCoordinator(forkChoice, consensusMaxDepth, consensusPolicy)
-	consensusBufferedExecutionActive := !isLive || consensusEnforceSource == "all"
+	consensusCoordinator := forkchoice.NewConsensusCoordinator(forkChoice, consensusCfg.maxDepth, consensusCfg.policy)
+	consensusBufferedExecutionActive := consensusCfg.bufferedExecutionActive
 
 	var statsCounter int
 	var execTimes []float64      // seconds per block
@@ -1383,12 +1374,6 @@ func ReplayBlocks(
 	voteTxCounts = make([]uint64, 0, summaryInterval)
 	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
 
-	type pendingConsensusPath struct {
-		leafSlot     uint64
-		leafBankhash solana.Hash
-		decisions    []forkchoice.SlotDecision
-	}
-
 	var readyConsensusPath *pendingConsensusPath
 	observedConsensusBlocks := make(map[uint64]*b.Block)
 
@@ -1402,9 +1387,9 @@ func ReplayBlocks(
 			StartSlot:            startSlot,
 			EndSlot:              endSlot,
 			BlockDir:             blockDir,
-			ConsensusManagedLightbringer: consensusEnforceActive &&
+			ConsensusManagedLightbringer: consensusCfg.enforceActive &&
 				isLive &&
-				consensusEnforceSource == "lightbringer",
+				consensusCfg.enforceSource == "lightbringer",
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
@@ -1443,32 +1428,6 @@ func ReplayBlocks(
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
 
-	// writeConsensusArtifact writes a best-effort JSON diagnostic artifact to the
-	// per-run consensus subdirectory. If the log dir is empty or any step fails,
-	// it logs a warning and continues — artifact failure must not crash replay.
-	writeConsensusArtifact := func(filename string, data map[string]interface{}) {
-		logDir := mlog.GetLogDir()
-		if logDir == "" {
-			return
-		}
-		dir := filepath.Join(logDir, "consensus")
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			mlog.Log.Warnf("consensus artifact: failed to create directory %s: %v", dir, err)
-			return
-		}
-		artifactPath := filepath.Join(dir, filename)
-		artifactJSON, jsonErr := json.MarshalIndent(data, "", "  ")
-		if jsonErr != nil {
-			mlog.Log.Warnf("consensus artifact: failed to marshal JSON for %s: %v", filename, jsonErr)
-			return
-		}
-		if writeErr := os.WriteFile(artifactPath, artifactJSON, 0644); writeErr != nil {
-			mlog.Log.Warnf("consensus artifact: failed to write %s: %v", artifactPath, writeErr)
-			return
-		}
-		mlog.Log.FileOnlyf("consensus artifact written: %s", artifactPath)
-	}
-
 	currentConsensusAnchorSlot := func() uint64 {
 		if lastSlotCtx != nil {
 			return lastSlotCtx.Slot
@@ -1498,25 +1457,8 @@ func ReplayBlocks(
 		}
 	}
 
-	pruneObservedConsensusBlocks := func(anchorSlot uint64) {
-		if observedConsensusBlocks == nil || anchorSlot == 0 {
-			return
-		}
-		for slot := range observedConsensusBlocks {
-			if slot <= anchorSlot {
-				delete(observedConsensusBlocks, slot)
-			}
-		}
-	}
-
-	clearObservedConsensusBlocks := func() {
-		for slot := range observedConsensusBlocks {
-			delete(observedConsensusBlocks, slot)
-		}
-	}
-
 	syncConsensusBufferedExecutionMode := func(triggerSlot uint64) {
-		if !consensusEnforceActive || !isLive || consensusEnforceSource != "lightbringer" {
+		if !consensusCfg.enforceActive || !isLive || consensusCfg.enforceSource != "lightbringer" {
 			return
 		}
 
@@ -1531,7 +1473,7 @@ func ReplayBlocks(
 
 			consensusBufferedExecutionActive = false
 			readyConsensusPath = nil
-			clearObservedConsensusBlocks()
+			clearObservedConsensusBlocks(observedConsensusBlocks)
 			observeConsensusAnchor()
 			mlog.Log.Warnf("forkchoice: suspending buffered execution at slot %d because block source left near-tip mode; RPC catchup will continue from anchor %d (discarded_observed_blocks=%d discarded_ready_decisions=%d next_emitted_slot=%d)",
 				triggerSlot, anchorSlot, discardedObservedBlocks, readyDecisionCount, stats.NextSlot)
@@ -1539,18 +1481,18 @@ func ReplayBlocks(
 	}
 
 	observeBlockForConsensus := func(block *b.Block) error {
-		if !consensusEnforceActive {
+		if !consensusCfg.enforceActive {
 			return nil
 		}
 
-		if !consensusBufferedExecutionActive && isLive && consensusEnforceSource == "lightbringer" {
+		if !consensusBufferedExecutionActive && isLive && consensusCfg.enforceSource == "lightbringer" {
 			if block == nil || !block.FromLightbringer {
 				return nil
 			}
 			consensusBufferedExecutionActive = true
 			readyConsensusPath = nil
 			observeConsensusAnchor()
-			pruneObservedConsensusBlocks(currentConsensusAnchorSlot())
+			pruneObservedConsensusBlocks(observedConsensusBlocks, currentConsensusAnchorSlot())
 			mlog.Log.Warnf("forkchoice: enabling buffered execution at slot %d after block source switched to Lightbringer", block.Slot)
 		}
 
@@ -1704,7 +1646,7 @@ func ReplayBlocks(
 					case errors.Is(err, forkchoice.ErrDepthExceeded):
 						if consensusCoordinator.Policy() == "halt" {
 							result.Error = fmt.Errorf("forkchoice: unable to resolve a confirmed path within %d slots from anchor %d",
-								consensusMaxDepth, currentConsensusAnchorSlot())
+								consensusCfg.maxDepth, currentConsensusAnchorSlot())
 							break
 						}
 						mlog.Log.Warnf("forkchoice: path resolution exceeded max depth from anchor %d", currentConsensusAnchorSlot())
@@ -1722,11 +1664,7 @@ func ReplayBlocks(
 					continue
 				}
 
-				readyConsensusPath = &pendingConsensusPath{
-					leafSlot:     resolvedPath.LeafSlot,
-					leafBankhash: resolvedPath.LeafBankhash,
-					decisions:    resolvedPath.SlotDecisions,
-				}
+				readyConsensusPath = newPendingConsensusPath(currentConsensusAnchorSlot(), resolvedPath)
 				continue
 			}
 		}
@@ -1767,10 +1705,11 @@ func ReplayBlocks(
 		currentSlot = block.Slot
 		block.Epoch = epochSchedule.GetEpoch(currentSlot)
 		var configErr error
+		initialBlockConfigured := lastSlotCtx == nil
 		// Use lastSlotCtx == nil to detect first block, not currentSlot == startSlot.
 		// This handles the case where startSlot (or slots after it) are skipped -
 		// the first emitted block might have slot > startSlot.
-		if lastSlotCtx == nil {
+		if initialBlockConfigured {
 			if resumeState != nil {
 				// RESUME: Use resume state + state file (for static fields)
 				configErr = configureInitialBlockFromResume(acctsDb, block, resumeState, mithrilState, epochSchedule)
@@ -1786,6 +1725,18 @@ func ReplayBlocks(
 			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
 			result.Error = configErr
 			break
+		}
+		if initialBlockConfigured {
+			// Initial block configuration rebuilds VoteCache and EpochAuthorizedVoters
+			// from AccountsDB. Forkchoice is created before that happens, so refresh
+			// its epoch view here to avoid using stale manifest voters after resume or
+			// an epoch boundary.
+			forkChoice.UpdateEpoch(
+				block.Epoch,
+				global.EpochStakes(block.Epoch),
+				global.EpochTotalStake(block.Epoch),
+				global.EpochAuthorizedVoters(),
+			)
 		}
 
 		// Log replay start message once, after initial configuration completes
@@ -1868,36 +1819,9 @@ func ReplayBlocks(
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
 
-		// EAH (Epoch Accounts Hash) Workaround - DISABLED
-		// Background: Before the AccountsLtHash feature was activated, Solana required an Epoch
-		// Accounts Hash at specific slots during partitioned epoch rewards. This hash covers all
-		// accounts and is included in the bankhash calculation at the EahStopOffsetSlot.
-		// Problem: Mithril does not implement EAH computation (it's expensive and was being phased out).
-		// Workaround: For historical slots that require EAH, we fetch the expected bankhash from RPC
-		// instead of computing it locally. This allows replaying old slots without EAH implementation.
-		// Note: This workaround is only needed for slots before AccountsLtHash activation (~Nov 2024).
-		// If replaying historical slots and hitting EAH requirements, the bankhash is fetched from
-		// a trusted RPC endpoint rather than computed. The bankhash is NOT stored to bankhash_db
-		// in this case (see ProcessBlock's early return when HasEahWorkaround is true).
-		// Uncomment if you need to replay pre-AccountsLtHash historical slots.
-		/*
-			if !block.Features.IsActive(features.AccountsLtHash) {
-				if partitionedEpochRewardsEnabled && block.Slot == partitionedRewardsInfo.EahStopOffsetSlot {
-					if replayCtx.HasEpochAcctsHash {
-						block.EpochAcctsHash = replayCtx.EpochAcctsHash
-					} else {
-						block.EahWorkaroundBankhash, err = fetchBankhashForSlot(rpcc, block.Slot)
-						if err != nil {
-							panic(fmt.Sprintf("unable to fetch bankhash for EAH workaround for slot %d", block.Slot))
-						}
-						block.HasEahWorkaround = true
-					}
-				}
-			}
-		*/
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, txParallelism, dbgOpts, pt)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -1912,8 +1836,6 @@ func ReplayBlocks(
 		}
 
 		if consensusBufferedExecutionActive {
-			observeConsensusAnchor()
-			pruneObservedConsensusBlocks(currentConsensusAnchorSlot())
 			if readyConsensusPath != nil && block.Slot == readyConsensusPath.leafSlot {
 				actualBankhash := solana.HashFromBytes(lastSlotCtx.FinalBankhash)
 				if actualBankhash != readyConsensusPath.leafBankhash {
@@ -1924,14 +1846,17 @@ func ReplayBlocks(
 					)
 					writeConsensusArtifact(
 						fmt.Sprintf("bankhash_mismatch_slot_%d.json", block.Slot),
-						map[string]interface{}{
-							"type":             "bankhash_mismatch",
-							"checked_slot":     block.Slot,
-							"our_bankhash":     base58.Encode(actualBankhash[:]),
-							"winning_bankhash": base58.Encode(readyConsensusPath.leafBankhash[:]),
-							"policy":           consensusCoordinator.Policy(),
-							"run_id":           CurrentRunID,
-						},
+						buildConsensusMismatchArtifact(
+							block,
+							lastSlotCtx,
+							readyConsensusPath,
+							actualBankhash,
+							blockStream.GetFetchStats(),
+							forkChoice,
+							consensusCoordinator.Policy(),
+							observedConsensusBlocks,
+							currentConsensusAnchorSlot(),
+						),
 					)
 					if consensusCoordinator.Policy() == "halt" {
 						result.Error = fmt.Errorf("consensus halt: slot %d bankhash mismatch (our=%s winning=%s)",
@@ -1941,6 +1866,8 @@ func ReplayBlocks(
 				}
 				readyConsensusPath = nil
 			}
+			observeConsensusAnchor()
+			pruneObservedConsensusBlocks(observedConsensusBlocks, currentConsensusAnchorSlot())
 		}
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
@@ -2665,6 +2592,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 func ProcessBlock(
 	acctsDb *accountsdb.AccountsDb,
 	block *b.Block,
+	epochSchedule *sealevel.SysvarEpochSchedule,
 	txParallelism int,
 	dbgOpts *DebugOptions,
 	// pt is updated after StoreAccounts completes through a callback.
@@ -2731,6 +2659,8 @@ func ProcessBlock(
 	unresolvedBlock := &b.Block{
 		Transactions: make([]*solana.Transaction, len(block.Transactions)),
 		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
+		Slot:         block.Slot,
+		ParentSlot:   block.ParentSlot,
 	}
 	for i := range block.Transactions {
 		clonedTx, cloneErr := cloneTransaction(block.Transactions[i])
@@ -2747,7 +2677,7 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block)
+	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -2787,7 +2717,6 @@ func ProcessBlock(
 
 	start = time.Now()
 	setReplayStage("collect_rent")
-	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	metrics.GlobalBlockReplay.Rent.AddTimingSince(start)

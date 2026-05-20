@@ -18,13 +18,18 @@ const nsPerSlot = 400000000
 const maxAllowableDriftFast = 25
 const maxAllowableDriftSlow = 150
 
-func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block) error {
-	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
+func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	epochOld := clock.Epoch
+	epochNew := block.Epoch
+
+	if epochOld != epochNew && epochOld+1 != epochNew {
+		return fmt.Errorf("unexpected epoch transition in Clock sysvar: clock epoch %d, block epoch %d at slot %d", epochOld, epochNew, block.Slot)
+	}
 
 	if global.CalcUnixTimeForClockSysvar() {
 		firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(clock.Epoch)
 		epochStartTimestamp := clock.EpochStartTimestamp
-		timestampEstimate := getTimestampEstimate(block.Slot, firstSlotInEpoch, epochStartTimestamp)
+		timestampEstimate := getTimestampEstimate(block.Slot, firstSlotInEpoch, epochStartTimestamp, epochSchedule)
 		if timestampEstimate > clock.UnixTimestamp {
 			clock.UnixTimestamp = timestampEstimate
 		}
@@ -33,8 +38,6 @@ func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block) error {
 	}
 
 	clock.Slot = block.Slot
-	epochOld := clock.Epoch
-	epochNew := block.Epoch
 	clock.Epoch = epochNew
 
 	if epochOld != epochNew {
@@ -51,9 +54,7 @@ type tsEntry struct {
 	timestamp int64
 }
 
-func getTimestampEstimate(slot uint64, epochStartTimestampSlot uint64, epochStartTimestamp int64) int64 {
-	epochSchedule := sealevel.SysvarCache.EpochSchedule.Sysvar
-
+func getTimestampEstimate(slot uint64, epochStartTimestampSlot uint64, epochStartTimestamp int64, epochSchedule *sealevel.SysvarEpochSchedule) int64 {
 	slotsPerEpoch := epochSchedule.SlotsPerEpoch
 	voteAccts := global.VoteCache()
 

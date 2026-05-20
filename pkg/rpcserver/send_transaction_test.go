@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 	tx, wire := testLegacyTransaction(t)
 	fetchCount := 0
 	rpcServer := &RpcServer{
-		packetSender:                      defaultPacketSender,
+		transactionSender:                 defaultTransactionSender,
 		clusterNodesRefreshEvery:          sendTransactionClusterNodesRefreshEvery,
 		sendTransactionLeaderForwardCount: sendTransactionLeaderForwardCount,
 		clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
@@ -161,7 +162,7 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 	assert.Equal(t, wire, mustReadUDP(t, listenerF))
 }
 
-func TestResolveUpcomingLeaderTPUAddresses_UsesFreshCacheWithoutRefetch(t *testing.T) {
+func TestResolveUpcomingLeaderTPUEndpoints_UsesFreshCacheWithoutRefetch(t *testing.T) {
 	leaderA := solana.PublicKey{0x01}
 	leaderB := solana.PublicKey{0x02}
 	leaderC := solana.PublicKey{0x03}
@@ -202,13 +203,13 @@ func TestResolveUpcomingLeaderTPUAddresses_UsesFreshCacheWithoutRefetch(t *testi
 	}
 
 	require.NoError(t, rpcServer.refreshLeaderTPUCache(context.Background()))
-	targets, err := rpcServer.resolveUpcomingLeaderTPUAddresses(context.Background(), sendTransactionTargetCount)
+	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpoints(context.Background(), 6)
 	require.NoError(t, err)
-	require.Len(t, targets, sendTransactionTargetCount)
+	require.Len(t, targets, 6)
 	assert.Equal(t, 1, fetchCount, "fresh cache should satisfy resolution without another RPC poll")
 }
 
-func TestResolveUpcomingLeaderTPUAddresses_RefreshesStaleCache(t *testing.T) {
+func TestResolveUpcomingLeaderTPUEndpoints_RefreshesStaleCache(t *testing.T) {
 	leaderA := solana.PublicKey{0x11}
 	leaderB := solana.PublicKey{0x12}
 	leaderC := solana.PublicKey{0x13}
@@ -253,10 +254,45 @@ func TestResolveUpcomingLeaderTPUAddresses_RefreshesStaleCache(t *testing.T) {
 	rpcServer.leaderTPUCacheUpdatedAt = time.Now().Add(-11 * time.Minute)
 	rpcServer.leaderTPUCacheMu.Unlock()
 
-	targets, err := rpcServer.resolveUpcomingLeaderTPUAddresses(context.Background(), sendTransactionTargetCount)
+	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpoints(context.Background(), 6)
 	require.NoError(t, err)
-	require.Len(t, targets, sendTransactionTargetCount)
+	require.Len(t, targets, 6)
 	assert.Equal(t, 2, fetchCount, "stale cache should trigger a refresh before resolving targets")
+}
+
+func TestRefreshLeaderTPUCache_PrefersQUICEndpoints(t *testing.T) {
+	leaderA := solana.PublicKey{0x21}
+	leaderB := solana.PublicKey{0x22}
+	leaderC := solana.PublicKey{0x23}
+
+	rpcServer := &RpcServer{
+		clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+			return []*solanarpc.GetClusterNodesResult{
+				{
+					Pubkey:  leaderA,
+					TPU:     stringPtr("127.0.0.1:9001"),
+					TPUQUIC: stringPtr("127.0.0.1:10001"),
+				},
+				{
+					Pubkey:  leaderB,
+					TPUQUIC: stringPtr("127.0.0.1:10002"),
+				},
+				{
+					Pubkey: leaderC,
+					TPU:    stringPtr("127.0.0.1:9003"),
+				},
+			}, nil
+		},
+	}
+
+	require.NoError(t, rpcServer.refreshLeaderTPUCache(context.Background()))
+
+	rpcServer.leaderTPUCacheMu.RLock()
+	defer rpcServer.leaderTPUCacheMu.RUnlock()
+
+	assert.Equal(t, tpuEndpoint{Addr: netip.MustParseAddrPort("127.0.0.1:10001"), Transport: tpuTransportQUIC}, rpcServer.leaderTPUByIdentity[leaderA])
+	assert.Equal(t, tpuEndpoint{Addr: netip.MustParseAddrPort("127.0.0.1:10002"), Transport: tpuTransportQUIC}, rpcServer.leaderTPUByIdentity[leaderB])
+	assert.Equal(t, tpuEndpoint{Addr: netip.MustParseAddrPort("127.0.0.1:9003"), Transport: tpuTransportUDP}, rpcServer.leaderTPUByIdentity[leaderC])
 }
 
 func mustRawParams(t *testing.T, params []interface{}) jsonrpc.RawParams {

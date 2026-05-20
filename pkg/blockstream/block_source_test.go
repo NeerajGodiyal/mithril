@@ -165,6 +165,66 @@ func TestPrepareLightbringerHandoffRequiresMinimumRunway(t *testing.T) {
 	}
 }
 
+func TestPrepareLightbringerHandoffAllowsLiveEdgeRunwayAtTip(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(150)
+	bs.confirmedTip.Store(151)
+	bs.lightbringerLastStreamSlot.Store(151)
+	bs.lastEmittedBlockSlot = 150
+	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
+	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, 151)
+
+	reason := bs.lightbringerHandoffWaitReason(151, 150)
+	if !strings.Contains(reason, "handoff-ready runway buffered through slot 151") {
+		t.Fatalf("expected live-edge runway to be handoff-ready, got %q", reason)
+	}
+
+	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	if !prepared {
+		t.Fatalf("expected consensus-managed handoff to prepare at the live edge")
+	}
+	if handoffSlot != 151 {
+		t.Fatalf("expected handoff slot 151, got %d", handoffSlot)
+	}
+	if len(blocks) != 1 || blocks[0].Slot != 151 {
+		t.Fatalf("expected single live-edge Lightbringer block to be enqueued, got %+v", blocks)
+	}
+}
+
+func TestPrepareLightbringerHandoffKeepsMinimumRunwayWhenLightbringerLagsTip(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(150)
+	bs.confirmedTip.Store(157)
+	bs.lightbringerLastStreamSlot.Store(151)
+	bs.lastEmittedBlockSlot = 150
+	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
+	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, 151)
+
+	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	if prepared || handoffSlot != 0 || len(blocks) != 0 {
+		t.Fatalf("expected stale Lightbringer stream to require the full handoff runway, got prepared=%v handoff=%d blocks=%+v",
+			prepared, handoffSlot, blocks)
+	}
+}
+
 func TestPrepareLightbringerHandoffRequiresRunwayThroughConfiguredBoundary(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
@@ -275,6 +335,188 @@ func TestPrepareLightbringerHandoffPurgesRPCOwnedStateAtBoundary(t *testing.T) {
 	}
 	if len(bs.retrySlots) != 1 || bs.retrySlots[0] != 149 {
 		t.Fatalf("expected retries at or beyond handoff to be purged, got %+v", bs.retrySlots)
+	}
+}
+
+func TestMaybePrepareLightbringerHandoffDefersWhenStreamTipShowsReplayGapTooLarge(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(101)
+	bs.confirmedTip.Store(117)
+	bs.lightbringerLastStreamSlot.Store(118)
+	bs.lastEmittedBlockSlot = 110
+	bs.nextSlotToSend = 111
+	for slot := uint64(111); slot <= 118; slot++ {
+		parentSlot := slot - 1
+		if slot == 111 {
+			parentSlot = 110
+		}
+		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
+		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+	}
+
+	bs.maybePrepareLightbringerHandoff()
+
+	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+		t.Fatalf("expected handoff to stay unarmed while replay gap exceeds handoff threshold, got %d", got)
+	}
+	if queued := len(bs.resultQueue); queued != 0 {
+		t.Fatalf("expected no Lightbringer blocks to be enqueued before handoff, got %d", queued)
+	}
+}
+
+func TestMaybePrepareLightbringerHandoffArmsWhenReplayGapHasHeadroom(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(102)
+	bs.confirmedTip.Store(117)
+	bs.lightbringerLastStreamSlot.Store(118)
+	bs.lastEmittedBlockSlot = 110
+	bs.nextSlotToSend = 111
+	for slot := uint64(111); slot <= 118; slot++ {
+		parentSlot := slot - 1
+		if slot == 111 {
+			parentSlot = 110
+		}
+		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
+		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+	}
+
+	bs.maybePrepareLightbringerHandoff()
+
+	if got := bs.lightbringerHandoffSlot.Load(); got != 111 {
+		t.Fatalf("expected handoff to arm at slot 111 once replay gap has headroom, got %d", got)
+	}
+	if queued := len(bs.resultQueue); queued != 8 {
+		t.Fatalf("expected the 8-slot Lightbringer runway to be enqueued, got %d", queued)
+	}
+}
+
+func TestShouldDecodeLightbringerSlotStagesBeforeNearTipWithinCatchupWindow(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              300,
+	})
+
+	bs.isNearTip.Store(false)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(100)
+	bs.confirmedTip.Store(164)
+	bs.lightbringerLastStreamSlot.Store(164)
+	bs.nextSlotToSend = 110
+
+	if !bs.shouldDecodeLightbringerSlot(120) {
+		t.Fatalf("expected Lightbringer slot within catchup staging window to be decoded")
+	}
+	if bs.shouldDecodeLightbringerSlot(109) {
+		t.Fatalf("expected slot behind the emission frontier to stay unstaged")
+	}
+}
+
+func TestShouldDecodeLightbringerSlotDoesNotStageWhenReplayGapTooLarge(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              300,
+	})
+
+	bs.isNearTip.Store(false)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(100)
+	bs.confirmedTip.Store(165)
+	bs.lightbringerLastStreamSlot.Store(165)
+	bs.nextSlotToSend = 101
+
+	if bs.shouldDecodeLightbringerSlot(120) {
+		t.Fatalf("expected Lightbringer staging to wait until replay is inside the catchup staging window")
+	}
+}
+
+func TestUpdateModeDefersCatchupWhileConsensusManagedLightbringerIsLive(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      300,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerStarted.Store(true)
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lightbringerHandoffSlot.Store(101)
+	bs.lastExecutedSlot.Store(100)
+	bs.confirmedTip.Store(165)
+	bs.lightbringerLastStreamSlot.Store(164)
+	bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+	bs.lastProgress.Store(time.Now().Unix())
+	bs.nextSlotToSend = 101
+
+	bs.updateMode()
+
+	if !bs.isNearTip.Load() {
+		t.Fatalf("expected near-tip mode to remain active while Lightbringer observations are fresh")
+	}
+	if !bs.lightbringerActive.Load() {
+		t.Fatalf("expected Lightbringer to stay active during consensus buffering")
+	}
+	if bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected RPC resume flag to stay clear while deferring catchup")
+	}
+}
+
+func TestUpdateModeFallsBackWhenConsensusManagedLightbringerReplayGapExceedsGrace(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceLightbringer,
+		LightbringerEndpoint:         "127.0.0.1:50051",
+		StartSlot:                    100,
+		EndSlot:                      300,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerStarted.Store(true)
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lightbringerHandoffSlot.Store(101)
+	bs.lastExecutedSlot.Store(100)
+	bs.confirmedTip.Store(229)
+	bs.lightbringerLastStreamSlot.Store(229)
+	bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+	bs.lastProgress.Store(time.Now().Unix())
+	bs.nextSlotToSend = 150
+
+	bs.updateMode()
+
+	if bs.isNearTip.Load() {
+		t.Fatalf("expected near-tip mode to fall back once replay gap exceeds consensus buffering grace")
+	}
+	if bs.lightbringerActive.Load() {
+		t.Fatalf("expected Lightbringer to be marked inactive after fallback")
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected RPC resume flag to be raised after fallback")
+	}
+	if got := bs.nextSlotToSend; got != 101 {
+		t.Fatalf("expected consensus-managed fallback to rewind emission frontier to replay next slot 101, got %d", got)
 	}
 }
 

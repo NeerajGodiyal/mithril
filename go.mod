@@ -20,6 +20,7 @@ require (
 	github.com/nixberg/chacha-rng-go v0.1.0
 	github.com/novifinancial/serde-reflection/serde-generate/runtime/golang v0.0.0-20220519162058-e5cd3c3b3f3a
 	github.com/prometheus/client_golang v1.20.4
+	github.com/quic-go/quic-go v0.59.1
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/twmb/murmur3 v1.1.8

@@ -324,6 +324,11 @@ func rebuildAuthorizedVotersFromVoteCache(epoch uint64) {
 			if err == nil {
 				newCache.PutEntry(voteAcct, voter)
 			}
+		case sealevel.VoteStateVersionV4:
+			voter, _, err := voteState.V4.AuthorizedVoters.GetOrCalculateAuthorizedVoterForEpoch(epoch)
+			if err == nil {
+				newCache.PutEntry(voteAcct, voter)
+			}
 		}
 	}
 

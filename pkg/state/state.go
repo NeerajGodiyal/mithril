@@ -81,13 +81,14 @@ type MithrilState struct {
 	ManifestEvictedBlockhash  string           `json:"manifest_evicted_blockhash,omitempty"` // base58
 
 	// ReplayCtx seed (inflation/capitalization at snapshot)
-	ManifestCapitalization          uint64  `json:"manifest_capitalization,omitempty"`
-	ManifestSlotsPerYear            float64 `json:"manifest_slots_per_year,omitempty"`
-	ManifestInflationInitial        float64 `json:"manifest_inflation_initial,omitempty"`
-	ManifestInflationTerminal       float64 `json:"manifest_inflation_terminal,omitempty"`
-	ManifestInflationTaper          float64 `json:"manifest_inflation_taper,omitempty"`
-	ManifestInflationFoundation     float64 `json:"manifest_inflation_foundation,omitempty"`
-	ManifestInflationFoundationTerm float64 `json:"manifest_inflation_foundation_term,omitempty"`
+	ManifestCapitalization          uint64                     `json:"manifest_capitalization,omitempty"`
+	ManifestSlotsPerYear            float64                    `json:"manifest_slots_per_year,omitempty"`
+	ManifestInflationInitial        float64                    `json:"manifest_inflation_initial,omitempty"`
+	ManifestInflationTerminal       float64                    `json:"manifest_inflation_terminal,omitempty"`
+	ManifestInflationTaper          float64                    `json:"manifest_inflation_taper,omitempty"`
+	ManifestInflationFoundation     float64                    `json:"manifest_inflation_foundation,omitempty"`
+	ManifestInflationFoundationTerm float64                    `json:"manifest_inflation_foundation_term,omitempty"`
+	ManifestEpochSchedule           *ManifestEpochScheduleSeed `json:"manifest_epoch_schedule,omitempty"`
 
 	// Epoch account hash (base64 for consistency with LtHash)
 	ManifestEpochAcctsHash string `json:"manifest_epoch_accts_hash,omitempty"` // base64
@@ -180,6 +181,17 @@ type ManifestFeeRateGovernorSeed struct {
 	MinLamportsPerSignature    uint64 `json:"min_lamports_per_sig"`
 	MaxLamportsPerSignature    uint64 `json:"max_lamports_per_sig"`
 	BurnPercent                byte   `json:"burn_percent"`
+}
+
+// ManifestEpochScheduleSeed contains the bank epoch schedule serialized in the
+// snapshot manifest. Some clusters can expose a divergent EpochSchedule sysvar
+// account, so replay uses this bank schedule for epoch/leader/rewards logic.
+type ManifestEpochScheduleSeed struct {
+	SlotsPerEpoch            uint64 `json:"slots_per_epoch"`
+	LeaderScheduleSlotOffset uint64 `json:"leader_schedule_slot_offset"`
+	Warmup                   bool   `json:"warmup"`
+	FirstNormalEpoch         uint64 `json:"first_normal_epoch"`
+	FirstNormalSlot          uint64 `json:"first_normal_slot"`
 }
 
 // SlotHashEntry represents a single entry in the SlotHashes sysvar
