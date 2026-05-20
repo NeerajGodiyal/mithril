@@ -67,6 +67,13 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	s.ManifestInflationTaper = m.Bank.Inflation.Taper
 	s.ManifestInflationFoundation = m.Bank.Inflation.FoundationVal
 	s.ManifestInflationFoundationTerm = m.Bank.Inflation.FoundationTerm
+	s.ManifestEpochSchedule = &state.ManifestEpochScheduleSeed{
+		SlotsPerEpoch:            m.Bank.EpochSchedule.SlotsPerEpoch,
+		LeaderScheduleSlotOffset: m.Bank.EpochSchedule.LeaderScheduleSlotOffset,
+		Warmup:                   m.Bank.EpochSchedule.Warmup,
+		FirstNormalEpoch:         m.Bank.EpochSchedule.FirstNormalEpoch,
+		FirstNormalSlot:          m.Bank.EpochSchedule.FirstNormalSlot,
+	}
 
 	// Epoch account hash (base64 for consistency with LtHash)
 	if m.EpochAccountHash != [32]byte{} {

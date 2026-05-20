@@ -2,6 +2,7 @@ package forkchoice
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
@@ -420,6 +421,157 @@ func TestSequentialProcessingDeterminesWinner(t *testing.T) {
 	assert.Equal(t, hashX, resultY.WinningHash, "winning hash should still be hashX")
 }
 
+func TestParseAndValidateVoteTxFindsVoteInstructionAfterComputeBudget(t *testing.T) {
+	voterKey := solana.PublicKey{1}
+	voteAcct := solana.PublicKey{2}
+	votedSlot := uint64(50)
+	votedHash := solana.Hash{0xBB}
+
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voterKey)
+
+	tx := buildTestVoteTx(voteAcct, voterKey, votedSlot, votedHash)
+	voteInstr := tx.Message.Instructions[0]
+	tx.Message.AccountKeys = []solana.PublicKey{
+		voterKey,
+		voteAcct,
+		solana.SysVarSlotHashesPubkey,
+		solana.SysVarClockPubkey,
+		solana.ComputeBudget,
+		solana.VoteProgramID,
+	}
+	tx.Message.Instructions = []solana.CompiledInstruction{
+		{
+			ProgramIDIndex: 4,
+			Data:           solana.Base58([]byte{2, 0, 0, 0, 200, 0, 0, 0, 0}),
+		},
+		{
+			ProgramIDIndex: 5,
+			Accounts:       voteInstr.Accounts,
+			Data:           voteInstr.Data,
+		},
+	}
+
+	require.True(t, tx.IsVote(), "fixture should still be recognized as a vote transaction")
+
+	info, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.True(t, ok)
+	assert.Equal(t, votedSlot, info.slot)
+	assert.Equal(t, votedHash, solana.Hash(info.bankHash))
+	assert.Equal(t, voteAcct, info.votePubkey)
+}
+
+func TestParseAndValidateVoteTxUsesSignerForVoteAuthority(t *testing.T) {
+	voterKey := solana.PublicKey{1}
+	voteAcct := solana.PublicKey{2}
+	votedSlot := uint64(50)
+	votedHash := solana.Hash{0xBB}
+
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voterKey)
+
+	tx := buildTestVoteTx(voteAcct, voterKey, votedSlot, votedHash)
+	require.True(t, tx.IsVote(), "fixture should be recognized as a vote transaction")
+	require.Equal(t, solana.SysVarSlotHashesPubkey, tx.Message.AccountKeys[tx.Message.Instructions[0].Accounts[1]],
+		"legacy vote account 1 is the slot-hashes sysvar, not the vote authority")
+
+	info, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.True(t, ok)
+	assert.Equal(t, votedSlot, info.slot)
+	assert.Equal(t, votedHash, solana.Hash(info.bankHash))
+	assert.Equal(t, voteAcct, info.votePubkey)
+}
+
+func TestParseAndValidateVoteTxRejectsAuthorityOutsideInstruction(t *testing.T) {
+	voterKey := solana.PublicKey{1}
+	voteAcct := solana.PublicKey{2}
+
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voterKey)
+
+	tx := buildTestVoteTx(voteAcct, voterKey, 50, solana.Hash{0xBB})
+	tx.Message.Instructions[0].Accounts = []uint16{1, 2, 3}
+
+	_, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.False(t, ok)
+}
+
+func TestParseAndValidateVoteTxAcceptsLiveTowerSyncShape(t *testing.T) {
+	voteAuthority := solana.MustPublicKeyFromBase58("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy")
+	voteAcct := solana.MustPublicKeyFromBase58("3N7s9zXMZ4QqvHQR15t5GNHyqc89KduzMP7423eWiD5g")
+	votedHash := solana.MustHashFromBase58("F4GcS4MtttPknSkbGW3KCXWJd6mWvzaXDnHHyM87Gd2A")
+
+	var data solana.Base58
+	err := json.Unmarshal([]byte(`"67MGmzm8yEnRh15X2h4HuP1ZCWg1Ld1zPNgZqhBGEySYPXuCReZ8tSvvhrKA1j7q6ky81hjNVPUp6WvdLbnfVYTmFvK2C2QCSBbGAoibsseTrrczvs6Xk47BPdpcN6PB9bYaFnu8wtykuo4WLhELbCuYYwwUyA6zNqZfDHLePABFKUDJLbyE9DsqoiATDtoznG7Bevvfra"`), &data)
+	require.NoError(t, err)
+
+	tx := &solana.Transaction{
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures: 1,
+			},
+			AccountKeys: []solana.PublicKey{
+				voteAuthority,
+				voteAcct,
+				solana.VoteProgramID,
+			},
+			Instructions: []solana.CompiledInstruction{
+				{
+					ProgramIDIndex: 2,
+					Accounts:       []uint16{1, 0},
+					Data:           data,
+				},
+			},
+		},
+		Signatures: []solana.Signature{{}},
+	}
+
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voteAuthority)
+
+	info, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.True(t, ok)
+	assert.Equal(t, uint64(420404777), info.slot)
+	assert.Equal(t, votedHash, solana.Hash(info.bankHash))
+	assert.Equal(t, voteAcct, info.votePubkey)
+}
+
+func TestParseAndValidateVoteTxFallsBackToSignatureCountWhenHeaderSignerCountMissing(t *testing.T) {
+	voteAuthority := solana.MustPublicKeyFromBase58("GmCxjmjKZoaKN1DKunbYq8RCYib94Nm3sHyncFfofaF5")
+	voteAcct := solana.MustPublicKeyFromBase58("7S9dHgoeMYvtShTjEC3x5D3THRDQz123WVGPseZsm3hm")
+
+	var data solana.Base58
+	err := json.Unmarshal([]byte(`"67MGn8HzmNzWfjLAq5WGPoC4LktJMeSH2UUTqWmWd2VXRbURnRQM4hTJvxGRcSbKb6CYLd3x42wvAjAyYsY19ajzUtqxDcE4XZP4eHV47zTUEkudvy7R2a7sJAaJtS9nk9D2NtMP3du8S8BFSUhjLPmVW9pmh4CgnBS5Jh7B8XNkQmGLS8sCGSWY9UbZrYipFy7rEVjirv"`), &data)
+	require.NoError(t, err)
+
+	tx := &solana.Transaction{
+		Message: solana.Message{
+			Header: solana.MessageHeader{},
+			AccountKeys: []solana.PublicKey{
+				voteAuthority,
+				voteAcct,
+				solana.VoteProgramID,
+			},
+			Instructions: []solana.CompiledInstruction{
+				{
+					ProgramIDIndex: 2,
+					Accounts:       []uint16{1, 0},
+					Data:           data,
+				},
+			},
+		},
+		Signatures: []solana.Signature{{}},
+	}
+
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voteAuthority)
+
+	info, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.True(t, ok)
+	assert.Equal(t, uint64(420407984), info.slot)
+	assert.Equal(t, voteAcct, info.votePubkey)
+}
+
 func TestObserveBlockResolvesParentSlotFromParentBlockhash(t *testing.T) {
 	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
 	service := NewForkChoiceService(0, map[solana.PublicKey]uint64{}, 100, epochAuth)
@@ -541,8 +693,7 @@ func TestFindConfirmedLeafReturnsHighestObservedWinner(t *testing.T) {
 	assert.Equal(t, hash(0xA7), leaf.Bankhash)
 }
 
-// buildTestVoteTx constructs a minimal valid vote transaction for testing.
-// The tx passes IsVote(), IsSigner(authority), and parseAndValidateVoteTx().
+// buildTestVoteTx constructs a minimal legacy Vote instruction for testing.
 func buildTestVoteTx(voteAcct, voteAuthority solana.PublicKey, slot uint64, hash solana.Hash) *solana.Transaction {
 	// Encode VoteProgramInstrTypeVote (type=2):
 	//   [type:4][num_slots:8][slot:8][hash:32][timestamp_opt:1] = 53 bytes
@@ -556,17 +707,23 @@ func buildTestVoteTx(voteAcct, voteAuthority solana.PublicKey, slot uint64, hash
 	return &solana.Transaction{
 		Message: solana.Message{
 			Header: solana.MessageHeader{
-				NumRequiredSignatures: 2,
+				NumRequiredSignatures: 1,
 			},
-			AccountKeys: []solana.PublicKey{voteAcct, voteAuthority, solana.VoteProgramID},
+			AccountKeys: []solana.PublicKey{
+				voteAuthority,
+				voteAcct,
+				solana.SysVarSlotHashesPubkey,
+				solana.SysVarClockPubkey,
+				solana.VoteProgramID,
+			},
 			Instructions: []solana.CompiledInstruction{
 				{
-					ProgramIDIndex: 2,
-					Accounts:       []uint16{0, 1},
+					ProgramIDIndex: 4,
+					Accounts:       []uint16{1, 2, 3, 0},
 					Data:           solana.Base58(data),
 				},
 			},
 		},
-		Signatures: []solana.Signature{{}, {}},
+		Signatures: []solana.Signature{{}},
 	}
 }

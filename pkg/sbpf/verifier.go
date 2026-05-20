@@ -2,7 +2,6 @@ package sbpf
 
 import (
 	"fmt"
-	"sort"
 )
 
 type Verifier struct {
@@ -26,8 +25,6 @@ const (
 	verifyInvalid
 	verifyCheckCallReg
 	verifyCheckCallRegDepr
-	verifyCheckCallImm
-	verifyCheckSyscall
 	verifyCheckJmpV0
 )
 
@@ -39,31 +36,7 @@ func (v *Verifier) VerifyProgram() error {
 		return fmt.Errorf("empty text")
 	}
 
-	var funcStarts []int64
-	if v.Program.SbpfVersion.EnableStaticSyscalls() {
-		for _, pc := range v.Program.Funcs {
-			funcStarts = append(funcStarts, pc)
-		}
-		sort.Slice(funcStarts, func(i, j int) bool { return funcStarts[i] < funcStarts[j] })
-	}
-
-	functionStart := int64(0)
-	functionNext := int64(len(text))
-	funcIdx := 0
-
 	for pc := 0; pc < len(text); pc++ {
-		if v.Program.SbpfVersion.EnableStaticSyscalls() {
-			for funcIdx < len(funcStarts) && int64(pc) >= funcStarts[funcIdx] {
-				functionStart = funcStarts[funcIdx]
-				if funcIdx+1 < len(funcStarts) {
-					functionNext = funcStarts[funcIdx+1]
-				} else {
-					functionNext = int64(len(text))
-				}
-				funcIdx++
-			}
-		}
-
 		ins := text[pc]
 
 		if ins.Src() > 10 {
@@ -93,7 +66,7 @@ func (v *Verifier) VerifyProgram() error {
 		case verifyCheckJmpV3:
 			{
 				dst := int64(pc) + int64(ins.Off()) + 1
-				if dst < functionStart || dst >= functionNext {
+				if dst < 0 || dst >= int64(len(text)) {
 					return fmt.Errorf("jump out of code")
 				}
 			}
@@ -140,27 +113,21 @@ func (v *Verifier) VerifyProgram() error {
 
 		case verifyCheckCallReg:
 			{
-				if ins.Src() > 9 {
+				reg := ins.Src()
+				if v.Program.SbpfVersion.CallXUsesDstReg() {
+					reg = ins.Dst()
+				}
+				if reg > 9 {
 					return fmt.Errorf("invalid register")
 				}
 			}
 
 		case verifyCheckCallRegDepr:
 			{
-				if ins.Imm() > 9 {
+				if ins.Imm() < 0 || ins.Imm() > 9 {
 					return fmt.Errorf("invalid register")
 				}
 			}
-
-		case verifyCheckCallImm:
-			{
-				if _, ok := v.Program.Funcs[ins.Uimm()]; !ok {
-					return fmt.Errorf("invalid function")
-				}
-			}
-
-		case verifyCheckSyscall:
-			// nothing to do - already verified by the loader
 
 		case verifyInvalid:
 			fallthrough
@@ -193,9 +160,6 @@ func (v *Verifier) VerifyProgram() error {
 
 func (v *Verifier) buildValidationMap() {
 	checkJmp := verifyCheckJmpV0
-	if v.Program.SbpfVersion.EnableStaticSyscalls() {
-		checkJmp = verifyCheckJmpV3
-	}
 
 	v.validationMap = [256]int{
 		/* 0x00 */ verifyInvalid /* 0x01 */, verifyInvalid /* 0x02 */, verifyInvalid /* 0x03 */, verifyInvalid,
@@ -231,13 +195,13 @@ func (v *Verifier) buildValidationMap() {
 		/* 0x78 */ verifyInvalid /* 0x79 */, verifyInvalid /* 0x7a */, verifyInvalid /* 0x7b */, verifyInvalid,
 		/* 0x7c */ verifyValid /* 0x7d */, checkJmp /* 0x7e */, verifyValid /* 0x7f */, verifyValid,
 		/* 0x80 */ verifyInvalid /* 0x81 */, verifyInvalid /* 0x82 */, verifyInvalid /* 0x83 */, verifyInvalid,
-		/* 0x84 */ verifyInvalid /* 0x85 */, verifyCheckCallImm /*0x86*/, verifyValid /* 0x87 */, verifyCheckSt,
+		/* 0x84 */ verifyInvalid /* 0x85 */, verifyValid /*0x86*/, verifyValid /* 0x87 */, verifyCheckSt,
 		/* 0x88 */ verifyInvalid /* 0x89 */, verifyInvalid /* 0x8a */, verifyInvalid /* 0x8b */, verifyInvalid,
 		/* 0x8c */ verifyValid /* 0x8d */, verifyCheckCallReg /*0x8e*/, verifyValid /* 0x8f */, verifyCheckSt,
 		/* 0x90 */ verifyInvalid /* 0x91 */, verifyInvalid /* 0x92 */, verifyInvalid /* 0x93 */, verifyInvalid,
-		/* 0x94 */ verifyInvalid /* 0x95 */, verifyCheckSyscall /*0x96*/, verifyValid /* 0x97 */, verifyCheckSt,
+		/* 0x94 */ verifyInvalid /* 0x95 */, verifyValid /*0x96*/, verifyValid /* 0x97 */, verifyCheckSt,
 		/* 0x98 */ verifyInvalid /* 0x99 */, verifyInvalid /* 0x9a */, verifyInvalid /* 0x9b */, verifyInvalid,
-		/* 0x9c */ verifyValid /* 0x9d */, verifyValid /* 0x9e */, verifyValid /* 0x9f */, verifyCheckSt,
+		/* 0x9c */ verifyValid /* 0x9d */, verifyInvalid /* 0x9e */, verifyValid /* 0x9f */, verifyCheckSt,
 		/* 0xa0 */ verifyInvalid /* 0xa1 */, verifyInvalid /* 0xa2 */, verifyInvalid /* 0xa3 */, verifyInvalid,
 		/* 0xa4 */ verifyValid /* 0xa5 */, checkJmp /* 0xa6 */, verifyInvalid /* 0xa7 */, verifyValid,
 		/* 0xa8 */ verifyInvalid /* 0xa9 */, verifyInvalid /* 0xaa */, verifyInvalid /* 0xab */, verifyInvalid,
@@ -345,6 +309,8 @@ func (v *Verifier) buildValidationMap() {
 	/* SIMD-0173: CALLX */
 	if v.Program.SbpfVersion.CallXUsesSrcReg() {
 		v.validationMap[0x8d] = verifyCheckCallReg
+	} else if v.Program.SbpfVersion.CallXUsesDstReg() {
+		v.validationMap[0x8d] = verifyCheckCallReg
 	} else {
 		v.validationMap[0x8d] = verifyCheckCallRegDepr
 	}
@@ -420,11 +386,29 @@ func (v *Verifier) buildValidationMap() {
 		v.validationMap[0xfe] = verifyInvalid
 	}
 
+	if v.Program.SbpfVersion.EnableJmp32() {
+		for _, op := range []uint8{
+			ClassPqr | SrcK | JumpEq, ClassPqr | SrcX | JumpEq,
+			ClassPqr | SrcK | JumpGt, ClassPqr | SrcX | JumpGt,
+			ClassPqr | SrcK | JumpGe, ClassPqr | SrcX | JumpGe,
+			ClassPqr | SrcK | JumpLt, ClassPqr | SrcX | JumpLt,
+			ClassPqr | SrcK | JumpLe, ClassPqr | SrcX | JumpLe,
+			ClassPqr | SrcK | JumpSet, ClassPqr | SrcX | JumpSet,
+			ClassPqr | SrcK | JumpNe, ClassPqr | SrcX | JumpNe,
+			ClassPqr | SrcK | JumpSgt, ClassPqr | SrcX | JumpSgt,
+			ClassPqr | SrcK | JumpSge, ClassPqr | SrcX | JumpSge,
+			ClassPqr | SrcK | JumpSlt, ClassPqr | SrcX | JumpSlt,
+			ClassPqr | SrcK | JumpSle, ClassPqr | SrcX | JumpSle,
+		} {
+			v.validationMap[op] = verifyCheckJmpV0
+		}
+	}
+
 	/* SIMD-0178: static syscalls */
 	if v.Program.SbpfVersion.EnableStaticSyscalls() {
-		v.validationMap[0x85] = verifyCheckCallImm
-		v.validationMap[0x95] = verifyCheckSyscall
-		v.validationMap[0x9d] = verifyValid
+		v.validationMap[0x85] = verifyValid
+		v.validationMap[0x95] = verifyValid
+		v.validationMap[0x9d] = verifyInvalid
 	} else {
 		v.validationMap[0x85] = verifyValid
 		v.validationMap[0x95] = verifyValid

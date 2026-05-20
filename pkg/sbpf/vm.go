@@ -49,11 +49,25 @@ type VMOpts struct {
 	MaxCU          int
 	ComputeMeter   *cu.ComputeMeter
 	Input          []byte // mapped at VaddrInput
+	InputRegions   []InputRegion
 	InputDataVaddr uint64 // VM address of instruction data within Input (SIMD-0321)
+	// DisableStackFrameGaps is used by SIMD-0460 virtual address space adjustments.
+	DisableStackFrameGaps bool
 
 	// Debug
 	ProgramId   solana.PublicKey
 	TxSignature solana.Signature
+}
+
+type InputRegion struct {
+	Offset               uint64
+	HostOffset           uint64
+	RegionSize           uint64
+	AddressSpaceReserved uint64
+	Writable             bool
+	AccountIndex         int
+	Data                 []byte
+	OnWrite              func(region *InputRegion, requestedLen uint64) error
 }
 
 type Exception struct {

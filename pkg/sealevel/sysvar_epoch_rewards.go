@@ -67,7 +67,7 @@ func (ser *SysvarEpochRewards) UnmarshalWithDecoder(decoder *bin.Decoder) error 
 		return fmt.Errorf("failed to read DistributedRewards when decoding SysvarEpochRewards: %w", err)
 	}
 
-	ser.Active, err = decoder.ReadBool()
+	ser.Active, err = ReadBool(decoder)
 	return err
 }
 
@@ -154,7 +154,10 @@ func ReadEpochRewardsSysvar(execCtx *ExecutionCtx) (SysvarEpochRewards, error) {
 	dec := bin.NewBinDecoder(epochRewardsSysvarAcct.Data)
 
 	var epochRewards SysvarEpochRewards
-	epochRewards.MustUnmarshalWithDecoder(dec)
+	err = epochRewards.UnmarshalWithDecoder(dec)
+	if err != nil {
+		return SysvarEpochRewards{}, InstrErrUnsupportedSysvar
+	}
 
 	return epochRewards, nil
 }

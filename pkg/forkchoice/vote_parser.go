@@ -17,22 +17,31 @@ type voteInfo struct {
 // parseAndValidateVoteTx validates a vote transaction against the given authorized
 // voters cache. Accepts the cache as a parameter to avoid racing with epoch updates.
 func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) (*voteInfo, bool) {
-	if len(tx.Message.Instructions) < 1 {
+	if len(tx.Message.Instructions) == 0 {
 		return nil, false
 	}
 
-	instr := tx.Message.Instructions[0]
+	for _, instr := range tx.Message.Instructions {
+		programID, err := tx.ResolveProgramIDIndex(instr.ProgramIDIndex)
+		if err != nil || !programID.Equals(solana.VoteProgramID) {
+			continue
+		}
+		return parseAndValidateVoteInstruction(tx, instr, authorizedVoters)
+	}
 
-	if len(instr.Accounts) < 2 {
+	return nil, false
+}
+
+func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.CompiledInstruction, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) (*voteInfo, bool) {
+	if len(instr.Accounts) < 1 {
 		return nil, false
 	}
-	votePubkey := tx.Message.AccountKeys[instr.Accounts[0]]
-	voteAuthority := tx.Message.AccountKeys[instr.Accounts[1]]
-
-	if authorizedVoters == nil {
+	votePubkey, err := tx.Message.Account(instr.Accounts[0])
+	if err != nil {
 		return nil, false
 	}
-	if !(tx.IsSigner(voteAuthority) && authorizedVoters.IsAuthorizedVoter(votePubkey, voteAuthority)) {
+
+	if !hasAuthorizedVoteSigner(tx, instr, votePubkey, authorizedVoters) {
 		return nil, false
 	}
 
@@ -79,6 +88,9 @@ func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstake
 
 	case sealevel.VoteProgramInstrTypeVote:
 		{
+			if !hasLegacyVoteSysvarAccounts(tx, instr) {
+				return nil, false
+			}
 			var vote sealevel.VoteInstrVote
 			err = vote.UnmarshalWithDecoder(decoder)
 			if err != nil {
@@ -97,6 +109,9 @@ func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstake
 
 	case sealevel.VoteProgramInstrTypeVoteSwitch:
 		{
+			if !hasLegacyVoteSysvarAccounts(tx, instr) {
+				return nil, false
+			}
 			var vote sealevel.VoteInstrVoteSwitch
 			err = vote.UnmarshalWithDecoder(decoder)
 			if err != nil {
@@ -186,6 +201,48 @@ func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstake
 			return nil, false
 		}
 	}
+}
+
+func hasAuthorizedVoteSigner(tx *solana.Transaction, instr solana.CompiledInstruction, votePubkey solana.PublicKey, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) bool {
+	if authorizedVoters == nil {
+		return false
+	}
+
+	// The Vote program validates authority from the instruction's signer set;
+	// for common vote instructions, account 1 is a sysvar rather than the voter.
+	numSigners := voteTransactionSignerCount(tx)
+	if numSigners > len(tx.Message.AccountKeys) {
+		numSigners = len(tx.Message.AccountKeys)
+	}
+	for _, accountIndex := range instr.Accounts {
+		if int(accountIndex) >= numSigners {
+			continue
+		}
+		if authorizedVoters.IsAuthorizedVoter(votePubkey, tx.Message.AccountKeys[accountIndex]) {
+			return true
+		}
+	}
+	return false
+}
+
+func voteTransactionSignerCount(tx *solana.Transaction) int {
+	numSigners := int(tx.Message.Header.NumRequiredSignatures)
+	if numSigners == 0 && len(tx.Signatures) > 0 {
+		numSigners = len(tx.Signatures)
+	}
+	return numSigners
+}
+
+func hasLegacyVoteSysvarAccounts(tx *solana.Transaction, instr solana.CompiledInstruction) bool {
+	if len(instr.Accounts) < 3 {
+		return false
+	}
+	slotHashes, err := tx.Message.Account(instr.Accounts[1])
+	if err != nil || slotHashes != solana.SysVarSlotHashesPubkey {
+		return false
+	}
+	clock, err := tx.Message.Account(instr.Accounts[2])
+	return err == nil && clock == solana.SysVarClockPubkey
 }
 
 func getLastLockout(lockouts *deque.Deque[sealevel.VoteLockout]) (*sealevel.VoteLockout, bool) {

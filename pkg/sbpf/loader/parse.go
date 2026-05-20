@@ -9,12 +9,17 @@ import (
 	"math"
 	"math/bits"
 	"strings"
+
+	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 )
 
 // parse checks ELF file for validity and loads metadata with minimal allocations.
 func (l *Loader) parse() error {
 	if err := l.readHeader(); err != nil {
 		return err
+	}
+	if l.enableStricterElfHeaders() {
+		return l.parseStrict()
 	}
 	if err := l.validateElfHeader(); err != nil {
 		return err
@@ -56,6 +61,69 @@ const (
 	EM_SBPF    = 263
 	EF_SBPF_V2 = 32
 )
+
+const (
+	elfIdentABIVersion = 8
+	elfIdentPadStart   = 9
+)
+
+const (
+	progFlagX = 0x1
+	progFlagR = 0x4
+)
+
+func (l *Loader) parseStrict() error {
+	if err := l.validateStrictElfHeader(); err != nil {
+		return err
+	}
+
+	programHeaders, err := l.readProgramHeaders()
+	if err != nil {
+		return err
+	}
+
+	expectedProgramHeaders := []struct {
+		flags uint32
+		vaddr uint64
+	}{
+		{progFlagR, 0},
+		{progFlagX, sbpf.VaddrProgram},
+	}
+
+	skipRodataProgramHeader := programHeaders[0].Flags != expectedProgramHeaders[0].flags
+	if skipRodataProgramHeader {
+		expectedProgramHeaders = expectedProgramHeaders[1:]
+	} else if l.eh.Phnum < 2 {
+		return fmt.Errorf("invalid ELF file")
+	}
+
+	expectedOffset := uint64(ehLen) + uint64(l.eh.Phnum)*phEntLen
+	for i, expected := range expectedProgramHeaders {
+		ph := programHeaders[i]
+		if err := l.validateStrictProgramHeader(ph, expected.flags, expected.vaddr, expectedOffset); err != nil {
+			return err
+		}
+		expectedOffset = clampAddUint64(expectedOffset, ph.Filesz)
+	}
+
+	var bytecodeHeader elf.Prog64
+	if skipRodataProgramHeader {
+		l.rodataRange = addrRange{min: uint64(ehLen) + uint64(l.eh.Phnum)*phEntLen, max: uint64(ehLen) + uint64(l.eh.Phnum)*phEntLen}
+		bytecodeHeader = programHeaders[0]
+	} else {
+		rodataHeader := programHeaders[0]
+		l.rodataRange = addrRange{min: rodataHeader.Off, max: rodataHeader.Off + rodataHeader.Filesz}
+		bytecodeHeader = programHeaders[1]
+	}
+
+	l.textAddr = bytecodeHeader.Vaddr
+	l.textRange = addrRange{min: bytecodeHeader.Off, max: bytecodeHeader.Off + bytecodeHeader.Filesz}
+	if !bytecodeHeaderContainsEntrypoint(bytecodeHeader, l.eh.Entry) || l.eh.Entry%sbpf.SlotSize != 0 {
+		return fmt.Errorf("invalid ELF file")
+	}
+
+	return nil
+}
 
 func (l *Loader) newShTableIter() *shTableIter {
 	eh := &l.eh
@@ -170,6 +238,93 @@ func (l *Loader) validateElfHeader() error {
 	return nil
 }
 
+func (l *Loader) validateSbpfVersion() error {
+	eh := &l.eh
+	if eh.Flags == EF_SBF_V2 {
+		return fmt.Errorf("invalid sbpf version")
+	}
+	if eh.Flags < l.minSbpfVersion || eh.Flags > l.maxSbpfVersion {
+		return fmt.Errorf("invalid sbpf version")
+	}
+	return nil
+}
+
+func (l *Loader) validateStrictElfHeader() error {
+	eh := &l.eh
+	ident := &eh.Ident
+
+	if err := l.validateSbpfVersion(); err != nil {
+		return err
+	}
+
+	if string(ident[:elf.EI_CLASS]) != elf.ELFMAG ||
+		elf.Class(ident[elf.EI_CLASS]) != elf.ELFCLASS64 ||
+		elf.Data(ident[elf.EI_DATA]) != elf.ELFDATA2LSB ||
+		elf.Version(ident[elf.EI_VERSION]) != elf.EV_CURRENT ||
+		elf.OSABI(ident[elf.EI_OSABI]) != elf.ELFOSABI_NONE ||
+		ident[elfIdentABIVersion] != 0 ||
+		!allZeroBytes(ident[elfIdentPadStart:]) ||
+		elf.Machine(eh.Machine) != elf.EM_BPF ||
+		eh.Version != uint32(elf.EV_CURRENT) ||
+		eh.Phoff != ehLen ||
+		eh.Ehsize != ehLen ||
+		eh.Phentsize != phEntLen ||
+		eh.Phnum == 0 {
+		return fmt.Errorf("invalid ELF file")
+	}
+
+	phTableEnd := uint64(ehLen) + uint64(eh.Phnum)*phEntLen
+	if phTableEnd > l.fileSize {
+		return fmt.Errorf("invalid ELF file")
+	}
+
+	return nil
+}
+
+func allZeroBytes(bytes []byte) bool {
+	for _, b := range bytes {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *Loader) readProgramHeaders() ([]elf.Prog64, error) {
+	programHeaders := make([]elf.Prog64, 0, l.eh.Phnum)
+	iter := l.newPhTableIter()
+	for iter.Next() && iter.Err() == nil {
+		programHeaders = append(programHeaders, iter.Item())
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	return programHeaders, nil
+}
+
+func (l *Loader) validateStrictProgramHeader(ph elf.Prog64, expectedFlags uint32, expectedVaddr uint64, expectedOffset uint64) error {
+	if elf.ProgType(ph.Type) != elf.PT_LOAD ||
+		ph.Flags != expectedFlags ||
+		ph.Off != expectedOffset ||
+		ph.Off >= l.fileSize ||
+		ph.Off%sbpf.SlotSize != 0 ||
+		ph.Vaddr != expectedVaddr ||
+		ph.Paddr != expectedVaddr ||
+		ph.Filesz != ph.Memsz ||
+		ph.Filesz > l.fileSize-ph.Off ||
+		ph.Filesz%sbpf.SlotSize != 0 ||
+		ph.Memsz >= sbpf.VaddrProgram {
+		return fmt.Errorf("invalid program header")
+	}
+	return nil
+}
+
+func bytecodeHeaderContainsEntrypoint(ph elf.Prog64, entrypoint uint64) bool {
+	entrypointEnd := clampAddUint64(entrypoint, sbpf.SlotSize-1)
+	bytecodeEnd := clampAddUint64(ph.Vaddr, ph.Memsz)
+	return ph.Vaddr <= entrypointEnd && entrypointEnd < bytecodeEnd
+}
+
 // scan the program header table and remember the last PT_LOAD segment
 func (l *Loader) loadProgramHeaderTable() error {
 	iter := l.newPhTableIter()
@@ -212,7 +367,6 @@ func (l *Loader) loadProgramHeaderTable() error {
 func (l *Loader) readSectionHeaderTable() error {
 	eh := &l.eh
 	iter := l.newShTableIter()
-	sectionDataOff := uint64(0)
 
 	if !iter.Next() {
 		return fmt.Errorf("missing section 0")
@@ -261,10 +415,6 @@ func (l *Loader) readSectionHeaderTable() error {
 			return fmt.Errorf("section %d overlaps with section header", i)
 		}
 
-		// More checks
-		if eh.Shoff < sectionDataOff {
-			return fmt.Errorf("sections not in order")
-		}
 		if shend > l.fileSize {
 			return fmt.Errorf("section %d out of bounds", i)
 		}
@@ -273,8 +423,6 @@ func (l *Loader) readSectionHeaderTable() error {
 		if eh.Shstrndx != uint16(elf.SHN_UNDEF) && uint32(eh.Shstrndx) == i {
 			l.shShstrtab = sh
 		}
-
-		sectionDataOff = shend
 	}
 	// TODO validate offset and size (?)
 	if elf.SectionType(l.shShstrtab.Type) != elf.SHT_STRTAB {

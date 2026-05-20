@@ -9,21 +9,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Overclock-Validator/mithril/conformance/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf/loader"
 	sealevelPkg "github.com/Overclock-Validator/mithril/pkg/sealevel"
 )
 
-func parseFBFeatures(fbFeatures *sealevel.FeatureSet) *features.Features {
+func parseFeatureIds(featureIds []uint64) *features.Features {
 	f := features.NewFeaturesDefault()
-	if fbFeatures == nil {
-		return f
-	}
-	n := fbFeatures.FeaturesLength()
-	for i := 0; i < n; i++ {
-		ftr := fbFeatures.Features(i)
+	for _, ftr := range featureIds {
 		for _, featureGate := range features.AllFeatureGates {
 			featureIdInt := binary.LittleEndian.Uint64(featureGate.Address[:8])
 			if featureIdInt == ftr {
@@ -32,6 +26,13 @@ func parseFBFeatures(fbFeatures *sealevel.FeatureSet) *features.Features {
 		}
 	}
 	return f
+}
+
+func parsePBFeatures(pbFeatures *FeatureSet) *features.Features {
+	if pbFeatures == nil {
+		return features.NewFeaturesDefault()
+	}
+	return parseFeatureIds(pbFeatures.GetFeatures())
 }
 
 func TestConformance_ElfLoader_Firedancer(t *testing.T) {
@@ -82,32 +83,26 @@ func TestConformance_ElfLoader_Firedancer(t *testing.T) {
 			continue
 		}
 
-		fixture := sealevel.GetRootAsELFLoaderFixture(data, 0)
-		if fixture == nil {
+		fixture, err := unmarshalFiredancerELFLoaderFixture(data)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("PARSE_ERROR %s: %v", name, err))
 			parseErrors++
 			continue
 		}
 
-		input := fixture.Input(nil)
-		if input == nil {
+		if len(fixture.ElfData) == 0 {
+			failures = append(failures, fmt.Sprintf("PARSE_ERROR %s: missing ELF data", name))
 			parseErrors++
 			continue
 		}
 
-		elfData := input.ElfDataBytes()
-		if elfData == nil {
-			parseErrors++
-			continue
-		}
+		output := fixture.Output
+		fixtureExpectsSuccess := output.expectsSuccess()
 
-		output := fixture.Output(nil)
-		fixtureExpectsSuccess := output != nil && output.ErrCode() == 0
-
-		fbFeatures := input.Features(nil)
-		f := parseFBFeatures(fbFeatures)
+		f := parsePBFeatures(fixture.Features)
 
 		syscalls := sbpf.SyscallRegistry(func(hash uint32) (sbpf.Syscall, bool) {
-			return sealevelPkg.Syscalls(f, input.DeployChecks(), hash)
+			return sealevelPkg.Syscalls(f, fixture.DeployChecks, hash)
 		})
 
 		var program *sbpf.Program
@@ -123,7 +118,7 @@ func TestConformance_ElfLoader_Firedancer(t *testing.T) {
 				}
 			}()
 
-			l, err := loader.NewLoaderWithSyscalls(elfData, syscalls, input.DeployChecks(), f)
+			l, err := loader.NewLoaderWithSyscalls(fixture.ElfData, syscalls, fixture.DeployChecks, f)
 			if err != nil {
 				loadErr = err
 				return
@@ -139,18 +134,22 @@ func TestConformance_ElfLoader_Firedancer(t *testing.T) {
 			passPass++
 
 			if output != nil {
-				entryTotal++
-				if program.Entrypoint == output.EntryPc() {
-					entryMatch++
-				} else {
-					failures = append(failures, fmt.Sprintf("ENTRY_MISMATCH %s: got=%d want=%d", name, program.Entrypoint, output.EntryPc()))
+				if output.HasEntryPc {
+					entryTotal++
+					if program.Entrypoint == output.EntryPc {
+						entryMatch++
+					} else {
+						failures = append(failures, fmt.Sprintf("ENTRY_MISMATCH %s: got=%d want=%d", name, program.Entrypoint, output.EntryPc))
+					}
 				}
 
-				textTotal++
-				if uint64(len(program.Text)) == output.TextCnt() {
-					textMatch++
-				} else {
-					failures = append(failures, fmt.Sprintf("TEXT_CNT_MISMATCH %s: got=%d want=%d", name, len(program.Text), output.TextCnt()))
+				if output.HasTextCnt {
+					textTotal++
+					if uint64(len(program.Text)) == output.TextCnt {
+						textMatch++
+					} else {
+						failures = append(failures, fmt.Sprintf("TEXT_CNT_MISMATCH %s: got=%d want=%d", name, len(program.Text), output.TextCnt))
+					}
 				}
 			}
 		} else if loadErr != nil && !fixtureExpectsSuccess {
@@ -160,7 +159,11 @@ func TestConformance_ElfLoader_Firedancer(t *testing.T) {
 			failures = append(failures, fmt.Sprintf("FALSE_PASS %s: loaded OK but fixture expects failure", name))
 		} else {
 			falseFail++
-			failures = append(failures, fmt.Sprintf("FALSE_FAIL %s: %v (entry_pc=%d text_cnt=%d)", name, loadErr, output.EntryPc(), output.TextCnt()))
+			if output != nil {
+				failures = append(failures, fmt.Sprintf("FALSE_FAIL %s: %v (entry_pc=%d text_cnt=%d err_code=%d)", name, loadErr, output.EntryPc, output.TextCnt, output.ErrCode))
+			} else {
+				failures = append(failures, fmt.Sprintf("FALSE_FAIL %s: %v", name, loadErr))
+			}
 		}
 	}
 
@@ -205,6 +208,15 @@ func TestConformance_ElfLoader_Firedancer(t *testing.T) {
 		t.Errorf("CRITICAL: %d fixtures caused panics in the loader", panics)
 	}
 	if disagree > 0 {
-		t.Logf("WARNING: %d disagreements found", disagree)
+		t.Errorf("%d ELF loader acceptance disagreements found", disagree)
+	}
+	if parseErrors > 0 {
+		t.Errorf("%d ELF loader fixture parse errors found", parseErrors)
+	}
+	if entryMatch != entryTotal {
+		t.Errorf("%d ELF loader entry PC mismatches found", entryTotal-entryMatch)
+	}
+	if textMatch != textTotal {
+		t.Errorf("%d ELF loader text count mismatches found", textTotal-textMatch)
 	}
 }

@@ -1,0 +1,111 @@
+package replay
+
+import (
+	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/blockstream"
+	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/gagliardetto/solana-go"
+)
+
+const (
+	defaultConsensusMaxDepth      = 64
+	defaultConsensusPolicy        = "halt"
+	defaultConsensusEnforceSource = "lightbringer"
+)
+
+// ConsensusOpts contains vote-anchored consensus configuration.
+// Nil means use defaults (max_depth=64, policy="halt").
+type ConsensusOpts struct {
+	SkipPathMaxDepth int    // Max slots for skip-path solver (default: 64)
+	UnresolvedPolicy string // "halt" or "warn" (default: "halt")
+	EnforceOnSource  string // "lightbringer" or "all" (default: "lightbringer")
+}
+
+type consensusConfig struct {
+	maxDepth                int
+	policy                  string
+	enforceSource           string
+	enforceActive           bool
+	bufferedExecutionActive bool
+}
+
+// pendingConsensusPath tracks a vote-resolved path that replay has observed but
+// has not yet executed through to the confirmed leaf.
+type pendingConsensusPath struct {
+	anchorSlot        uint64
+	leafSlot          uint64
+	leafBankhash      solana.Hash
+	decisions         []forkchoice.SlotDecision
+	originalDecisions []forkchoice.SlotDecision
+}
+
+func resolveConsensusConfig(opts *ConsensusOpts, useLightbringer, isLive bool) consensusConfig {
+	cfg := consensusConfig{
+		maxDepth:      defaultConsensusMaxDepth,
+		policy:        defaultConsensusPolicy,
+		enforceSource: defaultConsensusEnforceSource,
+	}
+
+	if opts != nil {
+		if opts.SkipPathMaxDepth > 0 {
+			cfg.maxDepth = opts.SkipPathMaxDepth
+		}
+		if opts.UnresolvedPolicy != "" {
+			cfg.policy = opts.UnresolvedPolicy
+		}
+		if opts.EnforceOnSource != "" {
+			cfg.enforceSource = opts.EnforceOnSource
+		}
+	}
+
+	switch cfg.enforceSource {
+	case "lightbringer", "all":
+	default:
+		mlog.Log.Warnf("forkchoice: invalid EnforceOnSource=%q, defaulting to %q", cfg.enforceSource, defaultConsensusEnforceSource)
+		cfg.enforceSource = defaultConsensusEnforceSource
+	}
+
+	cfg.enforceActive = cfg.enforceSource == "all" || useLightbringer
+	cfg.bufferedExecutionActive = !isLive || cfg.enforceSource == "all"
+	return cfg
+}
+
+func newPendingConsensusPath(anchorSlot uint64, resolvedPath *forkchoice.ResolvedPath) *pendingConsensusPath {
+	if resolvedPath == nil {
+		return nil
+	}
+	decisions := append([]forkchoice.SlotDecision(nil), resolvedPath.SlotDecisions...)
+	return &pendingConsensusPath{
+		anchorSlot:        anchorSlot,
+		leafSlot:          resolvedPath.LeafSlot,
+		leafBankhash:      resolvedPath.LeafBankhash,
+		decisions:         append([]forkchoice.SlotDecision(nil), decisions...),
+		originalDecisions: decisions,
+	}
+}
+
+func pruneObservedConsensusBlocks(blocks map[uint64]*b.Block, anchorSlot uint64) {
+	if blocks == nil || anchorSlot == 0 {
+		return
+	}
+	for slot := range blocks {
+		if slot <= anchorSlot {
+			delete(blocks, slot)
+		}
+	}
+}
+
+func clearObservedConsensusBlocks(blocks map[uint64]*b.Block) {
+	for slot := range blocks {
+		delete(blocks, slot)
+	}
+}
+
+func shouldDiscardLightbringerObservationAfterFallback(isLive, useLightbringer bool, block *b.Block, stats blockstream.FetchStatsSnapshot) bool {
+	return isLive &&
+		useLightbringer &&
+		block != nil &&
+		block.FromLightbringer &&
+		(!stats.IsNearTip || stats.CurrentSource != "lightbringer")
+}

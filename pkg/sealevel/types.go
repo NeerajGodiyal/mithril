@@ -128,8 +128,10 @@ type RefCellVecRust struct {
 type TranslatedAccounts []TranslatedAccount
 
 type TranslatedAccount struct {
-	IndexOfAccount uint64
-	CallerAccount  *CallerAccount
+	IndexOfAccount      uint64
+	CallerAccount       *CallerAccount
+	UpdateCallerAccount bool
+	UpdateCallerRegion  bool
 }
 
 type CallerAccount struct {
@@ -157,6 +159,9 @@ func (accountMeta *AccountMeta) Unmarshal(buf io.Reader) error {
 	}
 
 	copy(accountMeta.Pubkey[:], accountMetaBytes[:32])
+	if accountMetaBytes[32] > 1 || accountMetaBytes[33] > 1 {
+		return InstrErrInvalidArgument
+	}
 	accountMeta.IsSigner = accountMetaBytes[32] != 0
 	accountMeta.IsWritable = accountMetaBytes[33] != 0
 

@@ -35,20 +35,27 @@ func (sr *SysvarLastRestartSlot) MustUnmarshalWithDecoder(decoder *bin.Decoder) 
 	}
 }
 
-func ReadLastRestartSlotSysvar(execCtx *ExecutionCtx) SysvarLastRestartSlot {
+func ReadLastRestartSlotSysvar(execCtx *ExecutionCtx) (SysvarLastRestartSlot, error) {
+	if SysvarCache.LastRestartSlot.Sysvar != nil {
+		return *SysvarCache.LastRestartSlot.Sysvar, nil
+	}
+
 	accts := addrObjectForLookup(execCtx)
 
 	lrsAcct, err := (*accts).GetAccount(&SysvarLastRestartSlotAddr)
 	if err != nil {
-		panic("failed to read LastRestartSlot sysvar account")
+		return SysvarLastRestartSlot{}, InstrErrUnsupportedSysvar
 	}
 
 	dec := bin.NewBinDecoder(lrsAcct.Data)
 
 	var lrs SysvarLastRestartSlot
-	lrs.MustUnmarshalWithDecoder(dec)
+	err = lrs.UnmarshalWithDecoder(dec)
+	if err != nil {
+		return SysvarLastRestartSlot{}, InstrErrUnsupportedSysvar
+	}
 
-	return lrs
+	return lrs, nil
 }
 
 func WriteLastRestartSlotSysvar(accts *accounts.Accounts, lastRestartSlot SysvarLastRestartSlot) {

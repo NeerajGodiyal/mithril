@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/config"
@@ -24,7 +25,23 @@ import (
 )
 
 type clusterNodesFetcher func(context.Context) ([]*solanarpc.GetClusterNodesResult, error)
-type packetSender func([]byte, netip.AddrPort) error
+type transactionSender func(context.Context, []byte, tpuEndpoint) error
+
+type tpuTransport string
+
+const (
+	tpuTransportUDP  tpuTransport = "udp"
+	tpuTransportQUIC tpuTransport = "quic"
+)
+
+type tpuEndpoint struct {
+	Addr      netip.AddrPort
+	Transport tpuTransport
+}
+
+func (endpoint tpuEndpoint) String() string {
+	return fmt.Sprintf("%s/%s", endpoint.Addr.String(), endpoint.Transport)
+}
 
 type sendTransactionConfig struct {
 	encoding            string
@@ -42,6 +59,7 @@ const (
 	sendTransactionTargetCount              = sendTransactionLeaderForwardCount + 1
 	sendTransactionLeaderLookahead          = 64
 	sendTransactionClusterNodesRefreshEvery = 10 * time.Minute
+	sendTransactionTPUSendTimeout           = 3 * time.Second
 	maxSanitizedInstructionCount            = 64
 )
 
@@ -400,25 +418,39 @@ func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Cont
 		targetCount = sendTransactionTargetCount
 	}
 
-	targets, err := rpcServer.resolveUpcomingLeaderTPUAddresses(ctx, targetCount)
+	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpoints(ctx, targetCount)
 	if err != nil {
 		return err
 	}
 
-	send := rpcServer.packetSender
+	send := rpcServer.transactionSender
 	if send == nil {
-		send = defaultPacketSender
+		send = defaultTransactionSender
 	}
 
 	var sendErrs []error
 	sentCount := 0
+	var sendMu sync.Mutex
+	var sendWg sync.WaitGroup
 	for _, target := range targets {
-		if err := send(wire, target); err != nil {
-			sendErrs = append(sendErrs, fmt.Errorf("%s: %w", target.String(), err))
-			continue
-		}
-		sentCount++
+		target := target
+		sendWg.Add(1)
+		go func() {
+			defer sendWg.Done()
+			sendCtx, cancel := context.WithTimeout(ctx, sendTransactionTPUSendTimeout)
+			defer cancel()
+
+			err := send(sendCtx, wire, target)
+			sendMu.Lock()
+			defer sendMu.Unlock()
+			if err != nil {
+				sendErrs = append(sendErrs, fmt.Errorf("%s: %w", target.String(), err))
+				return
+			}
+			sentCount++
+		}()
 	}
+	sendWg.Wait()
 
 	if sentCount == 0 {
 		return fmt.Errorf("failed to forward transaction to any leader TPU: %w", errors.Join(sendErrs...))
@@ -429,12 +461,12 @@ func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Cont
 	return nil
 }
 
-func (rpcServer *RpcServer) resolveUpcomingLeaderTPUAddresses(ctx context.Context, want int) ([]netip.AddrPort, error) {
+func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpoints(ctx context.Context, want int) ([]tpuEndpoint, error) {
 	if want <= 0 {
 		want = 1
 	}
 
-	targets, updatedAt := rpcServer.collectUpcomingLeaderTPUAddressesFromCache(want)
+	targets, updatedAt := rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want)
 	cacheStale := updatedAt.IsZero() || time.Since(updatedAt) >= rpcServer.clusterNodesRefreshInterval()
 	if cacheStale || len(targets) < want {
 		if err := rpcServer.refreshLeaderTPUCache(ctx); err != nil {
@@ -444,7 +476,7 @@ func (rpcServer *RpcServer) resolveUpcomingLeaderTPUAddresses(ctx context.Contex
 			mlog.Log.Warnf("sendTransaction: using partial cached TPU target set after refresh failure: %v", err)
 			return targets, nil
 		}
-		targets, _ = rpcServer.collectUpcomingLeaderTPUAddressesFromCache(want)
+		targets, _ = rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want)
 	}
 
 	if len(targets) == 0 {
@@ -488,20 +520,21 @@ func (rpcServer *RpcServer) refreshLeaderTPUCache(ctx context.Context) error {
 		return err
 	}
 
-	leaderTPUs := make(map[solana.PublicKey]netip.AddrPort, len(nodes))
+	leaderTPUs := make(map[solana.PublicKey]tpuEndpoint, len(nodes))
 	for _, node := range nodes {
-		if node == nil || node.TPU == nil || *node.TPU == "" {
+		if node == nil {
 			continue
 		}
-		addr, err := netip.ParseAddrPort(*node.TPU)
-		if err != nil {
+
+		endpoint, ok := leaderTPUEndpointFromClusterNode(node)
+		if !ok {
 			continue
 		}
-		leaderTPUs[node.Pubkey] = addr
+		leaderTPUs[node.Pubkey] = endpoint
 	}
 
 	if len(leaderTPUs) == 0 {
-		return fmt.Errorf("cluster did not advertise any TPU UDP endpoints")
+		return fmt.Errorf("cluster did not advertise any TPU endpoints")
 	}
 
 	rpcServer.leaderTPUCacheMu.Lock()
@@ -511,19 +544,37 @@ func (rpcServer *RpcServer) refreshLeaderTPUCache(ctx context.Context) error {
 	return nil
 }
 
-func (rpcServer *RpcServer) collectUpcomingLeaderTPUAddressesFromCache(want int) ([]netip.AddrPort, time.Time) {
+func leaderTPUEndpointFromClusterNode(node *solanarpc.GetClusterNodesResult) (tpuEndpoint, bool) {
+	if endpoint, ok := parseLeaderTPUEndpoint(node.TPUQUIC, tpuTransportQUIC); ok {
+		return endpoint, true
+	}
+	return parseLeaderTPUEndpoint(node.TPU, tpuTransportUDP)
+}
+
+func parseLeaderTPUEndpoint(raw *string, transport tpuTransport) (tpuEndpoint, bool) {
+	if raw == nil || *raw == "" {
+		return tpuEndpoint{}, false
+	}
+	addr, err := netip.ParseAddrPort(*raw)
+	if err != nil {
+		return tpuEndpoint{}, false
+	}
+	return tpuEndpoint{Addr: addr, Transport: transport}, true
+}
+
+func (rpcServer *RpcServer) collectUpcomingLeaderTPUEndpointsFromCache(want int) ([]tpuEndpoint, time.Time) {
 	rpcServer.leaderTPUCacheMu.RLock()
-	nodeTPUs := make(map[solana.PublicKey]netip.AddrPort, len(rpcServer.leaderTPUByIdentity))
-	for leader, addr := range rpcServer.leaderTPUByIdentity {
-		nodeTPUs[leader] = addr
+	nodeTPUs := make(map[solana.PublicKey]tpuEndpoint, len(rpcServer.leaderTPUByIdentity))
+	for leader, endpoint := range rpcServer.leaderTPUByIdentity {
+		nodeTPUs[leader] = endpoint
 	}
 	updatedAt := rpcServer.leaderTPUCacheUpdatedAt
 	rpcServer.leaderTPUCacheMu.RUnlock()
 
 	currentSlot := global.Slot()
-	targets := make([]netip.AddrPort, 0, want)
+	targets := make([]tpuEndpoint, 0, want)
 	seenLeaders := make(map[solana.PublicKey]struct{}, want)
-	seenTargets := make(map[netip.AddrPort]struct{}, want)
+	seenTargets := make(map[tpuEndpoint]struct{}, want)
 
 	for offset := uint64(0); offset < sendTransactionLeaderLookahead && len(targets) < want; offset++ {
 		leader, ok := global.LeaderForSlot(currentSlot + offset)
@@ -557,7 +608,18 @@ func configuredSendTransactionRPCEndpoints() []string {
 	return endpoints
 }
 
-func defaultPacketSender(payload []byte, target netip.AddrPort) error {
+func defaultTransactionSender(ctx context.Context, payload []byte, target tpuEndpoint) error {
+	switch target.Transport {
+	case tpuTransportQUIC:
+		return defaultTPUQUICSender.Send(ctx, payload, target.Addr)
+	case tpuTransportUDP:
+		return defaultUDPPacketSender(payload, target.Addr)
+	default:
+		return fmt.Errorf("unsupported TPU transport %q", target.Transport)
+	}
+}
+
+func defaultUDPPacketSender(payload []byte, target netip.AddrPort) error {
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 )
@@ -49,6 +50,14 @@ func instructionAcctsFromFixture(fixture *InstrFixture, transactionAccts sealeve
 }
 
 func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
+	configureSysvarsWithDefaults(execCtx, fixture, true)
+}
+
+func configureSysvarsFromFixture(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
+	configureSysvarsWithDefaults(execCtx, fixture, false)
+}
+
+func configureSysvarsWithDefaults(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture, synthesizeDefaults bool) {
 	/// clock
 	var foundClockSysvar bool
 	for _, acct := range fixture.Input.Accounts {
@@ -67,7 +76,7 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 		}
 	}
 
-	if !foundClockSysvar {
+	if !foundClockSysvar && synthesizeDefaults {
 		fmt.Printf("******** setting default clock sysvar\n")
 		var clock sealevel.SysvarClock
 		clock.Slot = 10
@@ -98,7 +107,7 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 		}
 	}
 
-	if !foundRentSysvar {
+	if !foundRentSysvar && synthesizeDefaults {
 		var rent sealevel.SysvarRent
 		rent.LamportsPerUint8Year = 3480
 		rent.ExemptionThreshold = 2.0
@@ -137,20 +146,17 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 		if solana.PublicKeyFromBytes(acct.Address) == sealevel.SysvarEpochScheduleAddr {
 			fmt.Printf("adding state for sysvar: SysvarEpochSchedule\n")
 			epochScheduleAcct := fixtureAcctStateToAccount(acct)
-			if len(epochScheduleAcct.Data) < sealevel.SysvarEpochScheduleStructLen {
-				fmt.Printf("******** epoch schedule data less than SysvarEpochScheduleStructLen\n")
-				break
-			}
-			execCtx.Accounts.SetAccount(&sealevel.SysvarEpochScheduleAddr, &epochScheduleAcct)
-			_, err := sealevel.ReadEpochScheduleSysvar(execCtx)
+			var epochSchedule sealevel.SysvarEpochSchedule
+			err := epochSchedule.UnmarshalWithDecoder(bin.NewBinDecoder(epochScheduleAcct.Data))
 			if err == nil {
+				execCtx.Accounts.SetAccount(&sealevel.SysvarEpochScheduleAddr, &epochScheduleAcct)
 				foundEpochScheduleSysvar = true
 			}
 
 		}
 	}
 
-	if !foundEpochScheduleSysvar {
+	if !foundEpochScheduleSysvar && synthesizeDefaults {
 		fmt.Printf("******** adding default epoch schedule sysvar\n")
 		epochSchedule := sealevel.SysvarEpochSchedule{SlotsPerEpoch: 432000, LeaderScheduleSlotOffset: 432000, Warmup: true, FirstNormalEpoch: 14, FirstNormalSlot: 524256}
 
@@ -165,8 +171,19 @@ func configureSysvars(execCtx *sealevel.ExecutionCtx, fixture *InstrFixture) {
 		if solana.PublicKeyFromBytes(acct.Address) == sealevel.SysvarEpochRewardsAddr {
 			fmt.Printf("adding state for sysvar: SysvarEpochRewards\n")
 			epochRewardsAcct := fixtureAcctStateToAccount(acct)
-			if len(epochRewardsAcct.Data) == sealevel.SysvarEpochRewardsStructLen {
+			var epochRewards sealevel.SysvarEpochRewards
+			if err := epochRewards.UnmarshalWithDecoder(bin.NewBinDecoder(epochRewardsAcct.Data)); err == nil {
 				execCtx.Accounts.SetAccount(&sealevel.SysvarEpochRewardsAddr, &epochRewardsAcct)
+			}
+		}
+	}
+
+	/// LastRestartSlot
+	for _, acct := range fixture.Input.Accounts {
+		if solana.PublicKeyFromBytes(acct.Address) == sealevel.SysvarLastRestartSlotAddr {
+			lastRestartSlotAcct := fixtureAcctStateToAccount(acct)
+			if len(lastRestartSlotAcct.Data) == sealevel.SysvarLastRestartSlotStructLen {
+				execCtx.Accounts.SetAccount(&sealevel.SysvarLastRestartSlotAddr, &lastRestartSlotAcct)
 			}
 		}
 	}
@@ -226,7 +243,7 @@ func newExecCtxAndInstrAcctsFromFixture(fixture *InstrFixture) (*sealevel.Execut
 	instr := sealevel.Instruction{Data: fixture.Input.Data}
 	txCtx.AllInstructions = append(txCtx.AllInstructions, instr)
 
-	execCtx := sealevel.ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(fixture.Input.CuAvail)}
+	execCtx := sealevel.ExecutionCtx{TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(fixture.Input.CuAvail), Log: &sealevel.LogRecorder{}}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	configureSysvars(&execCtx, fixture)
 	parseAndConfigureFeatures(&execCtx, fixture)

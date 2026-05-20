@@ -72,6 +72,7 @@ func Syscalls(ft *features.Features, isDeploy bool, h uint32) (f sbpf.Syscall, o
 		f = SyscallKeccak256
 	case hash_sol_blake3:
 		f = SyscallBlake3
+		ok = ft.IsActive(features.Blake3SyscallEnabled)
 	case hash_sol_secp256k1_recover:
 		f = SyscallSecp256k1Recover
 	case hash_sol_poseidon:

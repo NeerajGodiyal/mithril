@@ -26,7 +26,7 @@ func main() {
 		{"sol_log_data", "SyscallLogData", ""},
 		{"sol_sha256", "SyscallSha256", ""},
 		{"sol_keccak256", "SyscallKeccak256", ""},
-		{"sol_blake3", "SyscallBlake3", ""},
+		{"sol_blake3", "SyscallBlake3", "ft.IsActive(features.Blake3SyscallEnabled)"},
 		{"sol_secp256k1_recover", "SyscallSecp256k1Recover", ""},
 		{"sol_poseidon", "SyscallPoseidon", ""},
 		{"sol_curve_validate_point", "SyscallValidatePoint", "ft.IsActive(features.Curve25519SyscallEnabled)"},

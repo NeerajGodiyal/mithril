@@ -12,11 +12,13 @@ import (
 func (l *Loader) relocate() error {
 	l.funcs = make(map[uint32]int64)
 	l.funcName = make(map[uint32]int64)
-	if err := l.fixupRelativeCalls(); err != nil {
-		return err
-	}
-	if err := l.applyDynamicRelocs(); err != nil {
-		return err
+	if !l.enableStaticSyscalls() {
+		if err := l.fixupRelativeCalls(); err != nil {
+			return err
+		}
+		if err := l.applyDynamicRelocs(); err != nil {
+			return err
+		}
 	}
 	if err := l.getEntrypoint(); err != nil {
 		return err
@@ -55,9 +57,12 @@ func (l *Loader) fixupRelativeCalls() error {
 }
 
 func (l *Loader) registerFunc(target uint64) (uint32, error) {
-	hash := sbpf.PCHash(target)
+	hash := uint32(target)
+	if !l.enableStaticSyscalls() {
+		hash = sbpf.PCHash(target)
+	}
 
-	if l.syscalls != nil && l.syscalls.ExistsByHash(hash) {
+	if !l.enableStaticSyscalls() && l.syscalls != nil && l.syscalls.ExistsByHash(hash) {
 		return 0, fmt.Errorf("symbol hash collision with syscall")
 	}
 
@@ -67,6 +72,13 @@ func (l *Loader) registerFunc(target uint64) (uint32, error) {
 
 	l.funcs[hash] = int64(target)
 	return hash, nil
+}
+
+func (l *Loader) normalizeVaddr(addr uint64) uint64 {
+	if addr < sbpf.VaddrProgram {
+		return clampAddUint64(addr, sbpf.VaddrProgram)
+	}
+	return addr
 }
 
 func (l *Loader) applyDynamicRelocs() error {
@@ -104,9 +116,7 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 		relAddr := binary.LittleEndian.Uint32(l.program[rOff+4 : rOff+8])
 		addr := clampAddUint64(sym.Value, uint64(relAddr))
 
-		if addr < sbpf.VaddrProgram {
-			addr += sbpf.VaddrProgram
-		}
+		addr = l.normalizeVaddr(addr)
 
 		// Write to imm field of two slots
 		binary.LittleEndian.PutUint32(l.program[rOff+4:rOff+8], uint32(addr))
@@ -120,9 +130,7 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 			if addr == 0 {
 				return fmt.Errorf("invalid R_BPF_64_RELATIVE")
 			}
-			if addr < sbpf.VaddrProgram {
-				addr += sbpf.VaddrProgram
-			}
+			addr = l.normalizeVaddr(addr)
 
 			// Write to imm field of two slots
 			binary.LittleEndian.PutUint32(l.program[rOff+4:rOff+8], uint32(addr))
@@ -131,12 +139,10 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 			var addr uint64
 			if l.eh.Flags == EF_SBF_V2 {
 				addr = binary.LittleEndian.Uint64(l.program[rOff : rOff+8])
-				if addr < sbpf.VaddrProgram {
-					addr += sbpf.VaddrProgram
-				}
+				addr = l.normalizeVaddr(addr)
 			} else {
 				addr = uint64(binary.LittleEndian.Uint32(l.program[rOff+4 : rOff+8]))
-				addr = clampAddUint64(addr, sbpf.VaddrProgram)
+				addr = l.normalizeVaddr(addr)
 			}
 			binary.LittleEndian.PutUint64(l.program[rOff:rOff+8], addr)
 		}
@@ -153,10 +159,11 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 		var hash uint32
 		if elf.ST_TYPE(sym.Info) == elf.STT_FUNC && sym.Value != 0 {
 			// Function call
-			if !l.textRange.contains(sym.Value) {
+			textVMRange := addrRange{min: l.shText.Addr, max: clampAddUint64(l.shText.Addr, l.shText.Size)}
+			if !textVMRange.contains(sym.Value) {
 				return fmt.Errorf("out-of-bounds R_BPF_64_32 function ref")
 			}
-			target := (sym.Value - l.textRange.min) / 8
+			target := (sym.Value - textVMRange.min) / 8
 
 			nameHash := sbpf.SymbolHash(name)
 			if existing, ok := l.funcName[nameHash]; ok && existing != int64(target) {
@@ -186,7 +193,13 @@ func (l *Loader) applyReloc(reloc *elf.Rel64) error {
 }
 
 func (l *Loader) getEntrypoint() error {
-	offset := l.eh.Entry - l.shText.Addr
+	textAddr := uint64(0)
+	if l.enableStricterElfHeaders() {
+		textAddr = l.textAddr
+	} else {
+		textAddr = l.shText.Addr
+	}
+	offset := l.eh.Entry - textAddr
 	if offset%sbpf.SlotSize != 0 {
 		return fmt.Errorf("invalid entrypoint")
 	}

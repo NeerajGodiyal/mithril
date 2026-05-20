@@ -514,6 +514,13 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// Handle transaction errors from the pure function
 	if output.ProcessingResult.TransactionError != nil {
 		txErr := output.ProcessingResult.TransactionError
+		if dbgOpts.IsDebugTx(tx.Signatures[0]) && execCtx != nil {
+			if logRecorder, ok := execCtx.Log.(*sealevel.LogRecorder); ok {
+				for _, l := range logRecorder.Logs {
+					mlog.Log.Debugf("%s", l)
+				}
+			}
+		}
 
 		switch txErr.ErrorType {
 		case TransactionErrorSanitizeFailure:

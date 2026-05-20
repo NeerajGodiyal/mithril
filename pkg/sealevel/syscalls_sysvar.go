@@ -25,6 +25,12 @@ func SyscallGetClockSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	if err != nil {
 		return syscallCuErr()
 	}
+	if !syscallAddressIsAligned(execCtx, addr, 8) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, addr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
+	}
 
 	var clockDst []byte
 	clockDst, err = vm.Translate(addr, SysvarClockStructLen, true)
@@ -58,6 +64,12 @@ func SyscallGetRentSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	if err != nil {
 		return syscallCuErr()
 	}
+	if !syscallAddressIsAligned(execCtx, addr, 8) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, addr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
+	}
 
 	rentDst, err := vm.Translate(addr, SysvarRentStructLen, true)
 	if err != nil {
@@ -86,6 +98,12 @@ func SyscallGetEpochScheduleSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) 
 	err := execCtx.ComputeMeter.Consume(cost)
 	if err != nil {
 		return syscallCuErr()
+	}
+	if !syscallAddressIsAligned(execCtx, addr, 8) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, addr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
 	}
 
 	epochScheduleDst, err := vm.Translate(addr, SysvarEpochScheduleStructLen, true)
@@ -133,6 +151,12 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 	if err != nil {
 		return syscallCuErr()
 	}
+	if !syscallAddressIsAligned(execCtx, addr, 16) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, addr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
+	}
 
 	epochRewardsDst, err := vm.Translate(addr, SysvarEpochRewardsStructLen, true)
 	if err != nil {
@@ -141,7 +165,7 @@ func SyscallGetEpochRewardsSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error) {
 
 	epochRewards, err := ReadEpochRewardsSysvar(execCtx)
 	if err != nil {
-		return syscallSuccess(1)
+		return syscallErr(err)
 	}
 
 	binary.LittleEndian.PutUint64(epochRewardsDst[:8], epochRewards.DistributionStartingBlockHeight)
@@ -175,13 +199,22 @@ func SyscallGetLastRestartSlotSysvarImpl(vm sbpf.VM, addr uint64) (uint64, error
 	if err != nil {
 		return syscallCuErr()
 	}
+	if !syscallAddressIsAligned(execCtx, addr, 8) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, addr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
+	}
 
 	lastRestartSlotDst, err := vm.Translate(addr, SysvarLastRestartSlotStructLen, true)
 	if err != nil {
 		return syscallErr(err)
 	}
 
-	lrs := ReadLastRestartSlotSysvar(execCtx)
+	lrs, err := ReadLastRestartSlotSysvar(execCtx)
+	if err != nil {
+		return syscallErr(err)
+	}
 	binary.LittleEndian.PutUint64(lastRestartSlotDst[:8], lrs.LastRestartSlot)
 
 	return syscallSuccess(0)
@@ -197,9 +230,18 @@ const (
 var permittedSysvarAddrs = []solana.PublicKey{SysvarClockAddr, SysvarEpochScheduleAddr, SysvarEpochRewardsAddr, SysvarRentAddr,
 	SysvarSlotHashesAddr, SysvarStakeHistoryAddr, SysvarLastRestartSlotAddr}
 
-func fetchSysvarBytesForPubkey(pubkey solana.PublicKey) ([]byte, error) {
+func fetchSysvarBytesForPubkey(execCtx *ExecutionCtx, pubkey solana.PublicKey) ([]byte, error) {
 	if !slices.Contains(permittedSysvarAddrs, pubkey) {
 		return nil, fmt.Errorf("unrecognised sysvar")
+	}
+
+	accts := addrObjectForLookup(execCtx)
+	if accts != nil && *accts != nil {
+		key := [32]byte(pubkey)
+		acct, err := (*accts).GetAccount(&key)
+		if err == nil {
+			return acct.Data, nil
+		}
 	}
 
 	var sysvarAcct *accounts.Account
@@ -218,6 +260,9 @@ func fetchSysvarBytesForPubkey(pubkey solana.PublicKey) ([]byte, error) {
 	} else if pubkey == SysvarLastRestartSlotAddr {
 		sysvarAcct = SysvarCache.LastRestartSlot.Acct
 	}
+	if sysvarAcct == nil {
+		return nil, fmt.Errorf("sysvar account not found")
+	}
 
 	return sysvarAcct.Data, nil
 }
@@ -233,17 +278,23 @@ func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offse
 	if err != nil {
 		return syscallCuErr()
 	}
+	if !syscallCheckAligned(execCtx) {
+		return syscallErrCustom("SyscallError::UnalignedPointer")
+	}
+	if syscallParameterAddressRestricted(execCtx, varAddr) {
+		return syscallErrCustom("SyscallError::InvalidPointer")
+	}
+
+	varBuf, err := vm.Translate(varAddr, length, true)
+	if err != nil {
+		return syscallErr(err)
+	}
 
 	sysvarIdBytes, err := vm.Translate(sysvarIdAddr, 32, false)
 	if err != nil {
 		return syscallErr(err)
 	}
 	sysvarId := solana.PublicKeyFromBytes(sysvarIdBytes)
-
-	varBuf, err := vm.Translate(varAddr, length, true)
-	if err != nil {
-		return syscallErr(err)
-	}
 
 	offsetLen, err := safemath.CheckedAddU64(offset, length)
 	if err != nil {
@@ -255,7 +306,7 @@ func SyscallGetSysvarImpl(vm sbpf.VM, sysvarIdAddr uint64, varAddr uint64, offse
 		return syscallErr(InstrErrArithmeticOverflow)
 	}
 
-	sysvarBuf, err := fetchSysvarBytesForPubkey(sysvarId)
+	sysvarBuf, err := fetchSysvarBytesForPubkey(execCtx, sysvarId)
 	if err != nil {
 		return syscallSuccess(sysvarNotFound)
 	}

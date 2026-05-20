@@ -2,6 +2,7 @@ package forkchoice
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
@@ -40,6 +41,27 @@ type BankhashResult struct {
 	WinningStake    uint64 // stake accumulated for the winning hash (may differ from StakeForHash)
 	TotalEpochStake uint64
 	ThresholdStake  uint64
+}
+
+// VoteHashDiagnostic is a JSON-friendly snapshot of votes accumulated for one
+// bankhash within a target slot.
+type VoteHashDiagnostic struct {
+	Bankhash   string `json:"bankhash"`
+	Stake      uint64 `json:"stake"`
+	VoterCount int    `json:"voter_count"`
+	Confirmed  bool   `json:"confirmed"`
+}
+
+// SlotVoteDiagnostic is a JSON-friendly snapshot of forkchoice's accumulated
+// vote state for a target slot.
+type SlotVoteDiagnostic struct {
+	Slot               uint64               `json:"slot"`
+	Status             string               `json:"status"`
+	WinningHash        string               `json:"winning_hash,omitempty"`
+	LatestObservedSlot uint64               `json:"latest_observed_slot"`
+	TotalEpochStake    uint64               `json:"total_epoch_stake"`
+	ThresholdStake     uint64               `json:"threshold_stake"`
+	Hashes             []VoteHashDiagnostic `json:"hashes,omitempty"`
 }
 
 // ConfirmedLeaf is a vote-confirmed bankhash winner paired with the observed
@@ -581,4 +603,53 @@ func (s *ForkChoiceService) GetSupermajorityHash(slot uint64) (solana.Hash, Bank
 	}
 
 	return solana.Hash{}, BankhashNoSupermajority
+}
+
+// SlotVoteDiagnostics returns a compact snapshot of forkchoice vote totals for
+// a target slot. It is intended for rare consensus mismatch artifacts rather
+// than hot-path logging.
+func (s *ForkChoiceService) SlotVoteDiagnostics(slot uint64) SlotVoteDiagnostic {
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+
+	out := SlotVoteDiagnostic{
+		Slot:               slot,
+		Status:             BankhashNoSupermajority.String(),
+		LatestObservedSlot: s.state.latestObservedSlot,
+		TotalEpochStake:    s.state.totalEpochStake,
+	}
+
+	accumulator, exists := s.state.voteStakeTotals[slot]
+	if !exists {
+		if s.state.latestObservedSlot < slot+VoteConfirmationTimeoutSlots {
+			out.Status = BankhashNeedWait.String()
+		}
+		return out
+	}
+
+	out.TotalEpochStake = accumulator.totalEpochStake
+	out.ThresholdStake = accumulator.thresholdStake
+	if winningHash, ok := accumulator.winningHash(); ok {
+		out.Status = BankhashHasSupermajority.String()
+		out.WinningHash = base58.Encode(winningHash[:])
+	} else if s.state.latestObservedSlot < slot+VoteConfirmationTimeoutSlots {
+		out.Status = BankhashNeedWait.String()
+	}
+
+	out.Hashes = make([]VoteHashDiagnostic, 0, len(accumulator.trackers))
+	for bankhash, tracker := range accumulator.trackers {
+		out.Hashes = append(out.Hashes, VoteHashDiagnostic{
+			Bankhash:   base58.Encode(bankhash[:]),
+			Stake:      tracker.stake,
+			VoterCount: len(tracker.voted),
+			Confirmed:  accumulator.hashHasSupermajority(bankhash),
+		})
+	}
+	sort.Slice(out.Hashes, func(i, j int) bool {
+		if out.Hashes[i].Stake == out.Hashes[j].Stake {
+			return out.Hashes[i].Bankhash < out.Hashes[j].Bankhash
+		}
+		return out.Hashes[i].Stake > out.Hashes[j].Stake
+	})
+	return out
 }

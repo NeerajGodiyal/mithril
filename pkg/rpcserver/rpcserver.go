@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -30,19 +29,19 @@ type RpcServer struct {
 	slotCtxMu     sync.RWMutex
 
 	leaderTPUCacheMu         sync.RWMutex
-	leaderTPUByIdentity      map[solana.PublicKey]netip.AddrPort
+	leaderTPUByIdentity      map[solana.PublicKey]tpuEndpoint
 	leaderTPUCacheUpdatedAt  time.Time
 	clusterNodesRefreshEvery time.Duration
 	clusterNodesRefreshOnce  sync.Once
 
 	clusterRPCEndpoints []string
 	clusterNodesFetcher clusterNodesFetcher
-	// packetSender is injectable for tests; production defaults to UDP.
-	packetSender                      packetSender
+	// transactionSender is injectable for tests; production supports QUIC with UDP fallback.
+	transactionSender                 transactionSender
 	sendTransactionLeaderForwardCount uint64
 }
 
-func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16) *RpcServer {
+func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16, epochSchedule *sealevel.SysvarEpochSchedule) *RpcServer {
 	var err error
 	rpcServer := &RpcServer{}
 
@@ -63,11 +62,15 @@ func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16) *RpcServer {
 
 	rpcServer.rpcService.Register("MithrilRpc", rpcServer)
 	rpcServer.acctsDb = acctsDb
-	rpcServer.epochSchedule = fetchAndUnmarshalEpochScheduleSysvar(acctsDb)
-	rpcServer.leaderTPUByIdentity = make(map[solana.PublicKey]netip.AddrPort)
+	if epochSchedule != nil {
+		rpcServer.epochSchedule = epochSchedule
+	} else {
+		rpcServer.epochSchedule = fetchAndUnmarshalEpochScheduleSysvar(acctsDb)
+	}
+	rpcServer.leaderTPUByIdentity = make(map[solana.PublicKey]tpuEndpoint)
 	rpcServer.clusterNodesRefreshEvery = sendTransactionClusterNodesRefreshEvery
 	rpcServer.clusterRPCEndpoints = configuredSendTransactionRPCEndpoints()
-	rpcServer.packetSender = defaultPacketSender
+	rpcServer.transactionSender = defaultTransactionSender
 	rpcServer.sendTransactionLeaderForwardCount = sendTransactionLeaderForwardCount
 
 	return rpcServer

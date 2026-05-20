@@ -314,7 +314,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 			scalars, err := unmarshalEdwardsScalars(scalarsBytes)
 			if err != nil {
-				return syscallErr(err)
+				return syscallSuccess(1)
 			}
 
 			pointsBytes, err := vm.Translate(pointsAddr, pointsLen*CurvePointBytesLen, false)
@@ -324,7 +324,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 			points, err := unmarshalEdwardsPoints(pointsBytes)
 			if err != nil {
-				return syscallErr(err)
+				return syscallSuccess(1)
 			}
 
 			resultPoint := edwards25519.NewIdentityPoint()
@@ -355,7 +355,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 			scalars, err := unmarshalRistrettoScalars(scalarsBytes)
 			if err != nil {
-				return syscallErr(err)
+				return syscallSuccess(1)
 			}
 
 			pointsBytes, err := vm.Translate(pointsAddr, pointsLen*CurvePointBytesLen, false)
@@ -365,7 +365,7 @@ func SyscallCurveMultiscalarMultiplicationImpl(vm sbpf.VM, curveId, scalarsAddr,
 
 			points, err := unmarshalRistrettoElements(pointsBytes)
 			if err != nil {
-				return syscallErr(err)
+				return syscallSuccess(1)
 			}
 
 			resultPoint := ristretto255.NewElement().MultiScalarMult(scalars, points)

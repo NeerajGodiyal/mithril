@@ -113,6 +113,87 @@ var (
 	lightbringerQuiet            bool
 )
 
+func snapshotEpochForState(manifest *snapshot.SnapshotManifest) uint64 {
+	if manifest == nil || manifest.Bank == nil {
+		return 0
+	}
+	if manifest.Bank.EpochSchedule.SlotsPerEpoch != 0 {
+		epoch := manifest.Bank.EpochSchedule.GetEpoch(manifest.Bank.Slot)
+		if manifest.Bank.Epoch != epoch {
+			mlog.Log.Warnf("manifest bank epoch %d differs from manifest epoch schedule epoch %d at slot %d; using schedule-derived epoch",
+				manifest.Bank.Epoch, epoch, manifest.Bank.Slot)
+		}
+		return epoch
+	}
+
+	return manifest.Bank.Epoch
+}
+
+func epochScheduleFromState(s *state.MithrilState) *sealevel.SysvarEpochSchedule {
+	if s != nil && s.ManifestEpochSchedule != nil && s.ManifestEpochSchedule.SlotsPerEpoch != 0 {
+		return &sealevel.SysvarEpochSchedule{
+			SlotsPerEpoch:            s.ManifestEpochSchedule.SlotsPerEpoch,
+			LeaderScheduleSlotOffset: s.ManifestEpochSchedule.LeaderScheduleSlotOffset,
+			Warmup:                   s.ManifestEpochSchedule.Warmup,
+			FirstNormalEpoch:         s.ManifestEpochSchedule.FirstNormalEpoch,
+			FirstNormalSlot:          s.ManifestEpochSchedule.FirstNormalSlot,
+		}
+	}
+	return sealevel.SysvarCache.EpochSchedule.Sysvar
+}
+
+func epochForStateSlot(s *state.MithrilState, slot uint64) uint64 {
+	if epochSchedule := epochScheduleFromState(s); epochSchedule != nil {
+		return epochSchedule.GetEpoch(slot)
+	}
+	return 0
+}
+
+func manifestEpochScheduleSeedMatches(s *state.MithrilState, manifest *snapshot.SnapshotManifest) bool {
+	if s == nil || s.ManifestEpochSchedule == nil || manifest == nil || manifest.Bank == nil {
+		return false
+	}
+	m := manifest.Bank.EpochSchedule
+	return s.ManifestEpochSchedule.SlotsPerEpoch == m.SlotsPerEpoch &&
+		s.ManifestEpochSchedule.LeaderScheduleSlotOffset == m.LeaderScheduleSlotOffset &&
+		s.ManifestEpochSchedule.Warmup == m.Warmup &&
+		s.ManifestEpochSchedule.FirstNormalEpoch == m.FirstNormalEpoch &&
+		s.ManifestEpochSchedule.FirstNormalSlot == m.FirstNormalSlot
+}
+
+func refreshManifestSeedFromManifest(accountsPath string, s *state.MithrilState, manifest *snapshot.SnapshotManifest) {
+	if s == nil || manifest == nil || manifest.Bank == nil {
+		return
+	}
+
+	snapshotEpoch := snapshotEpochForState(manifest)
+	if manifestEpochScheduleSeedMatches(s, manifest) && s.SnapshotEpoch == snapshotEpoch {
+		return
+	}
+
+	oldSnapshotEpoch := s.SnapshotEpoch
+	if oldSnapshotEpoch != 0 && oldSnapshotEpoch != snapshotEpoch && s.LastSlot > s.SnapshotSlot {
+		reason := fmt.Sprintf("snapshot epoch frame changed from %d to %d after replay had already persisted slot %d; rebuild AccountsDB from snapshot",
+			oldSnapshotEpoch, snapshotEpoch, s.LastSlot)
+		if err := s.MarkCorrupted(accountsPath, reason); err != nil {
+			mlog.Log.Errorf("failed to mark state as corrupted: %v", err)
+		}
+		klog.Fatalf(reason)
+	}
+
+	s.SnapshotEpoch = snapshotEpoch
+	snapshot.PopulateManifestSeed(s, manifest)
+	if s.LastSlot > 0 {
+		s.LastEpoch = epochForStateSlot(s, s.LastSlot)
+	}
+	if err := s.Save(accountsPath); err != nil {
+		mlog.Log.Errorf("failed to refresh manifest seed data in state file: %v", err)
+		return
+	}
+	mlog.Log.Warnf("refreshed manifest-derived state seed data from snapshot manifest (snapshot_epoch %d -> %d)",
+		oldSnapshotEpoch, snapshotEpoch)
+}
+
 func init() {
 	// [bootstrap] section flags
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
@@ -894,10 +975,7 @@ func runLive(c *cobra.Command, args []string) {
 		}
 
 		// Write state file
-		var snapshotEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-		}
+		snapshotEpoch := snapshotEpochForState(manifest)
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		// Populate manifest seed data so replay doesn't need manifest at runtime
 		snapshot.PopulateManifestSeed(mithrilState, manifest)
@@ -926,6 +1004,7 @@ func runLive(c *cobra.Command, args []string) {
 		if err != nil {
 			klog.Fatalf("failed to load manifest: %v", err)
 		}
+		refreshManifestSeedFromManifest(accountsPath, mithrilState, manifest)
 		// Run integrity check if we have a state file (warn only, don't fail - user chose force mode)
 		if hasValidState {
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
@@ -964,10 +1043,7 @@ func runLive(c *cobra.Command, args []string) {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
 		// Write state file to mark build as complete
-		var snapshotEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-		}
+		snapshotEpoch := snapshotEpochForState(manifest)
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		// Populate manifest seed data so replay doesn't need manifest at runtime
 		snapshot.PopulateManifestSeed(mithrilState, manifest)
@@ -1022,10 +1098,7 @@ func runLive(c *cobra.Command, args []string) {
 			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 		}
 		// Write state file to mark build as complete
-		var snapshotEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-		}
+		snapshotEpoch := snapshotEpochForState(manifest)
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		// Populate manifest seed data so replay doesn't need manifest at runtime
 		snapshot.PopulateManifestSeed(mithrilState, manifest)
@@ -1094,10 +1167,7 @@ func runLive(c *cobra.Command, args []string) {
 					if err != nil {
 						klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 					}
-					var snapshotEpoch uint64
-					if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-						snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-					}
+					snapshotEpoch := snapshotEpochForState(manifest)
 					mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 					// Populate manifest seed data so replay doesn't need manifest at runtime
 					snapshot.PopulateManifestSeed(mithrilState, manifest)
@@ -1122,6 +1192,7 @@ func runLive(c *cobra.Command, args []string) {
 			if err != nil {
 				klog.Fatalf("failed to load manifest: %v", err)
 			}
+			refreshManifestSeedFromManifest(accountsPath, mithrilState, manifest)
 
 			// Validate state file matches AccountsDB (detect Ctrl+Z / kill -9 corruption)
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
@@ -1190,10 +1261,7 @@ func runLive(c *cobra.Command, args []string) {
 				klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
 			}
 			// Write state file to mark build as complete
-			var snapshotEpoch uint64
-			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-				snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-			}
+			snapshotEpoch := snapshotEpochForState(manifest)
 			mithrilState = state.NewReadyStateWithOpts(state.NewReadyStateOpts{
 				SnapshotSlot:  manifest.Bank.Slot,
 				SnapshotEpoch: snapshotEpoch,
@@ -1312,10 +1380,7 @@ postBootstrap:
 
 	if mithrilState == nil {
 		// Initialize state for this session
-		var snapshotEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(manifest.Bank.Slot)
-		}
+		snapshotEpoch := snapshotEpochForState(manifest)
 		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
 		// Populate manifest seed data so replay doesn't need manifest at runtime
 		snapshot.PopulateManifestSeed(mithrilState, manifest)
@@ -1363,7 +1428,7 @@ postBootstrap:
 	if rpcPort < 0 || rpcPort > 65535 {
 		klog.Fatalf("invalid port: %d", rpcPort)
 	} else if rpcPort != 0 {
-		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort))
+		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort), epochScheduleFromState(mithrilState))
 		rpcServer.Start()
 		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
 	}
@@ -1433,10 +1498,7 @@ postBootstrap:
 		var shutdownCtx *state.ShutdownContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
-			var lastEpoch uint64
-			if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-				lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
-			}
+			lastEpoch := epochForStateSlot(mithrilState, result.LastPersistedSlot)
 			// Determine shutdown reason
 			shutdownReason := state.ShutdownReasonCompleted
 			if result.WasCancelled {
@@ -1503,11 +1565,8 @@ postBootstrap:
 	// Print shutdown summary if cancelled or error
 	if (result.WasCancelled || result.Error != nil) && result.LastPersistedSlot > 0 {
 		// Calculate epoch from slot using epoch schedule
-		var epoch, snapshotEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			epoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(result.LastPersistedSlot)
-			snapshotEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(snapshotBaseSlot)
-		}
+		epoch := epochForStateSlot(mithrilState, result.LastPersistedSlot)
+		snapshotEpoch := epochForStateSlot(mithrilState, snapshotBaseSlot)
 		progress.PrintShutdownSummary(progress.ShutdownInfo{
 			LastSlot:         result.LastPersistedSlot,
 			LastBankhash:     result.LastPersistedBankhash,
@@ -2309,10 +2368,7 @@ func runReplayWithRecovery(
 		}
 
 		// Calculate epoch for the last persisted slot
-		var lastEpoch uint64
-		if sealevel.SysvarCache.EpochSchedule.Sysvar != nil {
-			lastEpoch = sealevel.SysvarCache.EpochSchedule.Sysvar.GetEpoch(r.LastPersistedSlot)
-		}
+		lastEpoch := epochForStateSlot(mithrilState, r.LastPersistedSlot)
 
 		// Build shutdown context
 		var shutdownCtx *state.ShutdownContext
