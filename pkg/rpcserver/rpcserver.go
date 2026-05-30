@@ -1,8 +1,11 @@
 package rpcserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +42,18 @@ type RpcServer struct {
 	// transactionSender is injectable for tests; production supports QUIC with UDP fallback.
 	transactionSender                 transactionSender
 	sendTransactionLeaderForwardCount uint64
+}
+
+const maxQuietMethodProbeBody = 64 << 10
+
+var supportedRPCMethods = map[string]struct{}{
+	"getAccountInfo":      {},
+	"getBankHash":         {},
+	"getBlockHeight":      {},
+	"getEpochInfo":        {},
+	"getLatestBlockhash":  {},
+	"sendTransaction":     {},
+	"simulateTransaction": {},
 }
 
 func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16, epochSchedule *sealevel.SysvarEpochSchedule) *RpcServer {
@@ -103,7 +118,159 @@ func (rpcServer *RpcServer) getSlotCtx() *sealevel.SlotCtx {
 
 func (rpcServer *RpcServer) Start() {
 	rpcServer.startClusterNodesRefreshLoop()
-	go http.Serve(rpcServer.listener, rpcServer.rpcService)
+	go http.Serve(rpcServer.listener, rpcServer)
+}
+
+func (rpcServer *RpcServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if quietNonRPCProbe(w, r) || writeQuietRPCProbeError(w, r) {
+		return
+	}
+	rpcServer.rpcService.ServeHTTP(w, r)
+}
+
+type rpcMethodProbe struct {
+	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method"`
+}
+
+type rpcProbeErrorResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Error   rpcProbeError   `json:"error"`
+}
+
+type rpcProbeError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func quietNonRPCProbe(w http.ResponseWriter, r *http.Request) bool {
+	if strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+		return false
+	}
+	if r.Method == http.MethodPost {
+		return false
+	}
+	http.NotFound(w, r)
+	return true
+}
+
+func writeQuietRPCProbeError(w http.ResponseWriter, r *http.Request) bool {
+	body, ok := readQuietMethodProbeBody(r)
+	if !ok && r.ContentLength != 0 {
+		return false
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		writeRPCProbeError(w, nil, http.StatusBadRequest, -32600, "Invalid request")
+		return true
+	}
+	if body[0] == '[' {
+		return writeQuietBatchProbeError(w, body)
+	}
+
+	var req rpcMethodProbe
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeRPCProbeError(w, nil, http.StatusInternalServerError, -32700, "Parse error")
+		return true
+	}
+	if req.Method == "" {
+		writeRPCProbeError(w, req.ID, http.StatusBadRequest, -32600, "Invalid request")
+		return true
+	}
+	if _, ok := supportedRPCMethods[req.Method]; ok {
+		return false
+	}
+
+	writeRPCProbeError(w, req.ID, http.StatusInternalServerError, -32601, fmt.Sprintf("method '%s' not found", req.Method))
+	return true
+}
+
+func writeQuietBatchProbeError(w http.ResponseWriter, body []byte) bool {
+	var reqs []rpcMethodProbe
+	if err := json.Unmarshal(body, &reqs); err != nil {
+		writeRPCProbeError(w, nil, http.StatusInternalServerError, -32700, "Parse error")
+		return true
+	}
+	if len(reqs) == 0 {
+		writeRPCProbeError(w, nil, http.StatusBadRequest, -32600, "Invalid request")
+		return true
+	}
+	allQuiet := true
+	for _, req := range reqs {
+		if _, ok := supportedRPCMethods[req.Method]; ok {
+			allQuiet = false
+			break
+		}
+	}
+	if !allQuiet {
+		return false
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	resps := make([]rpcProbeErrorResponse, 0, len(reqs))
+	for _, req := range reqs {
+		code := -32601
+		message := fmt.Sprintf("method '%s' not found", req.Method)
+		if req.Method == "" {
+			code = -32600
+			message = "Invalid request"
+		}
+		resps = append(resps, rpcProbeErrorResponse{
+			JSONRPC: "2.0",
+			ID:      normalizedRPCProbeID(req.ID),
+			Error: rpcProbeError{
+				Code:    code,
+				Message: message,
+			},
+		})
+	}
+	_ = json.NewEncoder(w).Encode(resps)
+	return true
+}
+
+func writeRPCProbeError(w http.ResponseWriter, id json.RawMessage, status int, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(rpcProbeErrorResponse{
+		JSONRPC: "2.0",
+		ID:      normalizedRPCProbeID(id),
+		Error: rpcProbeError{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
+
+func normalizedRPCProbeID(id json.RawMessage) json.RawMessage {
+	if len(id) == 0 {
+		return json.RawMessage("null")
+	}
+	return id
+}
+
+func readQuietMethodProbeBody(r *http.Request) ([]byte, bool) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.ContentLength > maxQuietMethodProbeBody {
+		return nil, false
+	}
+	if r.ContentLength > 0 {
+		body, err := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		return body, err == nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxQuietMethodProbeBody+1))
+	if err != nil {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		return nil, false
+	}
+	if len(body) > maxQuietMethodProbeBody {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		return nil, false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, true
 }
 
 func (rpcServer *RpcServer) startClusterNodesRefreshLoop() {

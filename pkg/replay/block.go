@@ -1188,10 +1188,16 @@ func ReplayBlocks(
 	startSlot, endSlot uint64,
 	rpcEndpoints []string, // RPC endpoints in priority order (first = primary, rest = fallbacks)
 	lightbringerEndpoint string,
+	turbineBindAddr string,
+	turbineGossipEntrypoint string,
+	turbineGossipBindAddr string,
+	turbineAdvertisedIP string,
+	turbineShredVersion uint16,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
 	useLightbringer bool,
+	useTurbine bool,
 	dbgOpts *DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer SlotCtxSetter,
@@ -1335,7 +1341,15 @@ func ReplayBlocks(
 	}
 	// Resolve consensus config defaults before forkchoice init so we can
 	// check whether enforcement requires authorized voters.
-	consensusCfg := resolveConsensusConfig(consensusOpts, useLightbringer, isLive)
+	useLiveShredStream := useLightbringer || useTurbine
+	consensusCfg := resolveConsensusConfig(consensusOpts, useLightbringer, useTurbine, isLive)
+	consensusManagedLiveStream := consensusCfg.enforceActive &&
+		isLive &&
+		consensusManagesLiveShredStream(consensusCfg.enforceSource, useLightbringer, useTurbine)
+	consensusLiveStreamName := "Lightbringer"
+	if useTurbine {
+		consensusLiveStreamName = "TURBINE"
+	}
 
 	epochAuthVoters := global.EpochAuthorizedVoters()
 	if epochAuthVoters == nil {
@@ -1380,16 +1394,30 @@ func ReplayBlocks(
 	var opts *blockstream.BlockSourceOpts
 	if useLightbringer {
 		opts = &blockstream.BlockSourceOpts{
-			SourceType:           blockstream.BlockSourceLightbringer,
-			RpcClient:            rpcc,
-			LightbringerEndpoint: lightbringerEndpoint,
-			BackupRpcEndpoints:   rpcBackups,
-			StartSlot:            startSlot,
-			EndSlot:              endSlot,
-			BlockDir:             blockDir,
-			ConsensusManagedLightbringer: consensusCfg.enforceActive &&
-				isLive &&
-				consensusCfg.enforceSource == "lightbringer",
+			SourceType:                   blockstream.BlockSourceLightbringer,
+			RpcClient:                    rpcc,
+			LightbringerEndpoint:         lightbringerEndpoint,
+			BackupRpcEndpoints:           rpcBackups,
+			StartSlot:                    startSlot,
+			EndSlot:                      endSlot,
+			BlockDir:                     blockDir,
+			ConsensusManagedLightbringer: consensusManagedLiveStream,
+		}
+	} else if useTurbine {
+		opts = &blockstream.BlockSourceOpts{
+			SourceType:                   blockstream.BlockSourceTurbine,
+			RpcClient:                    rpcc,
+			TurbineBindAddr:              turbineBindAddr,
+			TurbineGossipEntrypoint:      turbineGossipEntrypoint,
+			TurbineGossipBindAddr:        turbineGossipBindAddr,
+			TurbineAdvertisedIP:          turbineAdvertisedIP,
+			TurbineShredVersion:          turbineShredVersion,
+			LeaderForSlot:                global.LeaderForSlot,
+			BackupRpcEndpoints:           rpcBackups,
+			StartSlot:                    startSlot,
+			EndSlot:                      endSlot,
+			BlockDir:                     blockDir,
+			ConsensusManagedLightbringer: consensusManagedLiveStream,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{
@@ -1458,7 +1486,7 @@ func ReplayBlocks(
 	}
 
 	syncConsensusBufferedExecutionMode := func(triggerSlot uint64) {
-		if !consensusCfg.enforceActive || !isLive || consensusCfg.enforceSource != "lightbringer" {
+		if !consensusManagedLiveStream {
 			return
 		}
 
@@ -1485,7 +1513,7 @@ func ReplayBlocks(
 			return nil
 		}
 
-		if !consensusBufferedExecutionActive && isLive && consensusCfg.enforceSource == "lightbringer" {
+		if !consensusBufferedExecutionActive && consensusManagedLiveStream {
 			if block == nil || !block.FromLightbringer {
 				return nil
 			}
@@ -1493,7 +1521,7 @@ func ReplayBlocks(
 			readyConsensusPath = nil
 			observeConsensusAnchor()
 			pruneObservedConsensusBlocks(observedConsensusBlocks, currentConsensusAnchorSlot())
-			mlog.Log.Warnf("forkchoice: enabling buffered execution at slot %d after block source switched to Lightbringer", block.Slot)
+			mlog.Log.Warnf("forkchoice: enabling buffered execution at slot %d after block source switched to %s", block.Slot, consensusLiveStreamName)
 		}
 
 		if !consensusBufferedExecutionActive {
@@ -1617,13 +1645,13 @@ func ReplayBlocks(
 
 			if block.FromLightbringer {
 				stats := blockStream.GetFetchStats()
-				if shouldDiscardLightbringerObservationAfterFallback(isLive, useLightbringer, block, stats) {
+				if shouldDiscardLightbringerObservationAfterFallback(isLive, useLiveShredStream, block, stats) {
 					modeStr := "catchup"
 					if stats.IsNearTip {
 						modeStr = "near-tip"
 					}
-					mlog.Log.Warnf("forkchoice: discarding stale Lightbringer observation for slot %d after source fallback (mode=%s current_source=%s anchor=%d next_emitted_slot=%d)",
-						block.Slot, modeStr, stats.CurrentSource, currentConsensusAnchorSlot(), stats.NextSlot)
+					mlog.Log.Warnf("forkchoice: discarding stale %s observation for slot %d after source fallback (mode=%s current_source=%s anchor=%d next_emitted_slot=%d)",
+						consensusLiveStreamName, block.Slot, modeStr, stats.CurrentSource, currentConsensusAnchorSlot(), stats.NextSlot)
 					continue
 				}
 			}
@@ -1644,6 +1672,22 @@ func ReplayBlocks(
 					case errors.Is(err, forkchoice.ErrNeedWait), errors.Is(err, forkchoice.ErrPathIncomplete):
 						continue
 					case errors.Is(err, forkchoice.ErrDepthExceeded):
+						if consensusManagedLiveStream && isLive && useLiveShredStream {
+							anchorSlot := currentConsensusAnchorSlot()
+							discardedObservedBlocks := len(observedConsensusBlocks)
+							readyDecisionCount := 0
+							if readyConsensusPath != nil {
+								readyDecisionCount = len(readyConsensusPath.decisions)
+							}
+							mlog.Log.Warnf("forkchoice: unable to resolve %s consensus path within %d slots from anchor %d after observing slot %d; falling back to RPC catchup (discarded_observed_blocks=%d discarded_ready_decisions=%d)",
+								consensusLiveStreamName, consensusCfg.maxDepth, anchorSlot, block.Slot, discardedObservedBlocks, readyDecisionCount)
+							consensusBufferedExecutionActive = false
+							readyConsensusPath = nil
+							clearObservedConsensusBlocks(observedConsensusBlocks)
+							observeConsensusAnchor()
+							blockStream.ForceRPCFallback("consensus_depth_exceeded")
+							continue
+						}
 						if consensusCoordinator.Policy() == "halt" {
 							result.Error = fmt.Errorf("forkchoice: unable to resolve a confirmed path within %d slots from anchor %d",
 								consensusCfg.maxDepth, currentConsensusAnchorSlot())
@@ -2127,6 +2171,16 @@ func ReplayBlocks(
 
 				// Line 2: Current block source
 				mlog.Log.InfofPrecise("  block source: %s", formatBlockSourceStatus(fetchStats))
+				if consensusBufferedExecutionActive {
+					readyDecisionCount := 0
+					readyLeafSlot := uint64(0)
+					if readyConsensusPath != nil {
+						readyDecisionCount = len(readyConsensusPath.decisions)
+						readyLeafSlot = readyConsensusPath.leafSlot
+					}
+					mlog.Log.InfofPrecise("  consensus buffer: observed=%d ready_decisions=%d anchor=%d ready_leaf=%d",
+						len(observedConsensusBlocks), readyDecisionCount, currentConsensusAnchorSlot(), readyLeafSlot)
+				}
 
 				// Line 3: CU and transaction stats (median/min/max)
 				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
@@ -2157,11 +2211,12 @@ func ReplayBlocks(
 				var mem runtime.MemStats
 				runtime.ReadMemStats(&mem)
 				const gib = 1024 * 1024 * 1024
-				mlog.Log.InfofPrecise("  memory: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | objs %d | gc %d | queue=%d",
+				mlog.Log.InfofPrecise("  memory: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | next_gc %.1fGiB | objs %d | gc %d | queue=%d",
 					float64(mem.HeapAlloc)/gib,
 					float64(mem.HeapInuse)/gib,
 					float64(mem.HeapIdle)/gib,
 					float64(mem.HeapReleased)/gib,
+					float64(mem.NextGC)/gib,
 					mem.HeapObjects,
 					mem.NumGC,
 					acctsDb.StoreQueueLen(),

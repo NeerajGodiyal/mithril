@@ -356,6 +356,12 @@
         description = "Store accounts workers.";
       };
 
+      tuningProgramCacheMaxMb = lib.mkOption {
+        type = lib.types.int;
+        default = 1024;
+        description = "Approximate maximum retained SBPF program cache size in MiB.";
+      };
+
       tuningPprofPort = lib.mkOption {
         type = lib.types.nullOr lib.types.int;
         default = null;

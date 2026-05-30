@@ -50,13 +50,19 @@ type DebugConfig struct {
 
 // DevelopmentConfig holds development/tuning configuration (matches Firedancer [development] section)
 type DevelopmentConfig struct {
-	ZstdDecoderConcurrency   int         `toml:"zstd_decoder_concurrency" mapstructure:"zstd_decoder_concurrency"`       // was: zstd-decoder-concurrency
-	MaxConcurrentFlushers    int         `toml:"max_concurrent_flushers" mapstructure:"max_concurrent_flushers"`         // was: max-concurrent-flushers
-	ParamArenaSizeMB         uint64      `toml:"param_arena_size_mb" mapstructure:"param_arena_size_mb"`                 // was: param-arena-size-mb
-	BorrowedAccountArenaSize uint64      `toml:"borrowed_account_arena_size" mapstructure:"borrowed_account_arena_size"` // was: borrowed-account-arena-size
-	UsePool                  bool        `toml:"use_pool" mapstructure:"use_pool"`                                       // was: use-pool
-	Pprof                    PprofConfig `toml:"pprof" mapstructure:"pprof"`
-	Debug                    DebugConfig `toml:"debug" mapstructure:"debug"`
+	ZstdDecoderConcurrency        int         `toml:"zstd_decoder_concurrency" mapstructure:"zstd_decoder_concurrency"`                 // was: zstd-decoder-concurrency
+	MaxConcurrentFlushers         int         `toml:"max_concurrent_flushers" mapstructure:"max_concurrent_flushers"`                   // was: max-concurrent-flushers
+	SnapshotAppendVecWorkers      int         `toml:"snapshot_append_vec_workers" mapstructure:"snapshot_append_vec_workers"`           // Snapshot appendvec write workers
+	SnapshotIndexBuilderWorkers   int         `toml:"snapshot_index_builder_workers" mapstructure:"snapshot_index_builder_workers"`     // Snapshot index parsing workers
+	SnapshotIndexCommitterWorkers int         `toml:"snapshot_index_committer_workers" mapstructure:"snapshot_index_committer_workers"` // Snapshot index shard enqueue workers
+	SnapshotIndexShards           int         `toml:"snapshot_index_shards" mapstructure:"snapshot_index_shards"`                       // Snapshot account-index shard count
+	SnapshotIndexTempDir          string      `toml:"snapshot_index_temp_dir" mapstructure:"snapshot_index_temp_dir"`                   // Optional temp dir for snapshot index shard logs/SST staging
+	ParamArenaSizeMB              uint64      `toml:"param_arena_size_mb" mapstructure:"param_arena_size_mb"`                           // was: param-arena-size-mb
+	BorrowedAccountArenaSize      uint64      `toml:"borrowed_account_arena_size" mapstructure:"borrowed_account_arena_size"`           // was: borrowed-account-arena-size
+	UsePool                       bool        `toml:"use_pool" mapstructure:"use_pool"`                                                 // was: use-pool
+	Pprof                         PprofConfig `toml:"pprof" mapstructure:"pprof"`
+	ProgramCacheMaxMB             int         `toml:"program_cache_max_mb" mapstructure:"program_cache_max_mb"` // Approximate SBPF program cache size in MiB
+	Debug                         DebugConfig `toml:"debug" mapstructure:"debug"`
 }
 
 // ReportingConfig holds metrics/reporting configuration (matches Firedancer [reporting] section)
@@ -66,8 +72,9 @@ type ReportingConfig struct {
 
 // BlockConfig holds block source configuration
 type BlockConfig struct {
-	Source               string `toml:"source" mapstructure:"source"`                               // "rpc" or "lightbringer"
+	Source               string `toml:"source" mapstructure:"source"`                               // "rpc", "lightbringer", or "turbine"
 	LightbringerEndpoint string `toml:"lightbringer_endpoint" mapstructure:"lightbringer_endpoint"` // Lightbringer endpoint (optional)
+	TurbineBindAddr      string `toml:"turbine_bind_addr" mapstructure:"turbine_bind_addr"`         // Native turbine UDP receiver bind address (optional)
 
 	// Global fetch tuning
 	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                           // Rate limit (requests per second)
@@ -85,6 +92,15 @@ type BlockConfig struct {
 	// Near-tip tuning
 	NearTipPollMs    int `toml:"near_tip_poll_interval_ms" mapstructure:"near_tip_poll_interval_ms"` // Faster poll in near-tip
 	NearTipLookahead int `toml:"near_tip_lookahead" mapstructure:"near_tip_lookahead"`               // Slots ahead to schedule
+}
+
+// TurbineConfig holds native gossip/turbine receiver configuration.
+type TurbineConfig struct {
+	BindAddr         string `toml:"bind_addr" mapstructure:"bind_addr"`                 // UDP address for incoming turbine shreds
+	GossipEntrypoint string `toml:"gossip_entrypoint" mapstructure:"gossip_entrypoint"` // Solana gossip entrypoint for turbine tree joining
+	GossipBindAddr   string `toml:"gossip_bind_addr" mapstructure:"gossip_bind_addr"`   // UDP address for Mithril gossip traffic
+	AdvertisedIP     string `toml:"advertised_ip" mapstructure:"advertised_ip"`         // Public IP to advertise in gossip
+	ShredVersion     uint16 `toml:"shred_version" mapstructure:"shred_version"`         // Optional override; normally discovered from entrypoint
 }
 
 // SnapshotConfig holds snapshot download configuration
@@ -122,6 +138,7 @@ type SnapshotConfig struct {
 	TCPTimeoutMs        int      `toml:"tcp_timeout_ms" mapstructure:"tcp_timeout_ms"`
 	MinNodeVersion      string   `toml:"min_node_version" mapstructure:"min_node_version"`
 	AllowedNodeVersions []string `toml:"allowed_node_versions" mapstructure:"allowed_node_versions"`
+	NodeBlacklist       []string `toml:"node_blacklist" mapstructure:"node_blacklist"`
 
 	// Snapshot age thresholds
 	FullThreshold        int `toml:"full_threshold" mapstructure:"full_threshold"`
@@ -178,7 +195,7 @@ type LogConfig struct {
 type ConsensusConfig struct {
 	SkipPathMaxDepth int    `toml:"skip_path_max_depth" mapstructure:"skip_path_max_depth"` // Max slots the skip-path solver explores (default: 64)
 	UnresolvedPolicy string `toml:"unresolved_policy" mapstructure:"unresolved_policy"`     // "halt" or "warn" (default: "halt")
-	EnforceOnSource  string `toml:"enforce_on_source" mapstructure:"enforce_on_source"`     // "lightbringer" or "all" (default: "lightbringer")
+	EnforceOnSource  string `toml:"enforce_on_source" mapstructure:"enforce_on_source"`     // "lightbringer", "turbine", "stream", or "all" (default: "stream")
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)
@@ -194,6 +211,7 @@ type Config struct {
 	Block        BlockConfig        `toml:"block" mapstructure:"block"`
 	Consensus    ConsensusConfig    `toml:"consensus" mapstructure:"consensus"`
 	Lightbringer LightbringerConfig `toml:"lightbringer" mapstructure:"lightbringer"`
+	Turbine      TurbineConfig      `toml:"turbine" mapstructure:"turbine"`
 	Snapshot     SnapshotConfig     `toml:"snapshot" mapstructure:"snapshot"`
 	Development  DevelopmentConfig  `toml:"development" mapstructure:"development"`
 	Reporting    ReportingConfig    `toml:"reporting" mapstructure:"reporting"`

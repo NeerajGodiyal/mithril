@@ -214,6 +214,11 @@ func newModel(cf string) model {
 			{section: "storage", key: "logs", label: "Logs Path"},
 			{isSep: true},
 			{section: "block", key: "source", label: "Block Source"},
+			{section: "block", key: "turbine_bind_addr", label: "Turbine UDP"},
+			{section: "turbine", key: "gossip_entrypoint", label: "Turbine Gossip"},
+			{section: "turbine", key: "gossip_bind_addr", label: "Gossip UDP"},
+			{section: "turbine", key: "advertised_ip", label: "Advertised IP"},
+			{section: "turbine", key: "shred_version", label: "Shred Version"},
 			{section: "block", key: "max_rps", label: "Block Max RPS"},
 			{section: "block", key: "max_inflight", label: "Block Max Inflight"},
 			{isSep: true},
@@ -714,6 +719,16 @@ func (m model) getFieldValue(f editFieldDef) string {
 		return m.cfg.logsPath
 	case "block.source":
 		return m.cfg.blockSource
+	case "block.turbine_bind_addr":
+		return m.cfg.turbineBindAddr
+	case "turbine.gossip_entrypoint":
+		return m.cfg.turbineGossip
+	case "turbine.gossip_bind_addr":
+		return m.cfg.turbineGossipBind
+	case "turbine.advertised_ip":
+		return m.cfg.turbineAdvertisedIP
+	case "turbine.shred_version":
+		return m.cfg.turbineShredVersion
 	case "block.max_rps":
 		return m.cfg.blockMaxRPS
 	case "block.max_inflight":
@@ -759,6 +774,7 @@ func menuOptionsFor(section, key string) []editOption {
 		return []editOption{
 			{label: "rpc", value: "rpc", desc: "Fetch blocks via RPC"},
 			{label: "lightbringer", value: "lightbringer", desc: "Sidecar streaming"},
+			{label: "turbine", value: "turbine", desc: "Native shred receiver"},
 		}
 	case "lightbringer.enabled":
 		return []editOption{
@@ -875,6 +891,43 @@ func (m *model) applyEditField() {
 	case key == "block.max_rps" || key == "block.max_inflight":
 		if _, err := strconv.Atoi(value); err != nil {
 			m.editErr = "Must be a number"
+			return
+		}
+	case key == "turbine.shred_version":
+		if value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 || n > 65535 {
+				m.editErr = "Must be 0-65535"
+				return
+			}
+		}
+	case key == "block.turbine_bind_addr" || key == "turbine.gossip_bind_addr":
+		if value != "" {
+			_, portStr, err := net.SplitHostPort(value)
+			if err != nil {
+				m.editErr = "Format: host:port or :port"
+				return
+			}
+			if p, perr := strconv.Atoi(portStr); perr != nil || p < 1 || p > 65535 {
+				m.editErr = "Port must be 1-65535"
+				return
+			}
+		}
+	case key == "turbine.gossip_entrypoint":
+		if value != "" {
+			host, portStr, err := net.SplitHostPort(value)
+			if err != nil || host == "" {
+				m.editErr = "Format: host:port"
+				return
+			}
+			if p, perr := strconv.Atoi(portStr); perr != nil || p < 1 || p > 65535 {
+				m.editErr = "Port must be 1-65535"
+				return
+			}
+		}
+	case key == "turbine.advertised_ip":
+		if value != "" && net.ParseIP(value) == nil {
+			m.editErr = "Must be an IP address"
 			return
 		}
 	case key == "tuning.txpar":

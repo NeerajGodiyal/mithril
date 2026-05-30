@@ -34,7 +34,7 @@ func MigrateConfig(configPath string) bool {
 # [consensus]
 # skip_path_max_depth = 64
 # unresolved_policy = "halt"
-# enforce_on_source = "lightbringer"
+# enforce_on_source = "stream"
 `
 	}
 

@@ -207,6 +207,9 @@ func (vote *VoteInstrVote) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if slotsLen > uint64(decoder.Remaining()/8) {
+		return InstrErrInvalidInstructionData
+	}
 
 	for count := uint64(0); count < slotsLen; count++ {
 		slot, err := decoder.ReadUint64(bin.LE)
@@ -302,6 +305,9 @@ func (updateVoteState *VoteInstrUpdateVoteState) UnmarshalWithDecoder(decoder *b
 	_, err = safemath.CheckedMulU64(numLockouts, 12)
 	if err != nil {
 		return err
+	}
+	if numLockouts > MaxLockoutHistory || numLockouts > uint64(decoder.Remaining()/12) {
+		return InstrErrInvalidInstructionData
 	}
 
 	updateVoteState.Lockouts.Clear()
@@ -502,6 +508,9 @@ func (cuvs *CompactUpdateVoteState) UnmarshalWithDecoder(decoder *bin.Decoder) e
 	if err != nil {
 		return err
 	}
+	if lockoutsLen > MaxLockoutHistory {
+		return InstrErrInvalidInstructionData
+	}
 
 	for count := 0; count < lockoutsLen; count++ {
 		var lockoutOffset LockoutOffset
@@ -547,6 +556,9 @@ func (towerSync *VoteInstrTowerSync) UnmarshalWithDecoder(decoder *bin.Decoder) 
 	lockoutOffsetsLen, err = decoder.ReadCompactU16()
 	if err != nil {
 		return err
+	}
+	if lockoutOffsetsLen > MaxLockoutHistory {
+		return InstrErrInvalidInstructionData
 	}
 
 	var lastSlot uint64

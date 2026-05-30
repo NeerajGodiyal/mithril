@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	stdlog "log"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +81,7 @@ type SnapshotConfig struct {
 	TCPTimeoutMs        int
 	MinNodeVersion      string
 	AllowedNodeVersions []string
+	NodeBlacklist       []string // RPC URLs, host:port pairs, or hosts/IPs to avoid as snapshot sources
 
 	// Snapshot age thresholds (slots)
 	FullThreshold        int
@@ -198,8 +201,8 @@ func (sc SnapshotConfig) toInternalConfig(path string) config.Config {
 		TCPTimeoutMs:         sc.TCPTimeoutMs,
 		MinNodeVersion:       sc.MinNodeVersion,
 		AllowedNodeVersions:  sc.AllowedNodeVersions,
-		MaxFullSnapshots:  sc.MaxFullSnapshots,
-		SafetyMarginSlots: sc.SafetyMarginSlots,
+		MaxFullSnapshots:     sc.MaxFullSnapshots,
+		SafetyMarginSlots:    sc.SafetyMarginSlots,
 	}
 }
 
@@ -225,14 +228,148 @@ func filterByMaxSlot(results []rpc.NodeResult, maxSlot int64) ([]rpc.NodeResult,
 	return filtered, filteredOut
 }
 
+type snapshotNodeBlacklist struct {
+	keys map[string]struct{}
+}
+
+func newSnapshotNodeBlacklist(entries []string) snapshotNodeBlacklist {
+	keys := make(map[string]struct{})
+	for _, entry := range entries {
+		for _, key := range snapshotEndpointKeys(entry) {
+			keys[key] = struct{}{}
+		}
+	}
+	return snapshotNodeBlacklist{keys: keys}
+}
+
+func (b snapshotNodeBlacklist) empty() bool {
+	return len(b.keys) == 0
+}
+
+func (b snapshotNodeBlacklist) contains(endpoint string) bool {
+	if b.empty() {
+		return false
+	}
+	for _, key := range snapshotEndpointKeys(endpoint) {
+		if _, ok := b.keys[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotEndpointKeys(raw string) []string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return nil
+	}
+
+	var keys []string
+	seen := make(map[string]struct{})
+	add := func(key string) {
+		key = strings.TrimRight(strings.TrimSpace(strings.ToLower(key)), "/")
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+
+	normalized := strings.TrimRight(strings.ToLower(cleaned), "/")
+	add(normalized)
+
+	if u, err := url.Parse(normalized); err == nil && u.Host != "" {
+		hostPort := strings.ToLower(u.Host)
+		host := strings.ToLower(u.Hostname())
+		port := u.Port()
+		add(hostPort)
+		if u.Scheme != "" {
+			add(u.Scheme + "://" + hostPort)
+		}
+		add(host)
+		if host != "" && port != "" {
+			add(host + ":" + port)
+			add(net.JoinHostPort(host, port))
+		}
+		return keys
+	}
+
+	hostPort := normalized
+	if slash := strings.IndexByte(hostPort, '/'); slash >= 0 {
+		hostPort = hostPort[:slash]
+	}
+	add(hostPort)
+
+	if host, port, err := net.SplitHostPort(hostPort); err == nil {
+		host = strings.Trim(host, "[]")
+		add(host)
+		if host != "" && port != "" {
+			add(host + ":" + port)
+			add(net.JoinHostPort(host, port))
+		}
+		return keys
+	}
+
+	if strings.Count(hostPort, ":") == 1 {
+		parts := strings.SplitN(hostPort, ":", 2)
+		add(parts[0])
+	}
+
+	return keys
+}
+
+func filterSnapshotRPCNodes(nodes []rpc.RPCNode, blacklist snapshotNodeBlacklist) ([]rpc.RPCNode, int) {
+	if blacklist.empty() {
+		return nodes, 0
+	}
+
+	filtered := make([]rpc.RPCNode, 0, len(nodes))
+	skipped := 0
+	for _, node := range nodes {
+		if blacklist.contains(node.Address) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+	return filtered, skipped
+}
+
+func filterSnapshotNodeResults(results []rpc.NodeResult, blacklist snapshotNodeBlacklist) ([]rpc.NodeResult, int) {
+	if blacklist.empty() {
+		return results, 0
+	}
+
+	filtered := make([]rpc.NodeResult, 0, len(results))
+	skipped := 0
+	for _, result := range results {
+		if blacklist.contains(result.RPC) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, result)
+	}
+	return filtered, skipped
+}
+
+func logSnapshotBlacklist(stage string, skipped int, remaining int) {
+	if skipped == 0 {
+		return
+	}
+	mlog.Log.Infof("Snapshot node blacklist excluded %d %s candidate(s); %d remain", skipped, stage, remaining)
+}
+
 // incBaseMatchStats tracks statistics for incremental base matching filter
 type incBaseMatchStats struct {
-	totalWithFull       int // nodes with a full snapshot
-	totalWithInc        int // nodes with any incremental
-	afterIncBaseMatch   int // nodes remaining after incremental base match filter
-	uniqueFullSlots     int // number of unique full snapshot slots
-	uniqueIncBases      int // number of unique incremental base slots
-	matchingFullSlots   int // full slots that have at least one matching inc base
+	totalWithFull     int // nodes with a full snapshot
+	totalWithInc      int // nodes with any incremental
+	afterIncBaseMatch int // nodes remaining after incremental base match filter
+	uniqueFullSlots   int // number of unique full snapshot slots
+	uniqueIncBases    int // number of unique incremental base slots
+	matchingFullSlots int // full slots that have at least one matching inc base
 }
 
 // filterByIncrementalBaseMatch filters results to only include nodes whose FullSlot
@@ -315,6 +452,7 @@ func DownloadSnapshot(ctx context.Context, rpcEndpoints []string, path string) (
 func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, int, error) {
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
+	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -330,11 +468,19 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	var skipped int
+	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
+	logSnapshotBlacklist("discovered", skipped, len(nodes))
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("all discovered rpc nodes were excluded by snapshot.node_blacklist")
+	}
 	mlog.Log.Infof("Found %d potential snapshot sources", len(nodes))
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	results, skipped = filterSnapshotNodeResults(results, blacklist)
+	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -424,6 +570,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*SnapshotInfo, error) {
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
+	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
@@ -439,10 +586,18 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	var skipped int
+	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
+	logSnapshotBlacklist("discovered", skipped, len(nodes))
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("all discovered rpc nodes were excluded by snapshot.node_blacklist")
+	}
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Probing %d nodes for snapshot availability...", len(nodes))
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	results, skipped = filterSnapshotNodeResults(results, blacklist)
+	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	// This prevents selecting a fast full snapshot that has no compatible incrementals
@@ -569,6 +724,7 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg SnapshotConfig) (string, int, int, error) {
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig(path)
+	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
@@ -584,11 +740,19 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	var skipped int
+	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
+	logSnapshotBlacklist("discovered", skipped, len(nodes))
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("all discovered rpc nodes were excluded by snapshot.node_blacklist")
+	}
 	mlog.Log.Infof("Found %d potential snapshot sources", len(nodes))
 
 	// Step 3: Evaluate nodes with version tracking and statistics
 	mlog.Log.Infof("Evaluating nodes for snapshot availability and speed...")
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	results, skipped = filterSnapshotNodeResults(results, blacklist)
+	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
@@ -689,6 +853,7 @@ func DownloadIncrementalSnapshot(rpcEndpoints []string, path string, referenceSl
 func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig(path)
+	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 	ctx := context.Background()
 
 	mlog.Log.Infof("Searching for incremental snapshot matching full slot %d...", fullSnapshotSlot)
@@ -702,9 +867,17 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	var skipped int
+	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
+	logSnapshotBlacklist("discovered", skipped, len(nodes))
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("all discovered rpc nodes were excluded by snapshot.node_blacklist")
+	}
 
 	// Step 2: Evaluate nodes
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	results, skipped = filterSnapshotNodeResults(results, blacklist)
+	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{
@@ -853,15 +1026,16 @@ func extractFullSnapshotSlot(path string) int {
 // Returns: (httpURL, baseSlot, endSlot, error)
 //
 // Fallback strategy (different from full snapshot):
-// 1. Try the same node that provided the full snapshot (fastest, most likely match)
-// 2. If that fails, find ALL nodes with matching base slot (more flexible than full snapshot)
-// 3. Among matching nodes, prioritize by:
-//    a. Freshness (highest end slot = most recent incremental)
-//    b. Speed (faster downloads preferred when end slots are equal)
-// 4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
+//  1. Try the same node that provided the full snapshot (fastest, most likely match)
+//  2. If that fails, find ALL nodes with matching base slot (more flexible than full snapshot)
+//  3. Among matching nodes, prioritize by:
+//     a. Freshness (highest end slot = most recent incremental)
+//     b. Speed (faster downloads preferred when end slots are equal)
+//  4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
 func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
+	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 	ctx := context.Background()
 
 	// Extract the source node RPC from the full snapshot URL
@@ -875,7 +1049,9 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	}
 
 	// Step 1: Try to get incremental from the same source as the full snapshot
-	if sourceNodeRPC != "" {
+	if sourceNodeRPC != "" && blacklist.contains(sourceNodeRPC) {
+		mlog.Log.Infof("Skipping same-source incremental check because %s is in snapshot.node_blacklist", sourceNodeRPC)
+	} else if sourceNodeRPC != "" {
 		mlog.Log.Infof("Checking same source for incremental (base slot %d): %s", fullSnapshotSlot, sourceNodeRPC)
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
 
@@ -909,9 +1085,17 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	var skipped int
+	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
+	logSnapshotBlacklist("discovered", skipped, len(nodes))
+	if len(nodes) == 0 {
+		return "", 0, 0, fmt.Errorf("all discovered rpc nodes were excluded by snapshot.node_blacklist")
+	}
 
 	// Evaluate nodes
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	results, skipped = filterSnapshotNodeResults(results, blacklist)
+	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	if snapCfg.Verbose && stats != nil {
 		filterCfg := rpc.FilterConfig{

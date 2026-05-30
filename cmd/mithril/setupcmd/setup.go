@@ -866,7 +866,8 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 
 	cfg.WriteString("[consensus]\n")
 	fmt.Fprintf(&cfg, "unresolved_policy = %q\n", m.consensusPolicy)
-	cfg.WriteString("skip_path_max_depth = 64\n\n")
+	cfg.WriteString("skip_path_max_depth = 64\n")
+	cfg.WriteString("enforce_on_source = \"stream\"\n\n")
 
 	cfg.WriteString("[snapshot]\n")
 	fmt.Fprintf(&cfg, "max_full_snapshots = %s\n\n", m.snapshotKeep)
@@ -915,10 +916,18 @@ cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "lightbringer"
+source = "rpc"   # "rpc" | "lightbringer" | "turbine"
+# turbine_bind_addr = "0.0.0.0:8001"
 # lightbringer_endpoint = "localhost:9000"
 max_rps = 8
 max_inflight = 8
+
+# [turbine]
+# bind_addr = "0.0.0.0:8001"
+# gossip_entrypoint = "1.2.3.4:8000"
+# gossip_bind_addr = "0.0.0.0:65401"
+# advertised_ip = "203.0.113.10"
+# shred_version = 0
 
 # [lightbringer]
 # enabled = false
@@ -935,6 +944,7 @@ txpar = %d   # Recommended: 2x your CPU core count
 [consensus]
 unresolved_policy = "halt"   # "halt" | "warn"
 skip_path_max_depth = 64
+enforce_on_source = "stream"
 
 [snapshot]
 max_full_snapshots = 1   # 0 = stream only, saves disk

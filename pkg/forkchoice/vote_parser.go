@@ -32,7 +32,14 @@ func parseAndValidateVoteTx(tx *solana.Transaction, authorizedVoters *epochstake
 	return nil, false
 }
 
-func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.CompiledInstruction, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) (*voteInfo, bool) {
+func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.CompiledInstruction, authorizedVoters *epochstakes.EpochAuthorizedVotersCache) (info *voteInfo, ok bool) {
+	defer func() {
+		if recover() != nil {
+			info = nil
+			ok = false
+		}
+	}()
+
 	if len(instr.Accounts) < 1 {
 		return nil, false
 	}
