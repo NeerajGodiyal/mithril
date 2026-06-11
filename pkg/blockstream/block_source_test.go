@@ -34,6 +34,32 @@ func TestLightbringerBlockConnectsLocked(t *testing.T) {
 	}
 }
 
+func TestCurrentSourceSnapshotUsesTurbineSourceName(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:0",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lightbringerLastStreamSlot.Store(150)
+
+	source, status, handoff := bs.currentSourceSnapshot()
+	if source != "rpc" || handoff != 0 || !strings.Contains(status, "turbine connected") {
+		t.Fatalf("expected pre-handoff turbine status, got source=%q status=%q handoff=%d", source, status, handoff)
+	}
+
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(151)
+
+	source, status, handoff = bs.currentSourceSnapshot()
+	if source != "turbine" || status != "turbine live stream" || handoff != 151 {
+		t.Fatalf("expected active turbine status, got source=%q status=%q handoff=%d", source, status, handoff)
+	}
+}
+
 func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
@@ -91,6 +117,70 @@ func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) 
 	}
 	if len(bs.lightbringerBuffer) != 0 || len(bs.lightbringerBufferOrder) != 0 {
 		t.Fatalf("expected prefetched Lightbringer buffer to be cleared")
+	}
+}
+
+func TestHandleLiveShredStreamClosedForcesRPCAndInvalidatesBufferedRunway(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:0",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lightbringerHandoffSlot.Store(121)
+	bs.lightbringerActive.Store(true)
+	bs.nextSlotToSend = 122
+	bs.lastEmittedBlockSlot = 121
+	bs.reorderBuffer[123] = &b.Block{Slot: 123, FromLightbringer: true, SourceParentSlot: 122}
+	bs.reorderBuffer[124] = &b.Block{Slot: 124, FromLightbringer: true, SourceParentSlot: 123}
+	bs.reorderBuffer[125] = &b.Block{Slot: 125, FromLightbringer: false}
+	bs.slotState[123] = slotDone
+	bs.slotState[124] = slotDone
+	bs.slotState[125] = slotDone
+	bs.lightbringerBuffer[126] = &b.Block{Slot: 126, FromLightbringer: true, SourceParentSlot: 125}
+	bs.lightbringerBufferOrder = []uint64{126}
+	oldGeneration := bs.lightbringerResultGeneration.Load()
+
+	bs.handleLiveShredStreamClosed("test reconnect")
+
+	if got := bs.lightbringerResultGeneration.Load(); got != oldGeneration+1 {
+		t.Fatalf("expected live stream generation to advance, got %d want %d", got, oldGeneration+1)
+	}
+	if got := bs.lightbringerForceRPCUntil.Load(); got != 122 {
+		t.Fatalf("expected RPC to be forced from waiting slot 122, got %d", got)
+	}
+	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+		t.Fatalf("expected handoff slot to be cleared, got %d", got)
+	}
+	if bs.lightbringerActive.Load() {
+		t.Fatalf("expected turbine to be marked inactive after stream close")
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected RPC resume flag after stream close")
+	}
+	if _, exists := bs.reorderBuffer[123]; exists {
+		t.Fatalf("expected stale turbine slot 123 to be removed from reorder buffer")
+	}
+	if _, exists := bs.reorderBuffer[124]; exists {
+		t.Fatalf("expected stale turbine slot 124 to be removed from reorder buffer")
+	}
+	if _, exists := bs.reorderBuffer[125]; !exists {
+		t.Fatalf("expected buffered RPC slot 125 to remain")
+	}
+	if _, exists := bs.slotState[123]; exists {
+		t.Fatalf("expected stale turbine slot state 123 to be cleared")
+	}
+	if _, exists := bs.slotState[124]; exists {
+		t.Fatalf("expected stale turbine slot state 124 to be cleared")
+	}
+	if _, exists := bs.slotState[125]; !exists {
+		t.Fatalf("expected RPC slot state 125 to remain")
+	}
+	if len(bs.lightbringerBuffer) != 0 || len(bs.lightbringerBufferOrder) != 0 {
+		t.Fatalf("expected prefetched turbine buffer to be cleared")
 	}
 }
 
@@ -197,6 +287,40 @@ func TestPrepareLightbringerHandoffAllowsLiveEdgeRunwayAtTip(t *testing.T) {
 	}
 	if len(blocks) != 1 || blocks[0].Slot != 151 {
 		t.Fatalf("expected single live-edge Lightbringer block to be enqueued, got %+v", blocks)
+	}
+}
+
+func TestPrepareTurbineHandoffAllowsLiveEdgeRunwayAtTipWithoutConsensusBuffering(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:8001",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(150)
+	bs.confirmedTip.Store(151)
+	bs.lightbringerLastStreamSlot.Store(151)
+	bs.lastEmittedBlockSlot = 150
+	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
+	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, 151)
+
+	reason := bs.lightbringerHandoffWaitReason(151, 150)
+	if !strings.Contains(reason, "handoff-ready runway buffered through slot 151") {
+		t.Fatalf("expected live-edge turbine runway to be handoff-ready, got %q", reason)
+	}
+
+	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	if !prepared {
+		t.Fatalf("expected turbine handoff to prepare at the live edge")
+	}
+	if handoffSlot != 151 {
+		t.Fatalf("expected handoff slot 151, got %d", handoffSlot)
+	}
+	if len(blocks) != 1 || blocks[0].Slot != 151 {
+		t.Fatalf("expected single live-edge turbine block to be enqueued, got %+v", blocks)
 	}
 }
 
@@ -930,6 +1054,59 @@ func TestForceRPCForCatchupRewindsConsensusManagedFrontier(t *testing.T) {
 	}
 }
 
+func TestForceRPCFallbackRewindsConsensusManagedTurbineFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:8001",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(121)
+	bs.lastExecutedSlot.Store(120)
+	bs.confirmedTip.Store(180)
+	bs.nextSlotToSend = 150
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.slotState[121] = slotDone
+	bs.slotState[149] = slotDone
+	bs.slotState[151] = slotInflight
+	bs.retrySlots = []uint64{119, 121, 149, 151}
+
+	bs.ForceRPCFallback("consensus_depth_exceeded")
+
+	if got := bs.nextSlotToSend; got != 121 {
+		t.Fatalf("expected RPC fallback frontier to rewind to replay's next slot 121, got %d", got)
+	}
+	if bs.lightbringerActive.Load() {
+		t.Fatalf("expected turbine to be marked inactive")
+	}
+	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+		t.Fatalf("expected turbine handoff to be cleared, got %d", got)
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected scheduler to resume RPC from the rewound frontier")
+	}
+	if _, exists := bs.reorderBuffer[121]; exists {
+		t.Fatalf("expected turbine slot 121 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[149]; exists {
+		t.Fatalf("expected turbine slot 149 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[151]; !exists {
+		t.Fatalf("expected buffered RPC slot 151 to remain")
+	}
+	if _, exists := bs.slotState[151]; exists {
+		t.Fatalf("expected future slot state to be cleared for RPC rescheduling")
+	}
+	if len(bs.retrySlots) != 1 || bs.retrySlots[0] != 119 {
+		t.Fatalf("expected only retries before the replay frontier to remain, got %+v", bs.retrySlots)
+	}
+}
+
 func TestForceRPCForCatchupKeepsPendingHandoffEmissionFrontier(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:                   BlockSourceLightbringer,
@@ -1002,6 +1179,45 @@ func TestEmitOrderedBlocksDirectlyStreamsConsensusManagedLightbringerObservation
 	}
 	if got := bs.nextSlotToSend; got != 101 {
 		t.Fatalf("expected direct observation to leave nextSlotToSend at 101 until replay resolves it, got %d", got)
+	}
+}
+
+func TestEmitOrderedBlocksDropsStaleLiveStreamGeneration(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:0",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(100)
+	staleGeneration := bs.lightbringerResultGeneration.Load()
+	bs.invalidateLightbringerResults()
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+
+	bs.resultQueue <- fetchResult{
+		slot:                 100,
+		block:                &b.Block{Slot: 100, FromLightbringer: true, SourceParentSlot: 99},
+		liveStreamGeneration: staleGeneration,
+	}
+	close(bs.resultQueue)
+	<-done
+
+	if len(bs.streamChan) != 0 {
+		t.Fatalf("expected stale turbine result to be dropped without emission")
+	}
+	if _, exists := bs.reorderBuffer[100]; exists {
+		t.Fatalf("expected stale turbine result not to enter reorder buffer")
+	}
+	if got := bs.nextSlotToSend; got != 100 {
+		t.Fatalf("expected stale turbine result to leave emission frontier at 100, got %d", got)
 	}
 }
 

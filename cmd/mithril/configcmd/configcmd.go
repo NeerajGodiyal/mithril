@@ -141,8 +141,16 @@ cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
-source = "rpc"   # "rpc" | "lightbringer"
+source = "rpc"   # "rpc" | "lightbringer" | "turbine"
 # lightbringer_endpoint = "localhost:9000"
+# turbine_bind_addr = "0.0.0.0:8001"
+
+# [turbine]
+# bind_addr = "0.0.0.0:8001"
+# gossip_entrypoint = "1.2.3.4:8000"
+# gossip_bind_addr = "0.0.0.0:65401"
+# advertised_ip = "203.0.113.10"
+# shred_version = 0
 
 # [lightbringer]
 # enabled = false

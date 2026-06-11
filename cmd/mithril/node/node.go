@@ -63,7 +63,7 @@ var (
 	scratchDirectory            string
 	rpcEndpoints                []string
 	cluster                     string // "mainnet-beta", "testnet", "devnet"
-	blockSource                 string // "rpc" or "lightbringer"
+	blockSource                 string // "rpc", "lightbringer", or "turbine"
 	lightbringerEndpoint        string
 	blockMaxRPS                 int // Rate limit for block fetching
 	blockMaxInflight            int // Max concurrent block fetch workers
@@ -111,6 +111,13 @@ var (
 	lightbringerBlockConfirmHTTP string
 	lightbringerBlockConfirmWS   string
 	lightbringerQuiet            bool
+
+	// Native turbine receiver config
+	turbineBindAddr         string
+	turbineGossipEntrypoint string
+	turbineGossipBindAddr   string
+	turbineAdvertisedIP     string
+	turbineShredVersion     int
 )
 
 func snapshotEpochForState(manifest *snapshot.SnapshotManifest) uint64 {
@@ -220,9 +227,15 @@ func init() {
 	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
 	Run.Flags().Uint64Var(&borrowedAccountArenaSize, "borrowed-account-arena-size", 1024, "Number of borrowed accounts to preallocate in arena (0 to disable)")
 	Run.Flags().IntVar(&snapshot.ZstdDecoderConcurrency, "zstd-decoder-concurrency", runtime.NumCPU(), "Zstd decoder concurrency")
-	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", 16, "Bound for number of log shards to flush to Accounts DB Index at once.")
+	Run.Flags().IntVar(&snapshot.MaxConcurrentFlushers, "max-concurrent-flushers", snapshot.DefaultSnapshotMaxConcurrentFlushers, "Bound for number of log shards to flush to Accounts DB Index at once")
+	Run.Flags().IntVar(&snapshot.SnapshotAppendVecCopyingWorkers, "snapshot-append-vec-workers", snapshot.DefaultSnapshotAppendVecCopyingWorkers, "Snapshot bootstrap appendvec write workers")
+	Run.Flags().IntVar(&snapshot.SnapshotIndexEntryBuilderWorkers, "snapshot-index-builder-workers", snapshot.DefaultSnapshotIndexEntryBuilderWorkers, "Snapshot bootstrap account-index parser workers")
+	Run.Flags().IntVar(&snapshot.SnapshotIndexEntryCommitterWorkers, "snapshot-index-committer-workers", snapshot.DefaultSnapshotIndexEntryCommitterWorkers, "Snapshot bootstrap account-index shard enqueue workers")
+	Run.Flags().IntVar(&snapshot.SnapshotIndexShards, "snapshot-index-shards", snapshot.DefaultSnapshotIndexShards, "Snapshot bootstrap account-index shard count")
+	Run.Flags().StringVar(&snapshot.SnapshotIndexTempDir, "snapshot-index-temp-dir", "", "Optional directory for snapshot index shard logs/SST staging")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
+	Run.Flags().IntVar(&accountsdb.ProgramCacheMaxMB, "program-cache-max-mb", accountsdb.DefaultProgramCacheMaxMB, "Maximum approximate SBPF program cache size in MiB")
 
 	// [tuning.pprof] section flags
 	Run.Flags().Int64Var(&pprofPort, "pprof-port", -1, "Port to serve HTTP pprof endpoint")
@@ -237,8 +250,13 @@ func init() {
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc' or 'lightbringer'")
+	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc', 'lightbringer', or 'turbine'")
 	Run.Flags().StringVar(&lightbringerEndpoint, "lightbringer-endpoint", "", "Address for Lightbringer endpoint (only used when block-source=lightbringer)")
+	Run.Flags().StringVar(&turbineBindAddr, "turbine-bind-addr", "", "UDP address for native turbine shred receiver (only used when block-source=turbine)")
+	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
+	Run.Flags().StringVar(&turbineGossipBindAddr, "turbine-gossip-bind-addr", "", "UDP address for native turbine gossip traffic (only used when block-source=turbine)")
+	Run.Flags().StringVar(&turbineAdvertisedIP, "turbine-advertised-ip", "", "Public IP advertised by native turbine gossip (optional)")
+	Run.Flags().IntVar(&turbineShredVersion, "turbine-shred-version", 0, "Shred version for native turbine gossip (0 = discover from entrypoint)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -475,6 +493,14 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		blockSource = "rpc" // default
 	}
 	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
+	turbineBindAddr = getString("turbine-bind-addr", "block.turbine_bind_addr")
+	if turbineBindAddr == "" {
+		turbineBindAddr = config.GetString("turbine.bind_addr")
+	}
+	turbineGossipEntrypoint = getString("turbine-gossip-entrypoint", "turbine.gossip_entrypoint")
+	turbineGossipBindAddr = getString("turbine-gossip-bind-addr", "turbine.gossip_bind_addr")
+	turbineAdvertisedIP = getString("turbine-advertised-ip", "turbine.advertised_ip")
+	turbineShredVersion = getInt("turbine-shred-version", "turbine.shred_version")
 
 	// [lightbringer] section — sidecar management
 	lightbringerEnabled = config.GetBool("lightbringer.enabled")
@@ -543,8 +569,18 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		if len(rpcEndpoints) == 0 {
 			return fmt.Errorf("block.source=lightbringer requires RPC endpoints for catchup (set network.rpc)")
 		}
+	case "turbine":
+		if turbineBindAddr == "" {
+			return fmt.Errorf("block.source=turbine requires block.turbine_bind_addr or turbine.bind_addr")
+		}
+		if turbineShredVersion < 0 || turbineShredVersion > 0xffff {
+			return fmt.Errorf("turbine.shred_version must be between 0 and 65535")
+		}
+		if len(rpcEndpoints) == 0 {
+			return fmt.Errorf("block.source=turbine requires RPC endpoints for catchup and tip polling (set network.rpc)")
+		}
 	default:
-		return fmt.Errorf("invalid block.source %q - must be 'rpc' or 'lightbringer'", blockSource)
+		return fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", blockSource)
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -636,8 +672,32 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 	snapshot.ZstdDecoderConcurrency = getInt("zstd-decoder-concurrency", "tuning.zstd_decoder_concurrency")
 	snapshot.MaxConcurrentFlushers = getInt("max-concurrent-flushers", "tuning.max_concurrent_flushers")
+	snapshot.SnapshotAppendVecCopyingWorkers = getInt("snapshot-append-vec-workers", "tuning.snapshot_append_vec_workers")
+	snapshot.SnapshotIndexEntryBuilderWorkers = getInt("snapshot-index-builder-workers", "tuning.snapshot_index_builder_workers")
+	snapshot.SnapshotIndexEntryCommitterWorkers = getInt("snapshot-index-committer-workers", "tuning.snapshot_index_committer_workers")
+	snapshot.SnapshotIndexShards = getInt("snapshot-index-shards", "tuning.snapshot_index_shards")
+	snapshot.SnapshotIndexTempDir = getString("snapshot-index-temp-dir", "tuning.snapshot_index_temp_dir")
+	if snapshot.MaxConcurrentFlushers <= 0 {
+		return fmt.Errorf("tuning.max_concurrent_flushers must be > 0")
+	}
+	if snapshot.SnapshotAppendVecCopyingWorkers <= 0 {
+		return fmt.Errorf("tuning.snapshot_append_vec_workers must be > 0")
+	}
+	if snapshot.SnapshotIndexEntryBuilderWorkers <= 0 {
+		return fmt.Errorf("tuning.snapshot_index_builder_workers must be > 0")
+	}
+	if snapshot.SnapshotIndexEntryCommitterWorkers <= 0 {
+		return fmt.Errorf("tuning.snapshot_index_committer_workers must be > 0")
+	}
+	if snapshot.SnapshotIndexShards <= 0 || snapshot.SnapshotIndexShards > 1000 {
+		return fmt.Errorf("tuning.snapshot_index_shards must be between 1 and 1000")
+	}
 	sbpf.UsePool = getBool("use-pool", "tuning.use_pool")
 	accountsdb.StoreAccountsWorkers = getInt("store-accounts-workers", "tuning.store_accounts_workers")
+	accountsdb.ProgramCacheMaxMB = getInt("program-cache-max-mb", "tuning.program_cache_max_mb")
+	if accountsdb.ProgramCacheMaxMB <= 0 {
+		return fmt.Errorf("tuning.program_cache_max_mb must be > 0")
+	}
 
 	return nil
 }
@@ -696,6 +756,9 @@ func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 	}
 	if config.IsSet("snapshot.allowed_node_versions") {
 		cfg.AllowedNodeVersions = config.GetStringSlice("snapshot.allowed_node_versions")
+	}
+	if config.IsSet("snapshot.node_blacklist") {
+		cfg.NodeBlacklist = config.GetStringSlice("snapshot.node_blacklist")
 	}
 	if config.IsSet("snapshot.full_threshold") {
 		cfg.FullThreshold = config.GetInt("snapshot.full_threshold")
@@ -812,6 +875,7 @@ func runLive(c *cobra.Command, args []string) {
 	// Lightbringer sidecar management
 	var lbManager *lightbringer.Manager
 	useLightbringer := blockSource == "lightbringer"
+	useTurbine := blockSource == "turbine"
 
 	if lightbringerEnabled {
 		lbLogWriter := mlog.Log.CreateSubprocessWriter("lightbringer")
@@ -878,6 +942,13 @@ func runLive(c *cobra.Command, args []string) {
 	} else if useLightbringer {
 		// block.source=lightbringer but lightbringer.enabled=false — standalone Lightbringer mode
 		mlog.Log.Infof("block.source=lightbringer with external Lightbringer at %s", lightbringerEndpoint)
+	} else if useTurbine {
+		mlog.Log.Infof("block.source=turbine with native turbine receiver on %s", turbineBindAddr)
+		if turbineGossipEntrypoint != "" {
+			mlog.Log.Infof("native turbine gossip enabled with entrypoint %s", turbineGossipEntrypoint)
+		} else {
+			mlog.Log.Warnf("native turbine gossip entrypoint is empty; Mithril will receive turbine packets only if shreds are sent directly to %s", turbineBindAddr)
+		}
 	}
 
 	dbgOpts, err := replay.NewDebugOptions(debugTxs, debugAcctWrites, debugDumpEpochVotingRewardDiff)
@@ -1467,14 +1538,14 @@ postBootstrap:
 	}
 	consensusEnforceSource := config.GetString("consensus.enforce_on_source")
 	if consensusEnforceSource == "" {
-		consensusEnforceSource = "lightbringer"
+		consensusEnforceSource = "stream"
 	}
 	switch consensusEnforceSource {
-	case "lightbringer", "all":
+	case "lightbringer", "turbine", "stream", "all":
 		// valid
 	default:
-		mlog.Log.Errorf("invalid consensus.enforce_on_source %q (must be \"lightbringer\" or \"all\"), defaulting to \"lightbringer\"", consensusEnforceSource)
-		consensusEnforceSource = "lightbringer"
+		mlog.Log.Errorf("invalid consensus.enforce_on_source %q (must be \"lightbringer\", \"turbine\", \"stream\", or \"all\"), defaulting to \"stream\"", consensusEnforceSource)
+		consensusEnforceSource = "stream"
 	}
 	consensusOpts := &replay.ConsensusOpts{
 		SkipPathMaxDepth: consensusMaxDepth,
@@ -1486,10 +1557,14 @@ postBootstrap:
 	if rpcServer != nil {
 		slotCtxSetter = rpcServer
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, blockstorePath, int(txParallelism), true, useLightbringer, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
 
-	if result.Error != nil && result.LastPersistedSlot == 0 {
-		mlog.Log.Errorf("Replay stopped before persisting the first post-start slot: %v", result.Error)
+	if result.Error != nil {
+		if result.LastPersistedSlot == 0 {
+			mlog.Log.Errorf("Replay stopped before persisting the first post-start slot: %v", result.Error)
+		} else {
+			mlog.Log.Errorf("Replay stopped with error after persisting slot %d: %v", result.LastPersistedSlot, result.Error)
+		}
 	}
 
 	// Update state file with last persisted slot and shutdown context
@@ -1879,6 +1954,8 @@ func printStartupInfo(commandName string) {
 		fmt.Printf(" %s(managed sidecar)%s\n", dim, reset)
 	case blockSource == "lightbringer":
 		fmt.Printf(" %s(external)%s\n", dim, reset)
+	case blockSource == "turbine":
+		fmt.Printf(" %s(native)%s\n", dim, reset)
 	default:
 		fmt.Println()
 	}
@@ -1892,6 +1969,18 @@ func printStartupInfo(commandName string) {
 	}
 	if blockSource == "lightbringer" && lightbringerEndpoint != "" {
 		fmt.Printf("  Lightbringer: %s%s%s\n", gold, lightbringerEndpoint, reset)
+	}
+	if blockSource == "turbine" && turbineBindAddr != "" {
+		fmt.Printf("  Turbine UDP:  %s%s%s\n", gold, turbineBindAddr, reset)
+	}
+	if blockSource == "turbine" && turbineGossipEntrypoint != "" {
+		fmt.Printf("  Gossip:       %s%s%s\n", gold, turbineGossipEntrypoint, reset)
+	}
+	if blockSource == "turbine" && turbineGossipBindAddr != "" {
+		fmt.Printf("  Gossip UDP:   %s%s%s\n", gold, turbineGossipBindAddr, reset)
+	}
+	if blockSource == "turbine" && turbineAdvertisedIP != "" {
+		fmt.Printf("  Advertised:   %s%s%s\n", gold, turbineAdvertisedIP, reset)
 	}
 
 	fmt.Println()
@@ -2346,10 +2435,16 @@ func runReplayWithRecovery(
 	startSlot, endSlot uint64,
 	rpcEndpoints []string, // RPC endpoints in priority order (first = primary)
 	lightbringerEndpoint string,
+	turbineBindAddr string,
+	turbineGossipEntrypoint string,
+	turbineGossipBindAddr string,
+	turbineAdvertisedIP string,
+	turbineShredVersion uint16,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
 	useLightbringer bool,
+	useTurbine bool,
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer replay.SlotCtxSetter,
@@ -2465,6 +2560,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, blockDir, txParallelism, isLive, useLightbringer, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	return result
 }

@@ -22,9 +22,19 @@ import (
 )
 
 const (
-	maxIndexEntryCommitter = 512
-	maxIndexEntryBuilder   = 500
-	maxAppendVecCopying    = 500
+	DefaultSnapshotIndexEntryCommitterWorkers = 64
+	DefaultSnapshotIndexEntryBuilderWorkers   = 64
+	DefaultSnapshotAppendVecCopyingWorkers    = 32
+	DefaultSnapshotIndexShards                = 64
+	DefaultSnapshotMaxConcurrentFlushers      = 8
+)
+
+var (
+	SnapshotIndexEntryCommitterWorkers = DefaultSnapshotIndexEntryCommitterWorkers
+	SnapshotIndexEntryBuilderWorkers   = DefaultSnapshotIndexEntryBuilderWorkers
+	SnapshotAppendVecCopyingWorkers    = DefaultSnapshotAppendVecCopyingWorkers
+	SnapshotIndexShards                = DefaultSnapshotIndexShards
+	SnapshotIndexTempDir               string
 )
 
 // CleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
@@ -163,6 +173,74 @@ var (
 	appendVecCopyingInProgress    = &atomic.Int64{}
 )
 
+func positiveOrDefault(value int, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func snapshotIndexEntryCommitterWorkers() int {
+	return positiveOrDefault(SnapshotIndexEntryCommitterWorkers, DefaultSnapshotIndexEntryCommitterWorkers)
+}
+
+func snapshotIndexEntryBuilderWorkers() int {
+	return positiveOrDefault(SnapshotIndexEntryBuilderWorkers, DefaultSnapshotIndexEntryBuilderWorkers)
+}
+
+func snapshotAppendVecCopyingWorkers() int {
+	return positiveOrDefault(SnapshotAppendVecCopyingWorkers, DefaultSnapshotAppendVecCopyingWorkers)
+}
+
+func snapshotIndexShards() int {
+	return positiveOrDefault(SnapshotIndexShards, DefaultSnapshotIndexShards)
+}
+
+func snapshotMaxConcurrentFlushers() int {
+	return positiveOrDefault(MaxConcurrentFlushers, DefaultSnapshotMaxConcurrentFlushers)
+}
+
+func logSnapshotBootstrapTuning() {
+	indexTempDir := SnapshotIndexTempDir
+	if indexTempDir == "" {
+		indexTempDir = "(accountsdb)"
+	}
+	mlog.Log.Infof("Snapshot bootstrap tuning: append_vec_workers=%d index_builder_workers=%d index_committer_workers=%d index_shards=%d max_concurrent_flushers=%d zstd_decoder_concurrency=%d index_temp_dir=%s",
+		snapshotAppendVecCopyingWorkers(),
+		snapshotIndexEntryBuilderWorkers(),
+		snapshotIndexEntryCommitterWorkers(),
+		snapshotIndexShards(),
+		snapshotMaxConcurrentFlushers(),
+		ZstdDecoderConcurrency,
+		indexTempDir)
+}
+
+func prepareSnapshotIndexWorkDir(accountsDbDir string) (string, func(), error) {
+	if SnapshotIndexTempDir == "" {
+		logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
+		if err := os.MkdirAll(logsDir, 0775); err != nil {
+			return "", nil, err
+		}
+		return logsDir, func() {}, nil
+	}
+
+	if err := os.MkdirAll(SnapshotIndexTempDir, 0775); err != nil {
+		return "", nil, fmt.Errorf("creating snapshot index temp dir %s: %w", SnapshotIndexTempDir, err)
+	}
+	logsDir, err := os.MkdirTemp(SnapshotIndexTempDir, "mithril-db-log-shards-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating snapshot index work dir in %s: %w", SnapshotIndexTempDir, err)
+	}
+	mlog.Log.Infof("Snapshot index shard logs/SST staging: %s", logsDir)
+
+	cleanup := func() {
+		if err := os.RemoveAll(logsDir); err != nil {
+			mlog.Log.Warnf("failed to remove snapshot index temp dir %s: %v", logsDir, err)
+		}
+	}
+	return logsDir, cleanup, nil
+}
+
 func BuildAccountsDbPaths(
 	ctx context.Context,
 	snapshotFile string,
@@ -196,17 +274,19 @@ func BuildAccountsDbPaths(
 	if err = os.MkdirAll(appendVecsOutputDir, 0775); err != nil {
 		return nil, nil, err
 	}
+	logSnapshotBootstrapTuning()
 
 	defer ants.Release()
 
 	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
-	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
-	if err = os.MkdirAll(logsDir, 0775); err != nil {
+	logsDir, cleanupIndexWorkDir, err := prepareSnapshotIndexWorkDir(accountsDbDir)
+	if err != nil {
 		return nil, nil, err
 	}
-	numShards := 256
+	defer cleanupIndexWorkDir()
+	numShards := snapshotIndexShards()
 	sl := NewShardLogger(numShards, logsDir)
 
 	// Create stake pubkey collector for building stake index during appendvec processing
@@ -463,9 +543,13 @@ func initWorkerPools(
 	largestFileId *atomic.Uint64,
 	stakeCollector *stakeIndexCollector,
 ) (*snapshotWorkerPools, error) {
-	indexEntryCommitterPool, err := ants.NewPoolWithFunc(maxIndexEntryCommitter, func(i any) {
+	indexEntryCommitterWorkers := snapshotIndexEntryCommitterWorkers()
+	indexEntryBuilderWorkers := snapshotIndexEntryBuilderWorkers()
+	appendVecCopyingWorkers := snapshotAppendVecCopyingWorkers()
+
+	indexEntryCommitterPool, err := ants.NewPoolWithFunc(indexEntryCommitterWorkers, func(i any) {
 		tasks := indexEntryCommitterInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryCommitter), []string{"index_entry_committer"})
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(indexEntryCommitterWorkers), []string{"index_entry_committer"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryCommitterTask)
@@ -480,9 +564,9 @@ func initWorkerPools(
 		return nil, err
 	}
 
-	indexEntryBuilderPool, err := ants.NewPoolWithFunc(maxIndexEntryBuilder, func(i any) {
+	indexEntryBuilderPool, err := ants.NewPoolWithFunc(indexEntryBuilderWorkers, func(i any) {
 		tasks := indexEntryBuilderInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxIndexEntryBuilder), []string{"index_entry_builder"})
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(indexEntryBuilderWorkers), []string{"index_entry_builder"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(indexEntryBuilderTask)
@@ -508,9 +592,9 @@ func initWorkerPools(
 		return nil, err
 	}
 
-	appendVecCopyingPool, err := ants.NewPoolWithFunc(maxAppendVecCopying, func(i any) {
+	appendVecCopyingPool, err := ants.NewPoolWithFunc(appendVecCopyingWorkers, func(i any) {
 		tasks := appendVecCopyingInProgress.Add(1)
-		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(maxAppendVecCopying), []string{"append_vec_copying"})
+		statsd.Gauge(statsd.SnapshotWorkerPoolUtilization, float64(tasks)/float64(appendVecCopyingWorkers), []string{"append_vec_copying"})
 		start := time.Now()
 		defer wg.Done()
 		task := i.(appendVecCopyingTask)

@@ -61,26 +61,31 @@ func readState(accountsPath string) *nodeState {
 // ── Config reading ──────────────────────────────────────────────────────
 
 type configData struct {
-	cluster            string
-	rpcEndpoints       []string
-	blockSource        string
-	lbEnabled          bool
-	lbGossip           string
-	lbGrpcAddr         string
-	lbRpcAddr          string
-	lbExternalEndpoint string // block.lightbringer_endpoint for external LB mode
-	lbBinaryPath       string
-	lbQuiet            bool
-	accountsPath       string
-	snapshotsPath      string
-	shredstorePath     string
-	logsPath           string
-	txpar              string
-	blockMaxRPS        string
-	blockInflight      string
-	rpcPort            string
-	logLevel           string
-	bootstrapMode      string
+	cluster             string
+	rpcEndpoints        []string
+	blockSource         string
+	lbEnabled           bool
+	lbGossip            string
+	lbGrpcAddr          string
+	lbRpcAddr           string
+	lbExternalEndpoint  string // block.lightbringer_endpoint for external LB mode
+	lbBinaryPath        string
+	lbQuiet             bool
+	turbineBindAddr     string
+	turbineGossip       string
+	turbineGossipBind   string
+	turbineAdvertisedIP string
+	turbineShredVersion string
+	accountsPath        string
+	snapshotsPath       string
+	shredstorePath      string
+	logsPath            string
+	txpar               string
+	blockMaxRPS         string
+	blockInflight       string
+	rpcPort             string
+	logLevel            string
+	bootstrapMode       string
 }
 
 func readConfig(configFile string) *configData {
@@ -106,28 +111,37 @@ func readConfig(configFile string) *configData {
 	if logsPath == "" {
 		logsPath = v.GetString("log.dir")
 	}
+	turbineBindAddr := v.GetString("block.turbine_bind_addr")
+	if turbineBindAddr == "" {
+		turbineBindAddr = v.GetString("turbine.bind_addr")
+	}
 
 	return &configData{
-		cluster:            cluster,
-		rpcEndpoints:       v.GetStringSlice("network.rpc"),
-		blockSource:        v.GetString("block.source"),
-		lbEnabled:          v.GetBool("lightbringer.enabled"),
-		lbGossip:           v.GetString("lightbringer.gossip_entrypoint"),
-		lbGrpcAddr:         v.GetString("lightbringer.grpc_addr"),
-		lbRpcAddr:          v.GetString("lightbringer.rpc_addr"),
-		lbQuiet:            v.GetBool("lightbringer.quiet"),
-		lbExternalEndpoint: v.GetString("block.lightbringer_endpoint"),
-		lbBinaryPath:       v.GetString("lightbringer.binary_path"),
-		accountsPath:       v.GetString("storage.accounts"),
-		snapshotsPath:      v.GetString("storage.snapshots"),
-		shredstorePath:     v.GetString("storage.shredstore"),
-		logsPath:           logsPath,
-		txpar:              txpar,
-		blockMaxRPS:        v.GetString("block.max_rps"),
-		blockInflight:      v.GetString("block.max_inflight"),
-		rpcPort:            v.GetString("rpc.port"),
-		logLevel:           v.GetString("log.level"),
-		bootstrapMode:      v.GetString("bootstrap.mode"),
+		cluster:             cluster,
+		rpcEndpoints:        v.GetStringSlice("network.rpc"),
+		blockSource:         v.GetString("block.source"),
+		lbEnabled:           v.GetBool("lightbringer.enabled"),
+		lbGossip:            v.GetString("lightbringer.gossip_entrypoint"),
+		lbGrpcAddr:          v.GetString("lightbringer.grpc_addr"),
+		lbRpcAddr:           v.GetString("lightbringer.rpc_addr"),
+		lbQuiet:             v.GetBool("lightbringer.quiet"),
+		lbExternalEndpoint:  v.GetString("block.lightbringer_endpoint"),
+		lbBinaryPath:        v.GetString("lightbringer.binary_path"),
+		turbineBindAddr:     turbineBindAddr,
+		turbineGossip:       v.GetString("turbine.gossip_entrypoint"),
+		turbineGossipBind:   v.GetString("turbine.gossip_bind_addr"),
+		turbineAdvertisedIP: v.GetString("turbine.advertised_ip"),
+		turbineShredVersion: v.GetString("turbine.shred_version"),
+		accountsPath:        v.GetString("storage.accounts"),
+		snapshotsPath:       v.GetString("storage.snapshots"),
+		shredstorePath:      v.GetString("storage.shredstore"),
+		logsPath:            logsPath,
+		txpar:               txpar,
+		blockMaxRPS:         v.GetString("block.max_rps"),
+		blockInflight:       v.GetString("block.max_inflight"),
+		rpcPort:             v.GetString("rpc.port"),
+		logLevel:            v.GetString("log.level"),
+		bootstrapMode:       v.GetString("bootstrap.mode"),
 	}
 }
 
@@ -392,6 +406,28 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 	} else if cfg.blockSource == "lightbringer" && cfg.lbExternalEndpoint == "" {
 		// Invalid: source=lightbringer but no sidecar and no endpoint
 		results = append(results, checkResult{"Lightbringer", "fail", "block.source=lightbringer requires enabled sidecar or endpoint"})
+	} else if cfg.blockSource == "turbine" {
+		if cfg.turbineBindAddr == "" {
+			results = append(results, checkResult{"Turbine UDP", "fail", "block.source=turbine requires block.turbine_bind_addr or turbine.bind_addr"})
+		} else if _, _, err := net.SplitHostPort(cfg.turbineBindAddr); err != nil {
+			results = append(results, checkResult{"Turbine UDP", "fail", "invalid format: " + cfg.turbineBindAddr})
+		} else {
+			results = append(results, checkResult{"Turbine UDP", "pass", cfg.turbineBindAddr})
+		}
+		if cfg.turbineGossip == "" {
+			results = append(results, checkResult{"Turbine gossip", "warn", "empty; UDP-only receiver mode"})
+		} else if _, _, err := net.SplitHostPort(cfg.turbineGossip); err != nil {
+			results = append(results, checkResult{"Turbine gossip", "fail", "invalid format: " + cfg.turbineGossip})
+		} else {
+			results = append(results, checkResult{"Turbine gossip", "pass", cfg.turbineGossip})
+		}
+		if cfg.turbineGossipBind != "" {
+			if _, _, err := net.SplitHostPort(cfg.turbineGossipBind); err != nil {
+				results = append(results, checkResult{"Turbine gossip UDP", "fail", "invalid format: " + cfg.turbineGossipBind})
+			} else {
+				results = append(results, checkResult{"Turbine gossip UDP", "pass", cfg.turbineGossipBind})
+			}
+		}
 	} else {
 		results = append(results, checkResult{"Lightbringer", "pass", "disabled"})
 	}
@@ -485,7 +521,8 @@ func saveConfigValue(configFile, section, key, value string) error {
 	var tomlValue string
 	switch {
 	case fullKey == "block.max_rps" || fullKey == "block.max_inflight" ||
-		fullKey == "tuning.txpar" || fullKey == "rpc.port":
+		fullKey == "tuning.txpar" || fullKey == "rpc.port" ||
+		fullKey == "turbine.shred_version":
 		tomlValue = value // numeric — no quoting
 	case fullKey == "lightbringer.enabled" || fullKey == "lightbringer.quiet":
 		tomlValue = value // boolean — no quoting

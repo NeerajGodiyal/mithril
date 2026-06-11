@@ -11,7 +11,7 @@ import (
 const (
 	defaultConsensusMaxDepth      = 64
 	defaultConsensusPolicy        = "halt"
-	defaultConsensusEnforceSource = "lightbringer"
+	defaultConsensusEnforceSource = "stream"
 )
 
 // ConsensusOpts contains vote-anchored consensus configuration.
@@ -19,7 +19,7 @@ const (
 type ConsensusOpts struct {
 	SkipPathMaxDepth int    // Max slots for skip-path solver (default: 64)
 	UnresolvedPolicy string // "halt" or "warn" (default: "halt")
-	EnforceOnSource  string // "lightbringer" or "all" (default: "lightbringer")
+	EnforceOnSource  string // "lightbringer", "turbine", "stream", or "all" (default: "stream")
 }
 
 type consensusConfig struct {
@@ -40,7 +40,7 @@ type pendingConsensusPath struct {
 	originalDecisions []forkchoice.SlotDecision
 }
 
-func resolveConsensusConfig(opts *ConsensusOpts, useLightbringer, isLive bool) consensusConfig {
+func resolveConsensusConfig(opts *ConsensusOpts, useLightbringer, useTurbine, isLive bool) consensusConfig {
 	cfg := consensusConfig{
 		maxDepth:      defaultConsensusMaxDepth,
 		policy:        defaultConsensusPolicy,
@@ -59,16 +59,50 @@ func resolveConsensusConfig(opts *ConsensusOpts, useLightbringer, isLive bool) c
 		}
 	}
 
+	if isLive && useTurbine && !useLightbringer && cfg.enforceSource == "lightbringer" {
+		mlog.Log.Warnf("forkchoice: consensus.enforce_on_source=%q is legacy Lightbringer-only while block source is native turbine; treating it as %q for this run",
+			cfg.enforceSource, "turbine")
+		cfg.enforceSource = "turbine"
+	}
+
 	switch cfg.enforceSource {
-	case "lightbringer", "all":
+	case "lightbringer", "turbine", "stream", "all":
 	default:
 		mlog.Log.Warnf("forkchoice: invalid EnforceOnSource=%q, defaulting to %q", cfg.enforceSource, defaultConsensusEnforceSource)
 		cfg.enforceSource = defaultConsensusEnforceSource
 	}
 
-	cfg.enforceActive = cfg.enforceSource == "all" || useLightbringer
+	cfg.enforceActive = consensusAppliesToRun(cfg.enforceSource, useLightbringer, useTurbine)
 	cfg.bufferedExecutionActive = !isLive || cfg.enforceSource == "all"
 	return cfg
+}
+
+func consensusAppliesToRun(enforceSource string, useLightbringer, useTurbine bool) bool {
+	switch enforceSource {
+	case "all":
+		return true
+	case "stream":
+		return useLightbringer || useTurbine
+	case "lightbringer":
+		return useLightbringer
+	case "turbine":
+		return useTurbine
+	default:
+		return false
+	}
+}
+
+func consensusManagesLiveShredStream(enforceSource string, useLightbringer, useTurbine bool) bool {
+	switch enforceSource {
+	case "stream", "all":
+		return useLightbringer || useTurbine
+	case "lightbringer":
+		return useLightbringer
+	case "turbine":
+		return useTurbine
+	default:
+		return false
+	}
 }
 
 func newPendingConsensusPath(anchorSlot uint64, resolvedPath *forkchoice.ResolvedPath) *pendingConsensusPath {
@@ -107,5 +141,5 @@ func shouldDiscardLightbringerObservationAfterFallback(isLive, useLightbringer b
 		useLightbringer &&
 		block != nil &&
 		block.FromLightbringer &&
-		(!stats.IsNearTip || stats.CurrentSource != "lightbringer")
+		(!stats.IsNearTip || (stats.CurrentSource != "lightbringer" && stats.CurrentSource != "turbine"))
 }

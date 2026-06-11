@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -316,7 +317,7 @@ type sigverifySnapshot struct {
 }
 
 func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnapshot, error) {
-	message, err := tx.Message.MarshalBinary()
+	message, err := txverify.MessageBytes(tx)
 	if err != nil {
 		return nil, err
 	}

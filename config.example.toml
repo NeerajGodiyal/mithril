@@ -120,10 +120,16 @@ name = "mithril"
     #   "rpc"          - Fetch blocks via getBlock RPC calls
     #   "lightbringer" - Stream via Lightbringer sidecar (see [lightbringer] section)
     #                    Uses RPC for catchup, hands off to live stream near tip.
+    #   "turbine"      - Native UDP turbine shred receiver.
+    #                    Uses RPC for catchup, hands off to reconstructed shreds near tip.
     source = "rpc"
 
     # Lightbringer endpoint address (only used when source = "lightbringer")
     # lightbringer_endpoint = "localhost:9000"
+
+    # Native turbine UDP bind address (only used when source = "turbine").
+    # turbine_bind_addr = "0.0.0.0:8001"
+    # Gossip settings for native turbine live under [turbine].
 
     # =========================================================================
     # Global Fetch Tuning
@@ -209,8 +215,38 @@ name = "mithril"
 
     # Which block source to enforce consensus on:
     #   "lightbringer" - Only enforce on Lightbringer blocks (RPC blocks are trusted)
+    #   "turbine"      - Only enforce on native turbine blocks
+    #   "stream"       - Enforce on any live shred-stream path
     #   "all"          - Enforce on all block sources (not yet implemented)
-    enforce_on_source = "lightbringer"
+    enforce_on_source = "stream"
+
+
+# ============================================================================
+# [turbine] - Native Turbine Receiver (block.source = "turbine")
+# ============================================================================
+#
+# Native turbine mode reconstructs blocks from data shreds inside Mithril.
+# RPC remains configured for catchup, tip polling, and repair/fallback paths.
+
+[turbine]
+    # UDP address where Mithril listens for turbine shreds.
+    # bind_addr = "0.0.0.0:8001"
+
+    # Solana gossip entrypoint used to discover the cluster shred version and
+    # advertise Mithril's turbine/TVU socket into the turbine tree.
+    # gossip_entrypoint = "1.2.3.4:8000"
+
+    # UDP address where Mithril listens for gossip traffic. Leave empty to let
+    # the OS choose an available port. Set a fixed port if your firewall/NAT
+    # needs an explicit rule.
+    # gossip_bind_addr = "0.0.0.0:65401"
+
+    # Optional public IP override. Leave empty to ask the gossip entrypoint's
+    # IP echo service.
+    # advertised_ip = "203.0.113.10"
+
+    # Optional override. Leave at zero/empty to discover from gossip_entrypoint.
+    # shred_version = 0
 
 
 # ============================================================================
@@ -301,8 +337,30 @@ name = "mithril"
     # Zstd decoder concurrency (defaults to NumCPU)
     # zstd_decoder_concurrency = 16
 
-    # Bound for number of log shards to flush to Accounts DB Index at once
-    max_concurrent_flushers = 16
+    # Snapshot bootstrap I/O tuning.
+    # These defaults deliberately avoid flooding a single NVMe with hundreds of
+    # concurrent writes. Increase cautiously on very fast multi-disk systems.
+
+    # AppendVec files copied from the snapshot archive concurrently.
+    snapshot_append_vec_workers = 32
+
+    # Workers parsing AppendVecs into account-index entries.
+    snapshot_index_builder_workers = 64
+
+    # Workers enqueueing account-index entries into shard logs.
+    snapshot_index_committer_workers = 64
+
+    # Number of temporary account-index shard logs/SSTs.
+    snapshot_index_shards = 64
+
+    # Optional temp directory for snapshot index shard logs/SST staging.
+    # This can move tens of GB of temporary write/read churn off the AccountsDB
+    # disk. On RAM-rich machines, /dev/shm/mithril-snapshot-index is useful.
+    # Leave empty to stage under storage.accounts.
+    snapshot_index_temp_dir = ""
+
+    # Bound for number of index shards to convert to SSTs at once.
+    max_concurrent_flushers = 8
 
     # Size in MB for serialized parameter arena (0 to disable)
     param_arena_size_mb = 512
@@ -315,6 +373,9 @@ name = "mithril"
 
     # Number of goroutines to store modified accounts at the end of each block
     store_accounts_workers = 128
+
+    # Approximate maximum retained SBPF program cache size in MiB.
+    program_cache_max_mb = 1024
 
     # [tuning.pprof] - CPU/Memory Profiling
     #
@@ -473,6 +534,14 @@ name = "mithril"
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]
     # allowed_node_versions = []
+
+    # Snapshot source blacklist. Entries may be full RPC URLs, host:port pairs,
+    # or bare host/IP values. Matching nodes are skipped before snapshot probing.
+    node_blacklist = [
+        # "http://203.0.113.10:8899",
+        # "198.51.100.24:8899",
+        # "bad-snapshot-node.example.com",
+    ]
 
     # -------------------------------------------------------------------------
     # Performance

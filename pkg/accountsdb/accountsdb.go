@@ -69,11 +69,14 @@ var (
 	ErrNoAccount = errors.New("ErrNoAccount")
 
 	StoreAccountsWorkers = 128
+	ProgramCacheMaxMB    = DefaultProgramCacheMaxMB
 )
 
 const (
 	indexPebbleMemTableSize                = 64 << 20
 	indexPebbleMemTableStopWritesThreshold = 4
+	DefaultProgramCacheMaxMB               = 1024
+	programCacheCostUnitBytes              = 1 << 20
 )
 
 func NewAccountsIndexPebbleOptions(logger pebble.Logger) *pebble.Options {
@@ -175,9 +178,9 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](2000).
+	accountsDb.ProgramCache, err = otter.MustBuilder[solana.PublicKey, *ProgramCacheEntry](programCacheCapacityUnits()).
 		Cost(func(key solana.PublicKey, progEntry *ProgramCacheEntry) uint32 {
-			return 1
+			return progEntry.CostUnits()
 		}).
 		Build()
 	if err != nil {
@@ -197,6 +200,29 @@ func (accountsDb *AccountsDb) InitCaches() {
 type ProgramCacheEntry struct {
 	Program        *sbpf.Program
 	DeploymentSlot uint64
+}
+
+func programCacheCapacityUnits() int {
+	if ProgramCacheMaxMB <= 0 {
+		return DefaultProgramCacheMaxMB
+	}
+	return ProgramCacheMaxMB
+}
+
+func (entry *ProgramCacheEntry) CostUnits() uint32 {
+	if entry == nil || entry.Program == nil {
+		return 1
+	}
+	bytes := entry.Program.MemoryBytes()
+	units := (bytes + programCacheCostUnitBytes - 1) / programCacheCostUnitBytes
+	if units == 0 {
+		return 1
+	}
+	max := uint64(^uint32(0))
+	if units > max {
+		return ^uint32(0)
+	}
+	return uint32(units)
 }
 
 func (accountsDb *AccountsDb) MaybeGetProgramFromCache(pubkey solana.PublicKey) (*ProgramCacheEntry, bool) {

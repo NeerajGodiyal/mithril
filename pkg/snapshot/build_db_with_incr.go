@@ -62,6 +62,7 @@ func BuildAccountsDbAuto(
 	if err = os.MkdirAll(appendVecsOutputDir, 0775); err != nil {
 		return nil, nil, err
 	}
+	logSnapshotBootstrapTuning()
 
 	defer ants.Release()
 
@@ -69,11 +70,12 @@ func BuildAccountsDbAuto(
 	var largestFileId atomic.Uint64
 	wg := &sync.WaitGroup{}
 
-	numShards := 256
-	logsDir := filepath.Join(accountsDbDir, "mithril_db_log_shards")
-	if err = os.MkdirAll(logsDir, 0775); err != nil {
+	numShards := snapshotIndexShards()
+	logsDir, cleanupIndexWorkDir, err := prepareSnapshotIndexWorkDir(accountsDbDir)
+	if err != nil {
 		return nil, nil, err
 	}
+	defer cleanupIndexWorkDir()
 	sl := NewShardLogger(numShards, logsDir)
 
 	// Create stake pubkey collector for building stake index during appendvec processing
@@ -147,7 +149,7 @@ func BuildAccountsDbAuto(
 		} else if strings.Contains(err.Error(), "no rpc nodes") || strings.Contains(err.Error(), "no nodes found") {
 			errMsg += "\n  Hint: Check RPC endpoints connectivity or try again later"
 		}
-		return nil, nil, fmt.Errorf(errMsg)
+		return nil, nil, fmt.Errorf("%s", errMsg)
 	}
 	mlog.Log.Debugf("found incremental snapshot URL in %s: %s", fmtDuration(time.Since(incrSnapshotDlStart)), incrementalSnapshotPath)
 

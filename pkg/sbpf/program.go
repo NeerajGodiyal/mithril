@@ -15,6 +15,20 @@ type Program struct {
 	SbpfVersion sbpfver.SbpfVersion
 }
 
+func (p *Program) MemoryBytes() uint64 {
+	if p == nil {
+		return 0
+	}
+	total := uint64(len(p.RO)) + uint64(len(p.Text))*8
+	if len(p.RO) == 0 {
+		total += uint64(len(p.TextBytes))
+	}
+	if len(p.Funcs) > 0 {
+		total += uint64(len(p.Funcs)) * 32
+	}
+	return total
+}
+
 // Verify runs the static bytecode verifier.
 func (p *Program) Verify() error {
 	return NewVerifier(p).VerifyProgram()
