@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/gagliardetto/solana-go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -57,6 +59,157 @@ func TestCurrentSourceSnapshotUsesTurbineSourceName(t *testing.T) {
 	source, status, handoff = bs.currentSourceSnapshot()
 	if source != "turbine" || status != "turbine live stream" || handoff != 151 {
 		t.Fatalf("expected active turbine status, got source=%q status=%q handoff=%d", source, status, handoff)
+	}
+}
+
+func TestAlpenglowBlockIDHintsAreExplicitlyOptedIn(t *testing.T) {
+	var blockID solana.Hash
+	blockID[0] = 1
+
+	classic := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:0",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+	classic.SetKnownAlpenglowBlockID(101, blockID)
+	if len(classic.knownAlpenglowBlockIDs) != 0 {
+		t.Fatalf("expected classic turbine source to ignore Alpenglow block-id hints")
+	}
+
+	alpenglow := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    100,
+		EndSlot:                      200,
+	})
+	alpenglow.SetKnownAlpenglowBlockID(101, blockID)
+	if got := alpenglow.knownAlpenglowBlockIDs[101]; got != blockID {
+		t.Fatalf("expected opted-in turbine source to retain Alpenglow block-id hint, got %v", got)
+	}
+}
+
+func TestApplyAlpenglowDecisionLockedMarksCertifiedSkip(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			if anchorSlot != 150 {
+				t.Fatalf("anchorSlot = %d, want 150", anchorSlot)
+			}
+			return alpenglow.ChainDecision{
+				Slot: 151,
+				Kind: alpenglow.ChainDecisionKindSkip,
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+
+	bs.reorderMu.Lock()
+	changed := bs.applyAlpenglowDecisionLocked()
+	bs.reorderMu.Unlock()
+
+	if changed {
+		t.Fatalf("expected skip decision to be emitted by normal skipped-slot branch")
+	}
+	if !bs.skippedSlots[151] {
+		t.Fatalf("expected certified skip to mark waiting slot skipped")
+	}
+	if got := bs.stats.FetchSkipped.Load(); got != 1 {
+		t.Fatalf("FetchSkipped = %d, want 1", got)
+	}
+}
+
+func TestApplyAlpenglowDecisionLockedLeavesMatchingCertifiedBlock(t *testing.T) {
+	blockID := solana.Hash{1}
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			return alpenglow.ChainDecision{
+				Slot:  151,
+				Kind:  alpenglow.ChainDecisionKindBlock,
+				Block: alpenglow.BlockID{Slot: 151, Hash: blockID},
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.reorderBuffer[151] = &b.Block{
+		Slot:                151,
+		FromLightbringer:    true,
+		HasAlpenglowBlockID: true,
+		AlpenglowBlockID:    [32]byte(blockID),
+	}
+
+	bs.reorderMu.Lock()
+	changed := bs.applyAlpenglowDecisionLocked()
+	bs.reorderMu.Unlock()
+
+	if changed {
+		t.Fatalf("expected matching certified block to stay in normal emission path")
+	}
+	if bs.reorderBuffer[151] == nil {
+		t.Fatalf("expected matching block to remain buffered")
+	}
+}
+
+func TestApplyAlpenglowDecisionLockedDiscardsMismatchedCertifiedBlock(t *testing.T) {
+	wantBlockID := solana.Hash{1}
+	gotBlockID := solana.Hash{2}
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			return alpenglow.ChainDecision{
+				Slot:  151,
+				Kind:  alpenglow.ChainDecisionKindBlock,
+				Block: alpenglow.BlockID{Slot: 151, Hash: wantBlockID},
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.reorderBuffer[151] = &b.Block{
+		Slot:                151,
+		FromLightbringer:    true,
+		HasAlpenglowBlockID: true,
+		AlpenglowBlockID:    [32]byte(gotBlockID),
+	}
+	bs.slotState[151] = slotDone
+
+	bs.reorderMu.Lock()
+	changed := bs.applyAlpenglowDecisionLocked()
+	bs.reorderMu.Unlock()
+
+	if !changed {
+		t.Fatalf("expected mismatched certified block to advance the emission loop")
+	}
+	if bs.reorderBuffer[151] != nil {
+		t.Fatalf("expected mismatched block to be discarded")
+	}
+	if _, exists := bs.slotState[151]; exists {
+		t.Fatalf("expected slot state to be cleared so another source can retry")
+	}
+	if got := bs.knownAlpenglowBlockIDs[151]; got != wantBlockID {
+		t.Fatalf("known Alpenglow block id = %s, want %s", got, wantBlockID)
+	}
+	if got := bs.lightbringerRepairSlot.Load(); got != 0 {
+		t.Fatalf("expected certified mismatch to avoid RPC repair, got repair slot %d", got)
+	}
+	if len(bs.retrySlots) != 0 {
+		t.Fatalf("expected certified mismatch to avoid enqueueing an RPC retry, got %+v", bs.retrySlots)
 	}
 }
 
@@ -644,63 +797,6 @@ func TestUpdateModeFallsBackWhenConsensusManagedLightbringerReplayGapExceedsGrac
 	}
 }
 
-func TestSynthesizeLightbringerSkipsLockedDoesNotInferMissingSlotsFromReconnectingDescendant(t *testing.T) {
-	bs := NewBlockSource(&BlockSourceOpts{
-		SourceType:           BlockSourceLightbringer,
-		LightbringerEndpoint: "127.0.0.1:50051",
-		StartSlot:            100,
-		EndSlot:              200,
-	})
-
-	bs.lightbringerActive.Store(true)
-	bs.nextSlotToSend = 151
-	bs.lastEmittedBlockSlot = 150
-	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 150}
-
-	bs.reorderMu.Lock()
-	synthesized := bs.synthesizeLightbringerSkipsLocked()
-	bs.reorderMu.Unlock()
-
-	if synthesized {
-		t.Fatalf("expected reconnecting descendant to stay diagnostic-only and not infer skipped slots")
-	}
-	if bs.skippedSlots[151] {
-		t.Fatalf("expected slot 151 to remain unresolved without an external skip confirmation")
-	}
-}
-
-func TestSynthesizeLightbringerSkipsLockedDoesNotBypassDisconnectedWaitingBlockFromDescendant(t *testing.T) {
-	bs := NewBlockSource(&BlockSourceOpts{
-		SourceType:           BlockSourceLightbringer,
-		LightbringerEndpoint: "127.0.0.1:50051",
-		StartSlot:            100,
-		EndSlot:              200,
-	})
-
-	bs.lightbringerActive.Store(true)
-	bs.nextSlotToSend = 151
-	bs.lastEmittedBlockSlot = 150
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
-	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 150}
-
-	bs.reorderMu.Lock()
-	synthesized := bs.synthesizeLightbringerSkipsLocked()
-	bs.reorderMu.Unlock()
-
-	if synthesized {
-		t.Fatalf("expected disconnected waiting block to remain unresolved instead of being rewritten as skipped")
-	}
-	if bs.skippedSlots[151] {
-		t.Fatalf("expected slot 151 to remain unresolved without a canonical skip proof")
-	}
-	if bs.reorderBuffer[151] == nil {
-		t.Fatalf("expected disconnected Lightbringer block at slot 151 to remain buffered until parent mismatch handling runs")
-	}
-	if bs.reorderBuffer[152] == nil {
-		t.Fatalf("expected connected descendant at slot 152 to remain buffered")
-	}
-}
-
 func TestShouldPreferIncomingLightbringerBlockLockedPrefersConnectedSameSlotBlock(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,
@@ -785,6 +881,81 @@ func TestShouldDiscardSkippedSlotAfterHandoffDropsRPCSkipMarker(t *testing.T) {
 
 	if !bs.shouldDiscardSkippedSlotAfterHandoff(151) {
 		t.Fatalf("expected provisional RPC skip marker at slot 151 to be discarded after Lightbringer handoff")
+	}
+}
+
+func TestShouldDiscardSkippedSlotAfterHandoffKeepsAlpenglowCertifiedSkip(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			return alpenglow.ChainDecision{
+				Slot:   151,
+				Kind:   alpenglow.ChainDecisionKindSkip,
+				Reason: "skip certificate",
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(151)
+
+	bs.reorderMu.Lock()
+	bs.applyAlpenglowDecisionLocked()
+	bs.reorderMu.Unlock()
+
+	if !bs.skippedSlots[151] {
+		t.Fatalf("expected certified skip to mark slot 151 skipped")
+	}
+	if bs.shouldDiscardSkippedSlotAfterHandoff(151) {
+		t.Fatalf("expected Alpenglow-certified skip marker at slot 151 to survive Turbine handoff")
+	}
+}
+
+func TestEmitOrderedBlocksMarksAlpenglowCertifiedSkipAsLiveStreamObservation(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			if anchorSlot != 150 {
+				return alpenglow.ChainDecision{}, false
+			}
+			return alpenglow.ChainDecision{
+				Slot:   151,
+				Kind:   alpenglow.ChainDecisionKindSkip,
+				Reason: "skip certificate",
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(151)
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+
+	bs.resultQueue <- fetchResult{
+		slot:  152,
+		block: &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 151},
+	}
+	close(bs.resultQueue)
+	<-done
+
+	skip := bs.NextBlock()
+	if skip == nil || !skip.IsSkipped || skip.Slot != 151 {
+		t.Fatalf("expected certified skip for slot 151, got %+v", skip)
+	}
+	if !skip.FromLightbringer {
+		t.Fatalf("expected certified skip to be marked as live-stream sourced")
 	}
 }
 
@@ -896,8 +1067,8 @@ func TestDetectLightbringerGapWaitsForConfiguredFallbackDelay(t *testing.T) {
 	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerGapFallbackWait / 2)).UnixNano())
 
 	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLightbringerGapLocked()
-	if waitingSlot != 0 || firstBufferedSlot != 0 || firstBufferedParentSlot != 0 || bufferedCount != 0 || shouldFallback {
-		t.Fatalf("expected Lightbringer gap detection to stay patient before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
+	if waitingSlot != 120 || firstBufferedSlot != 121 || firstBufferedParentSlot != 120 || bufferedCount != 2 || shouldFallback {
+		t.Fatalf("expected Lightbringer gap detection to report gap while staying patient before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
 			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback)
 	}
 }
@@ -1107,6 +1278,55 @@ func TestForceRPCFallbackRewindsConsensusManagedTurbineFrontier(t *testing.T) {
 	}
 }
 
+func TestForceRPCFallbackRewindsActiveTurbineFrontierToReplayProgress(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:8001",
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+
+	bs.lightbringerActive.Store(true)
+	bs.lightbringerHandoffSlot.Store(121)
+	bs.lastExecutedSlot.Store(120)
+	bs.confirmedTip.Store(180)
+	bs.nextSlotToSend = 150
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.slotState[121] = slotDone
+	bs.slotState[149] = slotDone
+	bs.slotState[151] = slotInflight
+	bs.retrySlots = []uint64{119, 121, 149, 151}
+
+	bs.forceRPCForCatchup(64)
+
+	if got := bs.nextSlotToSend; got != 121 {
+		t.Fatalf("expected active turbine fallback to rewind to replay's next slot 121, got %d", got)
+	}
+	if bs.lightbringerActive.Load() {
+		t.Fatalf("expected turbine to be marked inactive")
+	}
+	if !bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected scheduler to resume RPC from the rewound frontier")
+	}
+	if _, exists := bs.reorderBuffer[121]; exists {
+		t.Fatalf("expected queued turbine slot 121 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[149]; exists {
+		t.Fatalf("expected queued turbine slot 149 to be dropped for RPC refetch")
+	}
+	if _, exists := bs.reorderBuffer[151]; !exists {
+		t.Fatalf("expected buffered RPC slot 151 to remain")
+	}
+	if _, exists := bs.slotState[151]; exists {
+		t.Fatalf("expected future slot state to be cleared for RPC rescheduling")
+	}
+	if len(bs.retrySlots) != 1 || bs.retrySlots[0] != 119 {
+		t.Fatalf("expected only retries before the replay frontier to remain, got %+v", bs.retrySlots)
+	}
+}
+
 func TestForceRPCForCatchupKeepsPendingHandoffEmissionFrontier(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:                   BlockSourceLightbringer,
@@ -1287,8 +1507,8 @@ func TestDetectLightbringerGapResetsReconnectLatchForNewWaitingSlot(t *testing.T
 	bs.nextSlotToSend = 125
 
 	waitingSlot, _, _, _, shouldFallback := bs.detectLightbringerGapLocked()
-	if waitingSlot != 0 || shouldFallback {
-		t.Fatalf("expected first observation of a new gap to arm tracking only, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
+	if waitingSlot != 125 || shouldFallback {
+		t.Fatalf("expected first observation of a new gap to arm tracking only while reporting the waiting slot, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
 	}
 	if got := bs.lightbringerGapSlot.Load(); got != 125 {
 		t.Fatalf("expected new gap slot 125 to be tracked, got %d", got)

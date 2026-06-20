@@ -95,7 +95,7 @@ name = "mithril"
 # probes the primary and restores to it when healthy.
 
 [network]
-    # Solana cluster (required): "mainnet-beta", "testnet", or "devnet"
+    # Solana cluster (required): "mainnet-beta", "testnet", "devnet", or "alpenglow"
     # This is validated against the RPC's genesis hash to prevent accidentally
     # running mainnet state against testnet, or vice versa.
     cluster = "mainnet-beta"
@@ -191,6 +191,19 @@ name = "mithril"
     near_tip_lookahead = 2
 
 # ============================================================================
+# [validator] - Optional Validator Identity
+# ============================================================================
+#
+# These keys are not used for signing votes in classic or alpenglow-observer
+# mode. The identity keypair is used by native turbine gossip, which is required
+# for staked Alpenglow observer nodes to receive Votor traffic.
+
+[validator]
+    identity_keypair = ""
+    vote_account_keypair = ""
+    authorized_withdrawer_keypair = ""
+
+# ============================================================================
 # [consensus] - Vote-Anchored Consensus
 # ============================================================================
 #
@@ -204,6 +217,20 @@ name = "mithril"
 # policy determines behavior.
 
 [consensus]
+    # Consensus engine:
+    #   "classic"            - Current Solana vote-anchored consensus checks
+    #   "alpenglow-observer" - Passive Alpenglow observer hooks; no votes are signed
+    #   "alpenglow"          - Reserved for future Alpenglow voting mode
+    mode = "classic"
+
+    # Optional passive Alpenglow Votor QUIC listener for observer mode.
+    # Agave advertises this as the gossip "alpenglow" socket and sends
+    # wincode ConsensusMessage payloads over Solana QUIC ("solana-tpu" ALPN).
+    # When native turbine gossip is enabled, Mithril advertises this socket
+    # in CRDS so Alpenglow peers can discover it. Leave empty to disable.
+    alpenglow_observer_bind_addr = ""
+    alpenglow_max_message_bytes = 0
+
     # Maximum depth (number of slots) the skip-path solver will explore.
     # Longer ranges take more memory. 64 covers ~26 seconds of slots.
     skip_path_max_depth = 64
@@ -528,7 +555,8 @@ name = "mithril"
     # TCP connection timeout for pre-check (milliseconds)
     tcp_timeout_ms = 1000
 
-    # Minimum Solana version required (e.g., "3.0.0", empty = no filter)
+    # Minimum Solana version required (e.g., "3.0.0", empty = no filter).
+    # Defaults to "3.0.0" on classic clusters and "0.3.0" on alpenglow.
     # min_node_version = "3.0.0"
 
     # Allowed Solana versions (empty = all versions allowed)

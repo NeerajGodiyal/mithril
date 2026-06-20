@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +25,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/config"
+	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -36,6 +39,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/version"
+	solana "github.com/gagliardetto/solana-go"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
@@ -62,13 +66,19 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	cluster                     string // "mainnet-beta", "testnet", "devnet"
+	cluster                     string // "mainnet-beta", "testnet", "devnet", "alpenglow"
 	blockSource                 string // "rpc", "lightbringer", or "turbine"
 	lightbringerEndpoint        string
 	blockMaxRPS                 int // Rate limit for block fetching
 	blockMaxInflight            int // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int // Tip poll interval in milliseconds
 	blockTipSafetyMargin        int // Don't fetch within N slots of tip
+	consensusMode               string
+	alpenglowObserverBindAddr   string
+	alpenglowMaxMessageBytes    int64
+	validatorIdentityKeypair    string
+	validatorVoteAccountKeypair string
+	validatorWithdrawerKeypair  string
 
 	// Mode thresholds
 	blockNearTipThreshold        int // Enter near-tip when gap <= this
@@ -156,6 +166,51 @@ func epochForStateSlot(s *state.MithrilState, slot uint64) uint64 {
 	return 0
 }
 
+func alpenglowAddrForGossip(mode consensusengine.Mode, bindAddr string) string {
+	bindAddr = strings.TrimSpace(bindAddr)
+	if mode != consensusengine.ModeAlpenglowObserver || bindAddr == "" {
+		return ""
+	}
+	_, portRaw, err := net.SplitHostPort(bindAddr)
+	if err != nil {
+		mlog.Log.Warnf("ALPENGLOW observer: not advertising invalid Votor bind address %q in gossip: %v", bindAddr, err)
+		return ""
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 0xffff {
+		mlog.Log.Warnf("ALPENGLOW observer: not advertising Votor bind address %q in gossip because the port is not fixed", bindAddr)
+		return ""
+	}
+	return bindAddr
+}
+
+func loadValidatorIdentityKeypair(path string) (ed25519.PrivateKey, string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, "", nil
+	}
+	key, err := solana.PrivateKeyFromSolanaKeygenFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("load validator identity keypair %s: %w", path, err)
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, "", fmt.Errorf("validator identity keypair %s has invalid private key size %d", path, len(key))
+	}
+	return ed25519.PrivateKey(append([]byte(nil), key...)), key.PublicKey().String(), nil
+}
+
+func loadValidatorKeypairPubkey(label, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	key, err := solana.PrivateKeyFromSolanaKeygenFile(path)
+	if err != nil {
+		return "", fmt.Errorf("load %s keypair %s: %w", label, path, err)
+	}
+	return key.PublicKey().String(), nil
+}
+
 func manifestEpochScheduleSeedMatches(s *state.MithrilState, manifest *snapshot.SnapshotManifest) bool {
 	if s == nil || s.ManifestEpochSchedule == nil || manifest == nil || manifest.Bank == nil {
 		return false
@@ -206,6 +261,7 @@ func init() {
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
 	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
+	Run.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Directory for discovered/downloaded snapshots")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -213,7 +269,7 @@ func init() {
 
 	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
-	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'mainnet-beta', 'testnet', or 'devnet'")
+	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'mainnet-beta', 'testnet', 'devnet', or 'alpenglow'")
 
 	// [rpc] section flags (Mithril's RPC server)
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
@@ -222,6 +278,14 @@ func init() {
 	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 	Run.Flags().Int64Var(&numReplaySlots, "num-slots", 0, "Number of slots to replay (0 = run continuously)")
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
+
+	// [consensus] section flags
+	Run.Flags().StringVar(&consensusMode, "consensus-mode", string(consensusengine.ModeClassic), "Consensus mode: 'classic', 'alpenglow-observer', or 'alpenglow'")
+	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address for consensus-mode=alpenglow-observer")
+	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
+	Run.Flags().StringVar(&validatorIdentityKeypair, "identity-keypair", "", "Validator identity keypair for native turbine gossip (Solana keygen JSON)")
+	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "Vote account keypair path for validator diagnostics (Solana keygen JSON)")
+	Run.Flags().StringVar(&validatorWithdrawerKeypair, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair path for validator diagnostics (Solana keygen JSON)")
 
 	// [tuning] section flags
 	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
@@ -471,14 +535,14 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Cluster is required for safety (prevents mainnet/testnet mixups)
 	cluster = getString("cluster", "network.cluster")
 	if cluster == "" {
-		return fmt.Errorf("network.cluster is required - set to 'mainnet-beta', 'testnet', or 'devnet'")
+		return fmt.Errorf("network.cluster is required - set to 'mainnet-beta', 'testnet', 'devnet', or 'alpenglow'")
 	}
 	// Validate cluster value
 	switch cluster {
-	case "mainnet-beta", "testnet", "devnet":
+	case "mainnet-beta", "testnet", "devnet", "alpenglow":
 		// Valid
 	default:
-		return fmt.Errorf("invalid network.cluster %q - must be 'mainnet-beta', 'testnet', or 'devnet'", cluster)
+		return fmt.Errorf("invalid network.cluster %q - must be 'mainnet-beta', 'testnet', 'devnet', or 'alpenglow'", cluster)
 	}
 
 	// [rpc] section - Mithril's RPC server
@@ -486,6 +550,21 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 	// Top-level
 	scratchDirectory = getString("scratch-directory", "scratch_directory")
+
+	rawConsensusMode := getString("consensus-mode", "consensus.mode")
+	normalizedConsensusMode, err := consensusengine.NormalizeMode(rawConsensusMode)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(rawConsensusMode), "legacy") {
+		mlog.Log.Warnf("config: consensus.mode=\"legacy\" is accepted as an alias; prefer \"classic\"")
+	}
+	consensusMode = string(normalizedConsensusMode)
+	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
+	alpenglowMaxMessageBytes = getInt64("alpenglow-max-message-bytes", "consensus.alpenglow_max_message_bytes")
+	validatorIdentityKeypair = getString("identity-keypair", "validator.identity_keypair")
+	validatorVoteAccountKeypair = getString("vote-account-keypair", "validator.vote_account_keypair")
+	validatorWithdrawerKeypair = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
 
 	// [block] section
 	blockSource = getString("block-source", "block.source")
@@ -753,6 +832,11 @@ func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 	}
 	if config.IsSet("snapshot.min_node_version") {
 		cfg.MinNodeVersion = config.GetString("snapshot.min_node_version")
+	} else if cluster == "alpenglow" {
+		// The public Alpenglow test cluster currently advertises Agave/Votor node
+		// versions in the 0.3.x series. The normal mainnet default is 3.0.0,
+		// which would filter every Alpenglow snapshot source before speed tests.
+		cfg.MinNodeVersion = "0.3.0"
 	}
 	if config.IsSet("snapshot.allowed_node_versions") {
 		cfg.AllowedNodeVersions = config.GetStringSlice("snapshot.allowed_node_versions")
@@ -876,6 +960,29 @@ func runLive(c *cobra.Command, args []string) {
 	var lbManager *lightbringer.Manager
 	useLightbringer := blockSource == "lightbringer"
 	useTurbine := blockSource == "turbine"
+	validatorIdentity, validatorIdentityPubkey, err := loadValidatorIdentityKeypair(validatorIdentityKeypair)
+	if err != nil {
+		klog.Fatalf("%v", err)
+	}
+	if validatorVoteAccountKeypair != "" {
+		votePubkey, err := loadValidatorKeypairPubkey("vote account", validatorVoteAccountKeypair)
+		if err != nil {
+			klog.Fatalf("%v", err)
+		}
+		mlog.Log.Infof("validator vote account configured: %s", votePubkey)
+	}
+	if validatorWithdrawerKeypair != "" {
+		withdrawerPubkey, err := loadValidatorKeypairPubkey("authorized withdrawer", validatorWithdrawerKeypair)
+		if err != nil {
+			klog.Fatalf("%v", err)
+		}
+		mlog.Log.FileOnlyf("validator authorized withdrawer configured: %s", withdrawerPubkey)
+	}
+	if validatorIdentityPubkey != "" {
+		mlog.Log.Infof("validator identity configured for native gossip: %s", validatorIdentityPubkey)
+	} else if useTurbine && consensusMode == string(consensusengine.ModeAlpenglowObserver) && alpenglowObserverBindAddr != "" {
+		mlog.Log.Warnf("ALPENGLOW observer: no validator.identity_keypair configured; native gossip will use an ephemeral identity and may not receive staked Votor traffic")
+	}
 
 	if lightbringerEnabled {
 		lbLogWriter := mlog.Log.CreateSubprocessWriter("lightbringer")
@@ -1521,6 +1628,26 @@ postBootstrap:
 		NearTipLookahead: blockNearTipLookahead,
 	}
 	// Build consensus options from config
+	engineMode, err := consensusengine.NormalizeMode(consensusMode)
+	if err != nil {
+		klog.Fatalf("%v", err)
+	}
+	consensusEngine, err := consensusengine.NewEngineWithConfig(engineMode, consensusengine.Config{
+		AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
+		AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
+	})
+	if err != nil {
+		klog.Fatalf("unable to create consensus engine: %v", err)
+	}
+	if err := consensusEngine.Start(ctx); err != nil {
+		klog.Fatalf("unable to start consensus engine %q: %v", consensusEngine.Name(), err)
+	}
+	defer func() {
+		if err := consensusEngine.Close(); err != nil {
+			mlog.Log.Warnf("consensus engine close failed: %v", err)
+		}
+	}()
+
 	consensusMaxDepth := config.GetInt("consensus.skip_path_max_depth")
 	if consensusMaxDepth <= 0 {
 		consensusMaxDepth = 64
@@ -1551,13 +1678,16 @@ postBootstrap:
 		SkipPathMaxDepth: consensusMaxDepth,
 		UnresolvedPolicy: consensusPolicy,
 		EnforceOnSource:  consensusEnforceSource,
+		Mode:             consensusEngine.Name(),
+		Engine:           consensusEngine,
 	}
 
 	var slotCtxSetter replay.SlotCtxSetter
 	if rpcServer != nil {
 		slotCtxSetter = rpcServer
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+	turbineAlpenglowAddr := alpenglowAddrForGossip(engineMode, alpenglowObserverBindAddr)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
 
 	if result.Error != nil {
 		if result.LastPersistedSlot == 0 {
@@ -1981,6 +2111,15 @@ func printStartupInfo(commandName string) {
 	}
 	if blockSource == "turbine" && turbineAdvertisedIP != "" {
 		fmt.Printf("  Advertised:   %s%s%s\n", gold, turbineAdvertisedIP, reset)
+	}
+	if validatorIdentityKeypair != "" {
+		fmt.Printf("  Identity key: %s%s%s\n", gold, validatorIdentityKeypair, reset)
+	}
+	if consensusMode != "" {
+		fmt.Printf("  Consensus:    %s%s%s\n", gold, consensusMode, reset)
+	}
+	if consensusMode == string(consensusengine.ModeAlpenglowObserver) && alpenglowObserverBindAddr != "" {
+		fmt.Printf("  Votor QUIC:   %s%s%s\n", gold, alpenglowObserverBindAddr, reset)
 	}
 
 	fmt.Println()
@@ -2440,6 +2579,8 @@ func runReplayWithRecovery(
 	turbineGossipBindAddr string,
 	turbineAdvertisedIP string,
 	turbineShredVersion uint16,
+	turbineAlpenglowAddr string,
+	turbineIdentity ed25519.PrivateKey,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -2560,6 +2701,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	return result
 }

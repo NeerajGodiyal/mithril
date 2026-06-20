@@ -31,6 +31,7 @@ var Curve25519SyscallEnabled = FeatureGate{Name: "Curve25519SyscallEnabled", Add
 var SimplifyAltBn128SyscallErrorCodes = FeatureGate{Name: "SimplityAltBn128SyscallErrorCodes", Address: base58.MustDecodeFromString("JDn5q3GBeqzvUa7z67BbmVHVdE3EbUAjvFep3weR3jxX")}
 var EnableAltbn128CompressionSyscall = FeatureGate{Name: "EnableAltbn128CompressionSyscall", Address: base58.MustDecodeFromString("EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn")}
 var EnableAltBn128Syscall = FeatureGate{Name: "EnableAltBn128Syscall", Address: base58.MustDecodeFromString("A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ")}
+var DisableFeesSysvar = FeatureGate{Name: "DisableFeesSysvar", Address: base58.MustDecodeFromString("JAN1trEUEtZjgXYzNBYHU9DYd7GnThhXfFP7SzPXkPsG")}
 var DisableRentFeesCollection = FeatureGate{Name: "DisableRentFeesCollection", Address: base58.MustDecodeFromString("CJzY83ggJHqPGDq8VisV3U91jDJLuEaALZooBrXtnnLU")}
 var DeprecateUnusedLegacyVotePlumbing = FeatureGate{Name: "DeprecateUnusedLegacyVotePlumbing", Address: base58.MustDecodeFromString("6Uf8S75PVh91MYgPQSHnjRAPQq6an5BDv9vomrCwDqLe")}
 var RewardFullPriorityFee = FeatureGate{Name: "RewardFullPriorityFee", Address: base58.MustDecodeFromString("3opE3EzAKnUftUDURkzMgwpNgimBAypW1mNDYH4x4Zg7")}
@@ -61,6 +62,8 @@ var EnableSbpfV3DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV3Deployme
 var DisableSbpfV0Execution = FeatureGate{Name: "DisableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature11111111111111111111111111111111")}
 var ReenableSbpfV0Execution = FeatureGate{Name: "ReenableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature21111111111111111111111111111111")}
 var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTransactionDataSize", Address: base58.MustDecodeFromString("DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8")}
+var Alpenglow = FeatureGate{Name: "Alpenglow", Address: base58.MustDecodeFromString("mustRekeyVm2QHYB3JPefBiU4BY3Z6JkW2k3Scw5GWP")}
+var AlpenglowDevContext = FeatureGate{Name: "AlpenglowDevContext", Address: base58.MustDecodeFromString("8KpruRFrT59jQ9NfFX9DU6j8a1hW7y6xchvZNQ5rxD4P")}
 var IncreaseCpiAccountInfoLimit = FeatureGate{Name: "IncreaseCpiAccountInfoLimit", Address: base58.MustDecodeFromString("H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5")}
 var StaticInstructionLimit = FeatureGate{Name: "StaticInstructionLimit", Address: base58.MustDecodeFromString("64ixypL1HPu8WtJhNSMb9mSgfFaJvsANuRkTbHyuLfnx")}
 var PoseidonEnforcePadding = FeatureGate{Name: "PoseidonEnforcePadding", Address: base58.MustDecodeFromString("poUdAqRXXsNmfqAZ6UqpjbeYgwBygbfQLEvWSqVhSnb")}
@@ -92,13 +95,13 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	StakeRaiseMinimumDelegationTo1Sol, StakeRedelegateInstruction, RequireRentExemptSplitDestination,
 	DeprecateExecutableMetaUpdateInBpfLoader, RelaxAuthoritySignerCheckForLookupTableCreation, DedupeConfigProgramSigners,
 	Ed25519PrecompileVerifyStrict, AbortOnInvalidCurve, Blake3SyscallEnabled, Curve25519SyscallEnabled, SimplifyAltBn128SyscallErrorCodes,
-	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
+	EnableAltbn128CompressionSyscall, EnableAltBn128Syscall, DisableFeesSysvar, DisableRentFeesCollection, DeprecateUnusedLegacyVotePlumbing,
 	RewardFullPriorityFee, StakeMinimumDelegationForRewards, MoveStakeAndMoveLamportsIxs, GetSysvarSyscallEnabled,
 	AddNewReservedAccountKeys, EnableSecp256r1Precompile, FixAltBn128MultiplicationInputLength, EnableTowerSyncIx, SkipRentRewrites,
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
 	ReserveMinimalCUsForBuiltinInstructions, RelaxIntraBatchAccountLocks, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
-	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, IncreaseCpiAccountInfoLimit,
+	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, Alpenglow, AlpenglowDevContext, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2, SyscallParameterAddressRestrictions, VirtualAddressSpaceAdjustments, AccountDataDirectMapping,
 	VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,

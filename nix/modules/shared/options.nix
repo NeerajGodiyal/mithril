@@ -314,6 +314,24 @@
         description = "Finite replay: end slot.";
       };
 
+      consensusMode = lib.mkOption {
+        type = lib.types.enum ["classic" "legacy" "alpenglow-observer" "alpenglow"];
+        default = "classic";
+        description = "Consensus mode. \"legacy\" is accepted as an alias for \"classic\".";
+      };
+
+      consensusAlpenglowObserverBindAddr = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Optional passive Alpenglow Votor QUIC listener address for observer mode.";
+      };
+
+      consensusAlpenglowMaxMessageBytes = lib.mkOption {
+        type = lib.types.int;
+        default = 0;
+        description = "Maximum Alpenglow Votor QUIC stream payload size; 0 uses Mithril's default.";
+      };
+
       rpcPort = lib.mkOption {
         type = lib.types.int;
         default = 8899;

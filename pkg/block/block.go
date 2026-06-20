@@ -27,6 +27,8 @@ type Block struct {
 	PrevNumSignatures                   uint64
 	InitialPreviousLamportsPerSignature uint64
 	Blockhash                           [32]byte
+	AlpenglowBlockID                    [32]byte // Turbine Merkle-root block id used by Alpenglow/Votor.
+	HasAlpenglowBlockID                 bool
 	ExpectedBankhash                    [32]byte
 	TxMetas                             []*rpc.TransactionMeta
 	Leader                              solana.PublicKey

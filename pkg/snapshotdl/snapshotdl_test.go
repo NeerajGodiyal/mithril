@@ -78,3 +78,89 @@ func TestFilterSnapshotRPCNodes(t *testing.T) {
 		t.Fatalf("remaining node = %q, want good.example.com", filtered[0].Address)
 	}
 }
+
+func TestAddConfiguredSnapshotRPCNodes(t *testing.T) {
+	nodes := []snaprpc.RPCNode{
+		{Address: "http://public.example.com:8899", Version: "cluster"},
+	}
+
+	got, added := addConfiguredSnapshotRPCNodes(nodes, "https://rpc.example.com", []string{
+		"https://rpc.example.com",
+		"http://public.example.com:8899",
+	})
+	if added != 1 {
+		t.Fatalf("added = %d, want 1", added)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[1].Address != "https://rpc.example.com" {
+		t.Fatalf("configured address = %q", got[1].Address)
+	}
+	if got[1].Version != "999.0.0-configured" {
+		t.Fatalf("configured version = %q", got[1].Version)
+	}
+	if !got[1].IsStatic {
+		t.Fatalf("configured RPC was not marked static")
+	}
+}
+
+func TestFilterByIncrementalBaseMatchAllowsGenesisFullWithBaseZeroIncremental(t *testing.T) {
+	results := []snaprpc.NodeResult{
+		{
+			RPC:      "http://young-testnet.example.com:8899",
+			FullURL:  "http://young-testnet.example.com:8899/snapshot-0-hash.tar.zst",
+			FullSlot: 0,
+			HasInc:   true,
+			IncBase:  0,
+			IncSlot:  21102,
+			IncURL:   "http://young-testnet.example.com:8899/incremental-snapshot-0-21102-hash.tar.zst",
+		},
+	}
+
+	filtered, stats := filterByIncrementalBaseMatch(results)
+	if len(filtered) != 1 {
+		t.Fatalf("len(filtered) = %d, want 1", len(filtered))
+	}
+	if stats.totalWithFull != 1 || stats.totalWithFullSlotZero != 1 {
+		t.Fatalf("full stats = %d/%d, want 1/1", stats.totalWithFull, stats.totalWithFullSlotZero)
+	}
+	if stats.matchingFullSlots != 1 {
+		t.Fatalf("matchingFullSlots = %d, want 1", stats.matchingFullSlots)
+	}
+}
+
+func TestNormalizeGenesisFullSnapshotsForRankingUsesSyntheticSlot(t *testing.T) {
+	results := []snaprpc.NodeResult{
+		{
+			RPC:      "http://young-testnet.example.com:8899",
+			FullURL:  "http://young-testnet.example.com:8899/snapshot-0-hash.tar.zst",
+			FullSlot: 0,
+			HasInc:   true,
+			IncBase:  0,
+		},
+	}
+
+	normalized := normalizeGenesisFullSnapshotsForRanking(results)
+	if results[0].FullSlot != 0 {
+		t.Fatalf("original FullSlot mutated to %d", results[0].FullSlot)
+	}
+	if normalized[0].FullSlot != 1 {
+		t.Fatalf("normalized FullSlot = %d, want synthetic slot 1", normalized[0].FullSlot)
+	}
+}
+
+func TestRelaxedSnapshotProbeConfigUsesTinyStage1Sample(t *testing.T) {
+	cfg := DefaultSnapshotConfig().toInternalConfig("")
+	relaxed := relaxedSnapshotProbeConfig(cfg)
+
+	if relaxed.Stage1WarmKiB != 0 {
+		t.Fatalf("Stage1WarmKiB = %d, want 0", relaxed.Stage1WarmKiB)
+	}
+	if relaxed.Stage1WindowKiB != 64 {
+		t.Fatalf("Stage1WindowKiB = %d, want 64", relaxed.Stage1WindowKiB)
+	}
+	if relaxed.Stage1Windows != 1 {
+		t.Fatalf("Stage1Windows = %d, want 1", relaxed.Stage1Windows)
+	}
+}

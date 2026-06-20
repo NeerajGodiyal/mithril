@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -23,11 +24,14 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/bankhash"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
+	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
@@ -107,6 +111,88 @@ func formatBlockSourceStatus(fetchStats blockstream.FetchStatsSnapshot) string {
 		return fetchStats.CurrentSource
 	}
 	return fetchStats.SourceStatus
+}
+
+func formatAlpenglowObserverStatus(snapshot consensusengine.Snapshot) (string, bool) {
+	if snapshot.Mode != consensusengine.ModeAlpenglowObserver || snapshot.Alpenglow == nil {
+		return "", false
+	}
+	ag := snapshot.Alpenglow
+	status := fmt.Sprintf("cert_replay match/miss/pending=%d/%d/%d mature=%d pre_window=%d latest_cert=%d latest_finalized=%d latest_replay=%d",
+		ag.CertificateReplayMatches,
+		ag.CertificateReplayMismatches,
+		ag.CertificateReplayPending,
+		ag.CertificateReplayMaturePending,
+		ag.CertificateReplayPreWindowPending,
+		ag.LatestCertificateSlot,
+		ag.LatestFinalizedSlot,
+		ag.LatestReplayBlockSlot,
+	)
+	if snapshot.Receiver != nil {
+		recv := snapshot.Receiver
+		status = fmt.Sprintf("votor conn=%d streams=%d msgs=%d votes=%d certs=%d decode_errors=%d last_msg=%s | %s",
+			recv.ConnectionsAccepted,
+			recv.StreamsReceived,
+			recv.MessagesDecoded,
+			recv.VotesDecoded,
+			recv.CertificatesDecoded,
+			recv.DecodeErrors,
+			alpenglowMessageAgeLabel(recv.LastMessageAt),
+			status,
+		)
+	}
+	return status, true
+}
+
+func isAlpenglowReplayMode(consensusOpts *ConsensusOpts) bool {
+	if consensusOpts == nil || consensusOpts.Mode == "" {
+		return false
+	}
+	mode, err := consensusengine.NormalizeMode(consensusOpts.Mode)
+	if err != nil {
+		return false
+	}
+	return mode == consensusengine.ModeAlpenglowObserver || mode == consensusengine.ModeAlpenglow
+}
+
+func applyAlpenglowRuntimeFeatureOverrides(f *features.Features, slot uint64) {
+	if f == nil {
+		return
+	}
+
+	var enabled []string
+	for _, gate := range []features.FeatureGate{
+		features.VoteStateV4,
+		features.TimelyVoteCredits,
+		features.DeprecateUnusedLegacyVotePlumbing,
+	} {
+		if f.IsActive(gate) {
+			continue
+		}
+		f.EnableFeature(gate, slot)
+		enabled = append(enabled, gate.Name)
+	}
+	if len(enabled) != 0 {
+		mlog.Log.Infof("Alpenglow mode: forcing runtime vote feature(s) at slot %d: %v", slot, enabled)
+	}
+}
+
+func alpenglowClockFeatureActive(f *features.Features) bool {
+	if f == nil {
+		return false
+	}
+	return f.IsActive(features.Alpenglow) || f.IsActive(features.AlpenglowDevContext)
+}
+
+func useAlpenglowClockSemantics(alpenglowReplayMode bool, f *features.Features) bool {
+	return alpenglowReplayMode || alpenglowClockFeatureActive(f)
+}
+
+func alpenglowMessageAgeLabel(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return time.Since(t).Round(time.Second).String()
 }
 
 // ReplayResult contains the result of a replay operation, including shutdown state
@@ -214,6 +300,78 @@ func serializeAllEpochStakes() map[uint64][]byte {
 		result[epoch] = data
 	}
 	return result
+}
+
+func installAlpenglowValidatorSet(consensusEngine consensusengine.Engine, epoch uint64) {
+	sink, ok := consensusEngine.(consensusengine.AlpenglowValidatorSetSink)
+	if !ok {
+		return
+	}
+
+	stakes := global.EpochStakes(epoch)
+	voteAccts := alpenglowVoteAccountsForEpoch(epoch, stakes)
+	set, err := alpenglow.BuildValidatorSet(epoch, stakes, voteAccts, global.EpochTotalStake(epoch))
+	if err != nil {
+		mlog.Log.FileOnlyf("ALPENGLOW observer: validator set unavailable for epoch %d: %v", epoch, err)
+		return
+	}
+	if err := sink.SetAlpenglowValidatorSet(set); err != nil {
+		mlog.Log.FileOnlyf("ALPENGLOW observer: failed to install validator set for epoch %d: %v", epoch, err)
+	}
+}
+
+func installCachedAlpenglowValidatorSets(consensusEngine consensusengine.Engine, currentEpoch uint64) {
+	sink, ok := consensusEngine.(consensusengine.AlpenglowValidatorSetSink)
+	if !ok {
+		return
+	}
+
+	epochs := global.GetAllCachedEpochs()
+	if len(epochs) == 0 {
+		installAlpenglowValidatorSet(consensusEngine, currentEpoch)
+		return
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	installedCurrent := false
+	for _, epoch := range epochs {
+		if epoch == currentEpoch {
+			installedCurrent = true
+		}
+		stakes := global.EpochStakes(epoch)
+		voteAccts := alpenglowVoteAccountsForEpoch(epoch, stakes)
+		set, err := alpenglow.BuildValidatorSet(epoch, stakes, voteAccts, global.EpochTotalStake(epoch))
+		if err != nil {
+			mlog.Log.FileOnlyf("ALPENGLOW observer: validator set unavailable for cached epoch %d: %v", epoch, err)
+			continue
+		}
+		if err := sink.SetAlpenglowValidatorSet(set); err != nil {
+			mlog.Log.FileOnlyf("ALPENGLOW observer: failed to install cached validator set for epoch %d: %v", epoch, err)
+		}
+	}
+	if !installedCurrent {
+		installAlpenglowValidatorSet(consensusEngine, currentEpoch)
+	}
+}
+
+func alpenglowVoteAccountsForEpoch(epoch uint64, stakes map[solana.PublicKey]uint64) map[solana.PublicKey]*epochstakes.VoteAccount {
+	voteAccts := make(map[solana.PublicKey]*epochstakes.VoteAccount, len(stakes))
+	for voteAcct, meta := range global.EpochStakesVoteAccts(epoch) {
+		if meta == nil {
+			continue
+		}
+		copied := *meta
+		copied.BlsPubkeyCompressed = cloneBLSCompressed(meta.BlsPubkeyCompressed)
+		voteAccts[voteAcct] = &copied
+	}
+	return voteAccts
+}
+
+func cloneBLSCompressed(src *[48]byte) *[48]byte {
+	if src == nil {
+		return nil
+	}
+	copied := *src
+	return &copied
 }
 
 func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
@@ -351,7 +509,19 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 	}
 }
 
-func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
+func featureActiveInAccountsDb(acctsDb *accountsdb.AccountsDb, gate features.FeatureGate, slot uint64) bool {
+	acct, err := acctsDb.GetAccount(slot, gate.Address)
+	if err != nil {
+		return false
+	}
+	if acct.Owner != a.FeatureAddr {
+		return false
+	}
+	featureAcct := features.UnmarshalFeatureAcct(acct.Data)
+	return featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt
+}
+
+func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb, disableFeesSysvar bool) {
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochScheduleAddr)
 		if err != nil {
@@ -377,21 +547,27 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 
 	{
-		acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
-		if err != nil {
-			panic("unable to get fees sysvar when caching sysvars")
+		if disableFeesSysvar {
+			sealevel.SysvarCache.Fees.Sysvar = nil
+			sealevel.SysvarCache.Fees.Acct = nil
+			mlog.Log.Infof("DisableFeesSysvar feature active; skipping legacy Fees sysvar cache")
+		} else {
+			acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
+			if err != nil {
+				panic("unable to get fees sysvar when caching sysvars")
+			}
+			var fees sealevel.SysvarFees
+			decoder := bin.NewBinDecoder(acct.Data)
+			fees.MustUnmarshalWithDecoder(decoder)
+			sealevel.SysvarCache.Fees.Sysvar = &fees
+			sealevel.SysvarCache.Fees.Acct = acct
 		}
-		var fees sealevel.SysvarFees
-		decoder := bin.NewBinDecoder(acct.Data)
-		fees.MustUnmarshalWithDecoder(decoder)
-		sealevel.SysvarCache.Fees.Sysvar = &fees
-		sealevel.SysvarCache.Fees.Acct = acct
 	}
 
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochRewardsAddr)
 		if err != nil {
-			panic("unable to get fees sysvar when caching sysvars")
+			panic("unable to get epoch rewards sysvar when caching sysvars")
 		}
 		var rewards sealevel.SysvarEpochRewards
 		decoder := bin.NewBinDecoder(acct.Data)
@@ -401,7 +577,7 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) (accounts.Accounts, accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
 		return nil, nil, err
@@ -457,7 +633,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 				panic("unable to unmarshal clock sysvar")
 			}
 
-			err = updateClockSysvar(&clock, block, epochSchedule)
+			err = updateClockSysvarForMode(&clock, block, epochSchedule, alpenglowClock)
 			if err != nil {
 				panic(fmt.Sprintf("failed to update clock sysvar: %s", err))
 			}
@@ -678,6 +854,32 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	}
 
 	return accts, parentAccts, nil
+}
+
+func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	if block.UnixTimestamp == 0 {
+		return nil
+	}
+
+	clockAcct, err := slotCtx.GetAccount(sealevel.SysvarClockAddr)
+	if err != nil {
+		return fmt.Errorf("unable to get clock sysvar for Alpenglow footer update: %w", err)
+	}
+
+	decoder := bin.NewBinDecoder(clockAcct.Data)
+	var clock sealevel.SysvarClock
+	if err := clock.UnmarshalWithDecoder(decoder); err != nil {
+		return fmt.Errorf("unable to unmarshal clock sysvar for Alpenglow footer update: %w", err)
+	}
+	if err := updateClockSysvarFromAlpenglowFooter(&clock, block, epochSchedule); err != nil {
+		return err
+	}
+
+	newClockBytes := clock.MustMarshal()
+	copy(clockAcct.Data, newClockBytes)
+	sealevel.SysvarCache.Clock.Sysvar = &clock
+	sealevel.SysvarCache.Clock.Acct = clockAcct
+	return nil
 }
 
 // setupInitialVoteAcctsAndStakeAccts populates the vote and stake caches at startup.
@@ -1109,7 +1311,7 @@ func initializeBlockHeight(rpcc *rpcclient.RpcClient, mithrilState *state.Mithri
 }
 
 // buildInitialEpochStakesCache seeds the epoch stakes cache from state file manifest data.
-func buildInitialEpochStakesCache(mithrilState *state.MithrilState, currentEpoch uint64, snapshotEpoch uint64) error {
+func buildInitialEpochStakesCache(acctsDb *accountsdb.AccountsDb, mithrilState *state.MithrilState, currentEpoch uint64, snapshotEpoch uint64, slot uint64) error {
 	seeds, rebased, err := prepareManifestEpochStakesForRuntime(mithrilState, currentEpoch, snapshotEpoch)
 	if err != nil {
 		return err
@@ -1137,7 +1339,19 @@ func buildInitialEpochStakesCache(mithrilState *state.MithrilState, currentEpoch
 	// Load EpochAuthorizedVoters from state file (required)
 	// Supports multiple authorized voters per vote account (matches original manifest behavior)
 	if len(mithrilState.ManifestEpochAuthorizedVoters) == 0 {
-		return fmt.Errorf("state file missing manifest_epoch_authorized_voters - delete AccountsDB and rebuild from snapshot")
+		epochStakes := global.EpochStakes(currentEpoch)
+		if len(epochStakes) == 0 {
+			return fmt.Errorf("state file missing manifest_epoch_authorized_voters and no epoch stakes are loaded for epoch %d", currentEpoch)
+		}
+		mlog.Log.Warnf("state file missing manifest_epoch_authorized_voters; rebuilding authorized voters from vote accounts at slot %d", slot)
+		if err := RebuildVoteCacheFromAccountsDB(acctsDb, slot, epochStakes, 0); err != nil {
+			return fmt.Errorf("failed to rebuild vote cache for epoch authorized voters: %w", err)
+		}
+		rebuildAuthorizedVotersFromVoteCache(currentEpoch)
+		if cache := global.EpochAuthorizedVoters(); cache == nil || cache.Len() == 0 {
+			return fmt.Errorf("rebuilt epoch authorized voters cache is empty for epoch %d", currentEpoch)
+		}
+		return nil
 	}
 	for voteAcctStr, authorizedVoterStrs := range mithrilState.ManifestEpochAuthorizedVoters {
 		voteAcct, err := base58.DecodeFromString(voteAcctStr)
@@ -1193,6 +1407,8 @@ func ReplayBlocks(
 	turbineGossipBindAddr string,
 	turbineAdvertisedIP string,
 	turbineShredVersion uint16,
+	turbineAlpenglowAddr string,
+	turbineIdentity ed25519.PrivateKey,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -1234,7 +1450,8 @@ func ReplayBlocks(
 		rpcBackups = rpcEndpoints[1:]
 	}
 
-	cacheConstantSysvars(acctsDb)
+	disableFeesSysvar := featureActiveInAccountsDb(acctsDb, features.DisableFeesSysvar, startSlot)
+	cacheConstantSysvars(acctsDb, disableFeesSysvar)
 	epochSchedule, usingManifestEpochSchedule, err := bankEpochScheduleForReplay(mithrilState)
 	if err != nil {
 		result.Error = err
@@ -1268,7 +1485,15 @@ func ReplayBlocks(
 	// Use state file for transaction count (required)
 	global.IncrTransactionCount(mithrilState.ManifestTransactionCount)
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
+	alpenglowReplayMode := isAlpenglowReplayMode(consensusOpts)
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, replayCtx, startSlot, isFirstSlotInEpoch)
+	if alpenglowReplayMode {
+		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
+	}
+	alpenglowClock := useAlpenglowClockSemantics(alpenglowReplayMode, replayCtx.CurrentFeatures)
+	if alpenglowReplayMode && !alpenglowClockFeatureActive(replayCtx.CurrentFeatures) {
+		mlog.Log.Infof("Alpenglow mode: Alpenglow feature gate is not active; forcing Alpenglow bank clock semantics")
+	}
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	// Load epoch stakes - persisted stakes on resume, state file on fresh start
@@ -1323,14 +1548,14 @@ func ReplayBlocks(
 			}
 		} else {
 			// Resume in same epoch as snapshot, no boundaries crossed - state file epoch stakes still valid
-			if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
+			if err := buildInitialEpochStakesCache(acctsDb, mithrilState, currentEpoch, snapshotEpoch, startSlot); err != nil {
 				result.Error = err
 				return result
 			}
 		}
 	} else {
 		// Fresh start: load all epochs from state file
-		if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
+		if err := buildInitialEpochStakesCache(acctsDb, mithrilState, currentEpoch, snapshotEpoch, startSlot); err != nil {
 			result.Error = err
 			return result
 		}
@@ -1343,6 +1568,16 @@ func ReplayBlocks(
 	// check whether enforcement requires authorized voters.
 	useLiveShredStream := useLightbringer || useTurbine
 	consensusCfg := resolveConsensusConfig(consensusOpts, useLightbringer, useTurbine, isLive)
+	var consensusEngine consensusengine.Engine
+	if consensusOpts != nil {
+		consensusEngine = consensusOpts.Engine
+	}
+	if sink, ok := consensusEngine.(consensusengine.AlpenglowEpochLookupSink); ok {
+		schedule := epochSchedule
+		sink.SetAlpenglowEpochLookup(func(slot uint64) uint64 {
+			return schedule.GetEpoch(slot)
+		})
+	}
 	consensusManagedLiveStream := consensusCfg.enforceActive &&
 		isLive &&
 		consensusManagesLiveShredStream(consensusCfg.enforceSource, useLightbringer, useTurbine)
@@ -1365,6 +1600,7 @@ func ReplayBlocks(
 	forkChoice.Start()
 	defer forkChoice.Stop()
 	global.SetForkChoice(forkChoice)
+	installCachedAlpenglowValidatorSets(consensusEngine, currentEpoch)
 
 	// Instantiate the consensus coordinator for skip-path resolution and policy.
 	// In Lightbringer mode this now resolves a pre-execution block/skip path from
@@ -1412,6 +1648,9 @@ func ReplayBlocks(
 			TurbineGossipBindAddr:        turbineGossipBindAddr,
 			TurbineAdvertisedIP:          turbineAdvertisedIP,
 			TurbineShredVersion:          turbineShredVersion,
+			TurbineAlpenglowAddr:         turbineAlpenglowAddr,
+			TurbineAlpenglowBlockIDHints: turbineAlpenglowAddr != "",
+			TurbineIdentity:              turbineIdentity,
 			LeaderForSlot:                global.LeaderForSlot,
 			BackupRpcEndpoints:           rpcBackups,
 			StartSlot:                    startSlot,
@@ -1446,7 +1685,18 @@ func ReplayBlocks(
 		opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
 		opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
 	}
+	if useTurbine && turbineAlpenglowAddr != "" {
+		if decisionSource, ok := consensusEngine.(consensusengine.AlpenglowDecisionSource); ok {
+			opts.AlpenglowDecisionSource = decisionSource.NextAlpenglowDecision
+		}
+		if candidateObserver, ok := consensusEngine.(consensusengine.AlpenglowCandidateBlockObserver); ok {
+			opts.AlpenglowCandidateBlockSink = candidateObserver.ObserveAlpenglowCandidateBlock
+		}
+	}
 	blockStream := blockstream.NewBlockSource(opts)
+	if publisher, ok := consensusEngine.(consensusengine.AlpenglowBlockIDPublisher); ok && useTurbine && turbineAlpenglowAddr != "" {
+		publisher.SetAlpenglowBlockIDSink(blockStream.SetKnownAlpenglowBlockID)
+	}
 
 	if !isLive {
 		blockStream.DownloadInitialBlocks()
@@ -1641,6 +1891,18 @@ func ReplayBlocks(
 				continue
 			}
 
+			if consensusEngine != nil {
+				stats := blockStream.GetFetchStats()
+				if err := consensusEngine.ObserveBlock(ctx, consensusengine.BlockObservation{
+					Block:  block,
+					Source: stats.CurrentSource,
+					At:     time.Now(),
+				}); err != nil {
+					result.Error = fmt.Errorf("consensus engine observe block: %w", err)
+					break
+				}
+			}
+
 			syncConsensusBufferedExecutionMode(block.Slot)
 
 			if block.FromLightbringer {
@@ -1781,6 +2043,7 @@ func ReplayBlocks(
 				global.EpochTotalStake(block.Epoch),
 				global.EpochAuthorizedVoters(),
 			)
+			installAlpenglowValidatorSet(consensusEngine, block.Epoch)
 		}
 
 		// Log replay start message once, after initial configuration completes
@@ -1798,6 +2061,10 @@ func ReplayBlocks(
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, replayCtx, currentSlot, true)
+			if alpenglowReplayMode {
+				applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, currentSlot)
+			}
+			alpenglowClock = useAlpenglowClockSemantics(alpenglowReplayMode, replayCtx.CurrentFeatures)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch, rpcc, dbgOpts)
 			currentEpoch = block.Epoch
@@ -1810,6 +2077,7 @@ func ReplayBlocks(
 				global.EpochTotalStake(currentEpoch),
 				global.EpochAuthorizedVoters(),
 			)
+			installAlpenglowValidatorSet(consensusEngine, currentEpoch)
 
 			// Persist rebuilt authorized voters to state file so resume loads fresh data
 			if cache := global.EpochAuthorizedVoters(); cache != nil && mithrilState != nil {
@@ -1865,7 +2133,7 @@ func ReplayBlocks(
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt, alpenglowClock)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -1877,6 +2145,22 @@ func ReplayBlocks(
 
 		if rpcServer != nil {
 			rpcServer.SetSlotCtx(lastSlotCtx)
+		}
+
+		if consensusEngine != nil {
+			var finalBankhash [32]byte
+			copy(finalBankhash[:], lastSlotCtx.FinalBankhash)
+			stats := blockStream.GetFetchStats()
+			if err := consensusEngine.OnReplayResult(ctx, consensusengine.SlotReplayResult{
+				Slot:     block.Slot,
+				Bankhash: finalBankhash,
+				Source:   stats.CurrentSource,
+				At:       time.Now(),
+			}); err != nil {
+				result.Error = fmt.Errorf("consensus engine replay result: %w", err)
+				global.ClearPendingStakePubkeys()
+				break
+			}
 		}
 
 		if consensusBufferedExecutionActive {
@@ -2171,6 +2455,11 @@ func ReplayBlocks(
 
 				// Line 2: Current block source
 				mlog.Log.InfofPrecise("  block source: %s", formatBlockSourceStatus(fetchStats))
+				if consensusEngine != nil {
+					if status, ok := formatAlpenglowObserverStatus(consensusEngine.Snapshot()); ok {
+						mlog.Log.InfofPrecise("  alpenglow observer: %s", status)
+					}
+				}
 				if consensusBufferedExecutionActive {
 					readyDecisionCount := 0
 					readyLeafSlot := uint64(0)
@@ -2226,9 +2515,9 @@ func ReplayBlocks(
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
 					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
-					mlog.Log.InfofPrecise("  getBlock fetch: %.1f rps (%d calls) | avg %.0fms | %.0f%% success | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
+					mlog.Log.InfofPrecise("  getBlock fetch: %.1f rps (%d calls) | avg %.0fms | %.0f%% success | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d hist:%d tr:%d",
 						fetchStats.GetBlockRPS, fetchStats.Attempts, fetchStats.AvgLatencyMs, fetchStats.SuccessRate, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
-						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
+						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrHistory, fetchStats.ErrTransient)
 
 					// Surface tip poll issues (only show if there are problems)
 					if fetchStats.TipStaleSecs > 30 || fetchStats.TotalTipPollFails > 0 {
@@ -2653,6 +2942,7 @@ func ProcessBlock(
 	// pt is updated after StoreAccounts completes through a callback.
 	// Must be non-nil.
 	pt *persistedTracker,
+	alpenglowClock bool,
 ) (*sealevel.SlotCtx, error) {
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -2732,7 +3022,7 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule)
+	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule, alpenglowClock)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -2780,6 +3070,12 @@ func ProcessBlock(
 	setReplayStage("run_incinerator")
 	runIncinerator(slotCtx)
 	metrics.GlobalBlockReplay.RunIncinerator.AddTimingSince(start)
+
+	if alpenglowClock {
+		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
+			return nil, err
+		}
+	}
 
 	start = time.Now()
 	setReplayStage("compile_accounts")

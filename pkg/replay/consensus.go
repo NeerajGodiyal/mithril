@@ -3,6 +3,7 @@ package replay
 import (
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
+	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
 	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
@@ -20,6 +21,8 @@ type ConsensusOpts struct {
 	SkipPathMaxDepth int    // Max slots for skip-path solver (default: 64)
 	UnresolvedPolicy string // "halt" or "warn" (default: "halt")
 	EnforceOnSource  string // "lightbringer", "turbine", "stream", or "all" (default: "stream")
+	Mode             string // "classic", "alpenglow-observer", or "alpenglow" (default: "classic")
+	Engine           consensusengine.Engine
 }
 
 type consensusConfig struct {
@@ -56,6 +59,16 @@ func resolveConsensusConfig(opts *ConsensusOpts, useLightbringer, useTurbine, is
 		}
 		if opts.EnforceOnSource != "" {
 			cfg.enforceSource = opts.EnforceOnSource
+		}
+		if opts.Mode != "" {
+			mode, err := consensusengine.NormalizeMode(opts.Mode)
+			if err != nil {
+				mlog.Log.Warnf("%v; defaulting to %q", err, consensusengine.ModeClassic)
+			} else if mode != consensusengine.ModeClassic {
+				cfg.enforceActive = false
+				cfg.bufferedExecutionActive = false
+				return cfg
+			}
 		}
 	}
 

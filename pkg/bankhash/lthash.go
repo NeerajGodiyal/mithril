@@ -16,6 +16,11 @@ func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Acco
 }
 
 func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) *lthash.LtHash {
+	modifiedAccts = dedupeModifiedAccts(modifiedAccts)
+	if len(modifiedAccts) == 0 {
+		return &lthash.LtHash{}
+	}
+
 	numWorkers := min(32, len(modifiedAccts))
 
 	hashes := make([]*lthash.LtHash, len(modifiedAccts))
@@ -43,6 +48,28 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 	}
 
 	return &deltaHash
+}
+
+func dedupeModifiedAccts(modifiedAccts []*accounts.Account) []*accounts.Account {
+	if len(modifiedAccts) < 2 {
+		return modifiedAccts
+	}
+
+	unique := make([]*accounts.Account, 0, len(modifiedAccts))
+	seen := make(map[[32]byte]int, len(modifiedAccts))
+	for _, acct := range modifiedAccts {
+		if acct == nil {
+			continue
+		}
+		key := [32]byte(acct.Key)
+		if idx, ok := seen[key]; ok {
+			unique[idx] = acct
+			continue
+		}
+		seen[key] = len(unique)
+		unique = append(unique, acct)
+	}
+	return unique
 }
 
 func calculateSingleDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAcct *accounts.Account) *lthash.LtHash {

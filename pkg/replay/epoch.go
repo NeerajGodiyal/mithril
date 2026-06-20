@@ -290,7 +290,10 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 	for votePk, stake := range scanResult.EffectiveStakes {
 		voteAcct, exists := voteCache[votePk]
 		if exists {
-			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{NodePubkey: voteAcct.NodePubkey()})
+			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{
+				NodePubkey:          voteAcct.NodePubkey(),
+				BlsPubkeyCompressed: voteAcct.BlsPubkeyCompressed(),
+			})
 		}
 	}
 	global.PutEpochTotalStake(leaderScheduleEpoch, scanResult.TotalEffectiveStake)

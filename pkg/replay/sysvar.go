@@ -19,6 +19,10 @@ const maxAllowableDriftFast = 25
 const maxAllowableDriftSlow = 150
 
 func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	return updateClockSysvarForMode(clock, block, epochSchedule, false)
+}
+
+func updateClockSysvarForMode(clock *sealevel.SysvarClock, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) error {
 	epochOld := clock.Epoch
 	epochNew := block.Epoch
 
@@ -26,7 +30,11 @@ func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block, epochSch
 		return fmt.Errorf("unexpected epoch transition in Clock sysvar: clock epoch %d, block epoch %d at slot %d", epochOld, epochNew, block.Slot)
 	}
 
-	if global.CalcUnixTimeForClockSysvar() {
+	if alpenglowClock {
+		// Alpenglow banks populate timestamp fields from the block footer after
+		// execution. At bank start, transactions only see updated slot/epoch
+		// fields while timestamp fields are preserved from the parent bank.
+	} else if global.CalcUnixTimeForClockSysvar() {
 		firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(clock.Epoch)
 		epochStartTimestamp := clock.EpochStartTimestamp
 		timestampEstimate := getTimestampEstimate(block.Slot, firstSlotInEpoch, epochStartTimestamp, epochSchedule)
@@ -39,12 +47,32 @@ func updateClockSysvar(clock *sealevel.SysvarClock, block *block.Block, epochSch
 
 	clock.Slot = block.Slot
 	clock.Epoch = epochNew
+	clock.LeaderScheduleEpoch = epochSchedule.LeaderScheduleEpoch(clock.Slot)
 
 	if epochOld != epochNew {
 		clock.EpochStartTimestamp = clock.UnixTimestamp
-		clock.LeaderScheduleEpoch = epochSchedule.LeaderScheduleEpoch(clock.Slot)
 	}
 
+	return nil
+}
+
+func updateClockSysvarFromAlpenglowFooter(clock *sealevel.SysvarClock, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	if block.UnixTimestamp == 0 {
+		return nil
+	}
+
+	epochNew := block.Epoch
+	parentEpoch := epochSchedule.GetEpoch(block.ParentSlot)
+	epochStartTimestamp := clock.EpochStartTimestamp
+	if block.Slot == 0 || parentEpoch != epochNew {
+		epochStartTimestamp = block.UnixTimestamp
+	}
+
+	clock.Slot = block.Slot
+	clock.Epoch = epochNew
+	clock.LeaderScheduleEpoch = epochSchedule.LeaderScheduleEpoch(clock.Slot)
+	clock.EpochStartTimestamp = epochStartTimestamp
+	clock.UnixTimestamp = block.UnixTimestamp
 	return nil
 }
 

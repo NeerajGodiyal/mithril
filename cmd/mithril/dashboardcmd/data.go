@@ -64,6 +64,8 @@ type configData struct {
 	cluster             string
 	rpcEndpoints        []string
 	blockSource         string
+	consensusMode       string
+	alpenglowBindAddr   string
 	lbEnabled           bool
 	lbGossip            string
 	lbGrpcAddr          string
@@ -120,6 +122,8 @@ func readConfig(configFile string) *configData {
 		cluster:             cluster,
 		rpcEndpoints:        v.GetStringSlice("network.rpc"),
 		blockSource:         v.GetString("block.source"),
+		consensusMode:       v.GetString("consensus.mode"),
+		alpenglowBindAddr:   v.GetString("consensus.alpenglow_observer_bind_addr"),
 		lbEnabled:           v.GetBool("lightbringer.enabled"),
 		lbGossip:            v.GetString("lightbringer.gossip_entrypoint"),
 		lbGrpcAddr:          v.GetString("lightbringer.grpc_addr"),
@@ -357,6 +361,26 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 		results = append(results, checkResult{"RPC endpoint", "pass", cfg.rpcEndpoints[0]})
 	} else {
 		results = append(results, checkResult{"RPC endpoint", "fail", "no RPC endpoints configured"})
+	}
+
+	consensusMode := cfg.consensusMode
+	if consensusMode == "" {
+		consensusMode = "classic"
+	}
+	switch strings.ToLower(strings.TrimSpace(consensusMode)) {
+	case "classic", "legacy", "alpenglow-observer":
+		results = append(results, checkResult{"Consensus", "pass", consensusMode})
+	case "alpenglow":
+		results = append(results, checkResult{"Consensus", "warn", "alpenglow voting mode is not implemented yet"})
+	default:
+		results = append(results, checkResult{"Consensus", "fail", "invalid mode: " + consensusMode})
+	}
+	if cfg.alpenglowBindAddr != "" {
+		if _, _, err := net.SplitHostPort(cfg.alpenglowBindAddr); err != nil {
+			results = append(results, checkResult{"Alpenglow Votor", "fail", "invalid bind address: " + cfg.alpenglowBindAddr})
+		} else {
+			results = append(results, checkResult{"Alpenglow Votor", "pass", cfg.alpenglowBindAddr})
+		}
 	}
 
 	// AccountsDB path

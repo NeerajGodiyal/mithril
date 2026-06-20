@@ -103,13 +103,24 @@ func (sr *SysvarEpochSchedule) Slot0(epoch uint64) uint64 {
 func (sr *SysvarEpochSchedule) GetEpochAndSlotIndex(slot uint64) (uint64, uint64) {
 	if slot < sr.FirstNormalSlot {
 		nextPowerOfTwo := func(n uint64) uint64 {
-			shift := uint64(bits.Len(uint(n)))
-			return 1 << shift
+			if n <= 1 {
+				return 1
+			}
+			shift := bits.Len64(n - 1)
+			if shift >= 64 {
+				return math.MaxUint64
+			}
+			return 1 << uint(shift)
 		}
 
-		epoch := uint64(bits.TrailingZeros64(nextPowerOfTwo(slot+MinimumSlotsPerEpoch+1)) - bits.TrailingZeros64(MinimumSlotsPerEpoch) - 1)
-		epochLen := uint64(math.Pow(2, float64(bits.TrailingZeros64(uint64(epoch+MinimumSlotsPerEpoch)))))
-		return epoch, slot - (epochLen - MinimumSlotsPerEpoch)
+		nextPower := nextPowerOfTwo(safemath.SaturatingAddU64(slot, MinimumSlotsPerEpoch+1))
+		minEpochLenTrailingZeros := uint64(bits.TrailingZeros64(MinimumSlotsPerEpoch))
+		epoch := safemath.SaturatingSubU64(
+			safemath.SaturatingSubU64(uint64(bits.TrailingZeros64(nextPower)), minEpochLenTrailingZeros),
+			1,
+		)
+		epochLen := safemath.SaturatingPow(2, uint32(epoch)+uint32(minEpochLenTrailingZeros))
+		return epoch, safemath.SaturatingSubU64(slot, safemath.SaturatingSubU64(epochLen, MinimumSlotsPerEpoch))
 	} else {
 		normalSlotIndex := slot - sr.FirstNormalSlot
 		normalEpochIndex := normalSlotIndex / sr.SlotsPerEpoch

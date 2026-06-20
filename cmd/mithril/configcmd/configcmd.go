@@ -137,7 +137,7 @@ snapshots = %q           # ~100GB for full + incremental
 logs = %q                # Log files (created if missing)
 
 [network]
-cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
+cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet" | "alpenglow"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
@@ -163,6 +163,19 @@ source = "rpc"   # "rpc" | "lightbringer" | "turbine"
 
 [tuning]
 txpar = 24   # Recommended: 2x your CPU core count
+
+[validator]
+identity_keypair = ""              # Optional validator identity for native turbine gossip
+vote_account_keypair = ""          # Optional vote account keypair path for diagnostics/future voting
+authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
+
+[consensus]
+mode = "classic"             # "classic" | "alpenglow-observer" | "alpenglow"
+alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener for observer mode
+alpenglow_max_message_bytes = 0   # 0 = default
+unresolved_policy = "halt"   # "halt" | "warn"
+skip_path_max_depth = 64
+enforce_on_source = "stream"
 
 [rpc]
 port = 8899  # Mithril's RPC server (binds to all interfaces)

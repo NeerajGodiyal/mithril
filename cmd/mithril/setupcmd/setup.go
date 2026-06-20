@@ -247,6 +247,7 @@ func (m setupModel) currentItems() []menuItem {
 			menuOptionDesc("mainnet-beta", "mainnet-beta", "Production Solana network"),
 			menuOptionDesc("testnet", "testnet", "Test network (more stable)"),
 			menuOptionDesc("devnet", "devnet", "Development network (frequent resets)"),
+			menuOptionDesc("alpenglow", "alpenglow", "Public Alpenglow test cluster"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -398,6 +399,8 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 			m.rpcEndpoint = "https://api.testnet.solana.com"
 		case "devnet":
 			m.rpcEndpoint = "https://api.devnet.solana.com"
+		case "alpenglow":
+			m.rpcEndpoint = "https://alpenglow.rpcpool.com"
 		}
 		m.pushInput(scrRPC)
 
@@ -864,7 +867,15 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	cfg.WriteString("[tuning]\n")
 	fmt.Fprintf(&cfg, "txpar = %s\n\n", m.txpar)
 
+	cfg.WriteString("[validator]\n")
+	cfg.WriteString("identity_keypair = \"\"\n")
+	cfg.WriteString("vote_account_keypair = \"\"\n")
+	cfg.WriteString("authorized_withdrawer_keypair = \"\"\n\n")
+
 	cfg.WriteString("[consensus]\n")
+	cfg.WriteString("mode = \"classic\"\n")
+	cfg.WriteString("alpenglow_observer_bind_addr = \"\"\n")
+	cfg.WriteString("alpenglow_max_message_bytes = 0\n")
 	fmt.Fprintf(&cfg, "unresolved_policy = %q\n", m.consensusPolicy)
 	cfg.WriteString("skip_path_max_depth = 64\n")
 	cfg.WriteString("enforce_on_source = \"stream\"\n\n")
@@ -912,7 +923,7 @@ snapshots = "/mnt/mithril-ledger/snapshots"   # ~100GB for full + incremental
 logs = "/mnt/mithril-logs"                    # Log files (created if missing)
 
 [network]
-cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet"
+cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet" | "alpenglow"
 rpc = ["https://api.mainnet-beta.solana.com"]
 
 [block]
@@ -941,7 +952,15 @@ max_inflight = 8
 [tuning]
 txpar = %d   # Recommended: 2x your CPU core count
 
+[validator]
+identity_keypair = ""              # Optional validator identity for native turbine gossip
+vote_account_keypair = ""          # Optional vote account keypair path for diagnostics/future voting
+authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
+
 [consensus]
+mode = "classic"           # "classic" | "alpenglow-observer" | "alpenglow"
+alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener for observer mode
+alpenglow_max_message_bytes = 0   # 0 = default
 unresolved_policy = "halt"   # "halt" | "warn"
 skip_path_max_depth = 64
 enforce_on_source = "stream"

@@ -27,6 +27,7 @@ type Config struct {
 	Entrypoint        string
 	BindAddr          string
 	TVUAddr           string
+	AlpenglowAddr     string
 	AdvertisedIP      string
 	ShredVersion      uint16
 	Identity          ed25519.PrivateKey
@@ -42,6 +43,7 @@ type Client struct {
 	entrypoint *net.UDPAddr
 	bindAddr   *net.UDPAddr
 	tvuAddr    *net.UDPAddr
+	alpenglow  *net.UDPAddr
 	identity   ed25519.PrivateKey
 	pubkey     Pubkey
 
@@ -138,6 +140,13 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve TVU address: %w", err)
 	}
+	var alpenglowAddr *net.UDPAddr
+	if cfg.AlpenglowAddr != "" {
+		alpenglowAddr, err = net.ResolveUDPAddr("udp", cfg.AlpenglowAddr)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Alpenglow address: %w", err)
+		}
+	}
 	identity := cfg.Identity
 	if len(identity) == 0 {
 		_, identity, err = ed25519.GenerateKey(rand.Reader)
@@ -158,6 +167,7 @@ func NewClient(cfg Config) (*Client, error) {
 		entrypoint:  entrypoint,
 		bindAddr:    bindAddr,
 		tvuAddr:     tvuAddr,
+		alpenglow:   alpenglowAddr,
 		identity:    identity,
 		pubkey:      pubkey,
 		peers:       make(map[udpAddrKey]knownPeer),
@@ -196,8 +206,20 @@ func (c *Client) Run(ctx context.Context) error {
 	contact := c.contact
 	c.contactMu.RUnlock()
 	if contact != nil {
-		mlog.Log.Infof("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s shred_version=%d client=%s",
-			conn.LocalAddr().String(), contact.GossipAddr.String(), contact.TVUAddr.String(), contact.ShredVer, c.cfg.Name)
+		alpenglowAddr := "disabled"
+		tpuVoteAddr := "disabled"
+		tpuVoteQuicAddr := "disabled"
+		if contact.AlpenglowAddr != nil {
+			alpenglowAddr = contact.AlpenglowAddr.String()
+		}
+		if contact.TPUVoteAddr != nil {
+			tpuVoteAddr = contact.TPUVoteAddr.String()
+		}
+		if contact.TPUVoteQuicAddr != nil {
+			tpuVoteQuicAddr = contact.TPUVoteQuicAddr.String()
+		}
+		mlog.Log.Infof("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s advertised_alpenglow=%s advertised_tpu_vote=%s advertised_tpu_vote_quic=%s shred_version=%d client=%s",
+			conn.LocalAddr().String(), contact.GossipAddr.String(), contact.TVUAddr.String(), alpenglowAddr, tpuVoteAddr, tpuVoteQuicAddr, contact.ShredVer, c.cfg.Name)
 	}
 	c.recordPeer(c.entrypoint)
 
@@ -340,6 +362,21 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 	contact, err := NewContactInfo(c.pubkey, shredVersion, gossipAddr, tvuAddr)
 	if err != nil {
 		return err
+	}
+	if c.alpenglow != nil {
+		alpenglowAddr := &net.UDPAddr{IP: advertisedIP, Port: c.alpenglow.Port}
+		if alpenglowIP := normalizedIP(c.alpenglow.IP); alpenglowIP != nil && !alpenglowIP.IsUnspecified() {
+			alpenglowAddr.IP = alpenglowIP
+		}
+		if err := contact.SetAlpenglowAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow gossip socket: %w", err)
+		}
+		if err := contact.SetTPUVoteAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow TPU vote gossip socket: %w", err)
+		}
+		if err := contact.SetTPUVoteQuicAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow TPU vote QUIC gossip socket: %w", err)
+		}
 	}
 	c.contactMu.Lock()
 	c.contact = contact

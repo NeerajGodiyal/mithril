@@ -8,7 +8,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/tui"
 )
 
-// MigrateConfig checks if a config file is missing [lightbringer] or [consensus]
+// MigrateConfig checks if a config file is missing [lightbringer], [consensus],
+// or [validator]
 // sections and adds them. Returns true if any migration was performed.
 func MigrateConfig(configPath string) bool {
 	data, err := os.ReadFile(configPath)
@@ -19,8 +20,9 @@ func MigrateConfig(configPath string) bool {
 	content := string(data)
 	hasLB := strings.Contains(content, "[lightbringer]")
 	hasConsensus := strings.Contains(content, "[consensus]")
+	hasValidator := strings.Contains(content, "[validator]")
 
-	if hasLB && hasConsensus {
+	if hasLB && hasConsensus && hasValidator {
 		return false // already up to date
 	}
 
@@ -32,9 +34,27 @@ func MigrateConfig(configPath string) bool {
 # [consensus] - Vote-Anchored Consensus (added by mithril setup --migrate)
 # ============================================================================
 # [consensus]
+# mode = "classic"
+# alpenglow_observer_bind_addr = ""
+# alpenglow_max_message_bytes = 0
 # skip_path_max_depth = 64
 # unresolved_policy = "halt"
 # enforce_on_source = "stream"
+`
+	}
+
+	if !hasValidator {
+		additions += `
+# ============================================================================
+# [validator] - Optional Validator Identity (added by mithril setup --migrate)
+# ============================================================================
+# identity_keypair is used by native turbine gossip. Set it to a staked
+# validator identity when running consensus.mode="alpenglow-observer".
+#
+# [validator]
+# identity_keypair = ""
+# vote_account_keypair = ""
+# authorized_withdrawer_keypair = ""
 `
 	}
 

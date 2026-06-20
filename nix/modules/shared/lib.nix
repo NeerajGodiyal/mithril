@@ -56,6 +56,11 @@
         num_slots = cfg.configSchema.replayNumSlots;
         end_slot = cfg.configSchema.replayEndSlot;
       };
+      consensus = {
+        mode = cfg.configSchema.consensusMode;
+        alpenglow_observer_bind_addr = cfg.configSchema.consensusAlpenglowObserverBindAddr;
+        alpenglow_max_message_bytes = cfg.configSchema.consensusAlpenglowMaxMessageBytes;
+      };
       rpc = {
         port = cfg.configSchema.rpcPort;
       };
