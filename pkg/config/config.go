@@ -99,6 +99,15 @@ type BlockConfig struct {
 	NearTipLookahead int `toml:"near_tip_lookahead" mapstructure:"near_tip_lookahead"`               // Slots ahead to schedule
 }
 
+// BlockProductionConfig holds optional validator ingress/block-production settings.
+type BlockProductionConfig struct {
+	Enabled          bool   `toml:"enabled" mapstructure:"enabled"`
+	IdentityPath     string `toml:"identity_path" mapstructure:"identity_path"`
+	TPUQUICBind      string `toml:"tpu_quic_bind" mapstructure:"tpu_quic_bind"`
+	AdvertisedIP     string `toml:"advertised_ip" mapstructure:"advertised_ip"`
+	SigverifyWorkers int    `toml:"sigverify_workers" mapstructure:"sigverify_workers"`
+}
+
 // TurbineConfig holds native gossip/turbine receiver configuration.
 type TurbineConfig struct {
 	BindAddr         string `toml:"bind_addr" mapstructure:"bind_addr"`                 // UDP address for incoming turbine shreds
@@ -227,7 +236,8 @@ type Config struct {
 	Consensus    ConsensusConfig    `toml:"consensus" mapstructure:"consensus"`
 	Validator    ValidatorConfig    `toml:"validator" mapstructure:"validator"`
 	Lightbringer LightbringerConfig `toml:"lightbringer" mapstructure:"lightbringer"`
-	Turbine      TurbineConfig      `toml:"turbine" mapstructure:"turbine"`
+	BlockProduction BlockProductionConfig `toml:"block_production" mapstructure:"block_production"`
+	Turbine         TurbineConfig         `toml:"turbine" mapstructure:"turbine"`
 	Snapshot     SnapshotConfig     `toml:"snapshot" mapstructure:"snapshot"`
 	Development  DevelopmentConfig  `toml:"development" mapstructure:"development"`
 	Reporting    ReportingConfig    `toml:"reporting" mapstructure:"reporting"`

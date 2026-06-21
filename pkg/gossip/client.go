@@ -317,6 +317,16 @@ func (c *Client) RepairPeers() []RepairPeer {
 	return peers
 }
 
+// SetTPUQUIC updates the published TPU QUIC and TPU QUIC forwards endpoints.
+func (c *Client) SetTPUQUIC(addr *net.UDPAddr) error {
+	c.contactMu.Lock()
+	defer c.contactMu.Unlock()
+	if c.contact == nil {
+		return fmt.Errorf("gossip contact info is not initialized")
+	}
+	return c.contact.SetTPUQUIC(addr)
+}
+
 func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 	shredVersion := c.cfg.ShredVersion
 	var advertisedIP net.IP

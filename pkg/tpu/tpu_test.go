@@ -133,6 +133,15 @@ func BenchmarkParseTx(b *testing.B) {
 	}
 }
 
+func TestVerifyPacket(t *testing.T) {
+	if !VerifyPacket(parseHexdump(tpuTx)) {
+		t.Error("valid tx should verify")
+	}
+	if VerifyPacket([]byte("not a transaction")) {
+		t.Error("invalid packet should be discarded")
+	}
+}
+
 func TestVerifyTxSig(t *testing.T) {
 	tx, err := ParseTx(parseHexdump(tpuTx))
 	if err != nil {

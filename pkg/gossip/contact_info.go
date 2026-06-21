@@ -25,12 +25,14 @@ const (
 	protocolPingMessage  = 4
 	protocolPongMessage  = 5
 
-	socketTagGossip      = 0
-	socketTagServeRepair = 4
-	socketTagTPUVote     = 9
-	socketTagTVU         = 10
-	socketTagTPUVoteQuic = 12
-	socketTagAlpenglow   = 13
+	socketTagGossip            = 0
+	socketTagServeRepair       = 4
+	socketTagTPUQUICForwards   = 7
+	socketTagTPUQUIC           = 8
+	socketTagTPUVote           = 9
+	socketTagTVU               = 10
+	socketTagTPUVoteQuic       = 12
+	socketTagAlpenglow         = 13
 
 	// Agave's Version has a numeric ClientId, not a string. Unknown IDs are
 	// accepted, so use a stable "MI" marker while keeping ClientName in logs.
@@ -172,6 +174,14 @@ func (c *ContactInfo) SetTPUVoteQuicAddr(addr *net.UDPAddr) error {
 	}
 	c.TPUVoteQuicAddr = cloneUDPAddr(addr)
 	return nil
+}
+
+// SetTPUQUIC publishes the same endpoint for TPU QUIC and TPU QUIC forwards.
+func (c *ContactInfo) SetTPUQUIC(addr *net.UDPAddr) error {
+	if err := c.SetSocket(socketTagTPUQUICForwards, addr); err != nil {
+		return err
+	}
+	return c.SetSocket(socketTagTPUQUIC, addr)
 }
 
 func (c *ContactInfo) SetSocket(key uint8, addr *net.UDPAddr) error {

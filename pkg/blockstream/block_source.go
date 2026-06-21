@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,6 +55,7 @@ type BlockSourceOpts struct {
 	// Solana clusters leave this off even when blocks are sourced from Turbine.
 	TurbineAlpenglowBlockIDHints bool
 	TurbineIdentity              ed25519.PrivateKey
+	TPUQUICAdvertise               *net.UDPAddr
 	LeaderForSlot                func(slot uint64) (solana.PublicKey, bool)
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
@@ -298,6 +300,7 @@ type BlockSource struct {
 	turbineAlpenglowAddr           string
 	turbineAlpenglowBlockIDHints   bool
 	turbineIdentity                ed25519.PrivateKey
+	tpuQUICAdvertise               *net.UDPAddr
 	leaderForSlot                  func(slot uint64) (solana.PublicKey, bool)
 	lightbringerStarted            atomic.Bool
 	lightbringerConnected          atomic.Bool
@@ -497,6 +500,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		turbineAlpenglowAddr:         opts.TurbineAlpenglowAddr,
 		turbineAlpenglowBlockIDHints: opts.TurbineAlpenglowBlockIDHints,
 		turbineIdentity:              clonePrivateKey(opts.TurbineIdentity),
+		tpuQUICAdvertise:             opts.TPUQUICAdvertise,
 		leaderForSlot:                opts.LeaderForSlot,
 		alpenglowDecisionSource:      opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:  opts.AlpenglowCandidateBlockSink,
@@ -2043,6 +2047,20 @@ func (bs *BlockSource) runTurbineStream() {
 				continue
 			}
 			gossipClient = client
+			if bs.tpuQUICAdvertise != nil {
+				if err := gossipClient.SetTPUQUIC(bs.tpuQUICAdvertise); err != nil {
+					cancelStream()
+					bs.handleLiveShredStreamClosed(fmt.Sprintf("native turbine gossip TPU QUIC advertise failed: %v", err))
+					if bs.waitForStopOrTimeout(backoff) {
+						return
+					}
+					backoff *= 2
+					if backoff > lightbringerMaxRetryBackoff {
+						backoff = lightbringerMaxRetryBackoff
+					}
+					continue
+				}
+			}
 		}
 
 		receiver := turbine.NewUDPReceiver(bs.turbineBindAddr)

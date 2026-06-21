@@ -24,8 +24,11 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/blockprod"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/forge"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -38,6 +41,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/tpu"
+	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/Overclock-Validator/mithril/pkg/version"
 	solana "github.com/gagliardetto/solana-go"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
@@ -128,6 +133,13 @@ var (
 	turbineGossipBindAddr   string
 	turbineAdvertisedIP     string
 	turbineShredVersion     int
+
+	// Block production / TPU ingress
+	enableBlockProduction         bool
+	blockProductionIdentityPath   string
+	blockProductionTPUQUICBind    string
+	blockProductionAdvertisedIP   string
+	blockProductionSigverifyWorkers int
 )
 
 func snapshotEpochForState(manifest *snapshot.SnapshotManifest) uint64 {
@@ -325,6 +337,13 @@ func init() {
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
 	Run.Flags().IntVar(&blockTipSafetyMargin, "block-tip-safety-margin", 0, "Don't fetch within N slots of tip (0 = use default)")
+
+	// [block_production] section flags
+	Run.Flags().BoolVar(&enableBlockProduction, "enable-block-production", false, "Enable validator TPU QUIC ingress pipeline")
+	Run.Flags().StringVar(&blockProductionIdentityPath, "identity", "", "Validator identity keypair JSON for block production")
+	Run.Flags().StringVar(&blockProductionTPUQUICBind, "tpu-quic-bind", "", "UDP address for TPU QUIC ingress (default 0.0.0.0:0)")
+	Run.Flags().StringVar(&blockProductionAdvertisedIP, "tpu-advertised-ip", "", "Public IP to advertise for TPU QUIC in gossip")
+	Run.Flags().IntVar(&blockProductionSigverifyWorkers, "tpu-sigverify-workers", 0, "Sigverify workers for TPU ingress; 0 uses GOMAXPROCS")
 
 }
 
@@ -580,6 +599,18 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	turbineGossipBindAddr = getString("turbine-gossip-bind-addr", "turbine.gossip_bind_addr")
 	turbineAdvertisedIP = getString("turbine-advertised-ip", "turbine.advertised_ip")
 	turbineShredVersion = getInt("turbine-shred-version", "turbine.shred_version")
+
+	enableBlockProduction = getBool("enable-block-production", "block_production.enabled")
+	blockProductionIdentityPath = getString("identity", "block_production.identity_path")
+	blockProductionTPUQUICBind = getString("tpu-quic-bind", "block_production.tpu_quic_bind")
+	blockProductionAdvertisedIP = getString("tpu-advertised-ip", "block_production.advertised_ip")
+	if blockProductionAdvertisedIP == "" {
+		blockProductionAdvertisedIP = turbineAdvertisedIP
+	}
+	blockProductionSigverifyWorkers = getInt("tpu-sigverify-workers", "block_production.sigverify_workers")
+	if enableBlockProduction && blockProductionIdentityPath == "" {
+		return fmt.Errorf("block production requires --identity or block_production.identity_path")
+	}
 
 	// [lightbringer] section — sidecar management
 	lightbringerEnabled = config.GetBool("lightbringer.enabled")
@@ -1611,6 +1642,74 @@ postBootstrap:
 		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
 	}
 
+	var tpuAdvertise *net.UDPAddr
+	var blockProdController *blockprod.Controller
+	if enableBlockProduction {
+		identity, err := tpu.LoadIdentity(blockProductionIdentityPath)
+		if err != nil {
+			klog.Fatalf("block production identity: %v", err)
+		}
+		blockProdController = blockprod.NewController()
+		tpuCfg := tpu.DefaultConfig()
+		tpuCfg.Identity = identity
+		if blockProductionTPUQUICBind != "" {
+			tpuCfg.ListenAddr = blockProductionTPUQUICBind
+		}
+		tpuCfg.AdvertisedIP = blockProductionAdvertisedIP
+		if blockProductionSigverifyWorkers > 0 {
+			tpuCfg.Pipeline.SigverifyWorkers = blockProductionSigverifyWorkers
+		}
+		tpuCfg.Pipeline.Sink = forge.NewSink(blockProdController)
+
+		var broadcaster turbine.PacketBroadcaster
+		if bc, err := turbine.NewUDPBroadcaster(""); err == nil {
+			if turbineBindAddr != "" {
+				if peer, err := net.ResolveUDPAddr("udp", turbineBindAddr); err == nil {
+					bc.AddPeer(peer)
+				}
+			}
+			broadcaster = bc
+			defer bc.Close()
+		}
+
+		leaderStop := make(chan struct{})
+		defer close(leaderStop)
+		leaderLoop := blockprod.NewLeaderLoop(blockprod.LeaderLoopConfig{
+			Controller:    blockProdController,
+			Identity:      solana.PrivateKey(identity),
+			AccountsDb:    accountsDb,
+			Broadcaster:   broadcaster,
+			ShredVersion:  uint16(turbineShredVersion),
+			CurrentSlot:   global.Slot,
+			LeaderForSlot: global.LeaderForSlot,
+			ParentBlockID: func(uint64) solana.Hash { return solana.Hash(global.LatestBlockHash()) },
+			BankHash:      blockprod.DefaultBankHash,
+		})
+		go leaderLoop.Run(leaderStop)
+		tpuSvc, err := tpu.Start(ctx, tpuCfg)
+		if err != nil {
+			klog.Fatalf("start TPU: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := tpuSvc.Stop(shutdownCtx); err != nil {
+				mlog.Log.Warnf("TPU shutdown: %v", err)
+			}
+		}()
+		tpuAdvertise, err = tpuSvc.AdvertisedQUICAddr()
+		if err != nil {
+			klog.Fatalf("TPU advertised address: %v", err)
+		}
+		mlog.Log.Infof("block production TPU listening on %s (gossip advertise %s)", tpuSvc.ListenAddr(), tpuAdvertise)
+		if turbineBindAddr == "" {
+			mlog.Log.Warnf("block production leader loop has no turbine broadcast peer; set block.turbine_bind_addr to receive shreds locally")
+		}
+		if turbineGossipEntrypoint == "" {
+			mlog.Log.Warnf("block production enabled without turbine gossip entrypoint; TPU QUIC will not be published in gossip")
+		}
+	}
+
 	replayStartTime := time.Now()
 	blockFetchOpts := &replay.BlockFetchOpts{
 		MaxRPS:          blockMaxRPS,
@@ -1626,6 +1725,7 @@ postBootstrap:
 		// Near-tip tuning
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
+		TPUQUICAdvertise: tpuAdvertise,
 	}
 	// Build consensus options from config
 	engineMode, err := consensusengine.NormalizeMode(consensusMode)

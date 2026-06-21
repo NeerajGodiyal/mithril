@@ -12,6 +12,7 @@ import (
 	"io"
 	"maps"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -71,6 +72,9 @@ type BlockFetchOpts struct {
 	// Near-tip tuning
 	NearTipPollMs    int // Faster poll interval in near-tip, 0 = use default
 	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
+
+	// Optional TPU QUIC endpoint to publish in native turbine gossip.
+	TPUQUICAdvertise *net.UDPAddr
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1684,6 +1688,7 @@ func ReplayBlocks(
 		// Near-tip tuning
 		opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
 		opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
+		opts.TPUQUICAdvertise = blockFetchOpts.TPUQUICAdvertise
 	}
 	if useTurbine && turbineAlpenglowAddr != "" {
 		if decisionSource, ok := consensusEngine.(consensusengine.AlpenglowDecisionSource); ok {
