@@ -142,8 +142,12 @@ func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uin
 	}
 }
 
-func isBuiltin(instr Instruction) bool {
+func isBuiltin(instr Instruction, f *features.Features) bool {
 	programPubkey := instr.ProgramId
+	// SIMD-0387: vote is evicted from the 3k builtin CU bucket when BLS management is active.
+	if programPubkey == a.VoteProgramAddr && f != nil && f.IsActive(features.BlsPubkeyManagementInVoteAccount) {
+		return false
+	}
 	if migration.IsNonMigratingBuiltinProgram(programPubkey) {
 		return true
 	}
@@ -171,7 +175,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 	var updatedComputeUnitPrice uint64
 
 	for idx, instr := range instructions {
-		if isBuiltin(instr) {
+		if isBuiltin(instr, f) {
 			numBuiltinInstrs++
 		} else {
 			numNonBuiltinInstrs++

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -308,4 +309,23 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
 	assert.Equal(t, uint64(0), cbl.ComputeUnitPrice)
 	assert.Equal(t, uint32(MaxLoadedAccountsDataSizeBytes), cbl.LoadedAccountBytes)
+}
+
+func TestComputeBudgetDefaultLimitVoteProgramWithBLSManagement(t *testing.T) {
+	systemIx := Instruction{ProgramId: a.SystemProgramAddr, Data: []byte{0}}
+	voteIx := Instruction{ProgramId: a.VoteProgramAddr, Data: []byte{0, 0, 0, 16}}
+
+	ft := features.NewFeaturesDefault()
+	ft.EnableFeature(features.ReserveMinimalCUsForBuiltinInstructions, 0)
+	ft.EnableFeature(features.BlsPubkeyManagementInVoteAccount, 0)
+
+	cbl, err := ComputeBudgetExecuteInstructions([]Instruction{systemIx, voteIx}, ft)
+	require.NoError(t, err)
+	require.Equal(t, uint32(MaxBuiltinAllocationComputeUnitLimit+DefaultInstructionComputeUnitLimit), cbl.ComputeUnitLimit)
+
+	ftWithoutBLS := features.NewFeaturesDefault()
+	ftWithoutBLS.EnableFeature(features.ReserveMinimalCUsForBuiltinInstructions, 0)
+	cbl, err = ComputeBudgetExecuteInstructions([]Instruction{systemIx, voteIx}, ftWithoutBLS)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2*MaxBuiltinAllocationComputeUnitLimit), cbl.ComputeUnitLimit)
 }
