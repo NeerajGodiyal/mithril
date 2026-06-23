@@ -193,6 +193,17 @@ type AlpenglowObserverEngine struct {
 	voteVerifyNoSet         uint64
 	lastVoteVerifyLog       time.Time
 	lastVoteVerifyErr       string
+	votorMessageHookMu      sync.RWMutex
+	votorMessageHook        func(alpenglow.Message)
+}
+
+// SetVotorMessageHook registers an additional handler for inbound Votor QUIC
+// messages. Block production uses this to accumulate skip/notar votes for footer
+// reward certificates without opening a second QUIC listener.
+func (e *AlpenglowObserverEngine) SetVotorMessageHook(fn func(alpenglow.Message)) {
+	e.votorMessageHookMu.Lock()
+	e.votorMessageHook = fn
+	e.votorMessageHookMu.Unlock()
 }
 
 func (e *AlpenglowObserverEngine) Name() string { return string(ModeAlpenglowObserver) }
@@ -308,6 +319,13 @@ func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDS
 }
 
 func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
+	e.votorMessageHookMu.RLock()
+	hook := e.votorMessageHook
+	e.votorMessageHookMu.RUnlock()
+	if hook != nil {
+		hook(msg)
+	}
+
 	if msg.Vote != nil {
 		e.sampleVoteVerification(*msg.Vote)
 	}
@@ -376,7 +394,8 @@ func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.Validat
 	if err := e.ensureVerifier().SetValidatorSet(set); err != nil {
 		return err
 	}
-	mlog.Log.FileOnlyf("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)", set.Epoch, len(set.Validators), set.TotalStake)
+	mlog.Log.Infof("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)",
+		set.Epoch, len(set.Validators), set.TotalStake)
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/Overclock-Validator/mithril/cmd/mithril/dashboardcmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/node"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/setupcmd"
+	"github.com/Overclock-Validator/mithril/cmd/mithril/spycmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/statecmd"
 	"github.com/Overclock-Validator/mithril/cmd/mithril/statuscmd"
 	"github.com/Overclock-Validator/mithril/pkg/config"
@@ -53,6 +54,7 @@ func init() {
 	cmd.AddCommand(
 		&node.Run,                  // Primary command for running Mithril
 		&alpenglowcmd.AlpenglowCmd, // Alpenglow diagnostics and tools
+		&spycmd.SpyCmd,             // Gossip ContactInfo spy
 		&configcmd.ConfigCmd,       // Config management (init, etc.)
 		&statecmd.StateCmd,         // State file inspection and management
 		&setupcmd.SetupCmd,         // Interactive setup wizard

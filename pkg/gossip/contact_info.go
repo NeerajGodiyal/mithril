@@ -83,9 +83,12 @@ type contactEndpoint struct {
 
 type contactRecord struct {
 	Pubkey          Pubkey
+	Wallclock       uint64
 	ShredVer        uint16
 	GossipAddr      contactEndpoint
 	ServeRepairAddr contactEndpoint
+	TVUAddr         contactEndpoint
+	Sockets         map[uint8]contactEndpoint
 	signature       Signature
 	data            []byte
 }
@@ -125,6 +128,7 @@ func (r contactRecord) ContactInfo() *ContactInfo {
 		ShredVer:        r.ShredVer,
 		GossipAddr:      r.GossipAddr.UDPAddr(),
 		ServeRepairAddr: r.ServeRepairAddr.UDPAddr(),
+		TVUAddr:         r.TVUAddr.UDPAddr(),
 	}
 }
 
@@ -360,7 +364,7 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 		return contactRecord{}, err
 	}
 	copy(record.Pubkey[:], pubkey)
-	if _, err := d.varint(10); err != nil {
+	if record.Wallclock, err = d.varint(10); err != nil {
 		return contactRecord{}, err
 	}
 	if _, err := d.u64(); err != nil {
@@ -432,11 +436,17 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 		}
 		addr.port = int(port)
 		addr.ok = true
+		if record.Sockets == nil {
+			record.Sockets = make(map[uint8]contactEndpoint)
+		}
+		record.Sockets[key] = addr
 		switch key {
 		case socketTagGossip:
 			record.GossipAddr = addr
 		case socketTagServeRepair:
 			record.ServeRepairAddr = addr
+		case socketTagTVU:
+			record.TVUAddr = addr
 		}
 	}
 

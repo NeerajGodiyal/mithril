@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/gagliardetto/solana-go"
 )
 
 const (
@@ -46,6 +47,7 @@ type Client struct {
 	alpenglow  *net.UDPAddr
 	identity   ed25519.PrivateKey
 	pubkey     Pubkey
+	pendingTPUQUIC *net.UDPAddr
 
 	contactMu sync.RWMutex
 	contact   *ContactInfo
@@ -55,6 +57,12 @@ type Client struct {
 
 	repairPeerMu sync.Mutex
 	repairPeers  map[Pubkey]RepairPeer
+
+	tvuPeerMu sync.Mutex
+	tvuPeers  map[Pubkey]TVUPeer
+
+	discoveredMu sync.RWMutex
+	discovered   map[Pubkey]DiscoveredContact
 
 	rxPackets        atomic.Uint64
 	txPackets        atomic.Uint64
@@ -87,6 +95,14 @@ type RepairPeer struct {
 	Pubkey   Pubkey
 	Addr     *net.UDPAddr
 	LastSeen time.Time
+}
+
+// TVUPeer is a gossip contact with a TVU UDP socket for turbine broadcast.
+type TVUPeer struct {
+	Pubkey    Pubkey
+	TVUAddr   *net.UDPAddr
+	Wallclock uint64
+	LastSeen  time.Time
 }
 
 type Stats struct {
@@ -172,6 +188,8 @@ func NewClient(cfg Config) (*Client, error) {
 		pubkey:      pubkey,
 		peers:       make(map[udpAddrKey]knownPeer),
 		repairPeers: make(map[Pubkey]RepairPeer),
+		tvuPeers:    make(map[Pubkey]TVUPeer),
+		discovered:  make(map[Pubkey]DiscoveredContact),
 	}, nil
 }
 
@@ -322,7 +340,8 @@ func (c *Client) SetTPUQUIC(addr *net.UDPAddr) error {
 	c.contactMu.Lock()
 	defer c.contactMu.Unlock()
 	if c.contact == nil {
-		return fmt.Errorf("gossip contact info is not initialized")
+		c.pendingTPUQUIC = cloneUDPAddr(addr)
+		return nil
 	}
 	return c.contact.SetTPUQUIC(addr)
 }
@@ -386,6 +405,11 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 		}
 		if err := contact.SetTPUVoteQuicAddr(alpenglowAddr); err != nil {
 			return fmt.Errorf("set Alpenglow TPU vote QUIC gossip socket: %w", err)
+		}
+	}
+	if c.pendingTPUQUIC != nil {
+		if err := contact.SetTPUQUIC(c.pendingTPUQUIC); err != nil {
+			return fmt.Errorf("set pending TPU QUIC gossip socket: %w", err)
 		}
 	}
 	c.contactMu.Lock()
@@ -527,6 +551,8 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 	}
 	c.recordPeerEndpoint(record.GossipAddr)
 	c.recordRepairPeerRecord(record)
+	c.recordTVUPeerRecord(record)
+	c.recordDiscoveredContact(record)
 	c.acceptedContacts.Add(1)
 }
 
@@ -555,6 +581,65 @@ func (c *Client) recordRepairPeer(contact *ContactInfo) {
 		LastSeen: now,
 	}
 	c.repairPeerMu.Unlock()
+}
+
+func (c *Client) TVUPeers() []TVUPeer {
+	now := time.Now()
+	c.tvuPeerMu.Lock()
+	defer c.tvuPeerMu.Unlock()
+	for key, peer := range c.tvuPeers {
+		if now.Sub(peer.LastSeen) > peerExpirationWindow {
+			delete(c.tvuPeers, key)
+		}
+	}
+	out := make([]TVUPeer, 0, len(c.tvuPeers))
+	for _, peer := range c.tvuPeers {
+		out = append(out, peer)
+	}
+	return out
+}
+
+// SelfTVUAddr returns this node's gossip-advertised TVU socket.
+func (c *Client) SelfTVUAddr() *net.UDPAddr {
+	if c == nil || c.tvuAddr == nil {
+		return nil
+	}
+	cp := *c.tvuAddr
+	return &cp
+}
+
+// LookupTVU returns a peer TVU address learned from gossip.
+func (c *Client) LookupTVU(pubkey solana.PublicKey) (*net.UDPAddr, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.tvuPeerMu.Lock()
+	defer c.tvuPeerMu.Unlock()
+	peer, ok := c.tvuPeers[Pubkey(pubkey)]
+	if !ok || peer.TVUAddr == nil {
+		return nil, false
+	}
+	cp := *peer.TVUAddr
+	return &cp, true
+}
+
+func (c *Client) recordTVUPeerRecord(record contactRecord) {
+	if !record.TVUAddr.ok || record.TVUAddr.port == 0 {
+		return
+	}
+	now := time.Now()
+	key := record.Pubkey
+	addr := record.TVUAddr.UDPAddr()
+	if addr == nil {
+		return
+	}
+	c.tvuPeerMu.Lock()
+	c.tvuPeers[key] = TVUPeer{
+		Pubkey:    record.Pubkey,
+		TVUAddr:   addr,
+		LastSeen:  now,
+	}
+	c.tvuPeerMu.Unlock()
 }
 
 func (c *Client) recordRepairPeerRecord(record contactRecord) {

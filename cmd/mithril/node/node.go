@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -29,6 +28,8 @@ import (
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
 	"github.com/Overclock-Validator/mithril/pkg/forge"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/gossip"
+	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -42,10 +43,12 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/tpu"
+	"github.com/Overclock-Validator/mithril/pkg/tpu/quicserver"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/Overclock-Validator/mithril/pkg/version"
-	solana "github.com/gagliardetto/solana-go"
+	"crypto/ed25519"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
+	"github.com/gagliardetto/solana-go"
 	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -71,19 +74,13 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	cluster                     string // "mainnet-beta", "testnet", "devnet", "alpenglow"
+	cluster                     string // "mainnet-beta", "testnet", "devnet"
 	blockSource                 string // "rpc", "lightbringer", or "turbine"
 	lightbringerEndpoint        string
 	blockMaxRPS                 int // Rate limit for block fetching
 	blockMaxInflight            int // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int // Tip poll interval in milliseconds
 	blockTipSafetyMargin        int // Don't fetch within N slots of tip
-	consensusMode               string
-	alpenglowObserverBindAddr   string
-	alpenglowMaxMessageBytes    int64
-	validatorIdentityKeypair    string
-	validatorVoteAccountKeypair string
-	validatorWithdrawerKeypair  string
 
 	// Mode thresholds
 	blockNearTipThreshold        int // Enter near-tip when gap <= this
@@ -140,6 +137,13 @@ var (
 	blockProductionTPUQUICBind    string
 	blockProductionAdvertisedIP   string
 	blockProductionSigverifyWorkers int
+	blockProductionVotorBindAddr    string
+
+	consensusMode             string
+	validatorIdentityPath     string
+	validatorVotePath         string
+	validatorWithdrawerPath   string
+	alpenglowObserverBindAddr string
 )
 
 func snapshotEpochForState(manifest *snapshot.SnapshotManifest) uint64 {
@@ -176,51 +180,6 @@ func epochForStateSlot(s *state.MithrilState, slot uint64) uint64 {
 		return epochSchedule.GetEpoch(slot)
 	}
 	return 0
-}
-
-func alpenglowAddrForGossip(mode consensusengine.Mode, bindAddr string) string {
-	bindAddr = strings.TrimSpace(bindAddr)
-	if mode != consensusengine.ModeAlpenglowObserver || bindAddr == "" {
-		return ""
-	}
-	_, portRaw, err := net.SplitHostPort(bindAddr)
-	if err != nil {
-		mlog.Log.Warnf("ALPENGLOW observer: not advertising invalid Votor bind address %q in gossip: %v", bindAddr, err)
-		return ""
-	}
-	port, err := strconv.Atoi(portRaw)
-	if err != nil || port <= 0 || port > 0xffff {
-		mlog.Log.Warnf("ALPENGLOW observer: not advertising Votor bind address %q in gossip because the port is not fixed", bindAddr)
-		return ""
-	}
-	return bindAddr
-}
-
-func loadValidatorIdentityKeypair(path string) (ed25519.PrivateKey, string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, "", nil
-	}
-	key, err := solana.PrivateKeyFromSolanaKeygenFile(path)
-	if err != nil {
-		return nil, "", fmt.Errorf("load validator identity keypair %s: %w", path, err)
-	}
-	if len(key) != ed25519.PrivateKeySize {
-		return nil, "", fmt.Errorf("validator identity keypair %s has invalid private key size %d", path, len(key))
-	}
-	return ed25519.PrivateKey(append([]byte(nil), key...)), key.PublicKey().String(), nil
-}
-
-func loadValidatorKeypairPubkey(label, path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", nil
-	}
-	key, err := solana.PrivateKeyFromSolanaKeygenFile(path)
-	if err != nil {
-		return "", fmt.Errorf("load %s keypair %s: %w", label, path, err)
-	}
-	return key.PublicKey().String(), nil
 }
 
 func manifestEpochScheduleSeedMatches(s *state.MithrilState, manifest *snapshot.SnapshotManifest) bool {
@@ -273,7 +232,6 @@ func init() {
 	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
 	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
 	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
-	Run.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Directory for discovered/downloaded snapshots")
 
 	// [ledger] section flags
 	Run.Flags().StringVarP(&accountsPath, "accounts-path", "o", "", "Output path for writing AccountsDB data to")
@@ -290,14 +248,6 @@ func init() {
 	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
 	Run.Flags().Int64Var(&numReplaySlots, "num-slots", 0, "Number of slots to replay (0 = run continuously)")
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
-
-	// [consensus] section flags
-	Run.Flags().StringVar(&consensusMode, "consensus-mode", string(consensusengine.ModeClassic), "Consensus mode: 'classic', 'alpenglow-observer', or 'alpenglow'")
-	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address for consensus-mode=alpenglow-observer")
-	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
-	Run.Flags().StringVar(&validatorIdentityKeypair, "identity-keypair", "", "Validator identity keypair for native turbine gossip (Solana keygen JSON)")
-	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "Vote account keypair path for validator diagnostics (Solana keygen JSON)")
-	Run.Flags().StringVar(&validatorWithdrawerKeypair, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair path for validator diagnostics (Solana keygen JSON)")
 
 	// [tuning] section flags
 	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
@@ -344,6 +294,14 @@ func init() {
 	Run.Flags().StringVar(&blockProductionTPUQUICBind, "tpu-quic-bind", "", "UDP address for TPU QUIC ingress (default 0.0.0.0:0)")
 	Run.Flags().StringVar(&blockProductionAdvertisedIP, "tpu-advertised-ip", "", "Public IP to advertise for TPU QUIC in gossip")
 	Run.Flags().IntVar(&blockProductionSigverifyWorkers, "tpu-sigverify-workers", 0, "Sigverify workers for TPU ingress; 0 uses GOMAXPROCS")
+	Run.Flags().StringVar(&blockProductionVotorBindAddr, "votor-bind-addr", "", "QUIC address for Alpenglow Votor votes used to build footer reward certificates")
+
+	// [consensus] / [validator] section flags
+	Run.Flags().StringVar(&consensusMode, "consensus-mode", "", "Consensus engine: classic, alpenglow-observer, or alpenglow")
+	Run.Flags().StringVar(&validatorIdentityPath, "identity-keypair", "", "Validator gossip identity keypair JSON (CRDS contact info)")
+	Run.Flags().StringVar(&validatorVotePath, "vote-account-keypair", "", "Vote account keypair JSON (diagnostics/future voting)")
+	Run.Flags().StringVar(&validatorWithdrawerPath, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair JSON (diagnostics)")
+	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "QUIC address for passive Alpenglow Votor observer")
 
 }
 
@@ -570,21 +528,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// Top-level
 	scratchDirectory = getString("scratch-directory", "scratch_directory")
 
-	rawConsensusMode := getString("consensus-mode", "consensus.mode")
-	normalizedConsensusMode, err := consensusengine.NormalizeMode(rawConsensusMode)
-	if err != nil {
-		return err
-	}
-	if strings.EqualFold(strings.TrimSpace(rawConsensusMode), "legacy") {
-		mlog.Log.Warnf("config: consensus.mode=\"legacy\" is accepted as an alias; prefer \"classic\"")
-	}
-	consensusMode = string(normalizedConsensusMode)
-	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
-	alpenglowMaxMessageBytes = getInt64("alpenglow-max-message-bytes", "consensus.alpenglow_max_message_bytes")
-	validatorIdentityKeypair = getString("identity-keypair", "validator.identity_keypair")
-	validatorVoteAccountKeypair = getString("vote-account-keypair", "validator.vote_account_keypair")
-	validatorWithdrawerKeypair = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
-
 	// [block] section
 	blockSource = getString("block-source", "block.source")
 	if blockSource == "" {
@@ -608,8 +551,24 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		blockProductionAdvertisedIP = turbineAdvertisedIP
 	}
 	blockProductionSigverifyWorkers = getInt("tpu-sigverify-workers", "block_production.sigverify_workers")
+	blockProductionVotorBindAddr = getString("votor-bind-addr", "block_production.votor_bind_addr")
+	if blockProductionVotorBindAddr == "" {
+		blockProductionVotorBindAddr = config.GetString("consensus.alpenglow_observer_bind_addr")
+	}
 	if enableBlockProduction && blockProductionIdentityPath == "" {
 		return fmt.Errorf("block production requires --identity or block_production.identity_path")
+	}
+	if enableBlockProduction && turbineGossipEntrypoint == "" {
+		return fmt.Errorf("block production requires turbine.gossip_entrypoint (or --turbine-gossip-entrypoint) for per-shred turbine routing")
+	}
+
+	consensusMode = getString("consensus-mode", "consensus.mode")
+	validatorIdentityPath = getString("identity-keypair", "validator.identity_keypair")
+	validatorVotePath = getString("vote-account-keypair", "validator.vote_account_keypair")
+	validatorWithdrawerPath = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
+	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
+	if blockProductionVotorBindAddr == "" {
+		blockProductionVotorBindAddr = alpenglowObserverBindAddr
 	}
 
 	// [lightbringer] section — sidecar management
@@ -863,11 +822,6 @@ func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 	}
 	if config.IsSet("snapshot.min_node_version") {
 		cfg.MinNodeVersion = config.GetString("snapshot.min_node_version")
-	} else if cluster == "alpenglow" {
-		// The public Alpenglow test cluster currently advertises Agave/Votor node
-		// versions in the 0.3.x series. The normal mainnet default is 3.0.0,
-		// which would filter every Alpenglow snapshot source before speed tests.
-		cfg.MinNodeVersion = "0.3.0"
 	}
 	if config.IsSet("snapshot.allowed_node_versions") {
 		cfg.AllowedNodeVersions = config.GetStringSlice("snapshot.allowed_node_versions")
@@ -991,29 +945,6 @@ func runLive(c *cobra.Command, args []string) {
 	var lbManager *lightbringer.Manager
 	useLightbringer := blockSource == "lightbringer"
 	useTurbine := blockSource == "turbine"
-	validatorIdentity, validatorIdentityPubkey, err := loadValidatorIdentityKeypair(validatorIdentityKeypair)
-	if err != nil {
-		klog.Fatalf("%v", err)
-	}
-	if validatorVoteAccountKeypair != "" {
-		votePubkey, err := loadValidatorKeypairPubkey("vote account", validatorVoteAccountKeypair)
-		if err != nil {
-			klog.Fatalf("%v", err)
-		}
-		mlog.Log.Infof("validator vote account configured: %s", votePubkey)
-	}
-	if validatorWithdrawerKeypair != "" {
-		withdrawerPubkey, err := loadValidatorKeypairPubkey("authorized withdrawer", validatorWithdrawerKeypair)
-		if err != nil {
-			klog.Fatalf("%v", err)
-		}
-		mlog.Log.FileOnlyf("validator authorized withdrawer configured: %s", withdrawerPubkey)
-	}
-	if validatorIdentityPubkey != "" {
-		mlog.Log.Infof("validator identity configured for native gossip: %s", validatorIdentityPubkey)
-	} else if useTurbine && consensusMode == string(consensusengine.ModeAlpenglowObserver) && alpenglowObserverBindAddr != "" {
-		mlog.Log.Warnf("ALPENGLOW observer: no validator.identity_keypair configured; native gossip will use an ephemeral identity and may not receive staked Votor traffic")
-	}
 
 	if lightbringerEnabled {
 		lbLogWriter := mlog.Log.CreateSubprocessWriter("lightbringer")
@@ -1644,11 +1575,82 @@ postBootstrap:
 
 	var tpuAdvertise *net.UDPAddr
 	var blockProdController *blockprod.Controller
+	var gossipIdentity ed25519.PrivateKey
 	if enableBlockProduction {
 		identity, err := tpu.LoadIdentity(blockProductionIdentityPath)
 		if err != nil {
 			klog.Fatalf("block production identity: %v", err)
 		}
+		gossipIdentity = identity
+	} else if validatorIdentityPath != "" {
+		identity, err := tpu.LoadIdentity(validatorIdentityPath)
+		if err != nil {
+			klog.Fatalf("validator identity keypair: %v", err)
+		}
+		gossipIdentity = identity
+	}
+
+	var sharedGossip *gossip.Client
+	if useTurbine && turbineGossipEntrypoint != "" {
+		if len(gossipIdentity) == 0 {
+			klog.Fatalf("turbine gossip requires --identity-keypair or block production --identity")
+		}
+		client, err := gossip.NewClient(gossip.Config{
+			Entrypoint:    turbineGossipEntrypoint,
+			BindAddr:      turbineGossipBindAddr,
+			TVUAddr:       turbineBindAddr,
+			AlpenglowAddr: alpenglowObserverBindAddr,
+			AdvertisedIP:  turbineAdvertisedIP,
+			ShredVersion:  uint16(turbineShredVersion),
+			Identity:      gossipIdentity,
+			Name:          gossip.ClientName,
+		})
+		if err != nil {
+			klog.Fatalf("gossip client: %v", err)
+		}
+		sharedGossip = client
+		go func() {
+			if err := client.Run(ctx); err != nil && ctx.Err() == nil {
+				mlog.Log.Warnf("gossip client stopped: %v", err)
+			}
+		}()
+		mlog.Log.Infof("gossip client started: entrypoint=%s bind=%s tvu=%s alpenglow=%s",
+			turbineGossipEntrypoint, turbineGossipBindAddr, turbineBindAddr, alpenglowObserverBindAddr)
+	}
+
+	var alpenglowConsensusEngine consensusengine.Engine
+	if mode, err := consensusengine.NormalizeMode(consensusMode); err == nil && mode != consensusengine.ModeClassic {
+		engine, err := consensusengine.NewEngineWithConfig(mode, consensusengine.Config{
+			AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
+			AlpenglowMaxMessageBytes:  int64(config.GetInt("consensus.alpenglow_max_message_bytes")),
+		})
+		if err != nil {
+			klog.Fatalf("consensus engine: %v", err)
+		}
+		if err := engine.Start(ctx); err != nil {
+			klog.Fatalf("start consensus engine: %v", err)
+		}
+		if publisher, ok := engine.(consensusengine.AlpenglowBlockIDPublisher); ok {
+			publisher.SetAlpenglowBlockIDSink(global.SetAlpenglowBlockID)
+		}
+		if epochSink, ok := engine.(consensusengine.AlpenglowEpochLookupSink); ok {
+			if schedule := epochScheduleFromState(mithrilState); schedule != nil {
+				epochSink.SetAlpenglowEpochLookup(schedule.GetEpoch)
+			}
+		}
+		defer func() {
+			if err := engine.Close(); err != nil {
+				mlog.Log.Warnf("consensus engine shutdown: %v", err)
+			}
+		}()
+		alpenglowConsensusEngine = engine
+	}
+
+	if enableBlockProduction {
+		if sharedGossip == nil {
+			klog.Fatalf("block production requires turbine gossip (block-source turbine + --turbine-gossip-entrypoint)")
+		}
+		identity := gossipIdentity
 		blockProdController = blockprod.NewController()
 		tpuCfg := tpu.DefaultConfig()
 		tpuCfg.Identity = identity
@@ -1659,37 +1661,168 @@ postBootstrap:
 		if blockProductionSigverifyWorkers > 0 {
 			tpuCfg.Pipeline.SigverifyWorkers = blockProductionSigverifyWorkers
 		}
-		tpuCfg.Pipeline.Sink = forge.NewSink(blockProdController)
+		forgeSink := forge.NewSink(blockProdController)
+		tpuCfg.Pipeline.Sink = forgeSink
+		// TODO(cavey-debug): remove forgeCounters closure after debugging.
+		forgeCounters := func() blockprod.ForgeCounters {
+			s := forgeSink.Stats()
+			return blockprod.ForgeCounters{
+				InPackets:          s.InPackets,
+				InBytes:            s.InBytes,
+				Accepted:           s.Accepted,
+				DroppedNoBank:      s.DroppedNoBank,
+				DroppedVote:        s.DroppedVote,
+				DroppedParse:       s.DroppedParse,
+				DroppedCost:        s.DroppedCost,
+				DroppedExecution:   s.DroppedExecution,
+				DroppedBlockCost:   s.DroppedBlockCost,
+				DroppedAccountCost: s.DroppedAccountCost,
+				DroppedAllocCost:   s.DroppedAllocCost,
+				DroppedBatchBytes:  s.DroppedBatchBytes,
+			}
+		}
+
+		// TODO(cavey-debug): remove startup debug log after debugging.
+		mlog.Log.Infof("cavey debug: block production enabled identity=%s gossip_entrypoint=%s turbine_bind=%s votor_bind=%s",
+			solana.PrivateKey(identity).PublicKey(), turbineGossipEntrypoint, turbineBindAddr, blockProductionVotorBindAddr)
 
 		var broadcaster turbine.PacketBroadcaster
-		if bc, err := turbine.NewUDPBroadcaster(""); err == nil {
-			if turbineBindAddr != "" {
-				if peer, err := net.ResolveUDPAddr("udp", turbineBindAddr); err == nil {
-					bc.AddPeer(peer)
-				}
+		epochSchedule := epochScheduleFromState(mithrilState)
+		stakesForSlot := func(slot uint64) map[solana.PublicKey]uint64 {
+			epoch := uint64(0)
+			if epochSchedule != nil {
+				epoch = epochSchedule.GetEpoch(slot)
 			}
-			broadcaster = bc
-			defer bc.Close()
+			voteStakes := global.EpochStakes(epoch)
+			return turbine.StakedNodes(voteStakes, func(vote solana.PublicKey) (solana.PublicKey, bool) {
+				accts := global.EpochStakesVoteAccts(epoch)
+				if accts == nil {
+					return solana.PublicKey{}, false
+				}
+				va, ok := accts[vote]
+				if !ok || va == nil {
+					return solana.PublicKey{}, false
+				}
+				return va.NodePubkey, true
+			})
+		}
+		tb, err := turbine.NewTurbineBroadcaster(turbine.TurbineBroadcasterConfig{
+			Self:   solana.PrivateKey(identity).PublicKey(),
+			Peers:  sharedGossip,
+			Stakes: stakesForSlot,
+			EpochForSlot: func(slot uint64) uint64 {
+				if epochSchedule == nil {
+					return 0
+				}
+				return epochSchedule.GetEpoch(slot)
+			},
+			LeaderForSlot: global.LeaderForSlot,
+			UseChaCha8:    true, // switch_to_chacha8_turbine is live on Alpenglow/mainnet
+		})
+		if err != nil {
+			klog.Fatalf("block production turbine broadcaster: %v", err)
+		}
+		broadcaster = tb
+		defer tb.Close()
+		mlog.Log.Infof("block production turbine broadcast uses gossip-derived roots (entrypoint %s)", turbineGossipEntrypoint)
+
+		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {
+			global.SeedWallClockSlot(slot)
+			mlog.Log.Infof("block production wall-clock slot seeded from RPC: %d", slot)
+		} else if mithrilState != nil {
+			global.SeedWallClockSlot(mithrilState.GetCurrentSlot())
+			mlog.Log.Warnf("block production wall-clock slot seeded from state (%d); RPC unavailable: %v", mithrilState.GetCurrentSlot(), err)
 		}
 
 		leaderStop := make(chan struct{})
 		defer close(leaderStop)
+		rewardCertBuilder := rewardcerts.NewBuilder(rewardcerts.BuilderConfig{
+			RootSlot: global.Slot,
+		})
+		rewardCertVotorActive := false
+		if mode, err := consensusengine.NormalizeMode(consensusMode); err == nil && mode == consensusengine.ModeAlpenglowObserver {
+			if strings.TrimSpace(alpenglowObserverBindAddr) != "" {
+				if observer, ok := alpenglowConsensusEngine.(*consensusengine.AlpenglowObserverEngine); ok {
+					observer.SetVotorMessageHook(rewardCertBuilder.ObserveVotorMessage)
+					rewardCertVotorActive = true
+					mlog.Log.Infof("block production reward certs fed from Alpenglow observer Votor QUIC listener on %s", alpenglowObserverBindAddr)
+				}
+			}
+		}
+		votorBind := blockProductionVotorBindAddr
+		if !rewardCertVotorActive && strings.TrimSpace(votorBind) != "" {
+			maxVotorMsg := int64(config.GetInt("consensus.alpenglow_max_message_bytes"))
+			votorListener, err := rewardcerts.StartVotorListener(ctx, rewardCertBuilder, votorBind, maxVotorMsg)
+			if err != nil {
+				klog.Fatalf("block production Votor listener: %v", err)
+			}
+			defer func() {
+				if err := votorListener.Close(); err != nil {
+					mlog.Log.Warnf("block production Votor listener shutdown: %v", err)
+				}
+			}()
+			rewardCertVotorActive = true
+		} else if !rewardCertVotorActive {
+			mlog.Log.Warnf("block production has no Votor vote source; footer reward certificates will be empty until Votor votes are received")
+		}
 		leaderLoop := blockprod.NewLeaderLoop(blockprod.LeaderLoopConfig{
-			Controller:    blockProdController,
-			Identity:      solana.PrivateKey(identity),
-			AccountsDb:    accountsDb,
-			Broadcaster:   broadcaster,
-			ShredVersion:  uint16(turbineShredVersion),
-			CurrentSlot:   global.Slot,
+			Controller:     blockProdController,
+			Identity:       solana.PrivateKey(identity),
+			AccountsDb:     accountsDb,
+			Broadcaster:    broadcaster,
+			ShredVersion:   uint16(turbineShredVersion),
+			EpochSchedule:  epochScheduleFromState(mithrilState),
+			AlpenglowClock: useTurbine,
+			ParentContext: func(slot uint64) blockprod.ParentContext {
+				parentSlot := slot
+				if slot > 0 {
+					parentSlot = slot - 1
+				}
+				chainTip := replay.ChainTipParentContext()
+				ctx := blockprod.ParentContext{
+					PrevFeeGovernor:     &sealevel.FeeRateGovernor{PrevLamportsPerSignature: 5000, LamportsPerSignature: 5000},
+					PrevNumSigs:         chainTip.PrevNumSigs,
+					AcctsLtHash:         chainTip.AcctsLtHash,
+					Features:            chainTip.Features,
+					ParentLastEntryHash: chainTip.LastEntryHash,
+				}
+				if bh, err := accountsDb.GetBankHashForSlot(parentSlot); err == nil && len(bh) == 32 {
+					copy(ctx.ParentBankhash[:], bh)
+				}
+				return ctx
+			},
+			CurrentSlot:   global.WallClockSlot,
 			LeaderForSlot: global.LeaderForSlot,
-			ParentBlockID: func(uint64) solana.Hash { return solana.Hash(global.LatestBlockHash()) },
-			BankHash:      blockprod.DefaultBankHash,
+			// TODO(cavey-debug): remove NextLeaderSlot wiring after debugging.
+			NextLeaderSlot: func(fromSlot uint64) (uint64, bool) {
+				return global.NextLeaderSlotForIdentity(solana.PrivateKey(identity).PublicKey(), fromSlot)
+			},
+			ParentBlockID: func(slot uint64) (solana.Hash, bool) {
+				parentSlot := slot
+				if slot > 0 {
+					parentSlot = slot - 1
+				}
+				return global.AlpenglowBlockID(parentSlot)
+			},
+			BankHash:    blockprod.DefaultBankHash,
+			RewardCerts: rewardCertBuilder,
+			// TODO(cavey-debug): remove ForgeCounters wiring after debugging.
+			ForgeCounters: forgeCounters,
+			// TODO(cavey-debug): remove TVUPeerCount wiring after debugging.
+			TVUPeerCount: func() int {
+				if sharedGossip == nil {
+					return 0
+				}
+				return len(sharedGossip.TVUPeers())
+			},
 		})
 		go leaderLoop.Run(leaderStop)
 		tpuSvc, err := tpu.Start(ctx, tpuCfg)
 		if err != nil {
 			klog.Fatalf("start TPU: %v", err)
 		}
+		// TODO(cavey-debug): remove periodic TPU stats goroutine after debugging.
+		go runCaveyBlockProductionStats(ctx, tpuSvc, blockProdController, forgeCounters, alpenglowConsensusEngine, rewardCertBuilder, rewardCertVotorActive, solana.PrivateKey(identity).PublicKey())
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -1701,13 +1834,10 @@ postBootstrap:
 		if err != nil {
 			klog.Fatalf("TPU advertised address: %v", err)
 		}
+		if err := sharedGossip.SetTPUQUIC(tpuAdvertise); err != nil {
+			mlog.Log.Warnf("gossip TPU QUIC advertise failed: %v", err)
+		}
 		mlog.Log.Infof("block production TPU listening on %s (gossip advertise %s)", tpuSvc.ListenAddr(), tpuAdvertise)
-		if turbineBindAddr == "" {
-			mlog.Log.Warnf("block production leader loop has no turbine broadcast peer; set block.turbine_bind_addr to receive shreds locally")
-		}
-		if turbineGossipEntrypoint == "" {
-			mlog.Log.Warnf("block production enabled without turbine gossip entrypoint; TPU QUIC will not be published in gossip")
-		}
 	}
 
 	replayStartTime := time.Now()
@@ -1725,29 +1855,27 @@ postBootstrap:
 		// Near-tip tuning
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
-		TPUQUICAdvertise: tpuAdvertise,
+		TPUQUICAdvertise:         tpuAdvertise,
+		GossipIdentity:           gossipIdentity,
+		GossipClient:             sharedGossip,
+		TurbineAlpenglowBindAddr: alpenglowObserverBindAddr,
 	}
-	// Build consensus options from config
-	engineMode, err := consensusengine.NormalizeMode(consensusMode)
-	if err != nil {
-		klog.Fatalf("%v", err)
+	if enableBlockProduction {
+		blockFetchOpts.HasLocalLeaderCommit = replay.HasLocalLeaderCommit
 	}
-	consensusEngine, err := consensusengine.NewEngineWithConfig(engineMode, consensusengine.Config{
-		AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
-		AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
-	})
-	if err != nil {
-		klog.Fatalf("unable to create consensus engine: %v", err)
-	}
-	if err := consensusEngine.Start(ctx); err != nil {
-		klog.Fatalf("unable to start consensus engine %q: %v", consensusEngine.Name(), err)
-	}
-	defer func() {
-		if err := consensusEngine.Close(); err != nil {
-			mlog.Log.Warnf("consensus engine close failed: %v", err)
+	if len(gossipIdentity) > 0 {
+		// TODO(cavey-debug): remove wall-clock seed after debugging (used by blockprod leader loop).
+		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {
+			global.SeedWallClockSlot(slot)
+			mlog.Log.Infof("cavey debug: wall-clock slot seeded from RPC for leader-loop timing: %d", slot)
+		} else if mithrilState != nil {
+			global.SeedWallClockSlot(mithrilState.GetCurrentSlot())
+			mlog.Log.Warnf("cavey debug: wall-clock slot seeded from state (%d) for leader-loop timing; RPC unavailable: %v", mithrilState.GetCurrentSlot(), err)
 		}
-	}()
-
+	}
+	_ = validatorVotePath
+	_ = validatorWithdrawerPath
+	// Build consensus options from config
 	consensusMaxDepth := config.GetInt("consensus.skip_path_max_depth")
 	if consensusMaxDepth <= 0 {
 		consensusMaxDepth = 64
@@ -1778,16 +1906,15 @@ postBootstrap:
 		SkipPathMaxDepth: consensusMaxDepth,
 		UnresolvedPolicy: consensusPolicy,
 		EnforceOnSource:  consensusEnforceSource,
-		Mode:             consensusEngine.Name(),
-		Engine:           consensusEngine,
+		Mode:             consensusMode,
+		Engine:           alpenglowConsensusEngine,
 	}
 
 	var slotCtxSetter replay.SlotCtxSetter
 	if rpcServer != nil {
 		slotCtxSetter = rpcServer
 	}
-	turbineAlpenglowAddr := alpenglowAddrForGossip(engineMode, alpenglowObserverBindAddr)
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
 
 	if result.Error != nil {
 		if result.LastPersistedSlot == 0 {
@@ -2212,15 +2339,6 @@ func printStartupInfo(commandName string) {
 	if blockSource == "turbine" && turbineAdvertisedIP != "" {
 		fmt.Printf("  Advertised:   %s%s%s\n", gold, turbineAdvertisedIP, reset)
 	}
-	if validatorIdentityKeypair != "" {
-		fmt.Printf("  Identity key: %s%s%s\n", gold, validatorIdentityKeypair, reset)
-	}
-	if consensusMode != "" {
-		fmt.Printf("  Consensus:    %s%s%s\n", gold, consensusMode, reset)
-	}
-	if consensusMode == string(consensusengine.ModeAlpenglowObserver) && alpenglowObserverBindAddr != "" {
-		fmt.Printf("  Votor QUIC:   %s%s%s\n", gold, alpenglowObserverBindAddr, reset)
-	}
 
 	fmt.Println()
 }
@@ -2433,13 +2551,108 @@ func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []s
 
 // queryCurrentSlot gets the current slot from RPC.
 func queryCurrentSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	return querySlotFromRPC(ctx, rpcEndpoints, solrpc.CommitmentFinalized)
+}
+
+// queryWallClockSeedSlot returns the cluster tip for leader-loop timing.
+// Confirmed commitment tracks near-tip slot more closely than finalized.
+func queryWallClockSeedSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	return querySlotFromRPC(ctx, rpcEndpoints, solrpc.CommitmentConfirmed)
+}
+
+// TODO(cavey-debug): remove runCaveyBlockProductionStats and quicOpenConns/quicActiveStreams after debugging.
+func runCaveyBlockProductionStats(ctx context.Context, tpuSvc *tpu.TPU, controller *blockprod.Controller, forgeCounters func() blockprod.ForgeCounters, consensusEngine consensusengine.Engine, rewardCertBuilder *rewardcerts.Builder, rewardCertListenerActive bool, identity solana.PublicKey) {
+	if tpuSvc == nil {
+		return
+	}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := tpuSvc.Stats()
+			workingSlot := uint64(0)
+			if bank := controller.WorkingBank(); bank != nil {
+				workingSlot = bank.Slot()
+			}
+			forgeInfo := ""
+			if forgeCounters != nil {
+				forgeInfo = " " + blockprod.FormatForgeCounters(forgeCounters())
+			}
+			votorInfo := formatCaveyVotorStats(consensusEngine)
+			rewardCertInfo := formatCaveyRewardCertStats(rewardCertBuilder, rewardCertListenerActive, identity, workingSlot)
+			quic := stats.QUIC
+			p := stats.Pipeline
+			mlog.Log.Infof(
+				"cavey debug: TPU stats quic_open_conns=%d quic_streams=%d ingress_pkts=%d ingress_bytes=%d ingress_dropped=%d dedup_out=%d dedup_sanitize_drop=%d dedup_dedup_drop=%d sigverify_in=%d sigverify_ok=%d sigverify_drop=%d working_bank_slot=%d replay_slot=%d wall_clock_slot=%d%s%s%s",
+				quicOpenConns(quic), quicActiveStreams(quic),
+				p.Ingress.EnqueuedPackets, p.Ingress.EnqueuedBytes, p.Ingress.DroppedFull,
+				p.Dedup.OutPackets, p.Dedup.DroppedSanitize, p.Dedup.DroppedDedup,
+				p.Sigverify.InPackets, p.Sigverify.VerifiedPackets, p.Sigverify.DroppedSigverify,
+				workingSlot, global.Slot(), global.WallClockSlot(), forgeInfo, votorInfo, rewardCertInfo,
+			)
+		}
+	}
+}
+
+// TODO(cavey-debug): remove formatCaveyVotorStats after debugging.
+func formatCaveyVotorStats(engine consensusengine.Engine) string {
+	if engine == nil {
+		return " votor=disabled"
+	}
+	snapshot := engine.Snapshot()
+	if snapshot.Receiver == nil {
+		return " votor=listener_disabled"
+	}
+	r := snapshot.Receiver
+	chainCerts := uint64(0)
+	if snapshot.AlpenglowChain != nil {
+		chainCerts = snapshot.AlpenglowChain.CertificatesAccepted
+	}
+	return fmt.Sprintf(" votor_conns=%d votor_streams=%d votor_certs=%d votor_votes=%d chain_certs=%d known_block_ids=%d latest_cert_slot=%d",
+		r.ConnectionsAccepted, r.StreamsReceived, r.CertificatesDecoded, r.VotesDecoded,
+		chainCerts, global.AlpenglowBlockIDCount(), r.LatestCertSlot)
+}
+
+// TODO(cavey-debug): remove formatCaveyRewardCertStats after debugging.
+func formatCaveyRewardCertStats(builder *rewardcerts.Builder, listenerActive bool, identity solana.PublicKey, workingBankSlot uint64) string {
+	if builder == nil {
+		return " reward_cert_listener=unconfigured"
+	}
+	leaderSlot := workingBankSlot
+	if leaderSlot == 0 && !identity.IsZero() {
+		if next, ok := global.NextLeaderSlotForIdentity(identity, global.WallClockSlot()); ok {
+			leaderSlot = next
+		}
+	}
+	return builder.ReadinessForLeaderSlot(leaderSlot).Format(listenerActive)
+}
+
+// TODO(cavey-debug): remove quicOpenConns after debugging.
+func quicOpenConns(stats *quicserver.ServerStats) uint64 {
+	if stats == nil {
+		return 0
+	}
+	return stats.OpenConnections.Load()
+}
+
+// TODO(cavey-debug): remove quicActiveStreams after debugging.
+func quicActiveStreams(stats *quicserver.ServerStats) uint64 {
+	if stats == nil {
+		return 0
+	}
+	return stats.ActiveStreams.Load()
+}
+
+func querySlotFromRPC(ctx context.Context, rpcEndpoints []string, commitment solrpc.CommitmentType) (uint64, error) {
 	if len(rpcEndpoints) == 0 {
 		return 0, fmt.Errorf("no RPC endpoints configured")
 	}
 
-	// Use the first RPC endpoint
 	client := solrpc.New(rpcEndpoints[0])
-	slot, err := client.GetSlot(ctx, solrpc.CommitmentFinalized)
+	slot, err := client.GetSlot(ctx, commitment)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get slot from RPC: %w", err)
 	}
@@ -2679,8 +2892,6 @@ func runReplayWithRecovery(
 	turbineGossipBindAddr string,
 	turbineAdvertisedIP string,
 	turbineShredVersion uint16,
-	turbineAlpenglowAddr string,
-	turbineIdentity ed25519.PrivateKey,
 	blockDir string,
 	txParallelism int,
 	isLive bool,
@@ -2801,6 +3012,6 @@ func runReplayWithRecovery(
 		}
 	}()
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	return result
 }

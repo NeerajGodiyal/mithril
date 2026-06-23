@@ -98,6 +98,45 @@ func TestContactInfoRoundTripAndSignature(t *testing.T) {
 	}
 }
 
+func TestClientSetTPUQUICBeforeInitialize(t *testing.T) {
+	client, err := NewClient(Config{
+		Entrypoint:   "127.0.0.1:8000",
+		BindAddr:     "0.0.0.0:0",
+		TVUAddr:      "0.0.0.0:8001",
+		AdvertisedIP: "203.0.113.10",
+		ShredVersion: 4321,
+	})
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	tpuAddr := &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9007}
+	if err := client.SetTPUQUIC(tpuAddr); err != nil {
+		t.Fatalf("SetTPUQUIC before initializeContact returned error: %v", err)
+	}
+	if err := client.initializeContact(&net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 65400}); err != nil {
+		t.Fatalf("initializeContact returned error: %v", err)
+	}
+
+	client.contactMu.RLock()
+	contact := client.contact
+	client.contactMu.RUnlock()
+	if contact == nil {
+		t.Fatalf("expected contact info")
+	}
+	var foundForwards, foundTPU bool
+	for _, socket := range contact.Sockets {
+		switch socket.Key {
+		case socketTagTPUQUICForwards:
+			foundForwards = socket.Port == 9007
+		case socketTagTPUQUIC:
+			foundTPU = socket.Port == 9007
+		}
+	}
+	if !foundForwards || !foundTPU {
+		t.Fatalf("expected TPU QUIC socket tags 7 and 8 on port 9007, sockets=%v", contact.Sockets)
+	}
+}
+
 func TestClientAdvertisesAlpenglowSocket(t *testing.T) {
 	client, err := NewClient(Config{
 		Entrypoint:    "127.0.0.1:8000",

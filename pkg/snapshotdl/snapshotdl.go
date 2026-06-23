@@ -1118,7 +1118,7 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 		relaxedCfg := cfg
 		relaxedCfg.IncrementalThreshold = relaxedThreshold
 		bestNodes, rankedNodes = rpc.SortBestRPCsFilteredBySlot(
-			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
+			baseMatchingResults, relaxedCfg, stats, int64(fullSnapshotSlot), referenceSlot)
 	}
 
 	if len(bestNodes) == 0 {
@@ -1350,7 +1350,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		relaxedCfg.IncrementalThreshold = relaxedThreshold
 
 		_, rankedNodesRelaxed := rpc.SortBestRPCsFilteredBySlot(
-			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
+			baseMatchingResults, relaxedCfg, stats, int64(fullSnapshotSlot), referenceSlot)
 		for _, node := range rankedNodesRelaxed {
 			matchingNodes = append(matchingNodes, node)
 		}

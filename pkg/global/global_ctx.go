@@ -41,6 +41,7 @@ type GlobalCtx struct {
 	forkChoice                 *forkchoice.ForkChoiceService
 	slotsConfirmed             map[uint64]struct{}
 	leaderSchedule             *leaderschedule.LeaderSchedule
+	nextLeaderSchedule         *leaderschedule.LeaderSchedule
 	calcUnixTimeForClockSysvar bool
 	manageLeaderSchedule       bool
 	pendingStakeMutex          sync.Mutex // Protects pendingNewStakePubkeys
@@ -61,6 +62,7 @@ func SetBlockHeight(blockHeight uint64) {
 
 func SetSlot(slot uint64) {
 	instance.SetSlot(slot)
+	notifyWallClockSlot(slot)
 }
 
 func SetEpoch(epoch uint64) {
@@ -325,13 +327,36 @@ func ManageLeaderSchedule() bool {
 
 func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
 	instance.leaderSchedule = ls
+	instance.nextLeaderSchedule = nil
+}
+
+// SetNextLeaderSchedule stores the following epoch's schedule for look-ahead queries.
+func SetNextLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
+	instance.nextLeaderSchedule = ls
 }
 
 func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
-	if instance.leaderSchedule == nil {
-		return solana.PublicKey{}, false
+	if instance.leaderSchedule != nil {
+		if leader, ok := instance.leaderSchedule.LeaderForSlot(slot); ok {
+			return leader, true
+		}
 	}
-	return instance.leaderSchedule.LeaderForSlot(slot)
+	if instance.nextLeaderSchedule != nil {
+		return instance.nextLeaderSchedule.LeaderForSlot(slot)
+	}
+	return solana.PublicKey{}, false
+}
+
+func NextLeaderSlotForIdentity(identity solana.PublicKey, fromSlot uint64) (uint64, bool) {
+	if instance.leaderSchedule != nil {
+		if next, ok := instance.leaderSchedule.NextSlotForLeader(identity, fromSlot); ok {
+			return next, true
+		}
+	}
+	if instance.nextLeaderSchedule != nil {
+		return instance.nextLeaderSchedule.NextSlotForLeader(identity, fromSlot)
+	}
+	return 0, false
 }
 
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {
