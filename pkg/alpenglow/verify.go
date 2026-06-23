@@ -174,8 +174,10 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 	if len(entries) == 0 {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no BLS-ranked validators for epoch %d", epoch)
 	}
-	if len(entries) > MaximumValidators {
-		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: %d validators exceeds max %d", len(entries), MaximumValidators)
+	entries = capValidatorStakeEntries(entries, MaximumValidators)
+	// cavey TODO: do we really need this?
+	if len(entries) == 0 {
+		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no validators remain after VAT stake cap for epoch %d", epoch)
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -188,6 +190,26 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 		entries[i].Rank = uint16(i)
 	}
 	return ValidatorSet{Epoch: epoch, Validators: entries, TotalStake: totalStake}, nil
+}
+
+func capValidatorStakeEntries(entries []ValidatorStake, maxValidators int) []ValidatorStake {
+	if len(entries) <= maxValidators {
+		return entries
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Stake != entries[j].Stake {
+			return entries[i].Stake > entries[j].Stake
+		}
+		return bytes.Compare(entries[i].BlsPubkeyCompressed[:], entries[j].BlsPubkeyCompressed[:]) < 0
+	})
+	cutoffStake := entries[maxValidators].Stake
+	capped := make([]ValidatorStake, 0, maxValidators)
+	for _, entry := range entries {
+		if entry.Stake > cutoffStake {
+			capped = append(capped, entry)
+		}
+	}
+	return capped
 }
 
 func (v *CertificateVerifier) SetValidatorSet(set ValidatorSet) error {
