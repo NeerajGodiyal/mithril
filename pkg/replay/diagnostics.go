@@ -54,6 +54,13 @@ func consensusHashString(hash [32]byte) string {
 	return base58.Encode(hash[:])
 }
 
+func consensusExpectedBankhashString(block *b.Block) string {
+	if block == nil || !block.HasExpectedBankhash {
+		return ""
+	}
+	return consensusHashString(block.ExpectedBankhash)
+}
+
 func consensusByteHashString(hash []byte) string {
 	if len(hash) == 0 {
 		return ""
@@ -208,7 +215,7 @@ func consensusBlockDiagnostic(block *b.Block) map[string]any {
 		"blockhash":                   consensusHashString(block.Blockhash),
 		"last_blockhash":              consensusHashString(block.LastBlockhash),
 		"parent_bankhash":             consensusHashString(block.ParentBankhash),
-		"expected_bankhash":           consensusHashString(block.ExpectedBankhash),
+		"expected_bankhash":           consensusExpectedBankhashString(block),
 		"accts_lthash_checksum":       consensusLtHashChecksum(block.AcctsLtHash),
 		"num_signatures":              block.NumSignatures,
 		"prev_num_signatures":         block.PrevNumSignatures,

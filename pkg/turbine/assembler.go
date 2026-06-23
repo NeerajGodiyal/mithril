@@ -829,7 +829,7 @@ func (s *slotState) orderedShreds() []*Shred {
 }
 
 func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
-	entries, parentInfo, err := DecodeEntriesAndAlpenglowParentInfoFromDataShreds(s.orderedShreds())
+	entries, parentInfo, footer, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(s.orderedShreds())
 	if err != nil {
 		return nil, err
 	}
@@ -861,6 +861,16 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
+	}
+	if footer != nil {
+		blk.HasAlpenglowFooter = true
+		blk.SkipRewardCert = append([]byte(nil), footer.SkipRewardCert...)
+		blk.NotarRewardCert = append([]byte(nil), footer.NotarRewardCert...)
+		blk.FooterProducerTimeNanos = footer.BlockProducerTimeNanos
+		if footer.BankHash != ([32]byte{}) {
+			blk.ExpectedBankhash = footer.BankHash
+			blk.HasExpectedBankhash = true
+		}
 	}
 	return blk, nil
 }

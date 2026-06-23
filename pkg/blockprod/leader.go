@@ -308,6 +308,11 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 	producerTimeNanos := uint64(time.Now().UnixNano())
 	footerTimestamp := int64(producerTimeNanos / 1_000_000_000)
 
+	var footerRewards rewardcerts.RewardCertificates
+	if l.rewardCerts != nil {
+		footerRewards = l.rewardCerts.BuildForLeaderSlot(slot)
+	}
+
 	commitStatus := "skipped_no_accountsdb_or_epoch_schedule"
 	if l.accountsDb != nil && l.epochSchedule != nil {
 		block := BuildLeaderBlock(LeaderBlockInput{
@@ -319,6 +324,9 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 			EntryBlockhash:   tickHash,
 			TxFeeAccumulator: l.activeBank.TxFeeAccumulator(),
 		})
+		block.SkipRewardCert = append([]byte(nil), footerRewards.Skip...)
+		block.NotarRewardCert = append([]byte(nil), footerRewards.Notar...)
+		block.FooterProducerTimeNanos = producerTimeNanos
 
 		if _, err := replay.CommitLeaderSlot(replay.CommitLeaderInput{
 			AcctsDb:                 l.accountsDb,
@@ -350,13 +358,9 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		rewardSlot = rs
 	}
 	if l.activeSess != nil {
-		var rewards rewardcerts.RewardCertificates
-		if l.rewardCerts != nil {
-			rewards = l.rewardCerts.BuildForLeaderSlot(slot)
-		}
-		skipCertLen = len(rewards.Skip)
-		notarCertLen = len(rewards.Notar)
-		if err := l.activeSess.BroadcastFooter(bankHash, producerTimeNanos, rewards.Skip, rewards.Notar); err != nil {
+		skipCertLen = len(footerRewards.Skip)
+		notarCertLen = len(footerRewards.Notar)
+		if err := l.activeSess.BroadcastFooter(bankHash, producerTimeNanos, footerRewards.Skip, footerRewards.Notar); err != nil {
 			footerStatus = fmt.Sprintf("failed:%v", err)
 			// TODO(cavey-debug): remove after debugging — keep footerStatus in leader-finished log or revert.
 			caveyDebugf("blockprod footer broadcast failed slot=%d: %v", slot, err)

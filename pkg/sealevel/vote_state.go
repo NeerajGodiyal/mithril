@@ -1728,6 +1728,11 @@ var voteStateBufPool = &sync.Pool{New: func() any {
 }}
 
 func marshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, error) {
+	return MarshalVersionedVoteState(voteStateVersions)
+}
+
+// MarshalVersionedVoteState serializes a vote account state for storage.
+func MarshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, error) {
 	var buffer *bytes.Buffer
 	if sbpf.UsePool {
 		bs := voteStateBufPool.Get().([]byte)

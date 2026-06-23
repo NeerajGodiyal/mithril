@@ -44,6 +44,12 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 		return nil, err
 	}
 
+	if in.AlpenglowClock {
+		if err := ApplyAlpenglowVoteRewards(in.AcctsDb, slotCtx, block, in.EpochSchedule, block.SkipRewardCert, block.NotarRewardCert); err != nil {
+			return nil, err
+		}
+	}
+
 	if len(block.Transactions) > 0 {
 		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(in.AcctsDb, slotCtx, block.Leader, &in.TxFeeAccumulator)
 		slotCtx.RecordModifiedAcct(block.Leader)
@@ -58,6 +64,12 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 		return nil, err
 	}
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+
+	if in.AlpenglowClock {
+		if err := verifyAlpenglowBlockFooter(slotCtx, block, in.AlpenglowClock); err != nil {
+			return nil, err
+		}
+	}
 
 	accountsDbDir := filepath.Join(in.AcctsDb.AcctsDir, "..")
 	detailsInput := bankhash.SlotDetailsFromLeaderCommit(

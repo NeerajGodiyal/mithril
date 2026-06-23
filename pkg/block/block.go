@@ -32,6 +32,7 @@ type Block struct {
 	AlpenglowLastChainedRoot            [32]byte // Last data-shred merkle root; chained into child slots.
 	HasAlpenglowLastChainedRoot         bool
 	ExpectedBankhash                    [32]byte
+	HasExpectedBankhash                 bool
 	TxMetas                             []*rpc.TransactionMeta
 	Leader                              solana.PublicKey
 	BlockReward                         *BlockRewardsInfo
@@ -51,6 +52,10 @@ type Block struct {
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
 	FromLightbringer                    bool
 	IsSkipped                           bool // True for slots that were skipped by the leader
+	SkipRewardCert                      []byte
+	NotarRewardCert                     []byte
+	FooterProducerTimeNanos             uint64
+	HasAlpenglowFooter                  bool
 }
 
 func (b *Block) FixupTxVersions() {

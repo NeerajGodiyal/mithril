@@ -2985,6 +2985,9 @@ func ProcessBlock(
 		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
 			return nil, err
 		}
+		if err := ApplyAlpenglowVoteRewards(acctsDb, slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert); err != nil {
+			return nil, err
+		}
 	}
 
 	start = time.Now()
@@ -2995,6 +2998,12 @@ func ProcessBlock(
 	setReplayStage("bankhash")
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
+
+	if alpenglowClock {
+		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
+			return nil, err
+		}
+	}
 
 	// Bankhash consensus enforcement is handled in the replay loop (not here)
 	// because forkchoice is fed after ProcessBlock returns — checking here would

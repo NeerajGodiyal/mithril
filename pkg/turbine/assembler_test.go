@@ -523,7 +523,7 @@ func TestSlotStateDerivesAlpenglowBlockIDFromDoubleMerkleTree(t *testing.T) {
 func TestDecodeAlpenglowParentMarkers(t *testing.T) {
 	var headerParentID solana.Hash
 	headerParentID[0] = 1
-	header, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantHeader, 42, headerParentID), 0)
+	header, _, ok, err := decodeAlpenglowMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantHeader, 42, headerParentID), 0)
 	if err != nil {
 		t.Fatalf("decode header marker returned error: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestDecodeAlpenglowParentMarkers(t *testing.T) {
 
 	var updateParentID solana.Hash
 	updateParentID[0] = 2
-	update, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), dataShredsPerFECBlock)
+	update, _, ok, err := decodeAlpenglowMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), dataShredsPerFECBlock)
 	if err != nil {
 		t.Fatalf("decode update-parent marker returned error: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestDecodeAlpenglowParentMarkers(t *testing.T) {
 		t.Fatalf("decoded update-parent marker = %+v", update)
 	}
 
-	if marker, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), 0); err != nil || ok || marker != nil {
+	if marker, _, ok, err := decodeAlpenglowMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), 0); err != nil || ok || marker != nil {
 		t.Fatalf("update-parent at batch start 0 = marker=%+v ok=%t err=%v, want ignored", marker, ok, err)
 	}
 
