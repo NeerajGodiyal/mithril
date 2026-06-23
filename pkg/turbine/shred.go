@@ -38,6 +38,7 @@ const (
 	merkleHashPrefixLeaf = "\x00SOLANA_MERKLE_SHREDS_LEAF"
 	merkleHashPrefixNode = "\x01SOLANA_MERKLE_SHREDS_NODE"
 
+	// Legacy shred variant bytes mixed into turbine RNG seeds (protocol-defined).
 	legacyDataVariant = byte(0b1010_0101)
 	legacyCodeVariant = byte(0b0101_1010)
 
@@ -87,6 +88,18 @@ type Shred struct {
 	NumCodingShreds uint16
 	Position        uint16
 	Recovered       bool
+}
+
+// TurbineSeedTypeByte returns the legacy shred-type byte hashed into turbine RNG seeds.
+func (t ShredType) TurbineSeedTypeByte() byte {
+	switch t {
+	case ShredTypeData:
+		return legacyDataVariant
+	case ShredTypeCode:
+		return legacyCodeVariant
+	default:
+		return byte(t)
+	}
 }
 
 func ParseShred(packet []byte) (*Shred, error) {
@@ -275,6 +288,40 @@ func (s *Shred) erasureShard() ([]byte, error) {
 	return s.Payload[start:end], nil
 }
 
+func (s *Shred) EmbeddedChainedMerkleRoot() (solana.Hash, error) {
+	if s == nil || !isMerkleVariant(s.Variant) {
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+	proofSize, chained, resigned, ok := merkleVariantInfo(s.Variant)
+	if !ok || !chained {
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+
+	var headerSize, payloadSize int
+	switch s.Type {
+	case ShredTypeData:
+		headerSize = dataHeaderSize
+		payloadSize = dataPayloadSize
+	case ShredTypeCode:
+		headerSize = codingHeaderSize
+		payloadSize = codingPayloadSize
+	default:
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+
+	capacity, err := merkleCapacity(payloadSize, headerSize, proofSize, chained, resigned)
+	if err != nil {
+		return solana.Hash{}, err
+	}
+	rootOffset := headerSize + capacity
+	if rootOffset+merkleRootSize > len(s.Payload) {
+		return solana.Hash{}, fmt.Errorf("%w: chained merkle root slice %d:%d payload %d", ErrShortShred, rootOffset, rootOffset+merkleRootSize, len(s.Payload))
+	}
+	var root solana.Hash
+	copy(root[:], s.Payload[rootOffset:rootOffset+merkleRootSize])
+	return root, nil
+}
+
 func (s *Shred) MerkleRoot() (solana.Hash, error) {
 	if s == nil || !isMerkleVariant(s.Variant) {
 		return solana.Hash{}, ErrUnsupportedShred
@@ -344,14 +391,14 @@ func (s *Shred) VerifySignature(leader solana.PublicKey) error {
 }
 
 func merkleHashLeaf(data []byte) solana.Hash {
-	return hashv([][]byte{[]byte(merkleHashPrefixLeaf), data})
+	return hashV([][]byte{[]byte(merkleHashPrefixLeaf), data})
 }
 
 func merkleHashNode(left []byte, right []byte) solana.Hash {
-	return hashv([][]byte{[]byte(merkleHashPrefixNode), left, right})
+	return hashV([][]byte{[]byte(merkleHashPrefixNode), left, right})
 }
 
-func hashv(parts [][]byte) solana.Hash {
+func hashV(parts [][]byte) solana.Hash {
 	h := sha256.New()
 	for _, part := range parts {
 		_, _ = h.Write(part)

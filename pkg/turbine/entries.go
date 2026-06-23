@@ -12,8 +12,6 @@ import (
 )
 
 const (
-	dataShredsPerFECBlock = 32
-
 	blockComponentMarkerVersionV1  = 1
 	blockMarkerVariantFooter       = 0
 	blockMarkerVariantHeader       = 1

@@ -3,6 +3,7 @@ package turbine
 import (
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 
 	"github.com/gagliardetto/solana-go"
@@ -107,15 +108,23 @@ type BroadcastSession struct {
 }
 
 type BroadcastSessionConfig struct {
-	Leader      solana.PrivateKey
-	Slot        uint64
-	ParentSlot  uint64
-	Version     uint16
-	Broadcaster PacketBroadcaster
-	UserAgent   []byte
+	Leader        solana.PrivateKey
+	Slot          uint64
+	ParentSlot    uint64
+	ParentBlockID solana.Hash
+	// ParentChainedMerkleRoot is the last data-shred merkle root of the parent slot.
+	// It seeds the chained merkle root embedded in this slot's first FEC batch.
+	ParentChainedMerkleRoot solana.Hash
+	Broadcaster             PacketBroadcaster
+	UserAgent                 []byte
+	Version                   uint16
 }
 
 func NewBroadcastSession(cfg BroadcastSessionConfig) *BroadcastSession {
+	chainedRoot := solana.Hash{}
+	if cfg.Slot > cfg.ParentSlot {
+		chainedRoot = cfg.ParentChainedMerkleRoot
+	}
 	return &BroadcastSession{
 		leader: cfg.Leader,
 		shredder: Shredder{
@@ -124,8 +133,9 @@ func NewBroadcastSession(cfg BroadcastSessionConfig) *BroadcastSession {
 			Version:       cfg.Version,
 			ReferenceTick: 0,
 		},
-		broadcaster: cfg.Broadcaster,
-		userAgent:   cfg.UserAgent,
+		broadcaster:       cfg.Broadcaster,
+		userAgent:         cfg.UserAgent,
+		chainedMerkleRoot: chainedRoot,
 	}
 }
 
@@ -147,24 +157,35 @@ func (s *BroadcastSession) BroadcastEntryBatch(entries []Entry) error {
 }
 
 func (s *BroadcastSession) BroadcastEndingTick(hash solana.Hash) error {
-	component, err := NewEntryBatch([]Entry{{NumHashes: 1, Hash: hash}})
-	if err != nil {
-		return err
-	}
-	return s.broadcastComponent(component, false)
+	return s.BroadcastEndingTickLast(hash)
 }
 
-func (s *BroadcastSession) BroadcastFooter(bankHash solana.Hash, producerTimeNanos uint64) error {
+func (s *BroadcastSession) BroadcastFooter(bankHash solana.Hash, producerTimeNanos uint64, skipRewardCert, notarRewardCert []byte) error {
 	component := NewBlockFooter(BlockFooter{
 		BankHash:               bankHash,
 		BlockProducerTimeNanos: producerTimeNanos,
 		BlockUserAgent:         append([]byte(nil), s.userAgent...),
+		SkipRewardCert:         append([]byte(nil), skipRewardCert...),
+		NotarRewardCert:        append([]byte(nil), notarRewardCert...),
 	})
+	return s.broadcastComponent(component, false)
+}
+
+func (s *BroadcastSession) BroadcastEndingTickLast(hash solana.Hash) error {
+	component, err := NewEntryBatch([]Entry{{NumHashes: 1, Hash: hash}})
+	if err != nil {
+		return err
+	}
 	return s.broadcastComponent(component, true)
 }
 
 func (s *BroadcastSession) BlockID(parentSlot uint64, parentBlockID solana.Hash) solana.Hash {
 	return DoubleMerkleBlockID(parentSlot, parentBlockID, s.fecSetRoots)
+}
+
+// ChainedMerkleRoot returns the running chained merkle root after the last broadcast batch.
+func (s *BroadcastSession) ChainedMerkleRoot() solana.Hash {
+	return s.chainedMerkleRoot
 }
 
 func (s *BroadcastSession) broadcastComponent(component BlockComponent, isLastInSlot bool) error {
@@ -186,7 +207,40 @@ func (s *BroadcastSession) broadcastComponent(component BlockComponent, isLastIn
 	s.nextDataIndex = nextData
 	s.nextCodeIndex = nextCode
 	if len(batch.DataShreds) > 0 {
-		s.fecSetRoots = append(s.fecSetRoots, batch.ChainedMerkleRoot)
+		s.fecSetRoots = appendFECSetMerkleRoots(s.fecSetRoots, batch.DataShreds)
 	}
 	return s.broadcaster.Broadcast(batch.Packets)
+}
+
+func appendFECSetMerkleRoots(roots []solana.Hash, dataShreds []*Shred) []solana.Hash {
+	if len(dataShreds) == 0 {
+		return roots
+	}
+	indices := make([]uint32, 0)
+	seen := make(map[uint32]struct{})
+	for _, shred := range dataShreds {
+		if shred == nil {
+			continue
+		}
+		if _, ok := seen[shred.FECSetIndex]; ok {
+			continue
+		}
+		seen[shred.FECSetIndex] = struct{}{}
+		indices = append(indices, shred.FECSetIndex)
+	}
+	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+	for _, fecSetIndex := range indices {
+		for _, shred := range dataShreds {
+			if shred == nil || shred.FECSetIndex != fecSetIndex {
+				continue
+			}
+			root, err := shred.MerkleRoot()
+			if err != nil {
+				continue
+			}
+			roots = append(roots, root)
+			break
+		}
+	}
+	return roots
 }

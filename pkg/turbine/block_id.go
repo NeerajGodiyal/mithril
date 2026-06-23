@@ -1,6 +1,8 @@
 package turbine
 
 import (
+	"crypto/sha256"
+
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -18,11 +20,9 @@ func DoubleMerkleBlockID(parentSlot uint64, parentBlockID solana.Hash, fecSetRoo
 	if len(fecSetRoots) == 0 {
 		return solana.Hash{}
 	}
-	leaves := make([]solana.Hash, len(fecSetRoots))
-	for i, root := range fecSetRoots {
-		leaves[i] = ParentInfoLeaf(parentSlot, parentBlockID, uint32(i))
-		leaves[i] = joinDoubleMerkle(leaves[i], root)
-	}
+	fecSetCount := uint32(len(fecSetRoots))
+	leaves := append([]solana.Hash(nil), fecSetRoots...)
+	leaves = append(leaves, ParentInfoLeaf(parentSlot, parentBlockID, fecSetCount))
 	return merkleRoot(leaves)
 }
 
@@ -52,6 +52,16 @@ func merkleRoot(nodes []solana.Hash) solana.Hash {
 		cur = next
 	}
 	return cur[0]
+}
+
+func hashv(parts [][]byte) solana.Hash {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = h.Write(part)
+	}
+	var out solana.Hash
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 func uint64LE(v uint64) []byte {

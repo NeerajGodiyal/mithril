@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	dataShredsPerFECBlock   = 32
 	codingShredsPerFECBlock = 32
 	proofEntriesFor32x32    = 6
 )

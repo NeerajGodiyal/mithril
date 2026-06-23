@@ -1,7 +1,6 @@
 package turbine
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -852,6 +851,13 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	} else if ok {
 		blk.AlpenglowBlockID = blockID
 		blk.HasAlpenglowBlockID = true
+		if roots, err := s.fecSetMerkleRoots(); err != nil {
+			return nil, err
+		} else if len(roots) > 0 {
+			lastRoot := roots[len(roots)-1]
+			blk.AlpenglowLastChainedRoot = lastRoot
+			blk.HasAlpenglowLastChainedRoot = true
+		}
 	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
@@ -871,16 +877,7 @@ func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Has
 	if len(roots) == 0 {
 		return solana.Hash{}, false, nil
 	}
-	fecSetCount := uint32(s.lastIndex/dataShredsPerFECBlock + 1)
-
-	var parentSlotBytes [8]byte
-	binary.LittleEndian.PutUint64(parentSlotBytes[:], parentSlot)
-	var fecSetCountBytes [4]byte
-	binary.LittleEndian.PutUint32(fecSetCountBytes[:], fecSetCount)
-	parentInfoLeaf := hashv([][]byte{parentSlotBytes[:], parentBlockID[:], fecSetCountBytes[:]})
-	roots = append(roots, parentInfoLeaf)
-
-	return merkleTreeRoot(roots), true, nil
+	return DoubleMerkleBlockID(parentSlot, parentBlockID, roots), true, nil
 }
 
 func (s *slotState) fecSetMerkleRoots() ([]solana.Hash, error) {

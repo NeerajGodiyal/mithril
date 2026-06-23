@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
 	bin "github.com/gagliardetto/binary"
 )
 
@@ -249,9 +250,9 @@ func marshalVersionedBlockFooter(footer BlockFooter) ([]byte, error) {
 	}
 	out = append(out, byte(len(footer.BlockUserAgent)))
 	out = append(out, footer.BlockUserAgent...)
-	out = appendOptionBytes(out, footer.BlockFinalCert)
-	out = appendOptionBytes(out, footer.SkipRewardCert)
-	out = appendOptionBytes(out, footer.NotarRewardCert)
+	out = appendWincodeOption(out, footer.BlockFinalCert)
+	out = appendWincodeOption(out, footer.SkipRewardCert)
+	out = appendWincodeOption(out, footer.NotarRewardCert)
 	return out, nil
 }
 
@@ -276,15 +277,15 @@ func unmarshalVersionedBlockFooter(data []byte) (*BlockFooter, error) {
 	footer.BlockUserAgent = append([]byte(nil), data[pos:pos+agentLen]...)
 	pos += agentLen
 	var err error
-	footer.BlockFinalCert, pos, err = readOptionBytes(data, pos)
+	footer.BlockFinalCert, pos, err = readWincodeOptionBytes(data, pos, wincodeOptionFinalCert)
 	if err != nil {
 		return nil, err
 	}
-	footer.SkipRewardCert, pos, err = readOptionBytes(data, pos)
+	footer.SkipRewardCert, pos, err = readWincodeOptionBytes(data, pos, wincodeOptionSkipReward)
 	if err != nil {
 		return nil, err
 	}
-	footer.NotarRewardCert, pos, err = readOptionBytes(data, pos)
+	footer.NotarRewardCert, pos, err = readWincodeOptionBytes(data, pos, wincodeOptionNotarReward)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +338,66 @@ func appendUint16(out []byte, v uint16) []byte {
 	var buf [2]byte
 	binary.LittleEndian.PutUint16(buf[:], v)
 	return append(out, buf[:]...)
+}
+
+type wincodeOptionKind int
+
+const (
+	wincodeOptionGeneric wincodeOptionKind = iota
+	wincodeOptionFinalCert
+	wincodeOptionSkipReward
+	wincodeOptionNotarReward
+)
+
+func appendWincodeOption(out []byte, value []byte) []byte {
+	if len(value) == 0 {
+		return append(out, 0)
+	}
+	out = append(out, 1)
+	return append(out, value...)
+}
+
+func readWincodeOptionBytes(data []byte, pos int, kind wincodeOptionKind) ([]byte, int, error) {
+	if pos >= len(data) {
+		return nil, pos, fmt.Errorf("%w: truncated wincode option", ErrInvalidBlockComponent)
+	}
+	switch data[pos] {
+	case 0:
+		return nil, pos + 1, nil
+	case 1:
+		return readWincodeOptionPayload(data, pos+1, kind)
+	default:
+		return nil, pos, fmt.Errorf("%w: invalid wincode option tag %d", ErrInvalidBlockComponent, data[pos])
+	}
+}
+
+func readWincodeOptionPayload(data []byte, pos int, kind wincodeOptionKind) ([]byte, int, error) {
+	if pos >= len(data) {
+		return nil, pos, fmt.Errorf("%w: truncated wincode option payload", ErrInvalidBlockComponent)
+	}
+	var (
+		n   int
+		err error
+	)
+	switch kind {
+	case wincodeOptionSkipReward:
+		n, err = rewardcerts.SkipRewardCertificateEncodedLen(data[pos:])
+	case wincodeOptionNotarReward:
+		n, err = rewardcerts.NotarRewardCertificateEncodedLen(data[pos:])
+	case wincodeOptionFinalCert:
+		// Mithril does not embed final certs today; treat any Some payload as opaque to EOF.
+		n = len(data) - pos
+	default:
+		n = len(data) - pos
+	}
+	if err != nil {
+		return nil, pos, err
+	}
+	if n < 0 || pos+n > len(data) {
+		return nil, pos, fmt.Errorf("%w: wincode option payload overflow", ErrInvalidBlockComponent)
+	}
+	end := pos + n
+	return append([]byte(nil), data[pos:end]...), end, nil
 }
 
 func appendOptionBytes(out []byte, value []byte) []byte {

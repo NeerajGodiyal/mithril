@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
@@ -136,4 +137,46 @@ func TestShredBlockFooterMarkerRoundTrip(t *testing.T) {
 	require.Len(t, components, 1)
 	require.Equal(t, footer.BankHash, components[0].Marker.Footer.BankHash)
 	require.Equal(t, footer.BlockUserAgent, components[0].Marker.Footer.BlockUserAgent)
+}
+
+func TestShredBlockFooterRewardCertsRoundTrip(t *testing.T) {
+	leader := testLeader(t)
+	skipRaw, err := rewardcerts.EncodeSkipRewardCertificate(rewardcerts.SkipRewardCertificate{
+		Slot:      99,
+		Signature: [96]byte{1, 2, 3},
+		Bitmap:    []byte{4, 5},
+	})
+	require.NoError(t, err)
+	notarRaw, err := rewardcerts.EncodeNotarRewardCertificate(rewardcerts.NotarRewardCertificate{
+		Slot:      99,
+		BlockID:   solana.Hash{6},
+		Signature: [96]byte{7, 8, 9},
+		Bitmap:    []byte{10},
+	})
+	require.NoError(t, err)
+	footer := turbine.BlockFooter{
+		BankHash:               solana.Hash{4},
+		BlockProducerTimeNanos: 123,
+		BlockUserAgent:         []byte("mithril"),
+		SkipRewardCert:         skipRaw,
+		NotarRewardCert:        notarRaw,
+	}
+	component := turbine.NewBlockFooter(footer)
+
+	shredder := turbine.Shredder{Slot: 200, ParentSlot: 199, Version: 1, ReferenceTick: 63}
+	batch, _, _, err := shredder.MakeMerkleShredsFromComponent(
+		leader,
+		component,
+		true,
+		solana.Hash{3},
+		10,
+		10,
+	)
+	require.NoError(t, err)
+
+	components, err := turbine.DecodeComponentsFromDataShreds(batch.DataShreds)
+	require.NoError(t, err)
+	require.Len(t, components, 1)
+	require.Equal(t, footer.SkipRewardCert, components[0].Marker.Footer.SkipRewardCert)
+	require.Equal(t, footer.NotarRewardCert, components[0].Marker.Footer.NotarRewardCert)
 }

@@ -21,16 +21,35 @@ func testBroadcastLeader(t *testing.T) solana.PrivateKey {
 func TestBroadcastSessionHeaderAndFooter(t *testing.T) {
 	capture := &packetCapture{}
 	leader := testBroadcastLeader(t)
+	parentBlockID := solana.Hash{0xaa}
+	parentChainedRoot := solana.Hash{0xbb}
 	session := NewBroadcastSession(BroadcastSessionConfig{
-		Leader:      leader,
-		Slot:        100,
-		ParentSlot:  99,
-		Version:     7,
-		Broadcaster: capture,
+		Leader:                  leader,
+		Slot:                    100,
+		ParentSlot:              99,
+		ParentBlockID:           parentBlockID,
+		ParentChainedMerkleRoot: parentChainedRoot,
+		Version:                 7,
+		Broadcaster:             capture,
 	})
-	require.NoError(t, session.BroadcastHeader(solana.Hash{0xaa}))
-	require.NoError(t, session.BroadcastFooter(solana.Hash{0xbb}, 1234))
+	require.NoError(t, session.BroadcastHeader(parentBlockID))
+	require.NoError(t, session.BroadcastFooter(solana.Hash{0xcc}, 1234, nil, nil))
 	require.Greater(t, capture.len(), 0)
+
+	var firstData *Shred
+	for _, packet := range capture.packets {
+		shred, err := ParseShred(packet)
+		require.NoError(t, err)
+		if shred.Type == ShredTypeData && shred.Index == 0 {
+			firstData = shred
+			break
+		}
+	}
+	require.NotNil(t, firstData)
+	chainedRoot, err := firstData.EmbeddedChainedMerkleRoot()
+	require.NoError(t, err)
+	require.Equal(t, parentChainedRoot, chainedRoot)
+	require.NotEqual(t, parentBlockID, chainedRoot)
 }
 
 func TestUDPBroadcasterLoopback(t *testing.T) {
