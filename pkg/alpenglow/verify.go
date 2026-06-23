@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	MaximumValidators       = 4096
+	MaximumValidators       = 2000
 	signerStoreVersionBase2 = byte(0)
 	signerStoreVersionBase3 = byte(1)
 	signerStoreHeaderLen    = 3
