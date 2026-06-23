@@ -50,18 +50,21 @@ type BlockSourceOpts struct {
 	TurbineGossipBindAddr   string
 	TurbineAdvertisedIP     string
 	TurbineShredVersion     uint16
-	TurbineAlpenglowAddr    string
-	// Enables Alpenglow/Votor block-id hints for the Turbine assembler. Classic
-	// Solana clusters leave this off even when blocks are sourced from Turbine.
+	GossipIdentity          ed25519.PrivateKey
+	GossipClient            *gossipclient.Client
+	TurbineAlpenglowBindAddr string
+	// Enables Alpenglow/Votor block-id hints for the Turbine assembler.
 	TurbineAlpenglowBlockIDHints bool
-	TurbineIdentity              ed25519.PrivateKey
-	TPUQUICAdvertise               *net.UDPAddr
-	LeaderForSlot                func(slot uint64) (solana.PublicKey, bool)
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
-	StartSlot                    uint64
-	EndSlot                      uint64
-	BlockDir                     string
+	TPUQUICAdvertise        *net.UDPAddr
+	LeaderForSlot           func(slot uint64) (solana.PublicKey, bool)
+	// HasLocalLeaderCommit returns true once local block production has finalized
+	// the slot and registered a replay commit (see replay.RegisterLocalLeaderCommit).
+	HasLocalLeaderCommit func(slot uint64) bool
+	StartSlot               uint64
+	EndSlot                 uint64
+	BlockDir                string
 	// When enabled, an active near-tip Lightbringer stream is delivered to replay
 	// as an observation feed for consensus buffering instead of requiring the
 	// block source to resolve every local gap before delivery.
@@ -169,7 +172,6 @@ type StallDiagnostics struct {
 	ErrSlotNotAvail uint64
 	ErrRateLimited  uint64
 	ErrBeyondTip    uint64
-	ErrHistory      uint64
 	ErrTransient    uint64
 	ErrHardConn     uint64
 	ErrOther        uint64
@@ -194,7 +196,6 @@ type BlockSourceStats struct {
 	ErrSlotNotAvail atomic.Uint64
 	ErrRateLimited  atomic.Uint64
 	ErrBeyondTip    atomic.Uint64
-	ErrHistory      atomic.Uint64
 	ErrTransient    atomic.Uint64 // EOF, timeout, 502/503, connection reset, etc.
 	ErrOther        atomic.Uint64
 
@@ -247,9 +248,9 @@ type BlockSource struct {
 	// Tracks skips certified by Alpenglow consensus. These are not provisional
 	// RPC skip results and must not be discarded after a Turbine handoff.
 	alpenglowCertifiedSkips map[uint64]bool
-	nextSlotToSend          uint64
-	lastEmittedBlockSlot    uint64 // Last non-skipped block emitted to replay; used to validate Lightbringer ancestry at handoff.
-	maxPending              int
+	nextSlotToSend               uint64
+	lastEmittedBlockSlot         uint64 // Last non-skipped block emitted to replay; used to validate Lightbringer ancestry at handoff.
+	maxPending                   int
 
 	// Slot state tracking (prevents duplicates)
 	slotStateMu   sync.Mutex
@@ -297,11 +298,19 @@ type BlockSource struct {
 	turbineGossipBindAddr          string
 	turbineAdvertisedIP            string
 	turbineShredVersion            uint16
-	turbineAlpenglowAddr           string
+	gossipIdentity                 ed25519.PrivateKey
+	gossipClient                   *gossipclient.Client
+	turbineAlpenglowBindAddr       string
 	turbineAlpenglowBlockIDHints   bool
-	turbineIdentity                ed25519.PrivateKey
+	alpenglowMu                    sync.Mutex
+	knownAlpenglowBlockIDs         map[uint64]solana.Hash
+	knownAlpenglowBlockIDOrder     []uint64
+	activeTurbineReceiver          *turbine.UDPReceiver
+	alpenglowDecisionSource        func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
+	alpenglowCandidateBlockSink    func(alpenglow.ReplayBlockObservation)
 	tpuQUICAdvertise               *net.UDPAddr
 	leaderForSlot                  func(slot uint64) (solana.PublicKey, bool)
+	hasLocalLeaderCommit           func(slot uint64) bool
 	lightbringerStarted            atomic.Bool
 	lightbringerConnected          atomic.Bool
 	lightbringerLastStreamSlot     atomic.Uint64
@@ -325,12 +334,6 @@ type BlockSource struct {
 	lightbringerBuffer             map[uint64]*b.Block
 	lightbringerBufferOrder        []uint64
 	consensusManagedLightbringer   bool
-	alpenglowMu                    sync.Mutex
-	knownAlpenglowBlockIDs         map[uint64]solana.Hash
-	knownAlpenglowBlockIDOrder     []uint64
-	activeTurbineReceiver          *turbine.UDPReceiver
-	alpenglowDecisionSource        func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
-	alpenglowCandidateBlockSink    func(alpenglow.ReplayBlockObservation)
 
 	// Stats tracking
 	stats          BlockSourceStats
@@ -365,9 +368,9 @@ const (
 
 	// Near-tip mode defaults
 	// When within nearTipThreshold slots of confirmed tip, switch to low-latency mode
-	defaultNearTipThreshold   = 32  // Switch to near-tip mode when gap <= this
-	defaultCatchupThreshold   = 64  // Switch back to catchup mode when gap >= this (hysteresis)
-	defaultNearTipPollMs      = 500 // Faster tip polling in near-tip mode (ms)
+	defaultNearTipThreshold = 32  // Switch to near-tip mode when gap <= this
+	defaultCatchupThreshold = 64  // Switch back to catchup mode when gap >= this (hysteresis)
+	defaultNearTipPollMs    = 500 // Faster tip polling in near-tip mode (ms)
 	defaultNearTipLookahead   = 2   // Schedule up to N slots ahead in near-tip mode
 	maxKnownAlpenglowBlockIDs = 8192
 	// RPC latency ~300ms, execution ~100ms - need 1-2 slots buffered to avoid waiting
@@ -497,11 +500,13 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		turbineGossipBindAddr:        opts.TurbineGossipBindAddr,
 		turbineAdvertisedIP:          opts.TurbineAdvertisedIP,
 		turbineShredVersion:          opts.TurbineShredVersion,
-		turbineAlpenglowAddr:         opts.TurbineAlpenglowAddr,
+		gossipIdentity:               opts.GossipIdentity,
+		gossipClient:                 opts.GossipClient,
+		turbineAlpenglowBindAddr:     opts.TurbineAlpenglowBindAddr,
 		turbineAlpenglowBlockIDHints: opts.TurbineAlpenglowBlockIDHints,
-		turbineIdentity:              clonePrivateKey(opts.TurbineIdentity),
 		tpuQUICAdvertise:             opts.TPUQUICAdvertise,
 		leaderForSlot:                opts.LeaderForSlot,
+		hasLocalLeaderCommit:         opts.HasLocalLeaderCommit,
 		alpenglowDecisionSource:      opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:  opts.AlpenglowCandidateBlockSink,
 		lightbringerBuffer:           make(map[uint64]*b.Block),
@@ -541,129 +546,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	return bs
-}
-
-func clonePrivateKey(key ed25519.PrivateKey) ed25519.PrivateKey {
-	if len(key) == 0 {
-		return nil
-	}
-	return append(ed25519.PrivateKey(nil), key...)
-}
-
-func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
-	if !bs.turbineAlpenglowBlockIDHints || slot == 0 || blockID == (solana.Hash{}) {
-		return
-	}
-
-	bs.alpenglowMu.Lock()
-	if existing, ok := bs.knownAlpenglowBlockIDs[slot]; !ok {
-		bs.knownAlpenglowBlockIDOrder = append(bs.knownAlpenglowBlockIDOrder, slot)
-	} else if existing == blockID {
-		receiver := bs.activeTurbineReceiver
-		bs.alpenglowMu.Unlock()
-		if receiver != nil {
-			receiver.SetKnownAlpenglowBlockID(slot, blockID)
-		}
-		return
-	}
-	bs.knownAlpenglowBlockIDs[slot] = blockID
-	for len(bs.knownAlpenglowBlockIDOrder) > maxKnownAlpenglowBlockIDs {
-		old := bs.knownAlpenglowBlockIDOrder[0]
-		bs.knownAlpenglowBlockIDOrder = bs.knownAlpenglowBlockIDOrder[1:]
-		delete(bs.knownAlpenglowBlockIDs, old)
-	}
-	receiver := bs.activeTurbineReceiver
-	bs.alpenglowMu.Unlock()
-
-	if receiver != nil {
-		receiver.SetKnownAlpenglowBlockID(slot, blockID)
-	}
-}
-
-func (bs *BlockSource) resetTurbineSlotForAlpenglowBlock(slot uint64, blockID solana.Hash) {
-	if !bs.turbineAlpenglowBlockIDHints || slot == 0 || blockID == (solana.Hash{}) {
-		return
-	}
-	bs.SetKnownAlpenglowBlockID(slot, blockID)
-
-	bs.alpenglowMu.Lock()
-	receiver := bs.activeTurbineReceiver
-	bs.alpenglowMu.Unlock()
-	if receiver != nil {
-		receiver.ResetSlot(slot)
-		receiver.PrioritizeRepairSlot(slot)
-	}
-}
-
-func (bs *BlockSource) prioritizeTurbineRepairRange(start, end uint64) {
-	if bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints || start == 0 {
-		return
-	}
-	if end < start {
-		end = start
-	}
-
-	bs.alpenglowMu.Lock()
-	receiver := bs.activeTurbineReceiver
-	bs.alpenglowMu.Unlock()
-	if receiver != nil {
-		receiver.PrioritizeRepairRange(start, end)
-	}
-}
-
-func (bs *BlockSource) prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot uint64) {
-	end := waitingSlot
-	if firstBufferedParentSlot > waitingSlot {
-		end = firstBufferedParentSlot
-	}
-	bs.prioritizeTurbineRepairRange(waitingSlot, end)
-}
-
-func (bs *BlockSource) attachAlpenglowBlockIDHintsToReceiver(receiver *turbine.UDPReceiver) {
-	if !bs.turbineAlpenglowBlockIDHints || receiver == nil {
-		return
-	}
-
-	bs.alpenglowMu.Lock()
-	bs.activeTurbineReceiver = receiver
-	known := make([]struct {
-		slot    uint64
-		blockID solana.Hash
-	}, 0, len(bs.knownAlpenglowBlockIDs))
-	for slot, blockID := range bs.knownAlpenglowBlockIDs {
-		known = append(known, struct {
-			slot    uint64
-			blockID solana.Hash
-		}{slot: slot, blockID: blockID})
-	}
-	bs.alpenglowMu.Unlock()
-
-	for _, entry := range known {
-		receiver.SetKnownAlpenglowBlockID(entry.slot, entry.blockID)
-	}
-}
-
-func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) {
-	if bs.alpenglowCandidateBlockSink == nil || !bs.turbineAlpenglowBlockIDHints {
-		return
-	}
-	if blk == nil || !blk.HasAlpenglowBlockID {
-		return
-	}
-	parentSlot := blk.SourceParentSlot
-	if parentSlot == 0 {
-		parentSlot = blk.ParentSlot
-	}
-	bs.alpenglowCandidateBlockSink(alpenglow.ReplayBlockObservation{
-		Block: alpenglow.BlockID{
-			Slot: blk.Slot,
-			Hash: solana.Hash(blk.AlpenglowBlockID),
-		},
-		ParentSlot: parentSlot,
-		ParentHash: solana.Hash(blk.LastBlockhash),
-		Source:     bs.liveShredStreamName(),
-		At:         time.Now(),
-	})
 }
 
 func (bs *BlockSource) usesLiveShredStream() bool {
@@ -816,9 +698,12 @@ func (bs *BlockSource) currentModeString() string {
 	return "catchup"
 }
 
-func (bs *BlockSource) rewindLiveStreamFrontierForRPCFallbackLocked() (waitingSlot uint64, previousWaitingSlot uint64) {
+func (bs *BlockSource) rewindConsensusManagedFrontierForRPCFallbackLocked() (waitingSlot uint64, previousWaitingSlot uint64) {
 	waitingSlot = bs.nextSlotToSend
 	previousWaitingSlot = waitingSlot
+	if !bs.consensusManagedLightbringer {
+		return waitingSlot, previousWaitingSlot
+	}
 
 	replayNextSlot := bs.startSlot
 	if lastExecuted := bs.lastExecutedSlot.Load(); lastExecuted != 0 {
@@ -871,9 +756,8 @@ func (bs *BlockSource) forceRPCForCatchupWithReason(gap uint64, reason string) {
 	waitingSlot := bs.nextSlotToSend
 	previousWaitingSlot := waitingSlot
 	if wasActive {
-		waitingSlot, previousWaitingSlot = bs.rewindLiveStreamFrontierForRPCFallbackLocked()
+		waitingSlot, previousWaitingSlot = bs.rewindConsensusManagedFrontierForRPCFallbackLocked()
 	}
-	rewoundEmissionFrontier := previousWaitingSlot != waitingSlot
 	removedSlots := make([]uint64, 0)
 	for slot, blk := range bs.reorderBuffer {
 		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
@@ -891,7 +775,7 @@ func (bs *BlockSource) forceRPCForCatchupWithReason(gap uint64, reason string) {
 		}
 		bs.slotStateMu.Unlock()
 	}
-	if bs.consensusManagedLightbringer || rewoundEmissionFrontier {
+	if bs.consensusManagedLightbringer {
 		bs.slotStateMu.Lock()
 		for slot := range bs.slotState {
 			if slot >= waitingSlot {
@@ -1831,10 +1715,12 @@ func (bs *BlockSource) shouldDiscardLiveStreamResult(slot uint64, generation uin
 	return handoffSlot == 0 || slot < handoffSlot
 }
 
-// inspectLaterLightbringerBlocksLocked summarizes later buffered live shred
+// inspectLaterLightbringerBlocksLocked summarizes later buffered Lightbringer
 // traffic for the currently waiting slot so diagnostics can distinguish
 // "we have later stream traffic" from "we have a descendant that reconnects
-// directly to the current anchor".
+// directly to the current anchor". Reconnecting descendants are diagnostic
+// only; in live forked traffic they do not prove the intervening slots were
+// skipped on the canonical path.
 func (bs *BlockSource) inspectLaterLightbringerBlocksLocked(waitingSlot uint64) (firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, firstConnectedSlot uint64, firstConnectedParentSlot uint64, foundConnected bool) {
 	for slot, blk := range bs.reorderBuffer {
 		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
@@ -1857,68 +1743,41 @@ func (bs *BlockSource) inspectLaterLightbringerBlocksLocked(waitingSlot uint64) 
 	return firstBufferedSlot, firstBufferedParentSlot, bufferedCount, firstConnectedSlot, firstConnectedParentSlot, foundConnected
 }
 
-func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
-	if bs.alpenglowDecisionSource == nil || bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints {
-		return false
-	}
-	if !bs.lightbringerActive.Load() || !bs.isNearTip.Load() {
-		return false
-	}
+func (bs *BlockSource) synthesizeLightbringerSkipsLocked() bool {
+	// Stream-only skip inference is intentionally disabled. A later Lightbringer
+	// block reconnecting to the current anchor proves only that one observed fork
+	// skipped the gap; it does not prove the canonical path skipped those slots.
+	// Real slots can still arrive later for the same range, so marking them
+	// skipped here can create false-positive path jumps and forkchoice halts.
+	return false
+}
 
-	waitingSlot := bs.nextSlotToSend
-	if waitingSlot == 0 {
+func (bs *BlockSource) isLocalLeaderSlot(slot uint64) bool {
+	if bs.leaderForSlot == nil || len(bs.gossipIdentity) == 0 {
 		return false
 	}
-	decision, ok := bs.alpenglowDecisionSource(waitingSlot - 1)
-	if !ok || decision.Slot != waitingSlot {
-		return false
-	}
+	leader, ok := bs.leaderForSlot(slot)
+	return ok && leader == solana.PublicKey(bs.gossipIdentity)
+}
 
-	switch decision.Kind {
-	case alpenglow.ChainDecisionKindSkip:
-		if !bs.skippedSlots[waitingSlot] {
-			delete(bs.reorderBuffer, waitingSlot)
-			bs.skippedSlots[waitingSlot] = true
-			bs.alpenglowCertifiedSkips[waitingSlot] = true
-			delete(bs.lightbringerSynthesizedSkips, waitingSlot)
-			bs.slotStateMu.Lock()
-			bs.slotState[waitingSlot] = slotDone
-			delete(bs.inflightStart, waitingSlot)
-			bs.slotStateMu.Unlock()
-			bs.clearSlotErrors(waitingSlot)
-			bs.stats.FetchSkipped.Add(1)
-			mlog.Log.FileOnlyf("ALPENGLOW consensus decision: slot %d is skipped (%s)", waitingSlot, decision.Reason)
-		}
-		return false
-	case alpenglow.ChainDecisionKindBlock:
-		if bs.skippedSlots[waitingSlot] {
-			delete(bs.skippedSlots, waitingSlot)
-			delete(bs.lightbringerSynthesizedSkips, waitingSlot)
-			delete(bs.alpenglowCertifiedSkips, waitingSlot)
-		}
-		blk := bs.reorderBuffer[waitingSlot]
-		if blk == nil || !blk.HasAlpenglowBlockID {
-			return false
-		}
-		if solana.Hash(blk.AlpenglowBlockID) == decision.Block.Hash {
-			return false
-		}
-		delete(bs.reorderBuffer, waitingSlot)
-		bs.slotStateMu.Lock()
-		delete(bs.slotState, waitingSlot)
-		delete(bs.inflightStart, waitingSlot)
-		bs.slotStateMu.Unlock()
-		bs.clearSlotErrors(waitingSlot)
-		bs.resetTurbineSlotForAlpenglowBlock(waitingSlot, decision.Block.Hash)
-		mlog.Log.Warnf("ALPENGLOW consensus decision: discarded non-canonical turbine block for slot %d (got=%s want=%s)",
-			waitingSlot, solana.Hash(blk.AlpenglowBlockID), decision.Block.Hash)
-		return true
-	case alpenglow.ChainDecisionKindConflict:
-		mlog.Log.FileOnlyf("ALPENGLOW consensus decision: conflict at slot %d (%s)", waitingSlot, decision.Reason)
-		return false
-	default:
+func (bs *BlockSource) waitingOnLocalLeaderProduction(slot uint64) bool {
+	return bs.isLocalLeaderSlot(slot) && (bs.hasLocalLeaderCommit == nil || !bs.hasLocalLeaderCommit(slot))
+}
+
+// synthesizeLocalLeaderSkipLocked marks the next waiting slot as skipped once
+// local block production has committed it, so replay can advance via
+// TakeLocalLeaderCommit without ingesting our own turbine shreds.
+func (bs *BlockSource) synthesizeLocalLeaderSkipLocked() bool {
+	waiting := bs.nextSlotToSend
+	if bs.hasLocalLeaderCommit == nil || !bs.hasLocalLeaderCommit(waiting) {
 		return false
 	}
+	if bs.reorderBuffer[waiting] != nil || bs.skippedSlots[waiting] {
+		return false
+	}
+	bs.skippedSlots[waiting] = true
+	bs.lightbringerSynthesizedSkips[waiting] = true
+	return true
 }
 
 func (bs *BlockSource) waitForStopOrTimeout(delay time.Duration) bool {
@@ -2022,15 +1881,17 @@ func (bs *BlockSource) runTurbineStream() {
 
 		var gossipClient *gossipclient.Client
 		var gossipDone <-chan error
-		if bs.turbineGossipEntrypoint != "" {
+		if bs.gossipClient != nil {
+			gossipClient = bs.gossipClient
+		} else if bs.turbineGossipEntrypoint != "" {
 			gossipCfg := gossipclient.Config{
 				Entrypoint:    bs.turbineGossipEntrypoint,
 				BindAddr:      bs.turbineGossipBindAddr,
 				TVUAddr:       bs.turbineBindAddr,
-				AlpenglowAddr: bs.turbineAlpenglowAddr,
+				AlpenglowAddr: bs.turbineAlpenglowBindAddr,
 				AdvertisedIP:  bs.turbineAdvertisedIP,
 				ShredVersion:  bs.turbineShredVersion,
-				Identity:      bs.turbineIdentity,
+				Identity:      bs.gossipIdentity,
 				Name:          gossipclient.ClientName,
 			}
 			client, err := gossipclient.NewClient(gossipCfg)
@@ -2118,7 +1979,7 @@ func (bs *BlockSource) runTurbineStream() {
 		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
 		backoff = lightbringerRetryBackoff
 
-		if gossipClient != nil {
+		if gossipClient != nil && bs.gossipClient == nil {
 			done := make(chan error, 1)
 			go func() {
 				done <- gossipClient.Run(streamCtx)
@@ -2128,11 +1989,9 @@ func (bs *BlockSource) runTurbineStream() {
 			if bindAddr == "" {
 				bindAddr = gossipclient.DefaultBindAddr
 			}
-			alpenglowAddr := "disabled"
-			if bs.turbineAlpenglowAddr != "" {
-				alpenglowAddr = bs.turbineAlpenglowAddr
-			}
-			mlog.Log.Infof("Native turbine gossip client starting: entrypoint=%s bind=%s client=%s repair=enabled alpenglow=%s", bs.turbineGossipEntrypoint, bindAddr, gossipclient.ClientName, alpenglowAddr)
+			mlog.Log.Infof("Native turbine gossip client starting: entrypoint=%s bind=%s client=%s repair=enabled", bs.turbineGossipEntrypoint, bindAddr, gossipclient.ClientName)
+		} else if gossipClient != nil {
+			mlog.Log.Infof("Native turbine using shared gossip client (repair=enabled)")
 		} else {
 			mlog.Log.Warnf("Native turbine gossip entrypoint is not configured; receiver is running UDP-only on %s with repair disabled", bs.turbineBindAddr)
 		}
@@ -2175,13 +2034,9 @@ func (bs *BlockSource) runTurbineStream() {
 				if stats.LastPacketUnix != 0 {
 					lastPacketAge = time.Since(time.Unix(stats.LastPacketUnix, 0)).Round(time.Second).String()
 				}
-				nonCanonicalDesc := "none"
-				if stats.NonCanonicalBlockIDs != 0 {
-					nonCanonicalDesc = fmt.Sprintf("%d:%s!=%s", stats.LastNonCanonicalSlot, stats.LastNonCanonicalGot, stats.LastNonCanonicalWant)
-				}
-				mlog.Log.FileOnlyf("native turbine receiver stats: packets=%d data=%d coding=%d recovered=%d blocks=%d active_slots=%d evicted_slots=%d ignored_old_shreds=%d priority_repair_slots=%d noncanonical_block_ids=%d last_noncanonical=%s repair_requests=%d repair_responses=%d repair_timeouts=%d repair_outstanding=%d repair_peers=%d repair_pings=%d/%d repair_errors=%d parse_errors=%d sig_errors=%d missing_leaders=%d assembly_errors=%d last_packet=%s last_data_slot=%d last_block_slot=%d",
+				mlog.Log.FileOnlyf("native turbine receiver stats: packets=%d data=%d coding=%d recovered=%d blocks=%d active_slots=%d evicted_slots=%d ignored_old_shreds=%d repair_requests=%d repair_responses=%d repair_timeouts=%d repair_outstanding=%d repair_peers=%d repair_pings=%d/%d repair_errors=%d parse_errors=%d sig_errors=%d missing_leaders=%d assembly_errors=%d last_packet=%s last_data_slot=%d last_block_slot=%d",
 					stats.Packets, stats.DataShreds, stats.CodingShreds, stats.RecoveredData, stats.BlocksEmitted, stats.ActiveSlots,
-					stats.EvictedSlots, stats.IgnoredOldShreds, stats.PriorityRepairSlots, stats.NonCanonicalBlockIDs, nonCanonicalDesc, stats.Repair.Requests, stats.Repair.Responses, stats.Repair.Timeouts, stats.Repair.Outstanding, stats.Repair.Peers,
+					stats.EvictedSlots, stats.IgnoredOldShreds, stats.Repair.Requests, stats.Repair.Responses, stats.Repair.Timeouts, stats.Repair.Outstanding, stats.Repair.Peers,
 					stats.Repair.Pings, stats.Repair.Pongs, stats.Repair.Errors, stats.ParseErrors, stats.SignatureErrors, stats.MissingLeaders, stats.AssemblyErrors,
 					lastPacketAge, stats.LastDataSlot, stats.LastBlockSlot)
 			case err := <-streamDone:
@@ -2533,6 +2388,10 @@ func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstB
 	}
 
 	waitingSlot = bs.nextSlotToSend
+	if bs.waitingOnLocalLeaderProduction(waitingSlot) {
+		bs.clearLightbringerGapWatch()
+		return 0, 0, 0, 0, false
+	}
 	if !lightbringerActive && handoffSlot != 0 && waitingSlot < handoffSlot {
 		// RPC still owns slots before the pending handoff boundary. Buffered
 		// Lightbringer blocks beyond that boundary are expected and must not be
@@ -2575,14 +2434,14 @@ func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstB
 		bs.lightbringerGapSinceUnix.Store(now.UnixNano())
 		bs.lightbringerGapLastLogUnix.Store(0)
 		bs.lightbringerGapReconnectSlot.Store(0)
-		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, false
+		return 0, 0, 0, 0, false
 	}
 
 	if bufferedCount >= lightbringerGapBufferDepth {
 		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, true
 	}
 	if now.Sub(time.Unix(0, gapSinceUnix)) < lightbringerGapFallbackWait {
-		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, false
+		return 0, 0, 0, 0, false
 	}
 
 	return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, true
@@ -2623,9 +2482,6 @@ func classifyError(err error) string {
 	}
 	if isRateLimitedErr(err) {
 		return "rate_limited"
-	}
-	if isHistoryUnavailableErr(err) {
-		return "history_unavailable"
 	}
 	if isHardConnectivityErr(err) {
 		return "hard_conn"
@@ -2860,7 +2716,6 @@ func (bs *BlockSource) collectStallDiagnostics() StallDiagnostics {
 	diag.ErrSlotNotAvail = bs.stats.ErrSlotNotAvail.Load()
 	diag.ErrRateLimited = bs.stats.ErrRateLimited.Load()
 	diag.ErrBeyondTip = bs.stats.ErrBeyondTip.Load()
-	diag.ErrHistory = bs.stats.ErrHistory.Load()
 	diag.ErrTransient = bs.stats.ErrTransient.Load()
 	diag.ErrOther = bs.stats.ErrOther.Load()
 
@@ -2913,8 +2768,8 @@ func (bs *BlockSource) logStallDiagnostics(prefix string) {
 		diag.ActiveRpcIdx, diag.ActiveRpcURL, diag.IsOnPrimary)
 	mlog.Log.Errorf("  failover_count=%d last_failover=%s",
 		diag.FailoverCount, diag.LastFailoverTime.Format("15:04:05"))
-	mlog.Log.Errorf("  errors: slot_not_avail=%d rate_limited=%d beyond_tip=%d history_unavailable=%d transient=%d other=%d",
-		diag.ErrSlotNotAvail, diag.ErrRateLimited, diag.ErrBeyondTip, diag.ErrHistory, diag.ErrTransient, diag.ErrOther)
+	mlog.Log.Errorf("  errors: slot_not_avail=%d rate_limited=%d beyond_tip=%d transient=%d other=%d",
+		diag.ErrSlotNotAvail, diag.ErrRateLimited, diag.ErrBeyondTip, diag.ErrTransient, diag.ErrOther)
 
 	// 5) Worker pool stats
 	mlog.Log.Errorf("Worker pool: workers=%d rate_limit_rps=%.1f",
@@ -3552,7 +3407,6 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		// Note: isHardConnectivityErr is checked independently because hard errors
 		// (connection refused, no such host) are NOT in isTransientNetworkErr anymore
 		isHardErr := false
-		isHistoryErr := false
 		if result.err != nil {
 			if result.err == errBeyondTip {
 				// Already tracked in worker
@@ -3560,9 +3414,6 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				bs.stats.ErrSlotNotAvail.Add(1)
 			} else if isRateLimitedErr(result.err) {
 				bs.stats.ErrRateLimited.Add(1)
-			} else if isHistoryUnavailableErr(result.err) {
-				bs.stats.ErrHistory.Add(1)
-				isHistoryErr = true
 			} else if isHardConnectivityErr(result.err) {
 				// Hard connectivity errors: endpoint is down (connection refused, no such host, etc.)
 				// These count as transient for stats but also trigger failover logic
@@ -3574,18 +3425,6 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			} else if result.err != rpcclient.SlotSkipped {
 				bs.stats.ErrOther.Add(1)
 			}
-		}
-
-		// RPC failover: a node that returns -32011 cannot serve getBlock history.
-		// That endpoint may still serve snapshots and getSlot, but catchup needs
-		// transaction history for every slot between the snapshot and live turbine.
-		if isHistoryErr && len(bs.rpcClients) > 1 && result.rpcIdx == bs.activeRpcIdx.Load() {
-			if result.rpcIdx >= 0 && int(result.rpcIdx) < len(bs.rpcClients) {
-				mlog.Log.Errorf("RPC endpoint %s cannot serve getBlock transaction history; trying backup RPC",
-					bs.rpcClients[result.rpcIdx].Endpoint())
-			}
-			bs.failoverToNext()
-			bs.hardErrCount.Store(0)
 		}
 
 		// RPC failover: only after repeated HARD connectivity errors
@@ -3618,6 +3457,14 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		}
 
 		if result.skipped {
+			if bs.waitingOnLocalLeaderProduction(result.slot) {
+				bs.slotStateMu.Lock()
+				delete(bs.slotState, result.slot)
+				delete(bs.inflightStart, result.slot)
+				bs.slotStateMu.Unlock()
+				bs.reorderMu.Unlock()
+				continue
+			}
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
 			delete(bs.lightbringerSynthesizedSkips, result.slot)
@@ -3683,6 +3530,12 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		// Emit consecutive blocks
 		for {
 			if bs.applyAlpenglowDecisionLocked() {
+				continue
+			}
+			if bs.synthesizeLocalLeaderSkipLocked() {
+				continue
+			}
+			if bs.synthesizeLightbringerSkipsLocked() {
 				continue
 			}
 
@@ -4369,7 +4222,6 @@ type FetchStatsSnapshot struct {
 	ErrNotAvail        uint64
 	ErrRateLimit       uint64
 	ErrBeyondTip       uint64
-	ErrHistory         uint64
 	ErrTransient       uint64 // EOF, timeout, 502/503, connection reset, etc.
 	ErrOther           uint64
 	BufferDepth        int
@@ -4547,7 +4399,6 @@ func (bs *BlockSource) GetFetchStats() FetchStatsSnapshot {
 		ErrNotAvail:        bs.stats.ErrSlotNotAvail.Load(),
 		ErrRateLimit:       bs.stats.ErrRateLimited.Load(),
 		ErrBeyondTip:       bs.stats.ErrBeyondTip.Load(),
-		ErrHistory:         bs.stats.ErrHistory.Load(),
 		ErrTransient:       bs.stats.ErrTransient.Load(),
 		ErrOther:           bs.stats.ErrOther.Load(),
 		BufferDepth:        len(bs.streamChan),
@@ -4587,7 +4438,6 @@ func (bs *BlockSource) ResetStats() {
 	bs.stats.ErrSlotNotAvail.Store(0)
 	bs.stats.ErrRateLimited.Store(0)
 	bs.stats.ErrBeyondTip.Store(0)
-	bs.stats.ErrHistory.Store(0)
 	bs.stats.ErrTransient.Store(0)
 	bs.stats.ErrOther.Store(0)
 	bs.stats.TotalFetchLatencyNs.Store(0)

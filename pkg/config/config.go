@@ -12,11 +12,6 @@ const LightbringerQuietDefault = true
 
 func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
-	v.SetDefault("consensus.mode", "classic")
-	v.SetDefault("consensus.alpenglow_observer_bind_addr", "")
-	v.SetDefault("validator.identity_keypair", "")
-	v.SetDefault("validator.vote_account_keypair", "")
-	v.SetDefault("validator.authorized_withdrawer_keypair", "")
 }
 
 // LedgerConfig holds ledger-related configuration (matches Firedancer [ledger] section)
@@ -106,6 +101,7 @@ type BlockProductionConfig struct {
 	TPUQUICBind      string `toml:"tpu_quic_bind" mapstructure:"tpu_quic_bind"`
 	AdvertisedIP     string `toml:"advertised_ip" mapstructure:"advertised_ip"`
 	SigverifyWorkers int    `toml:"sigverify_workers" mapstructure:"sigverify_workers"`
+	VotorBindAddr    string `toml:"votor_bind_addr" mapstructure:"votor_bind_addr"`
 }
 
 // TurbineConfig holds native gossip/turbine receiver configuration.
@@ -207,19 +203,9 @@ type LogConfig struct {
 
 // ConsensusConfig holds vote-anchored consensus configuration
 type ConsensusConfig struct {
-	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "classic", "alpenglow-observer", or "alpenglow" (default: "classic")
-	AlpenglowObserverBindAddr string `toml:"alpenglow_observer_bind_addr" mapstructure:"alpenglow_observer_bind_addr"` // Optional passive Alpenglow Votor QUIC listener
-	AlpenglowMaxMessageBytes  int64  `toml:"alpenglow_max_message_bytes" mapstructure:"alpenglow_max_message_bytes"`   // Max Votor QUIC stream payload size
-	SkipPathMaxDepth          int    `toml:"skip_path_max_depth" mapstructure:"skip_path_max_depth"`                   // Max slots the skip-path solver explores (default: 64)
-	UnresolvedPolicy          string `toml:"unresolved_policy" mapstructure:"unresolved_policy"`                       // "halt" or "warn" (default: "halt")
-	EnforceOnSource           string `toml:"enforce_on_source" mapstructure:"enforce_on_source"`                       // "lightbringer", "turbine", "stream", or "all" (default: "stream")
-}
-
-// ValidatorConfig holds optional validator identity material for gossip and future voting modes.
-type ValidatorConfig struct {
-	IdentityKeypair             string `toml:"identity_keypair" mapstructure:"identity_keypair"`                           // Validator identity keypair used for native gossip
-	VoteAccountKeypair          string `toml:"vote_account_keypair" mapstructure:"vote_account_keypair"`                   // Vote account keypair path for diagnostics/future voting
-	AuthorizedWithdrawerKeypair string `toml:"authorized_withdrawer_keypair" mapstructure:"authorized_withdrawer_keypair"` // Authorized withdrawer keypair path for diagnostics
+	SkipPathMaxDepth int    `toml:"skip_path_max_depth" mapstructure:"skip_path_max_depth"` // Max slots the skip-path solver explores (default: 64)
+	UnresolvedPolicy string `toml:"unresolved_policy" mapstructure:"unresolved_policy"`     // "halt" or "warn" (default: "halt")
+	EnforceOnSource  string `toml:"enforce_on_source" mapstructure:"enforce_on_source"`     // "lightbringer", "turbine", "stream", or "all" (default: "stream")
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)
@@ -234,7 +220,6 @@ type Config struct {
 	Replay       ReplayConfig       `toml:"replay" mapstructure:"replay"`
 	Block        BlockConfig        `toml:"block" mapstructure:"block"`
 	Consensus    ConsensusConfig    `toml:"consensus" mapstructure:"consensus"`
-	Validator    ValidatorConfig    `toml:"validator" mapstructure:"validator"`
 	Lightbringer LightbringerConfig `toml:"lightbringer" mapstructure:"lightbringer"`
 	BlockProduction BlockProductionConfig `toml:"block_production" mapstructure:"block_production"`
 	Turbine         TurbineConfig         `toml:"turbine" mapstructure:"turbine"`

@@ -650,3 +650,29 @@ func TestStakeWeightedSlotLeadersPanics(t *testing.T) {
 		}, "should panic on cumulative overflow")
 	})
 }
+
+func TestNextSlotForLeader(t *testing.T) {
+	leader := solana.MustPublicKeyFromBase58("Aw5wEMXhbygFLR7jHtHpih8QvxVBGAMTqsQ2SjWPk1ex")
+	other := solana.MustPublicKeyFromBase58("2GUnfxZavKoPfS9s3VSEjaWDzB3vNf5RojUhprCS1rSx")
+
+	ls := &LeaderSchedule{lsMap: map[uint64]solana.PublicKey{
+		10: other,
+		20: leader,
+		30: other,
+		40: leader,
+	}}
+
+	next, ok := ls.NextSlotForLeader(leader, 15)
+	require.True(t, ok)
+	assert.Equal(t, uint64(20), next)
+
+	next, ok = ls.NextSlotForLeader(leader, 20)
+	require.True(t, ok)
+	assert.Equal(t, uint64(40), next)
+
+	_, ok = ls.NextSlotForLeader(leader, 40)
+	assert.False(t, ok)
+
+	_, ok = (*LeaderSchedule)(nil).NextSlotForLeader(leader, 0)
+	assert.False(t, ok)
+}

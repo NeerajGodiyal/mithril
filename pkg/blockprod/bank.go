@@ -5,6 +5,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
@@ -29,9 +30,13 @@ type WorkingBank struct {
 	slot    uint64
 	leader  solana.PublicKey
 
-	costs   *costmodel.CostTracker
-	entries *EntryBuilder
-	sink    BatchSink
+	costs        *costmodel.CostTracker
+	entries      *EntryBuilder
+	sink         BatchSink
+	forgedTxs    []*solana.Transaction
+	txFees       fees.TxFeeInfoAccumulator
+	numSigs      uint64
+	entryHash    solana.Hash
 }
 
 type BankConfig struct {
@@ -53,12 +58,13 @@ func NewWorkingBank(cfg BankConfig) *WorkingBank {
 		sink = NopBatchSink{}
 	}
 	return &WorkingBank{
-		slotCtx: cfg.SlotCtx,
-		slot:    cfg.Slot,
-		leader:  cfg.Leader,
-		costs:   costmodel.NewCostTracker(limits),
-		entries: NewEntryBuilder(limits, cfg.EntryHash),
-		sink:    sink,
+		slotCtx:   cfg.SlotCtx,
+		slot:      cfg.Slot,
+		leader:    cfg.Leader,
+		costs:     costmodel.NewCostTracker(limits),
+		entries:   NewEntryBuilder(limits, cfg.EntryHash),
+		sink:      sink,
+		entryHash: cfg.EntryHash,
 	}
 }
 
@@ -80,6 +86,30 @@ func (b *WorkingBank) CostTracker() *costmodel.CostTracker {
 
 func (b *WorkingBank) EntryBuilder() *EntryBuilder {
 	return b.entries
+}
+
+func (b *WorkingBank) EntryHash() solana.Hash {
+	return b.entryHash
+}
+
+func (b *WorkingBank) ForgedTransactions() []*solana.Transaction {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]*solana.Transaction, len(b.forgedTxs))
+	copy(out, b.forgedTxs)
+	return out
+}
+
+func (b *WorkingBank) NumSignatures() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.numSigs
+}
+
+func (b *WorkingBank) TxFeeAccumulator() fees.TxFeeInfoAccumulator {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.txFees
 }
 
 // ForgeResult reports whether a transaction was committed into the working bank.
@@ -159,9 +189,15 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if err := replay.ApplySuccessfulTransaction(b.slotCtx, output); err != nil {
 		return ForgeDroppedExecution, costmodel.ExceedNone
 	}
+	if output.FeeInfo != nil {
+		b.txFees.Add(output.FeeInfo)
+	}
+	b.forgedTxs = append(b.forgedTxs, tx)
+	b.numSigs += uint64(tx.Message.Header.NumRequiredSignatures)
 
 	b.costs.Record(cost)
 	if flushed, batchBytes, didFlush := b.entries.Append(*tx, wireSize); didFlush {
+		b.entryHash = b.entries.CurrentEntryHash()
 		b.sink.OnEntryBatch(flushed, batchBytes)
 	}
 	return ForgeAccepted, costmodel.ExceedNone
@@ -175,5 +211,6 @@ func (b *WorkingBank) FlushEntries() {
 	if len(entries) == 0 {
 		return
 	}
+	b.entryHash = b.entries.CurrentEntryHash()
 	b.sink.OnEntryBatch(entries, batchBytes)
 }

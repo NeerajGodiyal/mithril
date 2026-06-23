@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/panjf2000/ants/v2"
@@ -1167,6 +1168,29 @@ func scheduleFullHash(ls *leaderschedule.LeaderSchedule, firstSlot uint64, numSl
 	return base64.StdEncoding.EncodeToString(h.Sum(nil)[:16])
 }
 
+// trySetNextLeaderScheduleLookahead pre-builds the following epoch's schedule when
+// stake data is already available (typically one epoch ahead on live clusters).
+func trySetNextLeaderScheduleLookahead(currentEpoch uint64, epochSchedule *sealevel.SysvarEpochSchedule) {
+	nextEpoch, err := safemath.CheckedAddU64(currentEpoch, 1)
+	if err != nil {
+		global.SetNextLeaderSchedule(nil)
+		return
+	}
+	if !global.HasEpochStakes(nextEpoch) {
+		global.SetNextLeaderSchedule(nil)
+		return
+	}
+
+	voteAcctStakes := global.EpochStakes(nextEpoch)
+	voteAcctMap := global.EpochStakesVoteAccts(nextEpoch)
+	schedule, _, _, _ := buildLocalLeaderSchedule(nextEpoch, epochSchedule, voteAcctStakes, voteAcctMap)
+	if schedule == nil {
+		voteAcctStakes = global.EpochStakes(nextEpoch)
+		schedule, _, _, _ = buildLocalLeaderScheduleFromVoteCache(nextEpoch, epochSchedule, voteAcctStakes)
+	}
+	global.SetNextLeaderSchedule(schedule)
+}
+
 // PrepareLeaderScheduleLocal builds the leader schedule from local state and sets it as the source of truth.
 // This is the primary entry point for leader schedule - no RPC dependency.
 // Returns the schedule summary (for RPC validation) and error if schedule cannot be built.
@@ -1208,6 +1232,7 @@ func PrepareLeaderScheduleLocal(
 
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
+	trySetNextLeaderScheduleLookahead(epoch, epochSchedule)
 
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
@@ -1317,6 +1342,7 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 
 	// Set as source of truth
 	global.SetLeaderSchedule(schedule)
+	trySetNextLeaderScheduleLookahead(epoch, epochSchedule)
 
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)

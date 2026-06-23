@@ -185,7 +185,7 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 	return &stakeHistory
 }
 
-func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions) *rewards.PartitionedRewardDistributionInfo {
+func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions, alpenglowReplayMode bool) *rewards.PartitionedRewardDistributionInfo {
 	// Flush any pending stake pubkeys to the index file before scanning.
 	// The async StoreAccounts callback from the previous block may not have
 	// run yet, so flush here to ensure the index is complete for the scan.
@@ -216,7 +216,17 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	scanResult := scanStakesForEpochBoundary(acctsDb, prevSlotCtx.Slot, epoch, leaderScheduleEpoch, &stakeHistory, epochSchedule, f)
 	t1 := time.Now()
 
-	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
+	if err := RebuildVoteCacheFromAccountsDB(acctsDb, prevSlotCtx.Slot, scanResult.VoteAcctStakes, 0); err != nil {
+		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
+	}
+
+	effectiveStakes, vatVoteAccts, totalEffectiveStake, vatAllowedVotes := applyAlpenglowVATAtEpochBoundary(
+		acctsDb, prevSlotCtx, block, scanResult, f, alpenglowReplayMode,
+	)
+	scanResult.EffectiveStakes = effectiveStakes
+	scanResult.TotalEffectiveStake = totalEffectiveStake
+
+	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult, vatVoteAccts)
 	global.PutEpochVoteStateSnapshot(newEpoch, global.VoteCacheSnapshot())
 	t2 := time.Now()
 
@@ -240,7 +250,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t3 := time.Now()
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts)
+		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts, vatAllowedVotes, alpenglowReplayMode)
 	} else {
 		panic("only partitioned rewards supported")
 	}
@@ -264,15 +274,9 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 
 // updateEpochStakesAndRefreshVoteCache applies pre-computed vote/effective stake data
 // from the boundary scan to refresh the vote cache and store epoch stakes.
-func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult) {
+func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult, vatVoteAccts map[solana.PublicKey]*epochstakes.VoteAccount) {
 	// Check if we need to compute epoch stakes (skip on resume)
 	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
-
-	// ALWAYS refresh vote cache from AccountsDB, even if HasEpochStakes is true
-	// This ensures the vote cache has fresh NodePubkey for leader schedule
-	if err := RebuildVoteCacheFromAccountsDB(acctsDb, slot, scanResult.VoteAcctStakes, 0); err != nil {
-		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
-	}
 
 	// Rebuild authorized voters cache from vote accounts for the new epoch.
 	// This ensures forkchoice vote parsing uses current authorities, not stale manifest data.
@@ -288,13 +292,21 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 	// Store epoch stakes computed during scanning
 	voteCache := global.VoteCache()
 	for votePk, stake := range scanResult.EffectiveStakes {
-		voteAcct, exists := voteCache[votePk]
-		if exists {
-			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{
+		var voteAcctMeta *epochstakes.VoteAccount
+		if vatVoteAccts != nil {
+			voteAcctMeta = vatVoteAccts[votePk]
+		}
+		if voteAcctMeta == nil {
+			voteAcct, exists := voteCache[votePk]
+			if !exists {
+				continue
+			}
+			voteAcctMeta = &epochstakes.VoteAccount{
 				NodePubkey:          voteAcct.NodePubkey(),
 				BlsPubkeyCompressed: voteAcct.BlsPubkeyCompressed(),
-			})
+			}
 		}
+		global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, voteAcctMeta)
 	}
 	global.PutEpochTotalStake(leaderScheduleEpoch, scanResult.TotalEffectiveStake)
 

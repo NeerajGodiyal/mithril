@@ -330,3 +330,22 @@ func (ls *LeaderSchedule) LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 	leader, exists := ls.lsMap[slot]
 	return leader, exists
 }
+
+// NextSlotForLeader returns the earliest slot strictly after fromSlot led by identity.
+func (ls *LeaderSchedule) NextSlotForLeader(identity solana.PublicKey, fromSlot uint64) (uint64, bool) {
+	if ls == nil {
+		return 0, false
+	}
+	var next uint64
+	found := false
+	for slot, leader := range ls.lsMap {
+		if slot <= fromSlot || leader != identity {
+			continue
+		}
+		if !found || slot < next {
+			next = slot
+			found = true
+		}
+	}
+	return next, found
+}

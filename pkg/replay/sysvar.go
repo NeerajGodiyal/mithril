@@ -184,11 +184,31 @@ func calculateStakeWeightedTimestamp(
 	return estimate, nil
 }
 
+var adhSysvarPubkeys = []solana.PublicKey{
+	sealevel.SysvarClockAddr,
+	sealevel.SysvarRecentBlockHashesAddr,
+	sealevel.SysvarSlotHashesAddr,
+	sealevel.SysvarSlotHistoryAddr,
+}
+
+// collectSysvarAcctsFromSlotCtx returns sysvar accounts already updated in slotCtx.
+// Used by leader commit after updateLeaderSysvars; replay uses collectAndUpdateSysvarAcctsForAdh instead.
+func collectSysvarAcctsFromSlotCtx(slotCtx *sealevel.SlotCtx) []*accounts.Account {
+	sysvarAccts := make([]*accounts.Account, 0, len(adhSysvarPubkeys))
+	for _, pk := range adhSysvarPubkeys {
+		acct, err := slotCtx.GetAccount(pk)
+		if err != nil {
+			panic(fmt.Sprintf("unable to get sysvar account for ADH: %s", pk))
+		}
+		sysvarAccts = append(sysvarAccts, acct)
+	}
+	return sysvarAccts
+}
+
 func collectAndUpdateSysvarAcctsForAdh(slotCtx *sealevel.SlotCtx) []*accounts.Account {
-	sysvarPubkeys := []solana.PublicKey{sealevel.SysvarClockAddr, sealevel.SysvarRecentBlockHashesAddr, sealevel.SysvarSlotHashesAddr, sealevel.SysvarSlotHistoryAddr}
 	var sysvarAccts []*accounts.Account
 
-	for _, pk := range sysvarPubkeys {
+	for _, pk := range adhSysvarPubkeys {
 		acct, err := slotCtx.GetAccount(pk)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get sysvar account for ADH: %s", pk))
@@ -203,8 +223,15 @@ func collectAndUpdateSysvarAcctsForAdh(slotCtx *sealevel.SlotCtx) []*accounts.Ac
 		}
 
 		if acct.Key == sealevel.SysvarRecentBlockHashesAddr {
-			recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
+			recentBlockhashes, err := cloneRecentBlockhashesFromCache()
+			if err != nil {
+				panic(fmt.Sprintf("unable to clone RecentBlockhashes cache for slot %d: %v", slotCtx.Slot, err))
+			}
+			if slotCtx.Blockhash == ([32]byte{}) {
+				panic(fmt.Sprintf("entry blockhash missing for RecentBlockhashes update in slot %d", slotCtx.Slot))
+			}
 			slotCtx.LatestEvictedBlockhash = recentBlockhashes.PushLatest(slotCtx.Blockhash, slotCtx.FeeRateGovernor.LamportsPerSignature)
+			sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 			newRecentBlockhashesBytes := recentBlockhashes.MustMarshal()
 			copy(acct.Data, newRecentBlockhashesBytes)
 		}

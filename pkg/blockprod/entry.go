@@ -68,12 +68,19 @@ func (b *EntryBuilder) Flush() ([]turbine.Entry, int) {
 	return b.flushLocked()
 }
 
+func (b *EntryBuilder) CurrentEntryHash() solana.Hash {
+	return b.entryHash
+}
+
 func (b *EntryBuilder) flushLocked() ([]turbine.Entry, int) {
+	txns := append([]solana.Transaction(nil), b.pendingTxns...)
+	entryHash := turbine.NextAlpenglowEntryHash(b.entryHash, 1, txns)
 	entries := []turbine.Entry{{
 		NumHashes: 1,
-		Hash:      b.entryHash,
-		Txns:      append([]solana.Transaction(nil), b.pendingTxns...),
+		Hash:      entryHash,
+		Txns:      txns,
 	}}
+	b.entryHash = entryHash
 	batchBytes, err := marshalEntryBatchBytes(entries)
 	if err != nil {
 		return nil, 0

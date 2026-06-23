@@ -411,12 +411,15 @@ func ptrToVotingRewardSummary(summary votingRewardComparisonSummary) *votingRewa
 	return &summary
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account) {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions, vatAllowedVotes map[solana.PublicKey]struct{}, alpenglowReplayMode bool) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account) {
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	voteCacheSnapshot := global.VoteCacheSnapshot()
+	if useAlpenglowVAT(alpenglowReplayMode, f) && vatAllowedVotes != nil {
+		voteCacheSnapshot = filterVoteCacheForVAT(voteCacheSnapshot, vatAllowedVotes)
+	}
 
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: wide.Uint128{}}
 	streamResult, streamErr := rewards.CalculateRewardsStreaming(
