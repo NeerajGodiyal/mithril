@@ -12,6 +12,7 @@ type voteInfo struct {
 	slot       uint64
 	bankHash   [32]byte
 	votePubkey solana.PublicKey
+	rootSlot   *uint64 // validator's explicit tower root (nil for legacy votes); the cluster-finality signal
 }
 
 // parseAndValidateVoteTx validates a vote transaction against the given authorized
@@ -74,7 +75,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.Root}, true
 		}
 
 	case sealevel.VoteProgramInstrTypeTowerSyncSwitch:
@@ -90,7 +92,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 			}
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.TowerSync.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.TowerSync.Root}, true
 		}
 
 	case sealevel.VoteProgramInstrTypeVote:
@@ -149,7 +152,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 			}
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.Root}, true
 		}
 
 	case sealevel.VoteProgramInstrTypeUpdateVoteStateSwitch:
@@ -166,7 +170,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 			}
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.UpdateVoteState.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.UpdateVoteState.Root}, true
 		}
 
 	case sealevel.VoteProgramInstrTypeCompactUpdateVoteState:
@@ -183,7 +188,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 			}
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.UpdateVoteState.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.UpdateVoteState.Root}, true
 		}
 
 	case sealevel.VoteProgramInstrTypeCompactUpdateVoteStateSwitch:
@@ -200,7 +206,8 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 			}
 			return &voteInfo{slot: lockout.Slot,
 				bankHash:   vote.Hash,
-				votePubkey: votePubkey}, true
+				votePubkey: votePubkey,
+				rootSlot:   vote.UpdateVoteState.Root}, true
 		}
 
 	default:

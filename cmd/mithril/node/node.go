@@ -1362,6 +1362,11 @@ postBootstrap:
 			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
 				mithrilState.SnapshotSlot, manifest.Bank.Slot)
 			mithrilState = nil
+		} else if mithrilState.LastRootedContext != nil {
+			// Rooted-durable resume: durable position is the last rooted slot; the in-RAM
+			// slots above it were lost. Resume from the slot after the last rooted slot
+			// (GetResumeSlot returns it when LastRootedSlot > 0).
+			startSlot = int64(mithrilState.GetResumeSlot())
 		} else if mithrilState.LastSlot > 0 {
 			// Validate last_slot is reasonable
 			if mithrilState.LastSlot < manifest.Bank.Slot {
@@ -1376,7 +1381,18 @@ postBootstrap:
 
 	// Create ResumeState if we have resume context from state file
 	var resumeState *replay.ResumeState
-	if mithrilState != nil && mithrilState.HasResumeData() {
+	if mithrilState != nil && mithrilState.LastRootedContext != nil {
+		// Rooted-durable resume: build from the context as of the last rooted slot
+		// (durable), not the Last* fields at the replayed tip (lost in RAM on restart).
+		rs, err := resumeStateFromRootedContext(mithrilState.LastRootedContext, mithrilState.ComputedEpochStakes)
+		if err != nil {
+			mlog.Log.Errorf("failed to build rooted-durable resume state: %v; will start fresh from snapshot", err)
+			mithrilState = nil
+		} else {
+			resumeState = rs
+			mlog.Log.Infof("rooted-durable resume: continuing from rooted slot R=%d (durable checkpoint)", mithrilState.LastRootedContext.Slot)
+		}
+	} else if mithrilState != nil && mithrilState.HasResumeData() {
 		// Decode parent bankhash
 		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
 		if err != nil {
@@ -1476,6 +1492,61 @@ postBootstrap:
 		mlog.Log.Infof("finite replay: startSlot=%d endSlot=%d", startSlot, liveEndSlot)
 	}
 	accountsDb.InitCaches()
+
+	// Crash-safe durable commit (storage.durable_commit) and rooted-durable mode
+	// (storage.rooted_durable, keeps the store rooted-only, needs durable_commit).
+	accountsDb.DurableCommit = config.GetBool("storage.durable_commit")
+	accountsDb.RootedDurable = config.GetBool("storage.rooted_durable")
+	if accountsDb.RootedDurable && !accountsDb.DurableCommit {
+		klog.Fatalf("storage.rooted_durable requires storage.durable_commit=true (promotion uses the crash-safe commit path)")
+	}
+
+	// Crash recovery: roll forward any interrupted commit up to the DURABLE
+	// high-water (the last rooted slot in rooted-durable mode). Using the replayed tip
+	// would mishandle redos for the un-durable in-RAM slots above the last rooted slot.
+	if accountsDb.DurableCommit && mithrilState != nil {
+		recovered, rerr := accountsDb.ApplyPendingCommits(mithrilState.DurableHighWater())
+		if rerr != nil {
+			klog.Fatalf("durable-commit recovery failed: %v", rerr)
+		}
+		for _, s := range recovered {
+			if derr := accountsdb.DeleteRedo(accountsDb.AcctsDir, s); derr != nil {
+				mlog.Log.Errorf("failed to delete recovered redo for slot %d: %v", s, derr)
+			}
+		}
+		if len(recovered) > 0 {
+			mlog.Log.Infof("durable-commit recovery re-applied %d pending slot(s): %v", len(recovered), recovered)
+			// Rooted-durable: a rolled-forward promotion makes those slots durable,
+			// so advance the rooted watermark to the highest re-applied slot.
+			if accountsDb.RootedDurable {
+				maxR := mithrilState.LastRootedSlot
+				for _, s := range recovered {
+					if s > maxR {
+						maxR = s
+					}
+				}
+				if maxR > mithrilState.LastRootedSlot {
+					mlog.Log.Infof("rooted-durable recovery advanced rooted watermark R from %d to %d", mithrilState.LastRootedSlot, maxR)
+					mithrilState.LastRootedSlot = maxR
+				}
+			}
+		}
+	}
+
+	// Rooted-durable resume requires a context at the last rooted slot matching
+	// LastRootedSlot. If a prior run left state without one (crashed before promotion,
+	// or recovery rolled the last rooted slot forward past it), refuse to resume;
+	// re-bootstrap with --bootstrap snapshot.
+	if accountsDb.RootedDurable && mithrilState != nil && mithrilState.LastSlot > 0 {
+		if mithrilState.LastRootedContext == nil || mithrilState.LastRootedContext.Slot != mithrilState.LastRootedSlot {
+			ctxSlot := uint64(0)
+			if mithrilState.LastRootedContext != nil {
+				ctxSlot = mithrilState.LastRootedContext.Slot
+			}
+			klog.Fatalf("rooted-durable resume needs a context-at-R matching LastRootedSlot=%d (have context-slot=%d); re-bootstrap with --bootstrap snapshot",
+				mithrilState.LastRootedSlot, ctxSlot)
+		}
+	}
 
 	// Write replay timings to run-specific log directory
 	replayTimingsPath := filepath.Join(mlog.GetLogDir(), "replay_timings.jsonl")
@@ -1605,12 +1676,12 @@ postBootstrap:
 				NumSignatures:        result.LastNumSignatures,
 
 				// Blockhash context
-				RecentBlockhashes: encodeRecentBlockhashes(result.LastRecentBlockhashes),
+				RecentBlockhashes: replay.EncodeRecentBlockhashes(result.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(result.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(result.LastBlockhash[:]),
 
 				// SlotHashes context
-				SlotHashes: encodeSlotHashes(result.LastSlotHashes),
+				SlotHashes: replay.EncodeSlotHashes(result.LastSlotHashes),
 
 				// ReplayCtx fields
 				Capitalization:          result.LastCapitalization,
@@ -2371,34 +2442,70 @@ func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
 	return result
 }
 
-// encodeRecentBlockhashes converts sealevel.SysvarRecentBlockhashes to state.BlockhashEntry list
-func encodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.BlockhashEntry {
-	if sysvar == nil {
-		return nil
+// resumeStateFromRootedContext builds a replay.ResumeState from the context
+// captured at promotion (as of the last rooted slot); the next block is the slot
+// after the last rooted slot, whose parent is the last rooted slot.
+func resumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint64]string) (*replay.ResumeState, error) {
+	parentBankhash, err := base58.Decode(rc.Bankhash)
+	if err != nil {
+		return nil, fmt.Errorf("decode rooted bankhash: %w", err)
 	}
-	result := make([]state.BlockhashEntry, 0, len(*sysvar))
-	for _, entry := range *sysvar {
-		result = append(result, state.BlockhashEntry{
-			Blockhash:            base58.Encode(entry.Blockhash[:]),
-			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
-		})
+	ltHashBytes, err := base64.StdEncoding.DecodeString(rc.AcctsLtHash)
+	if err != nil {
+		return nil, fmt.Errorf("decode rooted accts_lt_hash: %w", err)
 	}
-	return result
-}
+	ltHash := &lthash.LtHash{}
+	ltHash.InitWithHash(ltHashBytes)
 
-// encodeSlotHashes converts sealevel.SysvarSlotHashes to state.SlotHashEntry list
-func encodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
-	if sysvar == nil {
-		return nil
+	rs := &replay.ResumeState{
+		ParentSlot:               rc.Slot,
+		ParentBlockHeight:        rc.BlockHeight,
+		ParentBankhash:           parentBankhash,
+		AcctsLtHash:              ltHash,
+		LamportsPerSignature:     rc.LamportsPerSignature,
+		PrevLamportsPerSignature: rc.PrevLamportsPerSig,
+		NumSignatures:            rc.NumSignatures,
+		Capitalization:           rc.Capitalization,
+		SlotsPerYear:             rc.SlotsPerYear,
+		InflationInitial:         rc.InflationInitial,
+		InflationTerminal:        rc.InflationTerminal,
+		InflationTaper:           rc.InflationTaper,
+		InflationFoundation:      rc.InflationFoundation,
+		InflationFoundationTerm:  rc.InflationFoundationTerm,
 	}
-	result := make([]state.SlotHashEntry, 0, len(*sysvar))
-	for _, entry := range *sysvar {
-		result = append(result, state.SlotHashEntry{
-			Slot: entry.Slot,
-			Hash: base58.Encode(entry.Hash[:]),
-		})
+
+	if len(rc.RecentBlockhashes) > 0 {
+		recentBlockhashes := decodeRecentBlockhashes(rc.RecentBlockhashes)
+		rs.RecentBlockhashes = &recentBlockhashes
+		if rc.EvictedBlockhash != "" {
+			if evb, err := base58.Decode(rc.EvictedBlockhash); err == nil && len(evb) == 32 {
+				copy(rs.EvictedBlockhash[:], evb)
+			}
+		}
+		if rc.Blockhash != "" {
+			if bb, err := base58.Decode(rc.Blockhash); err == nil && len(bb) == 32 {
+				copy(rs.LastBlockhash[:], bb)
+			}
+		}
 	}
-	return result
+	if len(rc.SlotHashes) > 0 {
+		slotHashes := decodeSlotHashes(rc.SlotHashes)
+		rs.SlotHashes = &slotHashes
+	}
+	if rc.Clock != "" {
+		clockData, err := base64.StdEncoding.DecodeString(rc.Clock)
+		if err != nil {
+			return nil, fmt.Errorf("decode rooted clock sysvar: %w", err)
+		}
+		rs.Clock = clockData
+	}
+	if len(epochStakes) > 0 {
+		rs.ComputedEpochStakes = make(map[uint64][]byte, len(epochStakes))
+		for epoch, data := range epochStakes {
+			rs.ComputedEpochStakes[epoch] = []byte(data)
+		}
+	}
+	return rs, nil
 }
 
 func createBufWriter(filename string) (io.Writer, func(), error) {
@@ -2484,12 +2591,12 @@ func runReplayWithRecovery(
 				NumSignatures:        r.LastNumSignatures,
 
 				// Blockhash context
-				RecentBlockhashes: encodeRecentBlockhashes(r.LastRecentBlockhashes),
+				RecentBlockhashes: replay.EncodeRecentBlockhashes(r.LastRecentBlockhashes),
 				EvictedBlockhash:  base58.Encode(r.LastEvictedBlockhash[:]),
 				LastBlockhash:     base58.Encode(r.LastBlockhash[:]),
 
 				// SlotHashes context
-				SlotHashes: encodeSlotHashes(r.LastSlotHashes),
+				SlotHashes: replay.EncodeSlotHashes(r.LastSlotHashes),
 
 				// ReplayCtx fields
 				Capitalization:          r.LastCapitalization,

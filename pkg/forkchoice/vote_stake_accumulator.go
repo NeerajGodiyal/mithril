@@ -1,6 +1,8 @@
 package forkchoice
 
 import (
+	"sort"
+
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -117,4 +119,36 @@ func (acc *slotVoteAccumulator) stakeForHash(hash solana.Hash) uint64 {
 		return 0
 	}
 	return tracker.stake
+}
+
+// highestRootedSlot returns the highest slot with >2/3 of epoch stake explicitly
+// rooted past it (0, false if none). roots: voter→latest root; stakes: voter→stake.
+func highestRootedSlot(roots map[solana.PublicKey]uint64, stakes map[solana.PublicKey]uint64, totalStake uint64) (uint64, bool) {
+	threshold := computeThresholdStake(totalStake) // reuse Agave's 2/3 rule
+
+	// A validator with root r counts toward every S <= r. Sorting roots descending
+	// and accumulating stake, the first root whose running total exceeds the
+	// threshold is the highest S a supermajority has rooted past.
+	type rootStake struct {
+		root  uint64
+		stake uint64
+	}
+	entries := make([]rootStake, 0, len(roots))
+	for voter, r := range roots {
+		s, ok := stakes[voter]
+		if !ok || s == 0 {
+			continue
+		}
+		entries = append(entries, rootStake{root: r, stake: s})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].root > entries[j].root })
+
+	var cumulative uint64
+	for _, e := range entries {
+		cumulative += e.stake
+		if cumulative > threshold {
+			return e.root, true
+		}
+	}
+	return 0, false
 }

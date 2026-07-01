@@ -34,6 +34,15 @@ type AccountsDb struct {
 	CommonAcctsCache otter.Cache[solana.PublicKey, *accounts.Account]
 	ProgramCache     otter.Cache[solana.PublicKey, *ProgramCacheEntry]
 
+	// DurableCommit routes block commits through the crash-safe CommitSlotAtomic
+	// path (redo + append-only + fsync) instead of the unsynced store. Off by default.
+	DurableCommit bool
+
+	// RootedDurable keeps the canonical store rooted-only: replayed slots buffer in
+	// an in-RAM overlay, folded to disk via CommitSlotAtomic once rooted. Requires
+	// consensus + DurableCommit. Off by default.
+	RootedDurable bool
+
 	// A list of store requests. They are added to the back as they arrive and
 	// removed from the front as they are persisted.
 	inProgressStoreRequestsMu sync.Mutex
@@ -43,10 +52,12 @@ type AccountsDb struct {
 }
 
 type storeRequest struct {
-	accts []*accounts.Account
-	slot  uint64
-	m     map[solana.PublicKey]*accounts.Account
-	cb    func()
+	accts    []*accounts.Account
+	slot     uint64
+	m        map[solana.PublicKey]*accounts.Account
+	cb       func()
+	durable  bool   // route through CommitSlotAtomic (crash-safe) instead of the unsynced store
+	bankhash []byte // committed bankhash, for the durable redo record
 }
 
 func (accountsDb *AccountsDb) StoreQueueLen() int {
@@ -363,7 +374,29 @@ func (accountsDb *AccountsDb) StoreAccounts(
 	}
 	// Must not hold lock during channel send to avoid deadlock with storeWorker.
 	accountsDb.inProgressStoreRequestsMu.Lock()
-	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts, slot, m, cb})
+	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts: accts, slot: slot, m: m, cb: cb})
+	accountsDb.inProgressStoreRequestsMu.Unlock()
+	accountsDb.storeRequestChan <- element
+	return nil
+}
+
+// StoreAccountsDurable enqueues a CRASH-SAFE commit of a slot's accounts + bankhash
+// on the same single storeWorker as StoreAccounts (single-writer/FIFO), routed
+// through CommitSlotAtomic. The callback runs after the commit; it should DeleteRedo.
+func (accountsDb *AccountsDb) StoreAccountsDurable(accts []*accounts.Account, slot uint64, bankhash []byte, cb func()) error {
+	for _, acct := range accts {
+		if acct != nil {
+			acct.Slot = slot
+		}
+	}
+	m := make(map[solana.PublicKey]*accounts.Account, len(accts))
+	for _, a := range accts {
+		if a != nil {
+			m[a.Key] = a
+		}
+	}
+	accountsDb.inProgressStoreRequestsMu.Lock()
+	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts: accts, slot: slot, m: m, cb: cb, durable: true, bankhash: bankhash})
 	accountsDb.inProgressStoreRequestsMu.Unlock()
 	accountsDb.storeRequestChan <- element
 	return nil
@@ -377,30 +410,28 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 		accountsDb.parallelStoreAccounts(StoreAccountsWorkers, accts, slot)
 	}
 
+	accountsDb.refreshReadCaches(accts)
+}
+
+// refreshReadCaches updates the vote/common read caches for a just-stored batch:
+// a deleted (zero-lamport) account is evicted so stale state isn't served (crucial
+// for vote accounts that lose the vote-program owner on withdraw); otherwise the
+// account is cached under the vote or common cache by owner.
+func (accountsDb *AccountsDb) refreshReadCaches(accts []*accounts.Account) {
 	for _, acct := range accts {
 		if acct == nil {
 			continue
 		}
-
-		// If the account has been deleted (lamports == 0), remove the old version from
-		// the cache, if it exists. This is essential for vote accounts because after
-		// deletion (such as via a VoteWithdraw instruction) the account no longer has
-		// the vote program as its owner, so this logic is necessary to prevent stale
-		// versions of now deleted vote accounts from remaining in the vote cache and
-		// thereafter being served up as invalid account state.
 		if acct.Lamports == 0 {
 			if accountsDb.CommonAcctsCache.Has(acct.Key) {
 				accountsDb.CommonAcctsCache.Delete(acct.Key)
 			} else if accountsDb.VoteAcctCache.Has(acct.Key) {
 				accountsDb.VoteAcctCache.Delete(acct.Key)
 			}
+		} else if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 		} else {
-			owner := solana.PublicKeyFromBytes(acct.Owner[:])
-			if owner == addresses.VoteProgramAddr {
-				accountsDb.VoteAcctCache.Set(acct.Key, acct)
-			} else {
-				accountsDb.CommonAcctsCache.Set(acct.Key, acct)
-			}
+			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
 		}
 	}
 }
@@ -409,7 +440,16 @@ func (accountsDb *AccountsDb) storeWorker() {
 	defer close(accountsDb.storeWorkerDone)
 	for elt := range accountsDb.storeRequestChan {
 		sr := elt.Value.(storeRequest)
-		accountsDb.storeAccountsSync(sr.accts, sr.slot)
+		if sr.durable {
+			// Panic on error (like storeAccountsSync) so cb does NOT run: the redo is
+			// preserved for recovery. Running cb would DeleteRedo + advance as committed,
+			// silently losing the slot.
+			if err := accountsDb.CommitSlotAtomic(sr.accts, sr.slot, sr.bankhash); err != nil {
+				panic(fmt.Sprintf("durable commit failed for slot %d: %v", sr.slot, err))
+			}
+		} else {
+			accountsDb.storeAccountsSync(sr.accts, sr.slot)
+		}
 		if sr.cb != nil {
 			sr.cb()
 		}

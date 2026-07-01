@@ -95,6 +95,7 @@ type forkChoiceState struct {
 	blockhashToSlot       map[solana.Hash]uint64
 	pendingParentByHash   map[solana.Hash][]uint64
 	equivocatedSlots      map[uint64]struct{}
+	validatorRoots        map[solana.PublicKey]uint64 // voter -> latest explicit tower root (the finality signal)
 	epoch                 uint64
 	epochStakes           map[solana.PublicKey]uint64
 	epochAuthorizedVoters *epochstakes.EpochAuthorizedVotersCache
@@ -123,6 +124,7 @@ func NewForkChoiceService(
 		blockhashToSlot:       make(map[solana.Hash]uint64),
 		pendingParentByHash:   make(map[solana.Hash][]uint64),
 		equivocatedSlots:      make(map[uint64]struct{}),
+		validatorRoots:        make(map[solana.PublicKey]uint64),
 		epoch:                 epoch,
 		epochStakes:           epochStakes,
 		epochAuthorizedVoters: epochAuthorizedVoters,
@@ -331,6 +333,13 @@ func (s *ForkChoiceService) applyVoteUpdatesLocked(updatesToApply []voteUpdate, 
 			update.voteInfo.votePubkey,
 			update.stake,
 		)
+
+		// Record the validator's explicit tower root (monotonic; never regress).
+		if r := update.voteInfo.rootSlot; r != nil {
+			if prev, ok := s.state.validatorRoots[update.voteInfo.votePubkey]; !ok || *r > prev {
+				s.state.validatorRoots[update.voteInfo.votePubkey] = *r
+			}
+		}
 	}
 }
 
@@ -439,7 +448,11 @@ func (s *ForkChoiceService) LatestObservedSlot() uint64 {
 func (s *ForkChoiceService) FindConfirmedLeaf(anchorSlot uint64, maxDepth int) (ConfirmedLeaf, error) {
 	s.state.mu.Lock()
 	defer s.state.mu.Unlock()
+	return s.findConfirmedLeafLocked(anchorSlot, maxDepth)
+}
 
+// findConfirmedLeafLocked is the body of FindConfirmedLeaf; the caller must hold s.state.mu.
+func (s *ForkChoiceService) findConfirmedLeafLocked(anchorSlot uint64, maxDepth int) (ConfirmedLeaf, error) {
 	if s.state.latestObservedSlot <= anchorSlot {
 		return ConfirmedLeaf{}, ErrNeedWait
 	}
@@ -484,12 +497,76 @@ func (s *ForkChoiceService) FindConfirmedLeaf(anchorSlot uint64, maxDepth int) (
 	return ConfirmedLeaf{}, ErrNeedWait
 }
 
+// HighestRootedSlot reports the raw explicit-root finality watermark: the highest
+// slot a >2/3 stake supermajority has explicitly rooted past, with no anchor or
+// path checks. It is the input to FindRootedSlot's gate and a diagnostic of
+// whether rooting is advancing. Returns (0,false) until a supermajority roots.
+func (s *ForkChoiceService) HighestRootedSlot() (uint64, bool) {
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+	return highestRootedSlot(s.state.validatorRoots, s.state.epochStakes, s.state.totalEpochStake)
+}
+
+// FindRootedSlot returns the deepest slot a >2/3 supermajority has explicitly rooted
+// past that is also observed, carries a confirmed bankhash, and resolves a same-fork
+// path from the anchor — the fail-closed durable-promotion gate (rooted, on-fork only).
+// Returns ErrNeedWait if none yet, ErrEquivocation on an equivocated slot, else path errors.
+// Not yet wired: promotion currently gates on HighestRootedSlot; this goes live with #14.
+func (s *ForkChoiceService) FindRootedSlot(anchorSlot uint64, maxDepth int) (ConfirmedLeaf, error) {
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+
+	rooted, ok := highestRootedSlot(s.state.validatorRoots, s.state.epochStakes, s.state.totalEpochStake)
+	if !ok || rooted <= anchorSlot {
+		return ConfirmedLeaf{}, ErrNeedWait
+	}
+
+	// Bound the explicit-root watermark to the search window above the anchor.
+	ceiling := rooted
+	if maxDepth > 0 && ceiling > anchorSlot+uint64(maxDepth) {
+		ceiling = anchorSlot + uint64(maxDepth)
+	}
+
+	// Highest observed, supermajority-confirmed slot at/below the rooted
+	// watermark whose path back to the anchor resolves on a single fork.
+	for slot := ceiling; slot > anchorSlot; slot-- {
+		if _, equivocated := s.state.equivocatedSlots[slot]; equivocated {
+			return ConfirmedLeaf{}, ErrEquivocation
+		}
+
+		accumulator, exists := s.state.voteStakeTotals[slot]
+		if !exists {
+			continue
+		}
+		winningHash, hasWinner := accumulator.winningHash()
+		if !hasWinner {
+			continue
+		}
+		if _, observed := s.state.observedBlocks[slot]; !observed {
+			continue
+		}
+
+		// Mandatory same-fork ancestry — fail closed if the rooted slot does not
+		// resolve a clean path from the anchor.
+		if _, err := s.resolvePathToLeafLocked(anchorSlot, slot, maxDepth); err != nil {
+			return ConfirmedLeaf{}, err
+		}
+		return ConfirmedLeaf{Slot: slot, Bankhash: winningHash}, nil
+	}
+
+	return ConfirmedLeaf{}, ErrNeedWait
+}
+
 // ResolvePathToLeaf reconstructs the block/skip decisions from anchorSlot to
 // leafSlot using the observed pre-execution block metadata.
 func (s *ForkChoiceService) ResolvePathToLeaf(anchorSlot uint64, leafSlot uint64, maxDepth int) (*SolveResult, error) {
 	s.state.mu.Lock()
 	defer s.state.mu.Unlock()
+	return s.resolvePathToLeafLocked(anchorSlot, leafSlot, maxDepth)
+}
 
+// resolvePathToLeafLocked is the body of ResolvePathToLeaf; caller holds s.state.mu.
+func (s *ForkChoiceService) resolvePathToLeafLocked(anchorSlot uint64, leafSlot uint64, maxDepth int) (*SolveResult, error) {
 	observedSnapshot := make(map[uint64]*ObservedBlockMeta, len(s.state.observedBlocks))
 	for slot, meta := range s.state.observedBlocks {
 		copyMeta := *meta

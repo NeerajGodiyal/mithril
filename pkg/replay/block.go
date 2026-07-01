@@ -181,6 +181,10 @@ type ResumeState struct {
 	// SlotHashes context - vote program needs accurate slot→hash mappings
 	SlotHashes *sealevel.SysvarSlotHashes
 
+	// Clock is the Clock sysvar data as-of the parent slot. Read from durable (not
+	// SysvarCache) during load, so resume must restore it explicitly. nil = fresh start.
+	Clock []byte
+
 	// ReplayCtx fields - so resume uses fresh values instead of stale manifest
 	Capitalization          uint64
 	SlotsPerYear            float64
@@ -216,7 +220,7 @@ func serializeAllEpochStakes() map[uint64][]byte {
 	return result
 }
 
-func resolveAddrTableLookups(accountsDb *accountsdb.AccountsDb, block *b.Block) error {
+func resolveAddrTableLookups(accountsDb blockAccountSource, block *b.Block) error {
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for _, tx := range block.Transactions {
@@ -401,7 +405,7 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) (accounts.Accounts, accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
 		return nil, nil, err
@@ -415,20 +419,16 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	}
 
 	numAccts := uint64(len(slotAccts))
-	accts := accounts.NewMemAccountsWithLen(numAccts)
 	parentAccts := accounts.NewMemAccountsWithLen(numAccts)
-
 	for _, acct := range slotAccts {
-		err = accts.SetAccountWithoutLock(acct.Key, acct)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		err = parentAccts.SetAccountWithoutLock(acct.Key, acct)
-		if err != nil {
+		if err = parentAccts.SetAccountWithoutLock(acct.Key, acct); err != nil {
 			return nil, nil, err
 		}
 	}
+
+	// accts is a branch-local overlay over the pristine parent snapshot; execution
+	// copy-on-writes, so parentAccts stays pristine for LtHash "before" values.
+	accts := accounts.NewOverlayAccounts(parentAccts)
 
 	block.FeeRateGovernor = sealevel.NewFeeRateGovernorDerived(block.PrevFeeRateGovernor, block.PrevNumSignatures)
 	if block.FeeRateGovernor.PrevLamportsPerSignature == 0 {
@@ -439,9 +439,17 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	{
 		// update and cache clock sysvar
 		{
-			clockAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
-			if err != nil {
-				panic("unable to retrieve clock sysvar when updating clock")
+			var clockAcct *accounts.Account
+			var err error
+			if sealevel.SysvarCache.Clock.Acct != nil {
+				// Prefer the in-RAM Clock (mirrors SlotHashes/RecentBlockhashes): on
+				// resume it is the restored Clock as of the last rooted slot, which durable may not match.
+				clockAcct = sealevel.SysvarCache.Clock.Acct.Clone()
+			} else {
+				clockAcct, err = accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
+				if err != nil {
+					panic("unable to retrieve clock sysvar when updating clock")
+				}
 			}
 
 			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct.Clone())
@@ -1047,6 +1055,24 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		if resumeState.SlotHashes != nil {
 			sealevel.SysvarCache.SlotHashes.Sysvar = resumeState.SlotHashes
 		}
+
+		// Restore the Clock sysvar as of the last rooted slot so the first resumed slot uses it rather
+		// than durable's (which can diverge). Lamports/owner are constant, so load
+		// from durable and overwrite only the data.
+		if len(resumeState.Clock) > 0 {
+			clockAcct, err := acctsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
+			if err != nil {
+				return fmt.Errorf("cannot resume: failed to load clock sysvar account: %w", err)
+			}
+			clockAcct.Data = make([]byte, len(resumeState.Clock))
+			copy(clockAcct.Data, resumeState.Clock)
+			var clock sealevel.SysvarClock
+			if err := clock.UnmarshalWithDecoder(bin.NewBinDecoder(clockAcct.Data)); err != nil {
+				return fmt.Errorf("cannot resume: failed to decode restored clock sysvar: %w", err)
+			}
+			sealevel.SysvarCache.Clock.Sysvar = &clock
+			sealevel.SysvarCache.Clock.Acct = clockAcct
+		}
 	} else {
 		// No blockhash context in state file - this should not happen with new state files,
 		// but could happen with old state files created before blockhash tracking was added.
@@ -1390,6 +1416,15 @@ func ReplayBlocks(
 
 	var readyConsensusPath *pendingConsensusPath
 	observedConsensusBlocks := make(map[uint64]*b.Block)
+	var lastRootedWatermark uint64 // diagnostics: highest explicit-root finality slot seen
+
+	// unrootedTailState holds the in-RAM unrooted overlay in rooted-durable mode;
+	// nil in legacy mode. When enabled, acctsDb serves durable reads + CommitSlotAtomic.
+	var unrootedTailState *unrootedTail
+	if acctsDb.RootedDurable {
+		unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap)
+		mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots)", unrootedTailHaltCap)
+	}
 
 	var opts *blockstream.BlockSourceOpts
 	if useLightbringer {
@@ -1475,8 +1510,11 @@ func ReplayBlocks(
 			forkChoice.ObserveExecutionAnchor(resumeState.ParentSlot, solana.Hash(resumeState.LastBlockhash))
 			return
 		}
-		if mithrilState != nil && mithrilState.ManifestParentBankhash != "" {
-			manifestParentBlockhash, err := base58.DecodeFromString(mithrilState.ManifestParentBankhash)
+		if mithrilState != nil && len(mithrilState.ManifestRecentBlockhashes) > 0 {
+			// Fresh snapshot start: seed the snapshot slot's PoH blockhash (newest
+			// recent blockhash), NOT the bank hash — RPC children carry the parent's
+			// PoH blockhash to recover their parent; the bank hash never matches.
+			manifestParentBlockhash, err := base58.DecodeFromString(mithrilState.ManifestRecentBlockhashes[0].Blockhash)
 			if err != nil {
 				mlog.Log.Warnf("forkchoice: failed to decode manifest parent blockhash for anchor seeding: %v", err)
 				return
@@ -1666,6 +1704,32 @@ func ReplayBlocks(
 			}
 
 			if consensusBufferedExecutionActive {
+				// Advance the explicit-root finality watermark. In rooted-durable mode this
+				// folds the now-rooted RAM prefix onto disk (irreversible); safe under linear replay.
+				// TODO(#14 multi-branch): gate promotion on FindRootedSlot (same-fork
+				// path + confirmed-bankhash) instead of the raw watermark once competing
+				// forks can exist; the raw watermark has no anchor/path checks.
+				if rooted, ok := forkChoice.HighestRootedSlot(); ok && rooted > lastRootedWatermark {
+					lastRootedWatermark = rooted
+					mlog.Log.Infof("forkchoice: rooted watermark advanced to slot %d", rooted)
+
+					// Rooted-durable: fold the now-rooted prefix into the canonical store,
+					// advance the last rooted slot, and persist the resume context as of that slot.
+					if unrootedTailState != nil {
+						promotedThrough, rootedCtx, perr := unrootedTailState.promote(rooted)
+						if perr != nil {
+							mlog.Log.Errorf("rooted-durable: promotion stopped at slot %d: %v", promotedThrough, perr)
+						}
+						if promotedThrough > mithrilState.LastRootedSlot {
+							mithrilState.LastRootedSlot = promotedThrough
+							if rootedCtx != nil {
+								mithrilState.LastRootedBankhash = rootedCtx.Bankhash
+								mithrilState.LastRootedContext = rootedCtx
+							}
+						}
+					}
+				}
+
 				resolvedPath, err := consensusCoordinator.ResolveFromAnchor(currentConsensusAnchorSlot())
 				if err != nil {
 					switch {
@@ -1865,12 +1929,20 @@ func ReplayBlocks(
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt, unrootedTailState)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
 			// Clear any pending stake pubkeys from this failed block
 			global.ClearPendingStakePubkeys()
+			break
+		}
+
+		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
+		// stalled), halt rather than grow RAM unbounded; resume re-replays from the last rooted slot.
+		if unrootedTailState != nil && unrootedTailState.OverCap() {
+			result.Error = fmt.Errorf("rooted-durable: unrooted tail exceeded %d held slots at slot %d (rooting stalled); halting", unrootedTailHaltCap, block.Slot)
+			mlog.Log.Errorf("%v", result.Error)
 			break
 		}
 		global.SetBlockHeight(block.BlockHeight)
@@ -1915,6 +1987,43 @@ func ReplayBlocks(
 		}
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
+
+		// Rooted-durable: capture this slot's end-of-slot resume context (deep-copied,
+		// no pointers into the global SysvarCache) and retain it in the tail until
+		// promotion, so resume restarts from the last rooted slot not the lost in-RAM replayed tip.
+		if unrootedTailState != nil && lastSlotCtx != nil {
+			rc := &state.ResumeContext{
+				Slot:                    block.Slot,
+				Bankhash:                base58.Encode(lastSlotCtx.FinalBankhash),
+				BlockHeight:             global.BlockHeight(),
+				Epoch:                   block.Epoch,
+				NumSignatures:           lastSlotCtx.NumSignatures,
+				EvictedBlockhash:        base58.Encode(lastSlotCtx.LatestEvictedBlockhash[:]),
+				Blockhash:               base58.Encode(lastSlotCtx.Blockhash[:]),
+				RecentBlockhashes:       EncodeRecentBlockhashes(sealevel.SysvarCache.RecentBlockHashes.Sysvar),
+				SlotHashes:              EncodeSlotHashes(sealevel.SysvarCache.SlotHashes.Sysvar),
+				Capitalization:          replayCtx.Capitalization,
+				SlotsPerYear:            replayCtx.SlotsPerYear,
+				InflationInitial:        replayCtx.Inflation.Initial,
+				InflationTerminal:       replayCtx.Inflation.Terminal,
+				InflationTaper:          replayCtx.Inflation.Taper,
+				InflationFoundation:     replayCtx.Inflation.FoundationVal,
+				InflationFoundationTerm: replayCtx.Inflation.FoundationTerm,
+			}
+			if lastSlotCtx.AcctsLtHash != nil {
+				rc.AcctsLtHash = base64.StdEncoding.EncodeToString(lastSlotCtx.AcctsLtHash.Hash())
+			}
+			// Capture the Clock sysvar as of the last rooted slot: read from durable (not SysvarCache)
+			// during load, so resume must restore it or the first slot's LtHash diverges.
+			if sealevel.SysvarCache.Clock.Acct != nil {
+				rc.Clock = base64.StdEncoding.EncodeToString(sealevel.SysvarCache.Clock.Acct.Data)
+			}
+			if lastSlotCtx.FeeRateGovernor != nil {
+				rc.LamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
+				rc.PrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
+			}
+			unrootedTailState.SetContext(block.Slot, rc)
+		}
 
 		// Clear ManifestEpochStakes after first replayed slot past snapshot
 		// This frees memory and ensures we don't use stale manifest data on restart
@@ -2363,7 +2472,39 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 	return writableAccts, modifiedAccts
 }
 
-func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb) *sealevel.SlotCtx {
+// EncodeRecentBlockhashes deep-copies the RecentBlockhashes sysvar into the
+// serializable []state.BlockhashEntry form (newest-first). nil sysvar returns nil.
+func EncodeRecentBlockhashes(sysvar *sealevel.SysvarRecentBlockhashes) []state.BlockhashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.BlockhashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.BlockhashEntry{
+			Blockhash:            base58.Encode(entry.Blockhash[:]),
+			LamportsPerSignature: entry.FeeCalculator.LamportsPerSignature,
+		})
+	}
+	return result
+}
+
+// EncodeSlotHashes deep-copies the SlotHashes sysvar into the serializable
+// []state.SlotHashEntry form. Returns nil for a nil sysvar.
+func EncodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
+	if sysvar == nil {
+		return nil
+	}
+	result := make([]state.SlotHashEntry, 0, len(*sysvar))
+	for _, entry := range *sysvar {
+		result = append(result, state.SlotHashEntry{
+			Slot: entry.Slot,
+			Hash: base58.Encode(entry.Hash[:]),
+		})
+	}
+	return result
+}
+
+func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb, tail *unrootedTail) *sealevel.SlotCtx {
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:        accts,
 		ParentAccts:     parentAccts,
@@ -2395,6 +2536,12 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		HasEahWorkaround: block.HasEahWorkaround,
 
 		SerializedParameterArena: SerializedParameterArena,
+	}
+
+	// Guard: a nil *unrootedTail stored in the AccountReader interface would be a
+	// non-nil typed-nil and break the nil check in GetAccountFromAccountsDb.
+	if tail != nil {
+		slotCtx.UnrootedRead = tail
 	}
 
 	return slotCtx
@@ -2653,6 +2800,9 @@ func ProcessBlock(
 	// pt is updated after StoreAccounts completes through a callback.
 	// Must be non-nil.
 	pt *persistedTracker,
+	// tail is the in-RAM unrooted overlay in rooted-durable mode; nil in legacy
+	// mode. When set, block reads resolve through it and commits buffer into it.
+	tail *unrootedTail,
 ) (*sealevel.SlotCtx, error) {
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -2732,14 +2882,20 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule)
+	// In rooted-durable mode, block accounts/sysvars load through the unrooted
+	// tail (overlay→durable) so execution sees confirmed-but-unrooted state.
+	var blockSrc blockAccountSource = acctsDb
+	if tail != nil {
+		blockSrc = tail
+	}
+	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(blockSrc, block, epochSchedule)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
 	}
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
-	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb)
+	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail)
 	slotCtx.TraceCtx = ctx
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
@@ -2805,9 +2961,19 @@ func ProcessBlock(
 	stakeIndexDir := filepath.Join(acctsDb.AcctsDir, "..")
 	afterStoreAccounts := func() {
 		metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
-		err := acctsDb.StoreBankHashForSlot(persistedSlot, persistedBankhash)
-		if err != nil {
-			mlog.Log.Infof("unable to store bankhash for slot %d", persistedSlot)
+		if tail != nil {
+			// Rooted-durable: accounts + bankhash are buffered in the overlay and
+			// become durable only on promotion; nothing written here (rooted-only).
+		} else if acctsDb.DurableCommit {
+			// CommitSlotAtomic already stored accounts + bankhash durably; finalize
+			// the crash-safe commit by removing its redo record.
+			if derr := accountsdb.DeleteRedo(acctsDb.AcctsDir, persistedSlot); derr != nil {
+				mlog.Log.Errorf("failed to delete redo for slot %d: %v", persistedSlot, derr)
+			}
+		} else {
+			if berr := acctsDb.StoreBankHashForSlot(persistedSlot, persistedBankhash); berr != nil {
+				mlog.Log.Infof("unable to store bankhash for slot %d", persistedSlot)
+			}
 		}
 		flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
 		if err != nil {
@@ -2823,7 +2989,16 @@ func ProcessBlock(
 		commitSlot.Store(0)
 	}
 
-	if len(modifiedAccts) > 0 {
+	if tail != nil {
+		// Rooted-durable: buffer this slot's writes + bankhash in the RAM overlay
+		// (always, even when empty, so the bankhash is recorded); no durable write.
+		tail.Add(slotCtx.Slot, modifiedAccts, persistedBankhash)
+		afterStoreAccounts()
+	} else if acctsDb.DurableCommit {
+		// Always enqueue (even with no modified accounts) so the commit window is
+		// always closed and the bankhash recorded — avoids the empty-block hang.
+		err = acctsDb.StoreAccountsDurable(modifiedAccts, slotCtx.Slot, persistedBankhash, afterStoreAccounts)
+	} else if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
 	}
 

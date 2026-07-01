@@ -109,10 +109,19 @@ type MithrilState struct {
 	// =========================================================================
 	// Current Position (where we left off)
 	// =========================================================================
-	LastSlot        uint64 `json:"last_slot,omitempty"`         // Last successfully replayed slot
+	LastSlot        uint64 `json:"last_slot,omitempty"`         // Last successfully replayed slot (the replayed tip)
 	LastEpoch       uint64 `json:"last_epoch,omitempty"`        // Epoch of last replayed slot
 	LastBankhash    string `json:"last_bankhash,omitempty"`     // Bankhash of last replayed slot (base58)
 	LastBlockHeight uint64 `json:"last_block_height,omitempty"` // Block height of last replayed slot
+
+	// Rooted-durable watermark: the canonical store holds only rooted (finalized) slots
+	// through here while replay runs ahead in RAM. Resume starts at the next slot. Zero = legacy.
+	LastRootedSlot     uint64 `json:"last_rooted_slot,omitempty"`     // Highest durably-committed (rooted) slot
+	LastRootedBankhash string `json:"last_rooted_bankhash,omitempty"` // Bankhash of the last rooted slot (base58)
+
+	// LastRootedContext is the replay context as of the last rooted slot; rooted-durable
+	// resume restarts from the next slot using it. nil in legacy mode.
+	LastRootedContext *ResumeContext `json:"last_rooted_context,omitempty"`
 
 	// =========================================================================
 	// Resume Context (everything needed to continue replay from LastSlot)
@@ -198,6 +207,32 @@ type ManifestEpochScheduleSeed struct {
 type SlotHashEntry struct {
 	Slot uint64 `json:"slot"`
 	Hash string `json:"hash"` // base58 encoded
+}
+
+// ResumeContext bundles the end-of-slot replay context to continue replay from a slot.
+// In rooted-durable mode it is captured as of the last rooted slot (stored in
+// MithrilState.LastRootedContext). Epoch stakes live in ComputedEpochStakes, not here.
+type ResumeContext struct {
+	Slot                    uint64           `json:"slot"`
+	Bankhash                string           `json:"bankhash"` // base58
+	BlockHeight             uint64           `json:"block_height"`
+	Epoch                   uint64           `json:"epoch"`
+	AcctsLtHash             string           `json:"accts_lt_hash"` // base64
+	LamportsPerSignature    uint64           `json:"lamports_per_sig"`
+	PrevLamportsPerSig      uint64           `json:"prev_lamports_per_sig"`
+	NumSignatures           uint64           `json:"num_signatures"`
+	RecentBlockhashes       []BlockhashEntry `json:"recent_blockhashes"`
+	EvictedBlockhash        string           `json:"evicted_blockhash"` // base58
+	Blockhash               string           `json:"blockhash"`         // base58
+	SlotHashes              []SlotHashEntry  `json:"slot_hashes"`
+	Clock                   string           `json:"clock"` // base64 of the Clock sysvar account data as of the last rooted slot
+	Capitalization          uint64           `json:"capitalization"`
+	SlotsPerYear            float64          `json:"slots_per_year"`
+	InflationInitial        float64          `json:"inflation_initial"`
+	InflationTerminal       float64          `json:"inflation_terminal"`
+	InflationTaper          float64          `json:"inflation_taper"`
+	InflationFoundation     float64          `json:"inflation_foundation"`
+	InflationFoundationTerm float64          `json:"inflation_foundation_term"`
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -433,13 +468,26 @@ func (s *MithrilState) getWriterCommit() string {
 	return s.LastCommit // Legacy field fallback
 }
 
-// GetResumeSlot returns the slot to resume from.
-// Returns LastSlot + 1 if replay has happened, otherwise SnapshotSlot + 1.
+// GetResumeSlot returns the slot to resume replay from: the slot after the last
+// rooted slot in rooted-durable mode (the in-RAM slots above the last rooted slot
+// are lost on restart), else LastSlot+1, else SnapshotSlot+1.
 func (s *MithrilState) GetResumeSlot() uint64 {
+	if s.LastRootedSlot > 0 {
+		return s.LastRootedSlot + 1
+	}
 	if s.LastSlot > 0 {
 		return s.LastSlot + 1
 	}
 	return s.SnapshotSlot + 1
+}
+
+// DurableHighWater returns the highest slot durably committed: the rooted watermark
+// in rooted-durable mode, else the replayed/snapshot slot (legacy).
+func (s *MithrilState) DurableHighWater() uint64 {
+	if s.LastRootedSlot > 0 {
+		return s.LastRootedSlot
+	}
+	return s.GetCurrentSlot()
 }
 
 // GetCurrentSlot returns the most recent slot (LastSlot if replayed, else SnapshotSlot).
@@ -466,6 +514,24 @@ type BankhashGetter interface {
 // This detects cases where the process was killed (Ctrl+Z, kill -9) without
 // updating the state file, leaving AccountsDB in an inconsistent state.
 func (s *MithrilState) ValidateAgainstBankhashDB(bankhashDb BankhashGetter) error {
+	// Rooted-durable: bankhash_db must end exactly at the last rooted slot (the in-RAM
+	// slots above it were never written); a bankhash beyond it = a torn durable write.
+	if s.LastRootedSlot > 0 {
+		checkSlot := s.LastRootedSlot + 1
+		if bankhash, err := bankhashDb.GetBankHashForSlot(checkSlot); err == nil && len(bankhash) > 0 {
+			return fmt.Errorf("state file shows last_rooted_slot=%d, but bankhash_db has entry for slot %d - torn durable commit", s.LastRootedSlot, checkSlot)
+		}
+		rootedBankhash, err := bankhashDb.GetBankHashForSlot(s.LastRootedSlot)
+		if err != nil || len(rootedBankhash) == 0 {
+			return fmt.Errorf("state file shows last_rooted_slot=%d, but no bankhash found in bankhash_db", s.LastRootedSlot)
+		}
+		if s.LastRootedBankhash != "" && base58.Encode(rootedBankhash) != s.LastRootedBankhash {
+			return fmt.Errorf("rooted bankhash mismatch for slot %d: state file has %s, bankhash_db has %s",
+				s.LastRootedSlot, s.LastRootedBankhash, base58.Encode(rootedBankhash))
+		}
+		return nil
+	}
+
 	if s.LastSlot == 0 {
 		// No replay happened according to state file
 		// Check if bankhash exists for snapshot_slot + 1

@@ -60,10 +60,18 @@ type SlotBank struct {
 	BanksHash    [32]byte
 }
 
+// AccountReader is an optional slot-scoped read source that shadows AccountsDb.
+// When set (rooted-durable mode), GetAccountFromAccountsDb resolves through it so
+// execution sees confirmed-but-unrooted account versions, not rooted-only durable.
+type AccountReader interface {
+	GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error)
+}
+
 type SlotCtx struct {
 	Accounts        accounts.Accounts
 	ParentAccts     accounts.Accounts
 	AccountsDb      *accountsdb.AccountsDb
+	UnrootedRead    AccountReader // nil in legacy mode; shadows AccountsDb reads when set
 	FeeRateGovernor *FeeRateGovernor
 	Slot            uint64
 	ParentSlot      uint64
@@ -438,6 +446,9 @@ func (slotCtx *SlotCtx) GetParentAccount(pubkey solana.PublicKey) (*accounts.Acc
 }
 
 func (slotCtx *SlotCtx) GetAccountFromAccountsDb(pubkey solana.PublicKey) (*accounts.Account, error) {
+	if slotCtx.UnrootedRead != nil {
+		return slotCtx.UnrootedRead.GetAccount(slotCtx.Slot, pubkey)
+	}
 	acct, err := slotCtx.AccountsDb.GetAccount(slotCtx.Slot, pubkey)
 	if err != nil {
 		return nil, err
