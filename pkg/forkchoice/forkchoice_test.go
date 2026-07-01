@@ -534,6 +534,24 @@ func TestParseAndValidateVoteTxAcceptsLiveTowerSyncShape(t *testing.T) {
 	assert.Equal(t, uint64(420404777), info.slot)
 	assert.Equal(t, votedHash, solana.Hash(info.bankHash))
 	assert.Equal(t, voteAcct, info.votePubkey)
+	// The explicit tower root must be extracted. A real TowerSync carries a root,
+	// and it is always below the tower tip.
+	require.NotNil(t, info.rootSlot, "TowerSync carries an explicit root")
+	assert.Less(t, *info.rootSlot, info.slot, "root is below the tower tip")
+}
+
+// A legacy Vote instruction carries no explicit root -> rootSlot is nil.
+func TestParseVoteTxLegacyHasNoRoot(t *testing.T) {
+	voteAcct := solana.PublicKey{0x11}
+	voteAuthority := solana.PublicKey{0x22}
+	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
+	epochAuth.PutEntry(voteAcct, voteAuthority)
+
+	tx := buildTestVoteTx(voteAcct, voteAuthority, 1000, hash(0xAB))
+	info, ok := parseAndValidateVoteTx(tx, epochAuth)
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), info.slot)
+	assert.Nil(t, info.rootSlot, "legacy Vote has no explicit root")
 }
 
 func TestParseAndValidateVoteTxFallsBackToSignatureCountWhenHeaderSignerCountMissing(t *testing.T) {
