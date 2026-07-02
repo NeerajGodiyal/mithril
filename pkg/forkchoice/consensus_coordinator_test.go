@@ -35,9 +35,9 @@ func injectSupermajority(fc *ForkChoiceService, slot uint64, winningHash solana.
 func TestResolveFromAnchorSuccess(t *testing.T) {
 	fc := newTestForkChoiceState(100)
 
-	injectSupermajority(fc, 13, hash(0xAA), 70)
-	fc.state.observedBlocks[11] = &ObservedBlockMeta{Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: hash(0x11)}
-	fc.state.observedBlocks[13] = &ObservedBlockMeta{Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: hash(0x13)}
+	injectSupermajority(fc, 13, testHash(0xAA), 70)
+	fc.state.observedBlocks[11] = &ObservedBlockMeta{Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: testHash(0x11)}
+	fc.state.observedBlocks[13] = &ObservedBlockMeta{Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: testHash(0x13)}
 	fc.state.latestObservedSlot = 13
 
 	cc := NewConsensusCoordinator(fc, 64, "halt")
@@ -45,7 +45,7 @@ func TestResolveFromAnchorSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resolved)
 	assert.Equal(t, uint64(13), resolved.LeafSlot)
-	assert.Equal(t, hash(0xAA), resolved.LeafBankhash)
+	assert.Equal(t, testHash(0xAA), resolved.LeafBankhash)
 	assert.Equal(t, []SlotDecision{
 		{Slot: 10, UseBlock: false},
 		{Slot: 11, UseBlock: true},
@@ -66,7 +66,7 @@ func TestResolveFromAnchorDepthExceeded(t *testing.T) {
 	fc := newTestForkChoiceState(100)
 
 	fc.state.latestObservedSlot = 100
-	injectSupermajority(fc, 100, hash(0xEE), 70)
+	injectSupermajority(fc, 100, testHash(0xEE), 70)
 
 	cc := NewConsensusCoordinator(fc, 16, "halt")
 	_, err := cc.ResolveFromAnchor(0)
@@ -86,8 +86,8 @@ func TestResolveFromAnchorWaitsWhenObservedDepthExceedsLimitWithoutConfirmedLeaf
 func TestResolveFromAnchorPathIncomplete(t *testing.T) {
 	fc := newTestForkChoiceState(100)
 
-	injectSupermajority(fc, 15, hash(0xCC), 70)
-	fc.state.observedBlocks[15] = &ObservedBlockMeta{Slot: 15, ParentSlotKnown: false, ParentBlockhash: hash(0x02)}
+	injectSupermajority(fc, 15, testHash(0xCC), 70)
+	fc.state.observedBlocks[15] = &ObservedBlockMeta{Slot: 15, ParentSlotKnown: false, ParentBlockhash: testHash(0x02)}
 	fc.state.latestObservedSlot = 15
 
 	cc := NewConsensusCoordinator(fc, 64, "halt")
@@ -99,13 +99,13 @@ func TestResolveFromAnchorSkipsDisconnectedConfirmedLeaf(t *testing.T) {
 	fc := newTestForkChoiceState(100)
 
 	// Newest confirmed leaf does not connect back to the anchor.
-	injectSupermajority(fc, 14, hash(0xDD), 70)
-	fc.state.observedBlocks[14] = &ObservedBlockMeta{Slot: 14, ParentSlot: 8, ParentSlotKnown: true, Blockhash: hash(0x14)}
+	injectSupermajority(fc, 14, testHash(0xDD), 70)
+	fc.state.observedBlocks[14] = &ObservedBlockMeta{Slot: 14, ParentSlot: 8, ParentSlotKnown: true, Blockhash: testHash(0x14)}
 
 	// Slightly older confirmed leaf is valid and should be selected instead.
-	injectSupermajority(fc, 13, hash(0xCC), 70)
-	fc.state.observedBlocks[11] = &ObservedBlockMeta{Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: hash(0x11)}
-	fc.state.observedBlocks[13] = &ObservedBlockMeta{Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: hash(0x13)}
+	injectSupermajority(fc, 13, testHash(0xCC), 70)
+	fc.state.observedBlocks[11] = &ObservedBlockMeta{Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: testHash(0x11)}
+	fc.state.observedBlocks[13] = &ObservedBlockMeta{Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: testHash(0x13)}
 	fc.state.latestObservedSlot = 14
 
 	cc := NewConsensusCoordinator(fc, 64, "halt")
@@ -113,7 +113,7 @@ func TestResolveFromAnchorSkipsDisconnectedConfirmedLeaf(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resolved)
 	assert.Equal(t, uint64(13), resolved.LeafSlot)
-	assert.Equal(t, hash(0xCC), resolved.LeafBankhash)
+	assert.Equal(t, testHash(0xCC), resolved.LeafBankhash)
 	assert.Equal(t, []SlotDecision{
 		{Slot: 10, UseBlock: false},
 		{Slot: 11, UseBlock: true},

@@ -30,54 +30,54 @@ func TestApplyVoteUpdatesRecordsRoots(t *testing.T) {
 	s := newRootingService()
 	rp := func(v uint64) *uint64 { return &v }
 	s.applyVoteUpdatesLocked([]voteUpdate{
-		{voteInfo: &voteInfo{slot: 110, bankHash: hash(110), votePubkey: vk(1), rootSlot: rp(78)}, stake: 50},
-		{voteInfo: &voteInfo{slot: 111, bankHash: hash(111), votePubkey: vk(2), rootSlot: rp(80)}, stake: 30},
-		{voteInfo: &voteInfo{slot: 109, bankHash: hash(109), votePubkey: vk(1), rootSlot: rp(70)}, stake: 50}, // older root -> ignored
-		{voteInfo: &voteInfo{slot: 112, bankHash: hash(112), votePubkey: vk(3), rootSlot: nil}, stake: 20},    // no root
+		{voteInfo: &voteInfo{slot: 110, bankHash: testHash(110), votePubkey: votePubkey(1), rootSlot: rp(78)}, stake: 50},
+		{voteInfo: &voteInfo{slot: 111, bankHash: testHash(111), votePubkey: votePubkey(2), rootSlot: rp(80)}, stake: 30},
+		{voteInfo: &voteInfo{slot: 109, bankHash: testHash(109), votePubkey: votePubkey(1), rootSlot: rp(70)}, stake: 50}, // older root -> ignored
+		{voteInfo: &voteInfo{slot: 112, bankHash: testHash(112), votePubkey: votePubkey(3), rootSlot: nil}, stake: 20},    // no root
 	}, 100)
 
-	assert.Equal(t, uint64(78), s.state.validatorRoots[vk(1)], "keeps the max root, not the later-but-lower one")
-	assert.Equal(t, uint64(80), s.state.validatorRoots[vk(2)])
-	_, ok := s.state.validatorRoots[vk(3)]
+	assert.Equal(t, uint64(78), s.state.validatorRoots[votePubkey(1)], "keeps the max root, not the later-but-lower one")
+	assert.Equal(t, uint64(80), s.state.validatorRoots[votePubkey(2)])
+	_, ok := s.state.validatorRoots[votePubkey(3)]
 	assert.False(t, ok, "nil root not recorded")
 }
 
-func vk(b byte) solana.PublicKey { return solana.PublicKey{b} }
+func votePubkey(b byte) solana.PublicKey { return solana.PublicKey{b} }
 
 // highestRootedSlot: the highest slot a >2/3 supermajority has rooted past, exact arithmetic.
 func TestHighestRootedSlot(t *testing.T) {
 	// total 120, threshold = floor(120*2/3) = 80, need stake STRICTLY > 80.
-	stakes := map[solana.PublicKey]uint64{vk(1): 40, vk(2): 40, vk(3): 40}
+	stakes := map[solana.PublicKey]uint64{votePubkey(1): 40, votePubkey(2): 40, votePubkey(3): 40}
 
 	// roots 100/90/80: rooted >=90 is 80 (not >80); >=80 is 120 (>80) -> 80.
-	got, ok := highestRootedSlot(map[solana.PublicKey]uint64{vk(1): 100, vk(2): 90, vk(3): 80}, stakes, 120)
+	got, ok := highestRootedSlot(map[solana.PublicKey]uint64{votePubkey(1): 100, votePubkey(2): 90, votePubkey(3): 80}, stakes, 120)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(80), got)
 
 	// Skewed stake 50/30/40: >=90 is 80 (not >80); >=80 is 120 -> still 80.
-	got, ok = highestRootedSlot(map[solana.PublicKey]uint64{vk(1): 100, vk(2): 90, vk(3): 80},
-		map[solana.PublicKey]uint64{vk(1): 50, vk(2): 30, vk(3): 40}, 120)
+	got, ok = highestRootedSlot(map[solana.PublicKey]uint64{votePubkey(1): 100, votePubkey(2): 90, votePubkey(3): 80},
+		map[solana.PublicKey]uint64{votePubkey(1): 50, votePubkey(2): 30, votePubkey(3): 40}, 120)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(80), got)
 
 	// One validator with >2/3 alone: its own root is the watermark.
-	got, ok = highestRootedSlot(map[solana.PublicKey]uint64{vk(1): 200, vk(2): 50},
-		map[solana.PublicKey]uint64{vk(1): 90, vk(2): 30}, 120)
+	got, ok = highestRootedSlot(map[solana.PublicKey]uint64{votePubkey(1): 200, votePubkey(2): 50},
+		map[solana.PublicKey]uint64{votePubkey(1): 90, votePubkey(2): 30}, 120)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(200), got)
 }
 
 func TestHighestRootedSlotNoQuorum(t *testing.T) {
 	// Only 80 of 120 stake has any root; 80 is NOT > threshold(80).
-	_, ok := highestRootedSlot(map[solana.PublicKey]uint64{vk(1): 100, vk(2): 100},
-		map[solana.PublicKey]uint64{vk(1): 40, vk(2): 40, vk(3): 40}, 120)
+	_, ok := highestRootedSlot(map[solana.PublicKey]uint64{votePubkey(1): 100, votePubkey(2): 100},
+		map[solana.PublicKey]uint64{votePubkey(1): 40, votePubkey(2): 40, votePubkey(3): 40}, 120)
 	assert.False(t, ok, "only 2/3 (not >2/3) rooted -> not final")
 }
 
 func TestHighestRootedSlotIgnoresUnstaked(t *testing.T) {
-	// vk(9) has a root but no stake entry -> ignored. vk(1)=100 > threshold 80.
-	got, ok := highestRootedSlot(map[solana.PublicKey]uint64{vk(1): 500, vk(9): 999},
-		map[solana.PublicKey]uint64{vk(1): 100, vk(2): 20}, 120)
+	// votePubkey(9) has a root but no stake entry -> ignored. votePubkey(1)=100 > threshold 80.
+	got, ok := highestRootedSlot(map[solana.PublicKey]uint64{votePubkey(1): 500, votePubkey(9): 999},
+		map[solana.PublicKey]uint64{votePubkey(1): 100, votePubkey(2): 20}, 120)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(500), got)
 }
@@ -89,16 +89,16 @@ func TestHighestRootedSlotEmpty(t *testing.T) {
 
 // makeRooted makes 3 validators (40 each, total 120) all explicitly root at rootSlot.
 func makeRooted(s *ForkChoiceService, rootSlot uint64) {
-	s.state.epochStakes = map[solana.PublicKey]uint64{vk(1): 40, vk(2): 40, vk(3): 40}
+	s.state.epochStakes = map[solana.PublicKey]uint64{votePubkey(1): 40, votePubkey(2): 40, votePubkey(3): 40}
 	s.state.totalEpochStake = 120
-	s.state.validatorRoots = map[solana.PublicKey]uint64{vk(1): rootSlot, vk(2): rootSlot, vk(3): rootSlot}
+	s.state.validatorRoots = map[solana.PublicKey]uint64{votePubkey(1): rootSlot, votePubkey(2): rootSlot, votePubkey(3): rootSlot}
 }
 
 // rootedChain observes+confirms slots (anchor, top] linked by parent, so a path
 // resolves from anchor to any slot in the chain.
 func rootedChain(s *ForkChoiceService, anchor, top uint64) {
 	for slot := anchor + 1; slot <= top; slot++ {
-		injectConfirmedSlot(s, slot, slot-1, hash(byte(slot)))
+		injectConfirmedSlot(s, slot, slot-1, testHash(byte(slot)))
 	}
 	s.state.latestObservedSlot = top
 }
@@ -113,16 +113,16 @@ func TestFindRootedSlotReturnsExplicitRoot(t *testing.T) {
 	r, err := s.FindRootedSlot(100, 32)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(110), r.Slot)
-	assert.Equal(t, hash(byte(110)), r.Bankhash)
+	assert.Equal(t, testHash(byte(110)), r.Bankhash)
 }
 
 // No durable root until a >2/3 supermajority has rooted (not just confirmed).
 func TestFindRootedSlotNeedWaitWhenNoSupermajorityRoot(t *testing.T) {
 	s := newRootingService()
 	rootedChain(s, 100, 110)
-	s.state.epochStakes = map[solana.PublicKey]uint64{vk(1): 40, vk(2): 40, vk(3): 40}
+	s.state.epochStakes = map[solana.PublicKey]uint64{votePubkey(1): 40, votePubkey(2): 40, votePubkey(3): 40}
 	s.state.totalEpochStake = 120
-	s.state.validatorRoots = map[solana.PublicKey]uint64{vk(1): 110} // only 40/120 rooted
+	s.state.validatorRoots = map[solana.PublicKey]uint64{votePubkey(1): 110} // only 40/120 rooted
 
 	_, err := s.FindRootedSlot(100, 32)
 	assert.ErrorIs(t, err, ErrNeedWait)
@@ -145,7 +145,7 @@ func TestFindRootedSlotSkipsUnobserved(t *testing.T) {
 	// slot 110 confirmed but NOT observed
 	acc := newSlotVoteAccumulator(100, 110)
 	acc.confirmed = true
-	acc.confirmedHash = hash(byte(110))
+	acc.confirmedHash = testHash(byte(110))
 	s.state.voteStakeTotals[110] = acc
 	s.state.latestObservedSlot = 110
 	makeRooted(s, 110) // watermark 110, but 110 unobserved
@@ -176,4 +176,16 @@ func TestFindRootedSlotFailsClosedOnBrokenPath(t *testing.T) {
 
 	_, err := s.FindRootedSlot(100, 32)
 	require.Error(t, err, "must not return a rooted slot whose path is unresolvable")
+}
+
+// ObserveVotesOnly (catchup mode) must advance observation state WITHOUT
+// registering the block for path resolution (no observedBlocks entry).
+func TestObserveVotesOnlyDoesNotRegisterBlocks(t *testing.T) {
+	s := newRootingService()
+	s.ObserveVotesOnly(500, nil)
+	assert.Equal(t, uint64(500), s.state.latestObservedSlot)
+	_, registered := s.state.observedBlocks[500]
+	assert.False(t, registered, "votes-only observation must not register the block")
+	// vote application path is shared with ObserveBlock (covered by
+	// TestApplyVoteUpdatesRecordsRoots); this pins the no-registration contract.
 }

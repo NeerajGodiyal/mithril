@@ -9,7 +9,7 @@ import (
 	"github.com/mr-tron/base58"
 )
 
-// LastRootedContext (the as-of-R resume bundle) must survive a JSON round-trip
+// LastRootedContext (the resume bundle as of the last rooted slot) must survive a JSON round-trip
 // through the state file unchanged.
 func TestResumeContextRoundTrip(t *testing.T) {
 	orig := &MithrilState{
@@ -76,7 +76,7 @@ func bh(b byte) []byte {
 }
 
 // GetResumeSlot must resume from the last DURABLE slot. In rooted-durable mode
-// the unrooted tail (R+1..C) is RAM-only and lost on restart, so resume is R+1
+// everything after the last rooted slot is RAM-only and lost on restart, so resume starts right after the rooted checkpoint
 // — NOT C+1. Legacy mode (LastRootedSlot==0) keeps the old LastSlot+1 behavior.
 func TestGetResumeSlot_RootedVsLegacy(t *testing.T) {
 	tests := []struct {
@@ -128,7 +128,7 @@ func TestDurableHighWater(t *testing.T) {
 // In rooted mode, ValidateAgainstBankhashDB must assert the durable high-water
 // is exactly R: bankhash_db has an entry at R (matching LastRootedBankhash) and
 // NOTHING beyond R. A bankhash beyond R = a torn durable write (process killed
-// after CommitSlotAtomic wrote bankhash R+1 but before state recorded it).
+// after CommitSlotAtomic wrote the next slot.s bankhash but before the state file recorded it).
 func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 	t.Run("clean: db high-water == R", func(t *testing.T) {
 		s := &MithrilState{LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}

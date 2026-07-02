@@ -547,7 +547,7 @@ func TestParseVoteTxLegacyHasNoRoot(t *testing.T) {
 	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
 	epochAuth.PutEntry(voteAcct, voteAuthority)
 
-	tx := buildTestVoteTx(voteAcct, voteAuthority, 1000, hash(0xAB))
+	tx := buildTestVoteTx(voteAcct, voteAuthority, 1000, testHash(0xAB))
 	info, ok := parseAndValidateVoteTx(tx, epochAuth)
 	require.True(t, ok)
 	assert.Equal(t, uint64(1000), info.slot)
@@ -619,16 +619,16 @@ func TestObserveExecutionAnchorPrunesOldForkchoiceState(t *testing.T) {
 	epochAuth := epochstakes.NewEpochAuthorizedVotersCache()
 	service := NewForkChoiceService(0, map[solana.PublicKey]uint64{}, 100, epochAuth)
 
-	oldParentHash := hash(0x10)
-	newParentHash := hash(0x20)
-	oldBlockHash := hash(0x11)
-	newBlockHash := hash(0x21)
-	anchorHash := hash(0x30)
+	oldParentHash := testHash(0x10)
+	newParentHash := testHash(0x20)
+	oldBlockHash := testHash(0x11)
+	newBlockHash := testHash(0x21)
+	anchorHash := testHash(0x30)
 
 	oldAcc := newSlotVoteAccumulator(100, 90)
-	oldAcc.trackers[hash(0x91)] = &voteStakeTracker{voted: map[solana.PublicKey]struct{}{}, stake: 70}
+	oldAcc.trackers[testHash(0x91)] = &voteStakeTracker{voted: map[solana.PublicKey]struct{}{}, stake: 70}
 	newAcc := newSlotVoteAccumulator(100, 101)
-	newAcc.trackers[hash(0xA1)] = &voteStakeTracker{voted: map[solana.PublicKey]struct{}{}, stake: 70}
+	newAcc.trackers[testHash(0xA1)] = &voteStakeTracker{voted: map[solana.PublicKey]struct{}{}, stake: 70}
 
 	service.state.mu.Lock()
 	service.state.voteStakeTotals[90] = oldAcc
@@ -698,17 +698,17 @@ func TestFindConfirmedLeafReturnsHighestObservedWinner(t *testing.T) {
 	}
 
 	service.state.mu.Lock()
-	service.state.observedBlocks[105] = &ObservedBlockMeta{Slot: 105, ParentSlot: 100, ParentSlotKnown: true, Blockhash: hash(0x05)}
-	service.state.observedBlocks[107] = &ObservedBlockMeta{Slot: 107, ParentSlot: 105, ParentSlotKnown: true, Blockhash: hash(0x07)}
-	injectWinner(105, hash(0xA5))
-	injectWinner(107, hash(0xA7))
+	service.state.observedBlocks[105] = &ObservedBlockMeta{Slot: 105, ParentSlot: 100, ParentSlotKnown: true, Blockhash: testHash(0x05)}
+	service.state.observedBlocks[107] = &ObservedBlockMeta{Slot: 107, ParentSlot: 105, ParentSlotKnown: true, Blockhash: testHash(0x07)}
+	injectWinner(105, testHash(0xA5))
+	injectWinner(107, testHash(0xA7))
 	service.state.latestObservedSlot = 107
 	service.state.mu.Unlock()
 
 	leaf, err := service.FindConfirmedLeaf(100, 16)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(107), leaf.Slot)
-	assert.Equal(t, hash(0xA7), leaf.Bankhash)
+	assert.Equal(t, testHash(0xA7), leaf.Bankhash)
 }
 
 // buildTestVoteTx constructs a minimal legacy Vote instruction for testing.

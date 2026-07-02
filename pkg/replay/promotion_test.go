@@ -36,19 +36,20 @@ func (d *fakeDurable) GetAccountsBatch(ctx context.Context, slot uint64, pks []s
 	return out, nil
 }
 
-func rpk(b byte) solana.PublicKey { return solana.PublicKey{b} }
-func racct(b byte, lamports uint64) *accounts.Account {
-	return &accounts.Account{Key: rpk(b), Lamports: lamports}
+func testKey(b byte) solana.PublicKey { return solana.PublicKey{b} }
+func testAccount(b byte, lamports uint64) *accounts.Account {
+	return &accounts.Account{Key: testKey(b), Lamports: lamports}
 }
-func bhash(b byte) [32]byte { var h [32]byte; h[0] = b; return h }
-func bhashB(b byte) []byte  { h := make([]byte, 32); h[0] = b; return h }
+func testHash(b byte) [32]byte    { var h [32]byte; h[0] = b; return h }
+func testHashBytes(b byte) []byte { h := make([]byte, 32); h[0] = b; return h }
 
 // fakeCommitter records CommitSlotAtomic calls and applies deltas to a durable
 // MemAccounts, optionally failing on a chosen slot.
 type fakeCommitter struct {
-	durable   accounts.MemAccounts
-	committed []uint64
-	failOn    uint64
+	durable    accounts.MemAccounts
+	committed  []uint64
+	bankhashes [][]byte
+	failOn     uint64
 }
 
 func (f *fakeCommitter) CommitRootedSlot(accts []*accounts.Account, slot uint64, bankhash []byte) error {
@@ -59,6 +60,7 @@ func (f *fakeCommitter) CommitRootedSlot(accts []*accounts.Account, slot uint64,
 		_ = f.durable.SetAccountWithoutLock(a.Key, a)
 	}
 	f.committed = append(f.committed, slot)
+	f.bankhashes = append(f.bankhashes, append([]byte(nil), bankhash...))
 	return nil
 }
 
@@ -67,11 +69,11 @@ func (f *fakeCommitter) CommitRootedSlot(accts []*accounts.Account, slot uint64,
 func TestPromoteRootedHappyPath(t *testing.T) {
 	durable := accounts.NewMemAccounts()
 	overlay := accounts.NewUnrootedOverlay()
-	overlay.Add(5, []*accounts.Account{racct(1, 51), racct(2, 52)})
-	overlay.Add(7, []*accounts.Account{racct(2, 72)})
-	overlay.Add(9, []*accounts.Account{racct(3, 93)}) // unrooted tip, stays held
+	overlay.Add(5, []*accounts.Account{testAccount(1, 51), testAccount(2, 52)})
+	overlay.Add(7, []*accounts.Account{testAccount(2, 72)})
+	overlay.Add(9, []*accounts.Account{testAccount(3, 93)}) // unrooted tip, stays held
 
-	bankhashes := map[uint64][32]byte{5: bhash(5), 7: bhash(7), 9: bhash(9)}
+	bankhashes := map[uint64][32]byte{5: testHash(5), 7: testHash(7), 9: testHash(9)}
 	fc := &fakeCommitter{durable: durable}
 
 	promoted, err := promoteRooted(overlay, 7, bankhashes, fc)
@@ -91,11 +93,11 @@ func TestPromoteRootedHappyPath(t *testing.T) {
 func TestPromoteRootedPartialFailureStopsAtLastDurable(t *testing.T) {
 	durable := accounts.NewMemAccounts()
 	overlay := accounts.NewUnrootedOverlay()
-	overlay.Add(5, []*accounts.Account{racct(1, 51)})
-	overlay.Add(7, []*accounts.Account{racct(2, 72)})
-	overlay.Add(9, []*accounts.Account{racct(3, 93)})
+	overlay.Add(5, []*accounts.Account{testAccount(1, 51)})
+	overlay.Add(7, []*accounts.Account{testAccount(2, 72)})
+	overlay.Add(9, []*accounts.Account{testAccount(3, 93)})
 
-	bankhashes := map[uint64][32]byte{5: bhash(5), 7: bhash(7), 9: bhash(9)}
+	bankhashes := map[uint64][32]byte{5: testHash(5), 7: testHash(7), 9: testHash(9)}
 	fc := &fakeCommitter{durable: durable, failOn: 7}
 
 	promoted, err := promoteRooted(overlay, 9, bankhashes, fc)
@@ -116,7 +118,7 @@ func TestPromoteRootedEmptyDeltaSlot(t *testing.T) {
 	overlay := accounts.NewUnrootedOverlay()
 	overlay.Add(5, nil) // empty block
 
-	bankhashes := map[uint64][32]byte{5: bhash(5)}
+	bankhashes := map[uint64][32]byte{5: testHash(5)}
 	fc := &fakeCommitter{durable: durable}
 
 	promoted, err := promoteRooted(overlay, 5, bankhashes, fc)
@@ -128,15 +130,15 @@ func TestPromoteRootedEmptyDeltaSlot(t *testing.T) {
 
 // Tail reads: overlay value wins; misses fall through to durable.
 func TestUnrootedTailGetAccount(t *testing.T) {
-	durable := &fakeDurable{known: map[solana.PublicKey]uint64{rpk(1): 100, rpk(2): 200}}
+	durable := &fakeDurable{known: map[solana.PublicKey]uint64{testKey(1): 100, testKey(2): 200}}
 	tail := newUnrootedTail(durable, &fakeCommitter{}, 512)
-	tail.Add(5, []*accounts.Account{racct(1, 51)}, bhashB(5)) // key 1 written unrooted
+	tail.Add(5, []*accounts.Account{testAccount(1, 51)}, testHashBytes(5)) // key 1 written unrooted
 
-	a, err := tail.GetAccount(5, rpk(1))
+	a, err := tail.GetAccount(5, testKey(1))
 	require.NoError(t, err)
 	assert.Equal(t, uint64(51), a.Lamports, "overlay value wins over durable 100")
 
-	b, err := tail.GetAccount(5, rpk(2))
+	b, err := tail.GetAccount(5, testKey(2))
 	require.NoError(t, err)
 	assert.Equal(t, uint64(200), b.Lamports, "miss falls through to durable")
 }
@@ -144,11 +146,11 @@ func TestUnrootedTailGetAccount(t *testing.T) {
 // Tail batch read: order preserved, overlay hits win, misses come from ONE
 // durable batch, placeholder for unknown keys.
 func TestUnrootedTailGetAccountsBatch(t *testing.T) {
-	durable := &fakeDurable{known: map[solana.PublicKey]uint64{rpk(2): 200}}
+	durable := &fakeDurable{known: map[solana.PublicKey]uint64{testKey(2): 200}}
 	tail := newUnrootedTail(durable, &fakeCommitter{}, 512)
-	tail.Add(5, []*accounts.Account{racct(1, 51), racct(4, 54)}, bhashB(5))
+	tail.Add(5, []*accounts.Account{testAccount(1, 51), testAccount(4, 54)}, testHashBytes(5))
 
-	keys := []solana.PublicKey{rpk(1), rpk(2), rpk(3), rpk(4)}
+	keys := []solana.PublicKey{testKey(1), testKey(2), testKey(3), testKey(4)}
 	out, err := tail.GetAccountsBatch(context.Background(), 5, keys)
 	require.NoError(t, err)
 	require.Len(t, out, 4, "one entry per requested key, in order")
@@ -162,22 +164,22 @@ func TestUnrootedTailGetAccountsBatch(t *testing.T) {
 // OverCap trips only when held slots exceed the cap (backpressure on stalled rooting).
 func TestUnrootedTailOverCap(t *testing.T) {
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 2)
-	tail.Add(1, nil, bhashB(1))
-	tail.Add(2, nil, bhashB(2))
+	tail.Add(1, nil, testHashBytes(1))
+	tail.Add(2, nil, testHashBytes(2))
 	assert.False(t, tail.OverCap(), "2 held == cap, not over")
-	tail.Add(3, nil, bhashB(3))
+	tail.Add(3, nil, testHashBytes(3))
 	assert.True(t, tail.OverCap(), "3 held > cap 2")
 }
 
-// promote returns the as-of-R resume context (highest promoted slot) and prunes
+// promote returns the resume context as of the highest promoted slot and prunes
 // the context map for promoted slots, retaining still-held ones.
 func TestUnrootedTailContextCaptureAndPromote(t *testing.T) {
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512)
-	tail.Add(5, []*accounts.Account{racct(1, 51)}, bhashB(5))
+	tail.Add(5, []*accounts.Account{testAccount(1, 51)}, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5, Bankhash: "bh5"})
-	tail.Add(7, []*accounts.Account{racct(2, 72)}, bhashB(7))
+	tail.Add(7, []*accounts.Account{testAccount(2, 72)}, testHashBytes(7))
 	tail.SetContext(7, &state.ResumeContext{Slot: 7, Bankhash: "bh7"})
-	tail.Add(9, []*accounts.Account{racct(3, 93)}, bhashB(9))
+	tail.Add(9, []*accounts.Account{testAccount(3, 93)}, testHashBytes(9))
 	tail.SetContext(9, &state.ResumeContext{Slot: 9, Bankhash: "bh9"})
 
 	promotedThrough, ctx, err := tail.promote(7)
@@ -198,7 +200,7 @@ func TestUnrootedTailContextCaptureAndPromote(t *testing.T) {
 func TestPromoteRootedNoPrefix(t *testing.T) {
 	durable := accounts.NewMemAccounts()
 	overlay := accounts.NewUnrootedOverlay()
-	overlay.Add(10, []*accounts.Account{racct(1, 10)})
+	overlay.Add(10, []*accounts.Account{testAccount(1, 10)})
 
 	fc := &fakeCommitter{durable: durable}
 	promoted, err := promoteRooted(overlay, 5, map[uint64][32]byte{}, fc)

@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func hash(b byte) solana.Hash {
+func testHash(b byte) solana.Hash {
 	return solana.Hash{b}
 }
 
 func TestResolvePohPathSingleBlock(t *testing.T) {
 	observed := map[uint64]*ObservedBlockMeta{
-		10: {Slot: 10, ParentSlot: 9, ParentSlotKnown: true, Blockhash: hash(0x10)},
+		10: {Slot: 10, ParentSlot: 9, ParentSlotKnown: true, Blockhash: testHash(0x10)},
 	}
 
 	result, err := ResolvePohPath(9, 10, observed, nil, 64)
@@ -25,8 +25,8 @@ func TestResolvePohPathSingleBlock(t *testing.T) {
 
 func TestResolvePohPathMultipleBlocksWithSkips(t *testing.T) {
 	observed := map[uint64]*ObservedBlockMeta{
-		11: {Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: hash(0x11)},
-		13: {Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: hash(0x13)},
+		11: {Slot: 11, ParentSlot: 9, ParentSlotKnown: true, Blockhash: testHash(0x11)},
+		13: {Slot: 13, ParentSlot: 11, ParentSlotKnown: true, Blockhash: testHash(0x13)},
 	}
 
 	result, err := ResolvePohPath(9, 13, observed, nil, 64)
@@ -42,7 +42,7 @@ func TestResolvePohPathMissingObservation(t *testing.T) {
 
 func TestResolvePohPathUnknownParent(t *testing.T) {
 	observed := map[uint64]*ObservedBlockMeta{
-		13: {Slot: 13, ParentSlotKnown: false, ParentBlockhash: hash(0x11), Blockhash: hash(0x13)},
+		13: {Slot: 13, ParentSlotKnown: false, ParentBlockhash: testHash(0x11), Blockhash: testHash(0x13)},
 	}
 
 	_, err := ResolvePohPath(9, 13, observed, nil, 64)
@@ -56,7 +56,7 @@ func TestResolvePohPathDepthExceeded(t *testing.T) {
 
 func TestResolvePohPathEquivocation(t *testing.T) {
 	observed := map[uint64]*ObservedBlockMeta{
-		10: {Slot: 10, ParentSlot: 9, ParentSlotKnown: true, Blockhash: hash(0x10)},
+		10: {Slot: 10, ParentSlot: 9, ParentSlotKnown: true, Blockhash: testHash(0x10)},
 	}
 	equivocated := map[uint64]struct{}{10: {}}
 
