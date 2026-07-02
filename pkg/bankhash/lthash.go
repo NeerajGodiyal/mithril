@@ -3,16 +3,41 @@ package bankhash
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 )
 
 func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) {
 	deltaLtHash := calculateDeltaLtHash(slotCtx, modifiedAccts)
 	slotCtx.AcctsLtHash.Add(deltaLtHash)
+	if ltDebug {
+		dumpPerAcctDeltas(slotCtx, modifiedAccts)
+	}
+}
+
+// ltDebug (MITHRIL_LTHASH_DEBUG=1) dumps every account's (key, old, new) state per
+// slot so two runs can be diffed to the exact diverging account.
+var ltDebug = os.Getenv("MITHRIL_LTHASH_DEBUG") == "1"
+
+func dumpPerAcctDeltas(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) {
+	for _, a := range dedupeModifiedAccts(modifiedAccts) {
+		prev, err := slotCtx.GetParentAccount(a.Key)
+		oldSum := "ERR"
+		if err == nil {
+			var oh lthash.LtHash
+			oh.InitWithAcct(prev)
+			oldSum = fmt.Sprintf("%x:%d", oh.Checksum(), prev.Lamports)
+		}
+		var nh lthash.LtHash
+		nh.InitWithAcct(a)
+		mlog.Log.Infof("LTDBG slot=%d key=%s old=%s new=%x:%d",
+			slotCtx.Slot, a.Key, oldSum, nh.Checksum(), a.Lamports)
+	}
 }
 
 func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) *lthash.LtHash {

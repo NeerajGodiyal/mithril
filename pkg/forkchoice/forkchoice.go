@@ -256,6 +256,34 @@ func (s *ForkChoiceService) ObserveBlock(meta ObservedBlockMeta, txs []*solana.T
 	return nil
 }
 
+// ObserveVotesOnly applies a block's votes (advancing lockouts and the
+// explicit-root finality watermark) WITHOUT registering the block for path
+// resolution. Used during live catchup, where blocks are sequential
+// cluster-confirmed data and buffered execution is suspended.
+func (s *ForkChoiceService) ObserveVotesOnly(slot uint64, txs []*solana.Transaction) {
+	s.state.mu.Lock()
+	epochStakes := s.state.epochStakes
+	epochAuthorizedVoters := s.state.epochAuthorizedVoters
+	totalEpochStake := s.state.totalEpochStake
+	s.state.mu.Unlock()
+
+	updatesToApply := collectVoteUpdates(txs, epochStakes, epochAuthorizedVoters)
+
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+
+	s.applyVoteUpdatesLocked(updatesToApply, totalEpochStake)
+
+	if s.state.latestObservedSlot < slot {
+		s.state.latestObservedSlot = slot
+	}
+
+	if slot%1000 == 0 {
+		mlog.Log.Infof("forkchoice: catchup vote observation at slot %d (%d validator roots tracked)",
+			slot, len(s.state.validatorRoots))
+	}
+}
+
 func (s *ForkChoiceService) processBlock(job *blockJob) {
 	updatesToApply := collectVoteUpdates(job.txs, job.epochStakes, job.epochAuthorizedVoters)
 

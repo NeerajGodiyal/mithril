@@ -43,6 +43,10 @@ type AccountsDb struct {
 	// consensus + DurableCommit. Off by default.
 	RootedDurable bool
 
+	// ForkAware selects the branch-tree speculative engine (fork handling) over the
+	// linear tail. Requires RootedDurable. Off by default.
+	ForkAware bool
+
 	// A list of store requests. They are added to the back as they arrive and
 	// removed from the front as they are persisted.
 	inProgressStoreRequestsMu sync.Mutex

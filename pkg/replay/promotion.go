@@ -26,6 +26,18 @@ type blockAccountSource interface {
 	GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error)
 }
 
+// unrootedState is the in-RAM speculative-state engine the replay loop drives in
+// rooted-durable mode: reads resolve speculative→durable, commits buffer in RAM,
+// rooted slots promote to disk. Implemented by unrootedTail (linear) and forkTail
+// (fork-aware, over forkCoordinator).
+type unrootedState interface {
+	blockAccountSource
+	Add(slot uint64, delta []*accounts.Account, bankhash []byte)
+	SetContext(slot uint64, ctx *state.ResumeContext)
+	promote(through uint64) (uint64, *state.ResumeContext, error)
+	OverCap() bool
+}
+
 // unrootedTail layers an in-RAM UnrootedOverlay over the durable store: reads
 // resolve overlay→durable, commits buffer until rooted slots promote out.
 type unrootedTail struct {
@@ -62,6 +74,14 @@ func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accoun
 // GetAccountsBatch returns one entry per requested key, in order, preferring the
 // unrooted value and falling through to a single durable batch for the misses.
 func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+	return batchOverDurable(ctx, slot, pks, t.durable, func(pk solana.PublicKey) (*accounts.Account, bool) {
+		return t.overlay.Lookup([32]byte(pk))
+	})
+}
+
+// batchOverDurable resolves each key via the speculative lookup, falling through to a
+// single durable batch for the misses, preserving order and placeholder semantics.
+func batchOverDurable(ctx context.Context, slot uint64, pks []solana.PublicKey, durable blockAccountSource, lookup func(solana.PublicKey) (*accounts.Account, bool)) ([]*accounts.Account, error) {
 	if len(pks) == 0 {
 		return nil, nil
 	}
@@ -69,7 +89,7 @@ func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []
 	var misses []solana.PublicKey
 	var missIdx []int
 	for i, pk := range pks {
-		if a, ok := t.overlay.Lookup([32]byte(pk)); ok {
+		if a, ok := lookup(pk); ok {
 			out[i] = a
 		} else {
 			misses = append(misses, pk)
@@ -77,7 +97,7 @@ func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []
 		}
 	}
 	if len(misses) > 0 {
-		loaded, err := t.durable.GetAccountsBatch(ctx, slot, misses)
+		loaded, err := durable.GetAccountsBatch(ctx, slot, misses)
 		if err != nil {
 			return nil, err
 		}
@@ -97,9 +117,9 @@ func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []
 // durable only via promote(). Resume context is attached separately (SetContext).
 func (t *unrootedTail) Add(slot uint64, delta []*accounts.Account, bankhash []byte) {
 	t.overlay.Add(slot, delta)
-	var bh [32]byte
-	copy(bh[:], bankhash)
-	t.bankhashes[slot] = bh
+	var slotBankhash [32]byte
+	copy(slotBankhash[:], bankhash)
+	t.bankhashes[slot] = slotBankhash
 }
 
 // SetContext attaches a held slot's end-of-slot resume context. ctx MUST be
@@ -147,8 +167,8 @@ func promoteRooted(
 	}
 
 	for _, sd := range batch {
-		bh := bankhashes[sd.Slot]
-		if cerr := committer.CommitRootedSlot(sd.Delta, sd.Slot, bh[:]); cerr != nil {
+		slotBankhash := bankhashes[sd.Slot]
+		if cerr := committer.CommitRootedSlot(sd.Delta, sd.Slot, slotBankhash[:]); cerr != nil {
 			err = fmt.Errorf("promote slot %d: %w", sd.Slot, cerr)
 			break
 		}

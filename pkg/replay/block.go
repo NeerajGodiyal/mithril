@@ -1250,7 +1250,7 @@ func ReplayBlocks(
 	}
 
 	// Track last successfully persisted slot for checkpoint/resume
-	pt := &persistedTracker{}
+	persistedHashes := &persistedTracker{}
 
 	// RPC client - for all cluster access (blocks, leader schedule, tip polling)
 	// First endpoint is primary, rest are backups for failover
@@ -1416,14 +1416,21 @@ func ReplayBlocks(
 
 	var readyConsensusPath *pendingConsensusPath
 	observedConsensusBlocks := make(map[uint64]*b.Block)
-	var lastRootedWatermark uint64 // diagnostics: highest explicit-root finality slot seen
+	var lastRootedWatermark uint64  // diagnostics: highest explicit-root finality slot seen
+	var lastVerifiedLeafSlot uint64 // highest slot whose leaf bankhash matched the confirmed one
 
-	// unrootedTailState holds the in-RAM unrooted overlay in rooted-durable mode;
+	// unrootedTailState holds the in-RAM speculative state in rooted-durable mode;
 	// nil in legacy mode. When enabled, acctsDb serves durable reads + CommitSlotAtomic.
-	var unrootedTailState *unrootedTail
+	// fork_aware selects the branch-tree engine (forkCoordinator) over the linear tail.
+	var unrootedTailState unrootedState
 	if acctsDb.RootedDurable {
-		unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap)
-		mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots)", unrootedTailHaltCap)
+		if acctsDb.ForkAware {
+			unrootedTailState = newForkTail(acctsDb, acctsDb, unrootedTailHaltCap)
+			mlog.Log.Infof("fork-aware mode: replayed slots buffer in a branch tree until rooted (halt cap %d branches)", unrootedTailHaltCap)
+		} else {
+			unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap)
+			mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots)", unrootedTailHaltCap)
+		}
 	}
 
 	var opts *blockstream.BlockSourceOpts
@@ -1553,6 +1560,15 @@ func ReplayBlocks(
 
 		if !consensusBufferedExecutionActive && consensusManagedLiveStream {
 			if block == nil || !block.FromLightbringer {
+				// Live catchup (RPC blocks while the managed stream is suspended):
+				// keep vote observation alive so the explicit-root watermark advances
+				// and rooted-durable promotion can drain the RAM tail.
+				if unrootedTailState != nil && block != nil && !block.IsSkipped {
+					forkChoice.ObserveVotesOnly(block.Slot, block.Transactions)
+					if block.Slot > 2*uint64(unrootedTailHaltCap) {
+						forkChoice.PruneBeforeSlot(block.Slot - 2*uint64(unrootedTailHaltCap))
+					}
+				}
 				return nil
 			}
 			consensusBufferedExecutionActive = true
@@ -1563,6 +1579,16 @@ func ReplayBlocks(
 		}
 
 		if !consensusBufferedExecutionActive {
+			// Live catchup: block registration/path resolution stay suspended, but
+			// keep VOTE observation alive so the explicit-root finality watermark
+			// advances and rooted-durable promotion can drain the RAM tail. Prune
+			// so per-slot vote state stays bounded across a long catchup.
+			if unrootedTailState != nil && !block.IsSkipped {
+				forkChoice.ObserveVotesOnly(block.Slot, block.Transactions)
+				if block.Slot > 2*uint64(unrootedTailHaltCap) {
+					forkChoice.PruneBeforeSlot(block.Slot - 2*uint64(unrootedTailHaltCap))
+				}
+			}
 			return nil
 		}
 
@@ -1696,19 +1722,28 @@ func ReplayBlocks(
 
 			if err := observeBlockForConsensus(block); err != nil {
 				if errors.Is(err, forkchoice.ErrEquivocation) {
-					result.Error = fmt.Errorf("forkchoice: equivocation detected at slot %d", block.Slot)
+					if acctsDb.ForkAware {
+						// Fork-aware: keep the version we hold and let the confirmed-leaf
+						// bankhash check adjudicate — a wrong version triggers
+						// dump-then-repair (self-healing) instead of a manual-restart halt.
+						mlog.Log.Warnf("forkchoice: equivocation observed at slot %d; continuing with held version (leaf check adjudicates)", block.Slot)
+					} else {
+						result.Error = fmt.Errorf("forkchoice: equivocation detected at slot %d", block.Slot)
+						break
+					}
 				} else {
 					result.Error = err
+					break
 				}
-				break
 			}
 
-			if consensusBufferedExecutionActive {
-				// Advance the explicit-root finality watermark. In rooted-durable mode this
-				// folds the now-rooted RAM prefix onto disk (irreversible); safe under linear replay.
-				// TODO(#14 multi-branch): gate promotion on FindRootedSlot (same-fork
-				// path + confirmed-bankhash) instead of the raw watermark once competing
-				// forks can exist; the raw watermark has no anchor/path checks.
+			// Advance the explicit-root finality watermark (runs in ALL modes: during
+			// suspended catchup votes flow in via ObserveVotesOnly). In rooted-durable
+			// mode this folds the now-rooted RAM prefix onto disk (irreversible).
+			// TODO(#14 multi-branch): gate promotion on FindRootedSlot (same-fork
+			// path + confirmed-bankhash) instead of the raw watermark once competing
+			// forks can exist; the raw watermark has no anchor/path checks.
+			{
 				if rooted, ok := forkChoice.HighestRootedSlot(); ok && rooted > lastRootedWatermark {
 					lastRootedWatermark = rooted
 					mlog.Log.Infof("forkchoice: rooted watermark advanced to slot %d", rooted)
@@ -1716,20 +1751,35 @@ func ReplayBlocks(
 					// Rooted-durable: fold the now-rooted prefix into the canonical store,
 					// advance the last rooted slot, and persist the resume context as of that slot.
 					if unrootedTailState != nil {
-						promotedThrough, rootedCtx, perr := unrootedTailState.promote(rooted)
-						if perr != nil {
-							mlog.Log.Errorf("rooted-durable: promotion stopped at slot %d: %v", promotedThrough, perr)
+						promoteThrough := rooted
+						// Fork-aware near-tip: only fold slots covered by a passed leaf
+						// bankhash check (chaining verifies all executed ancestors).
+						// During suspended catchup no leaf checks exist — promote on the
+						// raw 2/3-vote-root watermark (catchup blocks are sequential
+						// cluster-final data; same trust as bootstrap itself).
+						if acctsDb.ForkAware && consensusBufferedExecutionActive && promoteThrough > lastVerifiedLeafSlot {
+							promoteThrough = lastVerifiedLeafSlot
 						}
-						if promotedThrough > mithrilState.LastRootedSlot {
-							mithrilState.LastRootedSlot = promotedThrough
-							if rootedCtx != nil {
-								mithrilState.LastRootedBankhash = rootedCtx.Bankhash
-								mithrilState.LastRootedContext = rootedCtx
+						if promoteThrough > 0 {
+							promotedThrough, rootedCtx, perr := unrootedTailState.promote(promoteThrough)
+							if perr != nil {
+								mlog.Log.Errorf("rooted-durable: promotion stopped at slot %d: %v", promotedThrough, perr)
+							}
+							if promotedThrough > mithrilState.LastRootedSlot {
+								if rootedCtx == nil {
+									mlog.Log.Errorf("rooted-durable: promoted through slot %d with no resume context; watermark held back", promotedThrough)
+								} else {
+									mithrilState.LastRootedSlot = promotedThrough
+									mithrilState.LastRootedBankhash = rootedCtx.Bankhash
+									mithrilState.LastRootedContext = rootedCtx
+								}
 							}
 						}
 					}
 				}
+			}
 
+			if consensusBufferedExecutionActive {
 				resolvedPath, err := consensusCoordinator.ResolveFromAnchor(currentConsensusAnchorSlot())
 				if err != nil {
 					switch {
@@ -1760,6 +1810,12 @@ func ReplayBlocks(
 						mlog.Log.Warnf("forkchoice: path resolution exceeded max depth from anchor %d", currentConsensusAnchorSlot())
 						continue
 					default:
+						if acctsDb.ForkAware && errors.Is(err, forkchoice.ErrEquivocation) {
+							// Fork-aware: an equivocated slot on the path is adjudicated by
+							// the leaf bankhash check + dump-then-repair; wait for more votes.
+							mlog.Log.Warnf("forkchoice: equivocation on path from anchor %d; waiting for confirmation to adjudicate", currentConsensusAnchorSlot())
+							continue
+						}
 						mlog.Log.Warnf("forkchoice: failed to resolve a confirmed path from anchor %d after observing slot %d: %v",
 							currentConsensusAnchorSlot(), block.Slot, err)
 						result.Error = err
@@ -1929,7 +1985,7 @@ func ReplayBlocks(
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt, unrootedTailState)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -1941,7 +1997,7 @@ func ReplayBlocks(
 		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
 		// stalled), halt rather than grow RAM unbounded; resume re-replays from the last rooted slot.
 		if unrootedTailState != nil && unrootedTailState.OverCap() {
-			result.Error = fmt.Errorf("rooted-durable: unrooted tail exceeded %d held slots at slot %d (rooting stalled); halting", unrootedTailHaltCap, block.Slot)
+			result.Error = fmt.Errorf("rooted-durable: speculative state exceeded %d held slots/branches at slot %d (rooting stalled); halting", unrootedTailHaltCap, block.Slot)
 			mlog.Log.Errorf("%v", result.Error)
 			break
 		}
@@ -1954,6 +2010,10 @@ func ReplayBlocks(
 		if consensusBufferedExecutionActive {
 			if readyConsensusPath != nil && block.Slot == readyConsensusPath.leafSlot {
 				actualBankhash := solana.HashFromBytes(lastSlotCtx.FinalBankhash)
+				if actualBankhash == readyConsensusPath.leafBankhash {
+					// Bankhash chaining: a matching leaf verifies every executed ancestor.
+					lastVerifiedLeafSlot = block.Slot
+				}
 				if actualBankhash != readyConsensusPath.leafBankhash {
 					mlog.Log.Errorf("CONSENSUS MISMATCH: replayed leaf slot %d to bankhash %s, but votes confirmed %s",
 						block.Slot,
@@ -1975,6 +2035,17 @@ func ReplayBlocks(
 						),
 					)
 					if consensusCoordinator.Policy() == "halt" {
+						if acctsDb.ForkAware {
+							// Fork-aware: typed error triggers dump-then-repair in the
+							// caller (drop RAM tail, re-replay the confirmed chain from
+							// the rooted checkpoint). An identical repeat fails closed.
+							result.Error = &ConfirmedDivergence{
+								Slot:      block.Slot,
+								Ours:      actualBankhash,
+								Confirmed: readyConsensusPath.leafBankhash,
+							}
+							break
+						}
 						result.Error = fmt.Errorf("consensus halt: slot %d bankhash mismatch (our=%s winning=%s)",
 							block.Slot, base58.Encode(actualBankhash[:]), base58.Encode(readyConsensusPath.leafBankhash[:]))
 						break
@@ -1992,7 +2063,7 @@ func ReplayBlocks(
 		// no pointers into the global SysvarCache) and retain it in the tail until
 		// promotion, so resume restarts from the last rooted slot not the lost in-RAM replayed tip.
 		if unrootedTailState != nil && lastSlotCtx != nil {
-			rc := &state.ResumeContext{
+			resumeCtx := &state.ResumeContext{
 				Slot:                    block.Slot,
 				Bankhash:                base58.Encode(lastSlotCtx.FinalBankhash),
 				BlockHeight:             global.BlockHeight(),
@@ -2011,18 +2082,18 @@ func ReplayBlocks(
 				InflationFoundationTerm: replayCtx.Inflation.FoundationTerm,
 			}
 			if lastSlotCtx.AcctsLtHash != nil {
-				rc.AcctsLtHash = base64.StdEncoding.EncodeToString(lastSlotCtx.AcctsLtHash.Hash())
+				resumeCtx.AcctsLtHash = base64.StdEncoding.EncodeToString(lastSlotCtx.AcctsLtHash.Hash())
 			}
 			// Capture the Clock sysvar as of the last rooted slot: read from durable (not SysvarCache)
 			// during load, so resume must restore it or the first slot's LtHash diverges.
 			if sealevel.SysvarCache.Clock.Acct != nil {
-				rc.Clock = base64.StdEncoding.EncodeToString(sealevel.SysvarCache.Clock.Acct.Data)
+				resumeCtx.Clock = base64.StdEncoding.EncodeToString(sealevel.SysvarCache.Clock.Acct.Data)
 			}
 			if lastSlotCtx.FeeRateGovernor != nil {
-				rc.LamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
-				rc.PrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
+				resumeCtx.LamportsPerSignature = lastSlotCtx.FeeRateGovernor.LamportsPerSignature
+				resumeCtx.PrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 			}
-			unrootedTailState.SetContext(block.Slot, rc)
+			unrootedTailState.SetContext(block.Slot, resumeCtx)
 		}
 
 		// Clear ManifestEpochStakes after first replayed slot past snapshot
@@ -2042,7 +2113,7 @@ func ReplayBlocks(
 			acctsDb.WaitForStoreWorker()
 
 			// Populate result immediately for state write
-			result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
+			result.LastPersistedSlot, result.LastPersistedBankhash = persistedHashes.Get()
 			result.LastBlockHeight = global.BlockHeight()
 
 			// Capture resume context from the last slot context
@@ -2382,7 +2453,7 @@ func ReplayBlocks(
 	}
 
 	acctsDb.WaitForStoreWorker()
-	result.LastPersistedSlot, result.LastPersistedBankhash = pt.Get()
+	result.LastPersistedSlot, result.LastPersistedBankhash = persistedHashes.Get()
 	result.LastBlockHeight = global.BlockHeight()
 
 	// Capture resume context from the last slot context (if available)
@@ -2504,7 +2575,7 @@ func EncodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
 	return result
 }
 
-func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb, tail *unrootedTail) *sealevel.SlotCtx {
+func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb, tail unrootedState) *sealevel.SlotCtx {
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:        accts,
 		ParentAccts:     parentAccts,
@@ -2797,12 +2868,12 @@ func ProcessBlock(
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	txParallelism int,
 	dbgOpts *DebugOptions,
-	// pt is updated after StoreAccounts completes through a callback.
+	// persistedHashes is updated after StoreAccounts completes through a callback.
 	// Must be non-nil.
-	pt *persistedTracker,
+	persistedHashes *persistedTracker,
 	// tail is the in-RAM unrooted overlay in rooted-durable mode; nil in legacy
 	// mode. When set, block reads resolve through it and commits buffer into it.
-	tail *unrootedTail,
+	tail unrootedState,
 ) (*sealevel.SlotCtx, error) {
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -2982,7 +3053,7 @@ func ProcessBlock(
 			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
 		}
 
-		pt.Set(persistedBlockSlot, persistedBankhash)
+		persistedHashes.Set(persistedBlockSlot, persistedBankhash)
 
 		// Exit critical commit window - AccountsDB is now consistent
 		commitInProgress.Store(false)

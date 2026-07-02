@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -1500,6 +1501,16 @@ postBootstrap:
 	if accountsDb.RootedDurable && !accountsDb.DurableCommit {
 		klog.Fatalf("storage.rooted_durable requires storage.durable_commit=true (promotion uses the crash-safe commit path)")
 	}
+	accountsDb.ForkAware = config.GetBool("storage.fork_aware")
+	if accountsDb.ForkAware && !accountsDb.RootedDurable {
+		klog.Fatalf("storage.fork_aware requires storage.rooted_durable=true (the branch tree buffers over the rooted-only store)")
+	}
+	if accountsDb.ForkAware && config.GetString("consensus.unresolved_policy") == "warn" {
+		klog.Fatalf("storage.fork_aware requires consensus.unresolved_policy=halt (warn would keep replaying a divergent chain)")
+	}
+	if accountsDb.ForkAware && config.GetString("consensus.enforce_on_source") != "all" {
+		klog.Fatalf("storage.fork_aware requires consensus.enforce_on_source=all (promotion folds only vote-verified slots; without it rooting stalls)")
+	}
 
 	// Crash recovery: roll forward any interrupted commit up to the DURABLE
 	// high-water (the last rooted slot in rooted-durable mode). Using the replayed tip
@@ -2528,6 +2539,9 @@ func createBufWriter(filename string) (io.Writer, func(), error) {
 	return writer, cleanup, nil
 }
 
+// maxForkSwitchRetries bounds fork-aware dump-then-repair re-replays per run.
+const maxForkSwitchRetries = 3
+
 // runReplayWithRecovery wraps replay.ReplayBlocks with panic recovery.
 // It distinguishes between:
 // - Panics during commit (commitInProgress=true): AccountsDB may be corrupted, marks state as corrupted
@@ -2668,5 +2682,65 @@ func runReplayWithRecovery(
 	}()
 
 	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+
+	// Fork-aware dump-then-repair: on a confirmed divergence, the RAM tail (run-local)
+	// is already gone; re-replay the confirmed chain from the durable rooted
+	// checkpoint. Any REPEATED divergence = deterministic replay divergence -> fail
+	// closed. The retry budget resets when the rooted watermark advances (progress).
+	seenDiv := make(map[string]bool)
+	attempt := 0
+	var prevRooted uint64
+	if mithrilState != nil {
+		prevRooted = mithrilState.LastRootedSlot
+	}
+	for {
+		var div *replay.ConfirmedDivergence
+		if result == nil || !errors.As(result.Error, &div) {
+			break
+		}
+		key := fmt.Sprintf("%d/%x/%x", div.Slot, div.Ours, div.Confirmed)
+		if seenDiv[key] {
+			mlog.Log.Errorf("fork switch: repeated divergence at slot %d - deterministic replay divergence, halting", div.Slot)
+			break
+		}
+		seenDiv[key] = true
+		if mithrilState == nil || mithrilState.LastRootedContext == nil {
+			mlog.Log.Errorf("fork switch: no rooted checkpoint context to re-replay from; halting")
+			break
+		}
+		if mithrilState.LastRootedSlot > prevRooted { // progress since last attempt -> fresh budget
+			attempt = 0
+			prevRooted = mithrilState.LastRootedSlot
+		}
+		attempt++
+		if attempt > maxForkSwitchRetries {
+			mlog.Log.Errorf("fork switch: retry budget exhausted without rooted progress; halting")
+			break
+		}
+		retryStart := mithrilState.GetResumeSlot()
+		// Fail closed if the divergent span crosses an epoch boundary: in-process
+		// epoch-stakes/StakeHistory caches may hold failed-run state for the new epoch.
+		if epochForStateSlot(mithrilState, retryStart) != epochForStateSlot(mithrilState, div.Slot) {
+			mlog.Log.Errorf("fork switch: divergent span %d..%d crosses an epoch boundary; halting (restart to recover)", retryStart, div.Slot)
+			break
+		}
+		// Prefer the failed attempt's epoch stakes: the in-memory state file copy is
+		// only refreshed on shutdown and can be empty on a fresh bootstrap.
+		stakes := mithrilState.ComputedEpochStakes
+		if len(result.ComputedEpochStakes) > 0 {
+			stakes = make(map[uint64]string, len(result.ComputedEpochStakes))
+			for e, b := range result.ComputedEpochStakes {
+				stakes[e] = base64.StdEncoding.EncodeToString(b)
+			}
+		}
+		rs, err := resumeStateFromRootedContext(mithrilState.LastRootedContext, stakes)
+		if err != nil {
+			mlog.Log.Errorf("fork switch: cannot rebuild resume context: %v; halting", err)
+			break
+		}
+		mlog.Log.Warnf("fork switch: confirmed divergence at slot %d; re-replaying the confirmed chain from rooted slot %d (attempt %d/%d)",
+			div.Slot, retryStart-1, attempt, maxForkSwitchRetries)
+		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	}
 	return result
 }
