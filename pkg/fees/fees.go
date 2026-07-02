@@ -174,9 +174,10 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 
 	leaderAcct, err = slotCtx.GetAccount(leader)
 	if err != nil {
-		// if leader didn't appear at all in the block, then retrieve its latest state from
-		// accountsdb, and also add it to the parent accts object
-		leaderAcct, err = acctsDb.GetAccount(slotCtx.Slot, leader)
+		// Leader didn't appear in the block: fetch its latest state via the
+		// speculative-state-aware read (recent unrooted fee credits live in RAM,
+		// not on disk) and add it to the parent accts object.
+		leaderAcct, err = slotCtx.GetAccountFromAccountsDb(leader)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get leader acct %s from both slotCtx and accountsdb", leader))
 		}
