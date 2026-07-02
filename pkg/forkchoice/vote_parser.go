@@ -205,7 +205,7 @@ func parseAndValidateVoteInstruction(tx *solana.Transaction, instr solana.Compil
 				return nil, false
 			}
 			return &voteInfo{slot: lockout.Slot,
-				bankHash:   vote.Hash,
+				bankHash:   vote.UpdateVoteState.Hash,
 				votePubkey: votePubkey,
 				rootSlot:   vote.UpdateVoteState.Root}, true
 		}
