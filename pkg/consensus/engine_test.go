@@ -232,7 +232,7 @@ func testAlpenglowCertificateSignature(t *testing.T, cert alpenglow.Certificate)
 	if err != nil {
 		t.Fatalf("encode certificate vote: %v", err)
 	}
-	message, err := bls12381.HashToG2(payload, []byte("BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"))
+	message, err := bls12381.HashToG2(payload, []byte(alpenglow.DefaultHashToPointDST))
 	if err != nil {
 		t.Fatalf("hash certificate vote: %v", err)
 	}

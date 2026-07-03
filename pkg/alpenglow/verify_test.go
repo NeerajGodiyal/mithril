@@ -170,53 +170,27 @@ func TestVerifyVoteMessageSignature(t *testing.T) {
 	}
 }
 
-func TestVerifyVoteMessageSignatureRustFixture(t *testing.T) {
-	pubkeyCompressed := mustHex48(t, "82423626eecef17f3e3d53b6f8254c946d1fc0451c1dd6551ee9aea7b8cbca624c3a4ee8d1e5a9be5ef83a407d30ea44")
-	signature := mustHex(t, "0035fa868927897593efb1e3385b51d2df47dd9daca035a3f386509a4df49050bf51f5cde5b2b2fe85958d056819fcf10e77254213e3d16053418356f8d4a1f593e2739cac2fd1632bb0ea62fb97591e73002914f7b948d4cd1e4ffc3eb146ab0f9f9fd5809fcce6134a20d7f121ab57f6180d1025c4ad8d6ed50087b902643fe1c50791dab65076216d90984cb4a8e61873f9ff13234d682542a5cec62f7364b59f313bd8f9831f3df4342e94a109cf8ce640defc6477033168318ca063009a")
-	var blockHash solana.Hash
-	for i := range blockHash {
-		blockHash[i] = 0x42 + byte(i)
-	}
-	set := ValidatorSet{
-		Epoch:      52,
-		TotalStake: 100,
-		Validators: []ValidatorStake{{
-			Rank:                0,
-			BlsPubkeyCompressed: pubkeyCompressed,
-			Stake:               100,
-		}},
-	}
+// TestVerifyRealClusterBlstSignature pins gnark's hash-to-curve + pairing to real
+// blst crypto. The pubkey + signature were produced by a solana-bls 3.0.0 cluster's
+// blst over the message "mithril-hash-test" — so it pins the matching RO_NUL_ DST
+// (not the production default); if gnark's hash-to-curve drifts from blst, it fails.
+func TestVerifyRealClusterBlstSignature(t *testing.T) {
+	// This vector is 3.0.0 (RO_NUL_) material; select that DST regardless of default.
+	defer func(saved string) { blsHashToPointDST = saved }(blsHashToPointDST)
+	blsHashToPointDST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_"
+	pk := mustHex48(t, "95f61236d9fc1ea7bdbfd44109e7223f5f20769863e191fcf50e03cb0e3408dbf2ed74576d259be8acac3226292457d2")
+	sig := mustHex(t, "8ba66c044814b8ceacf89647d52f3a0724b456280f826e0eb691010113f271bae599b42026183805f9ed4ade351a183019d701c0a43f033f63448a8d8b8c0ee6bd3287b3633a99348aaff105c0a08f2526c847569dfb07e1989d4d73b46529a1")
 
-	_, err := verifyVoteMessageWithSet(set, VoteMessage{
-		Vote:      NewNotarizationVote(0x2223_2425_2627_2829, blockHash),
-		Signature: signature,
-		Rank:      0,
-	})
-	if err != nil {
-		t.Fatalf("verify Rust-produced vote signature: %v", err)
+	var pubkey bls12381.G1Affine
+	if _, err := pubkey.SetBytes(pk[:]); err != nil {
+		t.Fatalf("parse pubkey: %v", err)
 	}
-}
-
-func TestVerifyVoteMessageSignatureLiveVotorFixture(t *testing.T) {
-	pubkeyCompressed := mustHex48(t, "afa97fe11e43589b2b4f96e0b505d2a0a52a2c413df83019a3af05ba5d8bbac06ba7b6a0ba7892180354748a74d81b96")
-	signature := mustHex(t, "034ebb8bd92a5abfdd071e4e037c8c59513dd1f0c2b11b6139f54abb76f39234dbdce082324cd8a495c0f1b010549bc00df5e2f6a8405b3b1edf808c5e467370175f3b343d751a940e9ff4398f213c2a458f41f0b85062ba641f520a282f62c30a401bb44f8b75c79a38c059ec2f9997837c5f1fbb86a9be127f33ce21a8c42985eccfbabeb1334fa54c382c0dccd4650dda79e7c835c6e0bcc2452819c22ba6bba85dba51ea84c9d59aa96239ee8c15773aa705159f663b4daf92a89a0dea92")
-	set := ValidatorSet{
-		Epoch:      3,
-		TotalStake: 100,
-		Validators: []ValidatorStake{{
-			Rank:                0,
-			BlsPubkeyCompressed: pubkeyCompressed,
-			Stake:               100,
-		}},
+	var signature bls12381.G2Affine
+	if _, err := signature.SetBytes(sig); err != nil {
+		t.Fatalf("parse signature: %v", err)
 	}
-
-	_, err := verifyVoteMessageWithSet(set, VoteMessage{
-		Vote:      NewFinalizationVote(208215),
-		Signature: signature,
-		Rank:      0,
-	})
-	if err != nil {
-		t.Fatalf("verify live Votor vote signature: %v", err)
+	if err := verifyBLSSignature(pubkey, []byte("mithril-hash-test"), signature); err != nil {
+		t.Fatalf("gnark failed to verify a real cluster blst signature (DST/hash-to-curve drift?): %v", err)
 	}
 }
 

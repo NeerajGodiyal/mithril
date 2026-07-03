@@ -63,11 +63,15 @@ func TestAlpenglowForkChoiceSelectsCertifiedBranch(t *testing.T) {
 		t.Fatalf("apply slot2: %v", err)
 	}
 
+	t.Logf("slot 2 FORK: executed 2 competing branches in memory — winner=0xB, loser=0xA")
+	t.Logf("certificate named winner block 0xB (FinalizeFast) → fork engine selects it")
+
 	// Finalize the certified chain through slot 2.
 	through, _, err := driver.OnFinalized(kWin)
 	if err != nil || through != 2 {
 		t.Fatalf("finalize: through=%d err=%v, want 2", through, err)
 	}
+	t.Logf("promoted certified branch through slot %d", through)
 
 	// PROOF: durable slot-2 state is the WINNER's write (0xB), and the loser's
 	// write (0xA) never reached disk. fdExec writes lamports=version to pubkey=slot,
@@ -83,6 +87,7 @@ func TestAlpenglowForkChoiceSelectsCertifiedBranch(t *testing.T) {
 	if a, _ := committer.durable.GetAccountWithoutLock(solana.PublicKey{1}); a == nil || a.Lamports != 0xA1 {
 		t.Fatalf("durable slot-1 = %v, want the certified block 0xA1", a)
 	}
+	t.Logf("PROOF: durable slot-2 state = winner 0x%X; loser 0xA never reached disk ✓", acct.Lamports)
 }
 
 // Safety: if two DIFFERENT blocks are both certified for one slot (a protocol
