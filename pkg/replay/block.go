@@ -1414,6 +1414,12 @@ func ReplayBlocks(
 	defer forkChoice.Stop()
 
 	if alpenglowReplayMode && consensusEngine != nil {
+		// Certs must verify against their own epoch's validator set; without the
+		// lookup the engine falls back to the latest set and cross-epoch certs
+		// silently fail BLS (and the deferred-cert replay never triggers).
+		if lookupSink, ok := consensusEngine.(consensusengine.AlpenglowEpochLookupSink); ok {
+			lookupSink.SetAlpenglowEpochLookup(epochSchedule.GetEpoch)
+		}
 		installCachedAlpenglowValidatorSets(consensusEngine, currentEpoch)
 	}
 	global.SetForkChoice(forkChoice)
@@ -1444,6 +1450,31 @@ func ReplayBlocks(
 	observedConsensusBlocks := make(map[uint64]*b.Block)
 	var lastRootedWatermark uint64  // diagnostics: highest explicit-root finality slot seen
 	var lastVerifiedLeafSlot uint64 // highest slot whose leaf bankhash matched the confirmed one
+	// Alpenglow finality identities captured at observe/ingest time for the promotion
+	// gate (the tracker's own state may be pruned by promotion time). Pruned as slots
+	// promote; bounded by the unrooted tail cap.
+	alpenglowFooterFinalized := make(map[uint64]solana.Hash)
+	alpenglowExecutedBlockIDs := make(map[uint64]solana.Hash)
+	var gateStats alpenglowGateStats
+	// Persisted gate evidence: a previously-disputed slot promotes only on an exact
+	// executed match after restart — never under delegated trust.
+	alpenglowForced := make(map[uint64]solana.Hash)
+	for _, ev := range mithrilState.AlpenglowEvidence {
+		if ev.Slot <= mithrilState.LastRootedSlot {
+			continue
+		}
+		var want solana.Hash
+		if !ev.Conflict {
+			raw, err := hex.DecodeString(ev.Finalized)
+			if err != nil || len(raw) != 32 {
+				mlog.Log.Warnf("alpenglow evidence for slot %d has a malformed finalized id; treating as conflict", ev.Slot)
+			} else {
+				copy(want[:], raw)
+			}
+		}
+		alpenglowForced[ev.Slot] = want
+		mlog.Log.Warnf("alpenglow evidence loaded: slot %d requires exact finality match before promotion", ev.Slot)
+	}
 	// Alpenglow delegated finality: an unstaked observer can't receive Votor certs,
 	// so finality is attested by the RPC's finalized commitment (polled + throttled).
 	var delegatedFinalizedSlot uint64
@@ -1509,6 +1540,11 @@ func ReplayBlocks(
 		if ds, ok := consensusEngine.(consensusengine.AlpenglowDecisionSource); ok {
 			opts.TurbineAlpenglowBlockIDHints = true
 			opts.AlpenglowDecisionSource = ds.NextAlpenglowDecision
+		}
+		// Candidate observations (block-id + parent link) feed the tracker's
+		// ancestry and duplicate accounting before emission.
+		if co, ok := consensusEngine.(consensusengine.AlpenglowCandidateBlockObserver); ok {
+			opts.AlpenglowCandidateBlockSink = co.ObserveAlpenglowCandidateBlock
 		}
 	}
 
@@ -1756,7 +1792,12 @@ func ReplayBlocks(
 					mlog.Log.Warnf("consensus engine observe block %d: %v", block.Slot, err)
 				}
 				if len(block.AlpenglowFinalCert) > 0 {
-					ingestAlpenglowFooterCertificate(consensusEngine, block.AlpenglowFinalCert)
+					finalized := ingestAlpenglowFooterCertificate(consensusEngine, block.AlpenglowFinalCert)
+					if unrootedTailState != nil { // gate capture: only meaningful (and pruned) on the promotion path
+						for _, fin := range finalized {
+							alpenglowFooterFinalized[fin.Slot] = fin.Hash
+						}
+					}
 				}
 			}
 
@@ -1795,9 +1836,9 @@ func ReplayBlocks(
 			// Advance the finality watermark, then fold the now-rooted RAM prefix onto
 			// disk (irreversible). Finality source is mode-switched: classic uses the
 			// TowerBFT 2/3-vote-root; alpenglow uses the certificate-finalized slot.
-			// TODO(#14 multi-branch): gate promotion on FindRootedSlot (same-fork
-			// path + confirmed-bankhash) instead of the raw watermark once competing
-			// forks can exist; the raw watermark has no anchor/path checks.
+			// In alpenglow mode the promotion gate below verifies executed-vs-certified
+			// block identity per slot; once competing forks execute as side branches,
+			// promotion will also resolve the winning branch path.
 			{
 				rooted, ok := forkChoice.HighestRootedSlot()
 				if alpenglowReplayMode {
@@ -1838,6 +1879,25 @@ func ReplayBlocks(
 						if acctsDb.ForkAware && consensusBufferedExecutionActive && promoteThrough > lastVerifiedLeafSlot {
 							promoteThrough = lastVerifiedLeafSlot
 						}
+						// Alpenglow: never fold a slot whose executed block contradicts
+						// certificate finality (prefix-stop; equivocation fails closed).
+						if alpenglowReplayMode && consensusEngine != nil {
+							gated, gerr := alpenglowPromotionGate(consensusEngine,
+								alpenglowFooterFinalized, alpenglowExecutedBlockIDs, alpenglowForced,
+								mithrilState.LastRootedSlot, promoteThrough, block.Slot, &gateStats)
+							promoteThrough = gated
+							if gerr != nil {
+								var mismatch *AlpenglowFinalityMismatch
+								if errors.As(gerr, &mismatch) {
+									recordAlpenglowEvidence(mithrilState, mismatch)
+								}
+								result.Error = fmt.Errorf("ALPENGLOW SAFETY: %w; halting before folding slot %d", gerr, gated+1)
+								mlog.Log.Errorf("%v", result.Error)
+								break
+							}
+							mlog.Log.FileOnlyf("alpenglow gate: checked=%d matched=%d no_finality=%d no_local_id=%d",
+								gateStats.checked, gateStats.matched, gateStats.noFinality, gateStats.noLocalID)
+						}
 						if promoteThrough > 0 {
 							promotedThrough, rootedCtx, perr := unrootedTailState.promote(promoteThrough)
 							if perr != nil {
@@ -1850,6 +1910,24 @@ func ReplayBlocks(
 									mithrilState.LastRootedSlot = promotedThrough
 									mithrilState.LastRootedBankhash = rootedCtx.Bankhash
 									mithrilState.LastRootedContext = rootedCtx
+									for slot := range alpenglowFooterFinalized {
+										if slot <= promotedThrough {
+											delete(alpenglowFooterFinalized, slot)
+										}
+									}
+									for slot := range alpenglowExecutedBlockIDs {
+										if slot <= promotedThrough {
+											delete(alpenglowExecutedBlockIDs, slot)
+										}
+									}
+									// Disputed slots that promoted passed the exact-match
+									// requirement — the evidence is satisfied.
+									for slot := range alpenglowForced {
+										if slot <= promotedThrough {
+											delete(alpenglowForced, slot)
+											clearAlpenglowEvidence(mithrilState, slot)
+										}
+									}
 								}
 							}
 						}
@@ -2093,6 +2171,11 @@ func ReplayBlocks(
 		// Alpenglow: report the replayed slot's bankhash to the engine (drives cert
 		// replay reconciliation). Log-and-continue — never break replay on telemetry.
 		if alpenglowReplayMode && consensusEngine != nil && lastSlotCtx != nil {
+			// Record the executed identity here — execution is proven (a block
+			// captured at observe time can still be discarded before it runs).
+			if block.HasAlpenglowBlockID && unrootedTailState != nil {
+				alpenglowExecutedBlockIDs[block.Slot] = solana.Hash(block.AlpenglowBlockID)
+			}
 			if err := consensusEngine.OnReplayResult(ctx, consensusengine.SlotReplayResult{
 				Slot:     block.Slot,
 				Bankhash: solana.HashFromBytes(lastSlotCtx.FinalBankhash),

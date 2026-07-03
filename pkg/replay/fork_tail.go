@@ -12,8 +12,8 @@ import (
 // forkTail adapts forkCoordinator to the unrootedState interface the replay loop
 // drives: it tracks the executed chain (tip branch + slot→branch map) and uses the
 // slot bankhash as the block identity, so a finalized slot resolves to its branch.
-// Linear today; competing forks arrive via the coordinator once ingestion (P2) and
-// selection (P4) land.
+// The live replay path is linear (one executed chain); competing forks will execute
+// as side branches once branch-aware execution lands.
 type forkTail struct {
 	fc         *forkCoordinator
 	tipBranch  uint64            // branch of the last replayed slot (0 = durable base)

@@ -651,13 +651,19 @@ func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) {
 	if parentSlot == 0 {
 		parentSlot = blk.ParentSlot
 	}
+	// ParentHash stays in the alpenglow block-id domain (zero = unknown); the PoH
+	// LastBlockhash never matches the tracker's cert-keyed blocks.
+	var parentHash solana.Hash
+	if blk.HasAlpenglowParentBlockID {
+		parentHash = solana.Hash(blk.AlpenglowParentBlockID)
+	}
 	bs.alpenglowCandidateBlockSink(alpenglow.ReplayBlockObservation{
 		Block: alpenglow.BlockID{
 			Slot: blk.Slot,
 			Hash: solana.Hash(blk.AlpenglowBlockID),
 		},
 		ParentSlot: parentSlot,
-		ParentHash: solana.Hash(blk.LastBlockhash),
+		ParentHash: parentHash,
 		Source:     bs.liveShredStreamName(),
 		At:         time.Now(),
 	})

@@ -853,6 +853,10 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 		blk.AlpenglowBlockID = blockID
 		blk.HasAlpenglowBlockID = true
 	}
+	if effectiveParentKnown {
+		blk.AlpenglowParentBlockID = effectiveParentBlockID
+		blk.HasAlpenglowParentBlockID = true
+	}
 	// Pull the footer's finalization cert (for an earlier slot) if present; replay
 	// decodes + verifies it to drive Alpenglow finality without needing Votor QUIC.
 	if fc := s.footerFinalCert(); len(fc) > 0 {

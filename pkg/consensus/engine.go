@@ -53,6 +53,12 @@ type AlpenglowDecisionSource interface {
 	NextAlpenglowDecision(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 }
 
+// AlpenglowFinalityIndex answers per-slot finality queries for the promotion gate.
+type AlpenglowFinalityIndex interface {
+	FinalizedBlockAt(slot uint64) (alpenglow.BlockID, bool)
+	FinalityConflictAt(slot uint64) bool
+}
+
 type AlpenglowCandidateBlockObserver interface {
 	ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation)
 }
@@ -60,7 +66,10 @@ type AlpenglowCandidateBlockObserver interface {
 // AlpenglowFooterCertificateSink ingests finalization certs decoded from block
 // footers (the unstaked finality path). Implemented only by the observer engine.
 type AlpenglowFooterCertificateSink interface {
-	ObserveFooterCertificates(certs []alpenglow.Certificate)
+	// ObserveFooterCertificates returns the blocks finalized by the verified certs,
+	// so the caller can capture expected finality at ingest time (the tracker's own
+	// state may be pruned by the time promotion consults it).
+	ObserveFooterCertificates(certs []alpenglow.Certificate) []alpenglow.BlockID
 }
 
 type AlpenglowValidatorSetSink interface {
@@ -247,7 +256,9 @@ func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObser
 		replayObs := alpenglow.ReplayBlockObservation{
 			Block:      blockID,
 			ParentSlot: alpenglowParentSlot(obs.Block),
-			ParentHash: solana.Hash(obs.Block.LastBlockhash),
+			// ParentHash must stay in the alpenglow block-id domain (the tracker keys
+			// blocks by cert block-id); PoH hashes never match, so zero = unknown.
+			ParentHash: parentBlockIDOrZero(obs.Block),
 			Source:     obs.Source,
 			At:         obs.At,
 		}
@@ -338,8 +349,14 @@ func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 
 // ObserveFooterCertificates verifies and ingests certificates decoded from a block
 // footer (the unstaked finality path — no Votor QUIC needed). Each is verified and
-// fed to the chain tracker exactly like a QUIC cert.
-func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Certificate) {
+// fed to the chain tracker exactly like a QUIC cert. Returns the blocks these certs
+// finalize (fast: the FinalizeFast block; slow: the notarized block paired with the
+// Finalize cert), derived from the verified certs themselves so the result cannot
+// be raced away by tracker pruning.
+func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Certificate) []alpenglow.BlockID {
+	var finalized []alpenglow.BlockID
+	notarized := make(map[uint64]alpenglow.BlockID)
+	finalizeSlots := make(map[uint64]struct{})
 	for _, cert := range certs {
 		verified, result, err := e.verifyCertificate(cert)
 		if err != nil {
@@ -349,8 +366,27 @@ func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Ce
 		}
 		if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
 			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid footer certificate: %v", err)
+			continue
+		}
+		switch verified.Type {
+		case alpenglow.CertificateFinalizeFast:
+			if block, ok := verified.Block(); ok {
+				finalized = append(finalized, block)
+			}
+		case alpenglow.CertificateNotarize:
+			if block, ok := verified.Block(); ok {
+				notarized[verified.Slot] = block
+			}
+		case alpenglow.CertificateFinalize:
+			finalizeSlots[verified.Slot] = struct{}{}
 		}
 	}
+	for slot := range finalizeSlots {
+		if block, ok := notarized[slot]; ok {
+			finalized = append(finalized, block)
+		}
+	}
+	return finalized
 }
 
 // alpenglowPendingCertCap bounds deferred certs per epoch; alpenglowPendingEpochCap
@@ -374,21 +410,29 @@ func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certif
 	if !ok {
 		return
 	}
+	// Only defer certs for epochs plausibly near the installed sets — a cert with a
+	// far-off epoch can never verify soon and would just occupy buckets.
+	if latest := e.ensureVerifier().LatestEpoch(); latest > 0 {
+		if epoch+1 < latest || epoch > latest+2 {
+			return
+		}
+	}
 	e.pendingCertsMu.Lock()
 	defer e.pendingCertsMu.Unlock()
 	if e.pendingCerts == nil {
 		e.pendingCerts = make(map[uint64][]alpenglow.Certificate)
 	}
-	// Bound distinct epoch buckets: evict the lowest (oldest) epoch when a new one
-	// would exceed the cap. Honest operation only ever has ~1-2 epochs pending.
+	// Bound distinct epoch buckets: evict the HIGHEST epoch when a new one would
+	// exceed the cap — garbage slots are typically far-future, genuine pending
+	// epochs sit near the current one.
 	if _, exists := e.pendingCerts[epoch]; !exists && len(e.pendingCerts) >= alpenglowPendingEpochCap {
-		lowest, first := uint64(0), true
+		highest, first := uint64(0), true
 		for ep := range e.pendingCerts {
-			if first || ep < lowest {
-				lowest, first = ep, false
+			if first || ep > highest {
+				highest, first = ep, false
 			}
 		}
-		delete(e.pendingCerts, lowest)
+		delete(e.pendingCerts, highest)
 	}
 	q := e.pendingCerts[epoch]
 	if len(q) >= alpenglowPendingCertCap {
@@ -451,6 +495,14 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 
 func (e *AlpenglowObserverEngine) NextAlpenglowDecision(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
 	return e.ensureChain().NextDecision(anchorSlot)
+}
+
+func (e *AlpenglowObserverEngine) FinalizedBlockAt(slot uint64) (alpenglow.BlockID, bool) {
+	return e.ensureChain().FinalizedBlockAt(slot)
+}
+
+func (e *AlpenglowObserverEngine) FinalityConflictAt(slot uint64) bool {
+	return e.ensureChain().FinalityConflictAt(slot)
 }
 
 func (e *AlpenglowObserverEngine) ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation) {
@@ -718,6 +770,13 @@ func alpenglowParentSlot(block *block.Block) uint64 {
 		return block.SourceParentSlot
 	}
 	return block.ParentSlot
+}
+
+func parentBlockIDOrZero(block *block.Block) solana.Hash {
+	if block == nil || !block.HasAlpenglowParentBlockID {
+		return solana.Hash{}
+	}
+	return solana.Hash(block.AlpenglowParentBlockID)
 }
 
 type AlpenglowEngine struct{}

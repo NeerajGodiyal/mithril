@@ -1623,6 +1623,9 @@ postBootstrap:
 	if accountsDb.ForkAware && config.GetString("consensus.enforce_on_source") != "all" {
 		klog.Fatalf("storage.fork_aware requires consensus.enforce_on_source=all (promotion folds only vote-verified slots; without it rooting stalls)")
 	}
+	if consensusMode == string(consensusengine.ModeAlpenglowObserver) && !accountsDb.RootedDurable {
+		mlog.Log.Warnf("alpenglow-observer without storage.rooted_durable: every slot is written durably UNGATED — the finality promotion gate and dump-then-repair only protect rooted-durable runs")
+	}
 
 	// Crash recovery: roll forward any interrupted commit up to the DURABLE
 	// high-water (the last rooted slot in rooted-durable mode). Using the replayed tip
@@ -2830,10 +2833,12 @@ func runReplayWithRecovery(
 
 	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 
-	// Fork-aware dump-then-repair: on a confirmed divergence, the RAM tail (run-local)
-	// is already gone; re-replay the confirmed chain from the durable rooted
-	// checkpoint. Any REPEATED divergence = deterministic replay divergence -> fail
-	// closed. The retry budget resets when the rooted watermark advances (progress).
+	// Fork-aware dump-then-repair: on a confirmed divergence (bankhash vs confirmed
+	// leaf) or an Alpenglow finality mismatch (executed block-id vs certificate), the
+	// RAM tail (run-local) is already gone; re-replay the confirmed chain from the
+	// durable rooted checkpoint — repair then fetches the certified version. Any
+	// REPEATED divergence = deterministic replay divergence -> fail closed. The retry
+	// budget resets when the rooted watermark advances (progress).
 	seenDiv := make(map[string]bool)
 	attempt := 0
 	var prevRooted uint64
@@ -2841,13 +2846,32 @@ func runReplayWithRecovery(
 		prevRooted = mithrilState.LastRootedSlot
 	}
 	for {
-		var div *replay.ConfirmedDivergence
-		if result == nil || !errors.As(result.Error, &div) {
+		if result == nil {
 			break
 		}
-		key := fmt.Sprintf("%d/%x/%x", div.Slot, div.Ours, div.Confirmed)
+		var divSlot uint64
+		var key string
+		var div *replay.ConfirmedDivergence
+		var finMismatch *replay.AlpenglowFinalityMismatch
+		switch {
+		case errors.As(result.Error, &div):
+			divSlot = div.Slot
+			key = fmt.Sprintf("%d/%x/%x", div.Slot, div.Ours, div.Confirmed)
+		case errors.As(result.Error, &finMismatch):
+			if finMismatch.Conflict {
+				// Conflict-shaped (equivocation evidence, not a wrong local block):
+				// re-replay cannot help — halt without burning the retry budget.
+				mlog.Log.Errorf("fork switch: consensus conflict at slot %d is equivocation evidence — not retryable; halting", finMismatch.Slot)
+			} else {
+				divSlot = finMismatch.Slot
+				key = fmt.Sprintf("ag:%d/%x/%x", finMismatch.Slot, finMismatch.Executed, finMismatch.Finalized)
+			}
+		}
+		if key == "" { // neither divergence type: not a fork-switch error
+			break
+		}
 		if seenDiv[key] {
-			mlog.Log.Errorf("fork switch: repeated divergence at slot %d - deterministic replay divergence, halting", div.Slot)
+			mlog.Log.Errorf("fork switch: repeated divergence at slot %d - deterministic replay divergence, halting", divSlot)
 			break
 		}
 		seenDiv[key] = true
@@ -2867,8 +2891,8 @@ func runReplayWithRecovery(
 		retryStart := mithrilState.GetResumeSlot()
 		// Fail closed if the divergent span crosses an epoch boundary: in-process
 		// epoch-stakes/StakeHistory caches may hold failed-run state for the new epoch.
-		if epochForStateSlot(mithrilState, retryStart) != epochForStateSlot(mithrilState, div.Slot) {
-			mlog.Log.Errorf("fork switch: divergent span %d..%d crosses an epoch boundary; halting (restart to recover)", retryStart, div.Slot)
+		if epochForStateSlot(mithrilState, retryStart) != epochForStateSlot(mithrilState, divSlot) {
+			mlog.Log.Errorf("fork switch: divergent span %d..%d crosses an epoch boundary; halting (restart to recover)", retryStart, divSlot)
 			break
 		}
 		// Prefer the failed attempt's epoch stakes: the in-memory state file copy is
@@ -2886,7 +2910,7 @@ func runReplayWithRecovery(
 			break
 		}
 		mlog.Log.Warnf("fork switch: confirmed divergence at slot %d; re-replaying the confirmed chain from rooted slot %d (attempt %d/%d)",
-			div.Slot, retryStart-1, attempt, maxForkSwitchRetries)
+			divSlot, retryStart-1, attempt, maxForkSwitchRetries)
 		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	}
 	return result

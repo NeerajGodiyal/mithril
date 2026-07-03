@@ -123,6 +123,12 @@ type MithrilState struct {
 	// resume restarts from the next slot using it. nil in legacy mode.
 	LastRootedContext *ResumeContext `json:"last_rooted_context,omitempty"`
 
+	// AlpenglowEvidence persists finality mismatches/conflicts that halted promotion,
+	// so a restart cannot fold the disputed slot under delegated trust. An entry
+	// clears when its slot promotes with a matching identity; conflict entries (zero
+	// hashes) block promotion until removed by an operator.
+	AlpenglowEvidence []AlpenglowFinalityEvidence `json:"alpenglow_finality_evidence,omitempty"`
+
 	// =========================================================================
 	// Resume Context (everything needed to continue replay from LastSlot)
 	// These fields capture state at the end of the last successfully replayed slot
@@ -212,6 +218,16 @@ type SlotHashEntry struct {
 // ResumeContext bundles the end-of-slot replay context to continue replay from a slot.
 // In rooted-durable mode it is captured as of the last rooted slot (stored in
 // MithrilState.LastRootedContext). Epoch stakes live in ComputedEpochStakes, not here.
+// AlpenglowFinalityEvidence is one persisted promotion-gate violation: an executed
+// block-id contradicting the certificate-finalized one, or a certificate conflict
+// (Conflict=true, empty hashes).
+type AlpenglowFinalityEvidence struct {
+	Slot      uint64 `json:"slot"`
+	Executed  string `json:"executed,omitempty"`  // hex block-id
+	Finalized string `json:"finalized,omitempty"` // hex block-id
+	Conflict  bool   `json:"conflict,omitempty"`
+}
+
 type ResumeContext struct {
 	Slot                    uint64           `json:"slot"`
 	Bankhash                string           `json:"bankhash"` // base58

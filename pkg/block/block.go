@@ -29,6 +29,8 @@ type Block struct {
 	Blockhash                           [32]byte
 	AlpenglowBlockID                    [32]byte // Turbine Merkle-root block id used by Alpenglow/Votor.
 	HasAlpenglowBlockID                 bool
+	AlpenglowParentBlockID              [32]byte // parent's Merkle-root block id (header/update-parent marker)
+	HasAlpenglowParentBlockID           bool
 	AlpenglowFinalCert                  []byte // raw footer final_cert bytes (finalization cert for an earlier slot), decoded in replay
 	ExpectedBankhash                    [32]byte
 	TxMetas                             []*rpc.TransactionMeta

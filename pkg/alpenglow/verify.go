@@ -209,6 +209,13 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 	return ValidatorSet{Epoch: epoch, Validators: entries, TotalStake: totalStake}, nil
 }
 
+// LatestEpoch returns the newest epoch with an installed validator set (0 if none).
+func (v *CertificateVerifier) LatestEpoch() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.latestEpoch
+}
+
 func (v *CertificateVerifier) SetValidatorSet(set ValidatorSet) error {
 	if len(set.Validators) == 0 {
 		return fmt.Errorf("alpenglow verifier: validator set for epoch %d is empty", set.Epoch)
