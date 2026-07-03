@@ -122,13 +122,13 @@ type VoteState struct {
 
 	// V4-specific fields preserved through the processing loop.
 	// Populated by ConvertToCurrent when source is V4; used by newVoteState4FromCurrent.
-	wasV4                         bool
-	v4InflationRewardsCollector   solana.PublicKey
-	v4BlockRevenueCollector       solana.PublicKey
-	v4InflationRewardsCommBps     uint16
-	v4BlockRevenueCommBps         uint16
-	v4PendingDelegatorRewards     uint64
-	v4BlsPubkeyCompressed         *[48]byte
+	wasV4                       bool
+	v4InflationRewardsCollector solana.PublicKey
+	v4BlockRevenueCollector     solana.PublicKey
+	v4InflationRewardsCommBps   uint16
+	v4BlockRevenueCommBps       uint16
+	v4PendingDelegatorRewards   uint64
+	v4BlsPubkeyCompressed       *[48]byte
 }
 
 type VoteState4 struct {
@@ -144,7 +144,7 @@ type VoteState4 struct {
 	RootSlot                      *uint64
 	AuthorizedVoters              AuthorizedVoters
 	EpochCredits                  []EpochCredits
-	LastTimestamp                  BlockTimestamp
+	LastTimestamp                 BlockTimestamp
 }
 
 type VoteStateVersions struct {
@@ -1695,6 +1695,18 @@ func (voteStateVersions *VoteStateVersions) NodePubkey() solana.PublicKey {
 	}
 }
 
+func (voteStateVersions *VoteStateVersions) BlsPubkeyCompressed() *[48]byte {
+	if voteStateVersions == nil {
+		return nil
+	}
+	switch voteStateVersions.Type {
+	case VoteStateVersionV4:
+		return voteStateVersions.V4.BlsPubkeyCompressed
+	default:
+		return nil
+	}
+}
+
 func UnmarshalVersionedVoteState(data []byte) (*VoteStateVersions, error) {
 	versioned := new(VoteStateVersions)
 	decoder := bin.NewBinDecoder(data)
@@ -1774,7 +1786,7 @@ func newVoteState4FromCurrent(vs *VoteState, votePubkey solana.PublicKey) *VoteS
 		RootSlot:             vs.RootSlot,
 		AuthorizedVoters:     vs.AuthorizedVoters,
 		EpochCredits:         vs.EpochCredits,
-		LastTimestamp:         vs.LastTimestamp,
+		LastTimestamp:        vs.LastTimestamp,
 	}
 
 	if vs.wasV4 {

@@ -27,7 +27,10 @@ const (
 
 	socketTagGossip      = 0
 	socketTagServeRepair = 4
+	socketTagTPUVote     = 9
 	socketTagTVU         = 10
+	socketTagTPUVoteQuic = 12
+	socketTagAlpenglow   = 13
 
 	// Agave's Version has a numeric ClientId, not a string. Unknown IDs are
 	// accepted, so use a stable "MI" marker while keeping ClientName in logs.
@@ -64,6 +67,9 @@ type ContactInfo struct {
 	GossipAddr      *net.UDPAddr
 	ServeRepairAddr *net.UDPAddr
 	TVUAddr         *net.UDPAddr
+	TPUVoteAddr     *net.UDPAddr
+	TPUVoteQuicAddr *net.UDPAddr
+	AlpenglowAddr   *net.UDPAddr
 	Extensions      [][]byte
 }
 
@@ -138,7 +144,34 @@ func (c *ContactInfo) CloneWithWallclock(wallclock uint64) *ContactInfo {
 	cp.GossipAddr = cloneUDPAddr(c.GossipAddr)
 	cp.ServeRepairAddr = cloneUDPAddr(c.ServeRepairAddr)
 	cp.TVUAddr = cloneUDPAddr(c.TVUAddr)
+	cp.TPUVoteAddr = cloneUDPAddr(c.TPUVoteAddr)
+	cp.TPUVoteQuicAddr = cloneUDPAddr(c.TPUVoteQuicAddr)
+	cp.AlpenglowAddr = cloneUDPAddr(c.AlpenglowAddr)
 	return &cp
+}
+
+func (c *ContactInfo) SetAlpenglowAddr(addr *net.UDPAddr) error {
+	if err := c.SetSocket(socketTagAlpenglow, addr); err != nil {
+		return err
+	}
+	c.AlpenglowAddr = cloneUDPAddr(addr)
+	return nil
+}
+
+func (c *ContactInfo) SetTPUVoteAddr(addr *net.UDPAddr) error {
+	if err := c.SetSocket(socketTagTPUVote, addr); err != nil {
+		return err
+	}
+	c.TPUVoteAddr = cloneUDPAddr(addr)
+	return nil
+}
+
+func (c *ContactInfo) SetTPUVoteQuicAddr(addr *net.UDPAddr) error {
+	if err := c.SetSocket(socketTagTPUVoteQuic, addr); err != nil {
+		return err
+	}
+	c.TPUVoteQuicAddr = cloneUDPAddr(addr)
+	return nil
 }
 
 func (c *ContactInfo) SetSocket(key uint8, addr *net.UDPAddr) error {
@@ -291,6 +324,12 @@ func decodeContactInfo(d *decoder) (*ContactInfo, error) {
 			info.ServeRepairAddr = cloneUDPAddr(addr)
 		case socketTagTVU:
 			info.TVUAddr = cloneUDPAddr(addr)
+		case socketTagTPUVote:
+			info.TPUVoteAddr = cloneUDPAddr(addr)
+		case socketTagTPUVoteQuic:
+			info.TPUVoteQuicAddr = cloneUDPAddr(addr)
+		case socketTagAlpenglow:
+			info.AlpenglowAddr = cloneUDPAddr(addr)
 		}
 	}
 

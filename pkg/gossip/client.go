@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -27,6 +28,7 @@ type Config struct {
 	Entrypoint        string
 	BindAddr          string
 	TVUAddr           string
+	AlpenglowAddr     string
 	AdvertisedIP      string
 	ShredVersion      uint16
 	Identity          ed25519.PrivateKey
@@ -42,6 +44,7 @@ type Client struct {
 	entrypoint *net.UDPAddr
 	bindAddr   *net.UDPAddr
 	tvuAddr    *net.UDPAddr
+	alpenglow  *net.UDPAddr
 	identity   ed25519.PrivateKey
 	pubkey     Pubkey
 
@@ -67,6 +70,7 @@ type Client struct {
 	txPingMessages   atomic.Uint64
 	txPongMessages   atomic.Uint64
 	txPullResponses  atomic.Uint64
+	txPullRequests   atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
 }
@@ -138,6 +142,13 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve TVU address: %w", err)
 	}
+	var alpenglowAddr *net.UDPAddr
+	if cfg.AlpenglowAddr != "" {
+		alpenglowAddr, err = net.ResolveUDPAddr("udp", cfg.AlpenglowAddr)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Alpenglow address: %w", err)
+		}
+	}
 	identity := cfg.Identity
 	if len(identity) == 0 {
 		_, identity, err = ed25519.GenerateKey(rand.Reader)
@@ -158,6 +169,7 @@ func NewClient(cfg Config) (*Client, error) {
 		entrypoint:  entrypoint,
 		bindAddr:    bindAddr,
 		tvuAddr:     tvuAddr,
+		alpenglow:   alpenglowAddr,
 		identity:    identity,
 		pubkey:      pubkey,
 		peers:       make(map[udpAddrKey]knownPeer),
@@ -196,8 +208,20 @@ func (c *Client) Run(ctx context.Context) error {
 	contact := c.contact
 	c.contactMu.RUnlock()
 	if contact != nil {
-		mlog.Log.Infof("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s shred_version=%d client=%s",
-			conn.LocalAddr().String(), contact.GossipAddr.String(), contact.TVUAddr.String(), contact.ShredVer, c.cfg.Name)
+		alpenglowAddr := "disabled"
+		tpuVoteAddr := "disabled"
+		tpuVoteQuicAddr := "disabled"
+		if contact.AlpenglowAddr != nil {
+			alpenglowAddr = contact.AlpenglowAddr.String()
+		}
+		if contact.TPUVoteAddr != nil {
+			tpuVoteAddr = contact.TPUVoteAddr.String()
+		}
+		if contact.TPUVoteQuicAddr != nil {
+			tpuVoteQuicAddr = contact.TPUVoteQuicAddr.String()
+		}
+		mlog.Log.Infof("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s advertised_alpenglow=%s advertised_tpu_vote=%s advertised_tpu_vote_quic=%s shred_version=%d client=%s",
+			conn.LocalAddr().String(), contact.GossipAddr.String(), contact.TVUAddr.String(), alpenglowAddr, tpuVoteAddr, tpuVoteQuicAddr, contact.ShredVer, c.cfg.Name)
 	}
 	c.recordPeer(c.entrypoint)
 
@@ -240,6 +264,9 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 		case <-pingTicker.C:
 			_ = c.sendPing(conn, c.entrypoint)
+			// Pull peers' CRDS tables so discovery isn't purely passive (fixes
+			// peers=1). Peers ping us first if unponged; we answer, so this converges.
+			_ = c.sendPullRequests(conn)
 		case <-statsTicker.C:
 			stats := c.Stats()
 			mlog.Log.FileOnlyf("gossip client stats: rx=%d tx=%d peers=%d repair_peers=%d decode_errors=%d tx_errors=%d pings=%d/%d pongs=%d/%d contacts_rx=%d contacts_accepted=%d pull_requests=%d pull_responses=%d last_rx=%s last_tx=%s",
@@ -341,6 +368,21 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 	if err != nil {
 		return err
 	}
+	if c.alpenglow != nil {
+		alpenglowAddr := &net.UDPAddr{IP: advertisedIP, Port: c.alpenglow.Port}
+		if alpenglowIP := normalizedIP(c.alpenglow.IP); alpenglowIP != nil && !alpenglowIP.IsUnspecified() {
+			alpenglowAddr.IP = alpenglowIP
+		}
+		if err := contact.SetAlpenglowAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow gossip socket: %w", err)
+		}
+		if err := contact.SetTPUVoteAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow TPU vote gossip socket: %w", err)
+		}
+		if err := contact.SetTPUVoteQuicAddr(alpenglowAddr); err != nil {
+			return fmt.Errorf("set Alpenglow TPU vote QUIC gossip socket: %w", err)
+		}
+	}
 	c.contactMu.Lock()
 	c.contact = contact
 	c.contactMu.Unlock()
@@ -394,6 +436,49 @@ func (c *Client) sendPullResponse(conn *net.UDPConn, addr *net.UDPAddr) error {
 	c.txPullResponses.Add(1)
 	return nil
 }
+
+// sendPullRequests asks every known peer to dump its CRDS table (match-everything
+// filter), bootstrapping our peer/repair set. Peers ping us first if we're not yet
+// ponged; we answer pings, so repeated ticks converge. Best-effort per peer.
+func (c *Client) sendPullRequests(conn *net.UDPConn) error {
+	value, err := c.currentContactValue()
+	if err != nil {
+		return err
+	}
+	var seedBytes [8]byte
+	if _, err := rand.Read(seedBytes[:]); err != nil {
+		return err
+	}
+	packet, err := encodePullRequest(value, binary.LittleEndian.Uint64(seedBytes[:]))
+	if err != nil {
+		return err
+	}
+	// Pull from a bounded window each tick rather than flooding every peer (avoids
+	// peers rate-limiting our gossip, which the shared turbine path relies on). Start
+	// offset is derived from the random seed so the window rotates over time.
+	peers := c.currentPeers()
+	if len(peers) == 0 {
+		return nil
+	}
+	start := int(binary.LittleEndian.Uint64(seedBytes[:]) % uint64(len(peers)))
+	n := maxPullRequestsPerTick
+	if n > len(peers) {
+		n = len(peers)
+	}
+	for i := 0; i < n; i++ {
+		if err := sendUDP(conn, packet, peers[(start+i)%len(peers)]); err != nil {
+			c.txErrors.Add(1)
+			continue
+		}
+		c.recordTx()
+		c.txPullRequests.Add(1)
+	}
+	return nil
+}
+
+// maxPullRequestsPerTick bounds outbound CRDS pull requests per ping tick so a
+// large peer table doesn't turn into a gossip flood.
+const maxPullRequestsPerTick = 8
 
 func (c *Client) sendPing(conn *net.UDPConn, addr *net.UDPAddr) error {
 	ping, err := newPing(c.identity)

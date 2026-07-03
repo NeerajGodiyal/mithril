@@ -1,19 +1,22 @@
 package turbine
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/gagliardetto/solana-go"
 	"github.com/klauspost/reedsolomon"
 )
 
 var (
-	ErrDuplicateShred = errors.New("duplicate data shred")
-	ErrSlotIncomplete = errors.New("slot incomplete")
-	ErrSlotOverflow   = errors.New("slot has too many data shreds")
+	ErrDuplicateShred               = errors.New("duplicate data shred")
+	ErrSlotIncomplete               = errors.New("slot incomplete")
+	ErrSlotOverflow                 = errors.New("slot has too many data shreds")
+	ErrNonCanonicalAlpenglowBlockID = errors.New("non-canonical alpenglow block id")
 )
 
 const (
@@ -23,17 +26,26 @@ const (
 	maxRetainedCompletedSlotLag  = uint64(512)
 	repairObservedSlotLag        = uint64(1)
 	repairScanSlotWindow         = uint64(96)
+	maxPriorityRepairSlots       = 512
+	maxPriorityRepairRange       = uint64(64)
 )
 
 type SlotAssembler struct {
-	mu                  sync.Mutex
-	slots               map[uint64]*slotState
-	completedSlots      map[uint64]struct{}
-	encoders            map[fecLayout]reedsolomon.Encoder
-	maxObservedSlot     uint64
-	recoveredDataShreds uint64
-	evictedSlots        uint64
-	ignoredOldShreds    uint64
+	mu                   sync.Mutex
+	slots                map[uint64]*slotState
+	completedSlots       map[uint64]struct{}
+	knownBlockIDs        map[uint64]solana.Hash
+	priorityRepairSlots  map[uint64]struct{}
+	priorityRepairOrder  []uint64
+	encoders             map[fecLayout]reedsolomon.Encoder
+	maxObservedSlot      uint64
+	recoveredDataShreds  uint64
+	nonCanonicalBlockIDs uint64
+	lastNonCanonicalSlot uint64
+	lastNonCanonicalGot  solana.Hash
+	lastNonCanonicalWant solana.Hash
+	evictedSlots         uint64
+	ignoredOldShreds     uint64
 }
 
 type SlotRepairRequest struct {
@@ -75,9 +87,11 @@ type fecState struct {
 
 func NewSlotAssembler() *SlotAssembler {
 	return &SlotAssembler{
-		slots:          make(map[uint64]*slotState),
-		completedSlots: make(map[uint64]struct{}),
-		encoders:       make(map[fecLayout]reedsolomon.Encoder),
+		slots:               make(map[uint64]*slotState),
+		completedSlots:      make(map[uint64]struct{}),
+		knownBlockIDs:       make(map[uint64]solana.Hash),
+		priorityRepairSlots: make(map[uint64]struct{}),
+		encoders:            make(map[fecLayout]reedsolomon.Encoder),
 	}
 }
 
@@ -147,13 +161,67 @@ func (a *SlotAssembler) AddShred(shred *Shred) (*block.Block, error) {
 		return nil, nil
 	}
 
-	blk, err := state.block()
+	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
+	blk, err := state.block(parentBlockID, parentKnown)
 	if err != nil {
 		return nil, err
 	}
+	if !a.acceptAlpenglowBlockIDLocked(blk) {
+		a.trackNonCanonicalBlockIDLocked(blk)
+		delete(a.slots, shred.Slot)
+		return nil, nil
+	}
 	delete(a.slots, shred.Slot)
 	a.completedSlots[shred.Slot] = struct{}{}
+	a.trackBlockIDLocked(blk)
 	return blk, nil
+}
+
+func (a *SlotAssembler) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.knownBlockIDs[slot] = blockID
+}
+
+func (a *SlotAssembler) ResetSlot(slot uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	delete(a.slots, slot)
+	delete(a.completedSlots, slot)
+}
+
+func (a *SlotAssembler) PrioritizeRepairSlot(slot uint64) {
+	a.PrioritizeRepairRange(slot, slot)
+}
+
+func (a *SlotAssembler) PrioritizeRepairRange(start, end uint64) {
+	if start == 0 {
+		return
+	}
+	if end < start {
+		end = start
+	}
+	if end-start > maxPriorityRepairRange {
+		end = start + maxPriorityRepairRange
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for slot := start; ; slot++ {
+		if _, completed := a.completedSlots[slot]; !completed {
+			if _, exists := a.priorityRepairSlots[slot]; !exists {
+				a.priorityRepairSlots[slot] = struct{}{}
+				a.priorityRepairOrder = append(a.priorityRepairOrder, slot)
+			}
+		}
+		if slot == end {
+			break
+		}
+	}
+	a.prunePriorityRepairSlotsLocked()
 }
 
 func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
@@ -196,7 +264,13 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 				delete(a.completedSlots, slot)
 			}
 		}
+		for slot := range a.knownBlockIDs {
+			if slot < minSlot {
+				delete(a.knownBlockIDs, slot)
+			}
+		}
 	}
+	a.prunePriorityRepairSlotsLocked()
 
 	if len(a.slots) == 0 {
 		return
@@ -215,6 +289,40 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 		}
 		delete(a.slots, oldest)
 		a.evictedSlots++
+	}
+}
+
+func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
+	if len(a.priorityRepairOrder) == 0 {
+		return
+	}
+
+	minSlot := uint64(0)
+	if a.maxObservedSlot > maxRetainedIncompleteSlotLag {
+		minSlot = a.maxObservedSlot - maxRetainedIncompleteSlotLag
+	}
+
+	filtered := a.priorityRepairOrder[:0]
+	for _, slot := range a.priorityRepairOrder {
+		if _, exists := a.priorityRepairSlots[slot]; !exists {
+			continue
+		}
+		if slot < minSlot {
+			delete(a.priorityRepairSlots, slot)
+			continue
+		}
+		if _, completed := a.completedSlots[slot]; completed {
+			delete(a.priorityRepairSlots, slot)
+			continue
+		}
+		filtered = append(filtered, slot)
+	}
+	a.priorityRepairOrder = filtered
+
+	for len(a.priorityRepairOrder) > maxPriorityRepairSlots {
+		slot := a.priorityRepairOrder[0]
+		a.priorityRepairOrder = a.priorityRepairOrder[1:]
+		delete(a.priorityRepairSlots, slot)
 	}
 }
 
@@ -317,13 +425,56 @@ func (a *SlotAssembler) CompleteSlot(slot uint64) (*block.Block, error) {
 	if state == nil || !state.complete() {
 		return nil, ErrSlotIncomplete
 	}
-	blk, err := state.block()
+	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
+	blk, err := state.block(parentBlockID, parentKnown)
 	if err != nil {
 		return nil, err
 	}
+	if !a.acceptAlpenglowBlockIDLocked(blk) {
+		a.trackNonCanonicalBlockIDLocked(blk)
+		delete(a.slots, slot)
+		return nil, ErrNonCanonicalAlpenglowBlockID
+	}
 	delete(a.slots, slot)
 	a.completedSlots[slot] = struct{}{}
+	a.trackBlockIDLocked(blk)
 	return blk, nil
+}
+
+func (a *SlotAssembler) acceptAlpenglowBlockIDLocked(blk *block.Block) bool {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		return true
+	}
+	known, ok := a.knownBlockIDs[blk.Slot]
+	if !ok || known == (solana.Hash{}) {
+		return true
+	}
+	return solana.Hash(blk.AlpenglowBlockID) == known
+}
+
+func (a *SlotAssembler) trackBlockIDLocked(blk *block.Block) {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		return
+	}
+	blockID := solana.Hash(blk.AlpenglowBlockID)
+	if known, ok := a.knownBlockIDs[blk.Slot]; ok && known != (solana.Hash{}) && known != blockID {
+		return
+	}
+	a.knownBlockIDs[blk.Slot] = blockID
+}
+
+func (a *SlotAssembler) trackNonCanonicalBlockIDLocked(blk *block.Block) {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		return
+	}
+	want, ok := a.knownBlockIDs[blk.Slot]
+	if !ok || want == (solana.Hash{}) {
+		return
+	}
+	a.nonCanonicalBlockIDs++
+	a.lastNonCanonicalSlot = blk.Slot
+	a.lastNonCanonicalGot = solana.Hash(blk.AlpenglowBlockID)
+	a.lastNonCanonicalWant = want
 }
 
 func (a *SlotAssembler) ActiveSlots() int {
@@ -348,6 +499,19 @@ func (a *SlotAssembler) IgnoredOldShreds() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.ignoredOldShreds
+}
+
+func (a *SlotAssembler) PriorityRepairSlots() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.prunePriorityRepairSlotsLocked()
+	return len(a.priorityRepairSlots)
+}
+
+func (a *SlotAssembler) NonCanonicalBlockIDStats() (count uint64, slot uint64, got solana.Hash, want solana.Hash) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nonCanonicalBlockIDs, a.lastNonCanonicalSlot, a.lastNonCanonicalGot, a.lastNonCanonicalWant
 }
 
 func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []SlotRepairRequest {
@@ -377,9 +541,19 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 	}
 
 	requests := make([]SlotRepairRequest, 0, maxSlots)
-	for slot := start; slot <= repairThrough && len(requests) < maxSlots; slot++ {
+	seen := make(map[uint64]struct{}, maxSlots)
+	appendRequest := func(slot uint64) {
+		if len(requests) >= maxSlots {
+			return
+		}
+		if _, alreadySeen := seen[slot]; alreadySeen {
+			return
+		}
 		if _, completed := a.completedSlots[slot]; completed {
-			continue
+			return
+		}
+		if a.slotTooOldLocked(slot) || slot > repairThrough {
+			return
 		}
 		state := a.slots[slot]
 		if state == nil {
@@ -388,11 +562,25 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 				NeedHighestDataShred:  true,
 				HighestDataShredIndex: 0,
 			})
-			continue
+			seen[slot] = struct{}{}
+			return
 		}
 		if req, ok := state.repairRequest(maxMissingPerSlot); ok {
 			requests = append(requests, req)
+			seen[slot] = struct{}{}
 		}
+	}
+
+	a.prunePriorityRepairSlotsLocked()
+	for _, slot := range a.priorityRepairOrder {
+		appendRequest(slot)
+		if len(requests) >= maxSlots {
+			return requests
+		}
+	}
+
+	for slot := start; slot <= repairThrough && len(requests) < maxSlots; slot++ {
+		appendRequest(slot)
 	}
 	return requests
 }
@@ -641,14 +829,163 @@ func (s *slotState) orderedShreds() []*Shred {
 	return out
 }
 
-func (s *slotState) block() (*block.Block, error) {
-	entries, err := DecodeEntriesFromDataShreds(s.orderedShreds())
+func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
+	entries, parentInfo, err := DecodeEntriesAndAlpenglowParentInfoFromDataShreds(s.orderedShreds())
 	if err != nil {
 		return nil, err
 	}
-	blk := BlockFromEntries(s.slot, s.parentSlot, entries)
+	effectiveParentSlot := s.parentSlot
+	effectiveParentBlockID := parentBlockID
+	effectiveParentKnown := parentKnown
+	if parentInfo != nil {
+		if parentInfo.ParentSlot >= s.slot {
+			return nil, fmt.Errorf("slot %d alpenglow parent marker points to non-ancestor slot %d", s.slot, parentInfo.ParentSlot)
+		}
+		effectiveParentSlot = parentInfo.ParentSlot
+		effectiveParentBlockID = parentInfo.ParentBlockID
+		effectiveParentKnown = true
+	}
+
+	blk := BlockFromEntries(s.slot, effectiveParentSlot, entries)
+	if blockID, ok, err := s.alpenglowBlockID(effectiveParentSlot, effectiveParentBlockID, effectiveParentKnown); err != nil {
+		return nil, err
+	} else if ok {
+		blk.AlpenglowBlockID = blockID
+		blk.HasAlpenglowBlockID = true
+	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
 	}
 	return blk, nil
+}
+
+func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Hash, parentKnown bool) (solana.Hash, bool, error) {
+	if !parentKnown {
+		return solana.Hash{}, false, nil
+	}
+
+	roots, err := s.fecSetMerkleRoots()
+	if err != nil {
+		return solana.Hash{}, false, err
+	}
+	if len(roots) == 0 {
+		return solana.Hash{}, false, nil
+	}
+	fecSetCount := uint32(s.lastIndex/dataShredsPerFECBlock + 1)
+
+	var parentSlotBytes [8]byte
+	binary.LittleEndian.PutUint64(parentSlotBytes[:], parentSlot)
+	var fecSetCountBytes [4]byte
+	binary.LittleEndian.PutUint32(fecSetCountBytes[:], fecSetCount)
+	parentInfoLeaf := hashv([][]byte{parentSlotBytes[:], parentBlockID[:], fecSetCountBytes[:]})
+	roots = append(roots, parentInfoLeaf)
+
+	return merkleTreeRoot(roots), true, nil
+}
+
+func (s *slotState) fecSetMerkleRoots() ([]solana.Hash, error) {
+	if !s.haveLast {
+		return nil, nil
+	}
+
+	fecSetCount := s.lastIndex/dataShredsPerFECBlock + 1
+	roots := make([]solana.Hash, 0, fecSetCount)
+	for fecSetNumber := uint32(0); fecSetNumber < fecSetCount; fecSetNumber++ {
+		fecSetIndex := fecSetNumber * dataShredsPerFECBlock
+		fec := s.fecSets[fecSetIndex]
+		if fec == nil {
+			return nil, fmt.Errorf("slot %d alpenglow block id: missing FEC set %d", s.slot, fecSetIndex)
+		}
+		root, ok, err := fec.merkleRoot()
+		if err != nil {
+			return nil, fmt.Errorf("slot %d fec_set=%d alpenglow block id: %w", s.slot, fecSetIndex, err)
+		}
+		if !ok {
+			return nil, fmt.Errorf("slot %d fec_set=%d alpenglow block id: missing Merkle root", s.slot, fecSetIndex)
+		}
+		roots = append(roots, root)
+	}
+	return roots, nil
+}
+
+func (f *fecState) merkleRoot() (solana.Hash, bool, error) {
+	for _, idx := range sortedUint32Keys(f.data) {
+		shred := f.data[idx]
+		if shred == nil || shred.Recovered {
+			continue
+		}
+		root, err := shred.MerkleRoot()
+		if err != nil {
+			if errors.Is(err, ErrUnsupportedShred) {
+				continue
+			}
+			return solana.Hash{}, false, err
+		}
+		return root, true, nil
+	}
+	for _, pos := range sortedUint16Keys(f.coding) {
+		shred := f.coding[pos]
+		if shred == nil {
+			continue
+		}
+		root, err := shred.MerkleRoot()
+		if err != nil {
+			if errors.Is(err, ErrUnsupportedShred) {
+				continue
+			}
+			return solana.Hash{}, false, err
+		}
+		return root, true, nil
+	}
+	return solana.Hash{}, false, nil
+}
+
+func merkleTreeRoot(leaves []solana.Hash) solana.Hash {
+	if len(leaves) == 0 {
+		return solana.Hash{}
+	}
+
+	nodes := make([]solana.Hash, 0, merkleTreeSize(len(leaves)))
+	nodes = append(nodes, leaves...)
+	for size := len(leaves); size > 1; size = (size + 1) >> 1 {
+		offset := len(nodes) - size
+		end := offset + size
+		for idx := offset; idx < end; idx += 2 {
+			other := idx + 1
+			if other >= end {
+				other = end - 1
+			}
+			nodes = append(nodes, merkleHashNode(nodes[idx][:merkleProofEntrySize], nodes[other][:merkleProofEntrySize]))
+		}
+	}
+	return nodes[len(nodes)-1]
+}
+
+func merkleTreeSize(leaves int) int {
+	if leaves <= 0 {
+		return 0
+	}
+	size := leaves
+	for width := leaves; width > 1; width = (width + 1) >> 1 {
+		size += (width + 1) >> 1
+	}
+	return size
+}
+
+func sortedUint32Keys[V any](m map[uint32]V) []uint32 {
+	keys := make([]uint32, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
+}
+
+func sortedUint16Keys[V any](m map[uint16]V) []uint16 {
+	keys := make([]uint16, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
 }

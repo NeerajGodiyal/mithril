@@ -19,6 +19,15 @@ func isRateLimitedErr(err error) bool {
 		strings.Contains(errStr, "429")
 }
 
+func isHistoryUnavailableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "Transaction history is not available from this node") ||
+		strings.Contains(errStr, "-32011")
+}
+
 // isTransientNetworkErr returns true for common transient network/RPC errors
 // that should be retried rather than treated as permanent failures.
 // These errors are retried on the SAME endpoint - they don't trigger failover.

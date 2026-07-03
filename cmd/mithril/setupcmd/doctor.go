@@ -50,7 +50,7 @@ func runDoctor() {
 	// 2. Cluster
 	total++
 	cluster := config.GetString("network.cluster")
-	if cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" {
+	if cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" || cluster == "alpenglow" {
 		fmt.Printf("  %s Network: %s\n", successStyle.Render("✓"), cluster)
 		passed++
 	} else if cluster == "" {

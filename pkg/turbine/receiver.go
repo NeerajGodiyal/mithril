@@ -43,22 +43,27 @@ type UDPReceiver struct {
 }
 
 type ReceiverStats struct {
-	Packets          uint64
-	DataShreds       uint64
-	CodingShreds     uint64
-	ParseErrors      uint64
-	SignatureErrors  uint64
-	MissingLeaders   uint64
-	AssemblyErrors   uint64
-	BlocksEmitted    uint64
-	RecoveredData    uint64
-	EvictedSlots     uint64
-	IgnoredOldShreds uint64
-	Repair           RepairStats
-	LastPacketUnix   int64
-	LastDataSlot     uint64
-	LastBlockSlot    uint64
-	ActiveSlots      int
+	Packets              uint64
+	DataShreds           uint64
+	CodingShreds         uint64
+	ParseErrors          uint64
+	SignatureErrors      uint64
+	MissingLeaders       uint64
+	AssemblyErrors       uint64
+	BlocksEmitted        uint64
+	RecoveredData        uint64
+	EvictedSlots         uint64
+	IgnoredOldShreds     uint64
+	PriorityRepairSlots  int
+	NonCanonicalBlockIDs uint64
+	LastNonCanonicalSlot uint64
+	LastNonCanonicalGot  solana.Hash
+	LastNonCanonicalWant solana.Hash
+	Repair               RepairStats
+	LastPacketUnix       int64
+	LastDataSlot         uint64
+	LastBlockSlot        uint64
+	ActiveSlots          int
 }
 
 func NewUDPReceiver(addr string) *UDPReceiver {
@@ -84,6 +89,34 @@ func (r *UDPReceiver) SetRepairPeerSource(identity ed25519.PrivateKey, source fu
 	return nil
 }
 
+func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetKnownAlpenglowBlockID(slot, blockID)
+}
+
+func (r *UDPReceiver) ResetSlot(slot uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.ResetSlot(slot)
+}
+
+func (r *UDPReceiver) PrioritizeRepairSlot(slot uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.PrioritizeRepairSlot(slot)
+}
+
+func (r *UDPReceiver) PrioritizeRepairRange(start, end uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.PrioritizeRepairRange(start, end)
+}
+
 func (r *UDPReceiver) Blocks() <-chan *block.Block {
 	return r.blocks
 }
@@ -97,23 +130,29 @@ func (r *UDPReceiver) Ready() <-chan error {
 }
 
 func (r *UDPReceiver) Stats() ReceiverStats {
+	nonCanonicalCount, nonCanonicalSlot, nonCanonicalGot, nonCanonicalWant := r.assembler.NonCanonicalBlockIDStats()
 	return ReceiverStats{
-		Packets:          r.packets.Load(),
-		DataShreds:       r.dataShreds.Load(),
-		CodingShreds:     r.codingShreds.Load(),
-		ParseErrors:      r.parseErrors.Load(),
-		SignatureErrors:  r.signatureErrors.Load(),
-		MissingLeaders:   r.missingLeaders.Load(),
-		AssemblyErrors:   r.assemblyErrors.Load(),
-		BlocksEmitted:    r.blocksEmitted.Load(),
-		RecoveredData:    r.assembler.RecoveredDataShreds(),
-		EvictedSlots:     r.assembler.EvictedSlots(),
-		IgnoredOldShreds: r.assembler.IgnoredOldShreds(),
-		Repair:           r.repairStats(),
-		LastPacketUnix:   r.lastPacketUnix.Load(),
-		LastDataSlot:     r.lastDataSlot.Load(),
-		LastBlockSlot:    r.lastBlockSlot.Load(),
-		ActiveSlots:      r.assembler.ActiveSlots(),
+		Packets:              r.packets.Load(),
+		DataShreds:           r.dataShreds.Load(),
+		CodingShreds:         r.codingShreds.Load(),
+		ParseErrors:          r.parseErrors.Load(),
+		SignatureErrors:      r.signatureErrors.Load(),
+		MissingLeaders:       r.missingLeaders.Load(),
+		AssemblyErrors:       r.assemblyErrors.Load(),
+		BlocksEmitted:        r.blocksEmitted.Load(),
+		RecoveredData:        r.assembler.RecoveredDataShreds(),
+		EvictedSlots:         r.assembler.EvictedSlots(),
+		IgnoredOldShreds:     r.assembler.IgnoredOldShreds(),
+		PriorityRepairSlots:  r.assembler.PriorityRepairSlots(),
+		NonCanonicalBlockIDs: nonCanonicalCount,
+		LastNonCanonicalSlot: nonCanonicalSlot,
+		LastNonCanonicalGot:  nonCanonicalGot,
+		LastNonCanonicalWant: nonCanonicalWant,
+		Repair:               r.repairStats(),
+		LastPacketUnix:       r.lastPacketUnix.Load(),
+		LastDataSlot:         r.lastDataSlot.Load(),
+		LastBlockSlot:        r.lastBlockSlot.Load(),
+		ActiveSlots:          r.assembler.ActiveSlots(),
 	}
 }
 

@@ -85,9 +85,10 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 
 	// Epoch authorized voters (for snapshot epoch only)
 	// Supports multiple authorized voters per vote account (matches original manifest behavior)
+	snapshotEpoch := manifestSeedAuthorizedVotersEpoch(s, m)
 	s.ManifestEpochAuthorizedVoters = make(map[string][]string)
 	for _, epochStake := range m.VersionedEpochStakes {
-		if epochStake.Epoch == m.Bank.Epoch {
+		if epochStake.Epoch == snapshotEpoch {
 			for _, entry := range epochStake.Val.EpochAuthorizedVoters {
 				voteAcctStr := base58.Encode(entry.Key[:])
 				authorizedVoterStr := base58.Encode(entry.Val[:])
@@ -99,6 +100,42 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	// Epoch stakes: convert VersionedEpochStakes to PersistedEpochStakes format
 	// This stores ONLY vote-account aggregates, NOT full stake account data
 	s.ManifestEpochStakes = convertVersionedEpochStakesToPersisted(m.VersionedEpochStakes)
+}
+
+func manifestSeedAuthorizedVotersEpoch(s *state.MithrilState, m *SnapshotManifest) uint64 {
+	if m == nil || m.Bank == nil {
+		return 0
+	}
+	if manifestEpochHasAuthorizedVoters(m, m.Bank.Epoch) {
+		return m.Bank.Epoch
+	}
+	if s != nil && s.SnapshotEpoch != 0 {
+		if manifestEpochHasAuthorizedVoters(m, s.SnapshotEpoch) {
+			return s.SnapshotEpoch
+		}
+	}
+	if m.Bank.EpochSchedule.SlotsPerEpoch != 0 {
+		scheduleEpoch := m.Bank.EpochSchedule.GetEpoch(m.Bank.Slot)
+		if manifestEpochHasAuthorizedVoters(m, scheduleEpoch) {
+			return scheduleEpoch
+		}
+	}
+	if s != nil && s.SnapshotEpoch != 0 {
+		return s.SnapshotEpoch
+	}
+	return m.Bank.Epoch
+}
+
+func manifestEpochHasAuthorizedVoters(m *SnapshotManifest, epoch uint64) bool {
+	if m == nil {
+		return false
+	}
+	for _, epochStake := range m.VersionedEpochStakes {
+		if epochStake.Epoch == epoch && len(epochStake.Val.EpochAuthorizedVoters) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // convertVersionedEpochStakesToPersisted converts manifest epoch stakes to
@@ -120,14 +157,19 @@ func convertVersionedEpochStakesToPersisted(stakes []VersionedEpochStakesPair) m
 		for _, va := range epochStake.Val.Stakes.VoteAccounts {
 			pkStr := base58.Encode(va.Key[:])
 			persisted.Stakes[pkStr] = va.Stake
+			var bls []byte
+			if va.Value.BlsPubkeyCompressed != nil {
+				bls = append([]byte(nil), va.Value.BlsPubkeyCompressed[:]...)
+			}
 			persisted.VoteAccts[pkStr] = &epochstakes.VoteAccountJSON{
-				Lamports:          va.Value.Lamports,
-				NodePubkey:        base58.Encode(va.Value.NodePubkey[:]),
-				LastTimestampTs:   va.Value.LastTimestampTs,
-				LastTimestampSlot: va.Value.LastTimestampSlot,
-				Owner:             base58.Encode(va.Value.Owner[:]),
-				Executable:        va.Value.Executable,
-				RentEpoch:         va.Value.RentEpoch,
+				Lamports:            va.Value.Lamports,
+				NodePubkey:          base58.Encode(va.Value.NodePubkey[:]),
+				BlsPubkeyCompressed: bls,
+				LastTimestampTs:     va.Value.LastTimestampTs,
+				LastTimestampSlot:   va.Value.LastTimestampSlot,
+				Owner:               base58.Encode(va.Value.Owner[:]),
+				Executable:          va.Value.Executable,
+				RentEpoch:           va.Value.RentEpoch,
 			}
 		}
 

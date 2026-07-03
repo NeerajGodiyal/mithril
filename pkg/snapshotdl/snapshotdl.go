@@ -338,6 +338,54 @@ func filterSnapshotRPCNodes(nodes []rpc.RPCNode, blacklist snapshotNodeBlacklist
 	return filtered, skipped
 }
 
+func addConfiguredSnapshotRPCNodes(nodes []rpc.RPCNode, preferredRPC string, rpcAddresses []string) ([]rpc.RPCNode, int) {
+	seen := make(map[string]struct{})
+	for _, node := range nodes {
+		for _, key := range snapshotEndpointKeys(node.Address) {
+			seen[key] = struct{}{}
+		}
+	}
+
+	candidates := make([]string, 0, len(rpcAddresses)+1)
+	if preferredRPC != "" {
+		candidates = append(candidates, preferredRPC)
+	}
+	for _, addr := range rpcAddresses {
+		if addr != preferredRPC {
+			candidates = append(candidates, addr)
+		}
+	}
+
+	added := 0
+	for _, addr := range candidates {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		duplicate := false
+		keys := snapshotEndpointKeys(addr)
+		for _, key := range keys {
+			if _, ok := seen[key]; ok {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		nodes = append(nodes, rpc.RPCNode{
+			Address:  addr,
+			Version:  "999.0.0-configured",
+			IsStatic: true,
+		})
+		for _, key := range keys {
+			seen[key] = struct{}{}
+		}
+		added++
+	}
+	return nodes, added
+}
+
 func filterSnapshotNodeResults(results []rpc.NodeResult, blacklist snapshotNodeBlacklist) ([]rpc.NodeResult, int) {
 	if blacklist.empty() {
 		return results, 0
@@ -362,14 +410,98 @@ func logSnapshotBlacklist(stage string, skipped int, remaining int) {
 	mlog.Log.Infof("Snapshot node blacklist excluded %d %s candidate(s); %d remain", skipped, stage, remaining)
 }
 
+func logSnapshotProbeFilterSummary(label string, stats *rpc.ProbeStats, cfg config.Config, incStats incBaseMatchStats) {
+	if stats == nil {
+		return
+	}
+	mlog.Log.Warnf("Snapshot probe summary (%s): with_snapshots=%d after_version=%d after_rtt=%d after_full_age=%d after_inc_age=%d eligible=%d | incremental_base_match=%d/%d full_sources (%d slot-0 full archive(s), %d matching full slot(s), %d unique full slot(s), %d unique inc base(s)) | filters: min_version=%q allowed_versions=%s max_rtt_ms=%d full_threshold=%d incremental_threshold=%d",
+		label,
+		stats.InitialWithSnapshots,
+		stats.AfterVersionFilter,
+		stats.AfterRTTFilter,
+		stats.AfterFullAgeFilter,
+		stats.AfterIncAgeFilter,
+		stats.Eligible,
+		incStats.afterIncBaseMatch,
+		incStats.totalWithFull,
+		incStats.totalWithFullSlotZero,
+		incStats.matchingFullSlots,
+		incStats.uniqueFullSlots,
+		incStats.uniqueIncBases,
+		cfg.MinNodeVersion,
+		formatAllowedVersions(cfg.AllowedNodeVersions),
+		cfg.MaxRTTMs,
+		cfg.FullThreshold,
+		cfg.IncrementalThreshold,
+	)
+	if stats.InitialWithSnapshots > 0 && incStats.totalWithFull == 0 {
+		mlog.Log.Warnf("Snapshot probe summary (%s): discovered snapshot-serving nodes, but none exposed a full snapshot archive; incremental snapshots alone cannot bootstrap AccountsDB", label)
+	}
+	if incStats.totalWithFullSlotZero > 0 && incStats.matchingFullSlots == 0 {
+		mlog.Log.Warnf("Snapshot probe summary (%s): %d source(s) exposed slot-0 full snapshots, but none had a matching base-0 incremental", label, incStats.totalWithFullSlotZero)
+	}
+}
+
+func formatAllowedVersions(versions []string) string {
+	if len(versions) == 0 {
+		return "any"
+	}
+	return strings.Join(versions, ",")
+}
+
+func relaxedSnapshotProbeConfig(cfg config.Config) config.Config {
+	relaxed := cfg
+	if relaxed.MaxRTTMs > 0 && relaxed.MaxRTTMs < 1000 {
+		relaxed.MaxRTTMs = 1000
+	}
+	if relaxed.FullThreshold > 0 && relaxed.FullThreshold < 1000000 {
+		relaxed.FullThreshold = 1000000
+	}
+	if relaxed.IncrementalThreshold > 0 && relaxed.IncrementalThreshold < 10000 {
+		relaxed.IncrementalThreshold = 10000
+	}
+	if relaxed.Stage1TimeoutMS > 0 && relaxed.Stage1TimeoutMS < 8000 {
+		relaxed.Stage1TimeoutMS = 8000
+	}
+	if relaxed.Stage1WarmKiB > 0 {
+		relaxed.Stage1WarmKiB = 0
+	}
+	if relaxed.Stage1WindowKiB <= 0 || relaxed.Stage1WindowKiB > 64 {
+		relaxed.Stage1WindowKiB = 64
+	}
+	if relaxed.Stage1Windows <= 0 || relaxed.Stage1Windows > 1 {
+		relaxed.Stage1Windows = 1
+	}
+	if relaxed.Stage2TopK > 0 && relaxed.Stage2TopK < 16 {
+		relaxed.Stage2TopK = 16
+	}
+	if relaxed.Stage2MinRatio > 0 {
+		relaxed.Stage2MinRatio = 0
+	}
+	return relaxed
+}
+
+func snapshotProbeConfigChanged(a config.Config, b config.Config) bool {
+	return a.MaxRTTMs != b.MaxRTTMs ||
+		a.FullThreshold != b.FullThreshold ||
+		a.IncrementalThreshold != b.IncrementalThreshold ||
+		a.Stage1TimeoutMS != b.Stage1TimeoutMS ||
+		a.Stage1WarmKiB != b.Stage1WarmKiB ||
+		a.Stage1WindowKiB != b.Stage1WindowKiB ||
+		a.Stage1Windows != b.Stage1Windows ||
+		a.Stage2TopK != b.Stage2TopK ||
+		a.Stage2MinRatio != b.Stage2MinRatio
+}
+
 // incBaseMatchStats tracks statistics for incremental base matching filter
 type incBaseMatchStats struct {
-	totalWithFull     int // nodes with a full snapshot
-	totalWithInc      int // nodes with any incremental
-	afterIncBaseMatch int // nodes remaining after incremental base match filter
-	uniqueFullSlots   int // number of unique full snapshot slots
-	uniqueIncBases    int // number of unique incremental base slots
-	matchingFullSlots int // full slots that have at least one matching inc base
+	totalWithFull         int // nodes with a full snapshot endpoint, including slot 0
+	totalWithFullSlotZero int // nodes whose full snapshot filename parsed as slot 0
+	totalWithInc          int // nodes with any incremental
+	afterIncBaseMatch     int // nodes remaining after incremental base match filter
+	uniqueFullSlots       int // number of unique full snapshot slots
+	uniqueIncBases        int // number of unique incremental base slots
+	matchingFullSlots     int // full slots that have at least one matching inc base
 }
 
 // filterByIncrementalBaseMatch filters results to only include nodes whose FullSlot
@@ -383,11 +515,14 @@ func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, i
 	incBases := make(map[int64]bool)
 
 	for _, r := range results {
-		if r.FullSlot > 0 {
+		if fullSlot, ok := fullSnapshotSlotForMatch(r); ok {
 			stats.totalWithFull++
-			fullSlots[r.FullSlot] = true
+			fullSlots[fullSlot] = true
+			if fullSlot == 0 {
+				stats.totalWithFullSlotZero++
+			}
 		}
-		if r.HasInc && r.IncBase > 0 {
+		if r.HasInc {
 			stats.totalWithInc++
 			incBases[r.IncBase] = true
 		}
@@ -415,13 +550,39 @@ func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, i
 	// Step 3: Filter to only nodes whose FullSlot is in matchingSlots
 	var filtered []rpc.NodeResult
 	for _, r := range results {
-		if r.FullSlot > 0 && matchingSlots[r.FullSlot] {
+		if fullSlot, ok := fullSnapshotSlotForMatch(r); ok && matchingSlots[fullSlot] {
 			filtered = append(filtered, r)
 		}
 	}
 
 	stats.afterIncBaseMatch = len(filtered)
 	return filtered, stats
+}
+
+func fullSnapshotSlotForMatch(r rpc.NodeResult) (int64, bool) {
+	if r.FullSlot > 0 {
+		return r.FullSlot, true
+	}
+	if r.FullURL != "" && r.FullSlot == 0 {
+		return 0, true
+	}
+	return 0, false
+}
+
+func normalizeGenesisFullSnapshotsForRanking(results []rpc.NodeResult) []rpc.NodeResult {
+	normalized := make([]rpc.NodeResult, len(results))
+	copy(normalized, results)
+	for i := range normalized {
+		r := &normalized[i]
+		if r.FullURL != "" && r.FullSlot == 0 && r.HasInc && r.IncBase == 0 {
+			// solana-snapshot-finder treats FullSlot <= 0 as "no full snapshot".
+			// Fresh test clusters can legitimately expose snapshot-0 plus a
+			// base-0 incremental. Use slot 1 only for ranking/freshness checks;
+			// the final URL probe still returns the real slot 0 to the builder.
+			r.FullSlot = 1
+		}
+	}
+	return normalized
 }
 
 // DownloadSnapshot downloads a full snapshot from the best available RPC node.
@@ -468,6 +629,10 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
+	if configuredAdded > 0 {
+		mlog.Log.Infof("Added %d configured RPC endpoint(s) to snapshot probe candidates", configuredAdded)
+	}
 	var skipped int
 	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
 	logSnapshotBlacklist("discovered", skipped, len(nodes))
@@ -484,10 +649,11 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
+	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _ := rpc.SortBestNodesWithStats(rankingResults, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -586,6 +752,10 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
+	if configuredAdded > 0 {
+		mlog.Log.Infof("Added %d configured RPC endpoint(s) to snapshot probe candidates", configuredAdded)
+	}
 	var skipped int
 	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
 	logSnapshotBlacklist("discovered", skipped, len(nodes))
@@ -602,6 +772,7 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	// This prevents selecting a fast full snapshot that has no compatible incrementals
 	results, incBaseStats := filterByIncrementalBaseMatch(results)
+	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Print incremental base match stats
 	if incBaseStats.totalWithFull > 0 {
@@ -616,9 +787,29 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
 	mlog.Log.Infof("Testing download speeds (Stage 1 + Stage 2)...")
-	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, rankedNodes := rpc.SortBestNodesWithStats(rankingResults, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
-		return nil, fmt.Errorf("no suitable nodes found with snapshots (check incremental base matching)")
+		logSnapshotProbeFilterSummary("strict", stats, cfg, incBaseStats)
+		relaxedCfg := relaxedSnapshotProbeConfig(cfg)
+		if snapshotProbeConfigChanged(cfg, relaxedCfg) {
+			mlog.Log.Warnf("Strict snapshot source filters found no usable nodes; retrying with relaxed probe filters (rtt=%dms->%dms, full_threshold=%d->%d, inc_threshold=%d->%d, stage1_timeout=%dms->%dms, stage1_sample=%d+%dx%dKiB->%d+%dx%dKiB, stage2_min_ratio=%.2f->%.2f)",
+				cfg.MaxRTTMs, relaxedCfg.MaxRTTMs,
+				cfg.FullThreshold, relaxedCfg.FullThreshold,
+				cfg.IncrementalThreshold, relaxedCfg.IncrementalThreshold,
+				cfg.Stage1TimeoutMS, relaxedCfg.Stage1TimeoutMS,
+				cfg.Stage1WarmKiB, cfg.Stage1Windows, cfg.Stage1WindowKiB,
+				relaxedCfg.Stage1WarmKiB, relaxedCfg.Stage1Windows, relaxedCfg.Stage1WindowKiB,
+				cfg.Stage2MinRatio, relaxedCfg.Stage2MinRatio)
+			bestNodes, rankedNodes = rpc.SortBestNodesWithStats(rankingResults, relaxedCfg, stats, referenceSlot)
+			if len(bestNodes) == 0 {
+				logSnapshotProbeFilterSummary("relaxed", stats, relaxedCfg, incBaseStats)
+			} else {
+				mlog.Log.Infof("Relaxed snapshot probe selected %d candidate(s)", len(bestNodes))
+			}
+		}
+	}
+	if len(bestNodes) == 0 {
+		return nil, fmt.Errorf("no suitable nodes found with snapshots (filters eliminated all candidates; see snapshot probe summary above)")
 	}
 
 	// Print statistics report (after filtering is complete)
@@ -740,6 +931,10 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
+	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
+	if configuredAdded > 0 {
+		mlog.Log.Infof("Added %d configured RPC endpoint(s) to snapshot probe candidates", configuredAdded)
+	}
 	var skipped int
 	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
 	logSnapshotBlacklist("discovered", skipped, len(nodes))
@@ -756,10 +951,11 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	results, _ = filterByIncrementalBaseMatch(results)
+	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Step 4: Sort and select best nodes by download speed
 	// Note: This also populates filter pipeline stats in ProbeStats
-	bestNodes, _ := rpc.SortBestNodesWithStats(results, cfg, stats, referenceSlot)
+	bestNodes, _ := rpc.SortBestNodesWithStats(rankingResults, cfg, stats, referenceSlot)
 	if len(bestNodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no suitable nodes found with snapshots")
 	}
@@ -866,6 +1062,10 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	}
+	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
+	if configuredAdded > 0 {
+		mlog.Log.Infof("Added %d configured RPC endpoint(s) to snapshot probe candidates", configuredAdded)
 	}
 	var skipped int
 	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)
@@ -1084,6 +1284,10 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	}
+	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
+	if configuredAdded > 0 {
+		mlog.Log.Infof("Added %d configured RPC endpoint(s) to snapshot probe candidates", configuredAdded)
 	}
 	var skipped int
 	nodes, skipped = filterSnapshotRPCNodes(nodes, blacklist)

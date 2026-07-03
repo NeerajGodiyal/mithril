@@ -44,13 +44,14 @@ type RentCollector struct {
 }
 
 type VoteAccount struct {
-	Lamports          uint64
-	NodePubkey        solana.PublicKey
-	LastTimestampTs   int64
-	LastTimestampSlot uint64
-	Owner             solana.PublicKey
-	Executable        byte
-	RentEpoch         uint64
+	Lamports            uint64
+	NodePubkey          solana.PublicKey
+	BlsPubkeyCompressed *[48]byte
+	LastTimestampTs     int64
+	LastTimestampSlot   uint64
+	Owner               solana.PublicKey
+	Executable          byte
+	RentEpoch           uint64
 }
 
 type VoteAccountsPair struct {
@@ -414,6 +415,10 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 				{
 					voteTimestamp = voteState.V4.LastTimestamp
 					voteAcct.NodePubkey = voteState.V4.NodePubkey
+					if voteState.V4.BlsPubkeyCompressed != nil {
+						blsPubkey := *voteState.V4.BlsPubkeyCompressed
+						voteAcct.BlsPubkeyCompressed = &blsPubkey
+					}
 				}
 
 			default:

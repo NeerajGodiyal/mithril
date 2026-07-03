@@ -278,6 +278,7 @@ func (m editModel) currentItems() []edItem {
 			{label: "mainnet-beta", value: "mainnet-beta"},
 			{label: "testnet", value: "testnet"},
 			{label: "devnet", value: "devnet"},
+			{label: "alpenglow", value: "alpenglow"},
 			{isSep: true},
 			{label: "← Back", value: "_back"},
 		}

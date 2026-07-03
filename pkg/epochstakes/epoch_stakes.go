@@ -15,13 +15,14 @@ type EpochStakesCache struct {
 }
 
 type VoteAccount struct {
-	Lamports          uint64
-	NodePubkey        solana.PublicKey
-	LastTimestampTs   int64
-	LastTimestampSlot uint64
-	Owner             solana.PublicKey
-	Executable        byte
-	RentEpoch         uint64
+	Lamports            uint64
+	NodePubkey          solana.PublicKey
+	BlsPubkeyCompressed *[48]byte
+	LastTimestampTs     int64
+	LastTimestampSlot   uint64
+	Owner               solana.PublicKey
+	Executable          byte
+	RentEpoch           uint64
 }
 
 func NewEpochStakesCache() *EpochStakesCache {
@@ -71,21 +72,22 @@ func (cache *EpochStakesCache) ClearEpochStakes(epoch uint64) {
 
 // PersistedEpochStakes is the JSON-serializable format for epoch stakes.
 type PersistedEpochStakes struct {
-	Epoch      uint64                        `json:"epoch"`
-	TotalStake uint64                        `json:"total_stake"`
-	Stakes     map[string]uint64             `json:"stakes"`      // base58 pubkey → stake
-	VoteAccts  map[string]*VoteAccountJSON   `json:"vote_accts"`  // base58 pubkey → metadata
+	Epoch      uint64                      `json:"epoch"`
+	TotalStake uint64                      `json:"total_stake"`
+	Stakes     map[string]uint64           `json:"stakes"`     // base58 pubkey → stake
+	VoteAccts  map[string]*VoteAccountJSON `json:"vote_accts"` // base58 pubkey → metadata
 }
 
 // VoteAccountJSON is the JSON-serializable format for vote account metadata.
 type VoteAccountJSON struct {
-	Lamports          uint64 `json:"lamports"`
-	NodePubkey        string `json:"node_pubkey"`
-	LastTimestampTs   int64  `json:"last_ts"`
-	LastTimestampSlot uint64 `json:"last_ts_slot"`
-	Owner             string `json:"owner"`
-	Executable        byte   `json:"executable"`
-	RentEpoch         uint64 `json:"rent_epoch"`
+	Lamports            uint64 `json:"lamports"`
+	NodePubkey          string `json:"node_pubkey"`
+	BlsPubkeyCompressed []byte `json:"bls_pubkey_compressed,omitempty"`
+	LastTimestampTs     int64  `json:"last_ts"`
+	LastTimestampSlot   uint64 `json:"last_ts_slot"`
+	Owner               string `json:"owner"`
+	Executable          byte   `json:"executable"`
+	RentEpoch           uint64 `json:"rent_epoch"`
 }
 
 // SerializeEpoch serializes the stakes for a single epoch to JSON.
@@ -111,14 +113,19 @@ func (cache *EpochStakesCache) SerializeEpoch(epoch uint64) ([]byte, error) {
 
 	for pk, va := range voteAccts {
 		if va != nil {
+			var bls []byte
+			if va.BlsPubkeyCompressed != nil {
+				bls = append([]byte(nil), va.BlsPubkeyCompressed[:]...)
+			}
 			persisted.VoteAccts[pk.String()] = &VoteAccountJSON{
-				Lamports:          va.Lamports,
-				NodePubkey:        va.NodePubkey.String(),
-				LastTimestampTs:   va.LastTimestampTs,
-				LastTimestampSlot: va.LastTimestampSlot,
-				Owner:             va.Owner.String(),
-				Executable:        va.Executable,
-				RentEpoch:         va.RentEpoch,
+				Lamports:            va.Lamports,
+				NodePubkey:          va.NodePubkey.String(),
+				BlsPubkeyCompressed: bls,
+				LastTimestampTs:     va.LastTimestampTs,
+				LastTimestampSlot:   va.LastTimestampSlot,
+				Owner:               va.Owner.String(),
+				Executable:          va.Executable,
+				RentEpoch:           va.RentEpoch,
 			}
 		}
 	}
@@ -162,14 +169,24 @@ func (cache *EpochStakesCache) DeserializeAndLoadEpoch(data []byte) (uint64, err
 		if err != nil {
 			return 0, fmt.Errorf("invalid owner pubkey %q for vote acct %s epoch %d: %w", vaJSON.Owner, pkStr, epoch, err)
 		}
+		var bls *[48]byte
+		if len(vaJSON.BlsPubkeyCompressed) != 0 {
+			if len(vaJSON.BlsPubkeyCompressed) != 48 {
+				return 0, fmt.Errorf("invalid BLS pubkey length %d for vote acct %s epoch %d", len(vaJSON.BlsPubkeyCompressed), pkStr, epoch)
+			}
+			var b [48]byte
+			copy(b[:], vaJSON.BlsPubkeyCompressed)
+			bls = &b
+		}
 		cache.voteAcctCache[epoch][pk] = &VoteAccount{
-			Lamports:          vaJSON.Lamports,
-			NodePubkey:        nodePubkey,
-			LastTimestampTs:   vaJSON.LastTimestampTs,
-			LastTimestampSlot: vaJSON.LastTimestampSlot,
-			Owner:             owner,
-			Executable:        vaJSON.Executable,
-			RentEpoch:         vaJSON.RentEpoch,
+			Lamports:            vaJSON.Lamports,
+			NodePubkey:          nodePubkey,
+			BlsPubkeyCompressed: bls,
+			LastTimestampTs:     vaJSON.LastTimestampTs,
+			LastTimestampSlot:   vaJSON.LastTimestampSlot,
+			Owner:               owner,
+			Executable:          vaJSON.Executable,
+			RentEpoch:           vaJSON.RentEpoch,
 		}
 	}
 
