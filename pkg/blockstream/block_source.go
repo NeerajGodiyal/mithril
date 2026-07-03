@@ -119,6 +119,7 @@ const (
 	blockSourceStopReasonCompleted
 	blockSourceStopReasonStalled
 	blockSourceStopReasonUnexpectedLiveEnd
+	blockSourceStopReasonAlpenglowConflict
 )
 
 // slotErrorInfo tracks error history for a specific slot (for stall diagnostics)
@@ -1910,7 +1911,14 @@ func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
 			waitingSlot, solana.Hash(blk.AlpenglowBlockID), decision.Block.Hash)
 		return true
 	case alpenglow.ChainDecisionKindConflict:
-		mlog.Log.FileOnlyf("ALPENGLOW consensus decision: conflict at slot %d (%s)", waitingSlot, decision.Reason)
+		// Two blocks certified for one slot (equivocation) is a consensus safety
+		// violation. Fail closed: drop the buffered candidate so no fork is emitted,
+		// and record a fatal stop reason. The candidate never resolves, so the
+		// scheduler stalls on it and replay halts (setStopReason's CAS keeps this
+		// conflict reason over the later "stalled").
+		mlog.Log.Warnf("ALPENGLOW SAFETY: consensus conflict (equivocation) at slot %d (%s) — halting replay", waitingSlot, decision.Reason)
+		delete(bs.reorderBuffer, waitingSlot)
+		bs.setStopReason(blockSourceStopReasonAlpenglowConflict, waitingSlot)
 		return false
 	default:
 		return false
@@ -4335,6 +4343,8 @@ func (bs *BlockSource) StopReason() string {
 		return fmt.Sprintf("block fetch stalled while waiting for slot %d", stopSlot)
 	case blockSourceStopReasonUnexpectedLiveEnd:
 		return fmt.Sprintf("scheduler terminated unexpectedly in live mode at slot %d (endSlot=%d)", stopSlot, endSlot)
+	case blockSourceStopReasonAlpenglowConflict:
+		return fmt.Sprintf("halted on Alpenglow consensus conflict (equivocation) at slot %d", stopSlot)
 	default:
 		return "stream closed without an explicit block-source stop reason"
 	}

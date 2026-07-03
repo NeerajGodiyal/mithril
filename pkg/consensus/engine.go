@@ -188,6 +188,8 @@ type AlpenglowObserverEngine struct {
 	recentBlockIDOrder      []uint64
 	epochLookupMu           sync.RWMutex
 	epochForSlot            func(slot uint64) uint64
+	pendingCertsMu          sync.Mutex
+	pendingCerts            map[uint64][]alpenglow.Certificate // deferred until their epoch's stakes install
 	certVerifyLogMu         sync.Mutex
 	certVerifyDropCount     uint64
 	certVerifyDetailCount   uint64
@@ -323,6 +325,7 @@ func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 		verified, result, err := e.verifyCertificate(*msg.Certificate)
 		if err != nil {
 			e.logCertificateVerifyDrop(*msg.Certificate, result, err)
+			e.deferCertIfStakesMissing(*msg.Certificate, err)
 			return
 		} else if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
 			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid certificate: %v", err)
@@ -341,11 +344,72 @@ func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Ce
 		verified, result, err := e.verifyCertificate(cert)
 		if err != nil {
 			e.logCertificateVerifyDrop(cert, result, err)
+			e.deferCertIfStakesMissing(cert, err)
 			continue
 		}
 		if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
 			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid footer certificate: %v", err)
 		}
+	}
+}
+
+// alpenglowPendingCertCap bounds deferred certs per epoch; alpenglowPendingEpochCap
+// bounds the number of distinct epoch buckets. Certs carry a network-controlled slot
+// and are buffered before authentication, so both caps are needed to keep a peer
+// feeding far-future/garbage slots from growing the buffer without bound.
+const (
+	alpenglowPendingCertCap  = 512
+	alpenglowPendingEpochCap = 4
+)
+
+// deferCertIfStakesMissing buffers a certificate that failed verification only
+// because its epoch's validator set isn't installed yet, so it can be replayed once
+// the stakes arrive (otherwise a QUIC cert that races ahead of its epoch is lost and
+// that slot's decision stalls). Certs that fail for any other reason are not buffered.
+func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certificate, err error) {
+	if err == nil || !strings.Contains(err.Error(), "no validator set") {
+		return
+	}
+	epoch, ok := e.alpenglowEpochForSlot(cert.Slot)
+	if !ok {
+		return
+	}
+	e.pendingCertsMu.Lock()
+	defer e.pendingCertsMu.Unlock()
+	if e.pendingCerts == nil {
+		e.pendingCerts = make(map[uint64][]alpenglow.Certificate)
+	}
+	// Bound distinct epoch buckets: evict the lowest (oldest) epoch when a new one
+	// would exceed the cap. Honest operation only ever has ~1-2 epochs pending.
+	if _, exists := e.pendingCerts[epoch]; !exists && len(e.pendingCerts) >= alpenglowPendingEpochCap {
+		lowest, first := uint64(0), true
+		for ep := range e.pendingCerts {
+			if first || ep < lowest {
+				lowest, first = ep, false
+			}
+		}
+		delete(e.pendingCerts, lowest)
+	}
+	q := e.pendingCerts[epoch]
+	if len(q) >= alpenglowPendingCertCap {
+		q = q[1:] // drop oldest
+	}
+	e.pendingCerts[epoch] = append(q, cert)
+}
+
+// replayPendingCertsForEpoch re-verifies and ingests certs deferred until this
+// epoch's validator set installed.
+func (e *AlpenglowObserverEngine) replayPendingCertsForEpoch(epoch uint64) {
+	e.pendingCertsMu.Lock()
+	certs := e.pendingCerts[epoch]
+	delete(e.pendingCerts, epoch)
+	e.pendingCertsMu.Unlock()
+	for _, cert := range certs {
+		verified, _, err := e.verifyCertificate(cert)
+		if err != nil {
+			continue
+		}
+		_, _ = e.ensureChain().ObserveCertificate(verified)
 	}
 }
 
@@ -401,6 +465,7 @@ func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.Validat
 		return err
 	}
 	mlog.Log.FileOnlyf("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)", set.Epoch, len(set.Validators), set.TotalStake)
+	e.replayPendingCertsForEpoch(set.Epoch)
 	return nil
 }
 

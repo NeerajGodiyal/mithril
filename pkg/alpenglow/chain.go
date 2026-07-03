@@ -352,8 +352,80 @@ func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType Certifi
 	t.directFinalized[block] = certType
 	if block.Slot >= t.latestDirectFinalizedBlock.Slot {
 		t.latestDirectFinalizedBlock = block
+		// Bound memory on long runs: finalized slots well behind the watermark are
+		// settled and no longer needed for decisions or indirect-skip derivation.
+		if block.Slot > chainTrackerRetentionSlots {
+			t.pruneBeforeSlotLocked(block.Slot - chainTrackerRetentionSlots)
+		}
 	}
 	t.deriveIndirectSkipsLocked(block, certType)
+}
+
+// chainTrackerRetentionSlots is how many slots of state the tracker keeps behind the
+// finalized watermark. Live decisions are only made near the tip (the block source
+// gates on isNearTip, ~32-64 slots), so a window this far behind finality can never
+// remove state a live decision or indirect-skip derivation still needs.
+const chainTrackerRetentionSlots = 512
+
+// PruneBeforeSlot drops all tracker state for slots strictly below slot, bounding
+// memory on a long-running node. Pruning runs automatically behind finality; this
+// exported form lets a caller prune explicitly (e.g. behind the rooted watermark).
+func (t *ChainTracker) PruneBeforeSlot(slot uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneBeforeSlotLocked(slot)
+}
+
+func (t *ChainTracker) pruneBeforeSlotLocked(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	for k := range t.certificates {
+		if k.Slot < slot {
+			delete(t.certificates, k)
+			delete(t.appliedCerts, k)
+		}
+	}
+	for k := range t.appliedCerts {
+		if k.Slot < slot {
+			delete(t.appliedCerts, k)
+		}
+	}
+	for id := range t.blocks {
+		if id.Slot < slot {
+			delete(t.blocks, id)
+		}
+	}
+	for id := range t.directFinalized {
+		if id.Slot < slot {
+			delete(t.directFinalized, id)
+		}
+	}
+	for s := range t.blockSlots {
+		if s < slot {
+			delete(t.blockSlots, s)
+		}
+	}
+	for s := range t.skipCerts {
+		if s < slot {
+			delete(t.skipCerts, s)
+		}
+	}
+	for s := range t.finalizeCerts {
+		if s < slot {
+			delete(t.finalizeCerts, s)
+		}
+	}
+	for s := range t.indirectSkips {
+		if s < slot {
+			delete(t.indirectSkips, s)
+		}
+	}
+	for s := range t.conflicts {
+		if s < slot {
+			delete(t.conflicts, s)
+		}
+	}
 }
 
 func (t *ChainTracker) deriveIndirectSkipsLocked(block BlockID, certType CertificateType) {

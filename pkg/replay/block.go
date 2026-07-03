@@ -1502,6 +1502,16 @@ func ReplayBlocks(
 		}
 	}
 
+	// Alpenglow: drive cert-based block/skip selection at the block source from the
+	// engine's ChainTracker when running native turbine in observer mode. Without this
+	// the decision source is nil and applyAlpenglowDecisionLocked is a no-op.
+	if useTurbine && alpenglowReplayMode && consensusEngine != nil {
+		if ds, ok := consensusEngine.(consensusengine.AlpenglowDecisionSource); ok {
+			opts.TurbineAlpenglowBlockIDHints = true
+			opts.AlpenglowDecisionSource = ds.NextAlpenglowDecision
+		}
+	}
+
 	// Apply block fetching options if provided
 	if blockFetchOpts != nil {
 		opts.MaxRPS = blockFetchOpts.MaxRPS
