@@ -40,6 +40,49 @@ func TestChainTrackerPrunesBehindFinality(t *testing.T) {
 	}
 }
 
+// Byzantine conflict evidence must survive pruning: the promotion gate fails closed
+// on a conflicted slot even when the executed tip reaches it long after the cert
+// watermark (and its pruning) passed.
+func TestChainTrackerConflictsSurvivePruning(t *testing.T) {
+	tracker := NewChainTracker()
+	feed := func(c Certificate) {
+		c.SignatureVerified, c.StakeVerified = true, true
+		_, _ = tracker.ObserveCertificate(c)
+	}
+	// Equivocation at slot 5: two notarized blocks -> conflict recorded.
+	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xA}})
+	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xB}})
+	if !tracker.FinalityConflictAt(5) {
+		t.Fatal("conflict at slot 5 not recorded")
+	}
+	// Watermark races far ahead -> auto-prune fires well past slot 5.
+	feed(Certificate{Type: CertificateFinalizeFast, Slot: 5 + chainTrackerRetentionSlots + 100, BlockHash: solana.Hash{0xC}})
+
+	if !tracker.FinalityConflictAt(5) {
+		t.Fatal("pruning erased Byzantine conflict evidence at slot 5")
+	}
+}
+
+// Write-once evidence: after pruning rebuilt a conflicted slot's state, a re-observed
+// cert (honest footer re-ingest or QUIC replay) must NOT erase the conflict flag.
+func TestChainTrackerConflictSurvivesCertReobservation(t *testing.T) {
+	tracker := NewChainTracker()
+	feed := func(c Certificate) {
+		c.SignatureVerified, c.StakeVerified = true, true
+		_, _ = tracker.ObserveCertificate(c)
+	}
+	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xA}})
+	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xB}})
+	// Prune wipes slot 5's certs/blocks but keeps the conflict...
+	feed(Certificate{Type: CertificateFinalizeFast, Slot: 5 + chainTrackerRetentionSlots + 100, BlockHash: solana.Hash{0xC}})
+	// ...then ONE of the original certs is re-observed (dedup key was pruned).
+	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xA}})
+
+	if !tracker.FinalityConflictAt(5) {
+		t.Fatal("re-observed cert erased the recorded conflict (write-once violated)")
+	}
+}
+
 // Explicit PruneBeforeSlot drops everything strictly below the given slot.
 func TestChainTrackerPruneBeforeSlotExplicit(t *testing.T) {
 	tracker := NewChainTracker()

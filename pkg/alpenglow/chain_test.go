@@ -146,7 +146,11 @@ func TestChainTrackerDetectsCertifiedBlockConflict(t *testing.T) {
 	}
 }
 
-func TestChainTrackerDetectsBlockAndSkipConflict(t *testing.T) {
+// Notarize + skip certificates legally coexist (voters may notarize a block and
+// later skip-fallback; whitepaper Lemmas 21/26 reserve exclusivity for finalized
+// blocks). The slot resolves to the certified skip — a conflict here would false-halt
+// on normal fallback traffic.
+func TestChainTrackerNotarizePlusSkipResolvesToSkip(t *testing.T) {
 	tracker := NewChainTracker()
 
 	_, err := tracker.ObserveCertificate(Certificate{
@@ -168,11 +172,8 @@ func TestChainTrackerDetectsBlockAndSkipConflict(t *testing.T) {
 	}
 
 	decision, ok := tracker.NextDecision(10)
-	if !ok {
-		t.Fatalf("expected conflict decision")
-	}
-	if decision.Kind != ChainDecisionKindConflict || decision.Reason == "" {
-		t.Fatalf("unexpected conflict decision: %+v", decision)
+	if !ok || decision.Kind != ChainDecisionKindSkip {
+		t.Fatalf("notarize+skip must resolve to skip, got %+v (ok=%v)", decision, ok)
 	}
 }
 

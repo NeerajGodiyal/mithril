@@ -213,6 +213,53 @@ func TestApplyAlpenglowDecisionLockedDiscardsMismatchedCertifiedBlock(t *testing
 	}
 }
 
+// Restart adjudication: after a finality-mismatch halt the node re-runs replay with
+// the SAME engine — a FRESH block source wired to the surviving tracker's decisions
+// must discard the wrong version and steer repair to the certified block.
+func TestRestartAdjudicationConvergesViaRetainedDecision(t *testing.T) {
+	certified := solana.Hash{0xAA}
+	tracker := alpenglow.NewChainTracker()
+	if _, err := tracker.ObserveCertificate(alpenglow.Certificate{
+		Type: alpenglow.CertificateNotarize, Slot: 151, BlockHash: certified,
+		SignatureVerified: true, StakeVerified: true,
+	}); err != nil {
+		t.Fatalf("observe cert: %v", err)
+	}
+
+	// "Restart": a brand-new block source, only the tracker survives.
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource:      tracker.NextDecision,
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.reorderBuffer[151] = &b.Block{
+		Slot:                151,
+		FromLightbringer:    true,
+		HasAlpenglowBlockID: true,
+		AlpenglowBlockID:    [32]byte{0xBB}, // the wrong version that caused the halt
+	}
+	bs.slotState[151] = slotDone
+
+	bs.reorderMu.Lock()
+	changed := bs.applyAlpenglowDecisionLocked()
+	bs.reorderMu.Unlock()
+
+	if !changed {
+		t.Fatal("retained decision must adjudicate the waiting slot after restart")
+	}
+	if bs.reorderBuffer[151] != nil {
+		t.Fatal("wrong version must be discarded on restart")
+	}
+	if got := bs.knownAlpenglowBlockIDs[151]; got != certified {
+		t.Fatalf("repair must target the certified block: got %s want %s", got, certified)
+	}
+}
+
 // A conflict decision (equivocation) must fail closed: drop the buffered candidate
 // so no fork is emitted, and record a fatal stop reason so replay halts.
 func TestApplyAlpenglowDecisionLockedHaltsOnConflict(t *testing.T) {

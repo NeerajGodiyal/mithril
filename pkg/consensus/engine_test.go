@@ -160,8 +160,77 @@ func TestAlpenglowPendingCertEpochCap(t *testing.T) {
 	if n > alpenglowPendingEpochCap {
 		t.Fatalf("pending epoch buckets = %d, want <= %d", n, alpenglowPendingEpochCap)
 	}
-	if lowestKept {
-		t.Fatal("oldest epoch (1) should have been evicted")
+	if !lowestKept {
+		t.Fatal("genuine near epoch (1) must survive; far-future garbage epochs are evicted")
+	}
+}
+
+// ObserveFooterCertificates must return the blocks the verified certs finalize:
+// the FinalizeFast block on the fast path, the notarized block paired with the
+// Finalize cert on the slow path — the replay loop captures these for the
+// promotion gate.
+func TestObserveFooterCertificatesReturnsFinalizedBlocks(t *testing.T) {
+	engine, err := NewEngine(ModeAlpenglowObserver)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	observer := engine.(*AlpenglowObserverEngine)
+	if err := observer.SetAlpenglowValidatorSet(testAlpenglowValidatorSet()); err != nil {
+		t.Fatalf("SetAlpenglowValidatorSet: %v", err)
+	}
+
+	fastHash := solana.Hash{0xFA}
+	fast := alpenglow.Certificate{
+		Type: alpenglow.CertificateFinalizeFast, Slot: 42, BlockHash: fastHash,
+		Bitmap: testAlpenglowSignerBitmap(),
+	}
+	fast.Signature = testAlpenglowCertificateSignature(t, fast)
+	finalized := observer.ObserveFooterCertificates([]alpenglow.Certificate{fast})
+	if len(finalized) != 1 || finalized[0] != (alpenglow.BlockID{Slot: 42, Hash: fastHash}) {
+		t.Fatalf("fast path: want [{42 %s}], got %+v", fastHash, finalized)
+	}
+
+	slowHash := solana.Hash{0x51}
+	notar := alpenglow.Certificate{
+		Type: alpenglow.CertificateNotarize, Slot: 43, BlockHash: slowHash,
+		Bitmap: testAlpenglowSignerBitmap(),
+	}
+	notar.Signature = testAlpenglowCertificateSignature(t, notar)
+	fin := alpenglow.Certificate{
+		Type: alpenglow.CertificateFinalize, Slot: 43,
+		Bitmap: testAlpenglowSignerBitmap(),
+	}
+	fin.Signature = testAlpenglowCertificateSignature(t, fin)
+	finalized = observer.ObserveFooterCertificates([]alpenglow.Certificate{notar, fin})
+	if len(finalized) != 1 || finalized[0] != (alpenglow.BlockID{Slot: 43, Hash: slowHash}) {
+		t.Fatalf("slow path: want [{43 %s}], got %+v", slowHash, finalized)
+	}
+}
+
+// Once a validator set is installed, deferral only accepts epochs near it — a cert
+// with a far-off epoch can never verify soon and must not occupy buckets.
+func TestAlpenglowDeferRejectsFarOffEpochs(t *testing.T) {
+	engine, err := NewEngine(ModeAlpenglowObserver)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	observer := engine.(*AlpenglowObserverEngine)
+	if err := observer.SetAlpenglowValidatorSet(testAlpenglowValidatorSet()); err != nil { // epoch 1
+		t.Fatalf("SetAlpenglowValidatorSet: %v", err)
+	}
+	observer.SetAlpenglowEpochLookup(func(slot uint64) uint64 { return slot }) // slot == epoch
+
+	noSet := fmt.Errorf("alpenglow verifier: no validator set for epoch")
+	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 500}, noSet) // far future
+	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 2}, noSet)   // latest+1: in window
+
+	observer.pendingCertsMu.Lock()
+	defer observer.pendingCertsMu.Unlock()
+	if _, ok := observer.pendingCerts[500]; ok {
+		t.Fatal("far-future epoch must not be deferred")
+	}
+	if _, ok := observer.pendingCerts[2]; !ok {
+		t.Fatal("near epoch must be deferred")
 	}
 }
 
