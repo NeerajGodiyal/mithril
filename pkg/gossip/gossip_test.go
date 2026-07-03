@@ -48,6 +48,15 @@ func TestContactInfoRoundTripAndSignature(t *testing.T) {
 	if err := contact.SetSocket(socketTagServeRepair, &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8008}); err != nil {
 		t.Fatalf("SetSocket serve repair returned error: %v", err)
 	}
+	if err := contact.SetAlpenglowAddr(&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8002}); err != nil {
+		t.Fatalf("SetAlpenglowAddr returned error: %v", err)
+	}
+	if err := contact.SetTPUVoteAddr(&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8002}); err != nil {
+		t.Fatalf("SetTPUVoteAddr returned error: %v", err)
+	}
+	if err := contact.SetTPUVoteQuicAddr(&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8002}); err != nil {
+		t.Fatalf("SetTPUVoteQuicAddr returned error: %v", err)
+	}
 
 	value, err := signCrdsContactInfo(contact, priv)
 	if err != nil {
@@ -77,6 +86,57 @@ func TestContactInfoRoundTripAndSignature(t *testing.T) {
 	}
 	if decoded.ContactInfo.ServeRepairAddr.String() != "203.0.113.10:8008" {
 		t.Fatalf("serve repair addr = %s", decoded.ContactInfo.ServeRepairAddr.String())
+	}
+	if decoded.ContactInfo.AlpenglowAddr.String() != "203.0.113.10:8002" {
+		t.Fatalf("alpenglow addr = %s", decoded.ContactInfo.AlpenglowAddr.String())
+	}
+	if decoded.ContactInfo.TPUVoteAddr.String() != "203.0.113.10:8002" {
+		t.Fatalf("tpu vote addr = %s", decoded.ContactInfo.TPUVoteAddr.String())
+	}
+	if decoded.ContactInfo.TPUVoteQuicAddr.String() != "203.0.113.10:8002" {
+		t.Fatalf("tpu vote quic addr = %s", decoded.ContactInfo.TPUVoteQuicAddr.String())
+	}
+}
+
+func TestClientAdvertisesAlpenglowSocket(t *testing.T) {
+	client, err := NewClient(Config{
+		Entrypoint:    "127.0.0.1:8000",
+		BindAddr:      "0.0.0.0:0",
+		TVUAddr:       "0.0.0.0:8001",
+		AlpenglowAddr: "0.0.0.0:8002",
+		AdvertisedIP:  "203.0.113.10",
+		ShredVersion:  4321,
+	})
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	if err := client.initializeContact(&net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 65400}); err != nil {
+		t.Fatalf("initializeContact returned error: %v", err)
+	}
+
+	client.contactMu.RLock()
+	contact := client.contact
+	client.contactMu.RUnlock()
+	if contact == nil {
+		t.Fatalf("expected contact info")
+	}
+	if contact.AlpenglowAddr == nil {
+		t.Fatalf("expected alpenglow socket to be advertised")
+	}
+	if got, want := contact.AlpenglowAddr.String(), "203.0.113.10:8002"; got != want {
+		t.Fatalf("alpenglow addr = %s, want %s", got, want)
+	}
+	if contact.TPUVoteAddr == nil {
+		t.Fatalf("expected TPU vote socket to be advertised for Alpenglow Votor compatibility")
+	}
+	if got, want := contact.TPUVoteAddr.String(), "203.0.113.10:8002"; got != want {
+		t.Fatalf("tpu vote addr = %s, want %s", got, want)
+	}
+	if contact.TPUVoteQuicAddr == nil {
+		t.Fatalf("expected TPU vote QUIC socket to be advertised for Alpenglow Votor compatibility")
+	}
+	if got, want := contact.TPUVoteQuicAddr.String(), "203.0.113.10:8002"; got != want {
+		t.Fatalf("tpu vote quic addr = %s, want %s", got, want)
 	}
 }
 

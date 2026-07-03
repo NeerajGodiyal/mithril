@@ -119,7 +119,15 @@ func TestMerkleShredSignatureVerification(t *testing.T) {
 
 func TestSlotAssemblerBuildsBlockFromCompleteDataShreds(t *testing.T) {
 	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
+	fecRoots := fecMerkleRootsFromPackets(t, rawShreds)
+	var parentBlockID solana.Hash
+	parentBlockID[0] = 7
+	var expectedBlockID solana.Hash
 	assembler := NewSlotAssembler()
+	if len(fecRoots) > 0 {
+		expectedBlockID = doubleMerkleBlockID(fecRoots, 102815959, parentBlockID)
+		assembler.SetKnownAlpenglowBlockID(102815959, parentBlockID)
+	}
 
 	var blockSeen bool
 	for idx, raw := range rawShreds {
@@ -143,6 +151,15 @@ func TestSlotAssemblerBuildsBlockFromCompleteDataShreds(t *testing.T) {
 		if !blk.FromLightbringer {
 			t.Fatalf("expected block to be marked as live shred-stream sourced")
 		}
+		if len(fecRoots) == 0 && blk.HasAlpenglowBlockID {
+			t.Fatalf("legacy fixture unexpectedly carried an Alpenglow block id")
+		}
+		if len(fecRoots) > 0 && !blk.HasAlpenglowBlockID {
+			t.Fatalf("expected block to carry an Alpenglow block id")
+		}
+		if len(fecRoots) > 0 && solana.Hash(blk.AlpenglowBlockID) != expectedBlockID {
+			t.Fatalf("alpenglow block id = %s, want %s", solana.Hash(blk.AlpenglowBlockID), expectedBlockID)
+		}
 		if len(blk.Transactions) != 3177 {
 			t.Fatalf("transactions = %d, want 3177", len(blk.Transactions))
 		}
@@ -153,6 +170,81 @@ func TestSlotAssemblerBuildsBlockFromCompleteDataShreds(t *testing.T) {
 
 	if !blockSeen {
 		t.Fatalf("assembler did not emit a completed block")
+	}
+}
+
+func TestSlotAssemblerRejectsBlockThatContradictsKnownAlpenglowBlockID(t *testing.T) {
+	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
+	fecRoots := fecMerkleRootsFromPackets(t, rawShreds)
+	if len(fecRoots) == 0 {
+		t.Skip("fixture does not carry Merkle roots")
+	}
+
+	var parentBlockID solana.Hash
+	parentBlockID[0] = 7
+	expectedBlockID := doubleMerkleBlockID(fecRoots, 102815959, parentBlockID)
+	wrongBlockID := expectedBlockID
+	wrongBlockID[0] ^= 0xff
+
+	assembler := NewSlotAssembler()
+	assembler.SetKnownAlpenglowBlockID(102815959, parentBlockID)
+	assembler.SetKnownAlpenglowBlockID(102815960, wrongBlockID)
+
+	for idx, raw := range rawShreds {
+		blk, err := assembler.AddPacket(raw)
+		if err != nil {
+			t.Fatalf("AddPacket(%d) returned error: %v", idx, err)
+		}
+		if blk != nil {
+			t.Fatalf("assembler emitted non-canonical block id %s, want suppressed", solana.Hash(blk.AlpenglowBlockID))
+		}
+	}
+
+	assembler.mu.Lock()
+	_, completed := assembler.completedSlots[102815960]
+	_, active := assembler.slots[102815960]
+	known := assembler.knownBlockIDs[102815960]
+	assembler.mu.Unlock()
+	if completed {
+		t.Fatalf("non-canonical slot was marked completed")
+	}
+	if active {
+		t.Fatalf("non-canonical slot state was retained")
+	}
+	if known != wrongBlockID {
+		t.Fatalf("known block id = %s, want %s", known, wrongBlockID)
+	}
+}
+
+func TestSlotAssemblerResetSlotClearsCompletedSlotForRepair(t *testing.T) {
+	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
+	assembler := NewSlotAssembler()
+
+	var emitted bool
+	for idx, raw := range rawShreds {
+		blk, err := assembler.AddPacket(raw)
+		if err != nil {
+			t.Fatalf("AddPacket(%d) returned error: %v", idx, err)
+		}
+		if blk != nil {
+			emitted = true
+		}
+	}
+	if !emitted {
+		t.Fatalf("assembler did not emit completed fixture block")
+	}
+
+	assembler.ResetSlot(102815960)
+
+	assembler.mu.Lock()
+	_, completed := assembler.completedSlots[102815960]
+	_, active := assembler.slots[102815960]
+	assembler.mu.Unlock()
+	if completed {
+		t.Fatalf("slot remained completed after reset")
+	}
+	if active {
+		t.Fatalf("slot state remained active after reset")
 	}
 }
 
@@ -362,6 +454,112 @@ func TestParseMerkleCodingShred(t *testing.T) {
 	}
 }
 
+func TestSlotStateDerivesAlpenglowBlockIDFromDoubleMerkleTree(t *testing.T) {
+	dataShreds := localnetMerkleShreds(t, "d")
+	codeShreds := localnetMerkleShreds(t, "c")
+	var parentBlockID solana.Hash
+	parentBlockID[0] = 11
+
+	var state *slotState
+	add := func(raw []byte) {
+		t.Helper()
+		shred, err := ParseShred(raw)
+		if err != nil {
+			t.Fatalf("ParseShred returned error: %v", err)
+		}
+		if state == nil {
+			state = &slotState{
+				slot:      shred.Slot,
+				shreds:    make(map[uint32]*Shred),
+				fecSets:   make(map[uint32]*fecState),
+				shredVer:  shred.Version,
+				lastIndex: ^uint32(0),
+			}
+		}
+		switch shred.Type {
+		case ShredTypeData:
+			if err := state.addDataShred(shred); err != nil {
+				t.Fatalf("addDataShred returned error: %v", err)
+			}
+		case ShredTypeCode:
+			if err := state.addCodingShred(shred); err != nil {
+				t.Fatalf("addCodingShred returned error: %v", err)
+			}
+		}
+	}
+	for _, raw := range dataShreds {
+		add(raw)
+	}
+	for _, raw := range codeShreds {
+		add(raw)
+	}
+
+	fecRoots, err := state.fecSetMerkleRoots()
+	if err != nil {
+		t.Fatalf("fecSetMerkleRoots returned error: %v", err)
+	}
+	if len(fecRoots) == 0 {
+		t.Fatalf("fixture did not expose FEC Merkle roots")
+	}
+	expectedBlockID := doubleMerkleBlockID(fecRoots, state.parentSlot, parentBlockID)
+	lastFECBlockID := fecRoots[len(fecRoots)-1]
+
+	blockID, ok, err := state.alpenglowBlockID(state.parentSlot, parentBlockID, true)
+	if err != nil {
+		t.Fatalf("alpenglowBlockID returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("alpenglowBlockID did not find a block id")
+	}
+	if blockID != expectedBlockID {
+		t.Fatalf("alpenglow block id = %s, want %s (fec_roots=%d last_index=%d fec_set_count=%d)",
+			blockID, expectedBlockID, len(fecRoots), state.lastIndex, state.lastIndex/dataShredsPerFECBlock+1)
+	}
+	if blockID == lastFECBlockID {
+		t.Fatalf("alpenglow block id unexpectedly used the last FEC root")
+	}
+}
+
+func TestDecodeAlpenglowParentMarkers(t *testing.T) {
+	var headerParentID solana.Hash
+	headerParentID[0] = 1
+	header, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantHeader, 42, headerParentID), 0)
+	if err != nil {
+		t.Fatalf("decode header marker returned error: %v", err)
+	}
+	if !ok || header == nil {
+		t.Fatalf("expected header marker to decode")
+	}
+	if header.ParentSlot != 42 || header.ParentBlockID != headerParentID || header.FromUpdateParent {
+		t.Fatalf("decoded header marker = %+v", header)
+	}
+
+	var updateParentID solana.Hash
+	updateParentID[0] = 2
+	update, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), dataShredsPerFECBlock)
+	if err != nil {
+		t.Fatalf("decode update-parent marker returned error: %v", err)
+	}
+	if !ok || update == nil {
+		t.Fatalf("expected update-parent marker to decode")
+	}
+	if update.ParentSlot != 40 || update.ParentBlockID != updateParentID || !update.FromUpdateParent || update.ReplayFECSetIndex != dataShredsPerFECBlock {
+		t.Fatalf("decoded update-parent marker = %+v", update)
+	}
+
+	if marker, ok, err := decodeAlpenglowParentMarker(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), 0); err != nil || ok || marker != nil {
+		t.Fatalf("update-parent at batch start 0 = marker=%+v ok=%t err=%v, want ignored", marker, ok, err)
+	}
+
+	merged, err := mergeAlpenglowParentInfo(header, update)
+	if err != nil {
+		t.Fatalf("mergeAlpenglowParentInfo returned error: %v", err)
+	}
+	if merged == nil || !merged.FromUpdateParent || merged.ParentSlot != update.ParentSlot || merged.ParentBlockID != update.ParentBlockID {
+		t.Fatalf("merged parent marker = %+v, want update-parent", merged)
+	}
+}
+
 func TestSlotAssemblerRecoversMissingMerkleDataShredFromCodingShreds(t *testing.T) {
 	dataShreds := localnetMerkleShreds(t, "d")
 	codeShreds := localnetMerkleShreds(t, "c")
@@ -529,6 +727,39 @@ func TestSlotAssemblerRepairRequestsIncludeAbsentAndIncompleteSlots(t *testing.T
 	}
 }
 
+func TestSlotAssemblerRepairRequestsPrioritizeRequestedSlot(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 220
+	assembler.PrioritizeRepairSlot(180)
+
+	requests := assembler.RepairRequests(4, 8)
+	if len(requests) == 0 {
+		t.Fatalf("expected repair requests")
+	}
+	if requests[0].Slot != 180 {
+		t.Fatalf("first repair request slot = %d, want priority slot 180; requests=%+v", requests[0].Slot, requests)
+	}
+	if !requests[0].NeedHighestDataShred || requests[0].HighestDataShredIndex != 0 {
+		t.Fatalf("priority absent-slot request = %+v, want highest shred from index 0", requests[0])
+	}
+}
+
+func TestSlotAssemblerRepairRequestsPrioritizeRequestedRange(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 220
+	assembler.PrioritizeRepairRange(180, 183)
+
+	requests := assembler.RepairRequests(8, 8)
+	if len(requests) < 4 {
+		t.Fatalf("expected at least 4 repair requests, got %d: %+v", len(requests), requests)
+	}
+	for i, wantSlot := range []uint64{180, 181, 182, 183} {
+		if requests[i].Slot != wantSlot {
+			t.Fatalf("request %d slot = %d, want %d; requests=%+v", i, requests[i].Slot, wantSlot, requests)
+		}
+	}
+}
+
 func TestUDPReceiverSignalsReadyAfterBind(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -581,4 +812,59 @@ func localnetMerkleShreds(t testing.TB, prefix string) [][]byte {
 		shreds = append(shreds, raw)
 	}
 	return shreds
+}
+
+func fecMerkleRootsFromPackets(t testing.TB, rawShreds [][]byte) []solana.Hash {
+	t.Helper()
+
+	rootsByFECSet := make(map[uint32]solana.Hash)
+	for idx, raw := range rawShreds {
+		shred, err := ParseShred(raw)
+		if errors.Is(err, ErrCodingShredIgnored) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParseShred(%d) returned error: %v", idx, err)
+		}
+		if shred.Type != ShredTypeData || shred.Recovered {
+			continue
+		}
+		current, err := shred.MerkleRoot()
+		if errors.Is(err, ErrUnsupportedShred) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("MerkleRoot(%d) returned error: %v", idx, err)
+		}
+		rootsByFECSet[shred.FECSetIndex] = current
+	}
+
+	fecSetIndexes := sortedUint32Keys(rootsByFECSet)
+	roots := make([]solana.Hash, 0, len(fecSetIndexes))
+	for _, fecSetIndex := range fecSetIndexes {
+		roots = append(roots, rootsByFECSet[fecSetIndex])
+	}
+	return roots
+}
+
+func doubleMerkleBlockID(fecRoots []solana.Hash, parentSlot uint64, parentBlockID solana.Hash) solana.Hash {
+	var parentSlotBytes [8]byte
+	binary.LittleEndian.PutUint64(parentSlotBytes[:], parentSlot)
+	var fecSetCountBytes [4]byte
+	binary.LittleEndian.PutUint32(fecSetCountBytes[:], uint32(len(fecRoots)))
+	leaves := append([]solana.Hash(nil), fecRoots...)
+	leaves = append(leaves, hashv([][]byte{parentSlotBytes[:], parentBlockID[:], fecSetCountBytes[:]}))
+	return merkleTreeRoot(leaves)
+}
+
+func testAlpenglowParentMarkerBytes(variant byte, parentSlot uint64, parentBlockID solana.Hash) []byte {
+	var payload []byte
+	payload = binary.LittleEndian.AppendUint64(payload, 0)
+	payload = binary.LittleEndian.AppendUint16(payload, blockComponentMarkerVersionV1)
+	payload = append(payload, variant)
+	payload = binary.LittleEndian.AppendUint16(payload, 1+8+32)
+	payload = append(payload, versionedParentInfoV1)
+	payload = binary.LittleEndian.AppendUint64(payload, parentSlot)
+	payload = append(payload, parentBlockID[:]...)
+	return payload
 }

@@ -44,6 +44,13 @@ func TestShouldDiscardLightbringerObservationAfterFallback(t *testing.T) {
 	}) {
 		t.Fatalf("expected RPC block to be retained")
 	}
+
+	if !shouldDiscardLightbringerObservationAfterFallback(true, true, &b.Block{Slot: 123, IsSkipped: true, FromLightbringer: true}, blockstream.FetchStatsSnapshot{
+		IsNearTip:     false,
+		CurrentSource: "rpc",
+	}) {
+		t.Fatalf("expected queued live-stream skip marker to be discarded after catchup fallback")
+	}
 }
 
 func TestResolveConsensusConfigAppliesToNativeTurbineByDefault(t *testing.T) {
@@ -87,5 +94,18 @@ func TestResolveConsensusConfigAppliesToNativeTurbineByDefault(t *testing.T) {
 	cfg = resolveConsensusConfig(&ConsensusOpts{EnforceOnSource: "all"}, false, false, true)
 	if !cfg.enforceActive || !cfg.bufferedExecutionActive {
 		t.Fatalf("all consensus should apply immediately")
+	}
+}
+
+func TestResolveConsensusConfigDisablesClassicGateForAlpenglowObserver(t *testing.T) {
+	cfg := resolveConsensusConfig(&ConsensusOpts{
+		Mode:            "alpenglow-observer",
+		EnforceOnSource: "stream",
+	}, false, true, true)
+	if cfg.enforceActive {
+		t.Fatalf("alpenglow observer should not run classic vote-anchored enforcement")
+	}
+	if cfg.bufferedExecutionActive {
+		t.Fatalf("alpenglow observer should not arm classic buffered execution")
 	}
 }
