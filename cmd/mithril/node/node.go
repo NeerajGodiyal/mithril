@@ -77,6 +77,7 @@ var (
 	consensusMode               string
 	alpenglowObserverBindAddr   string
 	alpenglowMaxMessageBytes    int64
+	alpenglowBLSDST             string
 	validatorIdentityKeypair    string
 	validatorVoteAccountKeypair string
 	validatorWithdrawerKeypair  string
@@ -285,6 +286,7 @@ func init() {
 	// [consensus] section flags
 	Run.Flags().StringVar(&consensusMode, "consensus-mode", string(consensusengine.ModeClassic), "Consensus mode: 'classic', 'alpenglow-observer', or 'alpenglow'")
 	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address for consensus-mode=alpenglow-observer")
+	Run.Flags().StringVar(&alpenglowBLSDST, "alpenglow-bls-dst", "", "BLS hash-to-curve DST override (must match cluster's solana-bls version; empty = default)")
 	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
 	Run.Flags().StringVar(&validatorIdentityKeypair, "identity-keypair", "", "Validator identity keypair for native turbine gossip (Solana keygen JSON)")
 	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "Vote account keypair path for validator diagnostics (Solana keygen JSON)")
@@ -566,6 +568,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	consensusMode = string(normalizedConsensusMode)
 	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
 	alpenglowMaxMessageBytes = getInt64("alpenglow-max-message-bytes", "consensus.alpenglow_max_message_bytes")
+	alpenglowBLSDST = getString("alpenglow-bls-dst", "consensus.alpenglow_bls_dst")
 	validatorIdentityKeypair = getString("identity-keypair", "validator.identity_keypair")
 	validatorVoteAccountKeypair = getString("vote-account-keypair", "validator.vote_account_keypair")
 	validatorWithdrawerKeypair = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
@@ -1719,6 +1722,7 @@ postBootstrap:
 	consensusEngine, err := consensusengine.NewEngineWithConfig(engineMode, consensusengine.Config{
 		AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
 		AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
+		AlpenglowBLSDST:           alpenglowBLSDST,
 	})
 	if err != nil {
 		klog.Fatalf("unable to create consensus engine: %v", err)

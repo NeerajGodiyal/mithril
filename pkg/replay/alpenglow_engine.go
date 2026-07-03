@@ -3,18 +3,15 @@ package replay
 import (
 	"fmt"
 	"sort"
-	"time"
 
-	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
-	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -45,46 +42,6 @@ func alpenglowRootedSlot(consensusEngine consensusengine.Engine) (uint64, bool) 
 	}
 	slot := snap.AlpenglowChain.LatestDirectFinalizedBlock.Slot
 	return slot, slot > 0
-}
-
-func alpenglowMessageAgeLabel(t time.Time) string {
-	if t.IsZero() {
-		return "never"
-	}
-	return time.Since(t).Round(time.Second).String()
-}
-
-// formatAlpenglowObserverStatus renders the observer telemetry line, or ok=false
-// when not in observer mode.
-func formatAlpenglowObserverStatus(snapshot consensusengine.Snapshot) (string, bool) {
-	if snapshot.Mode != consensusengine.ModeAlpenglowObserver || snapshot.Alpenglow == nil {
-		return "", false
-	}
-	ag := snapshot.Alpenglow
-	status := fmt.Sprintf("cert_replay match/miss/pending=%d/%d/%d mature=%d pre_window=%d latest_cert=%d latest_finalized=%d latest_replay=%d",
-		ag.CertificateReplayMatches,
-		ag.CertificateReplayMismatches,
-		ag.CertificateReplayPending,
-		ag.CertificateReplayMaturePending,
-		ag.CertificateReplayPreWindowPending,
-		ag.LatestCertificateSlot,
-		ag.LatestFinalizedSlot,
-		ag.LatestReplayBlockSlot,
-	)
-	if snapshot.Receiver != nil {
-		recv := snapshot.Receiver
-		status = fmt.Sprintf("votor conn=%d streams=%d msgs=%d votes=%d certs=%d decode_errors=%d last_msg=%s | %s",
-			recv.ConnectionsAccepted,
-			recv.StreamsReceived,
-			recv.MessagesDecoded,
-			recv.VotesDecoded,
-			recv.CertificatesDecoded,
-			recv.DecodeErrors,
-			alpenglowMessageAgeLabel(recv.LastMessageAt),
-			status,
-		)
-	}
-	return status, true
 }
 
 // installAlpenglowValidatorSet builds and installs the BLS validator set for one
@@ -163,18 +120,6 @@ func cloneBLSCompressed(src *[48]byte) *[48]byte {
 	return &copied
 }
 
-func featureActiveInAccountsDb(acctsDb *accountsdb.AccountsDb, gate features.FeatureGate, slot uint64) bool {
-	acct, err := acctsDb.GetAccount(slot, gate.Address)
-	if err != nil {
-		return false
-	}
-	if acct.Owner != a.FeatureAddr {
-		return false
-	}
-	featureAcct := features.UnmarshalFeatureAcct(acct.Data)
-	return featureAcct.ActivatedAt != nil && slot >= *featureAcct.ActivatedAt
-}
-
 // applyAlpenglowFooterClock rewrites the Clock sysvar from the block footer's
 // timestamp (Alpenglow uses the footer time, not the estimated PoH time).
 func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
@@ -206,4 +151,31 @@ func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochS
 	sealevel.SysvarCache.Clock.Sysvar = &clock
 	sealevel.SysvarCache.Clock.Acct = clockAcct
 	return nil
+}
+
+// ingestAlpenglowFooterCertificate decodes a block-footer final_cert and feeds the
+// verified certificate(s) to the observer engine's chain tracker (the unstaked
+// finality path). No-op unless the engine accepts footer certificates.
+func ingestAlpenglowFooterCertificate(consensusEngine consensusengine.Engine, raw []byte) {
+	sink, ok := consensusEngine.(consensusengine.AlpenglowFooterCertificateSink)
+	if !ok {
+		return
+	}
+	fc, err := turbine.UnmarshalFinalCertificate(raw)
+	if err != nil {
+		mlog.Log.FileOnlyf("ALPENGLOW footer cert decode: %v", err)
+		return
+	}
+	var notarSig, notarBitmap []byte
+	if fc.NotarAggregate != nil {
+		notarSig = fc.NotarAggregate.Signature[:]
+		notarBitmap = fc.NotarAggregate.Bitmap
+	}
+	certs, err := alpenglow.FinalCertToCertificates(fc.Slot, fc.BlockID,
+		fc.FinalAggregate.Signature[:], fc.FinalAggregate.Bitmap, notarSig, notarBitmap)
+	if err != nil {
+		mlog.Log.FileOnlyf("ALPENGLOW footer cert convert (slot %d): %v", fc.Slot, err)
+		return
+	}
+	sink.ObserveFooterCertificates(certs)
 }

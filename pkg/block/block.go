@@ -29,6 +29,7 @@ type Block struct {
 	Blockhash                           [32]byte
 	AlpenglowBlockID                    [32]byte // Turbine Merkle-root block id used by Alpenglow/Votor.
 	HasAlpenglowBlockID                 bool
+	AlpenglowFinalCert                  []byte // raw footer final_cert bytes (finalization cert for an earlier slot), decoded in replay
 	ExpectedBankhash                    [32]byte
 	TxMetas                             []*rpc.TransactionMeta
 	Leader                              solana.PublicKey

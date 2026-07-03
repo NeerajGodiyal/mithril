@@ -853,10 +853,48 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 		blk.AlpenglowBlockID = blockID
 		blk.HasAlpenglowBlockID = true
 	}
+	// Pull the footer's finalization cert (for an earlier slot) if present; replay
+	// decodes + verifies it to drive Alpenglow finality without needing Votor QUIC.
+	if fc := s.footerFinalCert(); len(fc) > 0 {
+		blk.AlpenglowFinalCert = fc
+	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
 	}
 	return blk, nil
+}
+
+// footerFinalCert returns the raw final_cert bytes from the block footer, or nil.
+// Each batch is classified by its first shred, so entry batches (the common case)
+// are skipped without copying — this stays off the classic hot path.
+func (s *slotState) footerFinalCert() []byte {
+	batchStart := true
+	isMarker := false
+	var batch []byte
+	for _, shred := range s.orderedShreds() {
+		if shred == nil || shred.Type != ShredTypeData {
+			continue
+		}
+		if batchStart {
+			isMarker = InferIsBlockMarker(shred.Data)
+			batchStart = false
+		}
+		if isMarker {
+			batch = append(batch, shred.Data...)
+		}
+		if !shred.DataComplete() {
+			continue
+		}
+		if isMarker {
+			if comp, err := UnmarshalBlockComponent(batch); err == nil && comp.Marker != nil &&
+				comp.Marker.Kind == MarkerBlockFooter && comp.Marker.Footer != nil {
+				return comp.Marker.Footer.BlockFinalCert
+			}
+		}
+		batch = nil
+		batchStart = true
+	}
+	return nil
 }
 
 func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Hash, parentKnown bool) (solana.Hash, bool, error) {

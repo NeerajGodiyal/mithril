@@ -70,7 +70,6 @@ type Client struct {
 	txPingMessages   atomic.Uint64
 	txPongMessages   atomic.Uint64
 	txPullResponses  atomic.Uint64
-	txPullRequests   atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
 }
@@ -471,7 +470,6 @@ func (c *Client) sendPullRequests(conn *net.UDPConn) error {
 			continue
 		}
 		c.recordTx()
-		c.txPullRequests.Add(1)
 	}
 	return nil
 }

@@ -1745,6 +1745,9 @@ func ReplayBlocks(
 				}); err != nil {
 					mlog.Log.Warnf("consensus engine observe block %d: %v", block.Slot, err)
 				}
+				if len(block.AlpenglowFinalCert) > 0 {
+					ingestAlpenglowFooterCertificate(consensusEngine, block.AlpenglowFinalCert)
+				}
 			}
 
 			syncConsensusBufferedExecutionMode(block.Slot)
@@ -1791,15 +1794,17 @@ func ReplayBlocks(
 					// Alpenglow finality never uses the TowerBFT vote-root; start clean.
 					// Prefer engine cert-finality; fall back to RPC-attested finalized
 					// slot (delegated) since an unstaked observer gets no certs. Poll
-					// throttled (RPC round-trip is slow), clamp to what we've replayed.
+					// throttled (RPC round-trip is slow); promote() bounds the rooting.
 					rooted, ok = 0, false
 					if certRooted, certOk := alpenglowRootedSlot(consensusEngine); certOk {
 						rooted, ok = certRooted, true
 					} else {
 						if time.Since(delegatedFinalizedAt) > 2*time.Second {
+							// Record the attempt time regardless of outcome, so an RPC
+							// outage doesn't re-issue a blocking poll on every block.
+							delegatedFinalizedAt = time.Now()
 							if fin, err := rpcc.GetSlotWithTimeoutAndCommitment(15*time.Second, rpc.CommitmentFinalized); err == nil {
 								delegatedFinalizedSlot = fin
-								delegatedFinalizedAt = time.Now()
 							}
 						}
 						if delegatedFinalizedSlot > 0 {

@@ -57,6 +57,12 @@ type AlpenglowCandidateBlockObserver interface {
 	ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation)
 }
 
+// AlpenglowFooterCertificateSink ingests finalization certs decoded from block
+// footers (the unstaked finality path). Implemented only by the observer engine.
+type AlpenglowFooterCertificateSink interface {
+	ObserveFooterCertificates(certs []alpenglow.Certificate)
+}
+
 type AlpenglowValidatorSetSink interface {
 	SetAlpenglowValidatorSet(set alpenglow.ValidatorSet) error
 }
@@ -86,6 +92,7 @@ type Engine interface {
 type Config struct {
 	AlpenglowObserverBindAddr string
 	AlpenglowMaxMessageBytes  int64
+	AlpenglowBLSDST           string // BLS hash-to-curve DST; empty keeps the default (must match cluster's solana-bls version)
 }
 
 func NormalizeMode(raw string) (Mode, error) {
@@ -110,6 +117,7 @@ func NewEngine(mode Mode) (Engine, error) {
 }
 
 func NewEngineWithConfig(mode Mode, cfg Config) (Engine, error) {
+	alpenglow.SetHashToPointDST(strings.TrimSpace(cfg.AlpenglowBLSDST))
 	switch mode {
 	case ModeClassic:
 		return &ClassicEngine{}, nil
@@ -323,6 +331,22 @@ func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 		msg.Certificate = &verified
 	}
 	e.observeVotorBlockID(msg)
+}
+
+// ObserveFooterCertificates verifies and ingests certificates decoded from a block
+// footer (the unstaked finality path — no Votor QUIC needed). Each is verified and
+// fed to the chain tracker exactly like a QUIC cert.
+func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Certificate) {
+	for _, cert := range certs {
+		verified, result, err := e.verifyCertificate(cert)
+		if err != nil {
+			e.logCertificateVerifyDrop(cert, result, err)
+			continue
+		}
+		if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
+			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid footer certificate: %v", err)
+		}
+	}
 }
 
 func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {

@@ -231,6 +231,12 @@ name = "mithril"
     alpenglow_observer_bind_addr = ""
     alpenglow_max_message_bytes = 0
 
+    # BLS hash-to-curve domain-separation tag for verifying Alpenglow certificates.
+    # Version-specific: must match the cluster's solana-bls version (3.0.0 uses
+    # SSWU_RO_NUL_, 3.2.0 uses SSWU_POP_, 3.3.0 uses SSWU_RO_POP_). Empty uses the
+    # built-in default. Wrong value = every signature verification fails.
+    alpenglow_bls_dst = ""
+
     # Maximum depth (number of slots) the skip-path solver will explore.
     # Longer ranges take more memory. 64 covers ~26 seconds of slots.
     skip_path_max_depth = 64

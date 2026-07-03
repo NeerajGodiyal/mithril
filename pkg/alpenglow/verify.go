@@ -19,8 +19,25 @@ const (
 	signerStoreVersionBase3 = byte(1)
 	signerStoreHeaderLen    = 3
 	base3SymbolsPerByte     = 5
-	blsHashToPointDST       = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"
+	// DefaultHashToPointDST is agave's solana-bls HASH_TO_POINT_DST for hashing vote
+	// messages to G2 — the solana-bls 3.3.0 value used by current agave and live
+	// Alpenglow clusters. It is VERSION-SPECIFIC (3.0.0 = SSWU_RO_NUL_, 3.2.0 =
+	// SSWU_POP_); a cluster on a different version needs an override via
+	// alpenglow_bls_dst or every signature verification fails.
+	DefaultHashToPointDST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"
 )
+
+// blsHashToPointDST is the active DST; override via SetHashToPointDST for clusters
+// running a different solana-bls version.
+var blsHashToPointDST = DefaultHashToPointDST
+
+// SetHashToPointDST overrides the BLS hash-to-curve DST to match a target cluster's
+// solana-bls version. Empty is ignored (keeps the default). Call once at startup.
+func SetHashToPointDST(dst string) {
+	if dst != "" {
+		blsHashToPointDST = dst
+	}
+}
 
 type ValidatorStake struct {
 	Rank                  uint16
@@ -182,6 +199,8 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 		if entries[i].Stake != entries[j].Stake {
 			return entries[i].Stake > entries[j].Stake
 		}
+		// Tie-break on the COMPRESSED (48-byte) pubkey to match agave's rank order
+		// (BLSPubkeyToRankMap sorts equal stakes by a_pubkey_compressed.cmp(b)).
 		return bytes.Compare(entries[i].BlsPubkeyCompressed[:], entries[j].BlsPubkeyCompressed[:]) < 0
 	})
 	for i := range entries {
@@ -928,4 +947,42 @@ func decompressBLSPubkey(compressed []byte) ([96]byte, error) {
 	}
 	out = point.RawBytes()
 	return out, nil
+}
+
+// decompressBLSSignature converts a 96-byte compressed G2 signature (as carried in
+// block-footer aggregates) to the 192-byte uncompressed form the verifier expects.
+func decompressBLSSignature(compressed []byte) ([]byte, error) {
+	if len(compressed) != 96 {
+		return nil, fmt.Errorf("invalid compressed BLS signature len %d", len(compressed))
+	}
+	var point bls12381.G2Affine
+	if _, err := point.SetBytes(compressed); err != nil {
+		return nil, err
+	}
+	raw := point.RawBytes()
+	return raw[:], nil
+}
+
+// FinalCertToCertificates turns a block-footer FinalCertificate's aggregates into
+// the certificate(s) the ChainTracker consumes: notar present → Notarize+Finalize
+// (slow), else FinalizeFast (fast). Signatures are decompressed 96→192; the Finalize
+// cert is slot-scoped so it carries no block hash. notarSig empty selects the fast path.
+func FinalCertToCertificates(slot uint64, blockID solana.Hash, finalSig, finalBitmap, notarSig, notarBitmap []byte) ([]Certificate, error) {
+	finalSig192, err := decompressBLSSignature(finalSig)
+	if err != nil {
+		return nil, fmt.Errorf("final aggregate signature: %w", err)
+	}
+	if len(notarSig) > 0 {
+		notarSig192, err := decompressBLSSignature(notarSig)
+		if err != nil {
+			return nil, fmt.Errorf("notar aggregate signature: %w", err)
+		}
+		return []Certificate{
+			{Type: CertificateNotarize, Slot: slot, BlockHash: blockID, Signature: notarSig192, Bitmap: notarBitmap},
+			{Type: CertificateFinalize, Slot: slot, Signature: finalSig192, Bitmap: finalBitmap},
+		}, nil
+	}
+	return []Certificate{
+		{Type: CertificateFinalizeFast, Slot: slot, BlockHash: blockID, Signature: finalSig192, Bitmap: finalBitmap},
+	}, nil
 }
