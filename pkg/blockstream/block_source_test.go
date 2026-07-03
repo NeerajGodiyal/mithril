@@ -213,6 +213,43 @@ func TestApplyAlpenglowDecisionLockedDiscardsMismatchedCertifiedBlock(t *testing
 	}
 }
 
+// A conflict decision (equivocation) must fail closed: drop the buffered candidate
+// so no fork is emitted, and record a fatal stop reason so replay halts.
+func TestApplyAlpenglowDecisionLockedHaltsOnConflict(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+		AlpenglowDecisionSource: func(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+			return alpenglow.ChainDecision{
+				Slot:   151,
+				Kind:   alpenglow.ChainDecisionKindConflict,
+				Reason: "two certified blocks",
+			}, true
+		},
+	})
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, HasAlpenglowBlockID: true}
+
+	bs.reorderMu.Lock()
+	bs.applyAlpenglowDecisionLocked()
+	_, stillBuffered := bs.reorderBuffer[151]
+	bs.reorderMu.Unlock()
+
+	if stillBuffered {
+		t.Fatal("conflicted slot's block must be dropped, not emitted")
+	}
+	if bs.stopReasonEnum() != blockSourceStopReasonAlpenglowConflict {
+		t.Fatalf("stop reason = %d, want AlpenglowConflict", bs.stopReasonEnum())
+	}
+	if !strings.Contains(bs.StopReason(), "conflict") {
+		t.Fatalf("StopReason() = %q, want a conflict/halt message", bs.StopReason())
+	}
+}
+
 func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,

@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -99,6 +100,68 @@ func TestAlpenglowObserverTracksReplayInSnapshot(t *testing.T) {
 	}
 	if [32]byte(snapshot.Alpenglow.LatestReplayBlock.Hash) != alpenglowBlockID {
 		t.Fatalf("latest replay block hash = %s, want %x", snapshot.Alpenglow.LatestReplayBlock.Hash, alpenglowBlockID)
+	}
+}
+
+// A certificate that arrives before its epoch's validator set is installed must be
+// deferred and replayed once the stakes land — otherwise the cert is lost and that
+// slot's decision stalls.
+func TestAlpenglowDefersCertUntilStakesInstall(t *testing.T) {
+	engine, err := NewEngine(ModeAlpenglowObserver)
+	if err != nil {
+		t.Fatalf("NewEngine returned error: %v", err)
+	}
+	observer := engine.(*AlpenglowObserverEngine)
+	set := testAlpenglowValidatorSet()
+	observer.SetAlpenglowEpochLookup(func(slot uint64) uint64 { return set.Epoch })
+
+	cert := alpenglow.Certificate{
+		Type:   alpenglow.CertificateSkip,
+		Slot:   42,
+		Bitmap: testAlpenglowSignerBitmap(),
+	}
+	cert.Signature = testAlpenglowCertificateSignature(t, cert)
+
+	// Arrives before stakes install → deferred, no decision yet.
+	observer.observeVotorMessage(alpenglow.NewCertificateMessage(cert))
+	if _, ok := observer.NextAlpenglowDecision(41); ok {
+		t.Fatal("cert should be deferred until stakes install, not decided")
+	}
+
+	// Stakes install → the deferred cert replays and applies.
+	if err := observer.SetAlpenglowValidatorSet(set); err != nil {
+		t.Fatalf("SetAlpenglowValidatorSet returned error: %v", err)
+	}
+	decision, ok := observer.NextAlpenglowDecision(41)
+	if !ok || decision.Kind != alpenglow.ChainDecisionKindSkip || decision.Slot != 42 {
+		t.Fatalf("deferred cert not applied after stakes install: decision=%+v ok=%v", decision, ok)
+	}
+}
+
+// Deferred certs carry network-controlled slots, so the pending buffer must bound the
+// number of distinct epoch buckets (an attacker could otherwise feed far-future slots).
+func TestAlpenglowPendingCertEpochCap(t *testing.T) {
+	engine, err := NewEngine(ModeAlpenglowObserver)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	observer := engine.(*AlpenglowObserverEngine)
+	observer.SetAlpenglowEpochLookup(func(slot uint64) uint64 { return slot }) // slot == epoch
+
+	noSet := fmt.Errorf("alpenglow verifier: no validator set for epoch")
+	for epoch := uint64(1); epoch <= uint64(alpenglowPendingEpochCap)+2; epoch++ {
+		observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: epoch}, noSet)
+	}
+
+	observer.pendingCertsMu.Lock()
+	n := len(observer.pendingCerts)
+	_, lowestKept := observer.pendingCerts[1]
+	observer.pendingCertsMu.Unlock()
+	if n > alpenglowPendingEpochCap {
+		t.Fatalf("pending epoch buckets = %d, want <= %d", n, alpenglowPendingEpochCap)
+	}
+	if lowestKept {
+		t.Fatal("oldest epoch (1) should have been evicted")
 	}
 }
 
