@@ -1,7 +1,9 @@
 package alpenglow
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -113,6 +115,23 @@ type ChainTracker struct {
 	latestCertificateSlot        uint64
 	latestObservedBlock          BlockID
 	latestDirectFinalizedBlock   BlockID
+
+	// decisionVersion increments whenever the tracker becomes more decisive in a
+	// way that could contradict an already-executed slot — not just on cert
+	// acceptance but also on replay-derived parent links, finalized ancestry,
+	// indirect skips, and conflicts. The execute-on-receipt switch sweep gates on
+	// it, so it never misses a contradiction that arose without a new certificate.
+	decisionVersion uint64
+}
+
+// bumpDecisionLocked marks that a decision-relevant change occurred.
+func (t *ChainTracker) bumpDecisionLocked() { t.decisionVersion++ }
+
+// DecisionVersion returns the monotonic decision-change counter.
+func (t *ChainTracker) DecisionVersion() uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.decisionVersion
 }
 
 type chainBlockState struct {
@@ -215,6 +234,7 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 	state := t.ensureBlockStateLocked(obs.Block)
 	wasObserved := state.observed
 	state.observed = true
+	prevParentSlot, prevParentHash := state.parentSlot, state.parentHash
 	// Parent slot 0 means unknown — never clobber a known parent link with it, and
 	// never replace a known parent hash with zero (indirect-skip and ancestry
 	// derivation depend on the link surviving).
@@ -229,14 +249,27 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 			state.parentHash = obs.ParentHash
 		}
 	}
+	parentChanged := state.parentSlot != prevParentSlot || state.parentHash != prevParentHash
 
+	derived := false
 	if certType, finalized := t.directFinalized[obs.Block]; finalized {
 		t.deriveIndirectSkipsLocked(obs.Block, certType)
 		// The cert may have arrived before this observation supplied the parent
 		// link — ancestry marking needs the link, so re-run it now.
 		t.markChainFinalizedAncestorsLocked(obs.Block)
+		derived = true
 	} else if _, chainFin := t.chainFinalized[obs.Block]; chainFin {
 		t.markChainFinalizedAncestorsLocked(obs.Block)
+		derived = true
+	}
+
+	// A new parent link or a freshly-derived finalized-ancestry / indirect-skip
+	// can contradict an executed slot without any new certificate — advance the
+	// decision version so the switch sweep re-runs. A bare observation with no
+	// link and no derivation changes nothing the sweep reads (it consults
+	// certificates and derived skips), so it does not bump.
+	if parentChanged || derived {
+		t.bumpDecisionLocked()
 	}
 
 	return ChainReplayBlockUpdate{New: !wasObserved, Snapshot: t.snapshotLocked()}
@@ -311,6 +344,9 @@ func (t *ChainTracker) applyTrustedCertificateLocked(cert Certificate) {
 		t.skipCerts[cert.Slot] = cert
 		t.refreshConflictLocked(cert.Slot)
 	}
+	// A trusted cert (and everything it just derived) can newly contradict an
+	// executed slot — advance the decision version so the switch sweep re-runs.
+	t.bumpDecisionLocked()
 }
 
 func (t *ChainTracker) applyTrustedBlockCertificateLocked(cert Certificate) {
@@ -478,6 +514,153 @@ func (t *ChainTracker) FinalityConflictAt(slot uint64) bool {
 // PruneBeforeSlot drops all tracker state for slots strictly below slot, bounding
 // memory on a long-running node. Pruning runs automatically behind finality; this
 // exported form lets a caller prune explicitly (e.g. behind the rooted watermark).
+// CertifiedBlockAt returns the slot's DECISIVELY certified block: one backed
+// by a unique-strength certificate (notarize / finalize-fast / genesis — at
+// most one per slot by protocol, Lemma 21(i)/24) or finalized directly or by
+// ancestry. Fallback-only candidates are ambiguous (up to 7 can legally
+// coexist) and never returned. This is the execute-on-receipt switch signal:
+// an executed block contradicting the decisive block must be unwound.
+func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var winner BlockID
+	var winnerType CertificateType
+	found := false
+	// Iterate the slot's blocks directly (no candidate-slice allocation): the
+	// switch sweep calls this for every executed-unfolded slot whenever the
+	// tracker's decision version advances — which on a healthy cluster is
+	// nearly every block.
+	for _, block := range t.blockSlots[slot] {
+		state := t.blocks[block]
+		if state == nil {
+			continue
+		}
+		certType := strongestBlockCertificateType(state.certificates)
+		decisive := false
+		switch certType {
+		case CertificateFinalizeFast, CertificateNotarize, CertificateGenesis:
+			decisive = true
+		}
+		if !decisive {
+			if _, fin := t.directFinalized[block]; fin {
+				decisive = true
+			} else if _, fin := t.chainFinalized[block]; fin {
+				decisive = true
+			}
+		}
+		if !decisive {
+			continue
+		}
+		if found && winner != block {
+			// Two decisive blocks in one slot is Byzantine evidence; the
+			// conflict machinery owns it — report no decisive block here.
+			return BlockID{}, "", false
+		}
+		winner, winnerType, found = block, certType, true
+	}
+	return winner, winnerType, found
+}
+
+// SkipCertifiedAt reports whether the slot is certified skipped, explicitly
+// (skip cert) or indirectly (omitted between finalized ancestors).
+func (t *ChainTracker) SkipCertifiedAt(slot uint64) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if _, ok := t.skipCerts[slot]; ok {
+		return true
+	}
+	_, ok := t.indirectSkips[slot]
+	return ok
+}
+
+// WantedBlock names a certified block whose data replay has not observed yet —
+// the target of cert-driven repair.
+type WantedBlock struct {
+	Block     BlockID
+	Strongest CertificateType
+	Finalized bool
+}
+
+// wantedPriority ranks a slot's candidates for repair: a finalized block wins,
+// then a unique-strength certificate (notarize / fast-finalize / genesis), then
+// a fallback. -1 means it is not a repair target. Picking the highest-priority
+// candidate per slot (rather than the lowest hash) keeps the repair loop — which
+// nudges at most once per slot — aimed at the DECISIVE block, not a fallback
+// sibling that merely happens to sort first.
+func wantedPriority(ct CertificateType, finalized bool) int {
+	if finalized {
+		return 3
+	}
+	switch ct {
+	case CertificateFinalizeFast, CertificateNotarize, CertificateGenesis:
+		return 2
+	case CertificateNotarizeFallback:
+		return 1
+	default:
+		return -1
+	}
+}
+
+// WantedBlocks returns ONE certified-but-unobserved repair target per slot
+// strictly above afterSlot, ascending by slot, capped at max. Within a slot the
+// most decisive candidate is chosen (finalized > unique-strength > fallback),
+// tie-broken by lowest hash for determinism — so a fallback is targeted only
+// when no decisive candidate exists. Skip-certified slots are excluded unless
+// the block is finalized (finality outranks a skip; the illegal coexistence is
+// the conflict machinery's to flag). The scan is bounded by the tracker's
+// retention window and the <= 7 certified candidates per slot protocol bound.
+func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
+	if max <= 0 {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	slots := make([]uint64, 0, len(t.blockSlots))
+	for slot := range t.blockSlots {
+		if slot > afterSlot {
+			slots = append(slots, slot)
+		}
+	}
+	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
+
+	out := make([]WantedBlock, 0, min(max, len(slots)))
+	for _, slot := range slots {
+		if len(out) >= max {
+			break
+		}
+		_, skipped := t.skipCerts[slot]
+		if !skipped {
+			_, skipped = t.indirectSkips[slot]
+		}
+		// Pick the single most decisive unobserved candidate for the slot.
+		var best *WantedBlock
+		bestPri := -1
+		for _, cand := range t.blockCandidatesLocked(slot) {
+			if cand.Observed {
+				continue
+			}
+			finalized := t.finalizedLocked(cand.Block)
+			pri := wantedPriority(cand.CertificateType, finalized)
+			if pri < 0 {
+				continue // tracked but uncertified (e.g. replay-observed sibling)
+			}
+			if skipped && !finalized {
+				continue // skip-certified slot: only a finalized block overrides
+			}
+			if best == nil || pri > bestPri ||
+				(pri == bestPri && bytes.Compare(cand.Block.Hash[:], best.Block.Hash[:]) < 0) {
+				w := WantedBlock{Block: cand.Block, Strongest: cand.CertificateType, Finalized: finalized}
+				best, bestPri = &w, pri
+			}
+		}
+		if best != nil {
+			out = append(out, *best)
+		}
+	}
+	return out
+}
+
 func (t *ChainTracker) PruneBeforeSlot(slot uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
