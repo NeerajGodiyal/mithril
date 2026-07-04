@@ -111,7 +111,8 @@ func runConfigInit() {
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Edit the [storage] paths for your setup")
-	fmt.Println("  2. Run: mithril run --config config.toml")
+	fmt.Println("  2. Set [network].rpc and [turbine].gossip_entrypoint for your Alpenglow cluster")
+	fmt.Println("  3. Run: mithril run --config config.toml")
 	fmt.Println()
 	fmt.Println("See config.example.toml for detailed documentation of all options.")
 }
@@ -137,17 +138,20 @@ snapshots = %q           # ~100GB for full + incremental
 logs = %q                # Log files (created if missing)
 
 [network]
-cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet" | "alpenglow"
-rpc = ["https://api.mainnet-beta.solana.com"]
+cluster = "alpenglow"  # This build boots Alpenglow only (TowerBFT clusters need a dev-branch build)
+rpc = ["https://alpenglow.rpcpool.com"]
 
 [block]
-source = "rpc"   # "rpc" | "lightbringer" | "turbine"
+# "turbine" is the live mode: shreds carry the Alpenglow block ids and footer
+# certificates that gate durable state. "rpc" is catch-up/debug only — RPC
+# blocks carry no certificates, so near-tip operation cannot adjudicate them
+# and durable folds stall without a Votor QUIC cert feed ([consensus] below).
+source = "turbine"   # "turbine" (live) | "rpc" (catch-up/debug) | "lightbringer"
+turbine_bind_addr = "0.0.0.0:8001"
 # lightbringer_endpoint = "localhost:9000"
-# turbine_bind_addr = "0.0.0.0:8001"
 
-# [turbine]
-# bind_addr = "0.0.0.0:8001"
-# gossip_entrypoint = "1.2.3.4:8000"
+[turbine]
+gossip_entrypoint = ""     # REQUIRED for turbine: a gossip entrypoint of your Alpenglow cluster
 # gossip_bind_addr = "0.0.0.0:65401"
 # advertised_ip = "203.0.113.10"
 # shred_version = 0
@@ -170,12 +174,9 @@ vote_account_keypair = ""          # Optional vote account keypair path for diag
 authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
 
 [consensus]
-mode = "classic"             # "classic" | "alpenglow-observer" | "alpenglow"
-alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener for observer mode
+alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener
 alpenglow_max_message_bytes = 0   # 0 = default
-unresolved_policy = "halt"   # "halt" | "warn"
-skip_path_max_depth = 64
-enforce_on_source = "stream"
+alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)
 
 [rpc]
 port = 8899  # Mithril's RPC server (binds to all interfaces)

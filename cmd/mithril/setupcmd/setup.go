@@ -83,7 +83,6 @@ const (
 	scrBlockTuning   // maxRPS
 	scrBlockInflight // maxInflight
 	scrReplay
-	scrConsensus
 	scrSnapshot
 	scrLogLevel
 	scrRPCPort
@@ -108,24 +107,23 @@ type setupModel struct {
 	inputErr string
 
 	// Config values
-	mode            string // quick, full, manual
-	cluster         string
-	rpcEndpoint     string
-	enableLB        bool
-	gossipEntry     string
-	lbQuiet         bool // suppress Lightbringer info/debug logs
-	accountsPath    string
-	snapshotsPath   string
-	logsPath        string
-	shredstorePath  string
-	bootstrapMode   string
-	blockMaxRPS     string
-	blockInflight   string
-	txpar           string
-	consensusPolicy string
-	snapshotKeep    string
-	logLevel        string
-	rpcPort         string
+	mode           string // quick, full, manual
+	cluster        string
+	rpcEndpoint    string
+	enableLB       bool
+	gossipEntry    string
+	lbQuiet        bool // suppress Lightbringer info/debug logs
+	accountsPath   string
+	snapshotsPath  string
+	logsPath       string
+	shredstorePath string
+	bootstrapMode  string
+	blockMaxRPS    string
+	blockInflight  string
+	txpar          string
+	snapshotKeep   string
+	logLevel       string
+	rpcPort        string
 
 	// System
 	cpuCores   int
@@ -139,25 +137,24 @@ func newSetupModel() setupModel {
 	absPath, _ := filepath.Abs(outputPath)
 	storage := config.DefaultStoragePaths()
 	return setupModel{
-		screen:          scrMode,
-		cpuCores:        runtime.NumCPU(),
-		disks:           DetectDisks(),
-		cluster:         "mainnet-beta",
-		rpcEndpoint:     "https://api.mainnet-beta.solana.com",
-		lbQuiet:         config.LightbringerQuietDefault,
-		accountsPath:    storage.Accounts,
-		snapshotsPath:   storage.Snapshots,
-		logsPath:        storage.Logs,
-		shredstorePath:  storage.Shredstore,
-		bootstrapMode:   "auto",
-		blockMaxRPS:     "8",
-		blockInflight:   "8",
-		txpar:           fmt.Sprintf("%d", runtime.NumCPU()*2),
-		consensusPolicy: "halt",
-		snapshotKeep:    "1",
-		logLevel:        "info",
-		rpcPort:         "8899",
-		configPath:      absPath,
+		screen:         scrMode,
+		cpuCores:       runtime.NumCPU(),
+		disks:          DetectDisks(),
+		cluster:        "alpenglow",
+		rpcEndpoint:    "https://alpenglow.rpcpool.com",
+		lbQuiet:        config.LightbringerQuietDefault,
+		accountsPath:   storage.Accounts,
+		snapshotsPath:  storage.Snapshots,
+		logsPath:       storage.Logs,
+		shredstorePath: storage.Shredstore,
+		bootstrapMode:  "auto",
+		blockMaxRPS:    "8",
+		blockInflight:  "8",
+		txpar:          fmt.Sprintf("%d", runtime.NumCPU()*2),
+		snapshotKeep:   "1",
+		logLevel:       "info",
+		rpcPort:        "8899",
+		configPath:     absPath,
 	}
 }
 
@@ -244,10 +241,10 @@ func (m setupModel) currentItems() []menuItem {
 		}
 	case scrCluster:
 		return []menuItem{
-			menuOptionDesc("mainnet-beta", "mainnet-beta", "Production Solana network"),
-			menuOptionDesc("testnet", "testnet", "Test network (more stable)"),
-			menuOptionDesc("devnet", "devnet", "Development network (frequent resets)"),
-			menuOptionDesc("alpenglow", "alpenglow", "Public Alpenglow test cluster"),
+			menuOptionDesc("alpenglow", "alpenglow", "Alpenglow test cluster (the only cluster this build boots)"),
+			menuOptionDesc("mainnet-beta", "mainnet-beta", "Requires a dev-branch (TowerBFT) build"),
+			menuOptionDesc("testnet", "testnet", "Requires a dev-branch (TowerBFT) build"),
+			menuOptionDesc("devnet", "devnet", "Requires a dev-branch (TowerBFT) build"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -264,13 +261,6 @@ func (m setupModel) currentItems() []menuItem {
 			menuOptionDesc("snapshot", "snapshot", "Rebuild from snapshot"),
 			menuOptionDesc("new-snapshot", "new-snapshot", "Always download fresh"),
 			menuOptionDesc("accountsdb", "accountsdb", "Require existing data, fail if missing"),
-			menuSeparator(),
-			menuBack(),
-		}
-	case scrConsensus:
-		return []menuItem{
-			menuOptionDesc("halt", "halt", "Stop and write diagnostic (recommended)"),
-			menuOptionDesc("warn", "warn", "Log warning and continue (debug only)"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -420,10 +410,6 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 	case scrBootstrap:
 		m.bootstrapMode = value
 		m.pushInput(scrBlockTuning)
-
-	case scrConsensus:
-		m.consensusPolicy = value
-		m.pushMenu(scrSnapshot)
 
 	case scrSnapshot:
 		m.snapshotKeep = value
@@ -643,7 +629,7 @@ func (m *setupModel) advanceFromInput() {
 	case scrBlockInflight:
 		m.pushInput(scrReplay)
 	case scrReplay:
-		m.pushMenu(scrConsensus)
+		m.pushMenu(scrSnapshot)
 	case scrRPCPort:
 		m.pushMenu(scrReview)
 	}
@@ -766,7 +752,6 @@ func (m setupModel) View() string {
 			rows = append(rows, []string{"Block RPS", m.blockMaxRPS})
 			rows = append(rows, []string{"Inflight", m.blockInflight})
 			rows = append(rows, []string{"RPC Port", m.rpcPort})
-			rows = append(rows, []string{"Consensus", m.consensusPolicy})
 			rows = append(rows, []string{"Snapshot keep", m.snapshotKeep})
 			rows = append(rows, []string{"Log Level", m.logLevel})
 		}
@@ -802,9 +787,6 @@ func (m setupModel) View() string {
 		case scrBootstrap:
 			title = "Bootstrap Mode"
 			desc = "How Mithril initializes on startup."
-		case scrConsensus:
-			title = "Consensus Policy"
-			desc = "Action when blocks can't be verified via votes."
 		case scrSnapshot:
 			title = "Snapshot Storage"
 			desc = "How many downloaded snapshots to keep."
@@ -873,12 +855,9 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	cfg.WriteString("authorized_withdrawer_keypair = \"\"\n\n")
 
 	cfg.WriteString("[consensus]\n")
-	cfg.WriteString("mode = \"classic\"\n")
 	cfg.WriteString("alpenglow_observer_bind_addr = \"\"\n")
 	cfg.WriteString("alpenglow_max_message_bytes = 0\n")
-	fmt.Fprintf(&cfg, "unresolved_policy = %q\n", m.consensusPolicy)
-	cfg.WriteString("skip_path_max_depth = 64\n")
-	cfg.WriteString("enforce_on_source = \"stream\"\n\n")
+	cfg.WriteString("alpenglow_bls_dst = \"\"\n\n")
 
 	cfg.WriteString("[snapshot]\n")
 	fmt.Fprintf(&cfg, "max_full_snapshots = %s\n\n", m.snapshotKeep)
@@ -923,19 +902,20 @@ snapshots = "/mnt/mithril-ledger/snapshots"   # ~100GB for full + incremental
 logs = "/mnt/mithril-logs"                    # Log files (created if missing)
 
 [network]
-cluster = "mainnet-beta"  # Required: "mainnet-beta" | "testnet" | "devnet" | "alpenglow"
-rpc = ["https://api.mainnet-beta.solana.com"]
+cluster = "alpenglow"  # This build boots Alpenglow only (TowerBFT clusters need a dev-branch build)
+rpc = ["https://alpenglow.rpcpool.com"]
 
 [block]
-source = "rpc"   # "rpc" | "lightbringer" | "turbine"
-# turbine_bind_addr = "0.0.0.0:8001"
+# "turbine" is the live mode: shreds carry the Alpenglow block ids and footer
+# certificates that gate durable state. "rpc" is catch-up/debug only.
+source = "turbine"   # "turbine" (live) | "rpc" (catch-up/debug) | "lightbringer"
+turbine_bind_addr = "0.0.0.0:8001"
 # lightbringer_endpoint = "localhost:9000"
 max_rps = 8
 max_inflight = 8
 
-# [turbine]
-# bind_addr = "0.0.0.0:8001"
-# gossip_entrypoint = "1.2.3.4:8000"
+[turbine]
+gossip_entrypoint = ""     # REQUIRED for turbine: a gossip entrypoint of your Alpenglow cluster
 # gossip_bind_addr = "0.0.0.0:65401"
 # advertised_ip = "203.0.113.10"
 # shred_version = 0
@@ -958,12 +938,9 @@ vote_account_keypair = ""          # Optional vote account keypair path for diag
 authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
 
 [consensus]
-mode = "classic"           # "classic" | "alpenglow-observer" | "alpenglow"
-alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener for observer mode
+alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener (raw-vote cert feed)
 alpenglow_max_message_bytes = 0   # 0 = default
-unresolved_policy = "halt"   # "halt" | "warn"
-skip_path_max_depth = 64
-enforce_on_source = "stream"
+alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)
 
 [snapshot]
 max_full_snapshots = 1   # 0 = stream only, saves disk

@@ -47,14 +47,16 @@ func runDoctor() {
 		return
 	}
 
-	// 2. Cluster
+	// 2. Cluster — this build boots Alpenglow only.
 	total++
 	cluster := config.GetString("network.cluster")
-	if cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" || cluster == "alpenglow" {
+	if cluster == "alpenglow" {
 		fmt.Printf("  %s Network: %s\n", successStyle.Render("✓"), cluster)
 		passed++
 	} else if cluster == "" {
 		fmt.Printf("  %s network.cluster not set\n", errorStyle.Render("✗"))
+	} else if cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" {
+		fmt.Printf("  %s Cluster %q needs a dev-branch (TowerBFT) build — this build boots \"alpenglow\" only\n", errorStyle.Render("✗"), cluster)
 	} else {
 		fmt.Printf("  %s Invalid cluster: %s\n", errorStyle.Render("✗"), cluster)
 	}

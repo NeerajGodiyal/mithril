@@ -117,7 +117,7 @@ type editModel struct {
 func newEditModel(cf string, v *viper.Viper) editModel {
 	cluster := v.GetString("network.cluster")
 	if cluster == "" {
-		cluster = "mainnet-beta"
+		cluster = "alpenglow" // the only cluster this build boots
 	}
 	rpcSlice := v.GetStringSlice("network.rpc")
 	rpcEndpoint := ""
@@ -275,10 +275,10 @@ func (m editModel) currentItems() []edItem {
 		}
 	case edScrCluster:
 		return []edItem{
-			{label: "mainnet-beta", value: "mainnet-beta"},
-			{label: "testnet", value: "testnet"},
-			{label: "devnet", value: "devnet"},
-			{label: "alpenglow", value: "alpenglow"},
+			{label: "alpenglow", value: "alpenglow", desc: "The only cluster this build boots"},
+			{label: "mainnet-beta", value: "mainnet-beta", desc: "Requires a dev-branch (TowerBFT) build"},
+			{label: "testnet", value: "testnet", desc: "Requires a dev-branch (TowerBFT) build"},
+			{label: "devnet", value: "devnet", desc: "Requires a dev-branch (TowerBFT) build"},
 			{isSep: true},
 			{label: "← Back", value: "_back"},
 		}
