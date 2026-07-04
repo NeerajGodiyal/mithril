@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/trace"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1368,21 +1367,30 @@ func ReplayBlocks(
 		installCachedAlpenglowValidatorSets(consensusEngine, currentEpoch)
 	}
 
+	// 100-slot summary window collectors ("full" = reconstructable-from-shreds,
+	// Agave SlotMeta/is_full sense; detailed debugging stays in file logs).
 	var statsCounter int
-	var execTimes []float64      // seconds per block
-	var waitTimes []float64      // seconds per block
-	var cuValues []uint64        // CU per block
-	var voteTxCounts []uint64    // vote txns per block
-	var nonVoteTxCounts []uint64 // non-vote txns per block
+	var execTimes []float64 // seconds per executed block
+	var cuValues []uint64   // CU per executed block
+	var txnCounts []uint64  // transactions per executed block
+	var shredSamples []shredSample
+	var windowRepairedShreds int
+	var windowRepairedSlots int
+	var windowEmptyBlocks int
+	var windowSkippedWithShreds int // skipped slots where the leader sent partial shreds
+	var windowSwitches int          // certificate switches detected this window
+	var promotionHolds int          // iterations promotion was fully stalled while finality ran a chunk ahead
+	windowStart := time.Now()
+	var lastGCCount uint32
+	var liveShredAnchor int64 // cadence anchor for live per-slot shred deltas; rebased each window
 	var justCrossedEpochBoundary bool
 
 	// Preallocate slices for 100 blocks
 	const summaryInterval = 100
 	execTimes = make([]float64, 0, summaryInterval)
-	waitTimes = make([]float64, 0, summaryInterval)
 	cuValues = make([]uint64, 0, summaryInterval)
-	voteTxCounts = make([]uint64, 0, summaryInterval)
-	nonVoteTxCounts = make([]uint64, 0, summaryInterval)
+	txnCounts = make([]uint64, 0, summaryInterval)
+	shredSamples = make([]shredSample, 0, summaryInterval)
 
 	var lastRootedWatermark uint64 // highest certificate/delegated finality slot seen
 	var highestExecutedSlot uint64 // highest slot ProcessBlock has executed; bounds the promotion-gate walk
@@ -1508,6 +1516,12 @@ func ReplayBlocks(
 			}
 		}
 		if promoteThrough <= mithrilState.LastRootedSlot {
+			// Operator signal: promotion is fully stalled (verifier lag,
+			// divergence floor, or rewards hold) while finality has run at
+			// least a whole fold chunk ahead. Healthy steady state stays 0.
+			if lastRootedWatermark >= mithrilState.LastRootedSlot+uint64(FoldBatchSlots) {
+				promotionHolds++
+			}
 			return false // nothing new is both final and verified
 		}
 		// Alpenglow: never fold a slot whose executed block contradicts certificate
@@ -1772,6 +1786,7 @@ func ReplayBlocks(
 			// rooted checkpoint (repair re-fetches the certified version).
 			if unrootedTailState != nil {
 				if sw := switchSweeper.sweep(alpenglowExecutedBlockIDs, mithrilState.LastRootedSlot, currentExecutedAnchorSlot()); sw != nil {
+					windowSwitches++
 					blockStream.RewindForAlpenglowSwitch(sw.Slot, sw.Certified)
 					if rs := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo); rs != nil {
 						// In-RAM unwind: drop the wrong suffix, rebuild execution state
@@ -1849,10 +1864,25 @@ func ReplayBlocks(
 			if leader, exists := global.LeaderForSlot(block.Slot); exists {
 				leaderStr = leader.String()
 			}
-			// Log skipped slot in same format as regular blocks (with N/A for missing values)
-			// Padding: cu=10 chars, txns fields, exec/wait/total=%7.3fs = 8 chars (7 for number + 's')
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)",
-				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
+			// Terminal: aligned skipped-slot line, reporting any PARTIAL shred
+			// arrivals (leader sent something but the slot never became full).
+			// Full detail (wait) stays in logs.
+			partialShreds, repairedShreds, firstNanos, haveObs := blockStream.TurbineShredObservation(block.Slot)
+			haveFirst := false
+			firstMs := 0.0
+			if haveObs && firstNanos > 0 && liveShredAnchor != 0 {
+				expected := liveShredAnchor + int64(block.Slot)*nominalSlotNanos
+				firstMs = float64(firstNanos-expected) / 1e6
+				if firstMs < 0 {
+					firstMs = 0
+				}
+				haveFirst = true
+			}
+			mlog.Log.InfofPrecise("%s", buildSkippedStatsLine(block.Slot, leaderStr, partialShreds, repairedShreds, haveFirst, firstMs))
+			if partialShreds > 0 {
+				windowSkippedWithShreds++
+			}
+			mlog.Log.FileOnlyf("slot %d skipped | leader %s | wait %.3fs | partial shreds %d (repair %d)", block.Slot, leaderStr, waitTime.Seconds(), partialShreds, repairedShreds)
 			skippedSlotsCount++
 			if trailingVerifier != nil {
 				trailingVerifier.RecordSkip(block.Slot)
@@ -2144,15 +2174,7 @@ func ReplayBlocks(
 
 		slotReplayDuration := time.Since(start)
 
-		// Calculate slot stats: vote/non-vote tx counts and locally replayed CU.
-		var voteTxCount, nonVoteTxCount int
-		for _, tx := range block.Transactions {
-			if tx.IsVote() {
-				voteTxCount++
-			} else {
-				nonVoteTxCount++
-			}
-		}
+		txnCount := len(block.Transactions)
 		totalCU := lastSlotCtx.TotalComputeUnitsConsumed
 
 		// Get leader from block (set by configureBlock in live mode, or by block source in verify mode)
@@ -2161,11 +2183,37 @@ func ReplayBlocks(
 			leaderStr = block.Leader.String()
 		}
 
-		// Fixed-width format for consistent alignment (use precise timing for block replay)
-		// exec/wait/total use 7 char width to handle times up to 99.999s without breaking alignment
-		totalSlotTime := waitTime + slotReplayDuration
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: v:%-5d nv:%-5d | cu: %-10d | exec:%7.3fs | wait:%7.3fs | total:%7.3fs",
-			block.Slot, leaderStr, voteTxCount, nonVoteTxCount, totalCU, slotReplayDuration.Seconds(), waitTime.Seconds(), totalSlotTime.Seconds())
+		// Terminal: concise per-slot line. Shred timings only for shred-sourced
+		// blocks (never fabricated for RPC/file); deltas are cadence-adjusted
+		// against the fastest arrival seen (rebased each summary window).
+		execMsLine := slotReplayDuration.Seconds() * 1000
+		hasShreds := block.ShredFirstNanos > 0
+		var firstMsLine, fullMsLine float64
+		if hasShreds {
+			cand := shredAnchorCandidate(shredSample{slot: block.Slot, firstNanos: block.ShredFirstNanos})
+			if liveShredAnchor == 0 || cand < liveShredAnchor {
+				liveShredAnchor = cand
+			}
+			expected := liveShredAnchor + int64(block.Slot)*nominalSlotNanos
+			firstMsLine = float64(block.ShredFirstNanos-expected) / 1e6
+			if firstMsLine < 0 {
+				firstMsLine = 0
+			}
+			fullMsLine = float64(block.ShredFullNanos-expected) / 1e6
+			if fullMsLine < 0 {
+				fullMsLine = 0
+			}
+		}
+		mlog.Log.InfofPrecise("%s", buildSlotStatsLine(block.Slot, leaderStr, txnCount, totalCU, execMsLine, hasShreds, firstMsLine, fullMsLine, block.RepairedShreds))
+		// Full detail (wait, vote split) stays in file logs for debugging.
+		var voteTxCount int
+		for _, tx := range block.Transactions {
+			if tx.IsVote() {
+				voteTxCount++
+			}
+		}
+		mlog.Log.FileOnlyf("slot %d detail | leader %s | txns v:%d nv:%d | exec %.3fs | wait %.3fs | total %.3fs",
+			block.Slot, leaderStr, voteTxCount, txnCount-voteTxCount, slotReplayDuration.Seconds(), waitTime.Seconds(), (waitTime + slotReplayDuration).Seconds())
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
@@ -2184,10 +2232,18 @@ func ReplayBlocks(
 		if !justCrossedEpochBoundary {
 			statsCounter++
 			execTimes = append(execTimes, slotReplayDuration.Seconds())
-			waitTimes = append(waitTimes, waitTime.Seconds())
 			cuValues = append(cuValues, totalCU)
-			voteTxCounts = append(voteTxCounts, uint64(voteTxCount))
-			nonVoteTxCounts = append(nonVoteTxCounts, uint64(nonVoteTxCount))
+			txnCounts = append(txnCounts, uint64(txnCount))
+			if txnCount == 0 {
+				windowEmptyBlocks++
+			}
+			if hasShreds {
+				shredSamples = append(shredSamples, shredSample{slot: block.Slot, firstNanos: block.ShredFirstNanos, fullNanos: block.ShredFullNanos})
+				if block.RepairedShreds > 0 {
+					windowRepairedSlots++
+					windowRepairedShreds += block.RepairedShreds
+				}
+			}
 
 			// Trigger async tip refresh 5 slots before summary so it's fresh when we print
 			if statsCounter == summaryInterval-5 {
@@ -2195,219 +2251,144 @@ func ReplayBlocks(
 			}
 
 			if statsCounter == summaryInterval {
-				// Calculate statistics for float64 slices
-				medianFloat := func(vals []float64) float64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					sorted := make([]float64, len(vals))
-					copy(sorted, vals)
-					sort.Float64s(sorted)
-					n := len(sorted)
-					if n%2 == 0 {
-						return (sorted[n/2-1] + sorted[n/2]) / 2
-					}
-					return sorted[n/2]
-				}
-				minFloat := func(vals []float64) float64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					m := vals[0]
-					for _, v := range vals[1:] {
-						if v < m {
-							m = v
-						}
-					}
-					return m
-				}
-				maxFloat := func(vals []float64) float64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					m := vals[0]
-					for _, v := range vals[1:] {
-						if v > m {
-							m = v
-						}
-					}
-					return m
-				}
-
-				// Calculate statistics for uint64 slices
-				medianUint := func(vals []uint64) uint64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					sorted := make([]uint64, len(vals))
-					copy(sorted, vals)
-					sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-					n := len(sorted)
-					if n%2 == 0 {
-						return (sorted[n/2-1] + sorted[n/2]) / 2
-					}
-					return sorted[n/2]
-				}
-				minUint := func(vals []uint64) uint64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					m := vals[0]
-					for _, v := range vals[1:] {
-						if v < m {
-							m = v
-						}
-					}
-					return m
-				}
-				maxUint := func(vals []uint64) uint64 {
-					if len(vals) == 0 {
-						return 0
-					}
-					m := vals[0]
-					for _, v := range vals[1:] {
-						if v > m {
-							m = v
-						}
-					}
-					return m
-				}
-
-				// Compute total times (exec + wait for each block)
-				totalTimes := make([]float64, len(execTimes))
-				for i := range execTimes {
-					totalTimes[i] = execTimes[i] + waitTimes[i]
-				}
-
-				// Execution stats
-				medExec := medianFloat(execTimes)
-				minExec := minFloat(execTimes)
-				maxExec := maxFloat(execTimes)
-
-				// Wait stats
-				medWait := medianFloat(waitTimes)
-				minWait := minFloat(waitTimes)
-				maxWait := maxFloat(waitTimes)
-
-				// Total stats (only median needed - min/max can be inferred from execution + wait)
-				medTotal := medianFloat(totalTimes)
-
-				// CU stats
-				medCU := medianUint(cuValues)
-				minCU := minUint(cuValues)
-				maxCU := maxUint(cuValues)
-
-				// Txn stats
-				medVoteTx := medianUint(voteTxCounts)
-				medNonVoteTx := medianUint(nonVoteTxCounts)
-
-				// Blocks per second based on median total time
-				var blocksPerSec float64
-				if medTotal > 0 {
-					blocksPerSec = 1.0 / medTotal
-				}
-
-				// Get fetch stats (includes tip snapshot - refreshed at slot 95)
 				fetchStats := blockStream.GetFetchStats()
-
-				// Calculate distance from tip using current slot (more accurate than TipAtSlot)
-				// TipAtSlot is when we started the refresh, but block.Slot is what we just executed
-				var tipDistanceStr string
-				currentSlotForTip := block.Slot
-				if fetchStats.ConfirmedTip > 0 {
-					var behindConfirmed uint64
-					if currentSlotForTip < fetchStats.ConfirmedTip {
-						behindConfirmed = fetchStats.ConfirmedTip - currentSlotForTip
-					}
-					tipDistanceStr = fmt.Sprintf("%d slots behind confirmed", behindConfirmed)
-				} else {
-					tipDistanceStr = "tip unknown"
+				elapsed := time.Since(windowStart).Seconds()
+				slotsPerSec := 0.0
+				if elapsed > 0 {
+					slotsPerSec = float64(statsCounter+skippedSlotsCount) / elapsed
 				}
 
-				// Print summary in reorganized format
+				execMs := make([]float64, len(execTimes))
+				slowBlocks := 0
+				for i, secs := range execTimes {
+					execMs[i] = secs * 1000
+					if execMs[i] > 200 {
+						slowBlocks++
+					}
+				}
+				effVals := make([]float64, 0, len(execMs))
+				cuPerTx := make([]float64, 0, len(execMs))
+				txF := make([]float64, 0, len(txnCounts))
+				cuF := make([]float64, 0, len(cuValues))
+				for i := range cuValues {
+					cuF = append(cuF, float64(cuValues[i]))
+					txF = append(txF, float64(txnCounts[i]))
+					if cuValues[i] > 0 {
+						effVals = append(effVals, execMs[i]/(float64(cuValues[i])/1e6))
+					}
+					if txnCounts[i] > 0 {
+						cuPerTx = append(cuPerTx, float64(cuValues[i])/float64(txnCounts[i]))
+					}
+				}
+
 				mlog.Log.InfofPrecise("")
 				mlog.Log.InfofPrecise("=== 100 Slot Summary ===")
+				mlog.Log.InfofPrecise("  source: %s", fetchStats.CurrentSource)
 
-				// Line 1: Mode, blocks/sec, skipped slots, tip distance
-				modeStr := "catchup"
-				if fetchStats.IsNearTip {
-					modeStr = "near-tip"
+				// Shred gaps only when a turbine receiver is live — never fabricated
+				// for RPC-only operation.
+				progress := fmt.Sprintf("  progress: %.1f slots/sec", slotsPerSec)
+				if latestShred, highestFull, edgesOK := blockStream.TurbineShredEdges(); edgesOK && latestShred > 0 {
+					replayGap := int64(latestShred) - int64(block.Slot)
+					fullGap := int64(latestShred) - int64(highestFull)
+					if replayGap < 0 {
+						replayGap = 0
+					}
+					if fullGap < 0 {
+						fullGap = 0
+					}
+					progress += fmt.Sprintf(" | behind latest shred: replay %d, full %d", replayGap, fullGap)
 				}
-				if skippedSlotsCount > 0 {
-					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %d skipped | %s",
-						modeStr, blocksPerSec, skippedSlotsCount, tipDistanceStr)
+				if windowSkippedWithShreds > 0 {
+					progress += fmt.Sprintf(" | skipped %d (%d with shreds) | empty blocks %d", skippedSlotsCount, windowSkippedWithShreds, windowEmptyBlocks)
 				} else {
-					mlog.Log.InfofPrecise("  mode: %s | %.1f blocks/sec | %s",
-						modeStr, blocksPerSec, tipDistanceStr)
+					progress += fmt.Sprintf(" | skipped %d | empty blocks %d", skippedSlotsCount, windowEmptyBlocks)
+				}
+				mlog.Log.InfofPrecise("%s", progress)
+
+				finalizedStr := "--"
+				if lastRootedWatermark > 0 {
+					finalizedStr = fmt.Sprintf("%d", lastRootedWatermark)
+				}
+				mlog.Log.InfofPrecise("  consensus: finalized slot %s | switches %d", finalizedStr, windowSwitches)
+
+				checkedStr := "--"
+				if trailingVerifier != nil {
+					if vw := trailingVerifier.VerifiedWatermark(); vw > 0 {
+						checkedStr = fmt.Sprintf("%d", vw)
+					}
+				}
+				mlog.Log.InfofPrecise("  safety: exec checked slot %s | holds %d", checkedStr, promotionHolds)
+
+				if len(shredSamples) > 0 {
+					firstMs, fullMs, windowAnchor := computeShredDeltas(shredSamples)
+					liveShredAnchor = windowAnchor // rebase the live per-slot anchor (cadence drift)
+					mlog.Log.InfofPrecise("  shreds: first median +%.0fms, max +%.0fms | full median +%.0fms, max +%.0fms",
+						medianF(firstMs), maxF(firstMs), medianF(fullMs), maxF(fullMs))
+					mlog.Log.InfofPrecise("  repair: %d slots, %d shreds", windowRepairedSlots, windowRepairedShreds)
 				}
 
-				// Line 2: Current block source
-				mlog.Log.InfofPrecise("  block source: %s", formatBlockSourceStatus(fetchStats))
+				mlog.Log.InfofPrecise("  txns: median %.0f | p90 %.0f | max %.0f | cu/tx median %s | p90 %s",
+					medianF(txF), percentileF(txF, 90), maxF(txF), fmtK(medianF(cuPerTx)), fmtK(percentileF(cuPerTx, 90)))
+				mlog.Log.InfofPrecise("  cu: median %s | p90 %s | max %s",
+					fmtMcu(uint64(medianF(cuF))), fmtMcu(uint64(percentileF(cuF, 90))), fmtMcu(uint64(maxF(cuF))))
+				mlog.Log.InfofPrecise("  execution: median %.0fms | p95 %.0fms | max %.0fms | >200ms %d",
+					medianF(execMs), percentileF(execMs, 95), maxF(execMs), slowBlocks)
+				mlog.Log.InfofPrecise("  efficiency: median %.1fms/Mcu | p95 %.1fms/Mcu | max %.1fms/Mcu",
+					medianF(effVals), percentileF(effVals, 95), maxF(effVals))
 
-				// Line 3: CU and transaction stats (median/min/max)
-				mlog.Log.InfofPrecise("  cu: median %d, min %d, max %d | txns: median vote %d, median non-vote %d",
-					medCU, minCU, maxCU, medVoteTx, medNonVoteTx)
+				var mem runtime.MemStats
+				runtime.ReadMemStats(&mem)
+				const gib = 1024 * 1024 * 1024
+				gcDelta := mem.NumGC - lastGCCount
+				lastGCCount = mem.NumGC
+				resLine := "  resources:"
+				if rss := processRSSBytes(); rss > 0 {
+					resLine += fmt.Sprintf(" rss %.1fGiB |", float64(rss)/gib)
+				}
+				resLine += fmt.Sprintf(" heap %.1fGiB | heap inuse %.1fGiB | gc %d",
+					float64(mem.HeapAlloc)/gib, float64(mem.HeapInuse)/gib, gcDelta)
+				mlog.Log.InfofPrecise("%s", resLine)
+				mlog.Log.InfofPrecise("")
 
-				// Line 4: Execution stats (median/min/max for execution, wait; median for replay total)
-				mlog.Log.InfofPrecise("  execution: median %.3fs, min %.3fs, max %.3fs | wait: median %.3fs, min %.3fs, max %.3fs | replay total: median %.3fs",
-					medExec, minExec, maxExec, medWait, minWait, maxWait, medTotal)
-
-				// Account clone stats for copy-on-write optimization profiling
+				// Detailed debugging stays in file logs.
 				cloneStats := GetAndResetCloneStats()
 				if cloneStats.TxCount > 0 {
 					var cloneRatio float64
 					if cloneStats.AcctsLoaded > 0 {
 						cloneRatio = float64(cloneStats.AcctsCloned) / float64(cloneStats.AcctsLoaded) * 100
 					}
-					avgLoadedPerTx := float64(cloneStats.AcctsLoaded) / float64(cloneStats.TxCount)
-					avgClonedPerTx := float64(cloneStats.AcctsCloned) / float64(cloneStats.TxCount)
-					avgTouchedPerTx := float64(cloneStats.AcctsTouched) / float64(cloneStats.TxCount)
-					loadedMB := float64(cloneStats.AcctsLoadedBytes) / 1024 / 1024
-					clonedMB := float64(cloneStats.AcctsClonedBytes) / 1024 / 1024
-					touchedMB := float64(cloneStats.AcctsTouchedBytes) / 1024 / 1024
-					mlog.Log.InfofPrecise("  account COW: %.1f%% cloned on write (%d/%d accts) | %.1fMB loaded, %.1fMB cloned, %.1fMB modified | avg/tx: %.1f loaded, %.1f cloned, %.1f modified",
+					mlog.Log.FileOnlyf("account COW: %.1f%% cloned (%d/%d accts) | %.1fMB loaded, %.1fMB cloned, %.1fMB modified",
 						cloneRatio, cloneStats.AcctsCloned, cloneStats.AcctsLoaded,
-						loadedMB, clonedMB, touchedMB, avgLoadedPerTx, avgClonedPerTx, avgTouchedPerTx)
+						float64(cloneStats.AcctsLoadedBytes)/1024/1024, float64(cloneStats.AcctsClonedBytes)/1024/1024, float64(cloneStats.AcctsTouchedBytes)/1024/1024)
 				}
-
-				var mem runtime.MemStats
-				runtime.ReadMemStats(&mem)
-				const gib = 1024 * 1024 * 1024
-				mlog.Log.InfofPrecise("  memory: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | next_gc %.1fGiB | objs %d | gc %d | queue=%d",
-					float64(mem.HeapAlloc)/gib,
-					float64(mem.HeapInuse)/gib,
-					float64(mem.HeapIdle)/gib,
-					float64(mem.HeapReleased)/gib,
-					float64(mem.NextGC)/gib,
-					mem.HeapObjects,
-					mem.NumGC,
-					acctsDb.StoreQueueLen(),
-				)
-
-				// Line 5: RPC/fetch debugging info
+				mlog.Log.FileOnlyf("memory detail: alloc %.1fGiB | inuse %.1fGiB | idle %.1fGiB | released %.1fGiB | next_gc %.1fGiB | objs %d | gc_total %d | store_queue %d",
+					float64(mem.HeapAlloc)/gib, float64(mem.HeapInuse)/gib, float64(mem.HeapIdle)/gib,
+					float64(mem.HeapReleased)/gib, float64(mem.NextGC)/gib, mem.HeapObjects, mem.NumGC, acctsDb.StoreQueueLen())
 				if fetchStats.Attempts > 0 {
 					retryRate := float64(fetchStats.Retries) / float64(fetchStats.Attempts) * 100
-					prefetch := fetchStats.BufferDepth + fetchStats.ReorderBufLen
-					mlog.Log.InfofPrecise("  getBlock fetch: %.1f rps (%d calls) | avg %.0fms | %.0f%% success | retries %.1f%% | buf %d (stream:%d ro:%d) | wq %d | errs: na:%d rl:%d bt:%d tr:%d",
-						fetchStats.GetBlockRPS, fetchStats.Attempts, fetchStats.AvgLatencyMs, fetchStats.SuccessRate, retryRate, prefetch, fetchStats.BufferDepth, fetchStats.ReorderBufLen,
-						fetchStats.WorkQueueLen, fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
-
-					// Surface tip poll issues (only show if there are problems)
+					mlog.Log.FileOnlyf("getBlock fetch: %.1f rps (%d calls) | avg %.0fms | %.0f%% success | retries %.1f%% | errs: na:%d rl:%d bt:%d tr:%d",
+						fetchStats.GetBlockRPS, fetchStats.Attempts, fetchStats.AvgLatencyMs, fetchStats.SuccessRate, retryRate,
+						fetchStats.ErrNotAvail, fetchStats.ErrRateLimit, fetchStats.ErrBeyondTip, fetchStats.ErrTransient)
 					if fetchStats.TipStaleSecs > 30 || fetchStats.TotalTipPollFails > 0 {
 						mlog.Log.InfofPrecise("  WARNING: tip stale %ds | tip poll fails: %d (consecutive: %d)",
 							fetchStats.TipStaleSecs, fetchStats.TotalTipPollFails, fetchStats.TipPollFailures)
 					}
-
 					blockStream.ResetStats()
 				}
-				mlog.Log.InfofPrecise("")
 
-				// Reset slices (reuse capacity)
+				// Reset window collectors (reuse capacity)
 				execTimes = execTimes[:0]
-				waitTimes = waitTimes[:0]
 				cuValues = cuValues[:0]
-				voteTxCounts = voteTxCounts[:0]
-				nonVoteTxCounts = nonVoteTxCounts[:0]
+				txnCounts = txnCounts[:0]
+				shredSamples = shredSamples[:0]
+				windowRepairedShreds = 0
+				windowRepairedSlots = 0
+				windowEmptyBlocks = 0
+				windowSkippedWithShreds = 0
+				windowSwitches = 0
+				promotionHolds = 0
+				windowStart = time.Now()
 				statsCounter = 0
 				skippedSlotsCount = 0
 			}

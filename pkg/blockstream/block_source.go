@@ -598,6 +598,38 @@ func (bs *BlockSource) resetTurbineSlotForAlpenglowBlock(slot uint64, blockID so
 	}
 }
 
+// TurbineShredEdges reports the monotonic shred frontier (latest shred slot,
+// highest full slot) from the active turbine receiver. ok is false when no
+// receiver is active (RPC-only / pre-handoff) — callers must not fabricate
+// shred stats then.
+func (bs *BlockSource) TurbineShredEdges() (latestShredSlot, highestFullSlot uint64, ok bool) {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver == nil {
+		return 0, 0, false
+	}
+	latest, full := receiver.ShredEdges()
+	return latest, full, true
+}
+
+// TurbineShredObservation reports partial shred arrivals for a slot that never
+// became full — "the leader sent SOMETHING" skip observability. ok is false
+// when no receiver is active or no shred was ever accepted for the slot.
+func (bs *BlockSource) TurbineShredObservation(slot uint64) (dataShreds, repairedShreds int, firstNanos int64, ok bool) {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver == nil {
+		return 0, 0, 0, false
+	}
+	obs, found := receiver.ShredObservation(slot)
+	if !found {
+		return 0, 0, 0, false
+	}
+	return obs.DataShreds, obs.RepairedShreds, obs.FirstNanos, true
+}
+
 func (bs *BlockSource) prioritizeTurbineRepairRange(start, end uint64) {
 	if bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints || start == 0 {
 		return
