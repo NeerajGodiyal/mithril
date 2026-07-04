@@ -14,7 +14,6 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
-	"github.com/Overclock-Validator/mithril/pkg/forkchoice"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -37,8 +36,6 @@ type GlobalCtx struct {
 	voteCache                  map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochVoteStateSnapshots    map[uint64]map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochStakes                *epochstakes.EpochStakesCache
-	epochAuthorizedVoters      *epochstakes.EpochAuthorizedVotersCache
-	forkChoice                 *forkchoice.ForkChoiceService
 	slotsConfirmed             map[uint64]struct{}
 	leaderSchedule             *leaderschedule.LeaderSchedule
 	calcUnixTimeForClockSysvar bool
@@ -67,30 +64,12 @@ func SetEpoch(epoch uint64) {
 	instance.SetEpoch(epoch)
 }
 
-func SetForkChoice(forkChoice *forkchoice.ForkChoiceService) {
-	instance.forkChoice = forkChoice
-}
-
-func HasForkChoice() bool {
-	return instance.forkChoice != nil
-}
-
-func SubmitBlockToForkChoiceService(slot uint64, txs []*solana.Transaction) {
-	if instance.forkChoice == nil {
-		return
-	}
-	instance.forkChoice.SubmitBlock(slot, txs)
-}
-
-func BankhashConfirmedForSlot(slot uint64, bankHash solana.Hash) int {
-	if instance.forkChoice == nil {
-		return 0
-	}
-	return int(instance.forkChoice.IsBankhashCorrect(slot, bankHash).Status)
-}
-
 func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
+}
+
+func SetTransactionCount(num uint64) {
+	instance.SetTransactionCount(num)
 }
 
 // EnqueuePendingStakePubkey records a stake pubkey for later append to the index file.
@@ -100,23 +79,6 @@ func EnqueuePendingStakePubkey(pubkey solana.PublicKey) {
 	instance.pendingStakeMutex.Lock()
 	defer instance.pendingStakeMutex.Unlock()
 	instance.pendingNewStakePubkeys = append(instance.pendingNewStakePubkeys, accountsdb.StakeIndexEntry{Pubkey: pubkey})
-}
-
-func PutEpochAuthorizedVoter(voteAcct solana.PublicKey, authorizedVoter solana.PublicKey) {
-	if instance.epochAuthorizedVoters == nil {
-		instance.epochAuthorizedVoters = epochstakes.NewEpochAuthorizedVotersCache()
-	}
-	instance.epochAuthorizedVoters.PutEntry(voteAcct, authorizedVoter)
-}
-
-func EpochAuthorizedVoters() *epochstakes.EpochAuthorizedVotersCache {
-	return instance.epochAuthorizedVoters
-}
-
-// SetEpochAuthorizedVoters replaces the entire authorized voters cache.
-// Called at epoch boundaries after rebuilding from vote accounts.
-func SetEpochAuthorizedVoters(cache *epochstakes.EpochAuthorizedVotersCache) {
-	instance.epochAuthorizedVoters = cache
 }
 
 func PutSlotConfirmed(slot uint64) {
@@ -362,6 +324,15 @@ func (globctx *GlobalCtx) IncrTransactionCount(num uint64) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()
 	globctx.transactionCount += num
+}
+
+// SetTransactionCount overwrites the running transaction count — used to seed it
+// from a resume checkpoint and to restore it after an in-loop fork-switch unwind
+// (so a discarded fork's transactions do not linger in the count).
+func (globctx *GlobalCtx) SetTransactionCount(num uint64) {
+	globctx.mu.Lock()
+	defer globctx.mu.Unlock()
+	globctx.transactionCount = num
 }
 
 func (globctx *GlobalCtx) LatestBlockhash() [32]byte {

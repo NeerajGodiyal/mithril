@@ -12,7 +12,6 @@ const LightbringerQuietDefault = true
 
 func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
-	v.SetDefault("consensus.mode", "classic")
 	v.SetDefault("consensus.alpenglow_observer_bind_addr", "")
 	v.SetDefault("consensus.alpenglow_bls_dst", "")
 	v.SetDefault("validator.identity_keypair", "")
@@ -197,15 +196,11 @@ type LogConfig struct {
 	MaxBackups int    `toml:"max_backups" mapstructure:"max_backups"`   // Keep up to N old log files
 }
 
-// ConsensusConfig holds vote-anchored consensus configuration
+// ConsensusConfig holds Alpenglow consensus configuration.
 type ConsensusConfig struct {
-	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "classic", "alpenglow-observer", or "alpenglow" (default: "classic")
 	AlpenglowObserverBindAddr string `toml:"alpenglow_observer_bind_addr" mapstructure:"alpenglow_observer_bind_addr"` // Optional passive Alpenglow Votor QUIC listener
 	AlpenglowMaxMessageBytes  int64  `toml:"alpenglow_max_message_bytes" mapstructure:"alpenglow_max_message_bytes"`   // Max Votor QUIC stream payload size
 	AlpenglowBLSDST           string `toml:"alpenglow_bls_dst" mapstructure:"alpenglow_bls_dst"`                       // BLS hash-to-curve DST; empty = default (must match cluster's solana-bls version)
-	SkipPathMaxDepth          int    `toml:"skip_path_max_depth" mapstructure:"skip_path_max_depth"`                   // Max slots the skip-path solver explores (default: 64)
-	UnresolvedPolicy          string `toml:"unresolved_policy" mapstructure:"unresolved_policy"`                       // "halt" or "warn" (default: "halt")
-	EnforceOnSource           string `toml:"enforce_on_source" mapstructure:"enforce_on_source"`                       // "lightbringer", "turbine", "stream", or "all" (default: "stream")
 }
 
 // ValidatorConfig holds optional validator identity material for gossip and future voting modes.
