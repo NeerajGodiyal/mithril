@@ -305,7 +305,6 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 
 type sigverifySnapshot struct {
 	slot             uint64
-	txSig            string
 	version          solana.MessageVersion
 	resolved         bool
 	requiredSigs     uint8
@@ -314,22 +313,22 @@ type sigverifySnapshot struct {
 	staticKeys       int
 	totalKeys        int
 	lookups          int
-	firstSigners     []string
-	firstKeys        []string
+	firstKeys        []solana.PublicKey
 	signers          []solana.PublicKey
 	signatures       []solana.Signature
 	message          []byte
 }
 
+// buildSigverifySnapshot captures what verification needs, and NOTHING
+// rendered: it runs on the execution path for every transaction, and the
+// base58 strings the failure diagnostics want (tx signature, signer and key
+// previews) used to be built eagerly here — ~10 encodings per tx paid on
+// data only ever read when a signature fails, which is a halt. They render
+// lazily in diagContext now.
 func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnapshot, error) {
 	message, err := txverify.MessageBytes(tx)
 	if err != nil {
 		return nil, err
-	}
-
-	txSig := "<missing>"
-	if len(tx.Signatures) > 0 {
-		txSig = tx.Signatures[0].String()
 	}
 
 	numStaticKeys := len(tx.Message.AccountKeys)
@@ -338,21 +337,8 @@ func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnap
 	}
 
 	signers := tx.Message.Signers()
-	maxSigners := min(4, len(signers))
-	firstSigners := make([]string, 0, maxSigners)
-	for i := 0; i < maxSigners; i++ {
-		firstSigners = append(firstSigners, signers[i].String())
-	}
-
-	maxItems := min(6, len(tx.Message.AccountKeys))
-	firstKeys := make([]string, 0, maxItems)
-	for i := 0; i < maxItems; i++ {
-		firstKeys = append(firstKeys, tx.Message.AccountKeys[i].String())
-	}
-
 	snapshot := &sigverifySnapshot{
 		slot:             slot,
-		txSig:            txSig,
 		version:          tx.Message.GetVersion(),
 		resolved:         tx.Message.IsResolved(),
 		requiredSigs:     tx.Message.Header.NumRequiredSignatures,
@@ -361,8 +347,7 @@ func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnap
 		staticKeys:       numStaticKeys,
 		totalKeys:        len(tx.Message.AccountKeys),
 		lookups:          tx.Message.AddressTableLookups.NumLookups(),
-		firstSigners:     firstSigners,
-		firstKeys:        firstKeys,
+		firstKeys:        append([]solana.PublicKey(nil), tx.Message.AccountKeys[:min(6, len(tx.Message.AccountKeys))]...),
 		signers:          append([]solana.PublicKey(nil), signers...),
 		signatures:       append([]solana.Signature(nil), tx.Signatures...),
 		message:          message,
@@ -371,49 +356,47 @@ func buildSigverifySnapshot(tx *solana.Transaction, slot uint64) (*sigverifySnap
 	return snapshot, nil
 }
 
+// txSigString is the transaction's primary signature, rendered on demand
+// (failure paths only).
+func (s *sigverifySnapshot) txSigString() string {
+	if len(s.signatures) == 0 {
+		return "<missing>"
+	}
+	return s.signatures[0].String()
+}
+
+// diagContext renders the failure diagnostics from the raw snapshot data.
+func (s *sigverifySnapshot) diagContext() string {
+	firstSigners := make([]string, 0, min(4, len(s.signers)))
+	for i := 0; i < min(4, len(s.signers)); i++ {
+		firstSigners = append(firstSigners, s.signers[i].String())
+	}
+	firstKeys := make([]string, 0, len(s.firstKeys))
+	for _, key := range s.firstKeys {
+		firstKeys = append(firstKeys, key.String())
+	}
+	return fmt.Sprintf("slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
+		s.slot, s.txSigString(), s.version, s.resolved, s.requiredSigs, s.readonlySigned, s.readonlyUnsigned,
+		s.staticKeys, s.totalKeys, s.lookups, firstSigners, firstKeys)
+}
+
 func verifySignatures(snapshot *sigverifySnapshot, sigverifyWg *sync.WaitGroup) {
 	defer sigverifyWg.Done()
 	start := time.Now()
 
 	if len(snapshot.signers) != len(snapshot.signatures) {
-		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
-			snapshot.slot,
-			snapshot.txSig,
-			snapshot.version,
-			snapshot.resolved,
-			snapshot.requiredSigs,
-			snapshot.readonlySigned,
-			snapshot.readonlyUnsigned,
-			snapshot.staticKeys,
-			snapshot.totalKeys,
-			snapshot.lookups,
-			snapshot.firstSigners,
-			snapshot.firstKeys,
-		)
+		mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
 		panic(fmt.Sprintf("error - tx %s (version = %d) had mismatched signers/signatures: got %d signers, but %d signatures",
-			snapshot.txSig, snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
+			snapshot.txSigString(), snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
 	}
 
 	for i, sig := range snapshot.signatures {
 		if snapshot.signers[i].Verify(snapshot.message, sig) {
 			continue
 		}
-		mlog.Log.Errorf("sigverify context: slot=%d tx=%s version=%d resolved=%t required_sigs=%d readonly_signed=%d readonly_unsigned=%d static_keys=%d total_keys=%d lookups=%d signers=%v first_keys=%v",
-			snapshot.slot,
-			snapshot.txSig,
-			snapshot.version,
-			snapshot.resolved,
-			snapshot.requiredSigs,
-			snapshot.readonlySigned,
-			snapshot.readonlyUnsigned,
-			snapshot.staticKeys,
-			snapshot.totalKeys,
-			snapshot.lookups,
-			snapshot.firstSigners,
-			snapshot.firstKeys,
-		)
+		mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
 		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: invalid signature by %s",
-			snapshot.txSig, snapshot.version, snapshot.signers[i]))
+			snapshot.txSigString(), snapshot.version, snapshot.signers[i]))
 	}
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
@@ -475,7 +458,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		return nil, 0, err
 	}
 	sigverifyWg.Add(1)
-	go verifySignatures(sigverifySnapshot, sigverifyWg)
+	enqueueSigverify(sigverifySnapshot, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
