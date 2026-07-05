@@ -481,6 +481,13 @@ const (
 	repairCatchupPollInterval    = 250 * time.Millisecond
 	repairCatchupWindowSlots     = uint64(64) // matches the assembler's per-call priority range
 	repairCatchupStallWarnEvery  = 60 * time.Second
+	// Post-handoff live blocks farther than this beyond the waiting slot go
+	// to the CAPPED staging buffer instead of the reorder buffer: during a
+	// long catchup the live edge runs hundreds of slots ahead, and feeding
+	// every edge block straight into the reorder buffer is an unbounded
+	// memory path (monster blocks x hundreds). The drive drains staging
+	// into the queue as replay advances.
+	repairCatchupLiveDeliverWindow = uint64(256)
 	// Stuck-head self-heal: a head slot that holds shreds but cannot complete
 	// while repair responses flow is usually POISONED assembly state (a bad
 	// first shred pinning an FEC signature/variant/layout). Reset the slot's
@@ -1655,6 +1662,34 @@ func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
 	}
 }
 
+// drainStagedCatchupBlocks moves staged blocks inside [from, to] to the
+// emitter's queue — the post-handoff companion of the staging intake window:
+// far-future live blocks wait in capped staging, and replay pulls them in as
+// it approaches.
+func (bs *BlockSource) drainStagedCatchupBlocks(from, to uint64) {
+	var ready []*b.Block
+	bs.lightbringerBufferMu.Lock()
+	for slot, blk := range bs.lightbringerBuffer {
+		if blk != nil && slot >= from && slot <= to {
+			ready = append(ready, blk)
+			delete(bs.lightbringerBuffer, slot)
+		}
+	}
+	if len(ready) > 0 {
+		order := bs.lightbringerBufferOrder[:0]
+		for _, slot := range bs.lightbringerBufferOrder {
+			if _, still := bs.lightbringerBuffer[slot]; still {
+				order = append(order, slot)
+			}
+		}
+		bs.lightbringerBufferOrder = order
+	}
+	bs.lightbringerBufferMu.Unlock()
+	if len(ready) > 0 {
+		bs.enqueueLightbringerBlocks(ready)
+	}
+}
+
 // stagedLightbringerBlock returns the staged (pre-handoff) block for slot,
 // nil when none is held.
 func (bs *BlockSource) stagedLightbringerBlock(slot uint64) *b.Block {
@@ -2481,6 +2516,21 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		return true
 	}
 
+	// During catchup, only blocks NEAR the replay head go straight to the
+	// emitter's queue; the far live edge stages instead (capped, catchup
+	// eviction keeps the low end). The drive drains staging into the queue
+	// as replay advances — bounding reorder-buffer memory without ever
+	// discarding a block outright.
+	if bs.repairCatchupActive() && !bs.isNearTip.Load() {
+		bs.reorderMu.Lock()
+		waiting := bs.nextSlotToSend
+		bs.reorderMu.Unlock()
+		if waiting != 0 && blk.Slot > waiting+repairCatchupLiveDeliverWindow {
+			bs.bufferLightbringerBlock(blk)
+			return true
+		}
+	}
+
 	select {
 	case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.lightbringerResultGeneration.Load()}:
 		return true
@@ -3056,6 +3106,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		receiver.SetRetentionFloor(waiting)
 		receiver.PrioritizeRepairRange(waiting, winEnd)
 
+		// Post-handoff, far-future live blocks stage instead of flooding
+		// the reorder buffer; hand the ones replay is approaching to the
+		// emitter now.
+		if bs.lightbringerHandoffSlot.Load() != 0 {
+			bs.drainStagedCatchupBlocks(waiting, waiting+repairCatchupLiveDeliverWindow)
+		}
+
 		// Repair-health heartbeat to the FILE log only: whether requests go
 		// out, whether responses come back, and whether the window is
 		// actually filling — the questions a stalled-catchup postmortem asks.
@@ -3620,7 +3677,7 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 		firstConnectedDesc = fmt.Sprintf("%d(parent=%d gap_span=%d)", firstConnectedSlot, firstConnectedParentSlot, firstConnectedSlot-waitingSlot)
 	}
 
-	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d | first_live=%s | first_connected_to_anchor=%s | mode=%s",
+	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s",
 		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString())
 }
 
