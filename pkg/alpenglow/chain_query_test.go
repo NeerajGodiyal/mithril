@@ -156,6 +156,40 @@ func TestCertifiedBlockAtCertlessAncestryFinalized(t *testing.T) {
 	}
 }
 
+// FinalizedBlockAt must agree with CertifiedBlockAt on the cert-less
+// ancestry-finalized parent: promotion-gate evidence consults it, and the
+// per-slot finalized index is the only structure that can see a parent whose
+// stub never entered blockSlots. The Byzantine defense stays: a conflicting
+// decisive certificate at the finalized slot flips the answer back to none.
+func TestFinalizedBlockAtCertlessAncestryFinalized(t *testing.T) {
+	tracker := NewChainTracker()
+	parent := BlockID{Slot: 12, Hash: chainTestHash(12)}
+	child := BlockID{Slot: 15, Hash: chainTestHash(15)}
+
+	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: parent, ParentSlot: 11, ParentHash: chainTestHash(11)})
+	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: child, ParentSlot: parent.Slot, ParentHash: parent.Hash})
+	if _, ok := tracker.FinalizedBlockAt(12); ok {
+		t.Fatalf("nothing finalized before finality")
+	}
+
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: child.Hash})
+
+	got, ok := tracker.FinalizedBlockAt(12)
+	if !ok || got != parent {
+		t.Fatalf("cert-less ancestry-finalized parent must be visible to FinalizedBlockAt: %+v ok=%v", got, ok)
+	}
+	if fin, ok := tracker.FinalizedBlockAt(15); !ok || fin != child {
+		t.Fatalf("directly finalized child must be visible: %+v ok=%v", fin, ok)
+	}
+
+	// Byzantine defense: a decisive certificate for a DIFFERENT sibling at
+	// the finalized slot is a safety violation — no unambiguous answer.
+	specObserve(t, tracker, Certificate{Type: CertificateNotarize, Slot: 12, BlockHash: chainTestHash(99)})
+	if _, ok := tracker.FinalizedBlockAt(12); ok {
+		t.Fatalf("finalized block + conflicting decisive cert must yield NO finalized answer")
+	}
+}
+
 // A cert-less finalized block replay has NOT observed is a repair target: the
 // wanted-blocks feed must name it (Finalized=true) even though its slot has no
 // certified blocks at all — otherwise cert-driven repair could never fetch the

@@ -508,10 +508,20 @@ func (t *ChainTracker) FinalizedBlockAt(slot uint64) (BlockID, bool) {
 	if _, conflicted := t.conflicts[slot]; conflicted {
 		return BlockID{}, false
 	}
+	// The per-slot finalized index sees what the certified-blocks scan below
+	// cannot: an ancestry-finalized parent with no certificate of its own
+	// (its stub, minted from the finalized child's exact parent-hash
+	// binding, never enters blockSlots). Same reasoning as CertifiedBlockAt.
+	// The scan still runs as the Byzantine defense — a SECOND finalized
+	// block at the slot must yield ok=false, never a silent pick.
 	var found BlockID
 	matches := 0
+	if fin, ok := t.finalizedBySlot[slot]; ok {
+		found = fin
+		matches = 1
+	}
 	for _, id := range t.blockSlots[slot] {
-		if t.finalizedLocked(id) {
+		if id != found && t.finalizedLocked(id) {
 			found = id
 			matches++
 		}
@@ -927,6 +937,23 @@ func (t *ChainTracker) refreshConflictLocked(slot uint64) {
 		}
 	}
 
+	// A cert-less ancestry-finalized block never enters blockSlots (only its
+	// stub in the blocks map), yet carries the same exclusivity. Without
+	// counting it here, a competing certified sibling — or a skip cert — at
+	// its slot would pass silently, and the FinalizedBlockAt Byzantine
+	// defense (which trusts this flag) would keep answering.
+	certlessFinalized := false
+	if fin, ok := t.finalizedBySlot[slot]; ok {
+		present := false
+		for _, c := range candidates {
+			if c.Block == fin {
+				present = true
+				break
+			}
+		}
+		certlessFinalized = !present
+	}
+
 	switch {
 	case len(candidates) > maxCertifiedBlocksPerSlot:
 		// See maxCertifiedBlocksPerSlot: beyond the vote-budget bound is
@@ -952,6 +979,14 @@ func (t *ChainTracker) refreshConflictLocked(slot uint64) {
 		t.conflicts[slot] = chainConflict{
 			slot:       slot,
 			reason:     "finalized block plus competing certified block",
+			candidates: candidates,
+		}
+	case certlessFinalized && (hasSkip || len(candidates) > 0):
+		// Same violations as above with the finalized block invisible to the
+		// candidate scan (cert-less, ancestry-finalized).
+		t.conflicts[slot] = chainConflict{
+			slot:       slot,
+			reason:     "cert-less finalized block contradicted by certificate or skip",
 			candidates: candidates,
 		}
 	}
