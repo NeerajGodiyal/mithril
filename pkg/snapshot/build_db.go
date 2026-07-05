@@ -260,12 +260,12 @@ func BuildAccountsDbPaths(
 
 	var incrementalManifest *SnapshotManifest
 	if incrementalSnapshotFile != "" {
-		mlog.Log.Infof("Parsing incremental snapshot manifest...")
+		mlog.Log.FileOnlyf("Parsing incremental snapshot manifest...")
 		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotFile, accountsDbDir)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
-		mlog.Log.Infof("Parsed incremental snapshot manifest")
+		mlog.Log.FileOnlyf("Parsed incremental snapshot manifest")
 	}
 
 	start := time.Now()

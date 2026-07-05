@@ -123,7 +123,7 @@ func FinalizePartialDownload(savePath string) error {
 	if err := os.Rename(partialPath, savePath); err != nil {
 		return fmt.Errorf("failed to finalize snapshot %s: %w", savePath, err)
 	}
-	mlog.Log.Infof("Finalized snapshot download: %s", savePath)
+	mlog.Log.FileOnlyf("Finalized snapshot download: %s", savePath)
 	return nil
 }
 

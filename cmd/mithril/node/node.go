@@ -144,7 +144,10 @@ func snapshotEpochForState(manifest *snapshot.SnapshotManifest) uint64 {
 	if manifest.Bank.EpochSchedule.SlotsPerEpoch != 0 {
 		epoch := manifest.Bank.EpochSchedule.GetEpoch(manifest.Bank.Slot)
 		if manifest.Bank.Epoch != epoch {
-			mlog.Log.Warnf("manifest bank epoch %d differs from manifest epoch schedule epoch %d at slot %d; using schedule-derived epoch",
+			// Benign, common on this cluster: some snapshot producers leave
+			// the bank epoch field zeroed; the schedule-derived value is
+			// authoritative. File-only — it fires on every boot.
+			mlog.Log.FileOnlyf("manifest bank epoch %d differs from manifest epoch schedule epoch %d at slot %d; using schedule-derived epoch",
 				manifest.Bank.Epoch, epoch, manifest.Bank.Slot)
 		}
 		return epoch

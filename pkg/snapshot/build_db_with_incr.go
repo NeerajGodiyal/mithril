@@ -188,7 +188,7 @@ func BuildAccountsDbAuto(
 			mlog.Log.Infof("Found new incremental snapshot URL: %s (slot %d)", incrementalSnapshotPath, incrSlot)
 		}
 
-		mlog.Log.Infof("Parsing incremental snapshot manifest...")
+		mlog.Log.FileOnlyf("Parsing incremental snapshot manifest...")
 		incrementalManifestCopy, err := UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotPath, accountsDbDir)
 		if err != nil {
 			mlog.Log.Errorf("reading incremental snapshot manifest: %v", err)
@@ -196,7 +196,7 @@ func BuildAccountsDbAuto(
 		}
 		// Copy the manifest so the worker pool's pointer has the value.
 		*incrementalManifest = *incrementalManifestCopy
-		mlog.Log.Infof("Parsed incremental snapshot manifest")
+		mlog.Log.FileOnlyf("Parsed incremental snapshot manifest")
 
 		// Determine save path for incremental snapshot if streaming from HTTP
 		var incrSavePath string
@@ -210,7 +210,7 @@ func BuildAccountsDbAuto(
 				urlParts := strings.Split(incrementalSnapshotPath, "/")
 				filename := urlParts[len(urlParts)-1]
 				incrSavePath = filepath.Join(snapshotDownloadPath, filename)
-				mlog.Log.Infof("Will save incremental snapshot to %s while streaming", incrSavePath)
+				mlog.Log.FileOnlyf("Will save incremental snapshot to %s while streaming", incrSavePath)
 			}
 		}
 

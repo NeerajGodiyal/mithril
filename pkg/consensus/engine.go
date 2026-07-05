@@ -182,7 +182,7 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 	observer := e.ensureObserver()
 	e.ensureChain()
 	e.ensureVerifier()
-	mlog.Log.Infof("Consensus engine started: %s (passive; no votes will be signed)", e.Name())
+	mlog.Log.FileOnlyf("Consensus engine started: %s (passive; no votes will be signed)", e.Name())
 	mlog.Log.FileOnlyf("ALPENGLOW observer: certified path resolver requires stake and aggregate BLS signature verified certificates")
 	if e.receiverBindAddr == "" {
 		mlog.Log.FileOnlyf("ALPENGLOW observer: Votor receiver disabled; set consensus.alpenglow_observer_bind_addr to listen for Votor QUIC messages")

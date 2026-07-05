@@ -1370,7 +1370,7 @@ func ReplayBlocks(
 				result.Error = fmt.Errorf("building leader schedule for epoch %d before block-source start: %w", currentEpoch, err)
 				return result
 			}
-			mlog.Log.Infof("leader schedule ready for epoch %d (built before block-source start; turbine shred verification is live)", currentEpoch)
+			mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", currentEpoch)
 		}
 	}
 
@@ -1480,7 +1480,7 @@ func ReplayBlocks(
 			}
 			promoter.stop()
 		}()
-		mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots); folds run async off the replay loop", unrootedTailHaltCap)
+		mlog.Log.FileOnlyf("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots); folds run async off the replay loop", unrootedTailHaltCap)
 	}
 	// Any stake-index entries still pending from a previous in-process replay
 	// attempt (rooted-checkpoint re-replay after a fork switch or finality
@@ -1515,7 +1515,7 @@ func ReplayBlocks(
 		if !TrailingVerifierCfg.Required {
 			mlog.Log.Warnf("trailing verifier running in ADVISORY mode (verifier.required=false): folds are NOT gated on execution verification")
 		}
-		mlog.Log.Infof("trailing verifier active: lag=%d slots, budget=%d rps — folds gate on min(finality, verified)", TrailingVerifierCfg.LagSlots, TrailingVerifierCfg.MaxRPS)
+		mlog.Log.FileOnlyf("trailing verifier active: lag=%d slots, budget=%d rps — folds gate on min(finality, verified)", TrailingVerifierCfg.LagSlots, TrailingVerifierCfg.MaxRPS)
 	} else if unrootedTailState != nil {
 		mlog.Log.Warnf("trailing verifier DISABLED: folds gate on certificate finality only — certificates attest block data, not execution; a mithril-side execution divergence would fold to disk undetected")
 	}

@@ -119,7 +119,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	defer cancel()
 	go r.logStatsLoop(runCtx)
 
-	mlog.Log.Infof("ALPENGLOW Votor receiver listening on %s (transport=quic alpn=%s max_message=%d)",
+	mlog.Log.FileOnlyf("ALPENGLOW Votor receiver listening on %s (transport=quic alpn=%s max_message=%d)",
 		r.listener.Addr(), VotorQUICALPN, r.cfg.MaxMessageBytes)
 
 	for {

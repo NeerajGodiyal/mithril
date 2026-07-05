@@ -220,7 +220,9 @@ func (c *Client) Run(ctx context.Context) error {
 		if contact.TPUVoteQuicAddr != nil {
 			tpuVoteQuicAddr = contact.TPUVoteQuicAddr.String()
 		}
-		mlog.Log.Infof("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s advertised_alpenglow=%s advertised_tpu_vote=%s advertised_tpu_vote_quic=%s shred_version=%d client=%s",
+		mlog.Log.Infof("gossip joined: advertised tvu=%s alpenglow=%s | shred_version=%d",
+			contact.TVUAddr.String(), alpenglowAddr, contact.ShredVer)
+		mlog.Log.FileOnlyf("gossip client listening: local=%s advertised_gossip=%s advertised_tvu=%s advertised_alpenglow=%s advertised_tpu_vote=%s advertised_tpu_vote_quic=%s shred_version=%d client=%s",
 			conn.LocalAddr().String(), contact.GossipAddr.String(), contact.TVUAddr.String(), alpenglowAddr, tpuVoteAddr, tpuVoteQuicAddr, contact.ShredVer, c.cfg.Name)
 	}
 	c.recordPeer(c.entrypoint)

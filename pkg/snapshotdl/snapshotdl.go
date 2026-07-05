@@ -1368,7 +1368,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	if sourceNodeRPC != "" && blacklist.contains(sourceNodeRPC) {
 		mlog.Log.Infof("Skipping same-source incremental check because %s is in snapshot.node_blacklist", sourceNodeRPC)
 	} else if sourceNodeRPC != "" {
-		mlog.Log.Infof("Checking same source for incremental (base slot %d): %s", fullSnapshotSlot, sourceNodeRPC)
+		mlog.Log.FileOnlyf("Checking same source for incremental (base slot %d): %s", fullSnapshotSlot, sourceNodeRPC)
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
 
 		if err == nil && urlInfo != nil && urlInfo.BaseSlot == fullSnapshotSlot {

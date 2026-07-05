@@ -617,9 +617,9 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	if opts.SourceType == BlockSourceLightbringer && opts.LightbringerEndpoint != "" {
 		mlog.Log.Infof("Lightbringer live handoff configured for %s (RPC catchup remains enabled)", opts.LightbringerEndpoint)
 	} else if opts.SourceType == BlockSourceTurbine && opts.TurbineBindAddr != "" {
-		mlog.Log.Infof("Native turbine live handoff configured on %s (RPC catchup remains enabled)", opts.TurbineBindAddr)
+		mlog.Log.FileOnlyf("Native turbine live handoff configured on %s", opts.TurbineBindAddr)
 		if opts.TurbineGossipEntrypoint != "" {
-			mlog.Log.Infof("Native turbine gossip configured with entrypoint %s", opts.TurbineGossipEntrypoint)
+			mlog.Log.FileOnlyf("Native turbine gossip configured with entrypoint %s", opts.TurbineGossipEntrypoint)
 		}
 	}
 
@@ -2588,7 +2588,7 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		bs.repairCatchupUntil.Store(edge)
 		receiver.SetRetentionFloor(from)
 		releaseHold()
-		mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair — shreds carry block ids + footer certs (cryptographic finality); RPC reserved for the trailing verifier", from, edge, gap)
+		mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair", from, edge, gap)
 
 		if done := bs.driveRepairCatchup(ctx, receiver, from, edge); done {
 			return // near-tip machinery owns the stream from here
@@ -2939,7 +2939,7 @@ func (bs *BlockSource) runTurbineStream() {
 			if bs.turbineAlpenglowAddr != "" {
 				alpenglowAddr = bs.turbineAlpenglowAddr
 			}
-			mlog.Log.Infof("Native turbine gossip client starting: entrypoint=%s bind=%s client=%s repair=enabled alpenglow=%s", bs.turbineGossipEntrypoint, bindAddr, gossipclient.ClientName, alpenglowAddr)
+			mlog.Log.FileOnlyf("Native turbine gossip client starting: entrypoint=%s bind=%s client=%s repair=enabled alpenglow=%s", bs.turbineGossipEntrypoint, bindAddr, gossipclient.ClientName, alpenglowAddr)
 		} else {
 			mlog.Log.Warnf("Native turbine gossip entrypoint is not configured; receiver is running UDP-only on %s with repair disabled", bs.turbineBindAddr)
 		}
