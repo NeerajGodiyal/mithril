@@ -1359,6 +1359,17 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 			gapAge.Round(time.Second), streamName, waitingSlot)
 	}
 
+	// Native turbine is NOT a connection: "reconnecting" tears down the
+	// receiver and re-joins gossip (minutes of warmup) without re-streaming
+	// anything — a missing live slot is repair's job, and the gap-detection
+	// path keeps repair pressure on the hole every pass. Observed live: a
+	// single missing slot triggered a full teardown 15s after the first
+	// turbine-sourced replay in the branch's history. Reconnect stays a
+	// Lightbringer-sidecar remedy; the idle watchdog still handles a
+	// genuinely dead turbine socket.
+	if bs.sourceType == BlockSourceTurbine {
+		return
+	}
 	if shouldReconnect && bs.lightbringerGapReconnectSlot.CompareAndSwap(0, waitingSlot) {
 		bs.requestLightbringerReconnect(reconnectReason)
 	}
@@ -3157,7 +3168,12 @@ func (bs *BlockSource) runTurbineStream() {
 		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
 		backoff = lightbringerRetryBackoff
 
-		if bs.repairCatchupPending.Load() {
+		// (Re)start the repair-catchup monitor with EVERY turbine stream,
+		// not just the construction-time one: a stream restart mid-run left
+		// the replacement without a monitor (pending is construction-only),
+		// so a post-restart gap had no repair drive to fill it.
+		if bs.sourceType == BlockSourceTurbine && (bs.repairCatchupMaxGapSlots > 0 || !bs.rpcFallbackEnabled) {
+			bs.repairCatchupPending.Store(true)
 			go bs.runRepairCatchup(streamCtx, receiver)
 		}
 
