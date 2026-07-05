@@ -340,7 +340,10 @@ type BlockSource struct {
 	activeTurbineReceiver          *turbine.UDPReceiver
 	// Repair-first catchup: gap slots [repairCatchupFrom, repairCatchupUntil]
 	// fill via turbine repair; RPC never fetches at/above the gate while
-	// pending (decision in flight, RPC held ≤15s) or active. Turbine repair
+	// pending or active. The pending hold persists from construction until
+	// either repair arms (a fresh boot WAITS for turbine shreds rather than
+	// opening an RPC catchup, as long as the gap is within threshold) or
+	// repair is ruled out (gap too large, no tip signal). Turbine repair
 	// OWNS the gap — no timer ever hands it to RPC. The only ways out are
 	// the far-behind rule (replay more than repair_catchup_max_gap_slots
 	// behind the live edge, re-evaluated continuously) and stream loss; the
@@ -1968,8 +1971,10 @@ func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 		return true
 	}
 	// Repair-first catchup: the gap belongs to turbine repair. While the
-	// decision is pending (bounded by repairCatchupDecisionTimeout) RPC holds
-	// off entirely; on fallback the pending flag clears and RPC resumes.
+	// decision is pending RPC holds off entirely — including at startup,
+	// where the node WAITS for turbine shreds instead of opening an RPC
+	// catchup, for as long as the gap stays within the repair threshold.
+	// The pending flag clears only when repair arms or is ruled out.
 	if (bs.repairCatchupPending.Load() || bs.repairCatchupActive()) && slot >= bs.repairCatchupGateSlot() {
 		return false
 	}
@@ -2362,11 +2367,18 @@ func (bs *BlockSource) maybeRescueStalledCatchupSlot() {
 // serves only the trailing verifier. Turbine + repair are the native block
 // path; RPC block fetch exists ONLY for the too-far-behind case (the same
 // threshold, re-evaluated live inside the drive) — never on a stall timer.
-// RPC also bridges startup until turbine is demonstrably alive (shreds
-// received, repair peers known) and covers the no-tip-signal edge.
+// A fresh boot within the threshold WAITS for turbine to wake (shreds
+// received, repair peers known) with RPC held off the gap entirely — shreds
+// are coming, so the node waits for shreds; if the gap outgrows the
+// threshold while waiting, the far-behind rule releases the hold to RPC.
+// The only RPC bridge left is the no-tip-signal edge (RPC tip unknown AND
+// no shreds — nothing to measure the gap against).
 func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver) {
-	// The construction-time RPC hold releases after the FIRST evaluation —
-	// afterwards eligibility is re-checked continuously without holding RPC.
+	// The construction-time RPC hold persists until repair arms or is ruled
+	// out (gap too large, no tip signal). It is deliberately NOT released
+	// just because turbine is still waking up: a fresh boot within the
+	// repair threshold waits for shreds instead of starting an RPC catchup
+	// it would abandon.
 	first := true
 	releaseHold := func() {
 		if first {
@@ -2450,9 +2462,25 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 			if first && gap > bs.repairCatchupMaxGapSlots {
 				mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup — turbine repair takes over once the gap closes to within threshold", gap, from, edge, bs.repairCatchupMaxGapSlots)
 			}
-			if eligible && !turbineReady && time.Since(lastNotReadyLog) >= 30*time.Second {
-				lastNotReadyLog = time.Now()
-				mlog.Log.Infof("repair catchup: gap %d slots is within threshold but turbine is not ready yet (shreds received: %v, repair peers: %d); RPC catchup continues — repair takes over when turbine wakes", gap, shredEdge > 0, repairPeers)
+			if eligible && !turbineReady {
+				if time.Since(lastNotReadyLog) >= 30*time.Second {
+					lastNotReadyLog = time.Now()
+					if first {
+						mlog.Log.Infof("catchup: gap %d slots is within the repair threshold (%d) — holding RPC block fetch and WAITING for turbine shreds (received: %v, repair peers: %d); RPC engages only if the gap outgrows the threshold", gap, bs.repairCatchupMaxGapSlots, shredEdge > 0, repairPeers)
+					} else {
+						mlog.Log.Infof("repair catchup: gap %d slots is within threshold but turbine is not ready yet (shreds received: %v, repair peers: %d); RPC catchup continues — repair takes over when turbine wakes", gap, shredEdge > 0, repairPeers)
+					}
+				}
+				// Within-threshold with turbine still waking: the RPC hold is
+				// NOT released — shreds are the native path, so a fresh boot
+				// waits for them instead of opening an RPC catchup it would
+				// abandon. The far-behind rule stands watch: if the gap
+				// outgrows the threshold while waiting, eligibility flips and
+				// the branch below releases the hold to RPC.
+				if !bs.sleepOrStop(ctx, 2*time.Second) {
+					return
+				}
+				continue
 			}
 			releaseHold()
 			if !bs.sleepOrStop(ctx, 2*time.Second) {
