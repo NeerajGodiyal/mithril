@@ -2569,6 +2569,37 @@ func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []s
 		}
 	}
 
+	if bestSnapshot == nil {
+		return nil
+	}
+
+	// full_threshold (100k) is a loose "is this snapshot usable at all" gate,
+	// not "is it the FRESHEST available." A local full tens of thousands of
+	// slots old passes it, yet reusing it strands the node that far behind —
+	// and because the incremental search keys off the reused full's base, it
+	// never even looks for a fresher base the cluster may have. So when the
+	// local snapshot is itself materially stale (more than the incremental
+	// freshness band behind tip), probe the cluster and prefer a genuinely
+	// fresher full. If the cluster has nothing better, reuse and say so — that
+	// surfaces cluster-side staleness instead of silently starting far behind.
+	incThreshold := config.GetInt("snapshot.incremental_threshold")
+	if incThreshold <= 0 {
+		incThreshold = 2000
+	}
+	if currentSlot > bestSnapshot.slot && currentSlot-bestSnapshot.slot > uint64(incThreshold) {
+		if latest, lerr := queryLatestSnapshotSlot(ctx, rpcEndpoints); lerr == nil && latest > 0 {
+			if latest > bestSnapshot.slot+uint64(incThreshold) {
+				mlog.Log.Infof("On-disk snapshot at slot %d is %d slots behind tip; the cluster offers a fresher full at slot %d — downloading fresh instead of reusing the stale local file",
+					bestSnapshot.slot, currentSlot-bestSnapshot.slot, latest)
+				return nil
+			}
+			mlog.Log.Infof("On-disk snapshot at slot %d is the freshest the cluster offers (latest available %d, %d slots behind tip) — reusing; the cluster is not publishing anything newer",
+				bestSnapshot.slot, latest, currentSlot-bestSnapshot.slot)
+		} else if lerr != nil {
+			mlog.Log.Infof("could not check cluster for a fresher snapshot (%v); reusing the on-disk file at slot %d", lerr, bestSnapshot.slot)
+		}
+	}
+
 	return bestSnapshot
 }
 
