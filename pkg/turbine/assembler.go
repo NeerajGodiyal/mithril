@@ -768,6 +768,14 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 			return requests
 		}
 	}
+	// While ANY priority slots exist (catchup window, live-gap pins), the
+	// whole request budget belongs to them: the near-edge scan below would
+	// spend round-trips fetching shreds that live broadcast plus FEC
+	// recovery deliver for free within a second or two. The scan serves the
+	// un-prioritized case only (steady near-tip operation).
+	if len(a.priorityRepairOrder) > 0 {
+		return requests
+	}
 
 	for slot := start; slot <= repairThrough && len(requests) < maxSlots; slot++ {
 		appendRequest(slot)

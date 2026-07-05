@@ -65,6 +65,9 @@ type repairRequestKey struct {
 	kind  repairRequestKind
 	slot  uint64
 	index uint32
+	// attempt distinguishes bounded redundant sends of the SAME shred to
+	// different peers (head-slot fanout). 0 for ordinary single-flight.
+	attempt uint8
 }
 
 type repairAddressKey struct {
@@ -173,21 +176,33 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	if budget <= 0 {
 		return
 	}
-	for _, req := range requests {
+	for reqIdx, req := range requests {
+		// The FIRST request is the emission-gating head (priority order puts
+		// it first): its shreds get bounded 2-peer redundancy so one silent
+		// pick cannot cost the whole pipeline a request-timeout of latency.
+		// Everything else stays single-flight.
+		fanout := uint8(1)
+		if reqIdx == 0 {
+			fanout = 2
+		}
 		for _, index := range req.MissingDataShreds {
-			if budget <= 0 {
-				return
-			}
-			if c.sendRequest(conn, peers, repairRequestWindowIndex, req.Slot, index) {
-				budget--
+			for attempt := uint8(0); attempt < fanout; attempt++ {
+				if budget <= 0 {
+					return
+				}
+				if c.sendRequest(conn, peers, repairRequestWindowIndex, req.Slot, index, attempt) {
+					budget--
+				}
 			}
 		}
 		if req.NeedHighestDataShred {
-			if budget <= 0 {
-				return
-			}
-			if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, req.Slot, req.HighestDataShredIndex) {
-				budget--
+			for attempt := uint8(0); attempt < fanout; attempt++ {
+				if budget <= 0 {
+					return
+				}
+				if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, req.Slot, req.HighestDataShredIndex, attempt) {
+					budget--
+				}
 			}
 		}
 	}
@@ -257,21 +272,21 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	start := outstanding.key.index
 	followups := 0
 	for index := start; index < shred.Index && followups < repairMaxFollowupRequests; index++ {
-		if c.sendRequest(conn, peers, repairRequestWindowIndex, shred.Slot, index) {
+		if c.sendRequest(conn, peers, repairRequestWindowIndex, shred.Slot, index, 0) {
 			followups++
 		}
 	}
 	if !shred.LastInSlot() && followups < repairMaxFollowupRequests && shred.Index < maxDataShredsPerSlot-1 {
-		c.sendRequest(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1)
+		c.sendRequest(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1, 0)
 	}
 	return true
 }
 
-func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer, kind repairRequestKind, slot uint64, index uint32) bool {
+func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer, kind repairRequestKind, slot uint64, index uint32, attempt uint8) bool {
 	if conn == nil || len(peers) == 0 {
 		return false
 	}
-	key := repairRequestKey{kind: kind, slot: slot, index: index}
+	key := repairRequestKey{kind: kind, slot: slot, index: index, attempt: attempt}
 
 	c.mu.Lock()
 	if _, exists := c.outstanding[key]; exists {
