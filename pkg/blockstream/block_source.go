@@ -3131,11 +3131,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		// actually filling — the questions a stalled-catchup postmortem asks.
 		if time.Since(lastStatusLog) >= 15*time.Second {
 			lastStatusLog = time.Now()
-			repair := receiver.Stats().Repair
-			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d)",
+			hb := receiver.Stats()
+			repair := hb.Repair
+			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d)",
 				waiting, edge, windowBlocks,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
-				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers)
+				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers,
+				hb.HydratedSlots-statsAtArm.HydratedSlots, hb.HydratedFromDisk-statsAtArm.HydratedFromDisk)
 		}
 	}
 }

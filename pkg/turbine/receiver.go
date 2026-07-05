@@ -33,6 +33,12 @@ type UDPReceiver struct {
 	hydrLo      atomic.Uint64
 	hydrHi      atomic.Uint64
 	hydrateKick chan struct{}
+	// Hydration outcomes: whether spooled slots complete purely from disk
+	// (their own data + spooled coding via recovery) or hand holes to network
+	// repair — the number that says if the freshness-repair lead time is
+	// sufficient or the priority window needs widening.
+	hydratedSlots    atomic.Uint64
+	hydratedFromDisk atomic.Uint64
 
 	packets         atomic.Uint64
 	dataShreds      atomic.Uint64
@@ -69,6 +75,10 @@ type ReceiverStats struct {
 	LastDataSlot         uint64
 	LastBlockSlot        uint64
 	ActiveSlots          int
+	// Spool hydration outcomes: slots fed from disk, and how many of those
+	// completed with zero network repair (spooled coding healed the holes).
+	HydratedSlots    uint64
+	HydratedFromDisk uint64
 }
 
 func NewUDPReceiver(addr string) *UDPReceiver {
@@ -230,6 +240,8 @@ func (r *UDPReceiver) Stats() ReceiverStats {
 		LastDataSlot:         r.lastDataSlot.Load(),
 		LastBlockSlot:        r.lastBlockSlot.Load(),
 		ActiveSlots:          r.assembler.ActiveSlots(),
+		HydratedSlots:        r.hydratedSlots.Load(),
+		HydratedFromDisk:     r.hydratedFromDisk.Load(),
 	}
 }
 
@@ -456,6 +468,10 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 				if !r.emitAssembled(ctx, blk) {
 					return
 				}
+			}
+			r.hydratedSlots.Add(1)
+			if r.assembler.SlotCompleted(slot) {
+				r.hydratedFromDisk.Add(1)
 			}
 			select {
 			case <-ctx.Done():

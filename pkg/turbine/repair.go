@@ -166,13 +166,17 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 		return
 	}
 
-	budget := repairMaxSlotsPerScan * (repairMaxMissingPerSlot + 1)
-	if budget > repairMaxOutstanding {
-		budget = repairMaxOutstanding
+	// Size the token grant by what this scan can actually put on the wire:
+	// granted tokens are consumed from the bucket whether used or not, and
+	// most scans re-list shreds whose requests are still outstanding (dedup
+	// sends nothing for them). Unused grant is returned after the send pass,
+	// so the rate cap means "requests sent", not "requests considered".
+	edgeDemand := tierSendDemand(edge, false)
+	want := tierSendDemand(priority, true) + edgeDemand
+	if want > repairMaxOutstanding {
+		want = repairMaxOutstanding
 	}
-	if rate := c.takeRateTokens(budget); rate < budget {
-		budget = rate
-	}
+	budget := c.takeRateTokens(want)
 	if budget <= 0 {
 		return
 	}
@@ -181,13 +185,39 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	// window), but a reserved slice patches LIVE-EDGE holes while peers still
 	// serve those shreds hot — a hole repaired at receipt costs one cheap
 	// round trip; the same hole discovered at hydration time, minutes later,
-	// competes with the head for budget against colder peers. Leftover head
-	// budget flows to the edge.
-	edgeReserve := budget / 5
-	headBudget := budget - edgeReserve
-	spent := c.sendTier(conn, peers, priority, headBudget, true)
-	edgeBudget := budget - spent
-	c.sendTier(conn, peers, edge, edgeBudget, false)
+	// competes with the head for budget against colder peers. The reserve is
+	// sized by the edge's actual demand, so a blocked head is never capped
+	// below what the edge can use; leftover head budget flows to the edge.
+	spent := c.sendTier(conn, peers, priority, splitRepairBudget(budget, edgeDemand), true)
+	spent += c.sendTier(conn, peers, edge, budget-spent, false)
+	c.returnRateTokens(budget - spent)
+}
+
+// tierSendDemand counts the packets sendTier would emit for a tier given
+// unlimited budget (head fanout doubles the first request's sends).
+func tierSendDemand(requests []SlotRepairRequest, fanoutHead bool) int {
+	demand := 0
+	for reqIdx, req := range requests {
+		per := len(req.MissingDataShreds)
+		if req.NeedHighestDataShred {
+			per++
+		}
+		if fanoutHead && reqIdx == 0 {
+			per *= 2
+		}
+		demand += per
+	}
+	return demand
+}
+
+// splitRepairBudget returns the head tier's share: everything except a
+// freshness reserve of a fifth, bounded by the edge's actual demand.
+func splitRepairBudget(budget, edgeDemand int) int {
+	reserve := budget / 5
+	if reserve > edgeDemand {
+		reserve = edgeDemand
+	}
+	return budget - reserve
 }
 
 // sendTier sends one tier's requests within budget and returns how many
@@ -399,6 +429,20 @@ func (c *repairClient) takeRateTokens(want int) int {
 	}
 	c.rateTokens -= float64(grant)
 	return grant
+}
+
+// returnRateTokens puts the unused portion of a grant back in the bucket
+// (bounded by the burst cap) so dedup-suppressed sends don't burn rate.
+func (c *repairClient) returnRateTokens(count int) {
+	if count <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.rateTokens += float64(count)
+	if c.rateTokens > repairMaxRequestsPerSecond {
+		c.rateTokens = repairMaxRequestsPerSecond
+	}
+	c.mu.Unlock()
 }
 
 func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairPeer, bool) {

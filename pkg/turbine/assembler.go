@@ -521,23 +521,131 @@ func (s *slotState) repairRequest(maxMissing int) (SlotRepairRequest, bool) {
 		req.HighestDataShredIndex = maxObserved + 1
 	}
 
+	req.MissingDataShreds = s.missingDataForRepair(maxObserved, maxMissing)
+
+	if len(req.MissingDataShreds) == 0 && !req.NeedHighestDataShred {
+		return SlotRepairRequest{}, false
+	}
+	return req, true
+}
+
+// codedSpan is one FEC set with a KNOWN layout (at least one verified coding
+// shred held): its data-index span, how many more shreds it needs before
+// Reed-Solomon recovery fires, and which of its data indices are missing.
+type codedSpan struct {
+	start, end uint32 // data index span [start, end)
+	deficit    int    // shreds still needed to cross the recovery threshold
+	missing    []uint32
+}
+
+// requestsToUnlock is how many repair round trips fill the whole span: the
+// deficit normally (recovery supplies the rest), or everything missing when
+// the set already held enough to recover and errored anyway — direct fetch
+// is the bypass around poisoned coding state.
+func (span codedSpan) requestsToUnlock() int {
+	if span.deficit > 0 && span.deficit <= len(span.missing) {
+		return span.deficit
+	}
+	return len(span.missing)
+}
+
+// missingDataForRepair selects WHICH missing data indices are worth a repair
+// round trip. The repair protocol serves data shreds only — coding arrives
+// exclusively via live broadcast — so the only recovery leverage available
+// is the coding already held: a set missing 12 data shreds while holding 8
+// coding shreds needs just 4 repairs (any 4) before recovery yields the
+// rest; a plain low-to-high walk would request all 12 and waste two thirds
+// of the budget. Selection:
+//
+//   - a set with a known layout contributes only requestsToUnlock indices
+//     (lowest missing first, deterministic across scans);
+//   - sets go cheapest-unlock-first, so a truncated budget crosses recovery
+//     thresholds instead of spreading beneath them;
+//   - indices under no known layout (zero coding held: zero leverage) are
+//     requested in full, ascending — the old linear behavior, which is also
+//     the cold pre-join regime where every data shred must be fetched.
+//
+// A known layout also proves data extends through the span's end, so the
+// scan reaches past the highest RECEIVED index when a partially-heard set
+// promises more — without that, the tail waits on a HighestWindowIndex
+// round trip to be discovered.
+func (s *slotState) missingDataForRepair(maxObserved uint32, maxMissing int) []uint32 {
+	spans := make([]codedSpan, 0, len(s.fecSets))
+	for _, fec := range s.fecSets {
+		if !fec.haveLayout || fec.layout.dataShreds == 0 {
+			continue
+		}
+		spans = append(spans, codedSpan{
+			start:   fec.fecSetIndex,
+			end:     fec.fecSetIndex + uint32(fec.layout.dataShreds),
+			deficit: int(fec.layout.dataShreds) - len(fec.data) - len(fec.coding),
+		})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+
 	missingThrough := maxObserved
 	if s.haveLast {
 		missingThrough = s.lastIndex
+	} else {
+		for _, span := range spans {
+			if span.end-1 > missingThrough {
+				missingThrough = span.end - 1
+			}
+		}
 	}
-	for index := uint32(0); index <= missingThrough && len(req.MissingDataShreds) < maxMissing; index++ {
+	if missingThrough > maxDataShredsPerSlot-1 {
+		missingThrough = maxDataShredsPerSlot - 1
+	}
+
+	var uncovered []uint32
+	spanIdx := 0
+	for index := uint32(0); index <= missingThrough; index++ {
 		if s.shreds[index] == nil {
-			req.MissingDataShreds = append(req.MissingDataShreds, index)
+			for spanIdx < len(spans) && spans[spanIdx].end <= index {
+				spanIdx++
+			}
+			if spanIdx < len(spans) && spans[spanIdx].start <= index {
+				spans[spanIdx].missing = append(spans[spanIdx].missing, index)
+			} else {
+				uncovered = append(uncovered, index)
+			}
 		}
 		if index == maxDataShredsPerSlot-1 {
 			break
 		}
 	}
 
-	if len(req.MissingDataShreds) == 0 && !req.NeedHighestDataShred {
-		return SlotRepairRequest{}, false
+	order := make([]int, 0, len(spans))
+	for i := range spans {
+		if len(spans[i].missing) > 0 {
+			order = append(order, i)
+		}
 	}
-	return req, true
+	sort.Slice(order, func(a, b int) bool {
+		na, nb := spans[order[a]].requestsToUnlock(), spans[order[b]].requestsToUnlock()
+		if na != nb {
+			return na < nb
+		}
+		return spans[order[a]].start < spans[order[b]].start
+	})
+
+	missing := make([]uint32, 0, min(maxMissing, 64))
+	for _, i := range order {
+		span := spans[i]
+		for _, index := range span.missing[:span.requestsToUnlock()] {
+			if len(missing) >= maxMissing {
+				return missing
+			}
+			missing = append(missing, index)
+		}
+	}
+	for _, index := range uncovered {
+		if len(missing) >= maxMissing {
+			return missing
+		}
+		missing = append(missing, index)
+	}
+	return missing
 }
 
 func (s *slotState) addCodingShred(shred *Shred) error {
