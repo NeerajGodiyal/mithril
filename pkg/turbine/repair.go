@@ -161,8 +161,8 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	if len(peers) == 0 {
 		return
 	}
-	requests := assembler.RepairRequests(repairMaxSlotsPerScan, repairMaxMissingPerSlot)
-	if len(requests) == 0 {
+	priority, edge := assembler.RepairRequestsTiered(repairMaxSlotsPerScan, repairMaxMissingPerSlot)
+	if len(priority)+len(edge) == 0 {
 		return
 	}
 
@@ -176,36 +176,52 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	if budget <= 0 {
 		return
 	}
+
+	// Freshness split: most of the budget unblocks replay (the priority head
+	// window), but a reserved slice patches LIVE-EDGE holes while peers still
+	// serve those shreds hot — a hole repaired at receipt costs one cheap
+	// round trip; the same hole discovered at hydration time, minutes later,
+	// competes with the head for budget against colder peers. Leftover head
+	// budget flows to the edge.
+	edgeReserve := budget / 5
+	headBudget := budget - edgeReserve
+	spent := c.sendTier(conn, peers, priority, headBudget, true)
+	edgeBudget := budget - spent
+	c.sendTier(conn, peers, edge, edgeBudget, false)
+}
+
+// sendTier sends one tier's requests within budget and returns how many
+// were actually sent. fanoutHead gives the FIRST request (the
+// emission-gating head) bounded 2-peer redundancy.
+func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, fanoutHead bool) int {
+	sent := 0
 	for reqIdx, req := range requests {
-		// The FIRST request is the emission-gating head (priority order puts
-		// it first): its shreds get bounded 2-peer redundancy so one silent
-		// pick cannot cost the whole pipeline a request-timeout of latency.
-		// Everything else stays single-flight.
 		fanout := uint8(1)
-		if reqIdx == 0 {
+		if fanoutHead && reqIdx == 0 {
 			fanout = 2
 		}
 		for _, index := range req.MissingDataShreds {
 			for attempt := uint8(0); attempt < fanout; attempt++ {
-				if budget <= 0 {
-					return
+				if sent >= budget {
+					return sent
 				}
 				if c.sendRequest(conn, peers, repairRequestWindowIndex, req.Slot, index, attempt) {
-					budget--
+					sent++
 				}
 			}
 		}
 		if req.NeedHighestDataShred {
 			for attempt := uint8(0); attempt < fanout; attempt++ {
-				if budget <= 0 {
-					return
+				if sent >= budget {
+					return sent
 				}
 				if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, req.Slot, req.HighestDataShredIndex, attempt) {
-					budget--
+					sent++
 				}
 			}
 		}
 	}
+	return sent
 }
 
 func (c *repairClient) handleRepairPing(conn *net.UDPConn, packet []byte, from *net.UDPAddr) bool {

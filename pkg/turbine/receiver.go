@@ -158,6 +158,15 @@ func (r *UDPReceiver) SetHydrationWindow(lo, hi uint64) {
 	if r.spool != nil && lo > 8 {
 		r.spool.SetFloor(lo - 8)
 	}
+	// Keep the freshness-repair scan aligned with the RAM policy: with the
+	// window ON, only the last spoolLiveAssemblyLag slots assemble in RAM,
+	// so scanning further back would emit repair requests whose responses
+	// cannot assemble. Window OFF restores the full near-tip scan.
+	if hi != 0 {
+		r.assembler.SetEdgeRepairLag(spoolLiveAssemblyLag)
+	} else {
+		r.assembler.SetEdgeRepairLag(0)
+	}
 	select {
 	case r.hydrateKick <- struct{}{}:
 	default:

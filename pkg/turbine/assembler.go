@@ -41,6 +41,7 @@ type SlotAssembler struct {
 	encoders             map[fecLayout]reedsolomon.Encoder
 	partialShredObs      map[uint64]PartialShredObservation // shreds seen for slots that never became full (retained for skip observability)
 	retentionFloor       uint64                             // when non-zero, slots >= floor are never "too old" (repair catchup holds a window far behind the live edge)
+	edgeScanLag          uint64                             // how far behind the shred edge the freshness-repair scan reaches (0 = repairScanSlotWindow)
 	maxObservedSlot      uint64
 	highestFullSlot      uint64 // monotonic: highest slot reconstructed from shreds ("full", Agave SlotMeta/is_full sense)
 	recoveredDataShreds  uint64
@@ -334,6 +335,17 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 	}
 	a.slots[slot] = state
 	return state
+}
+
+// SetEdgeRepairLag bounds the freshness-repair scan to slots within lag of
+// the shred edge. The spool's RAM policy only assembles the last
+// spoolLiveAssemblyLag slots in memory — scanning further back would emit
+// repair requests whose responses cannot assemble (they spool to disk and
+// the request repeats forever).
+func (a *SlotAssembler) SetEdgeRepairLag(lag uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.edgeScanLag = lag
 }
 
 // SetRetentionFloor pins the assembler's age cutoff: while floor is non-zero,
@@ -714,9 +726,14 @@ func (a *SlotAssembler) NonCanonicalBlockIDStats() (count uint64, slot uint64, g
 	return a.nonCanonicalBlockIDs, a.lastNonCanonicalSlot, a.lastNonCanonicalGot, a.lastNonCanonicalWant
 }
 
-func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []SlotRepairRequest {
+// RepairRequestsTiered returns two request tiers: PRIORITY (catchup window
+// and live-gap pins — what unblocks replay) and EDGE (freshness scan just
+// behind the shred edge — holes are dramatically cheaper to patch while
+// peers still hold those shreds hot than at hydration time minutes later).
+// The caller allocates budget between them; scarce tokens go priority-first.
+func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int) (priority, edge []SlotRepairRequest) {
 	if maxSlots <= 0 {
-		return nil
+		return nil, nil
 	}
 	if maxMissingPerSlot <= 0 {
 		maxMissingPerSlot = 1
@@ -726,12 +743,16 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 	defer a.mu.Unlock()
 
 	if a.maxObservedSlot <= repairObservedSlotLag {
-		return nil
+		return nil, nil
 	}
 	repairThrough := a.maxObservedSlot - repairObservedSlotLag
+	scanLag := a.edgeScanLag
+	if scanLag == 0 {
+		scanLag = repairScanSlotWindow
+	}
 	start := uint64(0)
-	if repairThrough > repairScanSlotWindow {
-		start = repairThrough - repairScanSlotWindow
+	if repairThrough > scanLag {
+		start = repairThrough - scanLag
 	}
 	if a.maxObservedSlot > maxRetainedIncompleteSlotLag {
 		minRetained := a.maxObservedSlot - maxRetainedIncompleteSlotLag
@@ -740,57 +761,58 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 		}
 	}
 
-	requests := make([]SlotRepairRequest, 0, maxSlots)
 	seen := make(map[uint64]struct{}, maxSlots)
-	appendRequest := func(slot uint64) {
-		if len(requests) >= maxSlots {
-			return
+	appendRequest := func(dst []SlotRepairRequest, slot uint64) []SlotRepairRequest {
+		if len(dst) >= maxSlots {
+			return dst
 		}
 		if _, alreadySeen := seen[slot]; alreadySeen {
-			return
+			return dst
 		}
 		if _, completed := a.completedSlots[slot]; completed {
-			return
+			return dst
 		}
 		if a.slotTooOldLocked(slot) || slot > repairThrough {
-			return
+			return dst
 		}
 		state := a.slots[slot]
 		if state == nil {
-			requests = append(requests, SlotRepairRequest{
+			seen[slot] = struct{}{}
+			return append(dst, SlotRepairRequest{
 				Slot:                  slot,
 				NeedHighestDataShred:  true,
 				HighestDataShredIndex: 0,
 			})
-			seen[slot] = struct{}{}
-			return
 		}
 		if req, ok := state.repairRequest(maxMissingPerSlot); ok {
-			requests = append(requests, req)
 			seen[slot] = struct{}{}
+			return append(dst, req)
 		}
+		return dst
 	}
 
 	a.prunePriorityRepairSlotsLocked()
 	for _, slot := range a.priorityRepairOrder {
-		appendRequest(slot)
-		if len(requests) >= maxSlots {
-			return requests
+		priority = appendRequest(priority, slot)
+		if len(priority) >= maxSlots {
+			break
 		}
 	}
-	// While ANY priority slots exist (catchup window, live-gap pins), the
-	// whole request budget belongs to them: the near-edge scan below would
-	// spend round-trips fetching shreds that live broadcast plus FEC
-	// recovery deliver for free within a second or two. The scan serves the
-	// un-prioritized case only (steady near-tip operation).
-	if len(a.priorityRepairOrder) > 0 {
-		return requests
+	for slot := start; slot <= repairThrough && len(edge) < maxSlots; slot++ {
+		edge = appendRequest(edge, slot)
 	}
+	return priority, edge
+}
 
-	for slot := start; slot <= repairThrough && len(requests) < maxSlots; slot++ {
-		appendRequest(slot)
+// RepairRequests preserves the flat view (priority first) for callers that
+// do not budget tiers.
+func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []SlotRepairRequest {
+	priority, edge := a.RepairRequestsTiered(maxSlots, maxMissingPerSlot)
+	out := append(priority, edge...)
+	if len(out) > maxSlots {
+		out = out[:maxSlots]
 	}
-	return requests
+	return out
 }
 
 func (a *SlotAssembler) recoverFEC(state *slotState, fecSetIndex uint32) ([]*Shred, error) {
