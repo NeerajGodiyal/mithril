@@ -211,7 +211,7 @@ rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Us
 # "rpc" is catch-up/debug only. "lightbringer" uses the sidecar.
 source = "turbine"
 turbine_bind_addr = "0.0.0.0:8001"    # REQUIRED for turbine: the shred receive port (open inbound UDP)
-rpc_fallback = false                  # false (default): shreds via turbine + repair are the ONLY block path; RPC never fetches blocks (it still serves tip polling + the trailing verifier). true: RPC may catch up when replay is more than repair_catchup_max_gap_slots behind.
+rpc_fallback = false                  # false (default): with source="turbine", shreds via turbine + repair are the ONLY block path; RPC never fetches blocks (it still serves tip polling + the trailing verifier). true: RPC may catch up when replay is more than repair_catchup_max_gap_slots behind. Ignored for source="rpc"/"lightbringer" (they need RPC catchup).
 repair_catchup_max_gap_slots = 8192   # Gaps within this fill via turbine repair, which then OWNS catchup (no timer fallback to RPC). Only meaningful with rpc_fallback = true; ignored in shreds-only mode.
 # lightbringer_endpoint = "localhost:9000"
 # --- Fetch tuning (RPC catchup) ---

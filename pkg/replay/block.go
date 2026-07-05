@@ -1359,13 +1359,19 @@ func ReplayBlocks(
 	// the first block can only arrive AS verified shreds. Build the current
 	// epoch's schedule from the just-loaded epoch stakes NOW — deferring it
 	// to first-block configuration (the historical order) deadlocks:
-	// schedule ← first block ← verified shreds ← schedule.
-	if global.ManageLeaderSchedule() && !global.HasLeaderSchedule() {
-		if _, err := PrepareLeaderScheduleLocal(currentEpoch, epochSchedule, ""); err != nil {
-			result.Error = fmt.Errorf("building leader schedule for epoch %d before block-source start: %w", currentEpoch, err)
-			return result
+	// schedule ← first block ← verified shreds ← schedule. The guard is
+	// "can the installed schedule answer for the resume slot", not merely
+	// "does one exist" — same-process re-entry (recovery loop) can leave a
+	// prior epoch's schedule installed, which would reject every shred just
+	// as thoroughly as none at all.
+	if global.ManageLeaderSchedule() {
+		if _, ok := global.LeaderForSlot(startSlot); !ok {
+			if _, err := PrepareLeaderScheduleLocal(currentEpoch, epochSchedule, ""); err != nil {
+				result.Error = fmt.Errorf("building leader schedule for epoch %d before block-source start: %w", currentEpoch, err)
+				return result
+			}
+			mlog.Log.Infof("leader schedule ready for epoch %d (built before block-source start; turbine shred verification is live)", currentEpoch)
 		}
-		mlog.Log.Infof("leader schedule ready for epoch %d (built before block-source start; turbine shred verification is live)", currentEpoch)
 	}
 
 	if err := initializeBlockHeight(rpcc, mithrilState, resumeState); err != nil {

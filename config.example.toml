@@ -217,8 +217,10 @@ name = "mithril"
     # threshold WAITS for turbine to wake rather than starting an RPC catchup.
     # 0 disables repair catchup.
     # NOTE: this threshold only matters with rpc_fallback = true below. The
-    # default is shreds-only (rpc_fallback = false): RPC never fetches blocks
-    # at any distance, and this threshold is ignored.
+    # default is shreds-only (rpc_fallback = false): with source = "turbine",
+    # RPC never fetches blocks at any distance, and this threshold is ignored.
+    # rpc_fallback only applies to the native turbine source — "rpc" and
+    # "lightbringer" sources need RPC catchup and ignore it.
     # rpc_fallback = false
     # Peers serve repair from their blockstores (no protocol age limit;
     # retention is typically hours to days), so a generous window is safe.

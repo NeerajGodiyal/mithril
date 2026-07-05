@@ -130,6 +130,16 @@ func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
 		t.Fatalf("source=rpc must keep fetching blocks regardless of rpc_fallback")
 	}
 
+	// Lightbringer is a live shred stream WITHOUT repair machinery: it needs
+	// RPC for old/evicted shreds, so shreds-only mode must not gate it.
+	lb := NewBlockSource(&BlockSourceOpts{SourceType: BlockSourceLightbringer, LightbringerEndpoint: "localhost:1", StartSlot: 1_000, DisableRPCBlockFetch: true})
+	if !lb.rpcBlockFetchAllowed() {
+		t.Fatalf("source=lightbringer must keep RPC block fetch despite rpc_fallback=false")
+	}
+	if !lb.shouldUseRPCForSlot(2_000) {
+		t.Fatalf("source=lightbringer catchup slots must stay RPC-fetchable")
+	}
+
 	noThreshold := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceTurbine,
 		TurbineBindAddr:      "127.0.0.1:0",

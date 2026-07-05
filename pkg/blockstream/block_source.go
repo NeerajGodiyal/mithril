@@ -2002,21 +2002,25 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 }
 
 // rpcBlockFetchAllowed reports whether RPC may fetch BLOCKS at all. With
-// block.rpc_fallback=false (the shipped default) a live-shred source never
-// fetches blocks over RPC — turbine + repair are the only block path, no
-// matter how far behind replay is; RPC serves only tip polling and the
-// trailing verifier. Non-shred sources are their own block path, unaffected.
+// block.rpc_fallback=false (the shipped default) a NATIVE TURBINE source
+// never fetches blocks over RPC — turbine + repair are the only block path,
+// no matter how far behind replay is; RPC serves only tip polling and the
+// trailing verifier. Scoped to turbine because only turbine has the repair
+// machinery to fill gaps itself: the Lightbringer sidecar streams near-tip
+// only and NEEDS RPC for old/evicted shreds, and non-shred sources are their
+// own block path.
 func (bs *BlockSource) rpcBlockFetchAllowed() bool {
-	return bs.rpcFallbackEnabled || !bs.usesLiveShredStream()
+	return bs.rpcFallbackEnabled || bs.sourceType != BlockSourceTurbine
 }
 
 func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 	if !bs.usesLiveShredStream() {
 		return true
 	}
-	// Shreds-only mode: the single choke point — no slot is ever
-	// RPC-fetchable, so the scheduler idles and stray results are discarded.
-	if !bs.rpcFallbackEnabled {
+	// Shreds-only mode (native turbine only): the single choke point — no
+	// slot is ever RPC-fetchable, so the scheduler idles and stray results
+	// are discarded.
+	if !bs.rpcBlockFetchAllowed() {
 		return false
 	}
 	if bs.lightbringerForceRPCUntil.Load() != 0 {
