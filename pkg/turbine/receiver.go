@@ -117,6 +117,12 @@ func (r *UDPReceiver) SlotAssemblyErrors(slot uint64) (int, string) {
 	return r.assembler.SlotAssemblyErrors(slot)
 }
 
+// SlotCompleted reports whether the assembler holds a completed-slot marker —
+// a completed slot silently ignores all further shreds and repair requests.
+func (r *UDPReceiver) SlotCompleted(slot uint64) bool {
+	return r.assembler.SlotCompleted(slot)
+}
+
 // HeadShredDetail reports the completion picture for a slot still being
 // assembled (see SlotAssembler.HeadShredDetail).
 func (r *UDPReceiver) HeadShredDetail(slot uint64) (HeadShredDetail, bool) {

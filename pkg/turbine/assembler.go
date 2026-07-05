@@ -669,6 +669,17 @@ func (a *SlotAssembler) HeadShredDetail(slot uint64) (HeadShredDetail, bool) {
 	return d, true
 }
 
+// SlotCompleted reports whether the completed-slot marker is set. A marked
+// slot ignores all further shreds AND is skipped by repair-request
+// generation — correct after a block was truly emitted, catastrophic if the
+// marker is stale while the emitter still waits for the slot.
+func (a *SlotAssembler) SlotCompleted(slot uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.completedSlots[slot]
+	return ok
+}
+
 // SlotAssemblyErrors reports the failure count and latest failure text for a
 // slot's live assembly state (0/"" once the slot completes or is reset).
 func (a *SlotAssembler) SlotAssemblyErrors(slot uint64) (int, string) {

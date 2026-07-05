@@ -1566,20 +1566,59 @@ func (bs *BlockSource) bufferLightbringerBlock(blk *b.Block) {
 		return
 	}
 
+	var evicted []uint64
 	bs.lightbringerBufferMu.Lock()
-	defer bs.lightbringerBufferMu.Unlock()
-
 	if _, exists := bs.lightbringerBuffer[blk.Slot]; exists {
+		bs.lightbringerBufferMu.Unlock()
 		return
 	}
 
 	bs.lightbringerBuffer[blk.Slot] = blk
 	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, blk.Slot)
 
+	catchup := bs.repairCatchupActive()
 	for len(bs.lightbringerBufferOrder) > lightbringerBufferSlots {
-		oldest := bs.lightbringerBufferOrder[0]
-		bs.lightbringerBufferOrder = bs.lightbringerBufferOrder[1:]
-		delete(bs.lightbringerBuffer, oldest)
+		victimIdx := 0
+		if catchup {
+			// During catchup the staging buffer holds BOTH the repair-window
+			// blocks emission needs next AND live-edge prefetch streaming in
+			// at cluster pace. Insertion-order eviction flushes the WINDOW
+			// out under edge pressure — including the head block itself,
+			// deadlocking emission behind the assembler's completed-slot
+			// marker (observed: four consecutive catchups stuck at exactly
+			// the head slot). Evict the HIGHEST slot instead: the edge is
+			// cheap to re-fetch near tip; the window is what unblocks replay.
+			for i, slot := range bs.lightbringerBufferOrder {
+				if slot > bs.lightbringerBufferOrder[victimIdx] {
+					victimIdx = i
+				}
+			}
+		}
+		victim := bs.lightbringerBufferOrder[victimIdx]
+		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder[:victimIdx], bs.lightbringerBufferOrder[victimIdx+1:]...)
+		delete(bs.lightbringerBuffer, victim)
+		evicted = append(evicted, victim)
+	}
+	bs.lightbringerBufferMu.Unlock()
+
+	// An evicted staged block leaves a completed-slot marker in the
+	// assembler, which then silently ignores every future shred AND skips
+	// the slot in repair-request generation — the block becomes permanently
+	// unfetchable. Clear the marker so eviction means "re-fetch later",
+	// never "gone forever".
+	for _, slot := range evicted {
+		bs.resetTurbineSlotState(slot)
+	}
+}
+
+// resetTurbineSlotState clears the assembler's shred state AND completed-slot
+// marker for slot, making it repair-fetchable again.
+func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver != nil {
+		receiver.ResetSlot(slot)
 	}
 }
 
@@ -2660,13 +2699,13 @@ func (bs *BlockSource) sleepOrStop(ctx context.Context, d time.Duration) bool {
 func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver, from, edge uint64) bool {
 	ticker := time.NewTicker(repairCatchupPollInterval)
 	defer ticker.Stop()
-	statsAtArm := receiver.Stats().Repair
+	statsAtArm := receiver.Stats()
 	lastWaiting := uint64(0)
 	lastProgress := time.Now()
 	headShreds := -1 // distinct data shreds seen for the current head (-1 = none yet)
 	headResets := 0  // shred-state resets performed on the current head
 	sawWindowFill := false
-	lastResponses := statsAtArm.Responses
+	lastResponses := statsAtArm.Repair.Responses
 	var lastStallWarn time.Time
 	lastStatusLog := time.Now()
 
@@ -2731,6 +2770,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			repair := receiver.Stats().Repair
 			bs.deactivateRepairCatchup(receiver)
 			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
+			repairAtArm := statsAtArm.Repair
 			cooldown := repairCatchupReArmCooldown
 			note := ""
 			if !sawWindowFill {
@@ -2740,8 +2780,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			bs.repairCatchupCooldownUntil.Store(time.Now().Add(cooldown).Unix())
 			mlog.Log.Warnf("repair catchup: replay fell %d slots behind the live edge (block.repair_catchup_max_gap_slots=%d) — handing catchup to RPC%s | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) (repair re-arms once the gap is back under threshold, after %s)",
 				liveEdge-waiting, bs.repairCatchupMaxGapSlots, note,
-				repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-				repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers, cooldown)
+				repair.Requests-repairAtArm.Requests, repair.Responses-repairAtArm.Responses,
+				repair.Timeouts-repairAtArm.Timeouts, repair.Peers, repair.RespondingPeers, cooldown)
 			return false
 		}
 
@@ -2776,9 +2816,18 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 
 			// A stalled head stays on repair — loudly. The counters make the
 			// failure mode readable while the node keeps asking peers.
+			// A completed-slot marker on a head the emitter still waits for is
+			// inconsistent state: the assembler ignores every shred and repair
+			// skips the slot, so it can never resolve on its own. Clear it.
+			if receiver.SlotCompleted(waiting) {
+				receiver.ResetSlot(waiting)
+				mlog.Log.Warnf("repair catchup: head slot %d carried a stale completed-slot marker with no emitted block — cleared; repair re-fetches the slot", waiting)
+			}
+
 			if stalled >= repairCatchupStallWarnEvery && time.Since(lastStallWarn) >= repairCatchupStallWarnEvery {
 				lastStallWarn = time.Now()
-				repair := receiver.Stats().Repair
+				stats := receiver.Stats()
+				repair := stats.Repair
 				behind := uint64(0)
 				if liveEdge := bs.repairCatchupEdge(receiver); liveEdge > waiting {
 					behind = liveEdge - waiting
@@ -2795,11 +2844,15 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if stalled > 10*time.Minute {
 					hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or set block.rpc_fallback=true"
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d)%s",
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d%s",
 					waiting, stalled.Round(time.Second), rpcNote,
 					max(headShreds, 0), errCount, lastErr, headShredDetailString(receiver, waiting), windowBlocks,
-					repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-					repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers, hint)
+					repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
+					repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers,
+					stats.IgnoredOldShreds-statsAtArm.IgnoredOldShreds, stats.MissingLeaders-statsAtArm.MissingLeaders,
+					stats.SignatureErrors-statsAtArm.SignatureErrors, stats.ParseErrors-statsAtArm.ParseErrors,
+					stats.NonCanonicalBlockIDs-statsAtArm.NonCanonicalBlockIDs, stats.LastNonCanonicalSlot,
+					stats.EvictedSlots-statsAtArm.EvictedSlots, stats.ActiveSlots, hint)
 			}
 		}
 
@@ -2816,8 +2869,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			repair := receiver.Stats().Repair
 			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d)",
 				waiting, edge, windowBlocks,
-				repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-				repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers)
+				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
+				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers)
 		}
 	}
 }
