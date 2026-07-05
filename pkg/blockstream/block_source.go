@@ -1639,8 +1639,14 @@ func (bs *BlockSource) stagedLightbringerBlock(slot uint64) *b.Block {
 // slot 6176512, skipped on-chain, four-minute stall at "held 0").
 func (bs *BlockSource) applyCertifiedSkipToCatchupHead(slot uint64) bool {
 	bs.reorderMu.Lock()
-	already := bs.skippedSlots[slot] || bs.reorderBuffer[slot] != nil || slot != bs.nextSlotToSend
+	already := bs.skippedSlots[slot] || slot != bs.nextSlotToSend
 	if !already {
+		if bs.reorderBuffer[slot] != nil {
+			// A buffered candidate contradicted by a skip certificate is
+			// noncanonical — the certificate wins; drop the block so the
+			// synthetic skip can advance the emitter.
+			delete(bs.reorderBuffer, slot)
+		}
 		bs.alpenglowCertifiedSkips[slot] = true
 	}
 	bs.reorderMu.Unlock()
@@ -1825,21 +1831,24 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 	}
 
 	bs.lightbringerBufferMu.Lock()
-	defer bs.lightbringerBufferMu.Unlock()
 
 	runwayBlocks, coveredUntil, _, _, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
 	if !ok {
+		bs.lightbringerBufferMu.Unlock()
 		return nil, 0, false
 	}
 
 	requiredLastSlot := bs.lightbringerHandoffRequiredLastSlot(waitingSlot)
 	if coveredUntil < requiredLastSlot {
+		bs.lightbringerBufferMu.Unlock()
 		return nil, 0, false
 	}
 
 	handoffSlot := waitingSlot
 	if !bs.lightbringerHandoffSlot.CompareAndSwap(0, handoffSlot) {
-		return nil, bs.lightbringerHandoffSlot.Load(), false
+		current := bs.lightbringerHandoffSlot.Load()
+		bs.lightbringerBufferMu.Unlock()
+		return nil, current, false
 	}
 
 	bs.lightbringerNeedRPCResume.Store(false)
@@ -1849,8 +1858,8 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 
 	// Staged blocks NOT on the selected runway are dropped here — but their
 	// assembler completed-slot markers survive, which would make those slots
-	// silently unfetchable (shreds ignored, repair skips them). Reset their
-	// turbine state so post-handoff repair can fetch them again.
+	// silently unfetchable (shreds ignored, repair skips them). Collect them
+	// under the lock; reset after releasing it.
 	onRunway := make(map[uint64]bool, len(blocks))
 	for _, blk := range blocks {
 		onRunway[blk.Slot] = true
@@ -1864,14 +1873,10 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 
 	bs.lightbringerBuffer = make(map[uint64]*b.Block)
 	bs.lightbringerBufferOrder = nil
+	bs.lightbringerBufferMu.Unlock()
 
-	if len(dropped) > 0 {
-		// Reset outside the buffer lock is unnecessary (ResetSlot takes only
-		// the assembler mutex, a leaf lock), but keep the work after the
-		// buffer maps are already swapped for clarity.
-		for _, slot := range dropped {
-			bs.resetTurbineSlotState(slot)
-		}
+	for _, slot := range dropped {
+		bs.resetTurbineSlotState(slot)
 	}
 
 	return blocks, handoffSlot, true
@@ -2204,6 +2209,21 @@ func (bs *BlockSource) shouldDiscardLiveStreamResult(slot uint64, generation uin
 	}
 	if bs.isLightbringerRepairSlot(slot) {
 		return true
+	}
+	// Catchup stall rescue: the delivery exists precisely BECAUSE replay is
+	// far from the tip — it races the slow RPC fetch for the blocked head.
+	if bs.catchupRescueCovers(slot) {
+		return false
+	}
+	// Repair catchup delivers live-stream results far from the tip by
+	// design. The near-tip requirement below is the stale-result guard for
+	// ORDINARY live streaming only — applied during catchup it silently
+	// discarded every handoff delivery: the drained head "vanished", the
+	// assembler kept its completed marker, and the heal/re-fetch cycle spun
+	// forever (observed live at slot 6181681).
+	if bs.repairCatchupActive() {
+		handoffSlot := bs.lightbringerHandoffSlot.Load()
+		return handoffSlot == 0 || slot < handoffSlot
 	}
 	if !bs.isNearTip.Load() {
 		return true
@@ -2887,8 +2907,11 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			// poisoned (bad first shred pinning an FEC signature, variant, or
 			// layout). Drop the slot's shred state and re-repair it from
 			// scratch — bounded attempts so a genuinely unserved slot does
-			// not thrash.
-			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter {
+			// not thrash. A COMPLETED head is never reset here: it assembled
+			// fine and belongs to the staged/buffered/lost classification
+			// below — resetting it would destroy a block that merely has not
+			// emitted yet.
+			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter && !receiver.SlotCompleted(waiting) {
 				errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
 				if lastErr == "" {
 					lastErr = "none"
