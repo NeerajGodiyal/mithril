@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
@@ -154,46 +152,4 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	feePayerAcct.Lamports -= totalTxFee
 
 	return feeInfo, feePayerAcct.Lamports, nil
-}
-
-func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, leader solana.PublicKey, txFeeAccumulator *TxFeeInfoAccumulator) uint64 {
-	var feesToBurn uint64
-	var feesToLeader uint64
-
-	if slotCtx.Features.IsActive(features.RewardFullPriorityFee) {
-		halfFee := txFeeAccumulator.ExecutionFees / 2
-		feesToLeader = safemath.SaturatingAddU64(txFeeAccumulator.PriorityFees, txFeeAccumulator.ExecutionFees-halfFee)
-		feesToBurn = halfFee
-	} else {
-		feesToBurn = txFeeAccumulator.TotalFees / 2
-		feesToLeader = txFeeAccumulator.TotalFees - feesToBurn
-	}
-
-	var leaderAcct *accounts.Account
-	var err error
-
-	leaderAcct, err = slotCtx.GetAccount(leader)
-	if err != nil {
-		// if leader didn't appear at all in the block, then retrieve its latest state from
-		// accountsdb, and also add it to the parent accts object
-		leaderAcct, err = acctsDb.GetAccount(slotCtx.Slot, leader)
-		if err != nil {
-			panic(fmt.Sprintf("unable to get leader acct %s from both slotCtx and accountsdb", leader))
-		}
-		slotCtx.ParentAccts.SetAccountWithoutLock(leader, leaderAcct.Clone())
-	}
-
-	leaderAcct.Lamports, err = safemath.CheckedAddU64(leaderAcct.Lamports, feesToLeader)
-	if err != nil {
-		panic("overflow when adding reward to slot leader balance")
-	}
-
-	err = slotCtx.SetAccount(leader, leaderAcct)
-	if err != nil {
-		panic(fmt.Sprintf("failed to SetAccount for leader acct %s when distributing tx fees", leader))
-	}
-
-	//mlog.Log.Debugf("calculated fees for leader: %d, post-balance: %d (%s)", feesToLeader, leaderAcct.Lamports, leader)
-
-	return feesToBurn
 }

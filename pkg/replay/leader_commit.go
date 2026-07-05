@@ -60,8 +60,11 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	}
 
 	if len(block.Transactions) > 0 {
-		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(in.AcctsDb, slotCtx, block.Leader, &in.TxFeeAccumulator)
-		slotCtx.RecordModifiedAcct(block.Leader)
+		feeDist := fees.DistributeTxFeesToSlotLeader(in.AcctsDb, slotCtx, block.Leader, &in.TxFeeAccumulator)
+		slotCtx.LamportsBurnt = feeDist.LamportsBurnt
+		if !feeDist.FeeCollector.IsZero() {
+			slotCtx.RecordModifiedAcct(feeDist.FeeCollector)
+		}
 	}
 
 	rentSysvar := sealevel.SysvarCache.Rent.Sysvar

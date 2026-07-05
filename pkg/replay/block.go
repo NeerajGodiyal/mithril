@@ -1589,6 +1589,18 @@ func ReplayBlocks(
 	}
 	go blockStream.Start()
 
+	// TODO(cavey-debug): remove block-source lag registration once we are done debugging.
+	// cavey TODO: remove once we are done debugging.
+	global.SetBlockSourceLagSnapshot(func() global.BlockSourceLagSnapshot {
+		return blockStream.LagSnapshotForGlobal()
+	})
+	defer global.ClearBlockSourceLagSnapshot()
+
+	var lagTracker *replayLagTracker // cavey TODO: remove once we are done debugging.
+	if blockFetchOpts != nil && len(blockFetchOpts.GossipIdentity) > 0 {
+		lagTracker = newReplayLagTracker(solana.PrivateKey(blockFetchOpts.GossipIdentity).PublicKey())
+	}
+
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
 
@@ -1895,6 +1907,9 @@ func ReplayBlocks(
 			// A resolved skip still advances replay progress for near-tip mode and
 			// consensus-managed Lightbringer delivery.
 			blockStream.SetLastExecutedSlot(block.Slot)
+			if lagTracker != nil { // cavey TODO: remove once we are done debugging.
+				lagTracker.maybeLogSlotLag(block.Slot, true)
+			}
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -2201,6 +2216,9 @@ func ReplayBlocks(
 
 		// Track last executed slot for accurate tip distance calculation and mode switching
 		blockStream.SetLastExecutedSlot(block.Slot)
+		if lagTracker != nil { // cavey TODO: remove once we are done debugging.
+			lagTracker.maybeLogSlotLag(block.Slot, false)
+		}
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
@@ -2981,11 +2999,17 @@ func ProcessBlock(
 	// distribute tx fees to the slot leader
 	// skip leader handling if there are zero transactions in this block
 	if !global.ManageLeaderSchedule() && block.BlockReward != nil && len(block.Transactions) > 0 {
-		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
-		slotCtx.RecordModifiedAcct(block.BlockReward.Leader)
+		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
+		slotCtx.LamportsBurnt = feeDist.LamportsBurnt
+		if !feeDist.FeeCollector.IsZero() {
+			slotCtx.RecordModifiedAcct(feeDist.FeeCollector)
+		}
 	} else if global.ManageLeaderSchedule() && len(block.Transactions) > 0 {
-		slotCtx.LamportsBurnt = fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
-		slotCtx.RecordModifiedAcct(block.Leader)
+		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
+		slotCtx.LamportsBurnt = feeDist.LamportsBurnt
+		if !feeDist.FeeCollector.IsZero() {
+			slotCtx.RecordModifiedAcct(feeDist.FeeCollector)
+		}
 	}
 	metrics.GlobalBlockReplay.Reward.AddTimingSince(start)
 
@@ -3023,7 +3047,11 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
 	if alpenglowClock {
+		if block.HasExpectedBankhash {
+			logReplayDiagCompare(slotCtx, block, epochSchedule) // cavey TODO: remove once we are done debugging.
+		}
 		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
+			logFooterBankhashMismatchDiag(slotCtx, block, modifiedAccts, len(writableAccts)) // cavey TODO: remove once we are done debugging.
 			return nil, err
 		}
 	}
