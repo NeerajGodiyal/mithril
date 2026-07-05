@@ -66,6 +66,12 @@ const (
 	repairScoreFullLatency = 300 * time.Millisecond
 	repairRankedMinPeers   = 8
 	repairRankedRebuildTTL = 500 * time.Millisecond
+	// Head fanout engages only in the ENDGAME: with a big hole, doubling
+	// every head request halves distinct-shred throughput on the exact
+	// tokens that gate emission (bulk fill is rate-bound, not tail-latency
+	// bound). Once the head is within this many missing shreds of
+	// completion, one slow peer IS the completion time — redundancy pays.
+	repairHeadFanoutMaxMissing = 32
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
@@ -281,8 +287,17 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	c.returnRateTokens(budget - spent)
 }
 
+// headFanout reports the redundancy for a tier's first (emission-gating)
+// request: 2-peer fanout in the endgame, single-flight during bulk fill.
+func headFanout(req SlotRepairRequest) uint8 {
+	if len(req.MissingDataShreds) <= repairHeadFanoutMaxMissing {
+		return 2
+	}
+	return 1
+}
+
 // tierSendDemand counts the packets sendTier would emit for a tier given
-// unlimited budget (head fanout doubles the first request's sends).
+// unlimited budget (endgame head fanout doubles the first request's sends).
 func tierSendDemand(requests []SlotRepairRequest, fanoutHead bool) int {
 	demand := 0
 	for reqIdx, req := range requests {
@@ -291,7 +306,7 @@ func tierSendDemand(requests []SlotRepairRequest, fanoutHead bool) int {
 			per++
 		}
 		if fanoutHead && reqIdx == 0 {
-			per *= 2
+			per *= int(headFanout(req))
 		}
 		demand += per
 	}
@@ -310,13 +325,14 @@ func splitRepairBudget(budget, edgeDemand int) int {
 
 // sendTier sends one tier's requests within budget and returns how many
 // were actually sent. fanoutHead gives the FIRST request (the
-// emission-gating head) bounded 2-peer redundancy.
+// emission-gating head) bounded 2-peer redundancy — but only in the
+// endgame (see repairHeadFanoutMaxMissing).
 func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, fanoutHead bool) int {
 	sent := 0
 	for reqIdx, req := range requests {
 		fanout := uint8(1)
 		if fanoutHead && reqIdx == 0 {
-			fanout = 2
+			fanout = headFanout(req)
 		}
 		for _, index := range req.MissingDataShreds {
 			for attempt := uint8(0); attempt < fanout; attempt++ {

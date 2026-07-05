@@ -187,9 +187,24 @@ func TestTierSendDemand(t *testing.T) {
 		{Slot: 2, MissingDataShreds: []uint32{0}},
 	}
 	if got := tierSendDemand(requests, true); got != 7 {
-		t.Fatalf("head demand = %d, want 7 (first request's 3 sends doubled by fanout, plus 1)", got)
+		t.Fatalf("head demand = %d, want 7 (first request's 3 sends doubled by endgame fanout, plus 1)", got)
 	}
 	if got := tierSendDemand(requests, false); got != 4 {
 		t.Fatalf("edge demand = %d, want 4", got)
+	}
+
+	// Bulk fill: a head missing more than the endgame threshold gets NO
+	// fanout — doubling every request would halve distinct-shred throughput
+	// on the exact tokens that gate emission.
+	bulk := []SlotRepairRequest{{Slot: 3, MissingDataShreds: seq(0, uint32(repairHeadFanoutMaxMissing))}}
+	if headFanout(bulk[0]) != 1 {
+		t.Fatal("bulk head must be single-flight")
+	}
+	if got := tierSendDemand(bulk, true); got != repairHeadFanoutMaxMissing+1 {
+		t.Fatalf("bulk head demand = %d, want %d (single-flight)", got, repairHeadFanoutMaxMissing+1)
+	}
+	endgame := SlotRepairRequest{Slot: 4, MissingDataShreds: seq(0, uint32(repairHeadFanoutMaxMissing-1))}
+	if headFanout(endgame) != 2 {
+		t.Fatal("endgame head must fan out to 2 peers")
 	}
 }

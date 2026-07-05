@@ -915,12 +915,20 @@ func (bs *BlockSource) serviceAlpenglowWantedBlocks(nudged map[uint64]time.Time,
 }
 
 func (bs *BlockSource) attachAlpenglowBlockIDHintsToReceiver(receiver *turbine.UDPReceiver) {
-	if !bs.turbineAlpenglowBlockIDHints || receiver == nil {
+	if receiver == nil {
 		return
 	}
-
+	// The active-receiver pointer must be set regardless of the hints flag:
+	// staging-eviction marker resets, repair prioritization, and the catchup
+	// diagnostics all reach the receiver through it, and with hints off they
+	// would silently no-op — an evicted staged block's completed marker
+	// would then make its slot permanently unfetchable.
 	bs.alpenglowMu.Lock()
 	bs.activeTurbineReceiver = receiver
+	if !bs.turbineAlpenglowBlockIDHints {
+		bs.alpenglowMu.Unlock()
+		return
+	}
 	known := make([]struct {
 		slot    uint64
 		blockID solana.Hash
@@ -1026,7 +1034,19 @@ func (bs *BlockSource) updateMode() {
 			bs.isNearTip.Store(false)
 			mlog.Log.Infof("MODE SWITCH: near-tip → CATCHUP | gap=%d (threshold=%d) | exec_slot=%d | tip=%d",
 				gap, bs.catchupThreshold, lastExecuted, tip)
-			bs.forceRPCForCatchup(gap)
+			if bs.rpcBlockFetchAllowed() {
+				bs.forceRPCForCatchup(gap)
+			} else {
+				// Shreds-only: there is nothing to force — the live stream
+				// and its staged/buffered blocks ARE the recovery path, and
+				// tearing them down here (the RPC handover's job) would close
+				// every intake gate with no fetcher behind them, wedging the
+				// node until the stall watchdog kills it. Reopen the catchup
+				// intake gates now; the resident repair monitor re-arms the
+				// drive on its next tick.
+				bs.repairCatchupPending.Store(true)
+				mlog.Log.Infof("repair catchup: replay fell %d slots behind the tip — re-arming turbine repair over the gap (shreds-only; live stream kept)", gap)
+			}
 		}
 	} else {
 		// Currently in catchup mode - switch to near-tip if gap is small
@@ -2861,7 +2881,20 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair", from, edge, gap)
 
 		if done := bs.driveRepairCatchup(ctx, receiver, from, edge); done {
-			return // near-tip machinery owns the stream from here
+			if bs.rpcFallbackEnabled {
+				return // near-tip machinery owns the stream; RPC covers any regression
+			}
+			// Shreds-only: STAY RESIDENT. If replay later falls behind again
+			// (a monster-block streak, a promotion pause), this monitor is
+			// the only catchup that exists — updateMode reopens the intake
+			// gates and the next tick here re-arms the drive from the live
+			// emission frontier. While near-tip holds, the loop idles at
+			// poll cadence via the eligibility check. The completed handoff
+			// is cleared so re-arming eligibility is not blocked by a stale
+			// boot-time marker.
+			bs.lightbringerHandoffSlot.Store(0)
+			bs.repairCatchupPending.Store(false)
+			continue
 		}
 		// Stalled and fell back to RPC: loop back to monitoring (cooldown
 		// gates the next arming).
