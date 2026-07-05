@@ -32,7 +32,7 @@ func TestNextPeerPrefersRecentResponders(t *testing.T) {
 	if !ok {
 		t.Fatalf("premise: responder addr key")
 	}
-	client.perPeer[key] = &peerRecord{matched: 1, lastMatched: time.Now()}
+	client.perPeer[key] = &peerRecord{timely: 1, lastMatched: time.Now()}
 
 	hits := 0
 	const picks = 400
@@ -58,8 +58,10 @@ func TestNextPeerPrefersRecentResponders(t *testing.T) {
 	}
 
 	// A stale responder record (outside the window) drops back to blind
-	// round-robin: no concentration.
+	// round-robin: no concentration. Invalidate the ranked cache — live code
+	// rebuilds it within repairRankedRebuildTTL anyway.
 	client.perPeer[key].lastMatched = time.Now().Add(-2 * repairResponderWindow)
+	client.rankedAt = time.Time{}
 	stale := 0
 	client.mu.Lock()
 	for i := 0; i < picks; i++ {
@@ -71,5 +73,82 @@ func TestNextPeerPrefersRecentResponders(t *testing.T) {
 	client.mu.Unlock()
 	if stale > picks/4 {
 		t.Fatalf("stale responder still concentrated: %d/%d", stale, picks)
+	}
+}
+
+// Outcome scoring: timely low-latency answers raise a peer's score, late
+// answers raise it less, timeouts decay it toward zero — the signal behind
+// quality-ranked selection.
+func TestPeerScoreTracksOutcomes(t *testing.T) {
+	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	addr := repairAddressKey{port: 9000}
+
+	client.mu.Lock()
+	for i := 0; i < 20; i++ {
+		client.notePeerTimelyLocked(addr, 100*time.Millisecond)
+	}
+	fast := client.perPeer[addr].score
+	for i := 0; i < 20; i++ {
+		client.notePeerLateLocked(addr, 3*time.Second)
+	}
+	lateScore := client.perPeer[addr].score
+	for i := 0; i < 40; i++ {
+		client.notePeerTimeoutLocked(addr)
+	}
+	dead := client.perPeer[addr].score
+	client.mu.Unlock()
+
+	if fast < 0.8 {
+		t.Fatalf("fast responder score = %.2f, want near 1", fast)
+	}
+	if lateScore >= fast || lateScore < 0.2 {
+		t.Fatalf("late-heavy score = %.2f, want between timeout-dead and timely (%.2f)", lateScore, fast)
+	}
+	if dead > 0.1 {
+		t.Fatalf("timeout-only score = %.2f, want decayed toward 0", dead)
+	}
+	rec := client.perPeer[addr]
+	if rec.timely != 20 || rec.late != 20 || rec.timeouts != 40 {
+		t.Fatalf("counters = timely %d late %d timeouts %d, want 20/20/40", rec.timely, rec.late, rec.timeouts)
+	}
+}
+
+// Ranking narrows the responder set to the higher-scoring half (with a
+// floor so selection never overfits to a handful of peers): with 12
+// responders the 4 lowest-scoring are excluded, the floor of 8 kept.
+func TestRankedRespondersPreferHighScores(t *testing.T) {
+	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	peers := make([]gossip.RepairPeer, 0, 12)
+	for i := byte(1); i <= 12; i++ {
+		peer := repairTestPeer(i, 9000+int(i))
+		peers = append(peers, peer)
+		key, _ := repairAddressKeyFromUDP(peer.Addr)
+		client.perPeer[key] = &peerRecord{
+			score:       1.0 - 0.05*float64(i),
+			lastMatched: time.Now(),
+		}
+	}
+
+	client.mu.Lock()
+	client.rebuildRankedLocked(peers, time.Now())
+	ranked := append([]gossip.RepairPeer(nil), client.ranked...)
+	client.mu.Unlock()
+
+	if len(ranked) != repairRankedMinPeers {
+		t.Fatalf("ranked size = %d, want the floor %d", len(ranked), repairRankedMinPeers)
+	}
+	inRanked := make(map[string]bool, len(ranked))
+	for _, p := range ranked {
+		inRanked[p.Addr.String()] = true
+	}
+	for i := 0; i < 8; i++ {
+		if !inRanked[peers[i].Addr.String()] {
+			t.Fatalf("high-scoring peer %d missing from ranked set", i+1)
+		}
+	}
+	for i := 8; i < 12; i++ {
+		if inRanked[peers[i].Addr.String()] {
+			t.Fatalf("low-scoring peer %d should be excluded from ranked set", i+1)
+		}
 	}
 }

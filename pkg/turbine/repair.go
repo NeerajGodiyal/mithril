@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +53,19 @@ const (
 	// live: 95% timeouts during a resume-gap catchup).
 	repairResponderWindow = 60 * time.Second
 	repairPeerStatsCap    = 1024
+	// Per-peer quality score: an EWMA over request outcomes in [0,1]. A
+	// timely answer at/below repairScoreFullLatency earns 1.0 (linearly
+	// less when slower), a late answer earns repairScoreLateReward (it DID
+	// serve, slower than the timeout), a timeout earns 0 — so the score
+	// decays naturally as a peer stops answering. Selection concentrates on
+	// the higher-scoring half of the responder set while the 1-in-4
+	// full-set round-robin keeps exploring; the floor stops overfitting to
+	// a handful of peers.
+	repairScoreAlpha       = 0.1
+	repairScoreLateReward  = 0.3
+	repairScoreFullLatency = 300 * time.Millisecond
+	repairRankedMinPeers   = 8
+	repairRankedRebuildTTL = 500 * time.Millisecond
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
@@ -113,8 +128,24 @@ type outstandingRepairRequest struct {
 
 type peerRecord struct {
 	sent        uint64
-	matched     uint64
+	timely      uint64 // responses matched within the timeout
+	late        uint64 // responses matched from the expired-request memory
+	timeouts    uint64
+	latEWMASec  float64 // smoothed response latency, timely + late
+	score       float64 // rolling quality in [0,1]; see notePeerOutcomeLocked
 	lastMatched time.Time
+}
+
+// RepairPeerReport is one peer's service record, for file-log peer tables.
+type RepairPeerReport struct {
+	Addr              string
+	Sent              uint64
+	Timely            uint64
+	Late              uint64
+	Timeouts          uint64
+	AvgResponseMillis int64
+	Score             float64
+	SecondsSinceHeard int64 // -1: never answered
 }
 
 type repairClient struct {
@@ -126,6 +157,10 @@ type repairClient struct {
 	byResponse  map[repairResponseKey]repairRequestKey
 	perPeer     map[repairAddressKey]*peerRecord
 	peerCursor  uint64
+
+	// Quality-ranked responder cache (mu-guarded); see pickResponderLocked.
+	ranked   []gossip.RepairPeer
+	rankedAt time.Time
 
 	peerCacheMu sync.Mutex
 	peerCache   []gossip.RepairPeer
@@ -358,8 +393,13 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 		c.mu.Unlock()
 		return false
 	}
-	c.notePeerMatchedLocked(addrKey)
-	c.observeLatencyLocked(time.Since(outstanding.sentAt))
+	latency := time.Since(outstanding.sentAt)
+	if late {
+		c.notePeerLateLocked(addrKey, latency)
+	} else {
+		c.notePeerTimelyLocked(addrKey, latency)
+	}
+	c.observeLatencyLocked(latency)
 	c.mu.Unlock()
 
 	if outstanding.key.slot != shred.Slot {
@@ -604,13 +644,31 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	return gossip.RepairPeer{}, false
 }
 
-// pickResponderLocked round-robins among peers that answered a repair request
-// within repairResponderWindow. ok is false when no responder is known yet
-// (fresh start, or the whole set went quiet) — the caller falls back to the
-// full round-robin.
+// pickResponderLocked round-robins among the QUALITY-RANKED responder set:
+// peers that answered within repairResponderWindow, narrowed to the
+// higher-scoring half (with a floor so selection never overfits to a
+// handful of peers). ok is false when no responder is known yet (fresh
+// start, or the whole set went quiet) — the caller falls back to the full
+// round-robin. The ranking is cached briefly: selection runs once per
+// request and must not rebuild-and-sort the set per call.
 func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cursor uint64) (gossip.RepairPeer, bool) {
 	now := time.Now()
-	responders := make([]gossip.RepairPeer, 0, 16)
+	if now.Sub(c.rankedAt) > repairRankedRebuildTTL {
+		c.rebuildRankedLocked(peers, now)
+	}
+	if len(c.ranked) == 0 {
+		return gossip.RepairPeer{}, false
+	}
+	return c.ranked[int(cursor%uint64(len(c.ranked)))], true
+}
+
+func (c *repairClient) rebuildRankedLocked(peers []gossip.RepairPeer, now time.Time) {
+	c.rankedAt = now
+	type scoredPeer struct {
+		peer  gossip.RepairPeer
+		score float64
+	}
+	responders := make([]scoredPeer, 0, 32)
 	for _, peer := range peers {
 		if peer.Addr == nil || peer.Addr.Port == 0 {
 			continue
@@ -620,17 +678,26 @@ func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cursor uin
 			continue
 		}
 		if rec := c.perPeer[key]; rec != nil && now.Sub(rec.lastMatched) <= repairResponderWindow {
-			responders = append(responders, peer)
+			responders = append(responders, scoredPeer{peer: peer, score: rec.score})
 		}
 	}
-	if len(responders) == 0 {
-		return gossip.RepairPeer{}, false
+	sort.SliceStable(responders, func(i, j int) bool { return responders[i].score > responders[j].score })
+	keep := len(responders)
+	if keep > repairRankedMinPeers {
+		if half := (len(responders) + 1) / 2; half > repairRankedMinPeers {
+			keep = half
+		} else {
+			keep = repairRankedMinPeers
+		}
 	}
-	return responders[int(cursor%uint64(len(responders)))], true
+	c.ranked = c.ranked[:0]
+	for _, sp := range responders[:keep] {
+		c.ranked = append(c.ranked, sp.peer)
+	}
 }
 
-// notePeerSentLocked / notePeerMatchedLocked maintain the per-peer success
-// records behind responder-weighted selection.
+// notePeerSentLocked and the outcome noters maintain the per-peer service
+// records behind quality-ranked responder selection.
 func (c *repairClient) notePeerSentLocked(addr repairAddressKey) {
 	rec := c.perPeer[addr]
 	if rec == nil {
@@ -649,14 +716,46 @@ func (c *repairClient) notePeerSentLocked(addr repairAddressKey) {
 	rec.sent++
 }
 
-func (c *repairClient) notePeerMatchedLocked(addr repairAddressKey) {
+// notePeerOutcomeLocked folds one request outcome into the peer's rolling
+// score and (for answers) latency EWMA. outcome: 1.0-graded for timely
+// answers, repairScoreLateReward for late ones, 0 for timeouts.
+func (c *repairClient) notePeerOutcomeLocked(addr repairAddressKey, outcome float64, lat time.Duration) *peerRecord {
 	rec := c.perPeer[addr]
 	if rec == nil {
 		rec = &peerRecord{}
 		c.perPeer[addr] = rec
 	}
-	rec.matched++
+	rec.score = (1-repairScoreAlpha)*rec.score + repairScoreAlpha*outcome
+	if lat > 0 {
+		sec := lat.Seconds()
+		if rec.latEWMASec == 0 {
+			rec.latEWMASec = sec
+		} else {
+			rec.latEWMASec = (1-repairLatencyEWMAAlpha)*rec.latEWMASec + repairLatencyEWMAAlpha*sec
+		}
+	}
+	return rec
+}
+
+func (c *repairClient) notePeerTimelyLocked(addr repairAddressKey, lat time.Duration) {
+	quality := 1.0
+	if lat > repairScoreFullLatency {
+		quality = repairScoreFullLatency.Seconds() / lat.Seconds()
+	}
+	rec := c.notePeerOutcomeLocked(addr, quality, lat)
+	rec.timely++
 	rec.lastMatched = time.Now()
+}
+
+func (c *repairClient) notePeerLateLocked(addr repairAddressKey, lat time.Duration) {
+	rec := c.notePeerOutcomeLocked(addr, repairScoreLateReward, lat)
+	rec.late++
+	rec.lastMatched = time.Now()
+}
+
+func (c *repairClient) notePeerTimeoutLocked(addr repairAddressKey) {
+	rec := c.notePeerOutcomeLocked(addr, 0, 0)
+	rec.timeouts++
 }
 
 func (c *repairClient) expireOutstanding(now time.Time) {
@@ -674,6 +773,7 @@ func (c *repairClient) expireOutstanding(now time.Time) {
 		delete(c.outstanding, key)
 		delete(c.byResponse, responseKey)
 		c.rememberExpiredLocked(responseKey, outstanding)
+		c.notePeerTimeoutLocked(outstanding.addr)
 		c.timeouts.Add(1)
 	}
 }
@@ -719,6 +819,36 @@ func (c *repairClient) cachedPeerCount() int {
 		return count
 	}
 	return len(c.peerSnapshot(time.Now()))
+}
+
+// peerReport snapshots the busiest peers' service records, sorted by sent
+// descending, for file-log peer tables.
+func (c *repairClient) peerReport(maxPeers int) []RepairPeerReport {
+	now := time.Now()
+	c.mu.Lock()
+	reports := make([]RepairPeerReport, 0, len(c.perPeer))
+	for addr, rec := range c.perPeer {
+		since := int64(-1)
+		if !rec.lastMatched.IsZero() {
+			since = int64(now.Sub(rec.lastMatched).Seconds())
+		}
+		reports = append(reports, RepairPeerReport{
+			Addr:              net.JoinHostPort(net.IP(addr.ip[:]).String(), strconv.Itoa(addr.port)),
+			Sent:              rec.sent,
+			Timely:            rec.timely,
+			Late:              rec.late,
+			Timeouts:          rec.timeouts,
+			AvgResponseMillis: int64(rec.latEWMASec * 1000),
+			Score:             rec.score,
+			SecondsSinceHeard: since,
+		})
+	}
+	c.mu.Unlock()
+	sort.Slice(reports, func(i, j int) bool { return reports[i].Sent > reports[j].Sent })
+	if maxPeers > 0 && len(reports) > maxPeers {
+		reports = reports[:maxPeers]
+	}
+	return reports
 }
 
 func repairAddressKeyFromUDP(addr *net.UDPAddr) (repairAddressKey, bool) {

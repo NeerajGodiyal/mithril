@@ -119,6 +119,15 @@ func (r *UDPReceiver) SetRepairRequestRate(perSecond int) {
 	}
 }
 
+// RepairPeerReport returns the busiest repair peers' service records (sent,
+// timely/late/timeout, latency, score) for file-log peer tables.
+func (r *UDPReceiver) RepairPeerReport(maxPeers int) []RepairPeerReport {
+	if r.repairClient == nil {
+		return nil
+	}
+	return r.repairClient.peerReport(maxPeers)
+}
+
 func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if r == nil || r.assembler == nil {
 		return

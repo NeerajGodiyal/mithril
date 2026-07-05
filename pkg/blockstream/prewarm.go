@@ -24,8 +24,9 @@ import (
 // repair hole into spooled blocks handed to the BlockSource at replay
 // start.
 type TurbinePrewarm struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel   context.CancelFunc
+	done     chan struct{}
+	receiver *turbine.UDPReceiver
 
 	mu       sync.Mutex
 	spool    map[uint64]*b.Block
@@ -34,6 +35,17 @@ type TurbinePrewarm struct {
 	dropped  int
 	stopped  bool
 }
+
+// prewarmProbeSlots: the replay frontier slots the prewarm actively repairs
+// during the AccountsDB build. These are the slots replay needs FIRST and
+// the ones guaranteed to have aired before the receiver joined (zero FEC
+// leverage, one data shred per round trip) — every one completed during the
+// build is head-of-line stall time deleted from catchup. The probe rides
+// the normal repair client (priority pins -> HighestWindowIndex discovery ->
+// metered followups -> assembler/spool), so everything it fetches is kept,
+// and its response statistics double as the boot-time peer-quality
+// measurement behind the rate recommendation logged at handover.
+const prewarmProbeSlots = 16
 
 // TurbinePrewarmConfig mirrors the BlockSource's turbine wiring; the
 // prewarm receiver is torn down (freeing the bind port) before the
@@ -113,9 +125,14 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 		}
 	}
 
+	if cfg.FloorSlot > 0 {
+		receiver.PrioritizeRepairRange(cfg.FloorSlot, cfg.FloorSlot+prewarmProbeSlots-1)
+	}
+
 	pw := &TurbinePrewarm{
 		cancel:   cancel,
 		done:     make(chan struct{}),
+		receiver: receiver,
 		spool:    make(map[uint64]*b.Block),
 		floor:    cfg.FloorSlot,
 		capacity: cfg.MaxSpoolBlocks,
@@ -212,6 +229,7 @@ func (pw *TurbinePrewarm) add(blk *b.Block) {
 // BlockSource) and returns the spooled blocks in ascending slot order,
 // along with how many overflowed the spool.
 func (pw *TurbinePrewarm) Handover() ([]*b.Block, int) {
+	pw.logProbeOutcome() // before Stop: receiver stats die with the receiver
 	pw.Stop()
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
@@ -222,6 +240,50 @@ func (pw *TurbinePrewarm) Handover() ([]*b.Block, int) {
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i].Slot < blocks[j].Slot })
 	pw.spool = nil
 	return blocks, pw.dropped
+}
+
+// logProbeOutcome reports the boot-time frontier probe: how many of the
+// replay-frontier slots were fully repaired before replay starts, and what
+// the response statistics say about the peer set's headroom for the
+// configurable rate ceiling. One console line; the per-peer table goes to
+// the repair-peers file log.
+func (pw *TurbinePrewarm) logProbeOutcome() {
+	pw.mu.Lock()
+	receiver, floor, stopped := pw.receiver, pw.floor, pw.stopped
+	pw.mu.Unlock()
+	if receiver == nil || stopped {
+		return
+	}
+	completed := 0
+	if floor > 0 {
+		for slot := floor; slot < floor+prewarmProbeSlots; slot++ {
+			if receiver.SlotCompleted(slot) {
+				completed++
+			}
+		}
+	}
+	r := receiver.Stats().Repair
+	outcomes := r.Responses + r.LateResponses + r.Timeouts
+	if r.Requests == 0 || outcomes == 0 {
+		mlog.Log.FileOnlyf("prewarm repair probe: no repair traffic during boot (requests %d) — no rate assessment", r.Requests)
+		return
+	}
+	timeoutPct := 100 * r.Timeouts / outcomes
+	var verdict string
+	switch {
+	case timeoutPct <= 10 && r.RespondingPeers >= 30:
+		verdict = "healthy with headroom — consider raising block.repair_max_requests_per_second to 750, then 1000, watching the timeout share"
+	case timeoutPct <= 25:
+		verdict = "healthy at the current rate ceiling"
+	case timeoutPct <= 50:
+		verdict = "elevated timeouts — keep the current rate"
+	default:
+		verdict = "poor peer response quality — do not raise the rate"
+	}
+	mlog.Log.Infof("prewarm repair probe: %d/%d frontier slots fully repaired before replay | responses %d (late %d), timeouts %d (%d%%), avg %dms, peers responding %d/%d — %s",
+		completed, prewarmProbeSlots, r.Responses, r.LateResponses, r.Timeouts, timeoutPct,
+		r.AvgResponseMillis, r.RespondingPeers, r.Peers, verdict)
+	logRepairPeerTable(receiver, "boot probe")
 }
 
 // Stop tears the prewarm receiver and gossip session down and waits for the

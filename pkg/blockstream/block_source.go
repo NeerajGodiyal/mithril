@@ -2924,6 +2924,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	var lastStallWarn time.Time
 	var lastStagedWarn time.Time
 	lastStatusLog := time.Now()
+	lastPeerTableLog := time.Now()
 
 	for {
 		select {
@@ -3168,6 +3169,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				repair.Peers, repair.RespondingPeers,
 				hb.HydratedSlots-statsAtArm.HydratedSlots, hb.HydratedFromDisk-statsAtArm.HydratedFromDisk,
 				hb.SigVerifies-statsAtArm.SigVerifies, hb.SigVerifyCached-statsAtArm.SigVerifyCached)
+		}
+		// Peer service table to its own file on a slower cadence: which
+		// peers actually answer, how fast, and their rolling quality score
+		// — the ground truth behind responder-ranked selection.
+		if time.Since(lastPeerTableLog) >= 60*time.Second {
+			lastPeerTableLog = time.Now()
+			logRepairPeerTable(receiver, fmt.Sprintf("catchup head %d", waiting))
 		}
 	}
 }
@@ -3736,6 +3744,25 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 
 	mlog.NamedFilef("catchup", "reorder buffer: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s%s",
 		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString(), bs.catchupDiagSuffix())
+}
+
+// logRepairPeerTable writes the busiest repair peers' service records to the
+// repair-peers file log — which peers actually answer, how fast, and what
+// their rolling quality score is. File-only: the table is diagnostic bulk.
+func logRepairPeerTable(receiver *turbine.UDPReceiver, context string) {
+	report := receiver.RepairPeerReport(20)
+	if len(report) == 0 {
+		return
+	}
+	mlog.NamedFilef("repair-peers", "— %s: top %d peers by requests sent —", context, len(report))
+	for _, p := range report {
+		last := "never"
+		if p.SecondsSinceHeard >= 0 {
+			last = fmt.Sprintf("%ds ago", p.SecondsSinceHeard)
+		}
+		mlog.NamedFilef("repair-peers", "%-22s sent %6d | timely %6d | late %5d | timeout %6d | avg %5dms | score %.2f | heard %s",
+			p.Addr, p.Sent, p.Timely, p.Late, p.Timeouts, p.AvgResponseMillis, p.Score, last)
+	}
 }
 
 // catchupDiagSuffix appends the live repair/hydration/verification picture to

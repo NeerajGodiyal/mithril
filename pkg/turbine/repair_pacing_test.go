@@ -95,8 +95,8 @@ func TestLateResponseMatchedAfterExpiry(t *testing.T) {
 	if c.lateResponses.Load() != 1 {
 		t.Fatalf("lateResponses = %d, want 1", c.lateResponses.Load())
 	}
-	if rec := c.perPeer[addrKey]; rec == nil || rec.matched != 1 {
-		t.Fatal("late-answering peer must earn responder credit")
+	if rec := c.perPeer[addrKey]; rec == nil || rec.late != 1 {
+		t.Fatal("late-answering peer must earn responder credit (late count)")
 	}
 	if c.respLatencyEWMA < 4.5 {
 		t.Fatalf("late latency %.2fs must feed the EWMA (~5s)", c.respLatencyEWMA)
