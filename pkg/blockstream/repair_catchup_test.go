@@ -165,19 +165,35 @@ func TestHandoffArmsOnFreshResumeAnchor(t *testing.T) {
 
 	head := &b.Block{Slot: 1_000, SourceParentSlot: 999, FromLightbringer: true}
 	bs.bufferLightbringerBlock(head)
+	// A staged block BEYOND a gap (1001 missing): the payload must include
+	// it anyway — the reorder buffer handles out-of-order, holes are the
+	// repair drive's job. Handing over only the connected runway threw away
+	// a whole prewarm spool at the first gap (observed live: first buffered
+	// block 252 slots ahead of replay while ~190 collected blocks were
+	// dropped for re-repair).
+	beyondGap := &b.Block{Slot: 1_002, SourceParentSlot: 1_001, FromLightbringer: true}
+	bs.bufferLightbringerBlock(beyondGap)
 
 	bs.maybePrepareLightbringerHandoff()
 
 	if got := bs.lightbringerHandoffSlot.Load(); got != 1_000 {
 		t.Fatalf("handoff must arm at the resume head on a fresh boot (anchor = startSlot-1); handoff_slot=%d", got)
 	}
-	select {
-	case res := <-bs.resultQueue:
-		if res.slot != 1_000 || res.block == nil {
-			t.Fatalf("the staged head must drain to the emitter, got %+v", res)
+	gotSlots := map[uint64]bool{}
+	for {
+		select {
+		case res := <-bs.resultQueue:
+			if res.block == nil {
+				t.Fatalf("handoff payload must be blocks, got %+v", res)
+			}
+			gotSlots[res.slot] = true
+			continue
+		default:
 		}
-	default:
-		t.Fatalf("an armed handoff must enqueue the runway head")
+		break
+	}
+	if !gotSlots[1_000] || !gotSlots[1_002] {
+		t.Fatalf("armed handoff must enqueue ALL staged blocks at/above the handoff slot (gaps included), got %v", gotSlots)
 	}
 }
 

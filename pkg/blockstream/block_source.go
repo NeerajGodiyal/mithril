@@ -1865,7 +1865,7 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 
 	bs.lightbringerBufferMu.Lock()
 
-	runwayBlocks, coveredUntil, _, _, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
+	_, coveredUntil, _, _, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
 	if !ok {
 		bs.lightbringerBufferMu.Unlock()
 		return nil, 0, false
@@ -1887,19 +1887,23 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 	bs.lightbringerNeedRPCResume.Store(false)
 	bs.purgeRPCStateAtOrBeyondSlot(handoffSlot)
 
-	blocks := append([]*b.Block(nil), runwayBlocks...)
-
-	// Staged blocks NOT on the selected runway are dropped here — but their
-	// assembler completed-slot markers survive, which would make those slots
-	// silently unfetchable (shreds ignored, repair skips them). Collect them
-	// under the lock; reset after releasing it.
-	onRunway := make(map[uint64]bool, len(blocks))
-	for _, blk := range blocks {
-		onRunway[blk.Slot] = true
-	}
+	// Hand over EVERYTHING staged at/above the handoff slot, not just the
+	// connected runway. The reorder buffer is exactly the structure for
+	// out-of-order blocks, and holes between them are the repair drive's
+	// job. Handing over only the runway proved catastrophic with the
+	// prewarm spool: one missing slot right after the head reduced the
+	// runway to a single block and dropped ~190 pre-collected blocks for
+	// slow re-repair (observed live: first buffered block 252 slots ahead
+	// of replay). The ARMING requirement stays runway-based — the head must
+	// parent-link to the anchor; only the payload widens.
+	blocks := make([]*b.Block, 0, len(bs.lightbringerBuffer))
 	var dropped []uint64
-	for slot := range bs.lightbringerBuffer {
-		if !onRunway[slot] {
+	for slot, blk := range bs.lightbringerBuffer {
+		if slot >= handoffSlot && blk != nil {
+			blocks = append(blocks, blk)
+		} else {
+			// Below the handoff slot: stale relative to the resume point.
+			// Reset turbine state so the marker never strands the slot.
 			dropped = append(dropped, slot)
 		}
 	}
