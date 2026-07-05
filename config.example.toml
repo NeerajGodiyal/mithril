@@ -167,7 +167,7 @@ name = "mithril"
     #       "https://your-primary-alpenglow-rpc.example.com",  # Primary
     #       "https://your-fallback-alpenglow-rpc.example.com"  # Fallback
     #   ]
-    rpc = ["https://alpenglow.rpcpool.com"]
+    rpc = ["https://rpc.ag.validator1.net"]
 
 # ============================================================================
 # [block] - Block Source & Streaming
