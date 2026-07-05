@@ -68,13 +68,15 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	cluster                     string // "mainnet-beta", "testnet", "devnet"
-	blockSource                 string // "rpc", "lightbringer", or "turbine"
+	cluster                     string // "alpenglow" (the only cluster this build boots)
+	blockSource                 string // "turbine" (default), "rpc", or "lightbringer"
 	lightbringerEndpoint        string
-	blockMaxRPS                 int // Rate limit for block fetching
-	blockMaxInflight            int // Max concurrent block fetch workers
-	blockTipPollIntervalMs      int // Tip poll interval in milliseconds
-	blockTipSafetyMargin        int // Don't fetch within N slots of tip
+	blockMaxRPS                 int    // Rate limit for block fetching
+	blockMaxInflight            int    // Max concurrent block fetch workers
+	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
+	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
+	consensusModeFlag           string // raw --consensus-mode value (cobra binding)
+	consensusMode               string // resolved: "verifying" (default) or "validator"
 	alpenglowObserverBindAddr   string
 	alpenglowMaxMessageBytes    int64
 	alpenglowBLSDST             string
@@ -274,7 +276,7 @@ func init() {
 
 	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
-	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'mainnet-beta', 'testnet', or 'devnet'")
+	Run.Flags().StringVar(&cluster, "cluster", "alpenglow", "Solana cluster: 'alpenglow' (default; the only cluster this build boots — 'mainnet-beta'/'testnet'/'devnet' need a dev-branch TowerBFT build until they upgrade to Alpenglow)")
 
 	// [rpc] section flags (Mithril's RPC server)
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
@@ -285,6 +287,7 @@ func init() {
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
 
 	// [consensus] section flags
+	Run.Flags().StringVar(&consensusModeFlag, "consensus-mode", "verifying", "Node mode: 'verifying' (default; non-voting — observe, execute, and verify) or 'validator' (requires identity + vote-account keypairs, turbine source, gossip entrypoint, and the Votor QUIC listener; voting engine not yet active)")
 	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address")
 	Run.Flags().StringVar(&alpenglowBLSDST, "alpenglow-bls-dst", "", "BLS hash-to-curve DST override (must match cluster's solana-bls version; empty = default)")
 	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
@@ -320,7 +323,7 @@ func init() {
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	Run.Flags().StringVar(&blockSource, "block-source", "rpc", "Block source: 'rpc', 'lightbringer', or 'turbine'")
+	Run.Flags().StringVar(&blockSource, "block-source", "turbine", "Block source: 'turbine' (default, live), 'rpc' (catch-up/debug), or 'lightbringer'")
 	Run.Flags().StringVar(&lightbringerEndpoint, "lightbringer-endpoint", "", "Address for Lightbringer endpoint (only used when block-source=lightbringer)")
 	Run.Flags().StringVar(&turbineBindAddr, "turbine-bind-addr", "", "UDP address for native turbine shred receiver (only used when block-source=turbine)")
 	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
@@ -544,10 +547,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// TowerBFT cluster. Refuse anything except an Alpenglow cluster.
 	cluster = getString("cluster", "network.cluster")
 	if cluster == "" {
-		return fmt.Errorf("network.cluster is required - this build supports 'alpenglow' only")
+		cluster = "alpenglow" // the only cluster this build boots
+		mlog.Log.Infof("network.cluster not set; defaulting to %q", cluster)
 	}
 	if cluster != "alpenglow" {
-		return fmt.Errorf("network.cluster %q is not supported by this Alpenglow-only build (TowerBFT clusters need a mithril build from the dev branch)", cluster)
+		return fmt.Errorf("network.cluster %q is not supported by this Alpenglow-only build (TowerBFT clusters need a mithril build from the dev branch until they upgrade to Alpenglow)", cluster)
 	}
 
 	// Must be decided before any OpenDb call: with the WAL off, the fold
@@ -564,6 +568,19 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	scratchDirectory = getString("scratch-directory", "scratch_directory")
 
 	// [consensus] + [validator] keypairs
+	consensusMode = getString("consensus-mode", "consensus.mode")
+	switch consensusMode {
+	case "", "verifying":
+		consensusMode = "verifying"
+	case "validator":
+		// Selectable now so validator deployments (keypairs, sockets, gossip)
+		// are provisioned and validated ahead of the voting engine landing.
+		// Requirements are enforced below once the block/turbine settings are
+		// resolved; until the engine ships the node runs the same verifying
+		// pipeline and casts no votes (warned loudly at startup).
+	default:
+		return fmt.Errorf("unknown consensus.mode %q (valid: \"verifying\", \"validator\")", consensusMode)
+	}
 	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
 	alpenglowMaxMessageBytes = getInt64("alpenglow-max-message-bytes", "consensus.alpenglow_max_message_bytes")
 	alpenglowBLSDST = getString("alpenglow-bls-dst", "consensus.alpenglow_bls_dst")
@@ -573,8 +590,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 
 	// [block] section
 	blockSource = getString("block-source", "block.source")
+	blockSourceExplicit := blockSource != "" // operator chose (flag or config) vs defaulted
 	if blockSource == "" {
-		blockSource = "rpc" // default
+		blockSource = "turbine" // default: native turbine is the live Alpenglow source
 	}
 	// RPC is a catch-up/debug source on Alpenglow, not a live one: RPC blocks
 	// carry no Alpenglow block ids or footer certificates, so certificate
@@ -637,10 +655,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 			return fmt.Errorf("lightbringer.enabled=true but lightbringer.gossip_entrypoint is empty")
 		}
 		// Default block.source to "lightbringer" if not explicitly configured
-		if blockSource == "rpc" && !flagChanged("block-source") {
+		if !blockSourceExplicit {
 			blockSource = "lightbringer"
-		} else if blockSource == "rpc" && flagChanged("block-source") {
-			mlog.Log.Warnf("lightbringer.enabled=true but --block-source=rpc was set explicitly; sidecar will start but will not be used for block delivery")
+		} else if blockSource != "lightbringer" {
+			mlog.Log.Warnf("lightbringer.enabled=true but block source %q was set explicitly; sidecar will start but will not be used for block delivery", blockSource)
 		}
 		// Auto-sync grpc_addr to lightbringer_endpoint
 		if lightbringerEndpoint == "" {
@@ -666,7 +684,8 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		}
 	case "turbine":
 		if turbineBindAddr == "" {
-			return fmt.Errorf("block.source=turbine requires block.turbine_bind_addr or turbine.bind_addr")
+			turbineBindAddr = "0.0.0.0:8001" // documented default shred port
+			mlog.Log.Infof("turbine bind address not set; defaulting to %s", turbineBindAddr)
 		}
 		if turbineShredVersion < 0 || turbineShredVersion > 0xffff {
 			return fmt.Errorf("turbine.shred_version must be between 0 and 65535")
@@ -676,6 +695,34 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		}
 	default:
 		return fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", blockSource)
+	}
+
+	// Validator mode: enforce the deployment shape a voting node needs, even
+	// though the voting engine has not landed yet — operators provision once
+	// and the config stays valid when voting activates.
+	if consensusMode == "validator" {
+		var missing []string
+		if validatorIdentityKeypair == "" {
+			missing = append(missing, "validator.identity_keypair (signs gossip/turbine identity and, later, votes)")
+		}
+		if validatorVoteAccountKeypair == "" {
+			missing = append(missing, "validator.vote_account_keypair (the vote account votes are cast for)")
+		}
+		if blockSource != "turbine" {
+			missing = append(missing, fmt.Sprintf("block.source=turbine (a validator cannot run off %q)", blockSource))
+		}
+		if turbineGossipEntrypoint == "" {
+			missing = append(missing, "turbine.gossip_entrypoint (join the cluster's turbine tree)")
+		}
+		if alpenglowObserverBindAddr == "" {
+			missing = append(missing, "consensus.alpenglow_observer_bind_addr (receive Votor vote/cert traffic)")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("consensus.mode=validator requires:\n  - %s", strings.Join(missing, "\n  - "))
+		}
+		// The authorized withdrawer is deliberately NOT required at runtime —
+		// best practice keeps it offline.
+		mlog.Log.Warnf("consensus.mode=validator: the voting engine is not implemented yet in this build — running the verifying pipeline, NO votes will be cast")
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -2298,7 +2345,11 @@ func printStartupInfo(commandName string) {
 	if validatorIdentityKeypair != "" {
 		fmt.Printf("  Identity key: %s%s%s\n", gold, validatorIdentityKeypair, reset)
 	}
-	fmt.Printf("  Consensus:    %s%s%s\n", gold, "alpenglow-observer", reset)
+	consensusLabel := "verifying (non-voting)"
+	if consensusMode == "validator" {
+		consensusLabel = "validator (voting engine not yet active)"
+	}
+	fmt.Printf("  Consensus:    %s%s%s\n", gold, consensusLabel, reset)
 	if alpenglowObserverBindAddr != "" {
 		fmt.Printf("  Votor QUIC:   %s%s%s\n", gold, alpenglowObserverBindAddr, reset)
 	}

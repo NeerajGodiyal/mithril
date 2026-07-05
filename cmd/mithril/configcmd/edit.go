@@ -675,10 +675,11 @@ func (m *editModel) saveConfig() {
 			content = setTomlValue(content, "lightbringer", "quiet", "false")
 		}
 	} else {
-		// Only force block.source="rpc" if no external lightbringer_endpoint is configured.
-		// External LB mode (enabled=false + endpoint set) is a valid runtime config.
+		// Only force a source change if no external lightbringer_endpoint is
+		// configured. External LB mode (enabled=false + endpoint set) is a valid
+		// runtime config. Turbine is the default live Alpenglow source.
 		if m.v.GetString("block.lightbringer_endpoint") == "" {
-			content = setTomlValue(content, "block", "source", "\"rpc\"")
+			content = setTomlValue(content, "block", "source", "\"turbine\"")
 		}
 		if strings.Contains(content, "[lightbringer]") {
 			content = setTomlValue(content, "lightbringer", "enabled", "false")

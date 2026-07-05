@@ -64,6 +64,7 @@ type configData struct {
 	cluster             string
 	rpcEndpoints        []string
 	blockSource         string
+	consensusMode       string
 	alpenglowBindAddr   string
 	lbEnabled           bool
 	lbGossip            string
@@ -121,6 +122,7 @@ func readConfig(configFile string) *configData {
 		cluster:             cluster,
 		rpcEndpoints:        v.GetStringSlice("network.rpc"),
 		blockSource:         v.GetString("block.source"),
+		consensusMode:       v.GetString("consensus.mode"),
 		alpenglowBindAddr:   v.GetString("consensus.alpenglow_observer_bind_addr"),
 		lbEnabled:           v.GetBool("lightbringer.enabled"),
 		lbGossip:            v.GetString("lightbringer.gossip_entrypoint"),
@@ -361,7 +363,14 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 		results = append(results, checkResult{"RPC endpoint", "fail", "no RPC endpoints configured"})
 	}
 
-	results = append(results, checkResult{"Consensus", "pass", "alpenglow-observer"})
+	switch cfg.consensusMode {
+	case "", "verifying":
+		results = append(results, checkResult{"Node mode", "pass", "verifying (non-voting)"})
+	case "validator":
+		results = append(results, checkResult{"Node mode", "pass", "validator (voting engine not yet active)"})
+	default:
+		results = append(results, checkResult{"Node mode", "fail", "invalid consensus.mode: " + cfg.consensusMode})
+	}
 	if cfg.alpenglowBindAddr != "" {
 		if _, _, err := net.SplitHostPort(cfg.alpenglowBindAddr); err != nil {
 			results = append(results, checkResult{"Alpenglow Votor", "fail", "invalid bind address: " + cfg.alpenglowBindAddr})

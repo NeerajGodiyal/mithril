@@ -8,6 +8,31 @@
 #   3. Run: mithril run --config config.toml
 #
 # Everything else has sensible defaults.
+#
+# ----------------------------------------------------------------------------
+# Alpenglow turbine node — the settings that matter for a live deployment.
+# Each has a --flag equivalent; a config file replaces the long CLI. Setting
+# them here is the same as running:
+#
+#   mithril run --config config.toml
+#
+# instead of passing --cluster / --block-source / --turbine-bind-addr /
+# --turbine-gossip-entrypoint / --alpenglow-observer-bind-addr /
+# --identity-keypair / --rpc on the command line.
+#
+#   [network]   cluster = "alpenglow"   +   rpc = ["https://your-rpc"]
+#   [block]     source  = "turbine"     +   turbine_bind_addr = "0.0.0.0:8001"
+#   [turbine]   gossip_entrypoint = "<cluster gossip host:port>"   (REQUIRED)
+#   [consensus] alpenglow_observer_bind_addr = "0.0.0.0:8010"      (Votor QUIC)
+#   [validator] identity_keypair = "/path/to/validator-keypair.json"
+#
+# NOTE: this build is Alpenglow-only. [consensus].mode selects the node type:
+# "verifying" (default; non-voting) or "validator" (enforces the full voting
+# deployment shape — identity + vote-account keypairs, turbine + gossip
+# entrypoint, Votor QUIC listener — but the voting engine has not landed yet,
+# so it runs verify-only and casts NO votes). Both share the same fork choice.
+# Generate a per-type starter config: mithril config init [--validator]
+# ----------------------------------------------------------------------------
 
 # ============================================================================
 # GENERAL SETTINGS
@@ -128,9 +153,11 @@ name = "mithril"
 # probes the primary and restores to it when healthy.
 
 [network]
-    # Solana cluster (required). This build is Alpenglow-only: replay applies
-    # Alpenglow clock/feature semantics unconditionally, so only "alpenglow"
-    # is accepted (TowerBFT clusters need a mithril build from the dev branch).
+    # Solana cluster. Defaults to "alpenglow" — the only cluster this build
+    # boots: replay applies Alpenglow clock/feature semantics unconditionally.
+    # "mainnet-beta"/"testnet"/"devnet" currently need a mithril build from the
+    # dev branch (TowerBFT) and will be usable here once those clusters upgrade
+    # to Alpenglow.
     cluster = "alpenglow"
 
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
@@ -149,11 +176,12 @@ name = "mithril"
 # Block source configuration. See also [lightbringer] below for sidecar settings.
 
 [block]
-    # Where to stream new blocks from:
-    #   "turbine"      - Native UDP turbine shred receiver (the LIVE mode).
-    #                    Uses RPC for catchup, hands off to reconstructed shreds
-    #                    near tip. Shreds carry the Alpenglow block ids and
-    #                    footer certificates that gate durable state.
+    # Where to stream new blocks from (default: "turbine"):
+    #   "turbine"      - Native UDP turbine shred receiver (the LIVE mode, and
+    #                    the DEFAULT). Uses RPC for catchup, hands off to
+    #                    reconstructed shreds near tip. Shreds carry the
+    #                    Alpenglow block ids and footer certificates that gate
+    #                    durable state.
     #   "rpc"          - Fetch blocks via getBlock RPC calls. CATCH-UP/DEBUG
     #                    ONLY on Alpenglow: RPC blocks carry no block ids or
     #                    footer certificates, so near-tip identity cannot be
@@ -166,9 +194,14 @@ name = "mithril"
     # Lightbringer endpoint address (only used when source = "lightbringer")
     # lightbringer_endpoint = "localhost:9000"
 
-    # Native turbine UDP bind address (only used when source = "turbine").
-    # turbine_bind_addr = "0.0.0.0:8001"
-    # Gossip settings for native turbine live under [turbine].
+    # Native turbine UDP bind address — the port this node receives shreds on
+    # (only used when source = "turbine"). Defaults to 0.0.0.0:8001 when unset
+    # (or use the [turbine].bind_addr equivalent). Must be reachable from the
+    # cluster.
+    turbine_bind_addr = "0.0.0.0:8001"
+    # Cluster-join / gossip settings for native turbine live under [turbine];
+    # [turbine].gossip_entrypoint is also required to discover the shred version
+    # and advertise this node into the turbine tree.
 
     # =========================================================================
     # Global Fetch Tuning
@@ -233,13 +266,21 @@ name = "mithril"
 # [validator] - Optional Validator Identity
 # ============================================================================
 #
-# These keys are not used for signing votes in classic or alpenglow-observer
-# mode. The identity keypair is used by native turbine gossip, which is required
-# for staked Alpenglow observer nodes to receive Votor traffic.
+# In verifying mode nothing here is required: the identity keypair, if set, is
+# used by native turbine gossip to advertise this node's turbine/TVU and
+# observer sockets into the cluster (set it so a staked node joins the turbine
+# tree and receives shreds plus Votor traffic).
+#
+# In validator mode ([consensus].mode = "validator") the identity AND
+# vote-account keypairs are REQUIRED — the node refuses to start without them.
+# The authorized withdrawer keypair is NOT needed at runtime: keep it OFFLINE.
 
 [validator]
+    # identity_keypair = "/path/to/validator-keypair.json"
     identity_keypair = ""
+    # vote_account_keypair = "/path/to/vote-account-keypair.json"
     vote_account_keypair = ""
+    # authorized_withdrawer_keypair = "/path/to/authorized-withdrawer-keypair.json"
     authorized_withdrawer_keypair = ""
 
 # ============================================================================
@@ -248,15 +289,31 @@ name = "mithril"
 #
 # This build is Alpenglow-only: blocks execute immediately on receipt, and
 # Alpenglow certificates (block / skip / finalize / conflict) are the source
-# of truth for fork choice and durable-state promotion. There is no mode
-# switch — the observer engine always runs.
+# of truth for fork choice and durable-state promotion.
 
 [consensus]
-    # Passive Alpenglow Votor QUIC listener.
+    # Node mode:
+    #   "verifying" - DEFAULT. Non-voting: observe, execute, and verify the
+    #                 cluster. Fork choice is identical to validator mode
+    #                 (there is exactly one fork-choice algorithm).
+    #   "validator" - Enforces the full voting-deployment shape at startup:
+    #                 validator.identity_keypair, validator.vote_account_keypair,
+    #                 block.source = "turbine", turbine.gossip_entrypoint, and
+    #                 consensus.alpenglow_observer_bind_addr are all REQUIRED.
+    #                 The voting engine (Votor event loop, BLS vote signing,
+    #                 durable vote history) has NOT landed yet: a validator-mode
+    #                 node runs the same verifying pipeline and casts no votes —
+    #                 select it now so the deployment is provisioned and its
+    #                 config stays valid when voting activates.
+    mode = "verifying"
+
+    # Passive Alpenglow Votor QUIC listener (e.g. "0.0.0.0:8010").
     # Agave advertises this as the gossip "alpenglow" socket and sends
     # wincode ConsensusMessage payloads over Solana QUIC ("solana-tpu" ALPN).
     # When native turbine gossip is enabled, Mithril advertises this socket
-    # in CRDS so Alpenglow peers can discover it. Leave empty to disable.
+    # in CRDS so Alpenglow peers can discover it. This is the low-latency cert
+    # feed; leave empty to disable and rely only on footer certs carried in
+    # shreds (durable folds then lag until those arrive).
     alpenglow_observer_bind_addr = ""
     alpenglow_max_message_bytes = 0
 
@@ -275,12 +332,17 @@ name = "mithril"
 # RPC remains configured for catchup, tip polling, and repair/fallback paths.
 
 [turbine]
-    # UDP address where Mithril listens for turbine shreds.
-    # bind_addr = "0.0.0.0:8001"
+    # Solana gossip entrypoint of your Alpenglow cluster (host:port). REQUIRED
+    # for a live turbine deployment: Mithril contacts it to discover the shred
+    # version and to advertise its turbine/TVU + observer sockets into the
+    # turbine tree. Without it the node cannot join the tree and will not
+    # receive shreds. Example:
+    # gossip_entrypoint = "1.2.3.4:9000"
+    gossip_entrypoint = ""
 
-    # Solana gossip entrypoint used to discover the cluster shred version and
-    # advertise Mithril's turbine/TVU socket into the turbine tree.
-    # gossip_entrypoint = "1.2.3.4:8000"
+    # UDP address where Mithril listens for turbine shreds. Equivalent to
+    # [block].turbine_bind_addr; set either one (this key takes precedence).
+    # bind_addr = "0.0.0.0:8001"
 
     # UDP address where Mithril listens for gossip traffic. Leave empty to let
     # the OS choose an available port. Set a fixed port if your firewall/NAT
@@ -574,9 +636,10 @@ name = "mithril"
     # TCP connection timeout for pre-check (milliseconds)
     tcp_timeout_ms = 1000
 
-    # Minimum Solana version required (e.g., "3.0.0", empty = no filter).
-    # Defaults to "3.0.0" on classic clusters and "0.3.0" on alpenglow.
-    # min_node_version = "3.0.0"
+    # Minimum Solana version required (e.g., "0.3.0", empty = no filter).
+    # Defaults to "0.3.0": the Alpenglow test cluster advertises Agave/Votor
+    # node versions in the 0.x series.
+    # min_node_version = "0.3.0"
 
     # Allowed Solana versions (empty = all versions allowed)
     # Example: allowed_node_versions = ["2.2.0", "3.0.0"]

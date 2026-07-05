@@ -30,6 +30,15 @@ var (
 The generated config has all parameters with good defaults - you only need to
 customize the storage paths for your setup.
 
+Two profiles:
+  mithril config init              Verifying node (non-voting) — the default.
+  mithril config init --validator  Validator — consensus.mode=validator with the
+                                   required keypair/socket fields laid out
+                                   (identity + vote-account keypairs, turbine
+                                   gossip entrypoint, Votor QUIC listener).
+                                   The voting engine is not yet active; the
+                                   node runs verify-only until it lands.
+
 If config.toml already exists, this command will not overwrite it.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runConfigInit()
@@ -77,8 +86,9 @@ Examples:
 		},
 	}
 
-	outputPath string
-	configFile string
+	outputPath    string
+	initValidator bool
+	configFile    string
 )
 
 func init() {
@@ -86,6 +96,7 @@ func init() {
 	ConfigCmd.AddCommand(&SetCmd)
 	ConfigCmd.AddCommand(&GetCmd)
 	InitCmd.Flags().StringVarP(&outputPath, "output", "o", "config.toml", "Output path for config file")
+	InitCmd.Flags().BoolVar(&initValidator, "validator", false, "Generate a validator config (consensus.mode=validator with required keypair/socket fields)")
 	SetCmd.Flags().StringVarP(&configFile, "config", "c", "config.toml", "Path to config file")
 	GetCmd.Flags().StringVarP(&configFile, "config", "c", "config.toml", "Path to config file")
 }
@@ -98,7 +109,7 @@ func runConfigInit() {
 	}
 
 	// Generate the config content
-	config := generateStarterConfig()
+	config := generateStarterConfig(initValidator)
 
 	// Write to file
 	if err := tui.AtomicWriteFile(outputPath, []byte(config), 0600); err != nil {
@@ -112,16 +123,57 @@ func runConfigInit() {
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Edit the [storage] paths for your setup")
 	fmt.Println("  2. Set [network].rpc and [turbine].gossip_entrypoint for your Alpenglow cluster")
-	fmt.Println("  3. Run: mithril run --config config.toml")
+	if initValidator {
+		fmt.Println("  3. Set [validator].identity_keypair and vote_account_keypair —")
+		fmt.Println("     validator mode refuses to start without them")
+		fmt.Println("     (keep the authorized withdrawer keypair OFFLINE; it is not needed at runtime)")
+	} else {
+		fmt.Println("  3. For a staked node, set [validator].identity_keypair and")
+		fmt.Println("     [consensus].alpenglow_observer_bind_addr (Votor QUIC cert feed)")
+	}
+	fmt.Println("  4. Run: mithril run --config config.toml")
 	fmt.Println()
 	fmt.Println("See config.example.toml for detailed documentation of all options.")
 }
 
-func generateStarterConfig() string {
+func generateStarterConfig(validator bool) string {
 	// Pick storage paths that work for the current environment: production
 	// /mnt/mithril-* when scripts/disk-setup.sh has been run, ~/.mithril/*
 	// otherwise. See pkg/config/defaults.go for detection details.
 	s := config.DefaultStoragePaths()
+
+	// The [validator] + [consensus] sections are the profile split: a
+	// verifying node needs neither keypairs nor the Votor listener; validator
+	// mode REQUIRES identity + vote-account keypairs, a turbine gossip
+	// entrypoint, and the Votor QUIC listener (enforced at startup).
+	nodeSections := `[validator]
+identity_keypair = ""              # Validator identity — advertises this node into turbine gossip; set for a staked Alpenglow node
+vote_account_keypair = ""          # Vote account keypair path (used once voting activates)
+authorized_withdrawer_keypair = "" # Authorized withdrawer keypair path (diagnostics only)
+
+[consensus]
+mode = "verifying"                # "verifying" (default, non-voting) | "validator"
+alpenglow_observer_bind_addr = "" # Votor QUIC cert listener, e.g. "0.0.0.0:8010" (empty = rely on footer certs in shreds)
+alpenglow_max_message_bytes = 0   # 0 = default
+alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)`
+	if validator {
+		nodeSections = `[validator]
+# REQUIRED in validator mode — the node refuses to start without these two.
+identity_keypair = "/path/to/validator-keypair.json"        # Signs gossip/turbine identity and, once voting activates, votes
+vote_account_keypair = "/path/to/vote-account-keypair.json" # The vote account votes are cast for
+# NOT required at runtime — keep the withdrawer keypair OFFLINE.
+authorized_withdrawer_keypair = ""
+
+[consensus]
+# Validator mode enforces the full voting-deployment shape (keypairs above,
+# turbine source + gossip entrypoint, Votor QUIC listener below) so the
+# deployment is provisioned before the voting engine activates. Until it
+# lands the node runs the same verifying pipeline and casts NO votes.
+mode = "validator"
+alpenglow_observer_bind_addr = "0.0.0.0:8010" # REQUIRED: Votor QUIC vote/cert listener
+alpenglow_max_message_bytes = 0               # 0 = default
+alpenglow_bls_dst = ""                        # BLS DST override (must match cluster solana-bls version)`
+	}
 	return fmt.Sprintf(`# Mithril Configuration
 # Generated by: mithril config init
 # See config.example.toml for detailed documentation of all options.
@@ -168,15 +220,7 @@ gossip_entrypoint = ""     # REQUIRED for turbine: a gossip entrypoint of your A
 [tuning]
 txpar = 24   # Recommended: 2x your CPU core count
 
-[validator]
-identity_keypair = ""              # Optional validator identity for native turbine gossip
-vote_account_keypair = ""          # Optional vote account keypair path for diagnostics/future voting
-authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
-
-[consensus]
-alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener
-alpenglow_max_message_bytes = 0   # 0 = default
-alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)
+%s
 
 [rpc]
 port = 8899  # Mithril's RPC server (binds to all interfaces)
@@ -190,7 +234,7 @@ max_age_days = 7           # Delete logs older than this
 
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]
-`, s.Accounts, s.Shredstore, s.Snapshots, s.Logs, s.Logs)
+`, s.Accounts, s.Shredstore, s.Snapshots, s.Logs, nodeSections, s.Logs)
 }
 
 // runConfigSet updates a key in the config file

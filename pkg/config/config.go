@@ -12,6 +12,10 @@ const LightbringerQuietDefault = true
 
 func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
+	// network.cluster and block.source default in the run command itself
+	// (alpenglow / turbine) — NOT here, because the lightbringer auto-switch
+	// needs to distinguish "operator chose a source" from "defaulted".
+	v.SetDefault("consensus.mode", "verifying")
 	v.SetDefault("consensus.alpenglow_observer_bind_addr", "")
 	v.SetDefault("consensus.alpenglow_bls_dst", "")
 	v.SetDefault("validator.identity_keypair", "")
@@ -198,6 +202,7 @@ type LogConfig struct {
 
 // ConsensusConfig holds Alpenglow consensus configuration.
 type ConsensusConfig struct {
+	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "verifying" (default, non-voting) or "validator" (enforces keypair/socket requirements; voting engine not yet active)
 	AlpenglowObserverBindAddr string `toml:"alpenglow_observer_bind_addr" mapstructure:"alpenglow_observer_bind_addr"` // Optional passive Alpenglow Votor QUIC listener
 	AlpenglowMaxMessageBytes  int64  `toml:"alpenglow_max_message_bytes" mapstructure:"alpenglow_max_message_bytes"`   // Max Votor QUIC stream payload size
 	AlpenglowBLSDST           string `toml:"alpenglow_bls_dst" mapstructure:"alpenglow_bls_dst"`                       // BLS hash-to-curve DST; empty = default (must match cluster's solana-bls version)
