@@ -16,12 +16,28 @@ import (
 
 const (
 	repairScanInterval        = 100 * time.Millisecond
-	repairRequestTimeout      = 1500 * time.Millisecond
 	repairPeerRefreshInterval = 2 * time.Second
 	repairMaxSlotsPerScan     = 32
 	repairMaxMissingPerSlot   = 256
-	repairMaxFollowupRequests = 256
-	repairMaxOutstanding      = 2048
+	repairMaxFollowupRequests = 64
+	repairMaxOutstanding      = 4096
+	// Adaptive request timeout: peers serve unstaked requesters from QoS
+	// queues whose depth tracks OUR OWN send rate, so a fixed short timeout
+	// under load re-requests shreds whose answers are already queued — and
+	// each duplicate deepens the queue (observed live: 80% "timeouts" while
+	// nearly every request was in fact answered late). The effective timeout
+	// is repairTimeoutLatencyFactor x the smoothed observed response latency,
+	// clamped to this range.
+	repairMinRequestTimeout    = 1500 * time.Millisecond
+	repairMaxRequestTimeout    = 6 * time.Second
+	repairTimeoutLatencyFactor = 3
+	repairLatencyEWMAAlpha     = 0.1
+	// Expired-request memory: (responder, nonce) keys of timed-out requests,
+	// two rotating generations. A response landing after expiry is matched
+	// here instead of vanishing into ignored_old — it counts as a LATE
+	// answer, credits the peer as a responder, and feeds its true latency to
+	// the adaptive timeout.
+	repairExpiredGenCap = 8192
 	// Global request-rate ceiling. Serve-repair QoS on Agave-family peers
 	// deprioritizes and then effectively BANS heavy unstaked requesters —
 	// observed live: ~2000 req/s sustained answered normally for ~90s, then
@@ -52,6 +68,14 @@ type RepairStats struct {
 	// number that separates "cluster serves this range" from "only N nodes
 	// still retain it".
 	RespondingPeers int
+	// Answers that arrived AFTER their request expired (already counted in
+	// Timeouts). LateResponses tracking Timeouts means peers serve nearly
+	// everything but slower than the timeout — a pacing problem, not loss.
+	LateResponses uint64
+	// The adaptive request timeout currently in effect, and the smoothed
+	// response latency driving it.
+	TimeoutMillis     int64
+	AvgResponseMillis int64
 }
 
 type repairRequestKind uint8
@@ -111,12 +135,23 @@ type repairClient struct {
 	rateTokens   float64
 	rateRefillAt time.Time
 
-	requests  atomic.Uint64
-	responses atomic.Uint64
-	timeouts  atomic.Uint64
-	pings     atomic.Uint64
-	pongs     atomic.Uint64
-	errors    atomic.Uint64
+	// Adaptive timeout state: EWMA of observed response latency (mu-guarded),
+	// effective timeout published atomically for the expiry scan.
+	respLatencyEWMA float64 // seconds
+	timeoutNanos    atomic.Int64
+
+	// Recently-expired requests keyed like byResponse, for late-answer
+	// matching (mu-guarded, rotating generations).
+	expiredCur  map[repairResponseKey]time.Time
+	expiredPrev map[repairResponseKey]time.Time
+
+	requests      atomic.Uint64
+	responses     atomic.Uint64
+	timeouts      atomic.Uint64
+	lateResponses atomic.Uint64
+	pings         atomic.Uint64
+	pongs         atomic.Uint64
+	errors        atomic.Uint64
 }
 
 func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (*repairClient, error) {
@@ -133,13 +168,16 @@ func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (
 	if peerSource == nil {
 		return nil, fmt.Errorf("repair peer source is required")
 	}
-	return &repairClient{
+	c := &repairClient{
 		identity:    append(ed25519.PrivateKey(nil), identity...),
 		peerSource:  peerSource,
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
-	}, nil
+		expiredCur:  make(map[repairResponseKey]time.Time, repairExpiredGenCap),
+	}
+	c.timeoutNanos.Store(int64(repairMinRequestTimeout))
+	return c, nil
 }
 
 func (c *repairClient) run(ctx context.Context, conn *net.UDPConn, assembler *SlotAssembler) {
@@ -294,6 +332,23 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	c.mu.Lock()
 	reqKey, ok := c.byResponse[responseKey]
 	if !ok {
+		// Not outstanding — but it may be the LATE answer to a request we
+		// already expired. Matching it here keeps the peer's responder
+		// credit, attributes the shred as repair-delivered, and feeds the
+		// true tail latency to the adaptive timeout instead of letting the
+		// packet vanish into ignored_old.
+		if sentAt, late := c.expiredCur[responseKey]; late {
+			delete(c.expiredCur, responseKey)
+			c.noteLateResponseLocked(addrKey, sentAt)
+			c.mu.Unlock()
+			return true
+		}
+		if sentAt, late := c.expiredPrev[responseKey]; late {
+			delete(c.expiredPrev, responseKey)
+			c.noteLateResponseLocked(addrKey, sentAt)
+			c.mu.Unlock()
+			return true
+		}
 		c.mu.Unlock()
 		return false
 	}
@@ -301,6 +356,7 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	delete(c.byResponse, responseKey)
 	delete(c.outstanding, reqKey)
 	c.notePeerMatchedLocked(addrKey)
+	c.observeLatencyLocked(time.Since(outstanding.sentAt))
 	c.mu.Unlock()
 
 	if outstanding.key.slot != shred.Slot {
@@ -316,16 +372,79 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 		return true
 	}
 	start := outstanding.key.index
+	gap := 0
+	if shred.Index > start {
+		gap = int(shred.Index - start)
+	}
+	ask := gap
+	if ask > repairMaxFollowupRequests {
+		ask = repairMaxFollowupRequests
+	}
+	chainProbe := !shred.LastInSlot() && shred.Index < maxDataShredsPerSlot-1
+	if chainProbe {
+		ask++
+	}
+	if ask == 0 {
+		return true
+	}
+	// Followups draw from the SAME token bucket as the scan. This path used
+	// to be unmetered — with hundreds of probed slots it pushed the total
+	// send rate ~70% past the cap, which is exactly the flood the peer-side
+	// QoS ban punishes. When the bucket is dry the scan's deficit-aware
+	// selection covers the slot on its own cadence.
+	grant := c.takeRateTokens(ask)
+	if grant <= 0 {
+		return true
+	}
+	windowBudget := grant
+	if chainProbe && windowBudget > 0 {
+		windowBudget-- // reserve the chained probe's token
+	}
 	followups := 0
-	for index := start; index < shred.Index && followups < repairMaxFollowupRequests; index++ {
+	for index := start; index < shred.Index && followups < windowBudget; index++ {
 		if c.sendRequest(conn, peers, repairRequestWindowIndex, shred.Slot, index, 0) {
 			followups++
 		}
 	}
-	if !shred.LastInSlot() && followups < repairMaxFollowupRequests && shred.Index < maxDataShredsPerSlot-1 {
-		c.sendRequest(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1, 0)
+	if chainProbe && followups < grant {
+		if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1, 0) {
+			followups++
+		}
 	}
+	c.returnRateTokens(grant - followups)
 	return true
+}
+
+// noteLateResponseLocked credits a peer whose answer arrived after the
+// request expired: responder status (it DOES serve us — just slower than the
+// timeout allowed), late accounting, and the real observed latency.
+func (c *repairClient) noteLateResponseLocked(addr repairAddressKey, sentAt time.Time) {
+	c.notePeerMatchedLocked(addr)
+	c.observeLatencyLocked(time.Since(sentAt))
+	c.lateResponses.Add(1)
+}
+
+// observeLatencyLocked folds one request->response latency into the EWMA and
+// refreshes the effective timeout: repairTimeoutLatencyFactor x the smoothed
+// latency, clamped to [repairMinRequestTimeout, repairMaxRequestTimeout].
+func (c *repairClient) observeLatencyLocked(lat time.Duration) {
+	sec := lat.Seconds()
+	if sec <= 0 {
+		return
+	}
+	if c.respLatencyEWMA == 0 {
+		c.respLatencyEWMA = sec
+	} else {
+		c.respLatencyEWMA = (1-repairLatencyEWMAAlpha)*c.respLatencyEWMA + repairLatencyEWMAAlpha*sec
+	}
+	eff := time.Duration(c.respLatencyEWMA * repairTimeoutLatencyFactor * float64(time.Second))
+	if eff < repairMinRequestTimeout {
+		eff = repairMinRequestTimeout
+	}
+	if eff > repairMaxRequestTimeout {
+		eff = repairMaxRequestTimeout
+	}
+	c.timeoutNanos.Store(int64(eff))
 }
 
 func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer, kind repairRequestKind, slot uint64, index uint32, attempt uint8) bool {
@@ -525,16 +644,35 @@ func (c *repairClient) notePeerMatchedLocked(addr repairAddressKey) {
 }
 
 func (c *repairClient) expireOutstanding(now time.Time) {
+	timeout := time.Duration(c.timeoutNanos.Load())
+	if timeout <= 0 {
+		timeout = repairMinRequestTimeout
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for key, outstanding := range c.outstanding {
-		if now.Sub(outstanding.sentAt) < repairRequestTimeout {
+		if now.Sub(outstanding.sentAt) < timeout {
 			continue
 		}
+		responseKey := repairResponseKey{addr: outstanding.addr, nonce: outstanding.nonce}
 		delete(c.outstanding, key)
-		delete(c.byResponse, repairResponseKey{addr: outstanding.addr, nonce: outstanding.nonce})
+		delete(c.byResponse, responseKey)
+		c.rememberExpiredLocked(responseKey, outstanding.sentAt)
 		c.timeouts.Add(1)
 	}
+}
+
+// rememberExpiredLocked keeps an expired request's response key so a late
+// answer can still be recognized. Two rotating generations bound memory.
+func (c *repairClient) rememberExpiredLocked(key repairResponseKey, sentAt time.Time) {
+	if c.expiredCur == nil {
+		c.expiredCur = make(map[repairResponseKey]time.Time, repairExpiredGenCap)
+	}
+	if len(c.expiredCur) >= repairExpiredGenCap {
+		c.expiredPrev = c.expiredCur
+		c.expiredCur = make(map[repairResponseKey]time.Time, repairExpiredGenCap)
+	}
+	c.expiredCur[key] = sentAt
 }
 
 func (c *repairClient) peerSnapshot(now time.Time) []gossip.RepairPeer {
@@ -591,16 +729,20 @@ func (c *repairClient) stats() RepairStats {
 			responding++
 		}
 	}
+	avgResponseMillis := int64(c.respLatencyEWMA * 1000)
 	c.mu.Unlock()
 	return RepairStats{
-		Requests:        c.requests.Load(),
-		Responses:       c.responses.Load(),
-		Timeouts:        c.timeouts.Load(),
-		Pings:           c.pings.Load(),
-		Pongs:           c.pongs.Load(),
-		Errors:          c.errors.Load(),
-		Outstanding:     outstanding,
-		Peers:           peers,
-		RespondingPeers: responding,
+		Requests:          c.requests.Load(),
+		Responses:         c.responses.Load(),
+		Timeouts:          c.timeouts.Load(),
+		Pings:             c.pings.Load(),
+		Pongs:             c.pongs.Load(),
+		Errors:            c.errors.Load(),
+		Outstanding:       outstanding,
+		Peers:             peers,
+		RespondingPeers:   responding,
+		LateResponses:     c.lateResponses.Load(),
+		TimeoutMillis:     int64(time.Duration(c.timeoutNanos.Load()) / time.Millisecond),
+		AvgResponseMillis: avgResponseMillis,
 	}
 }

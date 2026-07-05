@@ -500,8 +500,13 @@ const (
 	// while repair responses flow is usually POISONED assembly state (a bad
 	// first shred pinning an FEC signature/variant/layout). Reset the slot's
 	// shred state and re-repair from scratch — bounded attempts, spaced out.
-	repairCatchupHeadResetAfter = 90 * time.Second
-	repairCatchupMaxHeadResets  = 2
+	// The reset requires the head to have stopped GROWING too: a head still
+	// accumulating shreds is rate-limited, not poisoned, and resetting it
+	// throws away paid-for progress (observed live: a 7392-shred slot wiped
+	// at 6434 held, mid-climb).
+	repairCatchupHeadResetAfter  = 90 * time.Second
+	repairCatchupMaxHeadResets   = 2
+	repairCatchupHeadGrowthGrace = 30 * time.Second
 
 	lightbringerLiveEdgeHandoffMaxLag = 4
 	lightbringerGapFallbackWait       = 8 * time.Second
@@ -2899,8 +2904,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	statsAtArm := receiver.Stats()
 	lastWaiting := uint64(0)
 	lastProgress := time.Now()
-	headShreds := -1 // distinct data shreds seen for the current head (-1 = none yet)
-	headResets := 0  // shred-state resets performed on the current head
+	headShreds := -1           // distinct data shreds seen for the current head (-1 = none yet)
+	headResets := 0            // shred-state resets performed on the current head
+	headGrowthAt := time.Now() // last time the head's shred count increased
 	var headCompletedAt time.Time
 	headCompletedSlot := uint64(0)
 	sawWindowFill := false
@@ -3002,22 +3008,29 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			lastProgress = time.Now()
 			headShreds = -1
 			headResets = 0
+			headGrowthAt = time.Now()
 		} else {
 			if obs, ok := receiver.ShredObservation(waiting); ok {
+				if obs.DataShreds > headShreds {
+					headGrowthAt = time.Now()
+				}
 				headShreds = obs.DataShreds
 			}
 			stalled := time.Since(lastProgress)
+			headStalled := time.Since(headGrowthAt)
 
 			// Stuck-head self-heal: shreds held but the slot cannot complete
 			// while responses flow means the assembly state is likely
 			// poisoned (bad first shred pinning an FEC signature, variant, or
 			// layout). Drop the slot's shred state and re-repair it from
 			// scratch — bounded attempts so a genuinely unserved slot does
-			// not thrash. A COMPLETED head is never reset here: it assembled
-			// fine and belongs to the staged/buffered/lost classification
-			// below — resetting it would destroy a block that merely has not
-			// emitted yet.
-			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter && !receiver.SlotCompleted(waiting) {
+			// not thrash. Two guards: a COMPLETED head is never reset (it
+			// assembled fine — the staged/buffered/lost classification below
+			// owns it), and a head whose shred count is still GROWING is
+			// never reset (it is rate-limited, not poisoned; the reset would
+			// discard progress the repair budget already paid for).
+			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter &&
+				headStalled >= repairCatchupHeadGrowthGrace && !receiver.SlotCompleted(waiting) {
 				errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
 				if lastErr == "" {
 					lastErr = "none"
@@ -3025,8 +3038,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				headResets++
 				detail := headShredDetailString(receiver, waiting)
 				receiver.ResetSlot(waiting)
-				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held but the slot cannot complete (assembly errors: %d, latest: %s) | %s; re-repairing from scratch",
-					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), errCount, lastErr, detail)
+				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held, no growth for %s, and the slot cannot complete (assembly errors: %d, latest: %s) | %s; re-repairing from scratch",
+					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), headStalled.Round(time.Second), errCount, lastErr, detail)
 			}
 
 			// A stalled head stays on repair — loudly. The counters make the
@@ -3097,11 +3110,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if stalled > 10*time.Minute {
 					hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or set block.rpc_fallback=true"
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d | repair pings +%d, pongs +%d, send_errors +%d%s",
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d | repair pings +%d, pongs +%d, send_errors +%d%s",
 					waiting, stalled.Round(time.Second), rpcNote,
 					max(headShreds, 0), errCount, lastErr, headShredDetailString(receiver, waiting), windowBlocks,
 					repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
-					repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers,
+					repair.LateResponses-statsAtArm.Repair.LateResponses,
+					repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,
+					repair.Peers, repair.RespondingPeers,
 					stats.IgnoredOldShreds-statsAtArm.IgnoredOldShreds, stats.MissingLeaders-statsAtArm.MissingLeaders,
 					stats.SignatureErrors-statsAtArm.SignatureErrors, stats.ParseErrors-statsAtArm.ParseErrors,
 					stats.NonCanonicalBlockIDs-statsAtArm.NonCanonicalBlockIDs, stats.LastNonCanonicalSlot,
@@ -3133,10 +3148,12 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			lastStatusLog = time.Now()
 			hb := receiver.Stats()
 			repair := hb.Repair
-			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
 				waiting, edge, windowBlocks,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
-				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.Peers, repair.RespondingPeers,
+				repair.LateResponses-statsAtArm.Repair.LateResponses,
+				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,
+				repair.Peers, repair.RespondingPeers,
 				hb.HydratedSlots-statsAtArm.HydratedSlots, hb.HydratedFromDisk-statsAtArm.HydratedFromDisk,
 				hb.SigVerifies-statsAtArm.SigVerifies, hb.SigVerifyCached-statsAtArm.SigVerifyCached)
 		}
