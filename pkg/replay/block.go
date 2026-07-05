@@ -1754,6 +1754,15 @@ func ReplayBlocks(
 			opts.AlpenglowWantedBlocks = wb.AlpenglowWantedBlocks
 			opts.AlpenglowSkipCertified = wb.SkipCertifiedAt
 		}
+		// Footer certs at ASSEMBLY time: staged catchup blocks carry the
+		// certificates that prove decisions (including skips) for OLDER
+		// slots. Feeding them only at replay time deadlocks a shreds-only
+		// catchup behind a certificate-skipped slot — the proof of the skip
+		// sits buffered one slot ahead of it. The engine dedupes, so the
+		// replay-time ingestion below stays as-is.
+		opts.AlpenglowFooterCertSink = func(raw []byte) {
+			ingestAlpenglowFooterCertificate(consensusEngine, raw)
+		}
 	}
 
 	// Apply block fetching options if provided

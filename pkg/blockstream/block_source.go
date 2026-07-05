@@ -62,6 +62,11 @@ type BlockSourceOpts struct {
 	// certificate-skipped slots.
 	AlpenglowWantedBlocks  func(afterSlot uint64, max int) []alpenglow.WantedBlock
 	AlpenglowSkipCertified func(slot uint64) bool
+	// Footer certificates from ASSEMBLED blocks, fed to the consensus engine
+	// at ingest time — before ordered emission. During catchup the certs
+	// proving decisions for older slots (including skips) arrive inside
+	// LATER blocks that cannot emit until those very decisions are known.
+	AlpenglowFooterCertSink func(raw []byte)
 	// RepairCatchupMaxGapSlots: when resuming behind the live shred edge by at
 	// most this many slots, fill the gap via turbine repair instead of RPC
 	// getBlock (0 disables). Repaired shreds carry block ids + footer certs, so
@@ -380,6 +385,7 @@ type BlockSource struct {
 	alpenglowCandidateBlockSink func(alpenglow.ReplayBlockObservation)
 	alpenglowWantedBlocksFn     func(afterSlot uint64, max int) []alpenglow.WantedBlock
 	alpenglowSkipCertifiedFn    func(slot uint64) bool
+	alpenglowFooterCertSink     func(raw []byte)
 
 	// Stats tracking
 	stats          BlockSourceStats
@@ -586,6 +592,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		leaderForSlot:                opts.LeaderForSlot,
 		alpenglowDecisionSource:      opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:  opts.AlpenglowCandidateBlockSink,
+		alpenglowFooterCertSink:      opts.AlpenglowFooterCertSink,
 		alpenglowWantedBlocksFn:      opts.AlpenglowWantedBlocks,
 		alpenglowSkipCertifiedFn:     opts.AlpenglowSkipCertified,
 		lightbringerBuffer:           make(map[uint64]*b.Block),
@@ -2260,6 +2267,18 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 
 	bs.lightbringerLastStreamSlot.Store(blk.Slot)
 	bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+
+	// Consensus feed at ASSEMBLY time, before ANY emission gating: footer
+	// certificates and parent links from blocks we may only stage (or even
+	// drop) are how the chain tracker learns decisions for older slots
+	// during catchup. Without this, a certificate-skipped slot inside the
+	// gap deadlocks the emitter — the proof of the skip is buffered one
+	// slot ahead of it, waiting on the skip to resolve. The engine dedupes,
+	// so the emission-time observations remain unchanged.
+	bs.observeAlpenglowCandidateBlock(blk)
+	if bs.alpenglowFooterCertSink != nil && len(blk.AlpenglowFinalCert) > 0 {
+		bs.alpenglowFooterCertSink(blk.AlpenglowFinalCert)
+	}
 
 	if !bs.shouldDecodeLightbringerSlot(blk.Slot) {
 		return true
