@@ -1695,6 +1695,16 @@ func (bs *BlockSource) allowsLiveEdgeHandoff() bool {
 }
 
 func (bs *BlockSource) lightbringerHandoffRequiredLastSlot(waitingSlot uint64) uint64 {
+	// Repair catchup: arm the handoff the moment the HEAD slot is assembled
+	// and anchor-connected — replay should start executing immediately, not
+	// wait for a deep staged runway. The 8-block minimum run below exists to
+	// avoid arm/disarm thrash on a raw live edge; during catchup the drive
+	// keeps repair pressure on the window, later blocks flow to the emitter
+	// as they assemble, and the parent-connect check at emission still gates
+	// execution.
+	if bs.repairCatchupActive() {
+		return waitingSlot
+	}
 	requiredLastSlot := lightbringerDefaultHandoffLastSlot(waitingSlot)
 	if !bs.allowsLiveEdgeHandoff() || !bs.lightbringerConnected.Load() {
 		return requiredLastSlot
