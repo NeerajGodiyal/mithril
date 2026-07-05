@@ -144,9 +144,12 @@ type repairClient struct {
 	timeoutNanos    atomic.Int64
 
 	// Recently-expired requests keyed like byResponse, for late-answer
-	// matching (mu-guarded, rotating generations).
-	expiredCur  map[repairResponseKey]time.Time
-	expiredPrev map[repairResponseKey]time.Time
+	// matching (mu-guarded, rotating generations). The FULL request record
+	// is kept so a late answer takes the exact same path as a timely one:
+	// slot validation, responder credit, latency feed, and HWI gap
+	// followups.
+	expiredCur  map[repairResponseKey]outstandingRepairRequest
+	expiredPrev map[repairResponseKey]outstandingRepairRequest
 
 	requests      atomic.Uint64
 	responses     atomic.Uint64
@@ -177,7 +180,7 @@ func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
-		expiredCur:  make(map[repairResponseKey]time.Time, repairExpiredGenCap),
+		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap),
 	}
 	c.timeoutNanos.Store(int64(repairMinRequestTimeout))
 	return c, nil
@@ -332,32 +335,29 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	}
 	responseKey := repairResponseKey{addr: addrKey, nonce: nonce}
 
+	// A late answer — one arriving after its request expired — is matched
+	// from the expired-request memory and then treated EXACTLY like a
+	// timely one: peer credited as a responder, true tail latency fed to
+	// the adaptive timeout, slot validated, and HWI gap followups fired.
+	// Without this, a slow-but-serving cluster looks dead and its revealed
+	// gaps never get requested.
 	c.mu.Lock()
-	reqKey, ok := c.byResponse[responseKey]
-	if !ok {
-		// Not outstanding — but it may be the LATE answer to a request we
-		// already expired. Matching it here keeps the peer's responder
-		// credit, attributes the shred as repair-delivered, and feeds the
-		// true tail latency to the adaptive timeout instead of letting the
-		// packet vanish into ignored_old.
-		if sentAt, late := c.expiredCur[responseKey]; late {
-			delete(c.expiredCur, responseKey)
-			c.noteLateResponseLocked(addrKey, sentAt)
-			c.mu.Unlock()
-			return true
-		}
-		if sentAt, late := c.expiredPrev[responseKey]; late {
-			delete(c.expiredPrev, responseKey)
-			c.noteLateResponseLocked(addrKey, sentAt)
-			c.mu.Unlock()
-			return true
-		}
+	var outstanding outstandingRepairRequest
+	late := false
+	if reqKey, ok := c.byResponse[responseKey]; ok {
+		outstanding = c.outstanding[reqKey]
+		delete(c.byResponse, responseKey)
+		delete(c.outstanding, reqKey)
+	} else if rec, ok := c.expiredCur[responseKey]; ok {
+		outstanding, late = rec, true
+		delete(c.expiredCur, responseKey)
+	} else if rec, ok := c.expiredPrev[responseKey]; ok {
+		outstanding, late = rec, true
+		delete(c.expiredPrev, responseKey)
+	} else {
 		c.mu.Unlock()
 		return false
 	}
-	outstanding := c.outstanding[reqKey]
-	delete(c.byResponse, responseKey)
-	delete(c.outstanding, reqKey)
 	c.notePeerMatchedLocked(addrKey)
 	c.observeLatencyLocked(time.Since(outstanding.sentAt))
 	c.mu.Unlock()
@@ -365,7 +365,11 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	if outstanding.key.slot != shred.Slot {
 		return false
 	}
-	c.responses.Add(1)
+	if late {
+		c.lateResponses.Add(1)
+	} else {
+		c.responses.Add(1)
+	}
 	if outstanding.key.kind != repairRequestHighestWindowIndex || shred.Type != ShredTypeData {
 		return true
 	}
@@ -416,15 +420,6 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	}
 	c.returnRateTokens(grant - followups)
 	return true
-}
-
-// noteLateResponseLocked credits a peer whose answer arrived after the
-// request expired: responder status (it DOES serve us — just slower than the
-// timeout allowed), late accounting, and the real observed latency.
-func (c *repairClient) noteLateResponseLocked(addr repairAddressKey, sentAt time.Time) {
-	c.notePeerMatchedLocked(addr)
-	c.observeLatencyLocked(time.Since(sentAt))
-	c.lateResponses.Add(1)
 }
 
 // observeLatencyLocked folds one request->response latency into the EWMA and
@@ -678,22 +673,23 @@ func (c *repairClient) expireOutstanding(now time.Time) {
 		responseKey := repairResponseKey{addr: outstanding.addr, nonce: outstanding.nonce}
 		delete(c.outstanding, key)
 		delete(c.byResponse, responseKey)
-		c.rememberExpiredLocked(responseKey, outstanding.sentAt)
+		c.rememberExpiredLocked(responseKey, outstanding)
 		c.timeouts.Add(1)
 	}
 }
 
-// rememberExpiredLocked keeps an expired request's response key so a late
-// answer can still be recognized. Two rotating generations bound memory.
-func (c *repairClient) rememberExpiredLocked(key repairResponseKey, sentAt time.Time) {
+// rememberExpiredLocked keeps an expired request's full record so a late
+// answer can still be recognized and handled like a timely one. Two
+// rotating generations bound memory.
+func (c *repairClient) rememberExpiredLocked(key repairResponseKey, req outstandingRepairRequest) {
 	if c.expiredCur == nil {
-		c.expiredCur = make(map[repairResponseKey]time.Time, repairExpiredGenCap)
+		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap)
 	}
 	if len(c.expiredCur) >= repairExpiredGenCap {
 		c.expiredPrev = c.expiredCur
-		c.expiredCur = make(map[repairResponseKey]time.Time, repairExpiredGenCap)
+		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap)
 	}
-	c.expiredCur[key] = sentAt
+	c.expiredCur[key] = req
 }
 
 func (c *repairClient) peerSnapshot(now time.Time) []gossip.RepairPeer {

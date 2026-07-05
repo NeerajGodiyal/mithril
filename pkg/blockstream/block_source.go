@@ -2916,7 +2916,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	var headCompletedAt time.Time
 	headCompletedSlot := uint64(0)
 	sawWindowFill := false
-	lastResponses := statsAtArm.Repair.Responses
+	lastResponses := statsAtArm.Repair.Responses + statsAtArm.Repair.LateResponses
 	var lastStallWarn time.Time
 	var lastStagedWarn time.Time
 	lastStatusLog := time.Now()
@@ -2979,10 +2979,12 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 
 		// Feed the global 5-minute stall watchdog while repair is
 		// demonstrably exchanging data: a head-of-line block on one slot is
-		// a wait (the configured shreds-only behavior), not node death. If
-		// even repair traffic ceases, the watchdog fires as before.
-		if repairNow := receiver.Stats().Repair; repairNow.Responses != lastResponses {
-			lastResponses = repairNow.Responses
+		// a wait (the configured shreds-only behavior), not node death. Late
+		// answers count too — a node living on slower-than-timeout responses
+		// is making real progress, not dying. If even repair traffic ceases,
+		// the watchdog fires as before.
+		if repairNow := receiver.Stats().Repair; repairNow.Responses+repairNow.LateResponses != lastResponses {
+			lastResponses = repairNow.Responses + repairNow.LateResponses
 			bs.lastProgress.Store(time.Now().Unix())
 		}
 

@@ -16,7 +16,7 @@ func newPacingTestClient(t *testing.T) *repairClient {
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
-		expiredCur:  make(map[repairResponseKey]time.Time),
+		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest),
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -105,6 +105,67 @@ func TestLateResponseMatchedAfterExpiry(t *testing.T) {
 	// Second delivery of the same nonce: entry consumed, ordinary broadcast.
 	if c.observeShredResponse(nil, packet, from, shred) {
 		t.Fatal("expired entry must be single-use")
+	}
+}
+
+// A late answer carrying a shred for the WRONG slot is rejected exactly like
+// a timely mismatch would be — the expired record keeps the request's slot,
+// so a peer cannot ride an old nonce to repair-attribute arbitrary data.
+func TestLateResponseWrongSlotRejected(t *testing.T) {
+	c := newPacingTestClient(t)
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 8), Port: 8008}
+	addrKey, _ := repairAddressKeyFromUDP(from)
+
+	reqKey := repairRequestKey{kind: repairRequestWindowIndex, slot: 42, index: 3}
+	c.outstanding[reqKey] = outstandingRepairRequest{key: reqKey, nonce: 900, addr: addrKey, sentAt: time.Now().Add(-5 * time.Second)}
+	c.byResponse[repairResponseKey{addr: addrKey, nonce: 900}] = reqKey
+	c.expireOutstanding(time.Now())
+
+	if c.observeShredResponse(nil, nonceTrailer(900), from, &Shred{Slot: 43, Index: 3, Type: ShredTypeData}) {
+		t.Fatal("wrong-slot late answer must not be attributed as repair")
+	}
+	if c.lateResponses.Load() != 0 {
+		t.Fatalf("lateResponses = %d, want 0 (slot check precedes counting)", c.lateResponses.Load())
+	}
+}
+
+// A LATE HighestWindowIndex answer fires the same metered gap followups as a
+// timely one — the revealed missing range is the whole point of the probe.
+func TestLateHighestResponseFiresFollowups(t *testing.T) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer conn.Close()
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("sink listen: %v", err)
+	}
+	defer sink.Close()
+
+	c := newPacingTestClient(t)
+	c.peerCache = []gossip.RepairPeer{{Addr: sink.LocalAddr().(*net.UDPAddr)}}
+	c.peerCacheAt = time.Now()
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 8009}
+	addrKey, _ := repairAddressKeyFromUDP(from)
+	reqKey := repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 50, index: 0}
+	c.outstanding[reqKey] = outstandingRepairRequest{key: reqKey, nonce: 6, addr: addrKey, sentAt: time.Now().Add(-5 * time.Second)}
+	c.byResponse[repairResponseKey{addr: addrKey, nonce: 6}] = reqKey
+	c.expireOutstanding(time.Now())
+
+	if !c.observeShredResponse(conn, nonceTrailer(6), from, &Shred{Slot: 50, Index: 200, Type: ShredTypeData}) {
+		t.Fatal("late HWI answer must match")
+	}
+	if c.lateResponses.Load() != 1 || c.responses.Load() != 0 {
+		t.Fatalf("late=%d responses=%d, want 1/0", c.lateResponses.Load(), c.responses.Load())
+	}
+	want := uint64(repairMaxFollowupRequests + 1)
+	if got := c.requests.Load(); got != want {
+		t.Fatalf("late HWI sent %d followups, want %d (same as timely)", got, want)
+	}
+	probeKey := repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 50, index: 201}
+	if _, ok := c.outstanding[probeKey]; !ok {
+		t.Fatal("chained highest probe must have gone out")
 	}
 }
 
