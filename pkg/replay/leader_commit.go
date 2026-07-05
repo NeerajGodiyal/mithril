@@ -39,6 +39,12 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	slotCtx := in.SlotCtx
 	block := in.Block
 	slotCtx.Blockhash = block.Blockhash
+	// Propagate the derived fee rate governor onto the committed slot context so the
+	// RecentBlockhashes push uses the correct lamports_per_signature and the chain tip
+	// carries it forward to the next (possibly consecutive leader) slot.
+	if block.FeeRateGovernor != nil {
+		slotCtx.FeeRateGovernor = block.FeeRateGovernor
+	}
 	if in.FooterProducerTimeNanos > 0 {
 		block.FooterProducerTimeNanos = in.FooterProducerTimeNanos
 	}
@@ -119,6 +125,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	}
 
 	slotCtx.Blockhash = block.Blockhash
+	slotCtx.NumSignatures = block.NumSignatures
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	global.SetSlot(block.Slot)
 	global.SetEpoch(block.Epoch)

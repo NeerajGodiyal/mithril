@@ -19,11 +19,12 @@ type ChainTipSnapshot struct {
 }
 
 var (
-	chainTipMu            sync.RWMutex
-	chainTipAcctsLtHash   *lthash.LtHash
-	chainTipFeatures      *features.Features
-	chainTipPrevNumSigs   uint64
-	chainTipLastEntryHash solana.Hash
+	chainTipMu              sync.RWMutex
+	chainTipAcctsLtHash     *lthash.LtHash
+	chainTipFeatures        *features.Features
+	chainTipPrevNumSigs     uint64
+	chainTipLastEntryHash   solana.Hash
+	chainTipPrevFeeGovernor *sealevel.FeeRateGovernor
 )
 
 // InitChainTip seeds blockprod parent context before the first ProcessBlock.
@@ -59,6 +60,14 @@ func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features) 
 	if slotCtx.Blockhash != ([32]byte{}) {
 		chainTipLastEntryHash = solana.Hash(slotCtx.Blockhash)
 	}
+	// Carry the parent slot's fully-populated (derived) fee rate governor so the
+	// next leader block derives the correct lamports_per_signature for the head
+	// RecentBlockhashes entry. A partial governor with zeroed Target* fields would
+	// derive lamports_per_signature=0 and diverge from Agave's bank hash.
+	if slotCtx.FeeRateGovernor != nil {
+		gov := *slotCtx.FeeRateGovernor
+		chainTipPrevFeeGovernor = &gov
+	}
 }
 
 // ChainTipParentContext returns a snapshot of replay chain metadata for leader forging.
@@ -74,6 +83,10 @@ func ChainTipParentContext() ChainTipSnapshot {
 	}
 	if chainTipFeatures != nil {
 		ctx.Features = chainTipFeatures.Clone()
+	}
+	if chainTipPrevFeeGovernor != nil {
+		gov := *chainTipPrevFeeGovernor
+		ctx.PrevFeeGovernor = &gov
 	}
 	return ctx
 }
