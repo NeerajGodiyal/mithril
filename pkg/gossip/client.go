@@ -79,6 +79,7 @@ type Client struct {
 	txPullResponses  atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
+	running          atomic.Bool
 }
 
 type knownPeer struct {
@@ -210,12 +211,21 @@ func (c *Client) ShredVersion() uint16 {
 	return c.contact.ShredVer
 }
 
+// Running reports whether Run has bound the gossip socket and not yet exited.
+func (c *Client) Running() bool {
+	return c.running.Load()
+}
+
 func (c *Client) Run(ctx context.Context) error {
 	conn, err := net.ListenUDP("udp", c.bindAddr)
 	if err != nil {
 		return fmt.Errorf("bind gossip socket %s: %w", c.bindAddr, err)
 	}
-	defer conn.Close()
+	c.running.Store(true)
+	defer func() {
+		c.running.Store(false)
+		conn.Close()
+	}()
 
 	if err := c.initializeContact(conn.LocalAddr().(*net.UDPAddr)); err != nil {
 		return err
@@ -331,6 +341,18 @@ func (c *Client) RepairPeers() []RepairPeer {
 	peers := make([]RepairPeer, 0, len(c.repairPeers))
 	for _, peer := range c.repairPeers {
 		peers = append(peers, peer)
+	}
+	if len(peers) == 0 {
+		for _, tvu := range c.TVUPeers() {
+			if tvu.TVUAddr == nil || tvu.TVUAddr.Port == 0 {
+				continue
+			}
+			peers = append(peers, RepairPeer{
+				Pubkey:   tvu.Pubkey,
+				Addr:     tvu.TVUAddr,
+				LastSeen: tvu.LastSeen,
+			})
+		}
 	}
 	return peers
 }

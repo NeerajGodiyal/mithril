@@ -69,6 +69,11 @@ type BlockSourceOpts struct {
 	// block source to resolve every local gap before delivery.
 	ConsensusManagedLightbringer bool
 
+	// TurbineRepairOnly disables RPC block fetch when SourceType is turbine.
+	// Blocks are sourced exclusively from the native turbine receiver and gossip
+	// repair. RPC endpoints are still used for tip polling only.
+	TurbineRepairOnly bool
+
 	// Backup RPC endpoints for failover (optional)
 	// These are tried in order if the primary fails with hard connectivity errors
 	// (connection refused, no such host, etc.). NOT used for timeouts or rate limits.
@@ -301,6 +306,7 @@ type BlockSource struct {
 	gossipClient                   *gossipclient.Client
 	turbineAlpenglowBindAddr       string
 	turbineAlpenglowBlockIDHints   bool
+	turbineRepairOnly              bool
 	alpenglowMu                    sync.Mutex
 	knownAlpenglowBlockIDs         map[uint64]solana.Hash
 	knownAlpenglowBlockIDOrder     []uint64
@@ -328,6 +334,12 @@ type BlockSource struct {
 	lightbringerGapLastLogUnix     atomic.Int64  // UnixNano of the last active-gap wait log
 	lightbringerGapReconnectSlot   atomic.Uint64 // Waiting slot that already triggered a Lightbringer reconnect
 	lightbringerRepairSlot         atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
+	turbineIdleRepairKickUnix      atomic.Int64  // Unix timestamp of last idle turbine repair kick
+	turbineStuckSinceUnix          atomic.Int64  // Unix timestamp when zero-block turbine ingest was first observed
+	turbineStuckLogAt              atomic.Int64  // Unix timestamp of last stuck-turbine INFO log
+	turbineStatsSnapMu             sync.Mutex
+	turbineStatsSnap               turbine.ReceiverStats
+	turbineStatsSnapValid          bool
 	lightbringerWg                 sync.WaitGroup
 	lightbringerBufferMu           sync.Mutex
 	lightbringerBuffer             map[uint64]*b.Block
@@ -503,6 +515,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		gossipClient:                 opts.GossipClient,
 		turbineAlpenglowBindAddr:     opts.TurbineAlpenglowBindAddr,
 		turbineAlpenglowBlockIDHints: opts.TurbineAlpenglowBlockIDHints,
+		turbineRepairOnly:            opts.TurbineRepairOnly && opts.SourceType == BlockSourceTurbine,
 		tpuQUICAdvertise:             opts.TPUQUICAdvertise,
 		leaderForSlot:                opts.LeaderForSlot,
 		hasLocalLeaderCommit:         opts.HasLocalLeaderCommit,
@@ -538,13 +551,111 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	if opts.SourceType == BlockSourceLightbringer && opts.LightbringerEndpoint != "" {
 		mlog.Log.Infof("Lightbringer live handoff configured for %s (RPC catchup remains enabled)", opts.LightbringerEndpoint)
 	} else if opts.SourceType == BlockSourceTurbine && opts.TurbineBindAddr != "" {
-		mlog.Log.Infof("Native turbine live handoff configured on %s (RPC catchup remains enabled)", opts.TurbineBindAddr)
+		if bs.turbineRepairOnly {
+			bs.isNearTip.Store(true)
+			mlog.Log.Infof("Native turbine repair-only configured on %s (RPC block fetch disabled; tip polling only)", opts.TurbineBindAddr)
+		} else {
+			mlog.Log.Infof("Native turbine live handoff configured on %s (RPC catchup remains enabled)", opts.TurbineBindAddr)
+		}
 		if opts.TurbineGossipEntrypoint != "" {
 			mlog.Log.Infof("Native turbine gossip configured with entrypoint %s", opts.TurbineGossipEntrypoint)
+		} else if bs.turbineRepairOnly {
+			mlog.Log.Warnf("Turbine repair-only mode requires gossip entrypoint for historical slot repair")
 		}
 	}
 
 	return bs
+}
+
+func (bs *BlockSource) turbineRepairOnlyMode() bool {
+	return bs.turbineRepairOnly
+}
+
+func (bs *BlockSource) waitingSlotLocked() uint64 {
+	waitingSlot := bs.nextSlotToSend
+	if waitingSlot == 0 {
+		waitingSlot = bs.startSlot
+	}
+	return waitingSlot
+}
+
+func (bs *BlockSource) armTurbineRepairOnlyHandoff() {
+	if !bs.turbineRepairOnlyMode() {
+		return
+	}
+	bs.reorderMu.Lock()
+	waitingSlot := bs.waitingSlotLocked()
+	bs.reorderMu.Unlock()
+	if bs.lightbringerHandoffSlot.CompareAndSwap(0, waitingSlot) {
+		bs.lightbringerActive.Store(true)
+		mlog.Log.Infof("BLOCK SOURCE STATUS: turbine repair-only handoff at slot %d (RPC block fetch disabled)", waitingSlot)
+	}
+}
+
+func (bs *BlockSource) kickTurbineRepairForWaitingFrontier() {
+	if !bs.turbineRepairOnlyMode() || !bs.lightbringerConnected.Load() {
+		return
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.waitingSlotLocked()
+	bs.reorderMu.Unlock()
+
+	tip := bs.confirmedTip.Load()
+	if streamedTip := bs.lightbringerHandoffTipEstimate(); streamedTip > tip {
+		tip = streamedTip
+	}
+	if tip < waitingSlot {
+		tip = waitingSlot
+	}
+
+	now := time.Now()
+	lastKickUnix := bs.turbineIdleRepairKickUnix.Load()
+	if lastKickUnix != 0 && now.Sub(time.Unix(lastKickUnix, 0)) < turbineIdleRepairKickInterval {
+		return
+	}
+	bs.turbineIdleRepairKickUnix.Store(now.Unix())
+
+	bs.prioritizeTurbineRepairRange(waitingSlot, tip)
+	repairDiag := bs.turbineRepairDiagnostics(waitingSlot)
+	mlog.Log.Infof("BLOCK SOURCE STATUS: turbine repair-only prioritized repair %d..%d (waiting_slot=%d confirmed_tip=%d latest_streamed=%d) %s",
+		waitingSlot, tip, waitingSlot, bs.confirmedTip.Load(), bs.lightbringerLastStreamSlot.Load(), repairDiag)
+}
+
+func (bs *BlockSource) turbineRepairDiagnostics(waitingSlot uint64) string {
+	var gossipRepairPeers, gossipTVUPeers int
+	if bs.gossipClient != nil {
+		gossipRepairPeers = bs.gossipClient.Stats().RepairPeers
+		gossipTVUPeers = len(bs.gossipClient.TVUPeers())
+	}
+	leaderOK := false
+	if bs.leaderForSlot != nil {
+		_, leaderOK = bs.leaderForSlot(waitingSlot)
+	}
+	stats, haveStats := bs.turbineReceiverStatsSnapshot()
+	if !haveStats {
+		return fmt.Sprintf("leader_ok=%t gossip_repair_peers=%d gossip_tvu_peers=%d receiver_stats=unavailable", leaderOK, gossipRepairPeers, gossipTVUPeers)
+	}
+	return fmt.Sprintf(
+		"leader_ok=%t gossip_repair_peers=%d gossip_tvu_peers=%d repair_peers=%d repair_requests=%d repair_responses=%d repair_timeouts=%d repair_outstanding=%d packets=%d data_shreds=%d blocks_emitted=%d missing_leaders=%d parse_errors=%d assembly_errors=%d last_data_slot=%d",
+		leaderOK, gossipRepairPeers, gossipTVUPeers,
+		stats.Repair.Peers, stats.Repair.Requests, stats.Repair.Responses, stats.Repair.Timeouts, stats.Repair.Outstanding,
+		stats.Packets, stats.DataShreds, stats.BlocksEmitted, stats.MissingLeaders, stats.ParseErrors, stats.AssemblyErrors, stats.LastDataSlot,
+	)
+}
+
+func (bs *BlockSource) turbineRepairOnlyWaitingForFirstBlock() bool {
+	if !bs.turbineRepairOnlyMode() {
+		return false
+	}
+	bs.reorderMu.Lock()
+	waitingSlot := bs.waitingSlotLocked()
+	bs.reorderMu.Unlock()
+	if bs.lightbringerLastStreamSlot.Load() >= waitingSlot {
+		return false
+	}
+	lastExecuted := bs.lastExecutedSlot.Load()
+	return lastExecuted+1 < waitingSlot
 }
 
 func (bs *BlockSource) usesLiveShredStream() bool {
@@ -590,6 +701,19 @@ func (bs *BlockSource) updateMode() {
 		return
 	}
 
+	if bs.turbineRepairOnlyMode() {
+		if !bs.isNearTip.Load() {
+			bs.isNearTip.Store(true)
+			mlog.Log.Infof("MODE: turbine repair-only (near-tip forced, RPC block fetch disabled)")
+		}
+		if bs.usesLiveShredStream() {
+			bs.maybeStartLightbringerStream()
+			bs.kickTurbineRepairForWaitingFrontier()
+			bs.maybeLogStuckTurbineIngest()
+		}
+		return
+	}
+
 	// Calculate gap (tip should always be >= lastExecuted, but handle wrap)
 	var gap uint64
 	if tip > lastExecuted {
@@ -624,7 +748,9 @@ func (bs *BlockSource) updateMode() {
 	if bs.usesLiveShredStream() {
 		bs.maybeStartLightbringerStream()
 		if bs.isNearTip.Load() {
+			bs.maybeKickTurbineRepairWhenIdle()
 			bs.maybePrepareLightbringerHandoff()
+			bs.maybeLogStuckTurbineIngest() // cavey TODO: remove once we are done debugging.
 		}
 	}
 }
@@ -717,6 +843,11 @@ func (bs *BlockSource) rewindConsensusManagedFrontierForRPCFallbackLocked() (wai
 }
 
 func (bs *BlockSource) ForceRPCFallback(reason string) {
+	if bs.turbineRepairOnlyMode() {
+		bs.kickTurbineRepairForWaitingFrontier()
+		mlog.Log.Infof("BLOCK SOURCE STATUS: turbine repair-only ignoring RPC fallback request | reason=%s", reason)
+		return
+	}
 	if reason == "" {
 		reason = "requested"
 	}
@@ -735,6 +866,11 @@ func (bs *BlockSource) forceRPCForCatchup(gap uint64) {
 
 func (bs *BlockSource) forceRPCForCatchupWithReason(gap uint64, reason string) {
 	if !bs.usesLiveShredStream() {
+		return
+	}
+	if bs.turbineRepairOnlyMode() {
+		bs.kickTurbineRepairForWaitingFrontier()
+		mlog.Log.Infof("BLOCK SOURCE STATUS: turbine repair-only ignoring RPC catchup request | reason=%s | gap=%d", reason, gap)
 		return
 	}
 	if reason == "" {
@@ -985,9 +1121,13 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 	if !bs.usesLiveShredStream() {
 		return
 	}
-	if !bs.lightbringerActive.Load() {
+	if !bs.lightbringerActive.Load() && !bs.turbineRepairOnlyMode() {
 		bs.forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
 		return
+	}
+
+	if bs.sourceType == BlockSourceTurbine {
+		bs.prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot)
 	}
 
 	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
@@ -1054,6 +1194,12 @@ func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot
 	if !bs.usesLiveShredStream() {
 		return
 	}
+	if bs.turbineRepairOnlyMode() {
+		bs.prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot)
+		mlog.Log.Infof("BLOCK SOURCE STATUS: turbine repair-only waiting for missing slot %d via repair | first_buffered=%d | first_parent_slot=%d | buffered_live_stream=%d | mode=%s",
+			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, bs.currentModeString())
+		return
+	}
 
 	recoveryUntil := waitingSlot + lightbringerRecoverySlots
 	if recoveryUntil < waitingSlot {
@@ -1109,6 +1255,12 @@ func (bs *BlockSource) handleDetectedLightbringerGap(waitingSlot, firstBufferedS
 
 func (bs *BlockSource) forceRPCForLightbringerParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot uint64) {
 	if !bs.usesLiveShredStream() {
+		return
+	}
+	if bs.turbineRepairOnlyMode() {
+		bs.kickTurbineRepairForWaitingFrontier()
+		mlog.Log.Warnf("BLOCK SOURCE STATUS: turbine repair-only ignoring parent mismatch RPC fallback at slot %d | observed_parent=%d expected_parent=%d",
+			waitingSlot, observedParentSlot, expectedParentSlot)
 		return
 	}
 
@@ -1315,6 +1467,18 @@ func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
 }
 
 func (bs *BlockSource) lightbringerHandoffMaxReplayGap() uint64 {
+	if bs.sourceType == BlockSourceTurbine {
+		// Turbine near-tip replay should take over from RPC across the full
+		// near-tip window; repair backfills slots between replay and the live edge.
+		maxGap := bs.nearTipThreshold
+		if maxGap == 0 {
+			maxGap = defaultNearTipThreshold
+		}
+		if bs.catchupThreshold > 0 && maxGap >= bs.catchupThreshold {
+			maxGap = bs.catchupThreshold - 1
+		}
+		return maxGap
+	}
 	// Arm Lightbringer only in the lower half of the near-tip window. Once
 	// forkchoice buffering starts, replay can wait for vote-confirmed path
 	// resolution; keeping this headroom prevents immediate lost-tip fallback.
@@ -1591,6 +1755,76 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 	bs.enqueueLightbringerBlocks(blocks)
 }
 
+const turbineIdleRepairKickInterval = 2 * time.Second
+
+// maybeKickTurbineRepairWhenIdle requests turbine repair for the replay waiting
+// frontier when the receiver is connected but has not buffered any blocks at or
+// beyond waitingSlot. Without this, detectLightbringerGapLocked never fires
+// (it requires buffered live-stream blocks ahead of the gap) and the node stays
+// on RPC indefinitely with "waiting for first buffered TURBINE slot".
+func (bs *BlockSource) maybeKickTurbineRepairWhenIdle() {
+	if bs.sourceType != BlockSourceTurbine {
+		return
+	}
+	if bs.turbineRepairOnlyMode() {
+		bs.kickTurbineRepairForWaitingFrontier()
+		return
+	}
+	if !bs.lightbringerConnected.Load() || !bs.isNearTip.Load() {
+		return
+	}
+	if bs.lightbringerHandoffSlot.Load() != 0 || bs.lightbringerActive.Load() {
+		return
+	}
+	if bs.lightbringerForceRPCUntil.Load() != 0 || bs.lightbringerCooldownUntil.Load() != 0 {
+		return
+	}
+
+	bs.reorderMu.Lock()
+	waitingSlot := bs.nextSlotToSend
+	bs.reorderMu.Unlock()
+	if waitingSlot == 0 {
+		return
+	}
+
+	bs.lightbringerBufferMu.Lock()
+	hasBufferedAtOrBeyondWaiting := false
+	for slot := range bs.lightbringerBuffer {
+		if slot >= waitingSlot {
+			hasBufferedAtOrBeyondWaiting = true
+			break
+		}
+	}
+	bs.lightbringerBufferMu.Unlock()
+	if hasBufferedAtOrBeyondWaiting {
+		return
+	}
+
+	lastStreamed := bs.lightbringerLastStreamSlot.Load()
+	if lastStreamed >= waitingSlot {
+		return
+	}
+
+	now := time.Now()
+	lastKickUnix := bs.turbineIdleRepairKickUnix.Load()
+	if lastKickUnix != 0 && now.Sub(time.Unix(lastKickUnix, 0)) < turbineIdleRepairKickInterval {
+		return
+	}
+	bs.turbineIdleRepairKickUnix.Store(now.Unix())
+
+	tip := bs.confirmedTip.Load()
+	if streamedTip := bs.lightbringerHandoffTipEstimate(); streamedTip > tip {
+		tip = streamedTip
+	}
+	if tip < waitingSlot {
+		tip = waitingSlot
+	}
+
+	bs.prioritizeTurbineRepairRange(waitingSlot, tip)
+	mlog.Log.Infof("BLOCK SOURCE STATUS: turbine connected but no buffered blocks at or beyond waiting slot %d (latest_streamed=%d confirmed_tip=%d); prioritized repair %d..%d",
+		waitingSlot, lastStreamed, bs.confirmedTip.Load(), waitingSlot, tip)
+}
+
 func (bs *BlockSource) lightbringerStagingMaxReplayGap() uint64 {
 	maxGap := bs.catchupThreshold
 	minGap := bs.nearTipThreshold + uint64(lightbringerMinHandoffRun)
@@ -1631,6 +1865,12 @@ func (bs *BlockSource) shouldStageLightbringerSlot(slot uint64) bool {
 }
 
 func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
+	if bs.turbineRepairOnlyMode() {
+		bs.reorderMu.Lock()
+		waitingSlot := bs.waitingSlotLocked()
+		bs.reorderMu.Unlock()
+		return slot >= waitingSlot || bs.shouldStageLightbringerSlot(slot)
+	}
 	if bs.lightbringerForceRPCUntil.Load() != 0 {
 		return false
 	}
@@ -1645,6 +1885,9 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 }
 
 func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
+	if bs.turbineRepairOnlyMode() {
+		return false
+	}
 	if !bs.usesLiveShredStream() {
 		return true
 	}
@@ -1693,6 +1936,9 @@ func (bs *BlockSource) shouldDiscardSkippedSlotAfterHandoff(slot uint64) bool {
 func (bs *BlockSource) shouldDiscardLiveStreamResult(slot uint64, generation uint64) bool {
 	if generation != bs.lightbringerResultGeneration.Load() {
 		return true
+	}
+	if bs.turbineRepairOnlyMode() {
+		return false
 	}
 	if bs.lightbringerForceRPCUntil.Load() != 0 {
 		return true
@@ -1812,6 +2058,24 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		return true
 	}
 
+	if bs.turbineRepairOnlyMode() {
+		if bs.lightbringerHandoffSlot.Load() == 0 {
+			bs.armTurbineRepairOnlyHandoff()
+		}
+		bs.reorderMu.Lock()
+		waitingSlot := bs.waitingSlotLocked()
+		bs.reorderMu.Unlock()
+		if blk.Slot < waitingSlot {
+			return true
+		}
+		select {
+		case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.lightbringerResultGeneration.Load()}:
+			return true
+		case <-bs.stopChan:
+			return false
+		}
+	}
+
 	if bs.lightbringerHandoffSlot.Load() == 0 {
 		// Stage a bounded runway before near-tip so handoff does not have
 		// to build its whole connected run while replay is already at tip.
@@ -1834,6 +2098,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 
 func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 	bs.lightbringerConnected.Store(false)
+	bs.resetTurbineStuckIngestWatch() // cavey TODO: remove once we are done debugging.
 	bs.clearLightbringerCancel()
 	interrupted := bs.lightbringerHandoffSlot.Load() != 0 || bs.lightbringerActive.Load()
 	if interrupted {
@@ -1846,6 +2111,17 @@ func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 			} else {
 				waitingSlot = bs.startSlot
 			}
+		}
+		if bs.turbineRepairOnlyMode() {
+			bs.invalidateLightbringerResults()
+			bs.lightbringerHandoffSlot.Store(0)
+			bs.lightbringerActive.Store(false)
+			mlog.Log.Warnf("%s handoff interrupted in repair-only mode; waiting for reconnect from slot %d",
+				bs.liveShredStreamName(), waitingSlot)
+			if reason != "" {
+				mlog.Log.Warnf("%s stream closed: %s", bs.liveShredStreamName(), reason)
+			}
+			return 0
 		}
 		bs.forceRPCForLightbringerGap(waitingSlot, 0, 0, 0)
 		mlog.Log.Warnf("%s handoff interrupted; replay will resume RPC fallback from slot %d until a fresh stream runway is armed",
@@ -1881,8 +2157,21 @@ func (bs *BlockSource) runTurbineStream() {
 		var gossipClient *gossipclient.Client
 		var gossipDone <-chan error
 		if bs.gossipClient != nil {
-			gossipClient = bs.gossipClient
-		} else if bs.turbineGossipEntrypoint != "" {
+			sharedReadyDeadline := time.Now().Add(10 * time.Second)
+			for !bs.gossipClient.Running() && time.Now().Before(sharedReadyDeadline) {
+				if bs.stopped.Load() {
+					cancelStream()
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if bs.gossipClient.Running() {
+				gossipClient = bs.gossipClient
+			} else {
+				mlog.Log.Warnf("shared gossip client is not running; falling back to dedicated turbine gossip on %s", bs.turbineGossipBindAddr)
+			}
+		}
+		if gossipClient == nil && bs.turbineGossipEntrypoint != "" {
 			gossipCfg := gossipclient.Config{
 				Entrypoint:    bs.turbineGossipEntrypoint,
 				BindAddr:      bs.turbineGossipBindAddr,
@@ -1976,9 +2265,15 @@ func (bs *BlockSource) runTurbineStream() {
 		mlog.Log.Infof("Native turbine receiver listening on %s", bs.turbineBindAddr)
 		bs.lightbringerConnected.Store(true)
 		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+		if bs.turbineRepairOnlyMode() {
+			bs.armTurbineRepairOnlyHandoff()
+			bs.kickTurbineRepairForWaitingFrontier()
+		}
 		backoff = lightbringerRetryBackoff
 
-		if gossipClient != nil && bs.gossipClient == nil {
+		if gossipClient != nil && bs.gossipClient != nil && gossipClient == bs.gossipClient {
+			mlog.Log.Infof("Native turbine using shared gossip client (repair=enabled)")
+		} else if gossipClient != nil {
 			done := make(chan error, 1)
 			go func() {
 				done <- gossipClient.Run(streamCtx)
@@ -1989,8 +2284,6 @@ func (bs *BlockSource) runTurbineStream() {
 				bindAddr = gossipclient.DefaultBindAddr
 			}
 			mlog.Log.Infof("Native turbine gossip client starting: entrypoint=%s bind=%s client=%s repair=enabled", bs.turbineGossipEntrypoint, bindAddr, gossipclient.ClientName)
-		} else if gossipClient != nil {
-			mlog.Log.Infof("Native turbine using shared gossip client (repair=enabled)")
 		} else {
 			mlog.Log.Warnf("Native turbine gossip entrypoint is not configured; receiver is running UDP-only on %s with repair disabled", bs.turbineBindAddr)
 		}
@@ -2029,6 +2322,7 @@ func (bs *BlockSource) runTurbineStream() {
 				}
 			case <-statsTicker.C:
 				stats := receiver.Stats()
+				bs.setTurbineReceiverStatsSnapshot(stats) // cavey TODO: remove once we are done debugging.
 				lastPacketAge := "never"
 				if stats.LastPacketUnix != 0 {
 					lastPacketAge = time.Since(time.Unix(stats.LastPacketUnix, 0)).Round(time.Second).String()
@@ -2378,8 +2672,12 @@ func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstB
 	handoffSlot := bs.lightbringerHandoffSlot.Load()
 	lightbringerActive := bs.lightbringerActive.Load()
 	if handoffSlot == 0 && !lightbringerActive {
-		bs.clearLightbringerGapWatch()
-		return 0, 0, 0, 0, false
+		if bs.turbineRepairOnlyMode() && bs.lightbringerConnected.Load() {
+			// Repair-only mode arms handoff immediately; keep watching for gaps.
+		} else {
+			bs.clearLightbringerGapWatch()
+			return 0, 0, 0, 0, false
+		}
 	}
 	if bs.consensusManagedLightbringer && lightbringerActive {
 		bs.clearLightbringerGapWatch()
@@ -3136,6 +3434,9 @@ func (bs *BlockSource) updateTipSnapshot(confirmedTip uint64) {
 	bs.confirmedTip.Store(confirmedTip)
 	bs.tipAtSlot.Store(slotAtTip)
 	bs.lastTipUpdate.Store(time.Now().Unix())
+	if bs.turbineRepairOnlyMode() {
+		bs.seedTurbineRepairObservedSlot(confirmedTip)
+	}
 }
 
 // RefreshTipsForSummary triggers an async refresh of both confirmed and processed tips.
@@ -3924,6 +4225,10 @@ func (bs *BlockSource) scheduler() {
 				}
 			}
 		case <-retryTicker.C:
+			if bs.turbineRepairOnlyMode() {
+				bs.maybeKickTurbineRepairWhenIdle()
+				bs.maybeLogStuckTurbineIngest()
+			}
 			// Handle normal retries
 			// CRITICAL: Get the slot we're waiting for FIRST - this slot must always
 			// be allowed to schedule, even if buffer is full. Otherwise we deadlock:
@@ -4262,6 +4567,20 @@ func (bs *BlockSource) currentSourceSnapshot() (string, string, uint64) {
 		source := "lightbringer"
 		if bs.sourceType == BlockSourceTurbine {
 			source = "turbine"
+		}
+		if bs.turbineRepairOnlyMode() {
+			handoffSlot := bs.lightbringerHandoffSlot.Load()
+			if bs.lightbringerConnected.Load() {
+				lastStreamSlot := bs.lightbringerLastStreamSlot.Load()
+				if lastStreamSlot != 0 {
+					return source, fmt.Sprintf("%s repair-only (latest streamed slot %d)", source, lastStreamSlot), handoffSlot
+				}
+				return source, source + " repair-only", handoffSlot
+			}
+			if bs.lightbringerStarted.Load() {
+				return source, source + " repair-only, waiting for stream connection", 0
+			}
+			return source, source + " repair-only, starting stream", 0
 		}
 		handoffSlot := bs.lightbringerHandoffSlot.Load()
 		cooldownUntil := bs.lightbringerCooldownUntil.Load()

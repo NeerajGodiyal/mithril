@@ -760,6 +760,25 @@ func TestSlotAssemblerRepairRequestsPrioritizeRequestedRange(t *testing.T) {
 	}
 }
 
+func TestSlotAssemblerRepairRequestsSeededObservedSlot(t *testing.T) {
+	assembler := NewSlotAssembler()
+	if requests := assembler.RepairRequests(4, 8); len(requests) != 0 {
+		t.Fatalf("expected no repair requests before seeding, got %+v", requests)
+	}
+
+	// Resume replay at slot 100 from snapshot parent 99: need maxObserved >= 101.
+	assembler.SeedRepairObservedSlot(101)
+	assembler.PrioritizeRepairSlot(100)
+
+	requests := assembler.RepairRequests(4, 8)
+	if len(requests) == 0 {
+		t.Fatalf("expected repair requests after seeding observed slot")
+	}
+	if requests[0].Slot != 100 {
+		t.Fatalf("first repair request slot = %d, want priority slot 100; requests=%+v", requests[0].Slot, requests)
+	}
+}
+
 func TestUDPReceiverSignalsReadyAfterBind(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

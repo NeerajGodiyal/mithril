@@ -130,6 +130,7 @@ var (
 	turbineGossipBindAddr   string
 	turbineAdvertisedIP     string
 	turbineShredVersion     int
+	turbineRepairOnly       bool
 
 	// Block production / TPU ingress
 	enableBlockProduction         bool
@@ -283,6 +284,7 @@ func init() {
 	Run.Flags().StringVar(&turbineGossipBindAddr, "turbine-gossip-bind-addr", "", "UDP address for native turbine gossip traffic (only used when block-source=turbine)")
 	Run.Flags().StringVar(&turbineAdvertisedIP, "turbine-advertised-ip", "", "Public IP advertised by native turbine gossip (optional)")
 	Run.Flags().IntVar(&turbineShredVersion, "turbine-shred-version", 0, "Shred version for native turbine gossip (0 = discover from entrypoint)")
+	Run.Flags().BoolVar(&turbineRepairOnly, "turbine-repair-only", false, "Disable RPC block fetch for turbine source; use turbine/repair only (RPC still used for tip polling)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
 	Run.Flags().IntVar(&blockMaxInflight, "block-max-inflight", 0, "Max concurrent block fetch workers (0 = use default)")
 	Run.Flags().IntVar(&blockTipPollIntervalMs, "block-tip-poll-ms", 0, "Tip poll interval in milliseconds (0 = use default)")
@@ -542,6 +544,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	turbineGossipBindAddr = getString("turbine-gossip-bind-addr", "turbine.gossip_bind_addr")
 	turbineAdvertisedIP = getString("turbine-advertised-ip", "turbine.advertised_ip")
 	turbineShredVersion = getInt("turbine-shred-version", "turbine.shred_version")
+	turbineRepairOnly = getBool("turbine-repair-only", "block.turbine_repair_only")
 
 	enableBlockProduction = getBool("enable-block-production", "block_production.enabled")
 	blockProductionIdentityPath = getString("identity", "block_production.identity_path")
@@ -646,7 +649,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 			return fmt.Errorf("turbine.shred_version must be between 0 and 65535")
 		}
 		if len(rpcEndpoints) == 0 {
-			return fmt.Errorf("block.source=turbine requires RPC endpoints for catchup and tip polling (set network.rpc)")
+			return fmt.Errorf("block.source=turbine requires RPC endpoints for tip polling (set network.rpc)")
+		}
+		if turbineRepairOnly && turbineGossipEntrypoint == "" {
+			return fmt.Errorf("block.turbine_repair_only requires turbine.gossip_entrypoint for historical slot repair")
 		}
 	default:
 		return fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", blockSource)
@@ -1012,7 +1018,11 @@ func runLive(c *cobra.Command, args []string) {
 		// block.source=lightbringer but lightbringer.enabled=false — standalone Lightbringer mode
 		mlog.Log.Infof("block.source=lightbringer with external Lightbringer at %s", lightbringerEndpoint)
 	} else if useTurbine {
-		mlog.Log.Infof("block.source=turbine with native turbine receiver on %s", turbineBindAddr)
+		if turbineRepairOnly {
+			mlog.Log.Infof("block.source=turbine repair-only on %s (RPC block fetch disabled)", turbineBindAddr)
+		} else {
+			mlog.Log.Infof("block.source=turbine with native turbine receiver on %s", turbineBindAddr)
+		}
 		if turbineGossipEntrypoint != "" {
 			mlog.Log.Infof("native turbine gossip enabled with entrypoint %s", turbineGossipEntrypoint)
 		} else {
@@ -1779,8 +1789,19 @@ postBootstrap:
 					parentSlot = slot - 1
 				}
 				chainTip := replay.ChainTipParentContext()
+				// Prefer the parent slot's fully-populated derived fee rate governor carried
+				// through the chain tip; a partial fallback (zeroed Target* fields) would derive
+				// lamports_per_signature=0 and diverge from Agave on the head RecentBlockhashes entry.
+				prevFeeGovernor := chainTip.PrevFeeGovernor
+				if prevFeeGovernor == nil {
+					prevFeeGovernor = &sealevel.FeeRateGovernor{
+						TargetLamportsPerSignature: 5000,
+						LamportsPerSignature:       5000,
+						PrevLamportsPerSignature:   5000,
+					}
+				}
 				ctx := blockprod.ParentContext{
-					PrevFeeGovernor:     &sealevel.FeeRateGovernor{PrevLamportsPerSignature: 5000, LamportsPerSignature: 5000},
+					PrevFeeGovernor:     prevFeeGovernor,
 					PrevNumSigs:         chainTip.PrevNumSigs,
 					AcctsLtHash:         chainTip.AcctsLtHash,
 					Features:            chainTip.Features,
@@ -1863,6 +1884,7 @@ postBootstrap:
 	if enableBlockProduction {
 		blockFetchOpts.HasLocalLeaderCommit = replay.HasLocalLeaderCommit
 	}
+	blockFetchOpts.TurbineRepairOnly = turbineRepairOnly
 	if len(gossipIdentity) > 0 {
 		// TODO(cavey-debug): remove wall-clock seed after debugging (used by blockprod leader loop).
 		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {

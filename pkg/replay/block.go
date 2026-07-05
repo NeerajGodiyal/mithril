@@ -85,6 +85,10 @@ type BlockFetchOpts struct {
 
 	// HasLocalLeaderCommit returns true once local block production finalized the slot.
 	HasLocalLeaderCommit func(slot uint64) bool
+
+	// TurbineRepairOnly disables RPC block fetch for turbine source; blocks come
+	// from native turbine/repair only (RPC still used for tip polling).
+	TurbineRepairOnly bool
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1485,6 +1489,17 @@ func ReplayBlocks(
 	observedConsensusBlocks := make(map[uint64]*b.Block)
 
 	var opts *blockstream.BlockSourceOpts
+	if useLiveShredStream {
+		if _, err := PrepareLeaderScheduleLocal(currentEpoch, epochSchedule, ""); err != nil {
+			result.Error = fmt.Errorf("bootstrap leader schedule for live shred stream at start_slot %d epoch %d: %w", startSlot, currentEpoch, err)
+			return result
+		}
+		if _, ok := global.LeaderForSlot(startSlot); !ok {
+			result.Error = fmt.Errorf("bootstrap leader schedule for epoch %d does not cover start_slot %d", currentEpoch, startSlot)
+			return result
+		}
+		mlog.Log.Infof("bootstrap leader schedule ready for epoch %d at start_slot %d", currentEpoch, startSlot)
+	}
 	if useLightbringer {
 		opts = &blockstream.BlockSourceOpts{
 			SourceType:                   blockstream.BlockSourceLightbringer,
@@ -1543,14 +1558,17 @@ func ReplayBlocks(
 			opts.GossipIdentity = blockFetchOpts.GossipIdentity
 		}
 		opts.HasLocalLeaderCommit = blockFetchOpts.HasLocalLeaderCommit
+		opts.TurbineAlpenglowBindAddr = blockFetchOpts.TurbineAlpenglowBindAddr
 		if blockFetchOpts.GossipClient == nil {
 			opts.TPUQUICAdvertise = blockFetchOpts.TPUQUICAdvertise
-			opts.TurbineAlpenglowBindAddr = blockFetchOpts.TurbineAlpenglowBindAddr
 		}
 	}
 	turbAlpenglowBind := ""
 	if blockFetchOpts != nil {
 		turbAlpenglowBind = blockFetchOpts.TurbineAlpenglowBindAddr
+	}
+	if blockFetchOpts != nil && useTurbine && blockFetchOpts.TurbineRepairOnly {
+		opts.TurbineRepairOnly = true
 	}
 	if useTurbine && turbAlpenglowBind != "" {
 		opts.TurbineAlpenglowBlockIDHints = true

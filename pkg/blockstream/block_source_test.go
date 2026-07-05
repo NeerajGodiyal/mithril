@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/gagliardetto/solana-go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -474,6 +475,91 @@ func TestPrepareTurbineHandoffAllowsLiveEdgeRunwayAtTipWithoutConsensusBuffering
 	}
 	if len(blocks) != 1 || blocks[0].Slot != 151 {
 		t.Fatalf("expected single live-edge turbine block to be enqueued, got %+v", blocks)
+	}
+}
+
+func TestTurbineHandoffMaxReplayGapUsesFullNearTipWindow(t *testing.T) {
+	turbine := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:8001",
+		StartSlot:       100,
+		EndSlot:         200,
+		NearTipThreshold: 32,
+		CatchupThreshold: 64,
+	})
+	if got := turbine.lightbringerHandoffMaxReplayGap(); got != 32 {
+		t.Fatalf("expected turbine handoff gap 32, got %d", got)
+	}
+
+	lb := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceLightbringer,
+		LightbringerEndpoint: "127.0.0.1:50051",
+		StartSlot:            100,
+		EndSlot:              200,
+		NearTipThreshold:     32,
+		CatchupThreshold:     64,
+	})
+	if got := lb.lightbringerHandoffMaxReplayGap(); got != 16 {
+		t.Fatalf("expected lightbringer handoff gap 16, got %d", got)
+	}
+}
+
+func TestPrepareTurbineHandoffAllowsNearTipReplayGapWithinThreshold(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:       BlockSourceTurbine,
+		TurbineBindAddr:  "127.0.0.1:8001",
+		StartSlot:        100,
+		EndSlot:          5000,
+		NearTipThreshold: 32,
+		CatchupThreshold: 64,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(3732316)
+	bs.confirmedTip.Store(3732339)
+	bs.lightbringerLastStreamSlot.Store(3732339)
+	bs.nextSlotToSend = 3732317
+	bs.lastEmittedBlockSlot = 3732316
+
+	for slot := uint64(3732317); slot <= 3732324; slot++ {
+		parentSlot := slot - 1
+		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
+		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+	}
+
+	ok, gap, maxGap, _, _ := bs.lightbringerHandoffReplayGapOK()
+	if !ok || gap != 23 || maxGap != 32 {
+		t.Fatalf("expected replay gap ok with gap=23 max=32, got ok=%v gap=%d max=%d", ok, gap, maxGap)
+	}
+
+	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(3732317, 3732316)
+	if !prepared || handoffSlot != 3732317 || len(blocks) != 8 {
+		t.Fatalf("expected turbine handoff with gap=23, got prepared=%v handoff=%d blocks=%d", prepared, handoffSlot, len(blocks))
+	}
+}
+
+func TestMaybeKickTurbineRepairWhenIdlePrioritizesWaitingFrontier(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:8001",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    100,
+		EndSlot:                      5000,
+	})
+
+	bs.isNearTip.Store(true)
+	bs.lightbringerConnected.Store(true)
+	bs.lastExecutedSlot.Store(3732316)
+	bs.confirmedTip.Store(3732339)
+	bs.nextSlotToSend = 3732317
+
+	receiver := turbine.NewUDPReceiver("127.0.0.1:0")
+	bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
+
+	bs.maybeKickTurbineRepairWhenIdle()
+	if got := receiver.Stats().PriorityRepairSlots; got == 0 {
+		t.Fatalf("expected turbine repair to be prioritized for idle connected receiver, got priority_slots=%d", got)
 	}
 }
 
@@ -1067,9 +1153,12 @@ func TestDetectLightbringerGapWaitsForConfiguredFallbackDelay(t *testing.T) {
 	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerGapFallbackWait / 2)).UnixNano())
 
 	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLightbringerGapLocked()
-	if waitingSlot != 120 || firstBufferedSlot != 121 || firstBufferedParentSlot != 120 || bufferedCount != 2 || shouldFallback {
-		t.Fatalf("expected Lightbringer gap detection to report gap while staying patient before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
+	if waitingSlot != 0 || firstBufferedSlot != 0 || firstBufferedParentSlot != 0 || bufferedCount != 0 || shouldFallback {
+		t.Fatalf("expected Lightbringer gap detection to stay silent before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
 			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback)
+	}
+	if got := bs.lightbringerGapSlot.Load(); got != 120 {
+		t.Fatalf("expected gap slot 120 to remain tracked, got %d", got)
 	}
 }
 
@@ -1280,10 +1369,11 @@ func TestForceRPCFallbackRewindsConsensusManagedTurbineFrontier(t *testing.T) {
 
 func TestForceRPCFallbackRewindsActiveTurbineFrontierToReplayProgress(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
-		SourceType:      BlockSourceTurbine,
-		TurbineBindAddr: "127.0.0.1:8001",
-		StartSlot:       100,
-		EndSlot:         200,
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:8001",
+		StartSlot:                    100,
+		EndSlot:                      200,
+		ConsensusManagedLightbringer: true,
 	})
 
 	bs.lightbringerActive.Store(true)
@@ -1507,8 +1597,8 @@ func TestDetectLightbringerGapResetsReconnectLatchForNewWaitingSlot(t *testing.T
 	bs.nextSlotToSend = 125
 
 	waitingSlot, _, _, _, shouldFallback := bs.detectLightbringerGapLocked()
-	if waitingSlot != 125 || shouldFallback {
-		t.Fatalf("expected first observation of a new gap to arm tracking only while reporting the waiting slot, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
+	if waitingSlot != 0 || shouldFallback {
+		t.Fatalf("expected first observation of a new gap to arm tracking without triggering fallback yet, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
 	}
 	if got := bs.lightbringerGapSlot.Load(); got != 125 {
 		t.Fatalf("expected new gap slot 125 to be tracked, got %d", got)
@@ -1662,5 +1752,36 @@ func TestStopReasonDistinguishesFiniteCompletionFromUnexpectedLiveEnd(t *testing
 	}
 	if got := live.StopReason(); !strings.Contains(got, "unexpectedly in live mode") {
 		t.Fatalf("expected unexpected live stop reason, got %q", got)
+	}
+}
+
+func TestTurbineRepairOnlyDisablesRPCBlockFetch(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:        BlockSourceTurbine,
+		TurbineBindAddr:   "127.0.0.1:8001",
+		TurbineRepairOnly: true,
+		StartSlot:         100,
+		EndSlot:           200,
+	})
+	bs.nextSlotToSend = 120
+	bs.isNearTip.Store(false)
+
+	bs.forceRPCForCatchup(128)
+	if bs.lightbringerNeedRPCResume.Load() {
+		t.Fatalf("expected repair-only mode to ignore RPC catchup")
+	}
+	if bs.shouldUseRPCForSlot(120) {
+		t.Fatalf("expected repair-only mode to disable RPC for waiting slot")
+	}
+
+	bs.lightbringerForceRPCUntil.Store(120)
+	if bs.shouldUseRPCForSlot(120) {
+		t.Fatalf("expected repair-only mode to ignore forced RPC state")
+	}
+
+	bs.isNearTip.Store(true)
+	source, status, _ := bs.currentSourceSnapshot()
+	if source != "turbine" || !strings.Contains(status, "repair-only") {
+		t.Fatalf("expected repair-only source status, got source=%q status=%q", source, status)
 	}
 }

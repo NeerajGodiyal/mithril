@@ -191,6 +191,20 @@ func (a *SlotAssembler) ResetSlot(slot uint64) {
 	delete(a.completedSlots, slot)
 }
 
+// SeedRepairObservedSlot advances the repair scan horizon before any live shreds arrive.
+// Repair only considers slots <= maxObservedSlot-repairObservedSlotLag; seed from the
+// snapshot/resume frontier (or tip) so cold-start repair can fetch the next slots.
+func (a *SlotAssembler) SeedRepairObservedSlot(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if slot > a.maxObservedSlot {
+		a.maxObservedSlot = slot
+	}
+}
+
 func (a *SlotAssembler) PrioritizeRepairSlot(slot uint64) {
 	a.PrioritizeRepairRange(slot, slot)
 }
@@ -541,7 +555,7 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 
 	requests := make([]SlotRepairRequest, 0, maxSlots)
 	seen := make(map[uint64]struct{}, maxSlots)
-	appendRequest := func(slot uint64) {
+	appendRequest := func(slot uint64, priority bool) {
 		if len(requests) >= maxSlots {
 			return
 		}
@@ -551,7 +565,10 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 		if _, completed := a.completedSlots[slot]; completed {
 			return
 		}
-		if a.slotTooOldLocked(slot) || slot > repairThrough {
+		if a.slotTooOldLocked(slot) {
+			return
+		}
+		if !priority && slot > repairThrough {
 			return
 		}
 		state := a.slots[slot]
@@ -571,15 +588,27 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 	}
 
 	a.prunePriorityRepairSlotsLocked()
+	minPrioritySlot := uint64(0)
 	for _, slot := range a.priorityRepairOrder {
-		appendRequest(slot)
+		if _, exists := a.priorityRepairSlots[slot]; !exists {
+			continue
+		}
+		if minPrioritySlot == 0 || slot < minPrioritySlot {
+			minPrioritySlot = slot
+		}
+	}
+	if minPrioritySlot != 0 && minPrioritySlot < start {
+		start = minPrioritySlot
+	}
+	for _, slot := range a.priorityRepairOrder {
+		appendRequest(slot, true)
 		if len(requests) >= maxSlots {
 			return requests
 		}
 	}
 
 	for slot := start; slot <= repairThrough && len(requests) < maxSlots; slot++ {
-		appendRequest(slot)
+		appendRequest(slot, false)
 	}
 	return requests
 }

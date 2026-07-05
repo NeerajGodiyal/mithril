@@ -117,6 +117,13 @@ func (r *UDPReceiver) PrioritizeRepairRange(start, end uint64) {
 	r.assembler.PrioritizeRepairRange(start, end)
 }
 
+func (r *UDPReceiver) SeedRepairObservedSlot(slot uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SeedRepairObservedSlot(slot)
+}
+
 func (r *UDPReceiver) Blocks() <-chan *block.Block {
 	return r.blocks
 }
