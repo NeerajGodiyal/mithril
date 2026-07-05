@@ -16,12 +16,18 @@ import (
 
 const (
 	repairScanInterval        = 100 * time.Millisecond
-	repairRequestTimeout      = 750 * time.Millisecond
+	repairRequestTimeout      = 1500 * time.Millisecond
 	repairPeerRefreshInterval = 2 * time.Second
 	repairMaxSlotsPerScan     = 32
 	repairMaxMissingPerSlot   = 256
 	repairMaxFollowupRequests = 256
 	repairMaxOutstanding      = 2048
+	// Global request-rate ceiling. Serve-repair QoS on Agave-family peers
+	// deprioritizes and then effectively BANS heavy unstaked requesters —
+	// observed live: ~2000 req/s sustained answered normally for ~90s, then
+	// responses froze entirely while requests kept flowing. A bounded rate
+	// with a longer per-request timeout yields more than an unbounded flood.
+	repairMaxRequestsPerSecond = 500
 	// Success-weighted peer selection: a peer that answered within this
 	// window counts as a responder, and 3 of 4 requests go to responders.
 	// Blind round-robin across a cluster where only a few peers still
@@ -98,6 +104,10 @@ type repairClient struct {
 	peerCache   []gossip.RepairPeer
 	peerCacheAt time.Time
 
+	// Token bucket for the global request-rate ceiling (guarded by mu).
+	rateTokens   float64
+	rateRefillAt time.Time
+
 	requests  atomic.Uint64
 	responses atomic.Uint64
 	timeouts  atomic.Uint64
@@ -156,6 +166,12 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	budget := repairMaxSlotsPerScan * (repairMaxMissingPerSlot + 1)
 	if budget > repairMaxOutstanding {
 		budget = repairMaxOutstanding
+	}
+	if rate := c.takeRateTokens(budget); rate < budget {
+		budget = rate
+	}
+	if budget <= 0 {
+		return
 	}
 	for _, req := range requests {
 		for _, index := range req.MissingDataShreds {
@@ -325,6 +341,33 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 
 	c.requests.Add(1)
 	return true
+}
+
+// takeRateTokens refills the request-rate bucket and grants up to want
+// tokens, returning how many requests this scan may send.
+func (c *repairClient) takeRateTokens(want int) int {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rateRefillAt.IsZero() {
+		c.rateRefillAt = now
+		c.rateTokens = repairMaxRequestsPerSecond
+	}
+	elapsed := now.Sub(c.rateRefillAt).Seconds()
+	c.rateRefillAt = now
+	c.rateTokens += elapsed * repairMaxRequestsPerSecond
+	if c.rateTokens > repairMaxRequestsPerSecond {
+		c.rateTokens = repairMaxRequestsPerSecond // burst cap: one second's worth
+	}
+	grant := want
+	if float64(grant) > c.rateTokens {
+		grant = int(c.rateTokens)
+	}
+	if grant < 0 {
+		grant = 0
+	}
+	c.rateTokens -= float64(grant)
+	return grant
 }
 
 func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairPeer, bool) {
