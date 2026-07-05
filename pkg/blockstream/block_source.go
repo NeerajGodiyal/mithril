@@ -25,7 +25,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -2905,12 +2904,12 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, erro
 	rpc := bs.rpcClients[rpcIdx]
 
 	// Single RPC attempt (no internal retry - scheduler handles retries)
-	blockResult, err := rpc.GetBlockConfirmedOnce(slot)
+	blockResult, err := rpc.GetBlockAGConfirmedOnce(slot)
 	if err != nil {
 		return nil, err
 	}
 
-	return block.FromBlockResult(blockResult, slot, rpc), nil
+	return block.FromBlockAGResult(blockResult, slot, rpc), nil
 }
 
 // pollTip periodically updates the confirmed tip by querying all configured RPCs
@@ -4117,7 +4116,7 @@ func (bs *BlockSource) startSequential() {
 // fetchAndParseBlockSequential is the old sequential fetch with retry
 func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, error) {
 	var err error
-	var blockResult *rpc.GetBlockResult
+	var blockResult *rpcclient.GetBlockAGResult
 	var blk *b.Block
 
 	if bs.sourceType == BlockSourceFile {
@@ -4126,7 +4125,7 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			rpc := bs.getActiveRpc()
 			for {
 				// Use single-attempt fetch to avoid inner retry loop bypassing rate limits
-				blockResult, err = rpc.GetBlockConfirmedOnce(uint64(slot))
+				blockResult, err = rpc.GetBlockAGConfirmedOnce(uint64(slot))
 				if err == nil {
 					break
 				} else if err == rpcclient.SlotSkipped {
@@ -4141,14 +4140,14 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 					return nil, fmt.Errorf("error fetching block: %w", err)
 				}
 			}
-			blk = block.FromBlockResult(blockResult, slot, rpc)
+			blk = block.FromBlockAGResult(blockResult, slot, rpc)
 		}
 	} else if bs.sourceType == BlockSourceLightbringer || bs.sourceType == BlockSourceTurbine {
 		// Legacy sequential mode does not support the live stream handoff.
 		// If this path is ever used, fall back to the RPC catchup fetcher.
 		rpc := bs.getActiveRpc()
 		for {
-			blockResult, err = rpc.GetBlockConfirmedOnce(slot)
+			blockResult, err = rpc.GetBlockAGConfirmedOnce(slot)
 			if err == nil {
 				break
 			} else if err == rpcclient.SlotSkipped {
@@ -4163,7 +4162,7 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 				return nil, fmt.Errorf("error fetching block: %w", err)
 			}
 		}
-		blk = block.FromBlockResult(blockResult, slot, rpc)
+		blk = block.FromBlockAGResult(blockResult, slot, rpc)
 	}
 
 	return blk, nil

@@ -54,6 +54,7 @@ type Block struct {
 	IsSkipped                           bool // True for slots that were skipped by the leader
 	SkipRewardCert                      []byte
 	NotarRewardCert                     []byte
+	BlockFinalCert                      []byte
 	FooterProducerTimeNanos             uint64
 	HasAlpenglowFooter                  bool
 }

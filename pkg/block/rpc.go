@@ -7,10 +7,19 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
+	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
 func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) *Block {
+	return fromBlockResult(blockResult, slot, rpcc, nil)
+}
+
+func FromBlockAGResult(blockResult *rpcclient.GetBlockAGResult, slot uint64, rpcc *rpcclient.RpcClient) *Block {
+	return fromBlockResult(&blockResult.GetBlockResult, slot, rpcc, blockResult.AlpenglowFooter)
+}
+
+func fromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient, alpenglowFooter *rpcclient.AlpenglowFooterRPC) *Block {
 	block := new(Block)
 	block.Slot = slot
 
@@ -60,7 +69,32 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 		block.NumSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
 	}
 
+	applyAlpenglowFooterFromRPC(block, alpenglowFooter)
+
 	return block
+}
+
+func applyAlpenglowFooterFromRPC(block *Block, footer *rpcclient.AlpenglowFooterRPC) {
+	if footer == nil {
+		return
+	}
+	block.HasAlpenglowFooter = true
+	block.FooterProducerTimeNanos = footer.BlockProducerTimeNanos
+	skipCert, notarCert, finalCert, err := rpcclient.DecodeAlpenglowFooterCerts(footer)
+	if err != nil {
+		panic(fmt.Sprintf("slot %d alpenglow footer decode: %s", block.Slot, err))
+	}
+	block.SkipRewardCert = skipCert
+	block.NotarRewardCert = notarCert
+	block.BlockFinalCert = finalCert
+	if footer.BankHash != "" {
+		bankHash, err := solana.HashFromBase58(footer.BankHash)
+		if err != nil {
+			panic(fmt.Sprintf("slot %d alpenglow footer bank hash: %s", block.Slot, err))
+		}
+		block.ExpectedBankhash = bankHash
+		block.HasExpectedBankhash = true
+	}
 }
 
 func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {
