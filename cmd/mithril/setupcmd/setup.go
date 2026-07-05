@@ -1003,7 +1003,7 @@ rpc = ["https://alpenglow.rpcpool.com"]
 # "turbine" is the live mode: shreds carry the Alpenglow block ids and footer
 # certificates that gate durable state. "rpc" is catch-up/debug only.
 source = "turbine"   # "turbine" (live) | "rpc" (catch-up/debug) | "lightbringer"
-repair_catchup_max_gap_slots = 1024 # Resume gaps up to this fill via turbine repair, not RPC (0 = off)
+repair_catchup_max_gap_slots = 8192 # Resume gaps up to this fill via turbine repair, not RPC (0 = off)
 turbine_bind_addr = "0.0.0.0:8001"
 # lightbringer_endpoint = "localhost:9000"
 max_rps = 8

@@ -329,7 +329,7 @@ func init() {
 	Run.Flags().StringVar(&turbineBindAddr, "turbine-bind-addr", "", "UDP address for native turbine shred receiver (only used when block-source=turbine)")
 	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
 	Run.Flags().StringVar(&turbineGossipBindAddr, "turbine-gossip-bind-addr", "", "UDP address for native turbine gossip traffic (only used when block-source=turbine)")
-	Run.Flags().IntVar(&repairCatchupMaxGapSlots, "repair-catchup-max-gap-slots", 1024, "Fill resume gaps up to this many slots via turbine repair instead of RPC getBlock (0 = always RPC catchup)")
+	Run.Flags().IntVar(&repairCatchupMaxGapSlots, "repair-catchup-max-gap-slots", 8192, "Fill resume gaps up to this many slots via turbine repair instead of RPC getBlock (0 = always RPC catchup)")
 	Run.Flags().StringVar(&turbineAdvertisedIP, "turbine-advertised-ip", "", "Public IP advertised by native turbine gossip (optional)")
 	Run.Flags().IntVar(&turbineShredVersion, "turbine-shred-version", 0, "Shred version for native turbine gossip (0 = discover from entrypoint)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
