@@ -39,6 +39,9 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	slotCtx := in.SlotCtx
 	block := in.Block
 	slotCtx.Blockhash = block.Blockhash
+	if in.FooterProducerTimeNanos > 0 {
+		block.FooterProducerTimeNanos = in.FooterProducerTimeNanos
+	}
 
 	if err := updateLeaderSysvars(in.AcctsDb, slotCtx, block, in.EpochSchedule, in.AlpenglowClock, in.FooterTimestamp); err != nil {
 		return nil, err
@@ -140,7 +143,18 @@ func footerTimestampPtr(ts int64) *int64 {
 }
 
 func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
-	if block.UnixTimestamp == 0 {
+	footerUnixTimestamp, ok, err := alpenglowFooterUnixTimestamp(block)
+	if err != nil {
+		return fmt.Errorf("slot %d alpenglow footer clock: %w", block.Slot, err)
+	}
+	if !ok {
+		if block.FromLightbringer && block.FooterProducerTimeNanos > 0 {
+			mlog.Log.Infof(
+				"cavey debug: alpenglow footer clock skipped slot=%d footer_producer_time_nanos=%d block_unix_timestamp=0 (Agave uses producer time for clock)",
+				block.Slot,
+				block.FooterProducerTimeNanos,
+			) // cavey TODO: remove once we are done debugging.
+		}
 		return nil
 	}
 
@@ -153,13 +167,22 @@ func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochS
 	if err := clock.UnmarshalWithDecoder(bin.NewBinDecoder(clockAcct.Data)); err != nil {
 		return fmt.Errorf("unable to unmarshal clock sysvar for Alpenglow footer update: %w", err)
 	}
-	if err := updateClockSysvarFromAlpenglowFooter(&clock, block, epochSchedule); err != nil {
+	footerBlock := *block
+	footerBlock.UnixTimestamp = footerUnixTimestamp
+	if err := updateClockSysvarFromAlpenglowFooter(&clock, &footerBlock, epochSchedule); err != nil {
 		return err
 	}
 
 	copy(clockAcct.Data, clock.MustMarshal())
+	if err := slotCtx.SetAccount(sealevel.SysvarClockAddr, clockAcct); err != nil {
+		return err
+	}
+	slotCtx.RecordModifiedAcct(sealevel.SysvarClockAddr)
 	sealevel.SysvarCache.Clock.Sysvar = &clock
 	sealevel.SysvarCache.Clock.Acct = clockAcct
+	if err := updateAlpenglowNanosecondClockAccount(slotCtx, block); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -178,6 +201,9 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 	if alpenglowClock && footerTimestamp > 0 {
 		block.UnixTimestamp = footerTimestamp
 		if err := updateClockSysvarFromAlpenglowFooter(&clock, block, epochSchedule); err != nil {
+			return err
+		}
+		if err := updateAlpenglowNanosecondClockAccount(slotCtx, block); err != nil {
 			return err
 		}
 	}

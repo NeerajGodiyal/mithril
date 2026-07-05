@@ -134,6 +134,55 @@ func TestUpdateClockSysvarFromAlpenglowFooterAppliesFooterTimestamp(t *testing.T
 	require.Equal(t, blk.UnixTimestamp, clock.UnixTimestamp)
 }
 
+func TestAlpenglowFooterUnixTimestampFromProducerTimeNanos(t *testing.T) {
+	blk := &block.Block{
+		FooterProducerTimeNanos: 1782227493876242864,
+	}
+	ts, ok, err := alpenglowFooterUnixTimestamp(blk)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, int64(1782227493), ts)
+}
+
+func TestAlpenglowFooterUnixTimestampPrefersBlockUnixTimestamp(t *testing.T) {
+	blk := &block.Block{
+		UnixTimestamp:           1779232900,
+		FooterProducerTimeNanos: 1782227493876242864,
+	}
+	ts, ok, err := alpenglowFooterUnixTimestamp(blk)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, int64(1779232900), ts)
+}
+
+func TestUpdateClockSysvarFromAlpenglowFooterUsesProducerTimeNanos(t *testing.T) {
+	bankEpochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch:            54000,
+		LeaderScheduleSlotOffset: 54000,
+	}
+
+	clock := &sealevel.SysvarClock{
+		Slot:                3737279,
+		Epoch:               69,
+		LeaderScheduleEpoch: 70,
+		EpochStartTimestamp: 1782222727,
+		UnixTimestamp:       1782227468,
+	}
+	blk := &block.Block{
+		Slot:                    3737280,
+		ParentSlot:              3737279,
+		Epoch:                   69,
+		FooterProducerTimeNanos: 1782227493876242864,
+	}
+
+	err := updateClockSysvarFromAlpenglowFooter(clock, blk, bankEpochSchedule)
+	require.NoError(t, err)
+
+	require.Equal(t, int64(1782227493), clock.UnixTimestamp)
+	require.Equal(t, blk.Slot, clock.Slot)
+	require.Equal(t, blk.Epoch, clock.Epoch)
+}
+
 func TestUpdateClockSysvarRejectsMismatchedEpochFrame(t *testing.T) {
 	clock := &sealevel.SysvarClock{Slot: 463624424, Epoch: 1073}
 	blk := &block.Block{Slot: 463624425, Epoch: 56592}

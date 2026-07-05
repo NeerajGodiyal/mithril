@@ -57,7 +57,11 @@ func updateClockSysvarForMode(clock *sealevel.SysvarClock, block *block.Block, e
 }
 
 func updateClockSysvarFromAlpenglowFooter(clock *sealevel.SysvarClock, block *block.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
-	if block.UnixTimestamp == 0 {
+	footerUnixTimestamp, ok, err := alpenglowFooterUnixTimestamp(block)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return nil
 	}
 
@@ -65,15 +69,33 @@ func updateClockSysvarFromAlpenglowFooter(clock *sealevel.SysvarClock, block *bl
 	parentEpoch := epochSchedule.GetEpoch(block.ParentSlot)
 	epochStartTimestamp := clock.EpochStartTimestamp
 	if block.Slot == 0 || parentEpoch != epochNew {
-		epochStartTimestamp = block.UnixTimestamp
+		epochStartTimestamp = footerUnixTimestamp
 	}
 
 	clock.Slot = block.Slot
 	clock.Epoch = epochNew
 	clock.LeaderScheduleEpoch = epochSchedule.LeaderScheduleEpoch(clock.Slot)
 	clock.EpochStartTimestamp = epochStartTimestamp
-	clock.UnixTimestamp = block.UnixTimestamp
+	clock.UnixTimestamp = footerUnixTimestamp
 	return nil
+}
+
+// alpenglowFooterUnixTimestamp returns the footer clock timestamp in seconds.
+// Agave stores block_producer_time_nanos on the wire and divides by 1e9 for Clock::unix_timestamp.
+func alpenglowFooterUnixTimestamp(block *block.Block) (int64, bool, error) {
+	if block == nil {
+		return 0, false, nil
+	}
+	if block.UnixTimestamp != 0 {
+		return block.UnixTimestamp, true, nil
+	}
+	if block.FooterProducerTimeNanos == 0 {
+		return 0, false, nil
+	}
+	if block.FooterProducerTimeNanos > uint64(^uint64(0)>>1) {
+		return 0, false, fmt.Errorf("footer producer time nanos %d overflows i64", block.FooterProducerTimeNanos)
+	}
+	return int64(block.FooterProducerTimeNanos / 1_000_000_000), true, nil
 }
 
 type tsEntry struct {

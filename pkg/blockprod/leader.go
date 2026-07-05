@@ -291,6 +291,35 @@ func (l *LeaderLoop) finishActiveSlot() {
 	l.finishActiveSlotLocked()
 }
 
+// clampProducerTimeNanos clamps the leader's wall-clock footer timestamp into the
+// Alpenglow nanosecond-clock bounds derived from the parent bank, matching Agave's
+// block_creation_loop::skew_block_producer_time_nanos. Without this, a leader that
+// just caught up stamps real "now", which is typically >2*slot_duration past the
+// parent clock and is rejected by the network as NanosecondClockOutOfBounds.
+func (l *LeaderLoop) clampProducerTimeNanos(slot uint64, nowNanos int64) uint64 {
+	if !l.alpenglowClock || l.accountsDb == nil || l.activeBank == nil {
+		return uint64(nowNanos)
+	}
+	slotCtx := l.activeBank.SlotCtx()
+	if slotCtx == nil {
+		return uint64(nowNanos)
+	}
+	parentSlot := slotCtx.ParentSlot
+	parentNanos, ok := replay.ReadNanosecondClockAt(l.accountsDb, parentSlot)
+	if !ok {
+		return uint64(nowNanos)
+	}
+	var elapsed uint64
+	if slot > parentSlot {
+		elapsed = (slot - parentSlot) * uint64(slotDuration.Nanoseconds())
+	}
+	clamped := replay.SkewBlockProducerTimeNanos(parentNanos, nowNanos, elapsed)
+	if clamped < 0 {
+		clamped = 0
+	}
+	return uint64(clamped)
+}
+
 func (l *LeaderLoop) finishActiveSlotLocked() {
 	if l.activeBank == nil {
 		return
@@ -305,7 +334,7 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 
 	pohTip := l.activeBank.EntryHash()
 	tickHash := turbine.AlpentickHash(pohTip)
-	producerTimeNanos := uint64(time.Now().UnixNano())
+	producerTimeNanos := l.clampProducerTimeNanos(slot, time.Now().UnixNano())
 	footerTimestamp := int64(producerTimeNanos / 1_000_000_000)
 
 	var footerRewards rewardcerts.RewardCertificates
