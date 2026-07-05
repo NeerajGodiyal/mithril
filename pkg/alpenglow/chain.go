@@ -105,6 +105,14 @@ type ChainTracker struct {
 	finalizeCerts   map[uint64]Certificate
 	directFinalized map[BlockID]CertificateType
 	chainFinalized  map[BlockID]struct{} // finalized by ancestry of a finalized block
+	// finalizedBySlot indexes the finalized block PER SLOT (direct or by
+	// ancestry) so slot-keyed decision queries (CertifiedBlockAt, WantedBlocks)
+	// can surface a finalized block even when it never received a certificate
+	// of its own — blockSlots indexes certified blocks only, and a cert-less
+	// ancestry-finalized parent would otherwise be invisible to the switch
+	// sweep. First finalized block wins; a DIFFERENT finalized block at the
+	// same slot is Byzantine and belongs to the conflict machinery.
+	finalizedBySlot map[uint64]BlockID
 	indirectSkips   map[uint64]chainIndirectSkip
 	conflicts       map[uint64]chainConflict
 
@@ -170,6 +178,7 @@ func NewChainTrackerWithConfig(cfg ChainConfig) *ChainTracker {
 		directFinalized: make(map[BlockID]CertificateType),
 		chainFinalized:  make(map[BlockID]struct{}),
 		indirectSkips:   make(map[uint64]chainIndirectSkip),
+		finalizedBySlot: make(map[uint64]BlockID),
 		conflicts:       make(map[uint64]chainConflict),
 	}
 }
@@ -406,6 +415,9 @@ func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType Certifi
 		return
 	}
 	t.directFinalized[block] = certType
+	if _, taken := t.finalizedBySlot[block.Slot]; !taken {
+		t.finalizedBySlot[block.Slot] = block
+	}
 	if block.Slot >= t.latestDirectFinalizedBlock.Slot {
 		t.latestDirectFinalizedBlock = block
 		// Bound memory on long runs: finalized slots well behind the watermark are
@@ -429,9 +441,9 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 			return
 		}
 		parent := BlockID{Slot: state.parentSlot, Hash: state.parentHash}
-		if _, known := t.blocks[parent]; !known || state.parentHash.IsZero() {
-			// Parent hash unknown to the cert index. Fall back to the parent slot's
-			// single certified block ONLY if it carries a unique-strength cert
+		if state.parentHash.IsZero() {
+			// No parent hash at all. Fall back to the parent slot's single
+			// certified block ONLY if it carries a unique-strength cert
 			// (notarize/fast-finalize/genesis — provably the slot's one block,
 			// Lemmas 21(i)/24). A fallback-only cert could be an equivocation twin.
 			slotBlocks := t.blockSlots[state.parentSlot]
@@ -440,11 +452,6 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 			}
 			for _, id := range slotBlocks {
 				parent = id
-			}
-			// A known parent hash that simply isn't cert-indexed still binds: never
-			// mark a different block than the one the child actually chains to.
-			if !state.parentHash.IsZero() && parent.Hash != state.parentHash {
-				return
 			}
 			st := t.blocks[parent]
 			if st == nil {
@@ -455,11 +462,23 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 			default:
 				return
 			}
+		} else if _, known := t.blocks[parent]; !known {
+			// The finalized child's header names its parent hash EXACTLY, but no
+			// cert or replay observation tracks that block yet (e.g. replay
+			// executed an equivocation twin, or the block was never fetched).
+			// The hash binding is protocol-final — mint a stub so the finalized
+			// identity is queryable (CertifiedBlockAt) and repairable
+			// (WantedBlocks). The walk stops at the stub (not observed, no
+			// parent link of its own) on the next iteration.
+			t.ensureBlockStateLocked(parent)
 		}
 		if _, done := t.chainFinalized[parent]; done {
 			return
 		}
 		t.chainFinalized[parent] = struct{}{}
+		if _, taken := t.finalizedBySlot[parent.Slot]; !taken {
+			t.finalizedBySlot[parent.Slot] = parent
+		}
 		// Ancestry finalization creates the same exclusivity as direct finalization.
 		t.refreshConflictLocked(parent.Slot)
 		block = parent
@@ -526,6 +545,15 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 	var winner BlockID
 	var winnerType CertificateType
 	found := false
+	// A finalized block (direct or by ancestry) is decisive even when it never
+	// received a certificate of its own — the cert-less ancestry-finalized
+	// parent case, which the cert-only blockSlots scan below cannot see.
+	if fin, ok := t.finalizedBySlot[slot]; ok {
+		winner, found = fin, true
+		if state := t.blocks[fin]; state != nil {
+			winnerType = strongestBlockCertificateType(state.certificates)
+		}
+	}
 	// Iterate the slot's blocks directly (no candidate-slice allocation): the
 	// switch sweep calls this for every executed-unfolded slot whenever the
 	// tracker's decision version advances — which on a healthy cluster is
@@ -617,9 +645,20 @@ func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 	defer t.mu.RUnlock()
 
 	slots := make([]uint64, 0, len(t.blockSlots))
+	seenSlot := make(map[uint64]struct{}, len(t.blockSlots))
 	for slot := range t.blockSlots {
 		if slot > afterSlot {
 			slots = append(slots, slot)
+			seenSlot[slot] = struct{}{}
+		}
+	}
+	// A cert-less ancestry-finalized block's slot may have NO certified blocks
+	// at all — it must still be repairable (it is the decisive block).
+	for slot := range t.finalizedBySlot {
+		if slot > afterSlot {
+			if _, dup := seenSlot[slot]; !dup {
+				slots = append(slots, slot)
+			}
 		}
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
@@ -636,6 +675,14 @@ func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 		// Pick the single most decisive unobserved candidate for the slot.
 		var best *WantedBlock
 		bestPri := -1
+		// The finalized block first (may be cert-less — absent from the
+		// certified-candidates scan below).
+		if fin, ok := t.finalizedBySlot[slot]; ok {
+			if state := t.blocks[fin]; state != nil && !state.observed {
+				w := WantedBlock{Block: fin, Strongest: strongestBlockCertificateType(state.certificates), Finalized: true}
+				best, bestPri = &w, wantedPriority(w.Strongest, true)
+			}
+		}
 		for _, cand := range t.blockCandidatesLocked(slot) {
 			if cand.Observed {
 				continue
@@ -695,6 +742,11 @@ func (t *ChainTracker) pruneBeforeSlotLocked(slot uint64) {
 	for id := range t.chainFinalized {
 		if id.Slot < slot {
 			delete(t.chainFinalized, id)
+		}
+	}
+	for s := range t.finalizedBySlot {
+		if s < slot {
+			delete(t.finalizedBySlot, s)
 		}
 	}
 	for s := range t.blockSlots {

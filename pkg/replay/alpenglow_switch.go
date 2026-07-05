@@ -122,6 +122,23 @@ func (s *alpenglowSwitchSweeper) sweep(executed map[uint64]solana.Hash, lastRoot
 //   - the slot is inside the partitioned-rewards distribution window
 //     (re-execution would double-apply distribution bookkeeping)
 //   - the parent slot's context is no longer retained in RAM
+//
+// Fallback reasons reported by tryInLoopUnwind; surfaced in the fork-switch
+// instrumentation (100-slot summary + logs) so operators can see WHY switches
+// fell back to the rooted-checkpoint re-replay — the signal that decides
+// whether the in-RAM engine suffices or a branch-aware state engine is needed.
+const (
+	unwindFallbackNilTail        = "nil-tail"
+	unwindFallbackCrossEpoch     = "cross-epoch"
+	unwindFallbackRewardsWindow  = "rewards-window"
+	unwindFallbackVoteStakeDirty = "vote-stake-dirty"
+	unwindFallbackMissingContext = "missing-context"
+	unwindFallbackContextRebuild = "context-rebuild"
+)
+
+// tryInLoopUnwind attempts the in-RAM fork switch. On success it returns the
+// rebuilt resume state and "". Otherwise it returns nil and the guard reason
+// that forced the rooted-checkpoint fallback.
 func tryInLoopUnwind(
 	sw *CertifiedSwitch,
 	tail *unrootedTail,
@@ -129,15 +146,15 @@ func tryInLoopUnwind(
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	currentEpoch uint64,
 	partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo,
-) *ResumeState {
+) (*ResumeState, string) {
 	if tail == nil || sw.Slot == 0 {
-		return nil
+		return nil, unwindFallbackNilTail
 	}
 	if epochSchedule.GetEpoch(sw.Slot-1) != currentEpoch || epochSchedule.GetEpoch(sw.Slot) != currentEpoch {
-		return nil
+		return nil, unwindFallbackCrossEpoch
 	}
 	if partitionedRewardsInfo != nil && partitionedRewardsInfo.NumRewardPartitionsRemaining > 0 {
-		return nil
+		return nil, unwindFallbackRewardsWindow
 	}
 	// Vote/stake cache safety, BOTH directions. The unwind cannot roll the
 	// global vote/stake caches back (a write in the UNWOUND suffix >= sw.Slot
@@ -151,7 +168,7 @@ func tryInLoopUnwind(
 	// exact by construction. Vote-program writes are rare in Alpenglow blocks
 	// (vote transactions are off-chain), so the fast path still dominates.
 	if voteStakeDirtySlot.Load() > mithrilState.LastRootedSlot {
-		return nil
+		return nil, unwindFallbackVoteStakeDirty
 	}
 
 	ctx := tail.unwind(sw.Slot)
@@ -161,12 +178,12 @@ func tryInLoopUnwind(
 		ctx = mithrilState.LastRootedContext
 	}
 	if ctx == nil {
-		return nil
+		return nil, unwindFallbackMissingContext
 	}
 	rs, err := ResumeStateFromRootedContext(ctx, nil)
 	if err != nil {
 		mlog.Log.Warnf("alpenglow switch: cannot rebuild resume state from retained context at slot %d: %v", ctx.Slot, err)
-		return nil
+		return nil, unwindFallbackContextRebuild
 	}
-	return rs
+	return rs, ""
 }

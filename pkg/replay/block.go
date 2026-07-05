@@ -1379,7 +1379,10 @@ func ReplayBlocks(
 	var windowEmptyBlocks int
 	var windowSkippedWithShreds int // skipped slots where the leader sent partial shreds
 	var windowSwitches int          // certificate switches detected this window
-	var promotionHolds int          // iterations promotion was fully stalled while finality ran a chunk ahead
+	var windowSwitchInRAM int       // switches resolved by the in-RAM unwind
+	var windowSwitchFallback int    // switches that fell back to rooted-checkpoint re-replay
+	switchFallbackReasons := make(map[string]int)
+	var promotionHolds int // iterations promotion was fully stalled while finality ran a chunk ahead
 	windowStart := time.Now()
 	var lastGCCount uint32
 	var liveShredAnchor int64 // cadence anchor for live per-slot shred deltas; rebased each window
@@ -1434,10 +1437,30 @@ func ReplayBlocks(
 	// Alpenglow build). It buffers replayed slots and folds them to disk via
 	// CommitBatch once rooted; block reads resolve through it.
 	var unrootedTailState *unrootedTail
+	var promoter *asyncPromoter
+	var applyFoldOutcome func(res *foldResult) // assigned below, used by the exit drain
 	if acctsDb.RootedDurable {
-		unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap, FoldBatchSlots)
-		mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots)", unrootedTailHaltCap)
+		unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap, FoldBatchSlots, filepath.Join(acctsDb.AcctsDir, ".."))
+		// Folds run on a worker goroutine so replay never stalls on the
+		// segment write + fsync; the loop builds jobs and applies completions.
+		promoter = newAsyncPromoter(acctsDb)
+		defer func() {
+			// Settle the worker on ANY exit: apply a completed fold so the
+			// in-process recovery retry resumes from the true durable frontier
+			// instead of re-folding it (a discarded-but-committed fold is
+			// still safe — RecoverFoldState reconciles — just wasteful).
+			if applyFoldOutcome != nil {
+				applyFoldOutcome(promoter.drain())
+			}
+			promoter.stop()
+		}()
+		mlog.Log.Infof("rooted-durable mode: canonical store stays rooted-only; replayed slots buffer in RAM until rooted (halt cap %d slots); folds run async off the replay loop", unrootedTailHaltCap)
 	}
+	// Any stake-index entries still pending from a previous in-process replay
+	// attempt (rooted-checkpoint re-replay after a fork switch or finality
+	// mismatch) belong to slots this run re-executes — or to a discarded wrong
+	// fork. Either way they re-enqueue if real; stale ones must not leak.
+	global.ClearPendingStakePubkeys()
 
 	// Trailing execution verifier: the dual-watermark's second leg. Runs on
 	// its own RPC client + budget so it never competes with block fetch.
@@ -1471,6 +1494,60 @@ func ReplayBlocks(
 		mlog.Log.Warnf("trailing verifier DISABLED: folds gate on certificate finality only — certificates attest block data, not execution; a mithril-side execution divergence would fold to disk undetected")
 	}
 
+	// applyPromotionBookkeeping advances the durable watermark and prunes every
+	// per-slot structure bounded by it. Shared by async fold application, the
+	// shutdown flush, and nothing else — it is the ONLY place LastRootedSlot
+	// advances during replay.
+	applyPromotionBookkeeping := func(promotedThrough uint64, rootedCtx *state.ResumeContext) {
+		mithrilState.LastRootedSlot = promotedThrough
+		mithrilState.LastRootedBankhash = rootedCtx.Bankhash
+		mithrilState.LastRootedContext = rootedCtx
+		for slot := range alpenglowFooterFinalized {
+			if slot <= promotedThrough {
+				delete(alpenglowFooterFinalized, slot)
+			}
+		}
+		for slot := range alpenglowExecutedBlockIDs {
+			if slot <= promotedThrough {
+				delete(alpenglowExecutedBlockIDs, slot)
+			}
+		}
+		if trailingVerifier != nil {
+			trailingVerifier.PruneThrough(promotedThrough)
+		}
+		if pruner, ok := consensusEngine.(consensusengine.AlpenglowPruneSink); ok {
+			pruner.PruneAlpenglowBefore(promotedThrough)
+		}
+		// Disputed slots that promoted passed the exact-match requirement —
+		// the evidence is satisfied.
+		for slot := range alpenglowForced {
+			if slot <= promotedThrough {
+				delete(alpenglowForced, slot)
+				clearAlpenglowEvidence(mithrilState, slot)
+			}
+		}
+	}
+
+	// applyFoldOutcome applies a completed async fold on the loop thread. A
+	// failed fold only logs: LastRootedSlot did not advance, so the next
+	// iteration rebuilds the same chunk (natural retry); a permanently broken
+	// store surfaces as the OverCap halt (fail-closed).
+	applyFoldOutcome = func(res *foldResult) {
+		if res == nil {
+			return
+		}
+		if res.err != nil {
+			mlog.Log.Errorf("rooted-durable: async fold failed: %v", res.err)
+			return
+		}
+		rootedCtx := unrootedTailState.applyFoldJob(res.job)
+		if rootedCtx == nil {
+			mlog.Log.Errorf("rooted-durable: fold through slot %d returned no resume context; watermark held back", res.job.through)
+			return
+		}
+		applyPromotionBookkeeping(res.job.through, rootedCtx)
+	}
+
 	// foldRootedPrefix folds the rooted RAM prefix onto disk up to the SAFE
 	// target = min(certificate finality, trailing-verification watermark), after
 	// the persisted-divergence floor and the Alpenglow exact-block-id gate. It is
@@ -1483,7 +1560,13 @@ func ReplayBlocks(
 	// force-folds the trailing partial chunk (shutdown); force=false folds full
 	// chunks only.
 	foldRootedPrefix := func(force bool) (halt bool) {
-		if unrootedTailState == nil || lastRootedWatermark == 0 {
+		if unrootedTailState == nil {
+			return false
+		}
+		// Apply any completed async fold first so the gates below see the
+		// current durable frontier.
+		applyFoldOutcome(promoter.poll())
+		if lastRootedWatermark == 0 {
 			return false
 		}
 		// The trailing verifier is the only execution-correctness oracle; a
@@ -1549,48 +1632,34 @@ func ReplayBlocks(
 			return false
 		}
 
-		var promotedThrough uint64
-		var rootedCtx *state.ResumeContext
-		var perr error
 		if force {
-			promotedThrough, rootedCtx, perr = unrootedTailState.flush(promoteThrough)
-		} else {
-			promotedThrough, rootedCtx, perr = unrootedTailState.promote(promoteThrough)
+			// Shutdown flush: settle the worker first, then fold everything
+			// (including the trailing partial chunk) synchronously through the
+			// SAME gate-derived target — shutdown can never fold a slot the
+			// loop would refuse.
+			if res := promoter.drain(); res != nil {
+				applyFoldOutcome(res)
+			}
+			promotedThrough, rootedCtx, perr := unrootedTailState.flush(promoteThrough)
+			if perr != nil {
+				mlog.Log.Errorf("rooted-durable: shutdown flush stopped at slot %d: %v", promotedThrough, perr)
+			}
+			if promotedThrough > mithrilState.LastRootedSlot && rootedCtx != nil {
+				applyPromotionBookkeeping(promotedThrough, rootedCtx)
+			}
+			return false
 		}
-		if perr != nil {
-			mlog.Log.Errorf("rooted-durable: promotion stopped at slot %d: %v", promotedThrough, perr)
-		}
-		if promotedThrough > mithrilState.LastRootedSlot {
-			if rootedCtx == nil {
-				mlog.Log.Errorf("rooted-durable: promoted through slot %d with no resume context; watermark held back", promotedThrough)
-			} else {
-				mithrilState.LastRootedSlot = promotedThrough
-				mithrilState.LastRootedBankhash = rootedCtx.Bankhash
-				mithrilState.LastRootedContext = rootedCtx
-				for slot := range alpenglowFooterFinalized {
-					if slot <= promotedThrough {
-						delete(alpenglowFooterFinalized, slot)
-					}
-				}
-				for slot := range alpenglowExecutedBlockIDs {
-					if slot <= promotedThrough {
-						delete(alpenglowExecutedBlockIDs, slot)
-					}
-				}
-				if trailingVerifier != nil {
-					trailingVerifier.PruneThrough(promotedThrough)
-				}
-				if pruner, ok := consensusEngine.(consensusengine.AlpenglowPruneSink); ok {
-					pruner.PruneAlpenglowBefore(promotedThrough)
-				}
-				// Disputed slots that promoted passed the exact-match requirement —
-				// the evidence is satisfied.
-				for slot := range alpenglowForced {
-					if slot <= promotedThrough {
-						delete(alpenglowForced, slot)
-						clearAlpenglowEvidence(mithrilState, slot)
-					}
-				}
+		// Async: one chunk in flight at a time. Enqueue the next chunk only
+		// when idle; completions are applied at the top of this function on a
+		// later iteration.
+		if !promoter.inFlight {
+			job, jerr := unrootedTailState.buildFoldJob(promoteThrough, false)
+			if jerr != nil {
+				mlog.Log.Errorf("rooted-durable: %v; watermark held back", jerr)
+				return false
+			}
+			if job != nil {
+				promoter.enqueue(job)
 			}
 		}
 		return false
@@ -1781,14 +1850,32 @@ func ReplayBlocks(
 
 			// Execute-on-receipt correction: certificates arriving after a slot
 			// executed can name a different outcome. The sweep reports the first
-			// contradiction; until the in-RAM unwind engine lands this surfaces as
-			// a typed error the node-level recovery loop re-replays from the
-			// rooted checkpoint (repair re-fetches the certified version).
+			// contradiction. The COMMON path resolves it in RAM: evict the wrong
+			// suffix from the WorkingSet, rebuild execution state from the
+			// retained parent context, and continue the loop. Guarded cases
+			// (reasons below) surface a typed error instead and the node-level
+			// recovery loop re-replays from the rooted checkpoint (repair
+			// re-fetches the certified version either way).
 			if unrootedTailState != nil {
 				if sw := switchSweeper.sweep(alpenglowExecutedBlockIDs, mithrilState.LastRootedSlot, currentExecutedAnchorSlot()); sw != nil {
 					windowSwitches++
 					blockStream.RewindForAlpenglowSwitch(sw.Slot, sw.Certified)
-					if rs := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo); rs != nil {
+					// Settle the in-flight fold before touching the overlay: the
+					// worker reads chunk layers the unwind would evict. If the
+					// applied fold moved the durable frontier past the switch
+					// slot, the contradiction is now at/below durable state —
+					// that is the node-level rewind/recovery path, not an
+					// in-RAM unwind.
+					applyFoldOutcome(promoter.drain())
+					if sw.Slot <= mithrilState.LastRootedSlot {
+						windowSwitchFallback++
+						switchFallbackReasons["durable-overlap"]++
+						result.Error = sw
+						mlog.Log.Warnf("%v — switch slot is at/below the durable watermark %d after settling the in-flight fold; deferring to the recovery loop", sw, mithrilState.LastRootedSlot)
+						break
+					}
+					rs, fallbackReason := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo)
+					if rs != nil {
 						// In-RAM unwind: drop the wrong suffix, rebuild execution state
 						// from the retained parent context, and let the certified
 						// version re-execute — no process restart, cost = the unwound
@@ -1806,13 +1893,17 @@ func ReplayBlocks(
 							global.SetTransactionCount(*rs.TransactionCount) // drop the discarded fork's txs
 						}
 						blockStream.SetLastExecutedSlot(sw.Slot - 1)
-						mlog.Log.Warnf("%v — unwound in RAM to slot %d; re-executing the certified chain", sw, sw.Slot-1)
+						windowSwitchInRAM++
+						mlog.Log.Warnf("%v — unwound in RAM to slot %d; re-executing the certified chain (in-RAM switches this window: %d)", sw, sw.Slot-1, windowSwitchInRAM)
 						continue
 					}
-					// Guarded out (cross-epoch span, rewards period, or missing parent
-					// context): fall back to the rooted-checkpoint re-replay.
+					// Guarded out: fall back to the rooted-checkpoint re-replay,
+					// recording WHY (the signal for whether the in-RAM engine
+					// suffices or FD-style branching is actually needed).
+					windowSwitchFallback++
+					switchFallbackReasons[fallbackReason]++
 					result.Error = sw
-					mlog.Log.Warnf("%v — re-replaying the certified chain from the rooted checkpoint", sw)
+					mlog.Log.Warnf("%v — in-RAM unwind unavailable (%s); re-replaying the certified chain from the rooted checkpoint", sw, fallbackReason)
 					break
 				}
 			}
@@ -2310,7 +2401,14 @@ func ReplayBlocks(
 				if lastRootedWatermark > 0 {
 					finalizedStr = fmt.Sprintf("%d", lastRootedWatermark)
 				}
-				mlog.Log.InfofPrecise("  consensus: finalized slot %s | switches %d", finalizedStr, windowSwitches)
+				if windowSwitches > 0 {
+					mlog.Log.InfofPrecise("  consensus: finalized slot %s | switches %d (in-RAM %d, fallback %d)", finalizedStr, windowSwitches, windowSwitchInRAM, windowSwitchFallback)
+					if len(switchFallbackReasons) > 0 {
+						mlog.Log.FileOnlyf("switch fallback reasons this window: %v", switchFallbackReasons)
+					}
+				} else {
+					mlog.Log.InfofPrecise("  consensus: finalized slot %s | switches 0", finalizedStr)
+				}
 
 				checkedStr := "--"
 				if trailingVerifier != nil {
@@ -2387,6 +2485,9 @@ func ReplayBlocks(
 				windowEmptyBlocks = 0
 				windowSkippedWithShreds = 0
 				windowSwitches = 0
+				windowSwitchInRAM = 0
+				windowSwitchFallback = 0
+				clear(switchFallbackReasons)
 				promotionHolds = 0
 				windowStart = time.Now()
 				statsCounter = 0
@@ -3030,11 +3131,17 @@ func ProcessBlock(
 				mlog.Log.Infof("unable to store bankhash for slot %d", persistedSlot)
 			}
 		}
-		flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
-		if err != nil {
-			mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
-		} else if flushed > 0 {
-			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+		if tail == nil {
+			// Legacy/verify modes (no fork ambiguity): flush per block as before.
+			// Rooted-durable replay flushes at FOLD time instead — entries stay
+			// slot-scoped in RAM so a fork unwind can drop them, and scans merge
+			// the pending set (StreamStakeAccounts) for completeness meanwhile.
+			flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
+			if err != nil {
+				mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
+			} else if flushed > 0 {
+				mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+			}
 		}
 
 		persistedHashes.Set(persistedBlockSlot, persistedBankhash)

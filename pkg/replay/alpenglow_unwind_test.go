@@ -103,7 +103,7 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 // unwind returns the ACTUAL executed parent context, which need not be
 // numerically fromSlot-1 when the slots in between were skipped (P2).
 func TestUnwindReturnsExecutedParentAcrossSkips(t *testing.T) {
-	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1)
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1, "")
 	// Executed slots 5 and 8 (6, 7 skipped -> no context), then 9.
 	tail.Add(5, []*accounts.Account{testAccount(1, 51)}, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5, Bankhash: "bh5"})
@@ -180,7 +180,7 @@ func TestTryInLoopUnwindFallsBackWhenVoteStakeDirty(t *testing.T) {
 		TransactionCount: &ctxTxCount,
 	}
 	newTail := func() *unrootedTail {
-		tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1)
+		tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1, "")
 		tail.Add(7, []*accounts.Account{testAccount(1, 71)}, testHashBytes(7))
 		tail.SetContext(7, validCtx)
 		return tail
@@ -194,7 +194,7 @@ func TestTryInLoopUnwindFallsBackWhenVoteStakeDirty(t *testing.T) {
 	// carries the parent's transaction count so the discarded fork's txs can be
 	// dropped from the running count.
 	resetVoteStakeDirty()
-	rs := tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
+	rs, _ := tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
 	require.NotNil(t, rs, "clean unwind should succeed in-loop")
 	require.NotNil(t, rs.TransactionCount, "unwind carries the parent's tx count for restore")
 	assert.Equal(t, uint64(999), *rs.TransactionCount)
@@ -202,8 +202,9 @@ func TestTryInLoopUnwindFallsBackWhenVoteStakeDirty(t *testing.T) {
 	// A global cache was mutated in the UNWOUND suffix (at the switch slot):
 	// the unwind cannot roll the caches back -> must fall back (nil).
 	markVoteStakeDirty(8)
-	rs = tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
+	rs, reason := tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
 	assert.Nil(t, rs, "dirty cache in the unwound suffix must force the rooted re-replay fallback")
+	assert.Equal(t, unwindFallbackVoteStakeDirty, reason)
 	resetVoteStakeDirty()
 
 	// A cache write in the RETAINED suffix (below the switch slot but above the
@@ -211,15 +212,16 @@ func TestTryInLoopUnwindFallsBackWhenVoteStakeDirty(t *testing.T) {
 	// cache from durable, which cannot see the retained suffix's writes — the
 	// reload would REGRESS the cache below live account state.
 	markVoteStakeDirty(7) // retained slot; rooted watermark is 0
-	rs = tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
+	rs, reason = tryInLoopUnwind(sw, newTail(), mithrilState, sched, epoch, nil)
 	assert.Nil(t, rs, "dirty cache in the retained suffix must also force the fallback")
+	assert.Equal(t, unwindFallbackVoteStakeDirty, reason)
 	resetVoteStakeDirty()
 
 	// Once the rooted watermark passes the dirty slot, the write is folded into
 	// durable and reload-from-durable is exact again -> fast path allowed.
 	markVoteStakeDirty(7)
 	rootedPast := &state.MithrilState{LastRootedSlot: 7}
-	rs = tryInLoopUnwind(sw, newTail(), rootedPast, sched, epoch, nil)
+	rs, _ = tryInLoopUnwind(sw, newTail(), rootedPast, sched, epoch, nil)
 	require.NotNil(t, rs, "dirtiness at/below the rooted watermark is durably folded — fast path is safe")
 	resetVoteStakeDirty()
 }
@@ -234,7 +236,7 @@ func TestTryInLoopUnwindGuardMatrix(t *testing.T) {
 		AcctsLtHash: base64.StdEncoding.EncodeToString(make([]byte, 2048)),
 	}
 	newTail := func(withCtx bool) *unrootedTail {
-		tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1)
+		tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1, "")
 		tail.Add(7, []*accounts.Account{testAccount(1, 71)}, testHashBytes(7))
 		if withCtx {
 			tail.SetContext(7, validCtx)
@@ -246,27 +248,49 @@ func TestTryInLoopUnwindGuardMatrix(t *testing.T) {
 	resetVoteStakeDirty()
 
 	// Nil tail / zero slot are inert.
-	assert.Nil(t, tryInLoopUnwind(&CertifiedSwitch{Slot: 8}, nil, mithrilState, sched, 0, nil))
-	assert.Nil(t, tryInLoopUnwind(&CertifiedSwitch{Slot: 0}, newTail(true), mithrilState, sched, 0, nil))
+	assertUnwindFallback(t, &CertifiedSwitch{Slot: 8}, nil, mithrilState, sched, 0, nil)
+	assertUnwindFallback(t, &CertifiedSwitch{Slot: 0}, newTail(true), mithrilState, sched, 0, nil)
 
 	// Cross-epoch span: the switch slot's parent sits in the previous epoch —
 	// epoch-scoped caches (stakes, leader schedule, stake history) would be
 	// stale for the re-execution. Slot 432000 is the first slot of epoch 1.
 	sw := &CertifiedSwitch{Slot: 432000, Executed: swHash(1), Certified: swHash(2)}
-	assert.Nil(t, tryInLoopUnwind(sw, newTail(true), mithrilState, sched, 1, nil),
-		"epoch-boundary switch must fall back")
+	assertUnwindFallbackReason(t, unwindFallbackCrossEpoch, sw, newTail(true), mithrilState, sched, 1, nil)
 
 	// Partitioned-rewards window: re-execution would double-apply distribution
 	// bookkeeping.
 	sw = &CertifiedSwitch{Slot: 8, Executed: swHash(1), Certified: swHash(2)}
 	rewardsActive := &rewards.PartitionedRewardDistributionInfo{NumRewardPartitionsRemaining: 3}
-	assert.Nil(t, tryInLoopUnwind(sw, newTail(true), mithrilState, sched, 0, rewardsActive),
-		"rewards-window switch must fall back")
+	assertUnwindFallbackReason(t, unwindFallbackRewardsWindow, sw, newTail(true), mithrilState, sched, 0, rewardsActive)
 
 	// Missing parent context: nothing retained to rebuild execution state from.
-	assert.Nil(t, tryInLoopUnwind(sw, newTail(false), mithrilState, sched, 0, nil),
-		"missing parent context must fall back")
+	assertUnwindFallbackReason(t, unwindFallbackMissingContext, sw, newTail(false), mithrilState, sched, 0, nil)
 
 	// Control: with every guard clear, the unwind proceeds.
-	require.NotNil(t, tryInLoopUnwind(sw, newTail(true), mithrilState, sched, 0, nil))
+	assertUnwindOK(t, sw, newTail(true), mithrilState, sched, 0, nil)
+}
+
+// assertUnwindOK asserts the in-RAM unwind proceeds (no fallback reason).
+func assertUnwindOK(t *testing.T, sw *CertifiedSwitch, tail *unrootedTail, ms *state.MithrilState, sched *sealevel.SysvarEpochSchedule, epoch uint64, ri *rewards.PartitionedRewardDistributionInfo) {
+	t.Helper()
+	rs, reason := tryInLoopUnwind(sw, tail, ms, sched, epoch, ri)
+	require.NotNil(t, rs, "expected in-RAM unwind to proceed, got fallback %q", reason)
+	assert.Empty(t, reason)
+}
+
+// assertUnwindFallback asserts the unwind falls back (any reason).
+func assertUnwindFallback(t *testing.T, sw *CertifiedSwitch, tail *unrootedTail, ms *state.MithrilState, sched *sealevel.SysvarEpochSchedule, epoch uint64, ri *rewards.PartitionedRewardDistributionInfo) {
+	t.Helper()
+	rs, reason := tryInLoopUnwind(sw, tail, ms, sched, epoch, ri)
+	assert.Nil(t, rs)
+	assert.NotEmpty(t, reason, "fallback must carry a reason for the instrumentation")
+}
+
+// assertUnwindFallbackReason asserts the unwind falls back with the exact
+// instrumented reason operators will see.
+func assertUnwindFallbackReason(t *testing.T, want string, sw *CertifiedSwitch, tail *unrootedTail, ms *state.MithrilState, sched *sealevel.SysvarEpochSchedule, epoch uint64, ri *rewards.PartitionedRewardDistributionInfo) {
+	t.Helper()
+	rs, reason := tryInLoopUnwind(sw, tail, ms, sched, epoch, ri)
+	assert.Nil(t, rs)
+	assert.Equal(t, want, reason)
 }

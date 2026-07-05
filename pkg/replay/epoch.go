@@ -186,13 +186,10 @@ func updateStakeHistorySysvar(acctsDb *accountsdb.AccountsDb, block *block.Block
 }
 
 func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewards bool, prevSlotCtx *sealevel.SlotCtx, replayCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, f *features.Features, block *block.Block, epoch uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions) *rewards.PartitionedRewardDistributionInfo {
-	// Flush any pending stake pubkeys to the index file before scanning.
-	// The async StoreAccounts callback from the previous block may not have
-	// run yet, so flush here to ensure the index is complete for the scan.
-	acctsDbDir := filepath.Join(acctsDb.AcctsDir, "..")
-	if _, err := global.FlushPendingStakePubkeys(acctsDbDir); err != nil {
-		mlog.Log.Errorf("failed to flush stake pubkeys before epoch scan: %v", err)
-	}
+	// No pre-scan index flush: StreamStakeAccounts merges the RAM-pending
+	// stake entries (slots not yet folded) with the file-backed index, so the
+	// scan is complete without durably writing entries for slots a fork
+	// switch could still unwind. Entries reach the file only at fold time.
 
 	// Load stake history (used by both scan and rewards)
 	var stakeHistory sealevel.SysvarStakeHistory
@@ -250,7 +247,9 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t5 := time.Now()
 
 	// Compact stake index at epoch boundary — removes duplicates from appends
-	if err := global.CompactStakePubkeyIndex(acctsDbDir); err != nil {
+	// (rewrites from the file-backed cache only; RAM-pending entries for
+	// unfolded slots are untouched and flush at their own fold).
+	if err := global.CompactStakePubkeyIndex(filepath.Join(acctsDb.AcctsDir, "..")); err != nil {
 		mlog.Log.Errorf("failed to compact stake pubkey index: %v", err)
 	}
 

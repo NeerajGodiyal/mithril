@@ -101,7 +101,7 @@ func TestPromoteRootedHappyPath(t *testing.T) {
 	contexts := map[uint64]*state.ResumeContext{5: {Slot: 5}, 7: {Slot: 7}, 9: {Slot: 9}}
 	fc := &fakeCommitter{durable: durable}
 
-	promoted, err := promoteRootedBatched(overlay, 7, bankhashes, contexts, fc, 2, false)
+	promoted, err := promoteRootedBatched(overlay, 7, bankhashes, contexts, fc, 2, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7), promoted)
 	assert.Equal(t, []uint64{5, 7}, fc.committed, "committed ascending")
@@ -126,7 +126,7 @@ func TestPromoteRootedPartialFailureStopsAtLastDurable(t *testing.T) {
 	contexts := map[uint64]*state.ResumeContext{5: {Slot: 5}, 7: {Slot: 7}, 9: {Slot: 9}}
 	fc := &fakeCommitter{durable: durable, failOn: 7}
 
-	promoted, err := promoteRootedBatched(overlay, 9, bankhashes, contexts, fc, 1, false)
+	promoted, err := promoteRootedBatched(overlay, 9, bankhashes, contexts, fc, 1, "", false)
 	require.Error(t, err, "commit failure surfaces")
 	assert.Equal(t, uint64(5), promoted, "advance only to last durable slot")
 	assert.Equal(t, []uint64{5}, fc.committed)
@@ -148,7 +148,7 @@ func TestPromoteRootedEmptyDeltaSlot(t *testing.T) {
 	contexts := map[uint64]*state.ResumeContext{5: {Slot: 5}}
 	fc := &fakeCommitter{durable: durable}
 
-	promoted, err := promoteRootedBatched(overlay, 5, bankhashes, contexts, fc, 1, false)
+	promoted, err := promoteRootedBatched(overlay, 5, bankhashes, contexts, fc, 1, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(5), promoted)
 	assert.Equal(t, []uint64{5}, fc.committed, "empty slot still committed for its bankhash")
@@ -194,7 +194,7 @@ func TestPromoteRootedMissingContextFailsClosed(t *testing.T) {
 	contexts := map[uint64]*state.ResumeContext{5: {Slot: 5}}
 	fc := &fakeCommitter{durable: durable}
 
-	promoted, err := promoteRootedBatched(overlay, 7, bankhashes, contexts, fc, 1, false)
+	promoted, err := promoteRootedBatched(overlay, 7, bankhashes, contexts, fc, 1, "", false)
 	require.ErrorContains(t, err, "no resume context")
 	assert.Equal(t, uint64(5), promoted, "advance only through the last chunk that had a context")
 	assert.Equal(t, []uint64{5}, fc.committed, "context-less chunk never committed")
@@ -203,7 +203,7 @@ func TestPromoteRootedMissingContextFailsClosed(t *testing.T) {
 // Tail reads: overlay value wins; misses fall through to durable.
 func TestUnrootedTailGetAccount(t *testing.T) {
 	durable := &fakeDurable{known: map[solana.PublicKey]uint64{testKey(1): 100, testKey(2): 200}}
-	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1)
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
 	tail.Add(5, []*accounts.Account{testAccount(1, 51)}, testHashBytes(5)) // key 1 written unrooted
 
 	a, err := tail.GetAccount(5, testKey(1))
@@ -219,7 +219,7 @@ func TestUnrootedTailGetAccount(t *testing.T) {
 // durable batch, placeholder for unknown keys.
 func TestUnrootedTailGetAccountsBatch(t *testing.T) {
 	durable := &fakeDurable{known: map[solana.PublicKey]uint64{testKey(2): 200}}
-	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1)
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
 	tail.Add(5, []*accounts.Account{testAccount(1, 51), testAccount(4, 54)}, testHashBytes(5))
 
 	keys := []solana.PublicKey{testKey(1), testKey(2), testKey(3), testKey(4)}
@@ -235,7 +235,7 @@ func TestUnrootedTailGetAccountsBatch(t *testing.T) {
 
 // OverCap trips only when held slots exceed the cap (backpressure on stalled rooting).
 func TestUnrootedTailOverCap(t *testing.T) {
-	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 2, 1)
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 2, 1, "")
 	tail.Add(1, nil, testHashBytes(1))
 	tail.Add(2, nil, testHashBytes(2))
 	assert.False(t, tail.OverCap(), "2 held == cap, not over")
@@ -246,7 +246,7 @@ func TestUnrootedTailOverCap(t *testing.T) {
 // promote returns the resume context as of the highest promoted slot and prunes
 // the context map for promoted slots, retaining still-held ones.
 func TestUnrootedTailContextCaptureAndPromote(t *testing.T) {
-	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1)
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{durable: accounts.NewMemAccounts()}, 512, 1, "")
 	tail.Add(5, []*accounts.Account{testAccount(1, 51)}, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5, Bankhash: "bh5"})
 	tail.Add(7, []*accounts.Account{testAccount(2, 72)}, testHashBytes(7))
@@ -275,7 +275,7 @@ func TestPromoteRootedNoPrefix(t *testing.T) {
 	overlay.Add(10, []*accounts.Account{testAccount(1, 10)})
 
 	fc := &fakeCommitter{durable: durable}
-	promoted, err := promoteRootedBatched(overlay, 5, map[uint64][32]byte{}, map[uint64]*state.ResumeContext{}, fc, 1, false)
+	promoted, err := promoteRootedBatched(overlay, 5, map[uint64][32]byte{}, map[uint64]*state.ResumeContext{}, fc, 1, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), promoted)
 	assert.Empty(t, fc.committed)
@@ -287,7 +287,7 @@ func TestPromoteRootedNoPrefix(t *testing.T) {
 // flush() (graceful shutdown) forces it.
 func TestPromoteBatchedDefersPartialChunkUntilFlush(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
-	tail := newUnrootedTail(&fakeDurable{}, fc, 512, 4)
+	tail := newUnrootedTail(&fakeDurable{}, fc, 512, 4, "")
 	for slot := uint64(1); slot <= 3; slot++ {
 		tail.Add(slot, []*accounts.Account{testAccount(byte(slot), slot)}, testHashBytes(byte(slot)))
 		tail.SetContext(slot, &state.ResumeContext{Slot: slot})
@@ -312,7 +312,7 @@ func TestPromoteBatchedDefersPartialChunkUntilFlush(t *testing.T) {
 // serialized JSON; per-chunk bankhash maps carry exactly the chunk's slots.
 func TestPromoteBatchedChunkBoundariesAndContext(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
-	tail := newUnrootedTail(&fakeDurable{}, fc, 512, 2)
+	tail := newUnrootedTail(&fakeDurable{}, fc, 512, 2, "")
 	for slot := uint64(1); slot <= 5; slot++ {
 		tail.Add(slot, []*accounts.Account{testAccount(byte(slot), slot)}, testHashBytes(byte(slot)))
 		tail.SetContext(slot, &state.ResumeContext{Slot: slot, Bankhash: "bh"})
