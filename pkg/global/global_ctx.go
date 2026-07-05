@@ -332,6 +332,12 @@ func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 	return instance.leaderSchedule.LeaderForSlot(slot)
 }
 
+// HasLeaderSchedule reports whether a leader schedule has been installed.
+// Turbine shred signature verification drops every shred until one exists.
+func HasLeaderSchedule() bool {
+	return instance.leaderSchedule != nil
+}
+
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {
 	globctx.mu.Lock()
 	defer globctx.mu.Unlock()

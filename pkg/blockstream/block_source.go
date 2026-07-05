@@ -2533,7 +2533,13 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 					lastNotReadyLog = time.Now()
 					switch {
 					case !bs.rpcFallbackEnabled:
-						mlog.Log.Infof("catchup: WAITING for turbine shreds (received: %v, repair peers: %d) — RPC block fetch is disabled (block.rpc_fallback=false); gap %d slots", shredEdge > 0, repairPeers, gap)
+						// The receiver counters split "nothing arrives" from
+						// "arrivals are rejected" (missing leader schedule,
+						// bad signatures, unparseable) — the first question
+						// to answer when this line repeats.
+						stats := receiver.Stats()
+						mlog.Log.Infof("catchup: WAITING for turbine shreds (received: %v, repair peers: %d) — RPC block fetch is disabled (block.rpc_fallback=false); gap %d slots | receiver: packets %d, missing_leader %d, sig_err %d, parse_err %d",
+							shredEdge > 0, repairPeers, gap, stats.Packets, stats.MissingLeaders, stats.SignatureErrors, stats.ParseErrors)
 					case first:
 						mlog.Log.Infof("catchup: gap %d slots is within the repair threshold (%d) — holding RPC block fetch and WAITING for turbine shreds (received: %v, repair peers: %d); RPC engages only if the gap outgrows the threshold", gap, bs.repairCatchupMaxGapSlots, shredEdge > 0, repairPeers)
 					default:

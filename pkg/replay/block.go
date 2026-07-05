@@ -1353,6 +1353,21 @@ func ReplayBlocks(
 			return result
 		}
 	}
+
+	// Shreds before blocks: turbine shred signature verification needs the
+	// leader schedule, and on a shreds-only node (block.rpc_fallback=false)
+	// the first block can only arrive AS verified shreds. Build the current
+	// epoch's schedule from the just-loaded epoch stakes NOW — deferring it
+	// to first-block configuration (the historical order) deadlocks:
+	// schedule ← first block ← verified shreds ← schedule.
+	if global.ManageLeaderSchedule() && !global.HasLeaderSchedule() {
+		if _, err := PrepareLeaderScheduleLocal(currentEpoch, epochSchedule, ""); err != nil {
+			result.Error = fmt.Errorf("building leader schedule for epoch %d before block-source start: %w", currentEpoch, err)
+			return result
+		}
+		mlog.Log.Infof("leader schedule ready for epoch %d (built before block-source start; turbine shred verification is live)", currentEpoch)
+	}
+
 	if err := initializeBlockHeight(rpcc, mithrilState, resumeState); err != nil {
 		result.Error = err
 		return result
