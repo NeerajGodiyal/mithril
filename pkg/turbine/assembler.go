@@ -26,7 +26,7 @@ const (
 	repairObservedSlotLag        = uint64(1)
 	repairScanSlotWindow         = uint64(96)
 	maxPriorityRepairSlots       = 512
-	maxPriorityRepairRange       = uint64(64)
+	maxPriorityRepairRange       = uint64(256)
 )
 
 type SlotAssembler struct {
