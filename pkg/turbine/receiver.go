@@ -306,6 +306,12 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		go r.repairClient.run(ctx, conn, r.assembler)
 	}
 	if r.spool != nil {
+		// Flush buffered slot-file tails and close the completeness journal
+		// when this receiver dies: the next receiver over the SAME spool
+		// directory (block source after a prewarm handoff, or a stream
+		// restart) can only see what reached disk — and it truncate-rewrites
+		// the journal on open, so ours must be closed first.
+		defer r.spool.Close()
 		go r.hydrateLoop(ctx)
 	}
 

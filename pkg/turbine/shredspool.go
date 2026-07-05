@@ -36,6 +36,7 @@ type ShredSpool struct {
 	bytes    int64
 	maxBytes int64
 	floor    uint64
+	closed   bool
 }
 
 // SpoolSlotMeta records a slot proven FULLY assembled: every data shred
@@ -188,7 +189,7 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if slot < s.floor {
+	if s.closed || slot < s.floor {
 		return
 	}
 	sf := s.open[slot]
@@ -339,10 +340,13 @@ func (s *ShredSpool) Stats() (slots int, bytes int64) {
 }
 
 // Close flushes and closes all open handles (files remain for the next
-// process).
+// opener — a stream restart or the block source after a prewarm handoff).
+// Buffered tails MUST reach disk here: the next opener sizes and reads the
+// directory fresh and can only see flushed bytes. Later writes no-op.
 func (s *ShredSpool) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	for slot := range s.open {
 		s.closeSlotLocked(slot)
 	}

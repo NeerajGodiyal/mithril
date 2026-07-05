@@ -1,6 +1,8 @@
 package turbine
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -79,6 +81,48 @@ func TestShredSpoolAdoptsExistingFiles(t *testing.T) {
 	got, err := second.ReadSlot(500)
 	if err != nil || len(got) != 1 || string(got[0]) != "persisted" {
 		t.Fatalf("ReadSlot after reopen = %v, %v", got, err)
+	}
+}
+
+// The handoff contract: buffered slot-file tails and the completeness
+// journal reach disk on Close, because the NEXT opener of the same directory
+// (the block source after a prewarm handoff, or a turbine stream restart)
+// sizes and reads it fresh and can only see flushed bytes. Writes after
+// Close are dropped rather than silently reopening handles nobody closes.
+func TestShredSpoolCloseFlushesBufferedTailsForNextOpener(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first.Append(700, []byte("buffered-tail"))
+	first.MarkComplete(700, 3, 4)
+
+	// Premise: the record is still in the bufio buffer — the on-disk file
+	// exists but is empty, which is exactly what a second opener would
+	// (wrongly) observe without the Close flush.
+	info, err := os.Stat(filepath.Join(dir, "s700.shreds"))
+	if err != nil {
+		t.Fatalf("slot file should exist while buffered: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("premise broken: tail already flushed (size %d)", info.Size())
+	}
+
+	first.Close()
+	first.Append(700, []byte("after-close"))
+
+	second, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer second.Close()
+	got, err := second.ReadSlot(700)
+	if err != nil || len(got) != 1 || string(got[0]) != "buffered-tail" {
+		t.Fatalf("ReadSlot after handoff = %v, %v (want the buffered tail, no post-Close write)", got, err)
+	}
+	if meta, ok := second.IsComplete(700); !ok || meta.LastIndex != 3 || meta.Shreds != 4 {
+		t.Fatalf("completeness must survive handoff (meta=%+v ok=%v)", meta, ok)
 	}
 }
 
