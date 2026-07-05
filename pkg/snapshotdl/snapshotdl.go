@@ -1291,6 +1291,52 @@ func extractFullSnapshotSlot(path string) int {
 	return slot
 }
 
+const (
+	// incrementalFreshnessBandSlots defines "near-tie" for incremental
+	// recency: surveyed candidates within this many slots of the freshest
+	// end found compete on download speed; anything staler is dropped.
+	// Incrementals are small downloads, so freshness dominates speed —
+	// ~256 slots is a couple of snapshot-production intervals.
+	incrementalFreshnessBandSlots = int64(256)
+
+	// incrementalSameSourceFreshSlots bounds the same-source shortcut: the
+	// full-snapshot source's own incremental is taken WITHOUT a cluster
+	// survey only when it ends within this many slots of the live tip.
+	// Staler than this (even inside the acceptance threshold), a survey is
+	// worth the extra seconds — another node likely has fresher.
+	incrementalSameSourceFreshSlots = int64(512)
+)
+
+// restrictToFreshestIncrementals keeps only candidates whose incremental end
+// is within band slots of the freshest end present, so the subsequent speed
+// ranking chooses among near-equally-fresh options instead of trading
+// recency for bandwidth.
+func restrictToFreshestIncrementals(results []rpc.NodeResult, band int64) []rpc.NodeResult {
+	var bestEnd int64
+	for _, r := range results {
+		if r.IncSlot > bestEnd {
+			bestEnd = r.IncSlot
+		}
+	}
+	if bestEnd == 0 {
+		return results
+	}
+	var fresh []rpc.NodeResult
+	for _, r := range results {
+		if bestEnd-r.IncSlot <= band {
+			fresh = append(fresh, r)
+		}
+	}
+	if len(fresh) == 0 {
+		return results
+	}
+	if len(fresh) < len(results) {
+		mlog.Log.Infof("Incremental selection: %d/%d candidates within %d slots of the freshest end %d; speed ranks among those",
+			len(fresh), len(results), band, bestEnd)
+	}
+	return fresh
+}
+
 // GetIncrementalSnapshotURL finds an incremental snapshot URL that matches the full snapshot.
 // It first tries the same source as the full snapshot, then searches other nodes if needed.
 // Returns: (httpURL, baseSlot, endSlot, error)
@@ -1326,11 +1372,13 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
 
 		if err == nil && urlInfo != nil && urlInfo.BaseSlot == fullSnapshotSlot {
-			// Check freshness: same-source must also meet incremental threshold
-			age := referenceSlot - urlInfo.Slot
-			if cfg.IncrementalThreshold > 0 && age > cfg.IncrementalThreshold {
-				mlog.Log.Infof("Same source incremental too old: %d slots behind (threshold: %d). Searching cluster...",
-					age, cfg.IncrementalThreshold)
+			// The shortcut only applies when the same-source incremental is
+			// near-tip fresh; otherwise a cluster survey is worth the extra
+			// seconds — incrementals are small, freshness beats convenience.
+			age := int64(referenceSlot) - int64(urlInfo.Slot)
+			if referenceSlot > 0 && age > incrementalSameSourceFreshSlots {
+				mlog.Log.Infof("Same source incremental is %d slots behind tip (shortcut bar: %d). Surveying cluster for a fresher one...",
+					age, incrementalSameSourceFreshSlots)
 			} else {
 				mlog.Log.Infof("📸 Incremental snapshot source: %s (same as full, base=%d, end=%d, age=%d slots)",
 					sourceNodeRPC, urlInfo.BaseSlot, urlInfo.Slot, age)
@@ -1398,6 +1446,10 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	if len(baseMatchingResults) == 0 {
 		return "", 0, 0, fmt.Errorf("no nodes found with incremental base slot %d", fullSnapshotSlot)
 	}
+
+	// Recency first: keep only candidates near the freshest available end,
+	// THEN let speed rank them. Applies to both threshold passes below.
+	baseMatchingResults = restrictToFreshestIncrementals(baseMatchingResults, incrementalFreshnessBandSlots)
 
 	// Step 2.2: Two-pass filtering - try strict threshold first, then relaxed
 	var matchingNodes []rpc.RankedNode

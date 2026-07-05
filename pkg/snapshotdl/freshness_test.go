@@ -115,3 +115,27 @@ func TestFreshnessDisabledKeepsBaseMatchOnly(t *testing.T) {
 		t.Fatalf("threshold 0 disables freshness restriction: %+v", slots)
 	}
 }
+
+// Recency-first incremental survey: only candidates within the freshness
+// band of the best end compete on speed; a lone/empty set passes through.
+func TestRestrictToFreshestIncrementals(t *testing.T) {
+	res := []rpc.NodeResult{
+		fullWithInc("freshest", 90_000, 90_000, 99_900),
+		fullWithInc("near-tie", 90_000, 90_000, 99_700), // within 256 — kept, speed decides
+		fullWithInc("stale", 90_000, 90_000, 95_000),    // 4.9k behind best — dropped
+	}
+	fresh := restrictToFreshestIncrementals(res, incrementalFreshnessBandSlots)
+	if len(fresh) != 2 {
+		t.Fatalf("want the two near-tie candidates, got %d", len(fresh))
+	}
+	for _, r := range fresh {
+		if r.IncSlot < 99_700 {
+			t.Fatalf("stale candidate leaked through: %+v", r)
+		}
+	}
+	// No incremental ends at all: untouched.
+	none := []rpc.NodeResult{fullNode("a", 1), fullNode("b", 2)}
+	if got := restrictToFreshestIncrementals(none, incrementalFreshnessBandSlots); len(got) != 2 {
+		t.Fatalf("no-end case must pass through")
+	}
+}
