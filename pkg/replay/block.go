@@ -2986,7 +2986,7 @@ func ProcessBlock(
 		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
 			return nil, err
 		}
-		if err := ApplyAlpenglowVoteRewards(acctsDb, slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert); err != nil {
+		if err := ApplyAlpenglowVoteRewards(acctsDb, slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert); err != nil {
 			return nil, err
 		}
 	}

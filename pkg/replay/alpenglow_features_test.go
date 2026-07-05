@@ -3,6 +3,7 @@ package replay
 import (
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +33,10 @@ func TestAlpenglowClockFeatureRequiresAgaveFeatureGate(t *testing.T) {
 	ft.DisableFeature(features.Alpenglow)
 	ft.EnableFeature(features.AlpenglowDevContext, 43)
 	require.True(t, alpenglowClockFeatureActive(ft))
+}
+
+func TestAlpenglowFeatureGateMatchesVoteRewardProgram(t *testing.T) {
+	require.Equal(t, AlpenglowFeatureGatePubkey, base58.Encode(features.Alpenglow.Address[:]))
 }
 
 func TestAlpenglowReplayModeForcesAlpenglowClockSemantics(t *testing.T) {

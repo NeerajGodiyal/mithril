@@ -96,6 +96,27 @@ func TestVerifyCertificateSignatureBase2(t *testing.T) {
 	}
 }
 
+func TestVerifyRewardCertificateAllowsLowStakeFraction(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 40, 35, 25)
+	cert := Certificate{
+		Type:   CertificateSkip,
+		Slot:   88,
+		Bitmap: testSignerBitmapBase2(3, 2),
+		Signature: testBLSSignature(t, []testBLSVoteSignature{
+			{Vote: NewSkipVote(88), Key: keys[2]},
+		}),
+	}
+
+	if err := verifyRewardCertificateWithSet(set, cert); err != nil {
+		t.Fatalf("verify reward certificate: %v", err)
+	}
+
+	_, _, err := verifyCertificateWithSet(set, cert, true)
+	if err == nil {
+		t.Fatalf("expected full chain verification to reject low-stake skip cert")
+	}
+}
+
 func TestVerifyCertificateSignatureRejectsTamperedPayload(t *testing.T) {
 	set, keys := testBLSValidatorSet(100, 40, 35, 25)
 	var signedHash solana.Hash

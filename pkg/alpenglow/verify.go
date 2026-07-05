@@ -268,6 +268,34 @@ func (v *CertificateVerifier) VerifyCertificate(cert Certificate) (Certificate, 
 	return v.VerifyCertificateForEpoch(epoch, cert)
 }
 
+// VerifyRewardCertificateForEpoch verifies a footer reward certificate the way Agave
+// ValidatedRewardCert::try_new does: BLS signature + bitmap only, without the 60%
+// consensus stake threshold. Reward certs aggregate skip/notar voters for payout, not
+// a supermajority certificate.
+func (v *CertificateVerifier) VerifyRewardCertificateForEpoch(epoch uint64, cert Certificate) error {
+	v.mu.RLock()
+	set, ok := v.sets[epoch]
+	v.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("alpenglow verifier: no validator set for epoch %d", epoch)
+	}
+	return verifyRewardCertificateWithSet(set, cert)
+}
+
+func verifyRewardCertificateWithSet(set ValidatorSet, cert Certificate) error {
+	if err := validateChainCertificateForVerifier(cert); err != nil {
+		return err
+	}
+	if len(cert.Signature) != BLSSignatureSize {
+		return fmt.Errorf("alpenglow verifier: %s reward certificate for slot %d has invalid signature length %d", cert.Type, cert.Slot, len(cert.Signature))
+	}
+	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	if err != nil {
+		return err
+	}
+	return verifyCertificateSignatureWithSet(set, cert, bitmap)
+}
+
 func (v *CertificateVerifier) VerifyCertificateStakeForEpoch(epoch uint64, cert Certificate) (Certificate, CertificateVerifyResult, error) {
 	v.mu.RLock()
 	set, ok := v.sets[epoch]

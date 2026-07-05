@@ -48,7 +48,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	}
 
 	if in.AlpenglowClock {
-		if err := ApplyAlpenglowVoteRewards(in.AcctsDb, slotCtx, block, in.EpochSchedule, block.SkipRewardCert, block.NotarRewardCert); err != nil {
+		if err := ApplyAlpenglowVoteRewards(in.AcctsDb, slotCtx, block, in.EpochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert); err != nil {
 			return nil, err
 		}
 	}

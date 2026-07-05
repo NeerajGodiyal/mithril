@@ -1731,6 +1731,28 @@ func marshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, er
 	return MarshalVersionedVoteState(voteStateVersions)
 }
 
+// WriteVersionedVoteStateInPlace serializes vote state into data in place, preserving
+// len(data). Agave vote reward updates use AccountSharedData::new(lamports, space, owner)
+// then serialize_into, leaving zero padding in the account buffer.
+func WriteVersionedVoteStateInPlace(data []byte, voteStateVersions *VoteStateVersions) error {
+	marshaled, err := MarshalVersionedVoteState(voteStateVersions)
+	if err != nil {
+		return err
+	}
+	if len(marshaled) > len(data) {
+		return fmt.Errorf(
+			"vote state serialized length %d exceeds account data capacity %d",
+			len(marshaled),
+			len(data),
+		)
+	}
+	copy(data, marshaled)
+	for i := len(marshaled); i < len(data); i++ {
+		data[i] = 0
+	}
+	return nil
+}
+
 // MarshalVersionedVoteState serializes a vote account state for storage.
 func MarshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, error) {
 	var buffer *bytes.Buffer

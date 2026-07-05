@@ -111,12 +111,8 @@ func notarCertToCertificate(cert NotarRewardCertificate) alpenglow.Certificate {
 }
 
 func verifyAndCollectRewardCert(verifier *alpenglow.CertificateVerifier, set alpenglow.ValidatorSet, cert alpenglow.Certificate, validators map[solana.PublicKey]struct{}) error {
-	_, result, err := verifier.VerifyCertificateForEpoch(set.Epoch, cert)
-	if err != nil {
+	if err := verifier.VerifyRewardCertificateForEpoch(set.Epoch, cert); err != nil {
 		return err
-	}
-	if !result.SignatureVerified {
-		return fmt.Errorf("reward cert signature not verified")
 	}
 	bitmap, err := alpenglow.DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
 	if err != nil {

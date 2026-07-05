@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,4 +52,41 @@ func TestEnsureMigrationMarker(t *testing.T) {
 	ensureMigrationMarker(&credits)
 	require.Len(t, credits, 1)
 	assert.Equal(t, uint64(math.MaxUint64), credits[0].Epoch)
+}
+
+func TestWriteVersionedVoteStateInPlacePreservesAccountDataLen(t *testing.T) {
+	var votePubkey, withdrawer solana.PublicKey
+	votePubkey[0] = 1
+	withdrawer[1] = 2
+
+	var authVoters sealevel.AuthorizedVoters
+	authVoters.AuthorizedVoters.Set(1, votePubkey)
+
+	versioned := &sealevel.VoteStateVersions{
+		Type: sealevel.VoteStateVersionV4,
+		V4: sealevel.VoteState4{
+			NodePubkey:                    votePubkey,
+			AuthorizedWithdrawer:          withdrawer,
+			AuthorizedVoters:              authVoters,
+			InflationRewardsCollector:     votePubkey,
+			BlockRevenueCollector:         votePubkey,
+			InflationRewardsCommissionBps: 0,
+			BlockRevenueCommissionBps:     10000,
+		},
+	}
+
+	marshaled, err := sealevel.MarshalVersionedVoteState(versioned)
+	require.NoError(t, err)
+	require.Less(t, len(marshaled), sealevel.VoteStateV3Size)
+
+	data := make([]byte, sealevel.VoteStateV3Size)
+	copy(data, marshaled)
+	data[len(data)-1] = 0x42
+
+	require.NoError(t, sealevel.WriteVersionedVoteStateInPlace(data, versioned))
+	require.Equal(t, sealevel.VoteStateV3Size, len(data))
+	require.Equal(t, marshaled, data[:len(marshaled)])
+	for _, b := range data[len(marshaled):] {
+		require.Equal(t, byte(0), b)
+	}
 }

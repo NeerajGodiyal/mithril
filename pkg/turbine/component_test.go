@@ -1,7 +1,9 @@
 package turbine_test
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
@@ -179,4 +181,67 @@ func TestShredBlockFooterRewardCertsRoundTrip(t *testing.T) {
 	require.Len(t, components, 1)
 	require.Equal(t, footer.SkipRewardCert, components[0].Marker.Footer.SkipRewardCert)
 	require.Equal(t, footer.NotarRewardCert, components[0].Marker.Footer.NotarRewardCert)
+}
+
+func TestShredBlockFooterWithFinalCertAndRewardCertsRoundTrip(t *testing.T) {
+	leader := testLeader(t)
+	finalCert := buildAgaveFinalCertWire(t)
+	skipRaw, err := rewardcerts.EncodeSkipRewardCertificate(rewardcerts.SkipRewardCertificate{
+		Slot:      99,
+		Signature: [96]byte{1, 2, 3},
+		Bitmap:    []byte{4, 5},
+	})
+	require.NoError(t, err)
+	notarRaw, err := rewardcerts.EncodeNotarRewardCertificate(rewardcerts.NotarRewardCertificate{
+		Slot:      99,
+		BlockID:   solana.Hash{6},
+		Signature: [96]byte{7, 8, 9},
+		Bitmap:    []byte{10},
+	})
+	require.NoError(t, err)
+	footer := turbine.BlockFooter{
+		BankHash:               solana.Hash{4},
+		BlockProducerTimeNanos: 123,
+		BlockUserAgent:         []byte("mithril"),
+		BlockFinalCert:         finalCert,
+		SkipRewardCert:         skipRaw,
+		NotarRewardCert:        notarRaw,
+	}
+	component := turbine.NewBlockFooter(footer)
+
+	shredder := turbine.Shredder{Slot: 200, ParentSlot: 199, Version: 1, ReferenceTick: 63}
+	batch, _, _, err := shredder.MakeMerkleShredsFromComponent(
+		leader,
+		component,
+		true,
+		solana.Hash{3},
+		10,
+		10,
+	)
+	require.NoError(t, err)
+
+	components, err := turbine.DecodeComponentsFromDataShreds(batch.DataShreds)
+	require.NoError(t, err)
+	require.Len(t, components, 1)
+	got := components[0].Marker.Footer
+	require.Equal(t, footer.BlockFinalCert, got.BlockFinalCert)
+	require.Equal(t, footer.SkipRewardCert, got.SkipRewardCert)
+	require.Equal(t, footer.NotarRewardCert, got.NotarRewardCert)
+}
+
+func buildAgaveFinalCertWire(t *testing.T) []byte {
+	t.Helper()
+	var out []byte
+	var slotBuf [8]byte
+	binary.LittleEndian.PutUint64(slotBuf[:], 1234567890)
+	out = append(out, slotBuf[:]...)
+	out = append(out, bytes.Repeat([]byte{1}, 32)...)
+	out = append(out, make([]byte, 96)...)
+	bitmap := bytes.Repeat([]byte{42}, 64)
+	var bitmapLen [2]byte
+	binary.LittleEndian.PutUint16(bitmapLen[:], uint16(len(bitmap)))
+	out = append(out, bitmapLen[:]...)
+	out = append(out, bitmap...)
+	out = append(out, 0) // notar_aggregate None
+	return out
 }

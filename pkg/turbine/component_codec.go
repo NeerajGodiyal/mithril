@@ -340,6 +340,48 @@ func appendUint16(out []byte, v uint16) []byte {
 	return append(out, buf[:]...)
 }
 
+const blsSignatureCompressedSize = 96
+
+func votesAggregateEncodedLen(data []byte) (int, error) {
+	if len(data) < blsSignatureCompressedSize+2 {
+		return 0, fmt.Errorf("%w: short votes aggregate", ErrInvalidBlockComponent)
+	}
+	bitmapLen := int(binary.LittleEndian.Uint16(data[blsSignatureCompressedSize : blsSignatureCompressedSize+2]))
+	total := blsSignatureCompressedSize + 2 + bitmapLen
+	if total > len(data) {
+		return 0, fmt.Errorf("%w: votes aggregate overflows buffer", ErrInvalidBlockComponent)
+	}
+	return total, nil
+}
+
+func finalCertificateEncodedLen(data []byte) (int, error) {
+	if len(data) < 8+32 {
+		return 0, fmt.Errorf("%w: short final certificate", ErrInvalidBlockComponent)
+	}
+	pos := 8 + 32
+	n, err := votesAggregateEncodedLen(data[pos:])
+	if err != nil {
+		return 0, err
+	}
+	pos += n
+	if pos >= len(data) {
+		return 0, fmt.Errorf("%w: truncated final certificate notar option", ErrInvalidBlockComponent)
+	}
+	switch data[pos] {
+	case 0:
+		return pos + 1, nil
+	case 1:
+		pos++
+		n, err = votesAggregateEncodedLen(data[pos:])
+		if err != nil {
+			return 0, err
+		}
+		return pos + n, nil
+	default:
+		return 0, fmt.Errorf("%w: invalid final certificate notar option tag %d", ErrInvalidBlockComponent, data[pos])
+	}
+}
+
 type wincodeOptionKind int
 
 const (
@@ -385,8 +427,7 @@ func readWincodeOptionPayload(data []byte, pos int, kind wincodeOptionKind) ([]b
 	case wincodeOptionNotarReward:
 		n, err = rewardcerts.NotarRewardCertificateEncodedLen(data[pos:])
 	case wincodeOptionFinalCert:
-		// Mithril does not embed final certs today; treat any Some payload as opaque to EOF.
-		n = len(data) - pos
+		n, err = finalCertificateEncodedLen(data[pos:])
 	default:
 		n = len(data) - pos
 	}

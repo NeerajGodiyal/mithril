@@ -866,6 +866,7 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 		blk.HasAlpenglowFooter = true
 		blk.SkipRewardCert = append([]byte(nil), footer.SkipRewardCert...)
 		blk.NotarRewardCert = append([]byte(nil), footer.NotarRewardCert...)
+		blk.BlockFinalCert = append([]byte(nil), footer.BlockFinalCert...)
 		blk.FooterProducerTimeNanos = footer.BlockProducerTimeNanos
 		if footer.BankHash != ([32]byte{}) {
 			blk.ExpectedBankhash = footer.BankHash
