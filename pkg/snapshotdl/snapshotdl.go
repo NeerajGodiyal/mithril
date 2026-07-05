@@ -146,7 +146,7 @@ func DefaultSnapshotConfig() SnapshotConfig {
 
 		// Snapshot age thresholds
 		FullThreshold:        100000, // Full snapshots up to 100k slots old (Agave 3.0+)
-		IncrementalThreshold: 1000,   // Allow incrementals up to 1000 slots ahead
+		IncrementalThreshold: 2000,   // Freshness band: incrementals (and full-source bases) within this many slots of tip
 
 		// Snapshot storage (0 = stream-only, 1+ = save and retain N)
 		// Saved snapshots are valuable for debugging and reproducing issues
@@ -495,24 +495,40 @@ func snapshotProbeConfigChanged(a config.Config, b config.Config) bool {
 
 // incBaseMatchStats tracks statistics for incremental base matching filter
 type incBaseMatchStats struct {
-	totalWithFull         int // nodes with a full snapshot endpoint, including slot 0
-	totalWithFullSlotZero int // nodes whose full snapshot filename parsed as slot 0
-	totalWithInc          int // nodes with any incremental
-	afterIncBaseMatch     int // nodes remaining after incremental base match filter
-	uniqueFullSlots       int // number of unique full snapshot slots
-	uniqueIncBases        int // number of unique incremental base slots
-	matchingFullSlots     int // full slots that have at least one matching inc base
+	totalWithFull         int   // nodes with a full snapshot endpoint, including slot 0
+	totalWithFullSlotZero int   // nodes whose full snapshot filename parsed as slot 0
+	totalWithInc          int   // nodes with any incremental
+	afterIncBaseMatch     int   // nodes remaining after incremental base match filter
+	uniqueFullSlots       int   // number of unique full snapshot slots
+	uniqueIncBases        int   // number of unique incremental base slots
+	matchingFullSlots     int   // full slots that have at least one matching inc base
+	freshBases            int   // bases whose best incremental end is within threshold of tip
+	freshestEndBehind     int64 // when nothing is fresh: how far behind tip the best achievable end is
 }
 
-// filterByIncrementalBaseMatch filters results to only include nodes whose FullSlot
-// has at least one incremental with matching base slot somewhere in the network.
-// This ensures that when we select a full snapshot, there will be compatible incrementals.
-func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, incBaseMatchStats) {
+// filterByIncrementalBaseMatch restricts full-snapshot candidates to bases
+// whose ACHIEVABLE end state is freshest, then lets download-speed ranking
+// pick among them. Selection order:
+//
+//  1. Bases with at least one incremental (anywhere in the network) ending
+//     within incThreshold slots of the live tip — the node bootstraps fresh
+//     no matter which of these sources wins the speed test.
+//  2. If none qualify, the base(s) with the freshest achievable incremental
+//     end, under a loud warning (the whole cluster is stale; pick the least
+//     stale reachable state rather than a fast-but-ancient source).
+//  3. If no base has any matching incremental at all, no filtering (the
+//     caller's downstream policies own that edge).
+//
+// Speed is deliberately the TIEBREAK inside a freshness class, never the
+// primary key: a fast node whose snapshotting has wedged must not outrank a
+// slower node that lets us start hours fresher.
+func filterByIncrementalBaseMatch(results []rpc.NodeResult, referenceSlot int, incThreshold int) ([]rpc.NodeResult, incBaseMatchStats) {
 	var stats incBaseMatchStats
 
-	// Step 1: Build sets of all full snapshot slots and all incremental base slots
+	// Step 1: Full slots present, and the best (highest) incremental end
+	// available anywhere per base slot.
 	fullSlots := make(map[int64]bool)
-	incBases := make(map[int64]bool)
+	bestEndByBase := make(map[int64]int64)
 
 	for _, r := range results {
 		if fullSlot, ok := fullSnapshotSlotForMatch(r); ok {
@@ -524,17 +540,19 @@ func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, i
 		}
 		if r.HasInc {
 			stats.totalWithInc++
-			incBases[r.IncBase] = true
+			if r.IncSlot > bestEndByBase[r.IncBase] {
+				bestEndByBase[r.IncBase] = r.IncSlot
+			}
 		}
 	}
 
 	stats.uniqueFullSlots = len(fullSlots)
-	stats.uniqueIncBases = len(incBases)
+	stats.uniqueIncBases = len(bestEndByBase)
 
-	// Step 2: Find full slots that have at least one matching inc base
+	// Step 2: Bases that are both present as a full AND have an incremental.
 	matchingSlots := make(map[int64]bool)
 	for fullSlot := range fullSlots {
-		if incBases[fullSlot] {
+		if _, ok := bestEndByBase[fullSlot]; ok {
 			matchingSlots[fullSlot] = true
 		}
 	}
@@ -547,10 +565,48 @@ func filterByIncrementalBaseMatch(results []rpc.NodeResult) ([]rpc.NodeResult, i
 		return results, stats
 	}
 
-	// Step 3: Filter to only nodes whose FullSlot is in matchingSlots
+	// Step 2.5: Freshness restriction. Prefer bases whose best incremental
+	// end is within incThreshold of the live tip; otherwise fall back to the
+	// freshest achievable base(s).
+	selected := matchingSlots
+	if referenceSlot > 0 && incThreshold > 0 {
+		fresh := make(map[int64]bool)
+		var bestEnd int64
+		for base := range matchingSlots {
+			end := bestEndByBase[base]
+			if end > bestEnd {
+				bestEnd = end
+			}
+			if int64(referenceSlot)-end <= int64(incThreshold) {
+				fresh[base] = true
+			}
+		}
+		if len(fresh) > 0 {
+			if len(fresh) < len(matchingSlots) {
+				mlog.Log.Infof("Snapshot source selection: restricting to %d/%d base slot(s) with incrementals within %d slots of tip %d",
+					len(fresh), len(matchingSlots), incThreshold, referenceSlot)
+			}
+			selected = fresh
+			stats.freshBases = len(fresh)
+		} else {
+			// Whole cluster is stale: pick the least-stale achievable state.
+			freshest := make(map[int64]bool)
+			for base := range matchingSlots {
+				if bestEndByBase[base] == bestEnd {
+					freshest[base] = true
+				}
+			}
+			selected = freshest
+			stats.freshestEndBehind = int64(referenceSlot) - bestEnd
+			mlog.Log.Warnf("Snapshot source selection: NO incremental within %d slots of tip anywhere in the network; freshest achievable is %d slots behind (end %d) — selecting sources for that base rather than a faster-but-staler one",
+				incThreshold, stats.freshestEndBehind, bestEnd)
+		}
+	}
+
+	// Step 3: Filter to only nodes whose FullSlot is in the selected set.
 	var filtered []rpc.NodeResult
 	for _, r := range results {
-		if fullSlot, ok := fullSnapshotSlotForMatch(r); ok && matchingSlots[fullSlot] {
+		if fullSlot, ok := fullSnapshotSlotForMatch(r); ok && selected[fullSlot] {
 			filtered = append(filtered, r)
 		}
 	}
@@ -648,7 +704,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
-	results, _ = filterByIncrementalBaseMatch(results)
+	results, _ = filterByIncrementalBaseMatch(results, referenceSlot, cfg.IncrementalThreshold)
 	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Step 4: Sort and select best nodes by download speed
@@ -771,7 +827,7 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
 	// This prevents selecting a fast full snapshot that has no compatible incrementals
-	results, incBaseStats := filterByIncrementalBaseMatch(results)
+	results, incBaseStats := filterByIncrementalBaseMatch(results, referenceSlot, cfg.IncrementalThreshold)
 	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Print incremental base match stats
@@ -964,7 +1020,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 	logSnapshotBlacklist("evaluated", skipped, len(results))
 
 	// Step 3.5: Filter to only full snapshots that have matching incrementals somewhere
-	results, _ = filterByIncrementalBaseMatch(results)
+	results, _ = filterByIncrementalBaseMatch(results, referenceSlot, cfg.IncrementalThreshold)
 	rankingResults := normalizeGenesisFullSnapshotsForRanking(results)
 
 	// Step 4: Sort and select best nodes by download speed

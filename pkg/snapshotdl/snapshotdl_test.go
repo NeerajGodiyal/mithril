@@ -118,7 +118,7 @@ func TestFilterByIncrementalBaseMatchAllowsGenesisFullWithBaseZeroIncremental(t 
 		},
 	}
 
-	filtered, stats := filterByIncrementalBaseMatch(results)
+	filtered, stats := filterByIncrementalBaseMatch(results, 0, 0) // freshness disabled: legacy base-match semantics
 	if len(filtered) != 1 {
 		t.Fatalf("len(filtered) = %d, want 1", len(filtered))
 	}

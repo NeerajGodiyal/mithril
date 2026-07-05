@@ -594,7 +594,7 @@ name = "mithril"
 
     # Maximum age for incremental snapshots (slots)
     # Incrementals are always downloaded (they're small and provide latest state)
-    incremental_threshold = 1000
+    incremental_threshold = 2000
 
     # Safety margin - warn if snapshot is this close to expiration (slots)
     safety_margin_slots = 5000
