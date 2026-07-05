@@ -2072,8 +2072,12 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 	if len(blocks) > 0 {
 		runwayCoveredUntil = blocks[len(blocks)-1].Slot
 	}
-	mlog.Log.Infof("%s handoff ready at slot %d (connected runway buffered through slot %d; RPC catchup continues until then)",
-		bs.liveShredStreamName(), handoffSlot, runwayCoveredUntil)
+	catchupNote := "RPC catchup continues until then"
+	if !bs.rpcBlockFetchAllowed() {
+		catchupNote = "repair catchup continues until then"
+	}
+	mlog.Log.Infof("%s handoff ready at slot %d (connected runway buffered through slot %d; %s)",
+		bs.liveShredStreamName(), handoffSlot, runwayCoveredUntil, catchupNote)
 	bs.enqueueLightbringerBlocks(blocks)
 }
 
@@ -2816,6 +2820,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	lastProgress := time.Now()
 	headShreds := -1 // distinct data shreds seen for the current head (-1 = none yet)
 	headResets := 0  // shred-state resets performed on the current head
+	var headCompletedAt time.Time
+	headCompletedSlot := uint64(0)
 	sawWindowFill := false
 	lastResponses := statsAtArm.Repair.Responses
 	var lastStallWarn time.Time
@@ -2952,7 +2958,16 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			//   buffered -> the emit loop owns it; nothing to do
 			//   neither  -> the block was genuinely lost (dropped after
 			//               assembly); clear the marker so repair can re-fetch
-			if receiver.SlotCompleted(waiting) {
+			if !receiver.SlotCompleted(waiting) {
+				headCompletedSlot = 0
+			} else if headCompletedSlot != waiting {
+				// First sighting: give an in-flight handoff drain a moment —
+				// the block legitimately sits in the result queue (neither
+				// staged nor buffered) for a tick or two. Classify only if
+				// the marker persists.
+				headCompletedSlot = waiting
+				headCompletedAt = time.Now()
+			} else if time.Since(headCompletedAt) >= time.Second {
 				staged := bs.stagedLightbringerBlock(waiting)
 				bs.reorderMu.Lock()
 				buffered := bs.reorderBuffer[waiting] != nil
@@ -3584,7 +3599,7 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 		firstConnectedDesc = fmt.Sprintf("%d(parent=%d gap_span=%d)", firstConnectedSlot, firstConnectedParentSlot, firstConnectedSlot-waitingSlot)
 	}
 
-	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d lightbringer) | buffered_range=%d-%d | gap_to_first_buffered=%d | first_lightbringer=%s | first_connected_to_anchor=%s | mode=%s",
+	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d | first_live=%s | first_connected_to_anchor=%s | mode=%s",
 		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString())
 }
 
@@ -4843,7 +4858,11 @@ func (bs *BlockSource) emitOrderedBlocks() {
 							bs.clearLightbringerRepairSlot(blk.Slot)
 						}
 						if !bs.lightbringerActive.Swap(true) {
-							mlog.Log.Infof("BLOCK SOURCE SWITCH: RPC -> %s at slot %d | mode=%s", bs.liveShredStreamName(), blk.Slot, bs.currentModeString())
+							if bs.rpcBlockFetchAllowed() {
+								mlog.Log.Infof("BLOCK SOURCE SWITCH: RPC -> %s at slot %d | mode=%s", bs.liveShredStreamName(), blk.Slot, bs.currentModeString())
+							} else {
+								mlog.Log.Infof("BLOCK SOURCE: %s live block emission active at slot %d | mode=%s", bs.liveShredStreamName(), blk.Slot, bs.currentModeString())
+							}
 						}
 					} else if repairingSlot {
 						bs.clearLightbringerRepairSlot(blk.Slot)
