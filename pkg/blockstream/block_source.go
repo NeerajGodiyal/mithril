@@ -1375,8 +1375,12 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 	lastLog := time.Unix(0, bs.lightbringerGapLastLogUnix.Load())
 	if lastLog.IsZero() || now.Sub(lastLog) >= reorderGapWarnInterval {
 		bs.lightbringerGapLastLogUnix.Store(now.UnixNano())
-		mlog.Log.Warnf("BLOCK SOURCE STATUS: waiting for missing %s slot %d from live stream while keeping %s active | first_buffered=%d | first_parent_slot=%d | buffered_live_stream=%d | reason=%s | mode=%s",
-			streamName, waitingSlot, streamName, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString())
+		// Expected catchup rhythm, not an operator problem: repair owns the
+		// hole and the per-slot lines show progress. The full picture —
+		// including the repair/hydration counters that explain WHY the head
+		// is waiting — goes to catchup.log in the run directory.
+		mlog.NamedFilef("catchup", "waiting for missing %s slot %d (keeping %s active) | first_buffered=%d | first_parent_slot=%d | buffered_live_stream=%d | reason=%s | mode=%s%s",
+			streamName, waitingSlot, streamName, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString(), bs.catchupDiagSuffix())
 	}
 
 	// Native turbine is NOT a connection: a missing live slot is repair's
@@ -3156,7 +3160,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			lastStatusLog = time.Now()
 			hb := receiver.Stats()
 			repair := hb.Repair
-			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+			mlog.NamedFilef("catchup", "repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
 				waiting, edge, windowBlocks,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
@@ -3730,8 +3734,32 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 		firstConnectedDesc = fmt.Sprintf("%d(parent=%d gap_span=%d)", firstConnectedSlot, firstConnectedParentSlot, firstConnectedSlot-waitingSlot)
 	}
 
-	mlog.Log.Warnf("reorderBuffer growth: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s",
-		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString())
+	mlog.NamedFilef("catchup", "reorder buffer: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s%s",
+		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString(), bs.catchupDiagSuffix())
+}
+
+// catchupDiagSuffix appends the live repair/hydration/verification picture to
+// a catchup.log line — the counters that turn "waiting on slot X" into
+// "waiting on slot X because responses stalled / are arriving late / the
+// window isn't filling". Counters are cumulative; read progressions down the
+// file. Empty when no turbine receiver is active.
+func (bs *BlockSource) catchupDiagSuffix() string {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver == nil {
+		return ""
+	}
+	st := receiver.Stats()
+	latest, full := receiver.ShredEdges()
+	return fmt.Sprintf(" | edge shred=%d full=%d | repair: req %d, resp %d (late %d), timeout %d, outstanding %d, timeout_ms %d (avg %d), peers %d/%d | hydrated %d (disk-complete %d) | sigverify ed25519 %d cached %d | active_slots %d",
+		latest, full,
+		st.Repair.Requests, st.Repair.Responses, st.Repair.LateResponses, st.Repair.Timeouts,
+		st.Repair.Outstanding, st.Repair.TimeoutMillis, st.Repair.AvgResponseMillis,
+		st.Repair.RespondingPeers, st.Repair.Peers,
+		st.HydratedSlots, st.HydratedFromDisk,
+		st.SigVerifies, st.SigVerifyCached,
+		st.ActiveSlots)
 }
 
 func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, shouldFallback bool) {

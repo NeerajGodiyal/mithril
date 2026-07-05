@@ -300,9 +300,55 @@ func Shutdown() {
 	}
 	Log.fileMu.Unlock()
 
+	namedMu.Lock()
+	for _, f := range namedFiles {
+		_ = f.Close()
+	}
+	namedFiles = nil
+	namedMu.Unlock()
+
 	Log.mu.Lock()
 	Log.initialized = false
 	Log.mu.Unlock()
+}
+
+// Named auxiliary log files: diagnostic streams voluminous enough to drown
+// the console or make the main log hard to read live in their own files
+// under the per-run directory. One unbuffered append per line — at the few
+// lines per second these streams run, that is cheap, crash-safe (nothing
+// buffered to lose), and needs no flusher.
+var (
+	namedMu    sync.Mutex
+	namedFiles map[string]*os.File
+)
+
+// NamedFilef appends a timestamped line to <runDir>/<name>.log, creating the
+// file on first use. Nothing goes to the console or the main log. Before
+// logging is initialized (no run directory yet) the line falls back to the
+// main file log so it is never silently dropped.
+func NamedFilef(name string, format string, args ...interface{}) {
+	Log.mu.Lock()
+	dir := Log.runDir
+	Log.mu.Unlock()
+	if dir == "" {
+		Log.FileOnlyf(format, args...)
+		return
+	}
+	namedMu.Lock()
+	defer namedMu.Unlock()
+	if namedFiles == nil {
+		namedFiles = make(map[string]*os.File)
+	}
+	f := namedFiles[name]
+	if f == nil {
+		var err error
+		f, err = os.OpenFile(filepath.Join(dir, name+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		namedFiles[name] = f
+	}
+	fmt.Fprintf(f, "%s%s\n", relativePrefix(), fmt.Sprintf(format, args...))
 }
 
 // GetLogPath returns the path to the current log file
