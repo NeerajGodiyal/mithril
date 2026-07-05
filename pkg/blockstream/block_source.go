@@ -351,6 +351,7 @@ type BlockSource struct {
 	// is connected, pull that slot via turbine repair and deliver the
 	// assembled block directly — instead of waiting tens of seconds for RPC
 	// to serve data the shred path already has.
+	repairCatchupCooldownUntil  atomic.Int64  // unix seconds: no repair-catchup re-arming until then (after a stall fallback)
 	rescueFrom                  atomic.Uint64 // rescue window start (0 = inactive)
 	rescueUntil                 atomic.Uint64 // rescue window end
 	rescueWaitingSlot           atomic.Uint64 // slot the stall timer is tracking
@@ -435,6 +436,7 @@ const (
 	catchupRescueAfterStall  = 10 * time.Second
 	catchupRescueWindowSlots = uint64(16)
 
+	repairCatchupReArmCooldown        = 2 * time.Minute
 	repairCatchupDecisionTimeout      = 15 * time.Second
 	repairCatchupPollInterval         = 250 * time.Millisecond
 	repairCatchupStallTimeout         = 30 * time.Second
@@ -2334,71 +2336,135 @@ func (bs *BlockSource) maybeRescueStalledCatchupSlot() {
 	}
 }
 
-// runRepairCatchup decides whether the startup gap is repair-fillable and, if
-// so, drives a sliding priority-repair window across it until replay reaches
-// the live edge. The gap is measured from the RESUME FRONTIER (the snapshot /
-// durable slot replay restarts at) to the live tip — NOT from lastExecutedSlot,
-// which is still 0 here because replay has not executed its first block yet
-// (that is precisely why a fresh snapshot bootstrap must key off the resume
-// frontier). The live edge is whichever tip signal appears first: turbine's
-// observed shred edge or the RPC confirmed tip. Fallbacks are fail-open to RPC
-// catchup: no tip signal, gap too large, no resume frontier, or a stall.
+// runRepairCatchup keeps catchup on turbine repair whenever the gap allows.
+// It is a CONTINUOUS monitor, not a one-shot decision: at startup it measures
+// the gap from the resume frontier to the live tip and arms when within
+// block.repair_catchup_max_gap_slots; when the gap is too large it falls back
+// to RPC catchup but KEEPS WATCHING — the moment RPC catchup shrinks the gap
+// under the threshold, the remainder hands over to turbine repair and RPC
+// serves only the trailing verifier. Turbine + repair are the native block
+// path; RPC block fetch is strictly the too-far-behind fallback. Fail-open on
+// stall (with a cooldown before re-arming) and to RPC when no tip signal
+// exists.
 func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver) {
-	// Pending clears exactly once — repair catchup is attempted once per
-	// process; stream restarts afterwards use ordinary RPC catchup.
+	// The construction-time RPC hold releases after the FIRST evaluation —
+	// afterwards eligibility is re-checked continuously without holding RPC.
+	first := true
+	releaseHold := func() {
+		if first {
+			first = false
+			bs.repairCatchupPending.Store(false)
+		}
+	}
 	defer bs.repairCatchupPending.Store(false)
 
-	from := bs.repairCatchupResumeFrontier()
-	if from == 0 {
-		mlog.Log.Warnf("repair catchup: no resume frontier (replaying from genesis); using RPC catchup")
-		return
-	}
-
-	// Decide from whichever live-tip signal is available first: turbine's
-	// observed shred edge or the RPC confirmed tip. Either resolves the gap
-	// without waiting on the other.
-	deadline := time.Now().Add(repairCatchupDecisionTimeout)
-	var edge uint64
 	for {
 		if bs.stopped.Load() || ctx.Err() != nil {
 			return
 		}
-		turbineEdge, _ := receiver.ShredEdges()
-		edge = turbineEdge
-		if tip := bs.confirmedTip.Load(); tip > edge {
-			edge = tip
-		}
-		if edge > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			mlog.Log.Warnf("repair catchup: no live-tip signal within %s; falling back to RPC catchup", repairCatchupDecisionTimeout)
-			return
-		}
-		select {
-		case <-bs.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		case <-time.After(repairCatchupPollInterval):
-		}
-	}
 
-	if edge < from {
-		mlog.Log.Infof("repair catchup: already at the live edge (edge %d, resume %d)", edge, from)
-		return
-	}
-	gap := edge - from + 1
-	if gap > bs.repairCatchupMaxGapSlots {
-		mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup with turbine handoff near tip", gap, from, edge, bs.repairCatchupMaxGapSlots)
-		return
-	}
+		// Frontier: the resume gate slot on the first pass (replay has not
+		// executed anything yet), the live emission frontier afterwards.
+		var from uint64
+		if first {
+			from = bs.repairCatchupResumeFrontier()
+			if from == 0 {
+				mlog.Log.Warnf("repair catchup: no resume frontier (replaying from genesis); using RPC catchup")
+				return
+			}
+		} else {
+			bs.reorderMu.Lock()
+			from = bs.nextSlotToSend
+			bs.reorderMu.Unlock()
+			if from == 0 {
+				from = bs.lastExecutedSlot.Load() + 1
+			}
+		}
 
-	bs.repairCatchupFrom.Store(from)
-	bs.repairCatchupUntil.Store(edge)
-	receiver.SetRetentionFloor(from)
-	mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair — shreds carry block ids + footer certs (cryptographic finality); RPC reserved for the trailing verifier", from, edge, gap)
+		// Tip signal: turbine's shred edge or the RPC confirmed tip,
+		// whichever is ahead. On the first pass, wait a bounded window for
+		// any signal before releasing the RPC hold.
+		edge := bs.repairCatchupEdge(receiver)
+		if edge == 0 && first {
+			deadline := time.Now().Add(repairCatchupDecisionTimeout)
+			for edge == 0 && time.Now().Before(deadline) && !bs.stopped.Load() && ctx.Err() == nil {
+				if !bs.sleepOrStop(ctx, repairCatchupPollInterval) {
+					return
+				}
+				edge = bs.repairCatchupEdge(receiver)
+			}
+			if edge == 0 {
+				mlog.Log.Warnf("repair catchup: no live-tip signal within %s; RPC catchup proceeds (repair re-arms when a signal appears and the gap is within threshold)", repairCatchupDecisionTimeout)
+			}
+		}
+		if edge == 0 || edge < from {
+			releaseHold()
+			if !bs.sleepOrStop(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
 
+		gap := edge - from + 1
+		eligible := gap <= bs.repairCatchupMaxGapSlots &&
+			bs.repairCatchupMaxGapSlots > 0 &&
+			bs.lightbringerHandoffSlot.Load() == 0 &&
+			!bs.isNearTip.Load() &&
+			bs.lightbringerForceRPCUntil.Load() == 0 &&
+			time.Now().Unix() >= bs.repairCatchupCooldownUntil.Load()
+
+		if !eligible {
+			if first && gap > bs.repairCatchupMaxGapSlots {
+				mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup — turbine repair takes over once the gap closes to within threshold", gap, from, edge, bs.repairCatchupMaxGapSlots)
+			}
+			releaseHold()
+			if !bs.sleepOrStop(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+
+		bs.repairCatchupFrom.Store(from)
+		bs.repairCatchupUntil.Store(edge)
+		receiver.SetRetentionFloor(from)
+		releaseHold()
+		mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair — shreds carry block ids + footer certs (cryptographic finality); RPC reserved for the trailing verifier", from, edge, gap)
+
+		if done := bs.driveRepairCatchup(ctx, receiver, from, edge); done {
+			return // near-tip machinery owns the stream from here
+		}
+		// Stalled and fell back to RPC: loop back to monitoring (cooldown
+		// gates the next arming).
+	}
+}
+
+// repairCatchupEdge returns the best live-tip signal available: turbine's
+// observed shred edge or the RPC confirmed tip, whichever is ahead.
+func (bs *BlockSource) repairCatchupEdge(receiver *turbine.UDPReceiver) uint64 {
+	edge, _ := receiver.ShredEdges()
+	if tip := bs.confirmedTip.Load(); tip > edge {
+		edge = tip
+	}
+	return edge
+}
+
+// sleepOrStop sleeps for d; false means the source is stopping.
+func (bs *BlockSource) sleepOrStop(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-bs.stopChan:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// driveRepairCatchup slides the priority-repair window ahead of replay until
+// replay reaches the (advancing) edge and near-tip mode engages (returns
+// true), or the window stalls and falls back to RPC catchup (returns false —
+// the monitor keeps watching, gated by a cooldown).
+func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver, from, edge uint64) bool {
 	ticker := time.NewTicker(repairCatchupPollInterval)
 	defer ticker.Stop()
 	lastWaiting := uint64(0)
@@ -2406,11 +2472,10 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 	for {
 		select {
 		case <-bs.stopChan:
-			return
+			return true
 		case <-ctx.Done():
-			// Stream died mid-catchup; handleLiveShredStreamClosed forces the
-			// RPC resume path and this attempt does not re-arm.
-			return
+			// Stream died mid-catchup; handleLiveShredStreamClosed cleans up.
+			return true
 		case <-ticker.C:
 		}
 
@@ -2431,7 +2496,7 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 			if bs.isNearTip.Load() {
 				bs.deactivateRepairCatchup(receiver)
 				mlog.Log.Infof("repair catchup complete: replay reached slot %d and near-tip mode is active", waiting-1)
-				return
+				return true
 			}
 			if latest, _ := receiver.ShredEdges(); latest > edge {
 				edge = latest
@@ -2445,8 +2510,11 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		} else if time.Since(lastProgress) > repairCatchupStallTimeout {
 			bs.deactivateRepairCatchup(receiver)
 			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
-			mlog.Log.Warnf("repair catchup stalled at slot %d for %s; falling back to RPC catchup", waiting, repairCatchupStallTimeout)
-			return
+			// Cool down before the monitor may re-arm, so RPC gets a real
+			// chance to move the frontier past whatever repair stalled on.
+			bs.repairCatchupCooldownUntil.Store(time.Now().Add(repairCatchupReArmCooldown).Unix())
+			mlog.Log.Warnf("repair catchup stalled at slot %d for %s; falling back to RPC catchup (repair may re-arm after %s)", waiting, repairCatchupStallTimeout, repairCatchupReArmCooldown)
+			return false
 		}
 
 		// Slide the window: release retention behind replay, keep repair

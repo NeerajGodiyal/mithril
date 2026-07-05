@@ -200,8 +200,11 @@ name = "mithril"
     # cluster.
     turbine_bind_addr = "0.0.0.0:8001"
 
-    # Repair-first catchup: when resuming behind the live shred edge by at most
-    # this many slots, the gap fills via turbine REPAIR instead of RPC getBlock.
+    # Repair-first catchup: whenever replay is behind the live shred tip by at
+    # most this many slots — checked CONTINUOUSLY, not just at startup — the
+    # gap fills via turbine REPAIR instead of RPC getBlock. A too-far-behind
+    # start uses RPC only until the gap closes to within this threshold, then
+    # repair takes over for the remainder.
     # Repaired shreds carry Alpenglow block ids and footer certificates, so
     # catchup finality is cryptographic rather than delegated to the RPC's
     # "finalized" commitment — and the whole RPC budget stays with the trailing

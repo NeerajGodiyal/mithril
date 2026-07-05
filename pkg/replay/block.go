@@ -2138,7 +2138,21 @@ func ReplayBlocks(
 		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
 		// stalled), halt rather than grow RAM unbounded; resume re-replays from the last rooted slot.
 		if unrootedTailState != nil && unrootedTailState.OverCap() {
-			result.Error = fmt.Errorf("rooted-durable: speculative state exceeded %d held slots/branches at slot %d (rooting stalled); halting", unrootedTailHaltCap, block.Slot)
+			// Diagnose WHY rooting stalled: folds gate on min(finality,
+			// verified). If finality ran ahead but the verifier watermark
+			// lags, the trailing verifier (RPC-served execution metas) is
+			// the bottleneck — common on clusters with giant blocks the RPC
+			// serializes slowly.
+			verifiedWM := uint64(0)
+			if trailingVerifier != nil {
+				verifiedWM = trailingVerifier.VerifiedWatermark()
+			}
+			diag := fmt.Sprintf("durable=%d finality=%d verified=%d replay=%d", mithrilState.LastRootedSlot, lastRootedWatermark, verifiedWM, block.Slot)
+			hint := ""
+			if trailingVerifier != nil && TrailingVerifierCfg.Required && lastRootedWatermark > verifiedWM+uint64(FoldBatchSlots) {
+				hint = " — the trailing verifier cannot keep pace with replay (finality is ahead; the verifier fetches every block's execution metas via RPC, which is slow for very large blocks). Options: verifier.required=false to gate folds on certificate finality only, a faster/archival RPC for the verifier, or wait for peer bankhash cross-checking to replace the RPC oracle"
+			}
+			result.Error = fmt.Errorf("rooted-durable: speculative state exceeded %d held slots at slot %d; rooting stalled (%s)%s; halting", unrootedTailHaltCap, block.Slot, diag, hint)
 			mlog.Log.Errorf("%v", result.Error)
 			break
 		}
@@ -2382,7 +2396,7 @@ func ReplayBlocks(
 					if fullGap < 0 {
 						fullGap = 0
 					}
-					progress += fmt.Sprintf(" | behind latest shred: replay %d, full %d", replayGap, fullGap)
+					progress += fmt.Sprintf(" | behind shred tip: replay %d, full %d", replayGap, fullGap)
 				}
 				if windowSkippedWithShreds > 0 {
 					progress += fmt.Sprintf(" | skipped %d (%d with shreds) | empty blocks %d", skippedSlotsCount, windowSkippedWithShreds, windowEmptyBlocks)
