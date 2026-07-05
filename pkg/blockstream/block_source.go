@@ -1622,6 +1622,33 @@ func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
 	}
 }
 
+// applyCertifiedSkipToCatchupHead marks the emitter's waiting slot as
+// certificate-skipped and nudges the results loop with a synthetic skip
+// result so emission ADVANCES. During a pre-handoff repair drive nothing
+// else feeds that loop — staged blocks bypass it — so even a skip the chain
+// tracker already knows about would never apply, and a genuinely skipped
+// head stalls catchup forever: zero shreds exist to repair (observed live:
+// slot 6176512, skipped on-chain, four-minute stall at "held 0").
+func (bs *BlockSource) applyCertifiedSkipToCatchupHead(slot uint64) bool {
+	bs.reorderMu.Lock()
+	already := bs.skippedSlots[slot] || bs.reorderBuffer[slot] != nil || slot != bs.nextSlotToSend
+	if !already {
+		bs.alpenglowCertifiedSkips[slot] = true
+	}
+	bs.reorderMu.Unlock()
+	if already {
+		return false
+	}
+	// Stop repairing a block that provably does not exist.
+	bs.resetTurbineSlotState(slot)
+	select {
+	case bs.resultQueue <- fetchResult{slot: slot, skipped: true, rpcIdx: -1, liveStreamGeneration: bs.lightbringerResultGeneration.Load()}:
+		return true
+	case <-bs.stopChan:
+		return false
+	}
+}
+
 func (bs *BlockSource) clearBufferedLightbringerBlocks() int {
 	bs.lightbringerBufferMu.Lock()
 	defer bs.lightbringerBufferMu.Unlock()
@@ -2740,6 +2767,18 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			}
 			if latest, _ := receiver.ShredEdges(); latest > edge {
 				edge = latest
+			}
+			continue
+		}
+
+		// A certificate-skipped head has NO shreds to repair — apply the skip
+		// and advance. The oracle is evidence-based only (explicit skip certs
+		// or skips derived from finalized ancestry), never bare parent-link
+		// inference; assembly-time footer-cert ingestion is what feeds it
+		// during catchup.
+		if bs.alpenglowSkipCertifiedFn != nil && bs.alpenglowSkipCertifiedFn(waiting) {
+			if bs.applyCertifiedSkipToCatchupHead(waiting) {
+				mlog.Log.Infof("repair catchup: slot %d is certificate-skipped — emitting the skip and advancing (no block exists to repair)", waiting)
 			}
 			continue
 		}
@@ -4569,7 +4608,13 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
 			delete(bs.lightbringerSynthesizedSkips, result.slot)
-			delete(bs.alpenglowCertifiedSkips, result.slot)
+			if result.rpcIdx >= 0 {
+				// An RPC-provisional skip distrusts any older cert marker. A
+				// certificate-driven skip (rpcIdx=-1, injected by the repair
+				// drive) KEEPS its certified marker — post-handoff logic
+				// trusts certified skips and discards provisional ones.
+				delete(bs.alpenglowCertifiedSkips, result.slot)
+			}
 			bs.hardErrCount.Store(0)        // Reset on progress
 			bs.clearSlotErrors(result.slot) // Clear stall diagnostics for this slot
 			isRetriable = false

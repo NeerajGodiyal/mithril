@@ -151,6 +151,51 @@ func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
 	}
 }
 
+// A certificate-skipped catchup head must be EMITTED as a skip, not merely
+// crossed by the handoff runway: pre-handoff nothing feeds the results loop,
+// so the drive injects a synthetic certified-skip result that the standard
+// emission machinery consumes. This is the half of skipped-gap handling the
+// runway test alone did not prove (observed live: an on-chain-skipped head
+// slot with zero shreds stalled catchup for minutes).
+func TestApplyCertifiedSkipToCatchupHead(t *testing.T) {
+	bs := newRepairCatchupTestSource(1024)
+	bs.reorderMu.Lock()
+	bs.nextSlotToSend = 2_001
+	bs.reorderMu.Unlock()
+
+	if !bs.applyCertifiedSkipToCatchupHead(2_001) {
+		t.Fatalf("skip must apply to the waiting head")
+	}
+	bs.reorderMu.Lock()
+	certified := bs.alpenglowCertifiedSkips[2_001]
+	bs.reorderMu.Unlock()
+	if !certified {
+		t.Fatalf("head must carry the CERTIFIED skip marker (post-handoff logic trusts it)")
+	}
+	select {
+	case res := <-bs.resultQueue:
+		if res.slot != 2_001 || !res.skipped || res.rpcIdx != -1 {
+			t.Fatalf("expected a synthetic certified-skip result for the head, got %+v", res)
+		}
+	default:
+		t.Fatalf("the results loop must be nudged — pre-handoff nothing else feeds it")
+	}
+
+	// Idempotent: a second application (skip already recorded) is a no-op.
+	bs.reorderMu.Lock()
+	bs.skippedSlots[2_001] = true
+	bs.reorderMu.Unlock()
+	if bs.applyCertifiedSkipToCatchupHead(2_001) {
+		t.Fatalf("an already-recorded skip must not re-apply")
+	}
+
+	// Only the WAITING slot qualifies: skips beyond the head stay owned by
+	// the ordinary decision machinery.
+	if bs.applyCertifiedSkipToCatchupHead(2_010) {
+		t.Fatalf("non-head slots must not be force-skipped by the drive")
+	}
+}
+
 // No timer-based RPC exception exists inside the repair gate: while the
 // drive is active, the ENTIRE gap — head included — is repair-owned. RPC
 // takes catchup back only via the far-behind rule (drive-internal) or
