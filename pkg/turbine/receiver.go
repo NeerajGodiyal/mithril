@@ -23,6 +23,7 @@ type UDPReceiver struct {
 	assembler     *SlotAssembler
 	leaderForSlot LeaderForSlotFunc
 	repairClient  *repairClient
+	sigCache      shredSigCache
 	blocks        chan *block.Block
 	errs          chan error
 	ready         chan error
@@ -79,6 +80,10 @@ type ReceiverStats struct {
 	// completed with zero network repair (spooled coding healed the holes).
 	HydratedSlots    uint64
 	HydratedFromDisk uint64
+	// Signature verification: ed25519 ops actually run vs shreds authenticated
+	// off the per-FEC-set merkle root cache (one signed root covers ~64 shreds).
+	SigVerifies     uint64
+	SigVerifyCached uint64
 }
 
 func NewUDPReceiver(addr string) *UDPReceiver {
@@ -218,6 +223,7 @@ func (r *UDPReceiver) Ready() <-chan error {
 
 func (r *UDPReceiver) Stats() ReceiverStats {
 	nonCanonicalCount, nonCanonicalSlot, nonCanonicalGot, nonCanonicalWant := r.assembler.NonCanonicalBlockIDStats()
+	sigHits, sigVerifies := r.sigCache.stats()
 	return ReceiverStats{
 		Packets:              r.packets.Load(),
 		DataShreds:           r.dataShreds.Load(),
@@ -242,6 +248,8 @@ func (r *UDPReceiver) Stats() ReceiverStats {
 		ActiveSlots:          r.assembler.ActiveSlots(),
 		HydratedSlots:        r.hydratedSlots.Load(),
 		HydratedFromDisk:     r.hydratedFromDisk.Load(),
+		SigVerifies:          sigVerifies,
+		SigVerifyCached:      sigHits,
 	}
 }
 
@@ -344,7 +352,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			if err := shred.VerifySignature(leader); err != nil {
+			if err := r.sigCache.verifyShred(shred, leader); err != nil {
 				r.signatureErrors.Add(1)
 				select {
 				case r.errs <- err:
