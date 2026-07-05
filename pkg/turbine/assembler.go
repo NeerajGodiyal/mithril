@@ -691,6 +691,16 @@ func (a *SlotAssembler) SlotAssemblyErrors(slot uint64) (int, string) {
 	return 0, ""
 }
 
+// IsPrioritySlot reports whether slot is currently priority-pinned for
+// repair (catchup window or live-gap pin) — such slots always assemble in
+// RAM regardless of the spool's assembly-window policy.
+func (a *SlotAssembler) IsPrioritySlot(slot uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.priorityRepairSlots[slot]
+	return ok
+}
+
 func (a *SlotAssembler) PriorityRepairSlots() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()

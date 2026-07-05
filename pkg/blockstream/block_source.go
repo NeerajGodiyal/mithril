@@ -74,6 +74,11 @@ type BlockSourceOpts struct {
 	// "finalized" commitment — and the whole RPC budget stays with the
 	// trailing verifier.
 	RepairCatchupMaxGapSlots uint64
+	// ShredSpoolDir: on-disk spool for verified raw shreds (typically under
+	// storage.shredstore). Bounds catchup RAM: far-future shreds live on
+	// disk and hydrate in batches ahead of replay; survives restarts, so a
+	// rebooted node re-hydrates instead of re-repairing. Empty = disabled.
+	ShredSpoolDir string
 	// PrewarmBlocks: turbine blocks collected by the boot-time prewarm
 	// receiver (see TurbinePrewarm), injected into the staging buffer at
 	// construction so the catchup handoff can arm from them immediately.
@@ -367,6 +372,7 @@ type BlockSource struct {
 	// monitor keeps watching and re-arms once the gap closes back under the
 	// threshold, cooldown-gated.
 	repairCatchupMaxGapSlots uint64
+	shredSpoolDir            string
 	rpcFallbackEnabled       bool // false (block.rpc_fallback=false): RPC never fetches blocks on a live-shred source
 	repairCatchupPending     atomic.Bool
 	repairCatchupFrom        atomic.Uint64 // first gap slot (0 = inactive)
@@ -488,6 +494,8 @@ const (
 	// memory path (monster blocks x hundreds). The drive drains staging
 	// into the queue as replay advances.
 	repairCatchupLiveDeliverWindow = uint64(256)
+	// On-disk shred spool byte cap (highest slots dropped first).
+	shredSpoolMaxBytes = int64(8) << 30
 	// Stuck-head self-heal: a head slot that holds shreds but cannot complete
 	// while repair responses flow is usually POISONED assembly state (a bad
 	// first shred pinning an FEC signature/variant/layout). Reset the slot's
@@ -592,6 +600,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		lightbringerEndpoint:         opts.LightbringerEndpoint,
 		turbineBindAddr:              opts.TurbineBindAddr,
 		repairCatchupMaxGapSlots:     opts.RepairCatchupMaxGapSlots,
+		shredSpoolDir:                opts.ShredSpoolDir,
 		rpcFallbackEnabled:           !opts.DisableRPCBlockFetch,
 		turbineGossipEntrypoint:      opts.TurbineGossipEntrypoint,
 		turbineGossipBindAddr:        opts.TurbineGossipBindAddr,
@@ -2628,6 +2637,7 @@ func (bs *BlockSource) deactivateRepairCatchup(receiver *turbine.UDPReceiver) {
 	bs.repairCatchupUntil.Store(0)
 	if receiver != nil {
 		receiver.SetRetentionFloor(0)
+		receiver.SetHydrationWindow(0, 0)
 	}
 }
 
@@ -3102,9 +3112,12 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		}
 
 		// Slide the window: release retention behind replay, keep repair
-		// pressure on the slots immediately ahead of it.
+		// pressure on the slots immediately ahead of it, and keep the disk
+		// spool hydrating a prefetch window AHEAD of the head so emission
+		// never waits on a disk load.
 		receiver.SetRetentionFloor(waiting)
 		receiver.PrioritizeRepairRange(waiting, winEnd)
+		receiver.SetHydrationWindow(waiting, waiting+repairCatchupLiveDeliverWindow)
 
 		// Post-handoff, far-future live blocks stage instead of flooding
 		// the reorder buffer; hand the ones replay is approaching to the
@@ -3217,6 +3230,16 @@ func (bs *BlockSource) runTurbineStream() {
 		receiver := turbine.NewUDPReceiver(bs.turbineBindAddr)
 		bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
 		receiver.SetLeaderForSlot(bs.leaderForSlot)
+		if bs.shredSpoolDir != "" {
+			if spool, serr := turbine.OpenShredSpool(bs.shredSpoolDir, shredSpoolMaxBytes); serr != nil {
+				mlog.Log.Warnf("shred spool disabled (%s): %v", bs.shredSpoolDir, serr)
+			} else {
+				receiver.SetShredSpool(spool)
+				if slots, bytes := spool.Stats(); slots > 0 {
+					mlog.Log.Infof("shred spool: adopted %d spooled slots (%.1f MiB) from a previous run", slots, float64(bytes)/(1<<20))
+				}
+			}
+		}
 		if gossipClient != nil {
 			if err := receiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err != nil {
 				cancelStream()

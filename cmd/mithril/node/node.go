@@ -198,6 +198,15 @@ func alpenglowAddrForGossip(bindAddr string) string {
 	return bindAddr
 }
 
+// catchupShredSpoolDir places the disposable verified-shred spool on the
+// shredstore disk, away from AccountsDB I/O.
+func catchupShredSpoolDir() string {
+	if blockstorePath == "" {
+		return ""
+	}
+	return filepath.Join(blockstorePath, "catchup-spool")
+}
+
 func loadValidatorIdentityKeypair(path string) (ed25519.PrivateKey, string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -1092,6 +1101,7 @@ func runLive(c *cobra.Command, args []string) {
 				Identity:         validatorIdentity,
 				LeaderForSlot:    global.LeaderForSlot,
 				FloorSlot:        m.Bank.Slot + 1,
+				ShredSpoolDir:    catchupShredSpoolDir(),
 			})
 			if err != nil {
 				mlog.Log.Warnf("turbine prewarm failed to start (continuing without): %v", err)
@@ -2012,6 +2022,7 @@ postBootstrap:
 		RepairCatchupMaxGapSlots: uint64(repairCatchupMaxGapSlots),
 		DisableRPCBlockFetch:     !blockRPCFallback,
 		TurbinePrewarm:           turbinePrewarm,
+		ShredSpoolDir:            catchupShredSpoolDir(),
 	}
 	// Alpenglow-only: the observer engine is the only consensus engine.
 	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{

@@ -49,6 +49,10 @@ type TurbinePrewarmConfig struct {
 	LeaderForSlot    turbine.LeaderForSlotFunc
 	FloorSlot        uint64 // resume frontier: spool floor and assembler retention floor
 	MaxSpoolBlocks   int
+	// ShredSpoolDir: shared on-disk shred spool. Everything the prewarm
+	// hears goes to disk too, so even blocks beyond the in-RAM spool cap
+	// hydrate later instead of re-repairing.
+	ShredSpoolDir string
 }
 
 // StartTurbinePrewarm joins gossip, starts a shred receiver with the
@@ -93,6 +97,16 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	}
 	if cfg.FloorSlot > 0 {
 		receiver.SetRetentionFloor(cfg.FloorSlot)
+	}
+	if cfg.ShredSpoolDir != "" {
+		if spool, serr := turbine.OpenShredSpool(cfg.ShredSpoolDir, shredSpoolMaxBytes); serr != nil {
+			mlog.Log.FileOnlyf("prewarm shred spool disabled: %v", serr)
+		} else {
+			receiver.SetShredSpool(spool)
+			// Assemble the resume-adjacent window in RAM; spool the far
+			// edge to disk only.
+			receiver.SetHydrationWindow(cfg.FloorSlot, cfg.FloorSlot+repairCatchupLiveDeliverWindow)
+		}
 	}
 
 	pw := &TurbinePrewarm{

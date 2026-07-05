@@ -76,6 +76,9 @@ type BlockFetchOpts struct {
 	// TurbinePrewarm: boot-time shred collector to hand over (stop + drain)
 	// right before the block source starts. May be nil.
 	TurbinePrewarm *blockstream.TurbinePrewarm
+	// ShredSpoolDir: on-disk verified-shred spool shared by prewarm and the
+	// block source (empty = disabled).
+	ShredSpoolDir string
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1776,6 +1779,7 @@ func ReplayBlocks(
 		opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
 		opts.RepairCatchupMaxGapSlots = blockFetchOpts.RepairCatchupMaxGapSlots
 		opts.DisableRPCBlockFetch = blockFetchOpts.DisableRPCBlockFetch
+		opts.ShredSpoolDir = blockFetchOpts.ShredSpoolDir
 
 		// Mode thresholds
 		opts.NearTipThreshold = blockFetchOpts.NearTipThreshold
