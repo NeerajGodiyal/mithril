@@ -223,6 +223,13 @@ txpar = 24   # Recommended: 2x your CPU core count
 
 %s
 
+[snapshot]
+# How stale (in slots behind the live tip) an incremental snapshot may be
+# before the finder rejects it and searches the cluster for a fresher one.
+incremental_threshold = 1000
+# max_full_snapshots = 1        # 0 = stream-only (don't save snapshots to disk)
+# download_path = ""            # defaults to storage.snapshots
+
 [rpc]
 port = 8899  # Mithril's RPC server (binds to all interfaces)
 

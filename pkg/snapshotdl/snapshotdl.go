@@ -911,6 +911,20 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	}, nil
 }
 
+// GetReferenceSlot queries the configured RPCs for the current slot — the
+// freshness reference for incremental-snapshot selection. The reference MUST
+// be the live chain tip: measuring incremental age against the full
+// snapshot's slot makes any incremental that merely extends past the full
+// look "fresh" (negative age) and defeats the staleness gate entirely.
+func GetReferenceSlot(snapCfg SnapshotConfig) (int, error) {
+	cfg := snapCfg.toInternalConfig("")
+	referenceSlot, _, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
+	if err != nil {
+		return 0, fmt.Errorf("error getting reference slot: %w", err)
+	}
+	return referenceSlot, nil
+}
+
 // DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
 func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg SnapshotConfig) (string, int, int, error) {
 	defer suppressStdlogOutput()()

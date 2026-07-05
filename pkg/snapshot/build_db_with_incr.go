@@ -137,6 +137,20 @@ func BuildAccountsDbAuto(
 	// and flush once at the end. This avoids the bug where pools still reference
 	// the old ShardLogger after reinit.
 
+	// Refresh the freshness reference to the CURRENT chain tip before picking
+	// an incremental: the tip advanced during the full download/build, and the
+	// callers' initial reference may even be the full slot itself — against
+	// which any incremental looks fresh and the staleness gate never fires
+	// (the bug that bootstrapped 81k slots behind on the Alpenglow cluster).
+	if fresh, rerr := snapshotdl.GetReferenceSlot(snapCfg); rerr == nil && fresh > referenceSlot {
+		if referenceSlot > 0 && fresh > referenceSlot+1000 {
+			mlog.Log.Infof("refreshed incremental freshness reference: %d -> %d (tip advanced during full snapshot build)", referenceSlot, fresh)
+		}
+		referenceSlot = fresh
+	} else if rerr != nil {
+		mlog.Log.Warnf("could not refresh reference slot for incremental freshness gating: %v (using %d)", rerr, referenceSlot)
+	}
+
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
@@ -145,7 +159,10 @@ func BuildAccountsDbAuto(
 		// Return error instead of fatal exit so caller can handle gracefully
 		errMsg := fmt.Sprintf("failed to find incremental snapshot: %v", err)
 		if strings.Contains(err.Error(), "threshold") {
-			errMsg += fmt.Sprintf("\n  Hint: Try increasing incremental_threshold in config (current: %d slots)", snapCfg.IncrementalThreshold)
+			errMsg += fmt.Sprintf("\n  Hint: every available incremental is staler than snapshot.incremental_threshold (current: %d slots)."+
+				"\n  Either raise the threshold to accept a staler incremental — and pair it with a raised"+
+				"\n  block.repair_catchup_max_gap_slots so turbine repair fills the remaining gap after bootstrap —"+
+				"\n  or wait for the cluster to publish a fresher incremental.", snapCfg.IncrementalThreshold)
 		} else if strings.Contains(err.Error(), "no rpc nodes") || strings.Contains(err.Error(), "no nodes found") {
 			errMsg += "\n  Hint: Check RPC endpoints connectivity or try again later"
 		}
