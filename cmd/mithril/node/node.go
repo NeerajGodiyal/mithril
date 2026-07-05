@@ -2749,6 +2749,11 @@ func killExistingMithrilProcesses() int {
 		// Send SIGKILL
 		if err := proc.Signal(syscall.SIGKILL); err == nil {
 			killed++
+		} else {
+			// A survivor competes for ports AND doubles our repair/gossip
+			// traffic against the cluster (peer-side rate limiting then
+			// throttles BOTH instances) — never skip one silently.
+			fmt.Printf("  ⚠ could not kill existing mithril process %d: %v — kill it manually before continuing\n", pid, err)
 		}
 	}
 
