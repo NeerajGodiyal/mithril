@@ -210,7 +210,10 @@ name = "mithril"
     # "finalized" commitment — and the whole RPC budget stays with the trailing
     # execution verifier (usually the catchup bottleneck). Gaps larger than the
     # threshold use RPC catchup with a turbine handoff near tip, as before.
-    # Repair stalls fail open to RPC automatically. 0 disables.
+    # While repairing, repair OWNS the gap: a stall never falls back to RPC on
+    # a timer — the node warns (with repair request/response counters) and
+    # keeps asking peers. RPC takes catchup back only if replay falls more
+    # than this threshold behind the live edge. 0 disables repair catchup.
     # Peers serve repair from their blockstores (no protocol age limit;
     # retention is typically hours to days), so a generous window is safe.
     # Default 8192 slots (~55 min at 400ms) covers a fresh snapshot bootstrap
