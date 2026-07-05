@@ -2749,9 +2749,10 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 					lastErr = "none"
 				}
 				headResets++
+				detail := headShredDetailString(receiver, waiting)
 				receiver.ResetSlot(waiting)
-				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held but the slot cannot complete (assembly errors: %d, latest: %s); re-repairing from scratch",
-					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), errCount, lastErr)
+				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held but the slot cannot complete (assembly errors: %d, latest: %s) | %s; re-repairing from scratch",
+					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), errCount, lastErr, detail)
 			}
 
 			// A stalled head stays on repair — loudly. The counters make the
@@ -2771,9 +2772,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if lastErr == "" {
 					lastErr = "none"
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s), window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
 					waiting, stalled.Round(time.Second), rpcNote,
-					max(headShreds, 0), errCount, lastErr, windowBlocks,
+					max(headShreds, 0), errCount, lastErr, headShredDetailString(receiver, waiting), windowBlocks,
 					repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
 					repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
 			}
@@ -2796,6 +2797,25 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
 		}
 	}
+}
+
+// headShredDetailString renders the stuck-head completion picture: how far
+// the contiguous prefix reaches, whether the block-end shred registered, and
+// the flags of the highest held shred. This is the line that separates
+// "missing tail" from "end flag never registered" from "gappy holdings" —
+// the three remaining explanations for a head that holds ~a whole block yet
+// never completes.
+func headShredDetailString(receiver *turbine.UDPReceiver, slot uint64) string {
+	d, ok := receiver.HeadShredDetail(slot)
+	if !ok {
+		return "head detail: no live shred state"
+	}
+	lastDesc := "?"
+	if d.HaveLast {
+		lastDesc = fmt.Sprintf("%d", d.LastIndex)
+	}
+	return fmt.Sprintf("head detail: max_idx %d, contig_through %d, have_last %v (last_idx %s), top_flags 0x%02x recovered=%v",
+		d.MaxIndex, d.ContiguousThrough, d.HaveLast, lastDesc, d.TopFlags, d.TopRecovered)
 }
 
 // turbineCatchupBlocksInWindow counts shred-path blocks the drive's priority

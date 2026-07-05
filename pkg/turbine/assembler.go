@@ -628,6 +628,47 @@ func (a *SlotAssembler) IgnoredOldShreds() uint64 {
 	return a.ignoredOldShreds
 }
 
+// HeadShredDetail is the completion picture for one incomplete slot: what is
+// held, where the contiguous prefix ends, whether the block-end shred was
+// seen, and the flags of the highest-index held shred. Both observed
+// stuck-head incidents held ~the whole block with haveLast=false — this
+// detail distinguishes "missing tail" from "end flag never registered".
+type HeadShredDetail struct {
+	DataShreds        int
+	MaxIndex          uint32
+	ContiguousThrough int64 // highest i with 0..i all held; -1 when index 0 missing
+	HaveLast          bool
+	LastIndex         uint32 // meaningful when HaveLast
+	TopFlags          byte   // flags byte of the highest-index held shred
+	TopRecovered      bool   // that shred came from FEC recovery
+}
+
+// HeadShredDetail reports the completion picture for a slot still being
+// assembled; ok is false when no live state exists.
+func (a *SlotAssembler) HeadShredDetail(slot uint64) (HeadShredDetail, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := a.slots[slot]
+	if state == nil || len(state.shreds) == 0 {
+		return HeadShredDetail{}, false
+	}
+	d := HeadShredDetail{DataShreds: len(state.shreds), HaveLast: state.haveLast, LastIndex: state.lastIndex}
+	first := true
+	for idx, sh := range state.shreds {
+		if first || idx > d.MaxIndex {
+			d.MaxIndex = idx
+			d.TopFlags = sh.Flags
+			d.TopRecovered = sh.Recovered
+			first = false
+		}
+	}
+	d.ContiguousThrough = -1
+	for idx := uint32(0); state.shreds[idx] != nil; idx++ {
+		d.ContiguousThrough = int64(idx)
+	}
+	return d, true
+}
+
 // SlotAssemblyErrors reports the failure count and latest failure text for a
 // slot's live assembly state (0/"" once the slot completes or is reset).
 func (a *SlotAssembler) SlotAssemblyErrors(slot uint64) (int, string) {
