@@ -199,6 +199,7 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("bind gossip socket %s: %w", c.bindAddr, err)
 	}
 	defer conn.Close()
+	BoostUDPReceiveBuffer(conn, GossipUDPReceiveBufferBytes, "gossip client")
 
 	if err := c.initializeContact(conn.LocalAddr().(*net.UDPAddr)); err != nil {
 		return err

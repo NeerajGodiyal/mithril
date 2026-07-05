@@ -2181,6 +2181,13 @@ func printStartupInfo(commandName string) {
 	}
 	fmt.Printf("  Run ID:       %s%s%s\n", dim, runID, reset)
 
+	// Node mode, right at the top where an operator looks first
+	modeLabel := "verifying node (non-voting)"
+	if consensusMode == "validator" {
+		modeLabel = "validator (voting engine not yet active)"
+	}
+	fmt.Printf("  Mode:         %s%s%s\n", gold, modeLabel, reset)
+
 	// Bootstrap mode with description
 	var bootstrapDesc string
 	switch bootstrapMode {
@@ -2368,11 +2375,6 @@ func printStartupInfo(commandName string) {
 	if validatorIdentityKeypair != "" {
 		fmt.Printf("  Identity key: %s%s%s\n", gold, validatorIdentityKeypair, reset)
 	}
-	consensusLabel := "verifying (non-voting)"
-	if consensusMode == "validator" {
-		consensusLabel = "validator (voting engine not yet active)"
-	}
-	fmt.Printf("  Consensus:    %s%s%s\n", gold, consensusLabel, reset)
 	if alpenglowObserverBindAddr != "" {
 		fmt.Printf("  Votor QUIC:   %s%s%s\n", gold, alpenglowObserverBindAddr, reset)
 	}

@@ -206,6 +206,9 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	// Shreds AND repair responses land on this one socket in multi-megabyte
+	// bursts; the kernel buffer is the only slack while the read loop drains.
+	gossip.BoostUDPReceiveBuffer(conn, gossip.TurbineUDPReceiveBufferBytes, "turbine receiver")
 	r.signalReady(nil)
 
 	go func() {
