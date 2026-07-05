@@ -69,8 +69,9 @@ type SlotCtx struct {
 	ParentSlot      uint64
 	Epoch           uint64
 	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
-	ModifiedAccts   map[solana.PublicKey]bool
-	WritableAccts   map[solana.PublicKey]bool
+	ModifiedAccts     map[solana.PublicKey]bool
+	WritableAccts     map[solana.PublicKey]bool
+	LtHashAppliedAccts map[solana.PublicKey]bool
 	NumSignatures   uint64
 	Blockhash       [32]byte
 	LastBlockhash   [32]byte
@@ -446,6 +447,26 @@ func (slotCtx *SlotCtx) GetAccountFromAccountsDb(pubkey solana.PublicKey) (*acco
 	}
 }
 
+// GetAccountLiveOrPersisted returns the account from the live in-slot working set
+// (reflecting same-slot transaction writes) when present, falling back to the
+// persisted store (parent state for the current slot). This mirrors Agave's single
+// account view (cache layered over storage) so footer/epoch-boundary code that runs
+// after the transaction loop observes the latest in-slot account state rather than
+// the stale parent version. The returned account is a copy safe to mutate.
+func (slotCtx *SlotCtx) GetAccountLiveOrPersisted(pubkey solana.PublicKey) (*accounts.Account, error) {
+	if acct, err := slotCtx.GetAccount(pubkey); err == nil {
+		return acct, nil
+	}
+	acct, err := slotCtx.GetAccountFromAccountsDb(pubkey)
+	if err != nil {
+		return nil, err
+	}
+	// AccountsDb may return a pointer shared with its internal caches (VoteAcctCache/
+	// CommonAcctsCache). Return a clone so in-place mutation by the caller does not corrupt
+	// the cache — otherwise a later parent-baseline read would observe the mutated state.
+	return acct.Clone(), nil
+}
+
 func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Account) error {
 	pk := [32]byte(pubkey)
 	err := slotCtx.Accounts.SetAccount(&pk, acct)
@@ -457,6 +478,21 @@ func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
 	defer slotCtx.AcctMapsMu.Unlock()
 	slotCtx.WritableAccts[pubkey] = true
 	slotCtx.ModifiedAccts[pubkey] = true
+}
+
+func (slotCtx *SlotCtx) RecordLtHashApplied(pubkey solana.PublicKey) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	if slotCtx.LtHashAppliedAccts == nil {
+		slotCtx.LtHashAppliedAccts = make(map[solana.PublicKey]bool)
+	}
+	slotCtx.LtHashAppliedAccts[pubkey] = true
+}
+
+func (slotCtx *SlotCtx) LtHashAlreadyApplied(pubkey solana.PublicKey) bool {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	return slotCtx.LtHashAppliedAccts != nil && slotCtx.LtHashAppliedAccts[pubkey]
 }
 
 func (slotCtx *SlotCtx) RecordWritableAcct(pubkey solana.PublicKey) {

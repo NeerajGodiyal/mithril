@@ -2488,12 +2488,13 @@ func ReplayBlocks(
 
 func runIncinerator(slotCtx *sealevel.SlotCtx) {
 	incineratorAcct, err := slotCtx.GetAccount(a.IncineratorAddr)
-	if err != nil {
+	if err != nil || incineratorAcct.Lamports == 0 {
 		return
 	}
 	newIncineratorAcct := &accounts.Account{Key: a.IncineratorAddr, Owner: a.SystemProgramAddr, RentEpoch: math.MaxUint64}
 	slotCtx.SetAccount(a.IncineratorAddr, newIncineratorAcct)
 	slotCtx.LamportsBurnt += incineratorAcct.Lamports
+	slotCtx.RecordModifiedAcct(a.IncineratorAddr)
 }
 
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account, sysvarsAlreadyUpdated bool) ([]*accounts.Account, []*accounts.Account) {
@@ -2993,6 +2994,10 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("compile_accounts")
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts, false)
+
+	if err := ensureParentAcctsForModified(acctsDb, slotCtx); err != nil {
+		return nil, err
+	}
 
 	start = time.Now()
 	setReplayStage("bankhash")

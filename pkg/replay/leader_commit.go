@@ -63,7 +63,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	runIncinerator(slotCtx)
 
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts, true)
-	if err := ensureLeaderParentAccts(in.AcctsDb, slotCtx); err != nil {
+	if err := ensureParentAcctsForModified(in.AcctsDb, slotCtx); err != nil {
 		return nil, err
 	}
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
@@ -191,6 +191,10 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 	if err != nil {
 		return fmt.Errorf("load clock sysvar: %w", err)
 	}
+	// AccountsDb may hand back a pointer shared with its internal caches; clone before
+	// mutating in place so the cache (and thus the parent lt-hash baseline read later by
+	// ensureParentAcctsForModified) keeps the true pre-update parent state.
+	clockAcct = clockAcct.Clone()
 	var clock sealevel.SysvarClock
 	if err := clock.UnmarshalWithDecoder(bin.NewBinDecoder(clockAcct.Data)); err != nil {
 		return fmt.Errorf("decode clock sysvar: %w", err)
@@ -219,6 +223,7 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 	if err != nil {
 		return fmt.Errorf("load slothashes sysvar: %w", err)
 	}
+	slotHashesAcct = slotHashesAcct.Clone()
 	var slotHashes sealevel.SysvarSlotHashes
 	if sealevel.SysvarCache.SlotHashes.Sysvar != nil {
 		slotHashes = *sealevel.SysvarCache.SlotHashes.Sysvar
@@ -242,6 +247,7 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 	if err != nil {
 		return fmt.Errorf("load recent blockhashes sysvar: %w", err)
 	}
+	recentAcct = recentAcct.Clone()
 	recent, err := cloneRecentBlockhashesFromCache()
 	if err != nil {
 		return fmt.Errorf("RecentBlockhashes cache for slot %d: %w", block.Slot, err)
@@ -259,6 +265,7 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 	if err != nil {
 		return fmt.Errorf("load slot history sysvar: %w", err)
 	}
+	slotHistoryAcct = slotHistoryAcct.Clone()
 	var slotHistory sealevel.SysvarSlotHistory
 	if sealevel.SysvarCache.SlotHistory.Sysvar != nil {
 		slotHistory = *sealevel.SysvarCache.SlotHistory.Sysvar
@@ -279,10 +286,11 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 }
 
 func ensureLeaderParentAccts(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx) error {
+	return ensureParentAcctsForModified(acctsDb, slotCtx)
+}
+
+func ensureParentAcctsForModified(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx) error {
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.AccountsLtHash) {
-		return nil
-	}
-	if slotCtx.ParentAccts != nil {
 		return nil
 	}
 
@@ -296,20 +304,28 @@ func ensureLeaderParentAccts(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.S
 		return nil
 	}
 
-	parentAccts := accounts.NewMemAccountsWithLen(uint64(len(modified)))
+	if slotCtx.ParentAccts == nil {
+		slotCtx.ParentAccts = accounts.NewMemAccountsWithLen(uint64(len(modified)))
+	}
+
 	for _, pk := range modified {
+		if slotCtx.LtHashAlreadyApplied(pk) {
+			continue
+		}
+		if _, err := slotCtx.GetParentAccount(pk); err == nil {
+			continue
+		}
 		acct, err := acctsDb.GetAccount(slotCtx.ParentSlot, pk)
 		if err != nil {
 			acct, err = acctsDb.GetAccount(slotCtx.Slot, pk)
 		}
 		if err != nil {
-			return fmt.Errorf("load parent acct %s for leader slot %d: %w", pk, slotCtx.Slot, err)
+			return fmt.Errorf("load parent acct %s for slot %d: %w", pk, slotCtx.Slot, err)
 		}
 		key := [32]byte(pk)
-		if err := parentAccts.SetAccountWithoutLock(key, acct); err != nil {
+		if err := slotCtx.ParentAccts.SetAccountWithoutLock(key, acct.Clone()); err != nil {
 			return err
 		}
 	}
-	slotCtx.ParentAccts = parentAccts
 	return nil
 }
