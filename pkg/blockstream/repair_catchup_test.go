@@ -151,6 +151,36 @@ func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
 	}
 }
 
+// The FIRST handoff of a fresh boot: nothing has emitted or executed yet, so
+// the runway anchor falls back to startSlot-1 (the resume block). Without
+// the fallback the handoff can never arm — no block parent-links to slot 0 —
+// and a shreds-only catchup deadlocks AT BOOT with the head fully assembled
+// and staged, since the first emission can only come from this very handoff.
+// Root cause behind four consecutive live catchup stalls.
+func TestHandoffArmsOnFreshResumeAnchor(t *testing.T) {
+	bs := newRepairCatchupTestSource(1024) // StartSlot 1_000
+	bs.repairCatchupPending.Store(false)
+	bs.repairCatchupFrom.Store(1_000)
+	bs.repairCatchupUntil.Store(1_800)
+
+	head := &b.Block{Slot: 1_000, SourceParentSlot: 999, FromLightbringer: true}
+	bs.bufferLightbringerBlock(head)
+
+	bs.maybePrepareLightbringerHandoff()
+
+	if got := bs.lightbringerHandoffSlot.Load(); got != 1_000 {
+		t.Fatalf("handoff must arm at the resume head on a fresh boot (anchor = startSlot-1); handoff_slot=%d", got)
+	}
+	select {
+	case res := <-bs.resultQueue:
+		if res.slot != 1_000 || res.block == nil {
+			t.Fatalf("the staged head must drain to the emitter, got %+v", res)
+		}
+	default:
+		t.Fatalf("an armed handoff must enqueue the runway head")
+	}
+}
+
 // A certificate-skipped catchup head must be EMITTED as a skip, not merely
 // crossed by the handoff runway: pre-handoff nothing feeds the results loop,
 // so the drive injects a synthetic certified-skip result that the standard

@@ -1622,6 +1622,14 @@ func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
 	}
 }
 
+// stagedLightbringerBlock returns the staged (pre-handoff) block for slot,
+// nil when none is held.
+func (bs *BlockSource) stagedLightbringerBlock(slot uint64) *b.Block {
+	bs.lightbringerBufferMu.Lock()
+	defer bs.lightbringerBufferMu.Unlock()
+	return bs.lightbringerBuffer[slot]
+}
+
 // applyCertifiedSkipToCatchupHead marks the emitter's waiting slot as
 // certificate-skipped and nudges the results loop with a synthetic skip
 // result so emission ADVANCES. During a pre-handoff repair drive nothing
@@ -1651,16 +1659,20 @@ func (bs *BlockSource) applyCertifiedSkipToCatchupHead(slot uint64) bool {
 
 func (bs *BlockSource) clearBufferedLightbringerBlocks() int {
 	bs.lightbringerBufferMu.Lock()
-	defer bs.lightbringerBufferMu.Unlock()
-
-	cleared := len(bs.lightbringerBuffer)
-	if cleared == 0 {
-		return 0
+	cleared := make([]uint64, 0, len(bs.lightbringerBuffer))
+	for slot := range bs.lightbringerBuffer {
+		cleared = append(cleared, slot)
 	}
-
 	bs.lightbringerBuffer = make(map[uint64]*b.Block)
 	bs.lightbringerBufferOrder = nil
-	return cleared
+	bs.lightbringerBufferMu.Unlock()
+
+	// A cleared staged block's assembler completed-slot marker would make
+	// the slot silently unfetchable forever; reset so it can be re-fetched.
+	for _, slot := range cleared {
+		bs.resetTurbineSlotState(slot)
+	}
+	return len(cleared)
 }
 
 func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
@@ -1835,8 +1847,32 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 
 	blocks := append([]*b.Block(nil), runwayBlocks...)
 
+	// Staged blocks NOT on the selected runway are dropped here — but their
+	// assembler completed-slot markers survive, which would make those slots
+	// silently unfetchable (shreds ignored, repair skips them). Reset their
+	// turbine state so post-handoff repair can fetch them again.
+	onRunway := make(map[uint64]bool, len(blocks))
+	for _, blk := range blocks {
+		onRunway[blk.Slot] = true
+	}
+	var dropped []uint64
+	for slot := range bs.lightbringerBuffer {
+		if !onRunway[slot] {
+			dropped = append(dropped, slot)
+		}
+	}
+
 	bs.lightbringerBuffer = make(map[uint64]*b.Block)
 	bs.lightbringerBufferOrder = nil
+
+	if len(dropped) > 0 {
+		// Reset outside the buffer lock is unnecessary (ResetSlot takes only
+		// the assembler mutex, a leaf lock), but keep the work after the
+		// buffer maps are already swapped for clarity.
+		for _, slot := range dropped {
+			bs.resetTurbineSlotState(slot)
+		}
+	}
 
 	return blocks, handoffSlot, true
 }
@@ -1986,6 +2022,16 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 		if lastExecuted := bs.lastExecutedSlot.Load(); lastExecuted != 0 {
 			anchorSlot = lastExecuted
 		}
+	}
+	// Fresh boot: replay has not executed ANYTHING this process yet, so both
+	// anchors above are zero — but startSlot IS the resume frontier, so the
+	// anchor is the slot before it. Without this, the runway can never
+	// connect (no block has SourceParentSlot == 0), the handoff can never
+	// arm, and on a shreds-only node — where the FIRST emission can only
+	// come from this very handoff — catchup deadlocks at boot with the head
+	// fully assembled and staged. Observed live on four consecutive runs.
+	if anchorSlot == 0 && bs.startSlot > 0 {
+		anchorSlot = bs.startSlot - 1
 	}
 
 	// A large replay gap is the POINT of repair catchup; the gap check guards
@@ -2734,6 +2780,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	sawWindowFill := false
 	lastResponses := statsAtArm.Repair.Responses
 	var lastStallWarn time.Time
+	var lastStagedWarn time.Time
 	lastStatusLog := time.Now()
 
 	for {
@@ -2855,12 +2902,41 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 
 			// A stalled head stays on repair — loudly. The counters make the
 			// failure mode readable while the node keeps asking peers.
-			// A completed-slot marker on a head the emitter still waits for is
-			// inconsistent state: the assembler ignores every shred and repair
-			// skips the slot, so it can never resolve on its own. Clear it.
+			// A completed-slot marker on the waiting head means the block
+			// ASSEMBLED. Three sub-cases, and only one is stale:
+			//   staged   -> assembled-but-blocked on handoff arming; resetting
+			//               would rebuild the same block forever — log WHY it
+			//               is not emitting instead
+			//   buffered -> the emit loop owns it; nothing to do
+			//   neither  -> the block was genuinely lost (dropped after
+			//               assembly); clear the marker so repair can re-fetch
 			if receiver.SlotCompleted(waiting) {
-				receiver.ResetSlot(waiting)
-				mlog.Log.Warnf("repair catchup: head slot %d carried a stale completed-slot marker with no emitted block — cleared; repair re-fetches the slot", waiting)
+				staged := bs.stagedLightbringerBlock(waiting)
+				bs.reorderMu.Lock()
+				buffered := bs.reorderBuffer[waiting] != nil
+				emittedAnchor := bs.lastEmittedBlockSlot
+				bs.reorderMu.Unlock()
+				switch {
+				case staged != nil:
+					if time.Since(lastStagedWarn) >= 30*time.Second {
+						lastStagedWarn = time.Now()
+						anchor := emittedAnchor
+						if anchor == 0 {
+							if lastExecuted := bs.lastExecutedSlot.Load(); lastExecuted != 0 {
+								anchor = lastExecuted
+							} else if bs.startSlot > 0 {
+								anchor = bs.startSlot - 1
+							}
+						}
+						mlog.Log.Warnf("repair catchup: head slot %d is ASSEMBLED and staged but not emitting — staged parent %d, runway anchor %d, handoff_slot %d, alpenglow_block_id %v; waiting on handoff arming",
+							waiting, staged.SourceParentSlot, anchor, bs.lightbringerHandoffSlot.Load(), staged.HasAlpenglowBlockID)
+					}
+				case buffered:
+					// Emit loop owns it.
+				default:
+					receiver.ResetSlot(waiting)
+					mlog.Log.Warnf("repair catchup: head slot %d carried a completed-slot marker but the block is in neither staging nor the buffer (lost after assembly) — cleared; repair re-fetches the slot", waiting)
+				}
 			}
 
 			if stalled >= repairCatchupStallWarnEvery && time.Since(lastStallWarn) >= repairCatchupStallWarnEvery {
@@ -2883,7 +2959,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if stalled > 10*time.Minute {
 					hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or set block.rpc_fallback=true"
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d%s",
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d | repair pings +%d, pongs +%d, send_errors +%d%s",
 					waiting, stalled.Round(time.Second), rpcNote,
 					max(headShreds, 0), errCount, lastErr, headShredDetailString(receiver, waiting), windowBlocks,
 					repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
@@ -2891,7 +2967,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 					stats.IgnoredOldShreds-statsAtArm.IgnoredOldShreds, stats.MissingLeaders-statsAtArm.MissingLeaders,
 					stats.SignatureErrors-statsAtArm.SignatureErrors, stats.ParseErrors-statsAtArm.ParseErrors,
 					stats.NonCanonicalBlockIDs-statsAtArm.NonCanonicalBlockIDs, stats.LastNonCanonicalSlot,
-					stats.EvictedSlots-statsAtArm.EvictedSlots, stats.ActiveSlots, hint)
+					stats.EvictedSlots-statsAtArm.EvictedSlots, stats.ActiveSlots,
+					repair.Pings-statsAtArm.Repair.Pings, repair.Pongs-statsAtArm.Repair.Pongs,
+					repair.Errors-statsAtArm.Repair.Errors, hint)
 			}
 		}
 
