@@ -4626,13 +4626,22 @@ func (bs *BlockSource) emitOrderedBlocks() {
 
 		if result.block != nil && result.block.FromLightbringer {
 			handoffSlot := bs.lightbringerHandoffSlot.Load()
-			if !bs.isNearTip.Load() {
-				bs.reorderMu.Unlock()
-				continue
-			}
-			if !bs.lightbringerActive.Load() && (handoffSlot == 0 || result.slot < handoffSlot) {
-				bs.reorderMu.Unlock()
-				continue
+			// Catchup handoff and stall-rescue deliveries are legitimate FAR
+			// from the tip — the same exemption shouldDiscardLiveStreamResult
+			// carries. This inline twin of that gate ate the drained head a
+			// second time after the intake fix: assembled, handoff armed,
+			// queued, then silently dropped right here.
+			catchupDelivery := (bs.repairCatchupActive() && handoffSlot != 0 && result.slot >= handoffSlot) ||
+				bs.catchupRescueCovers(result.slot)
+			if !catchupDelivery {
+				if !bs.isNearTip.Load() {
+					bs.reorderMu.Unlock()
+					continue
+				}
+				if !bs.lightbringerActive.Load() && (handoffSlot == 0 || result.slot < handoffSlot) {
+					bs.reorderMu.Unlock()
+					continue
+				}
 			}
 		}
 
