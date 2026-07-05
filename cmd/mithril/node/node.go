@@ -62,7 +62,7 @@ var (
 		},
 	}
 
-	bootstrapMode               string // "auto", "snapshot", or "accountsdb"
+	bootstrapMode               string // "auto", "snapshot", "new-snapshot", "new-incremental", or "accountsdb"
 	snapshotArchivePath         string
 	incrementalSnapshotFilename string
 	accountsPath                string
@@ -270,7 +270,7 @@ func refreshManifestSeedFromManifest(accountsPath string, s *state.MithrilState,
 
 func init() {
 	// [bootstrap] section flags
-	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh)")
+	Run.Flags().StringVar(&bootstrapMode, "bootstrap", "auto", "Bootstrap mode: 'auto' (use AccountsDB if exists, else snapshot), 'accountsdb' (require existing), 'snapshot' (rebuild from snapshot), 'new-snapshot' (always download fresh), 'new-incremental' (reuse local full, fetch fresh incremental)")
 	Run.Flags().StringVar(&snapshotArchivePath, "snapshot", "", "Path to specific full snapshot file (bypasses auto-discovery)")
 	Run.Flags().StringVar(&incrementalSnapshotFilename, "incremental-snapshot", "", "Path to specific incremental snapshot file (bypasses auto-discovery)")
 	Run.Flags().StringVar(&snapshotDlPath, "download-snapshot-path", "", "Directory for discovered/downloaded snapshots")
@@ -558,7 +558,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		mlog.Log.Infof("network.cluster not set; defaulting to %q", cluster)
 	}
 	if cluster != "alpenglow" {
-		return fmt.Errorf("network.cluster %q is not supported by this Alpenglow-only build (TowerBFT clusters need a mithril build from the dev branch until they upgrade to Alpenglow)", cluster)
+		src := config.FileUsed()
+		if src == "" {
+			src = "CLI/defaults (no config file loaded)"
+		}
+		return fmt.Errorf("network.cluster %q (read from %s) is not supported by this Alpenglow-only build (TowerBFT clusters need a mithril build from the dev branch until they upgrade to Alpenglow)", cluster, src)
 	}
 
 	// Must be decided before any OpenDb call: with the WAL off, the fold
@@ -1318,6 +1322,43 @@ func runLive(c *cobra.Command, args []string) {
 		// Record bootstrap in history
 		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
 
+	case "new-incremental":
+		// Mode: reuse the local full snapshot as the base, fetch the freshest
+		// incremental for it, rebuild — the cheap refresh (incrementals are a
+		// fraction of a full download).
+		if snapshotDownloadPath == "" {
+			klog.Fatalf("mode=new-incremental requires a snapshot directory (set storage.snapshots or snapshot.download_path in config)")
+		}
+		fullThreshold := config.GetInt("snapshot.full_threshold")
+		if fullThreshold == 0 {
+			fullThreshold = 100000 // default
+		}
+		existingSnap := detectLocalFullSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+		if existingSnap == nil {
+			klog.Fatalf("mode=new-incremental: no usable local full snapshot in %s — use --bootstrap new-snapshot to download one", snapshotDownloadPath)
+		}
+		mlog.Log.Infof("mode=new-incremental: reusing local full snapshot at slot %d, fetching a fresh incremental", existingSnap.slot)
+		if accountsPath != "" {
+			if mithrilState != nil {
+				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "new-incremental mode")
+			} else {
+				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "new-incremental mode (no prior state)")
+			}
+			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
+			snapshot.CleanAccountsDbDir(accountsPath)
+		}
+		accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
+		if err != nil {
+			klog.Fatalf("failed to build AccountsDB from snapshot: %v", err)
+		}
+		snapshotEpoch := snapshotEpochForState(manifest)
+		mithrilState = state.NewReadyState(manifest.Bank.Slot, snapshotEpoch, "", "", 0, 0)
+		snapshot.PopulateManifestSeed(mithrilState, manifest)
+		if err := mithrilState.Save(accountsPath); err != nil {
+			mlog.Log.Errorf("failed to save state file: %v", err)
+		}
+		state.RecordBootstrap(accountsPath, manifest.Bank.Slot, "", replay.CurrentRunID, getVersion(), getCommit(), getBranch())
+
 	case "snapshot":
 		// Mode: Rebuild AccountsDB from snapshot, reuse existing snapshot file if fresh enough
 		if snapshotDownloadPath == "" {
@@ -1383,13 +1424,19 @@ func runLive(c *cobra.Command, args []string) {
 		}
 
 		if hasValidState {
-			// Check if AccountsDB is behind chain tip (more than 2000 slots triggers prompt)
-			// Use queryCurrentSlot instead of queryLatestSnapshotSlot to avoid expensive node discovery
-			const stalePromptThreshold = 2000
+			// Check if AccountsDB is behind chain tip. Use queryCurrentSlot
+			// instead of queryLatestSnapshotSlot to avoid expensive node
+			// discovery. The default prompts early: a fresh incremental is a
+			// seconds-long download, while repairing many hundreds of slots
+			// of a high-volume cluster takes far longer.
+			stalePromptThreshold := config.GetInt("snapshot.stale_prompt_slots")
+			if stalePromptThreshold <= 0 {
+				stalePromptThreshold = 500
+			}
 			currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
 			if err != nil {
 				mlog.Log.Infof("could not query current slot: %v (continuing with existing AccountsDB)", err)
-			} else if mithrilState.IsStale(currentSlot, stalePromptThreshold) {
+			} else if mithrilState.IsStale(currentSlot, uint64(stalePromptThreshold)) {
 				slotsBehind := currentSlot - mithrilState.GetCurrentSlot()
 				mlog.Log.Infof("AccountsDB is %d slots behind chain tip", slotsBehind)
 
@@ -1400,18 +1447,32 @@ func runLive(c *cobra.Command, args []string) {
 					SlotsBehind:        slotsBehind,
 				})
 
-				if choice == 2 || choice == 3 {
+				if choice >= 2 {
 					// choice 2: rebuild from the best available snapshot (reuse
 					// the local full only if it is the freshest the cluster
 					// offers). choice 3: force a brand-new full download,
-					// ignoring any local snapshot.
+					// ignoring any local snapshot. choice 4: pin the LOCAL full
+					// as the base and just fetch a fresh incremental — the
+					// cheap path (incrementals are a fraction of a full).
 					if snapshotDownloadPath == "" {
 						klog.Fatalf("cannot rebuild from snapshot: no snapshot directory configured (set storage.snapshots or snapshot.download_path in config)")
 					}
-					if choice == 3 {
-						mlog.Log.Infof("User chose to download a brand-new full snapshot")
-					} else {
+					switch choice {
+					case 2:
 						mlog.Log.Infof("User chose to rebuild from the best available snapshot")
+					case 3:
+						mlog.Log.Infof("User chose to download a brand-new full snapshot")
+					case 4:
+						mlog.Log.Infof("User chose to refresh the incremental only (reusing the local full snapshot)")
+					}
+					var existingSnap *snapshotInfo
+					if choice == 4 {
+						// Resolve the base BEFORE any cleanup so a missing local
+						// full fails without destroying the current AccountsDB.
+						existingSnap = detectLocalFullSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+						if existingSnap == nil {
+							klog.Fatalf("incremental-only refresh needs a usable local full snapshot in %s and none was found; choose [2]/[3] instead (or --bootstrap new-snapshot)", snapshotDownloadPath)
+						}
 					}
 					if accountsPath != "" {
 						// Record rebuild in history before cleanup (history file is preserved)
@@ -1421,7 +1482,6 @@ func runLive(c *cobra.Command, args []string) {
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// choice 3 forces a fresh download: skip the local-reuse check.
-					var existingSnap *snapshotInfo
 					if choice == 2 {
 						existingSnap = detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
 					}
@@ -2200,6 +2260,8 @@ func printStartupInfo(commandName string) {
 		bootstrapDesc = "rebuild from local snapshot"
 	case "new-snapshot":
 		bootstrapDesc = "download fresh snapshot from network"
+	case "new-incremental":
+		bootstrapDesc = "reuse local full snapshot, fetch fresh incremental"
 	case "accountsdb":
 		bootstrapDesc = "require existing AccountsDB"
 	case "explicit":
@@ -2557,7 +2619,12 @@ func findMatchingIncremental(snapshotDir string, baseSlot uint64) *snapshotInfo 
 
 // detectFreshSnapshot checks for an existing snapshot file within the freshness threshold.
 // Returns the snapshotInfo if found, nil otherwise.
-func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []string, ctx context.Context) *snapshotInfo {
+// detectLocalFullSnapshot scans the snapshot dir for the newest local full
+// snapshot within fullThreshold of the tip — WITHOUT the cluster-freshness
+// veto detectFreshSnapshot adds. The incremental-only refresh pins this as
+// its base deliberately: the point is the cheap path (reuse the tens-of-GB
+// full already on disk, fetch only a fresh incremental for its base).
+func detectLocalFullSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []string, ctx context.Context) *snapshotInfo {
 	if snapshotDir == "" {
 		return nil
 	}
@@ -2587,8 +2654,17 @@ func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []s
 			}
 		}
 	}
+	return bestSnapshot
+}
 
+func detectFreshSnapshot(snapshotDir string, fullThreshold int, rpcEndpoints []string, ctx context.Context) *snapshotInfo {
+	bestSnapshot := detectLocalFullSnapshot(snapshotDir, fullThreshold, rpcEndpoints, ctx)
 	if bestSnapshot == nil {
+		return nil
+	}
+	currentSlot, err := queryCurrentSlot(ctx, rpcEndpoints)
+	if err != nil {
+		mlog.Log.Infof("could not query current slot: %v", err)
 		return nil
 	}
 

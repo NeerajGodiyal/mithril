@@ -609,6 +609,11 @@ name = "mithril"
     # Maximum age for incremental snapshots (slots)
     # Incrementals are always downloaded (they're small and provide latest state)
     incremental_threshold = 2000
+    # On start, prompt (continue / rebuild / new full / new incremental) when
+    # the existing AccountsDB is more than this many slots behind the tip. A
+    # fresh incremental is a seconds-long download; repairing many hundreds of
+    # slots of a high-volume cluster takes far longer.
+    stale_prompt_slots = 500
 
     # Safety margin - warn if snapshot is this close to expiration (slots)
     safety_margin_slots = 5000

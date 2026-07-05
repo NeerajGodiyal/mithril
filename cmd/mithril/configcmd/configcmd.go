@@ -237,6 +237,7 @@ gossip_bind_addr = "0.0.0.0:65401"  # Local gossip UDP port (open inbound); empt
 [snapshot]
 incremental_threshold = 2000   # Freshness band (slots behind tip): full sources restricted to bases with an incremental this fresh; staler incrementals rejected
 full_threshold = 100000        # Max full-snapshot age (slots) still usable
+stale_prompt_slots = 500       # On start, prompt (continue / rebuild / new full / new incremental) when the AccountsDB is more than this many slots behind tip
 max_full_snapshots = 1         # Snapshots kept on disk (0 = stream-only, don't save)
 min_incremental_speed_mbs = 2.0
 max_rtt_ms = 200               # Skip snapshot sources slower than this RTT (0 = disabled)

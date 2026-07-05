@@ -251,6 +251,12 @@ var ConfigFile string
 // InitConfig loads configuration from TOML file.
 // If no --config flag is provided, defaults to "config.toml" in current directory.
 // CLI flag precedence is handled separately in initConfigAndBindFlags.
+// FileUsed reports the config file viper actually loaded ("" when none) —
+// the first thing to name when a value surprises the operator.
+func FileUsed() string {
+	return viper.ConfigFileUsed()
+}
+
 func InitConfig() error {
 	ApplyDefaults(viper.GetViper())
 
