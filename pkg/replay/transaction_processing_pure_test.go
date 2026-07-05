@@ -332,10 +332,10 @@ func TestTransactionError_MarshalJSON_TupleStructVariants(t *testing.T) {
 // inner Go error is nil.
 func TestTransactionErrorType_String(t *testing.T) {
 	cases := map[TransactionErrorType]string{
-		TransactionErrorSanitizeFailure:        "SanitizeFailure",
-		TransactionErrorBlockhashNotFound:      "BlockhashNotFound",
-		TransactionErrorAccountNotFound:        "AccountNotFound",
-		TransactionErrorProgramAccountNotFound: "ProgramAccountNotFound",
+		TransactionErrorSanitizeFailure:         "SanitizeFailure",
+		TransactionErrorBlockhashNotFound:       "BlockhashNotFound",
+		TransactionErrorAccountNotFound:         "AccountNotFound",
+		TransactionErrorProgramAccountNotFound:  "ProgramAccountNotFound",
 		TransactionErrorInsufficientFundsForFee: "InsufficientFundsForFee",
 	}
 	for in, want := range cases {

@@ -19,6 +19,17 @@ import (
 // collecting live shreds while the AccountsDB is still building.
 var OnIncrementalManifestParsed func(m *SnapshotManifest)
 
+// OnFullSnapshotManifestParsed fires as soon as the FULL snapshot manifest is
+// decoded — in the incremental flow, minutes before the incremental manifest
+// (the whole full-archive build sits between them). Its epoch stakes usually
+// already cover the live tip's leader schedule, letting the turbine prewarm
+// join that much earlier; every second of earlier collection is thousands of
+// shreds repair never has to fetch one-per-round-trip. If the full is stale
+// past its schedule horizon, the receiver just drops shreds as
+// missing-leader until the incremental hook loads fresh stakes — no worse
+// than not starting early at all.
+var OnFullSnapshotManifestParsed func(m *SnapshotManifest)
+
 func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	// Block config
 	s.ManifestParentSlot = m.Bank.Slot

@@ -53,6 +53,9 @@ type TurbinePrewarmConfig struct {
 	// hears goes to disk too, so even blocks beyond the in-RAM spool cap
 	// hydrate later instead of re-repairing.
 	ShredSpoolDir string
+	// RepairMaxRequestsPerSecond mirrors the BlockSource's repair rate
+	// ceiling override (0 = default).
+	RepairMaxRequestsPerSecond int
 }
 
 // StartTurbinePrewarm joins gossip, starts a shred receiver with the
@@ -95,6 +98,7 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 		cancel()
 		return nil, fmt.Errorf("prewarm repair setup: %w", err)
 	}
+	receiver.SetRepairRequestRate(cfg.RepairMaxRequestsPerSecond)
 	if cfg.FloorSlot > 0 {
 		receiver.SetRetentionFloor(cfg.FloorSlot)
 	}

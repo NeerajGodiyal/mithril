@@ -228,6 +228,12 @@ name = "mithril"
     # (the incremental is fetched AFTER the full snapshot builds, so the resume
     # point is usually only minutes behind tip) and typical restart gaps.
     repair_catchup_max_gap_slots = 8192
+    # Repair request-rate ceiling, requests/second (0 or unset = default 500).
+    # Peer serve-repair QoS bans heavy unstaked requesters (observed: ~2000/s
+    # sustained froze all responses after ~90s). Raise in steps — try 750,
+    # then 1000 — and watch the timeout share and "late" counts in the repair
+    # catchup heartbeat; back off if timeouts climb.
+    # repair_max_requests_per_second = 500
     # Cluster-join / gossip settings for native turbine live under [turbine];
     # [turbine].gossip_entrypoint is also required to discover the shred version
     # and advertise this node into the turbine tree.

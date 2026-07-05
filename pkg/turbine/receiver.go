@@ -110,6 +110,15 @@ func (r *UDPReceiver) SetRepairPeerSource(identity ed25519.PrivateKey, source fu
 	return nil
 }
 
+// SetRepairRequestRate overrides the global repair request-rate ceiling
+// (requests per second; <=0 keeps the default). Call after
+// SetRepairPeerSource.
+func (r *UDPReceiver) SetRepairRequestRate(perSecond int) {
+	if r.repairClient != nil && perSecond > 0 {
+		r.repairClient.setRateLimit(perSecond)
+	}
+}
+
 func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if r == nil || r.assembler == nil {
 		return

@@ -74,6 +74,7 @@ var (
 	blockSource                 string // "turbine" (default), "rpc", or "lightbringer"
 	lightbringerEndpoint        string
 	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
+	repairMaxRequestsPerSecond  int    // Repair request-rate ceiling override (0 = default 500)
 	blockRPCFallback            bool   // Allow RPC block fetch when > repairCatchupMaxGapSlots behind (default false: shreds only)
 	blockMaxRPS                 int    // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
@@ -640,6 +641,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if repairCatchupMaxGapSlots < 0 {
 		repairCatchupMaxGapSlots = 0
 	}
+	repairMaxRequestsPerSecond = config.GetInt("block.repair_max_requests_per_second")
+	if repairMaxRequestsPerSecond < 0 {
+		repairMaxRequestsPerSecond = 0
+	}
 	blockRPCFallback = getBool("rpc-fallback", "block.rpc_fallback")
 
 	// [lightbringer] section — sidecar management
@@ -1055,19 +1060,21 @@ func runLive(c *cobra.Command, args []string) {
 		klog.Fatalf("%v", err)
 	}
 
-	// Turbine prewarm: the moment the incremental snapshot manifest is
-	// parsed we hold current-epoch stakes — enough to verify shreds. Start
-	// collecting live blocks right then, while the AccountsDB is still
-	// building: every slot collected live is a slot repair never has to
-	// fetch one shred per round trip (repair carries no coding shreds, so
-	// pre-join slots get zero FEC leverage). Fail-open: any error just
-	// means no prewarm.
+	// Turbine prewarm: start collecting live shreds the moment a snapshot
+	// manifest supplies stakes good enough to verify them — every second of
+	// earlier collection is thousands of shreds repair never has to fetch
+	// one per round trip (repair carries no coding shreds, so pre-join slots
+	// get zero FEC leverage). The FULL manifest parses minutes before the
+	// incremental in the with-incremental flow and its epoch stakes usually
+	// already cover the live tip's leader schedule, so prewarm starts there;
+	// the incremental hook then refreshes stakes and — if the full's
+	// schedule horizon missed the live tip — rebuilds the schedule, which
+	// the running receiver picks up per shred (self-healing, no restart).
+	// Fail-open: any error just means no (or later) prewarm.
 	var turbinePrewarm *blockstream.TurbinePrewarm
 	if useTurbine && turbineBindAddr != "" && turbineGossipEntrypoint != "" {
-		snapshot.OnIncrementalManifestParsed = func(m *snapshot.SnapshotManifest) {
-			if turbinePrewarm != nil || m == nil {
-				return
-			}
+		var prewarmMu sync.Mutex
+		seedManifestStakes := func(m *snapshot.SnapshotManifest) bool {
 			tmp := &state.MithrilState{}
 			snapshot.PopulateManifestSeed(tmp, m)
 			loaded := false
@@ -1078,37 +1085,86 @@ func runLive(c *cobra.Command, args []string) {
 				}
 				loaded = true
 			}
-			if !loaded {
-				mlog.Log.Warnf("turbine prewarm: incremental manifest carried no loadable epoch stakes; prewarm skipped")
-				return
+			return loaded
+		}
+		// ensureLeaderSchedule makes LeaderForSlot cover the manifest's
+		// resume region, building the manifest epoch's schedule when it does
+		// not already.
+		ensureLeaderSchedule := func(m *snapshot.SnapshotManifest) bool {
+			if _, ok := global.LeaderForSlot(m.Bank.Slot + 1); ok {
+				return true
 			}
 			epochSchedule := m.Bank.EpochSchedule
 			epoch := epochSchedule.GetEpoch(m.Bank.Slot)
-			if _, ok := global.LeaderForSlot(m.Bank.Slot + 1); !ok {
-				if _, err := replay.PrepareLeaderScheduleLocal(epoch, &epochSchedule, ""); err != nil {
-					mlog.Log.Warnf("turbine prewarm: leader schedule for epoch %d: %v; prewarm skipped", epoch, err)
-					return
-				}
-				mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", epoch)
+			if _, err := replay.PrepareLeaderScheduleLocal(epoch, &epochSchedule, ""); err != nil {
+				mlog.Log.Warnf("turbine prewarm: leader schedule for epoch %d: %v", epoch, err)
+				return false
 			}
+			mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", epoch)
+			return true
+		}
+		startPrewarm := func(m *snapshot.SnapshotManifest, origin string) {
 			pw, err := blockstream.StartTurbinePrewarm(blockstream.TurbinePrewarmConfig{
-				BindAddr:         turbineBindAddr,
-				GossipEntrypoint: turbineGossipEntrypoint,
-				GossipBindAddr:   turbineGossipBindAddr,
-				AdvertisedIP:     turbineAdvertisedIP,
-				ShredVersion:     uint16(turbineShredVersion),
-				AlpenglowAddr:    alpenglowObserverBindAddr,
-				Identity:         validatorIdentity,
-				LeaderForSlot:    global.LeaderForSlot,
-				FloorSlot:        m.Bank.Slot + 1,
-				ShredSpoolDir:    catchupShredSpoolDir(),
+				BindAddr:                   turbineBindAddr,
+				GossipEntrypoint:           turbineGossipEntrypoint,
+				GossipBindAddr:             turbineGossipBindAddr,
+				AdvertisedIP:               turbineAdvertisedIP,
+				ShredVersion:               uint16(turbineShredVersion),
+				AlpenglowAddr:              alpenglowObserverBindAddr,
+				Identity:                   validatorIdentity,
+				LeaderForSlot:              global.LeaderForSlot,
+				FloorSlot:                  m.Bank.Slot + 1,
+				ShredSpoolDir:              catchupShredSpoolDir(),
+				RepairMaxRequestsPerSecond: repairMaxRequestsPerSecond,
 			})
 			if err != nil {
 				mlog.Log.Warnf("turbine prewarm failed to start (continuing without): %v", err)
 				return
 			}
 			turbinePrewarm = pw
-			mlog.Log.Infof("turbine prewarm: collecting live shreds from slot %d while the AccountsDB builds", m.Bank.Slot+1)
+			mlog.Log.Infof("turbine prewarm: collecting live shreds from slot %d while the AccountsDB builds (stakes %s)", m.Bank.Slot+1, origin)
+		}
+		snapshot.OnFullSnapshotManifestParsed = func(m *snapshot.SnapshotManifest) {
+			prewarmMu.Lock()
+			defer prewarmMu.Unlock()
+			if turbinePrewarm != nil || m == nil {
+				return
+			}
+			if !seedManifestStakes(m) {
+				mlog.Log.FileOnlyf("turbine prewarm: full manifest carried no loadable epoch stakes; waiting for the incremental")
+				return
+			}
+			if !ensureLeaderSchedule(m) {
+				return // stale full: the incremental hook is the fallback start
+			}
+			startPrewarm(m, "from the full manifest")
+		}
+		snapshot.OnIncrementalManifestParsed = func(m *snapshot.SnapshotManifest) {
+			prewarmMu.Lock()
+			defer prewarmMu.Unlock()
+			if m == nil {
+				return
+			}
+			if turbinePrewarm != nil {
+				// Prewarm already live off the full manifest. Refresh with
+				// the incremental's strictly-fresher stakes; if the full's
+				// schedule horizon missed the resume region, this rebuild is
+				// what turns the receiver's missing-leader drops into
+				// verified shreds.
+				if seedManifestStakes(m) {
+					ensureLeaderSchedule(m)
+				}
+				return
+			}
+			if !seedManifestStakes(m) {
+				mlog.Log.Warnf("turbine prewarm: incremental manifest carried no loadable epoch stakes; prewarm skipped")
+				return
+			}
+			if !ensureLeaderSchedule(m) {
+				mlog.Log.Warnf("turbine prewarm: no leader schedule for the resume region; prewarm skipped")
+				return
+			}
+			startPrewarm(m, "from the incremental manifest")
 		}
 	}
 	if validatorVoteAccountKeypair != "" {
@@ -2019,10 +2075,11 @@ postBootstrap:
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
 
-		RepairCatchupMaxGapSlots: uint64(repairCatchupMaxGapSlots),
-		DisableRPCBlockFetch:     !blockRPCFallback,
-		TurbinePrewarm:           turbinePrewarm,
-		ShredSpoolDir:            catchupShredSpoolDir(),
+		RepairCatchupMaxGapSlots:   uint64(repairCatchupMaxGapSlots),
+		RepairMaxRequestsPerSecond: repairMaxRequestsPerSecond,
+		DisableRPCBlockFetch:       !blockRPCFallback,
+		TurbinePrewarm:             turbinePrewarm,
+		ShredSpoolDir:              catchupShredSpoolDir(),
 	}
 	// Alpenglow-only: the observer engine is the only consensus engine.
 	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{

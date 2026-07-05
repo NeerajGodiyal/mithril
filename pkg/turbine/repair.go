@@ -132,8 +132,11 @@ type repairClient struct {
 	peerCacheAt time.Time
 
 	// Token bucket for the global request-rate ceiling (guarded by mu).
-	rateTokens   float64
-	rateRefillAt time.Time
+	// ratePerSecond is configurable (block.repair_max_requests_per_second);
+	// zero means the built-in default.
+	rateTokens    float64
+	rateRefillAt  time.Time
+	ratePerSecond float64
 
 	// Adaptive timeout state: EWMA of observed response latency (mu-guarded),
 	// effective timeout published atomically for the expiry scan.
@@ -523,21 +526,39 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 	return true
 }
 
+// rateLimitLocked is the effective requests-per-second ceiling.
+func (c *repairClient) rateLimitLocked() float64 {
+	if c.ratePerSecond > 0 {
+		return c.ratePerSecond
+	}
+	return repairMaxRequestsPerSecond
+}
+
+// setRateLimit overrides the request-rate ceiling (0 restores the default).
+// Callers should stay well below the peer-side QoS ban threshold — observed
+// live: ~2000 req/s sustained froze all responses after ~90s.
+func (c *repairClient) setRateLimit(perSecond int) {
+	c.mu.Lock()
+	c.ratePerSecond = float64(perSecond)
+	c.mu.Unlock()
+}
+
 // takeRateTokens refills the request-rate bucket and grants up to want
 // tokens, returning how many requests this scan may send.
 func (c *repairClient) takeRateTokens(want int) int {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	limit := c.rateLimitLocked()
 	if c.rateRefillAt.IsZero() {
 		c.rateRefillAt = now
-		c.rateTokens = repairMaxRequestsPerSecond
+		c.rateTokens = limit
 	}
 	elapsed := now.Sub(c.rateRefillAt).Seconds()
 	c.rateRefillAt = now
-	c.rateTokens += elapsed * repairMaxRequestsPerSecond
-	if c.rateTokens > repairMaxRequestsPerSecond {
-		c.rateTokens = repairMaxRequestsPerSecond // burst cap: one second's worth
+	c.rateTokens += elapsed * limit
+	if c.rateTokens > limit {
+		c.rateTokens = limit // burst cap: one second's worth
 	}
 	grant := want
 	if float64(grant) > c.rateTokens {
@@ -558,8 +579,8 @@ func (c *repairClient) returnRateTokens(count int) {
 	}
 	c.mu.Lock()
 	c.rateTokens += float64(count)
-	if c.rateTokens > repairMaxRequestsPerSecond {
-		c.rateTokens = repairMaxRequestsPerSecond
+	if limit := c.rateLimitLocked(); c.rateTokens > limit {
+		c.rateTokens = limit
 	}
 	c.mu.Unlock()
 }

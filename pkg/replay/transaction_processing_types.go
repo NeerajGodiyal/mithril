@@ -250,9 +250,9 @@ const (
 // If execution failed, all account state changes will be rolled back except
 // deducted fees and any advanced nonces.
 type ExecutedTransaction struct {
-	LoadedTransaction  LoadedTransaction
-	ExecutionDetails   TransactionExecutionDetails
-	ProgramsModified   map[solana.PublicKey]bool // Programs that were modified by this transaction
+	LoadedTransaction LoadedTransaction
+	ExecutionDetails  TransactionExecutionDetails
+	ProgramsModified  map[solana.PublicKey]bool // Programs that were modified by this transaction
 }
 
 // FeesOnlyTransaction represents a transaction that was not able to be executed

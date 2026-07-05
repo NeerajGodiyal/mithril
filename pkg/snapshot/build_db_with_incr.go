@@ -55,6 +55,9 @@ func BuildAccountsDbAuto(
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
 	}
 	mlog.Log.Infof("Parsed full snapshot manifest")
+	if OnFullSnapshotManifestParsed != nil {
+		OnFullSnapshotManifestParsed(manifest)
+	}
 
 	start := time.Now()
 

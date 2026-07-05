@@ -74,6 +74,10 @@ type BlockSourceOpts struct {
 	// "finalized" commitment — and the whole RPC budget stays with the
 	// trailing verifier.
 	RepairCatchupMaxGapSlots uint64
+	// RepairMaxRequestsPerSecond overrides the repair request-rate ceiling
+	// (0 = built-in default). Peer-side serve-repair QoS bans heavy unstaked
+	// requesters, so raise with care.
+	RepairMaxRequestsPerSecond int
 	// ShredSpoolDir: on-disk spool for verified raw shreds (typically under
 	// storage.shredstore). Bounds catchup RAM: far-future shreds live on
 	// disk and hydrate in batches ahead of replay; survives restarts, so a
@@ -326,6 +330,7 @@ type BlockSource struct {
 	// Lightbringer live-stream handoff
 	lightbringerEndpoint           string
 	turbineBindAddr                string
+	repairMaxRequestsPerSecond     int
 	turbineGossipEntrypoint        string
 	turbineGossipBindAddr          string
 	turbineAdvertisedIP            string
@@ -605,6 +610,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		lightbringerEndpoint:         opts.LightbringerEndpoint,
 		turbineBindAddr:              opts.TurbineBindAddr,
 		repairCatchupMaxGapSlots:     opts.RepairCatchupMaxGapSlots,
+		repairMaxRequestsPerSecond:   opts.RepairMaxRequestsPerSecond,
 		shredSpoolDir:                opts.ShredSpoolDir,
 		rpcFallbackEnabled:           !opts.DisableRPCBlockFetch,
 		turbineGossipEntrypoint:      opts.TurbineGossipEntrypoint,
@@ -3261,7 +3267,9 @@ func (bs *BlockSource) runTurbineStream() {
 			}
 		}
 		if gossipClient != nil {
-			if err := receiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err != nil {
+			if err := receiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err == nil {
+				receiver.SetRepairRequestRate(bs.repairMaxRequestsPerSecond)
+			} else {
 				cancelStream()
 				bs.handleLiveShredStreamClosed(fmt.Sprintf("native turbine repair setup failed: %v", err))
 				if bs.waitForStopOrTimeout(backoff) {

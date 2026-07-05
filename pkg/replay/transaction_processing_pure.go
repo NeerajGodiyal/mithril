@@ -111,7 +111,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 					InstructionError: err,
 				},
 			},
-			Instrs:       instrs,
+			Instrs: instrs,
 		}
 	}
 	metrics.GlobalBlockReplay.ComputeBudgetExecutionInstructions.AddTimingSince(start)

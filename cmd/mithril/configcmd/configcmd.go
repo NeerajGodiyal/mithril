@@ -213,6 +213,7 @@ source = "turbine"
 turbine_bind_addr = "0.0.0.0:8001"    # REQUIRED for turbine: the shred receive port (open inbound UDP)
 rpc_fallback = false                  # false (default): with source="turbine", shreds via turbine + repair are the ONLY block path; RPC never fetches blocks (it still serves tip polling + the trailing verifier). true: RPC may catch up when replay is more than repair_catchup_max_gap_slots behind. Ignored for source="rpc"/"lightbringer" (they need RPC catchup).
 repair_catchup_max_gap_slots = 8192   # Gaps within this fill via turbine repair, which then OWNS catchup (no timer fallback to RPC). Only meaningful with rpc_fallback = true; ignored in shreds-only mode.
+# repair_max_requests_per_second = 500 # Repair request-rate ceiling (0/unset = 500). Peer QoS bans heavy unstaked requesters; raise in steps (750, 1000) and watch timeout/late counts in the repair heartbeat.
 # lightbringer_endpoint = "localhost:9000"
 # --- Fetch tuning (RPC catchup) ---
 max_rps = 8               # Max block-fetch requests/sec (match your RPC's limit)

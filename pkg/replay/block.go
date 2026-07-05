@@ -71,6 +71,8 @@ type BlockFetchOpts struct {
 	// Repair-first catchup: resume gaps up to this many slots fill via turbine
 	// repair instead of RPC getBlock (0 disables). Turbine source only.
 	RepairCatchupMaxGapSlots uint64
+	// Repair request-rate ceiling override, requests/second (0 = default).
+	RepairMaxRequestsPerSecond int
 	// Shreds-only: RPC never fetches blocks (block.rpc_fallback=false).
 	DisableRPCBlockFetch bool
 	// TurbinePrewarm: boot-time shred collector to hand over (stop + drain)
@@ -1778,6 +1780,7 @@ func ReplayBlocks(
 		opts.TipPollMs = blockFetchOpts.TipPollMs
 		opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
 		opts.RepairCatchupMaxGapSlots = blockFetchOpts.RepairCatchupMaxGapSlots
+		opts.RepairMaxRequestsPerSecond = blockFetchOpts.RepairMaxRequestsPerSecond
 		opts.DisableRPCBlockFetch = blockFetchOpts.DisableRPCBlockFetch
 		opts.ShredSpoolDir = blockFetchOpts.ShredSpoolDir
 
