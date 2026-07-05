@@ -3172,10 +3172,14 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		}
 		// Peer service table to its own file on a slower cadence: which
 		// peers actually answer, how fast, and their rolling quality score
-		// — the ground truth behind responder-ranked selection.
+		// — the ground truth behind responder-ranked selection. The compact
+		// aggregate goes to catchup.log alongside it.
 		if time.Since(lastPeerTableLog) >= 60*time.Second {
 			lastPeerTableLog = time.Now()
 			logRepairPeerTable(receiver, fmt.Sprintf("catchup head %d", waiting))
+			if quality := repairPeerQualityLine(receiver); quality != "" {
+				mlog.NamedFilef("catchup", "peer quality: %s", quality)
+			}
 		}
 	}
 }
@@ -3744,6 +3748,32 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 
 	mlog.NamedFilef("catchup", "reorder buffer: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s%s",
 		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString(), bs.catchupDiagSuffix())
+}
+
+// repairPeerQualityLine renders the one-clause peer-quality summary ("" when
+// nothing tracked yet): responder count, timely/late shares, median latency,
+// score distribution. Compact by design — it rides existing summary and
+// heartbeat lines rather than adding new ones.
+func repairPeerQualityLine(receiver *turbine.UDPReceiver) string {
+	agg, ok := receiver.RepairPeerQuality()
+	if !ok || agg.Tracked == 0 || agg.Responding == 0 {
+		return ""
+	}
+	return fmt.Sprintf("peers %d/%d (timely %d%%, late %d%%, avg %dms, score p50 %.2f p90 %.2f)",
+		agg.Responding, agg.Tracked, agg.TimelyPct, agg.LatePct,
+		agg.MedianLatencyMillis, agg.ScoreP50, agg.ScoreP90)
+}
+
+// RepairPeerQualityLine exposes the peer-quality clause for the replay
+// summary block; empty when no turbine receiver is active.
+func (bs *BlockSource) RepairPeerQualityLine() string {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver == nil {
+		return ""
+	}
+	return repairPeerQualityLine(receiver)
 }
 
 // logRepairPeerTable writes the busiest repair peers' service records to the

@@ -128,6 +128,15 @@ func (r *UDPReceiver) RepairPeerReport(maxPeers int) []RepairPeerReport {
 	return r.repairClient.peerReport(maxPeers)
 }
 
+// RepairPeerQuality returns the aggregate peer-quality picture; ok is false
+// when no repair client is attached.
+func (r *UDPReceiver) RepairPeerQuality() (RepairPeerAggregate, bool) {
+	if r.repairClient == nil {
+		return RepairPeerAggregate{}, false
+	}
+	return r.repairClient.peerAggregate(), true
+}
+
 func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if r == nil || r.assembler == nil {
 		return

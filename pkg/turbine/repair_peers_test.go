@@ -163,6 +163,39 @@ func TestSelectionCoversAllRankedPeers(t *testing.T) {
 	}
 }
 
+// The aggregate compresses per-peer records into the one-clause summary the
+// replay summary and catchup heartbeat print.
+func TestPeerAggregateSummarizes(t *testing.T) {
+	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	now := time.Now()
+	for i := 0; i < 4; i++ {
+		client.perPeer[repairAddressKey{port: 9200 + i}] = &peerRecord{
+			timely:      8,
+			late:        1,
+			timeouts:    1,
+			score:       0.2 * float64(i+1),
+			latEWMASec:  0.1 * float64(i+1),
+			lastMatched: now,
+		}
+	}
+	client.perPeer[repairAddressKey{port: 9300}] = &peerRecord{timeouts: 10} // tracked, never answered
+
+	agg := client.peerAggregate()
+	if agg.Tracked != 5 || agg.Responding != 4 {
+		t.Fatalf("tracked/responding = %d/%d, want 5/4", agg.Tracked, agg.Responding)
+	}
+	// timely 32, late 4, timeouts 14 -> of 50: 64% timely, 8% late.
+	if agg.TimelyPct != 64 || agg.LatePct != 8 {
+		t.Fatalf("timely/late = %d%%/%d%%, want 64%%/8%%", agg.TimelyPct, agg.LatePct)
+	}
+	if agg.ScoreP50 < 0.59 || agg.ScoreP50 > 0.61 {
+		t.Fatalf("score p50 = %.4f, want ~0.60", agg.ScoreP50)
+	}
+	if agg.MedianLatencyMillis != 300 {
+		t.Fatalf("median latency = %dms, want 300", agg.MedianLatencyMillis)
+	}
+}
+
 // Ranking narrows the responder set to the higher-scoring half (with a
 // floor so selection never overfits to a handful of peers): with 12
 // responders the 4 lowest-scoring are excluded, the floor of 8 kept.

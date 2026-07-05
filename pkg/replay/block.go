@@ -2489,7 +2489,11 @@ func ReplayBlocks(
 					}
 					mlog.Log.InfofPrecise("  shreds: ready median %+.1fs, worst %+.1fs (neg = assembled before replay needed it) | asm median %.1fs, max %.1fs",
 						medianF(ready), maxF(ready), medianF(asm), maxF(asm))
-					mlog.Log.InfofPrecise("  repair: %d slots, %d shreds", windowRepairedSlots, windowRepairedShreds)
+					repairLine := fmt.Sprintf("  repair: %d slots, %d shreds", windowRepairedSlots, windowRepairedShreds)
+					if quality := blockStream.RepairPeerQualityLine(); quality != "" {
+						repairLine += " | " + quality
+					}
+					mlog.Log.InfofPrecise("%s", repairLine)
 				}
 
 				mlog.Log.InfofPrecise("  txns: median %.0f | p90 %.0f | max %.0f | cu/tx median %s | p90 %s",

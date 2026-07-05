@@ -830,6 +830,55 @@ func (c *repairClient) cachedPeerCount() int {
 	return len(c.peerSnapshot(time.Now()))
 }
 
+// RepairPeerAggregate is the one-clause peer-quality picture: how many
+// peers serve us, how reliably, and how the quality mass is distributed —
+// enough to see the trend in a summary line without a table.
+type RepairPeerAggregate struct {
+	Tracked             int
+	Responding          int
+	TimelyPct           int // timely / (timely+late+timeouts), all peers
+	LatePct             int
+	MedianLatencyMillis int64 // median of responding peers' latency EWMAs
+	ScoreP50            float64
+	ScoreP90            float64
+}
+
+func (c *repairClient) peerAggregate() RepairPeerAggregate {
+	cutoff := time.Now().Add(-repairResponderWindow)
+	c.mu.Lock()
+	agg := RepairPeerAggregate{Tracked: len(c.perPeer)}
+	var timely, late, timeouts uint64
+	scores := make([]float64, 0, len(c.perPeer))
+	lats := make([]float64, 0, len(c.perPeer))
+	for _, rec := range c.perPeer {
+		timely += rec.timely
+		late += rec.late
+		timeouts += rec.timeouts
+		if rec.lastMatched.After(cutoff) {
+			agg.Responding++
+			scores = append(scores, rec.score)
+			if rec.latEWMASec > 0 {
+				lats = append(lats, rec.latEWMASec)
+			}
+		}
+	}
+	c.mu.Unlock()
+	if total := timely + late + timeouts; total > 0 {
+		agg.TimelyPct = int(100 * timely / total)
+		agg.LatePct = int(100 * late / total)
+	}
+	sort.Float64s(scores)
+	if len(scores) > 0 {
+		agg.ScoreP50 = scores[len(scores)/2]
+		agg.ScoreP90 = scores[(len(scores)-1)*9/10]
+	}
+	sort.Float64s(lats)
+	if len(lats) > 0 {
+		agg.MedianLatencyMillis = int64(lats[len(lats)/2] * 1000)
+	}
+	return agg
+}
+
 // peerReport snapshots the busiest peers' service records, sorted by sent
 // descending, for file-log peer tables.
 func (c *repairClient) peerReport(maxPeers int) []RepairPeerReport {
