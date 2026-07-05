@@ -2738,10 +2738,10 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				note = "; repair produced nothing this attempt, so the retry waits longer"
 			}
 			bs.repairCatchupCooldownUntil.Store(time.Now().Add(cooldown).Unix())
-			mlog.Log.Warnf("repair catchup: replay fell %d slots behind the live edge (block.repair_catchup_max_gap_slots=%d) — handing catchup to RPC%s | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (repair re-arms once the gap is back under threshold, after %s)",
+			mlog.Log.Warnf("repair catchup: replay fell %d slots behind the live edge (block.repair_catchup_max_gap_slots=%d) — handing catchup to RPC%s | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d) (repair re-arms once the gap is back under threshold, after %s)",
 				liveEdge-waiting, bs.repairCatchupMaxGapSlots, note,
 				repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-				repair.Timeouts-statsAtArm.Timeouts, repair.Peers, cooldown)
+				repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers, cooldown)
 			return false
 		}
 
@@ -2791,11 +2791,15 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if lastErr == "" {
 					lastErr = "none"
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+				hint := ""
+				if stalled > 10*time.Minute {
+					hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or set block.rpc_fallback=true"
+				}
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d)%s",
 					waiting, stalled.Round(time.Second), rpcNote,
 					max(headShreds, 0), errCount, lastErr, headShredDetailString(receiver, waiting), windowBlocks,
 					repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-					repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
+					repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers, hint)
 			}
 		}
 
@@ -2810,10 +2814,10 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		if time.Since(lastStatusLog) >= 15*time.Second {
 			lastStatusLog = time.Now()
 			repair := receiver.Stats().Repair
-			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (responding %d)",
 				waiting, edge, windowBlocks,
 				repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
-				repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
+				repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repair.RespondingPeers)
 		}
 	}
 }

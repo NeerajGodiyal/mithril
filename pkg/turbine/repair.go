@@ -22,6 +22,13 @@ const (
 	repairMaxMissingPerSlot   = 256
 	repairMaxFollowupRequests = 256
 	repairMaxOutstanding      = 2048
+	// Success-weighted peer selection: a peer that answered within this
+	// window counts as a responder, and 3 of 4 requests go to responders.
+	// Blind round-robin across a cluster where only a few peers still
+	// retain old shreds wastes nearly every request on silence (observed
+	// live: 95% timeouts during a resume-gap catchup).
+	repairResponderWindow = 60 * time.Second
+	repairPeerStatsCap    = 1024
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
@@ -35,6 +42,10 @@ type RepairStats struct {
 	Errors      uint64
 	Outstanding int
 	Peers       int
+	// Peers that answered a request within repairResponderWindow — the
+	// number that separates "cluster serves this range" from "only N nodes
+	// still retain it".
+	RespondingPeers int
 }
 
 type repairRequestKind uint8
@@ -67,6 +78,12 @@ type outstandingRepairRequest struct {
 	sentAt time.Time
 }
 
+type peerRecord struct {
+	sent        uint64
+	matched     uint64
+	lastMatched time.Time
+}
+
 type repairClient struct {
 	identity   ed25519.PrivateKey
 	peerSource RepairPeerSource
@@ -74,6 +91,7 @@ type repairClient struct {
 	mu          sync.Mutex
 	outstanding map[repairRequestKey]outstandingRepairRequest
 	byResponse  map[repairResponseKey]repairRequestKey
+	perPeer     map[repairAddressKey]*peerRecord
 	peerCursor  uint64
 
 	peerCacheMu sync.Mutex
@@ -107,6 +125,7 @@ func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (
 		peerSource:  peerSource,
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
+		perPeer:     make(map[repairAddressKey]*peerRecord),
 	}, nil
 }
 
@@ -204,6 +223,7 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	outstanding := c.outstanding[reqKey]
 	delete(c.byResponse, responseKey)
 	delete(c.outstanding, reqKey)
+	c.notePeerMatchedLocked(addrKey)
 	c.mu.Unlock()
 
 	if outstanding.key.slot != shred.Slot {
@@ -291,6 +311,7 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 		sentAt: time.Now(),
 	}
 	c.byResponse[responseKey] = key
+	c.notePeerSentLocked(addrKey)
 	c.mu.Unlock()
 
 	if _, err := conn.WriteToUDP(packet, peer.Addr); err != nil {
@@ -307,6 +328,18 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 }
 
 func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairPeer, bool) {
+	if len(peers) == 0 {
+		return gossip.RepairPeer{}, false
+	}
+	c.peerCursor++
+	// 3 of 4 requests go to peers that answered recently; every 4th
+	// round-robins the FULL set so new or newly-caught-up peers keep being
+	// discovered and the responder set can grow back after churn.
+	if c.peerCursor%4 != 0 {
+		if peer, ok := c.pickResponderLocked(peers, c.peerCursor); ok {
+			return peer, true
+		}
+	}
 	for attempts := 0; attempts < len(peers); attempts++ {
 		index := int(c.peerCursor % uint64(len(peers)))
 		c.peerCursor++
@@ -316,6 +349,61 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 		}
 	}
 	return gossip.RepairPeer{}, false
+}
+
+// pickResponderLocked round-robins among peers that answered a repair request
+// within repairResponderWindow. ok is false when no responder is known yet
+// (fresh start, or the whole set went quiet) — the caller falls back to the
+// full round-robin.
+func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cursor uint64) (gossip.RepairPeer, bool) {
+	now := time.Now()
+	responders := make([]gossip.RepairPeer, 0, 16)
+	for _, peer := range peers {
+		if peer.Addr == nil || peer.Addr.Port == 0 {
+			continue
+		}
+		key, ok := repairAddressKeyFromUDP(peer.Addr)
+		if !ok {
+			continue
+		}
+		if rec := c.perPeer[key]; rec != nil && now.Sub(rec.lastMatched) <= repairResponderWindow {
+			responders = append(responders, peer)
+		}
+	}
+	if len(responders) == 0 {
+		return gossip.RepairPeer{}, false
+	}
+	return responders[int(cursor%uint64(len(responders)))], true
+}
+
+// notePeerSentLocked / notePeerMatchedLocked maintain the per-peer success
+// records behind responder-weighted selection.
+func (c *repairClient) notePeerSentLocked(addr repairAddressKey) {
+	rec := c.perPeer[addr]
+	if rec == nil {
+		if len(c.perPeer) >= repairPeerStatsCap {
+			// Bound memory across peer churn: drop stale non-responders.
+			cutoff := time.Now().Add(-repairResponderWindow)
+			for key, old := range c.perPeer {
+				if old.lastMatched.Before(cutoff) {
+					delete(c.perPeer, key)
+				}
+			}
+		}
+		rec = &peerRecord{}
+		c.perPeer[addr] = rec
+	}
+	rec.sent++
+}
+
+func (c *repairClient) notePeerMatchedLocked(addr repairAddressKey) {
+	rec := c.perPeer[addr]
+	if rec == nil {
+		rec = &peerRecord{}
+		c.perPeer[addr] = rec
+	}
+	rec.matched++
+	rec.lastMatched = time.Now()
 }
 
 func (c *repairClient) expireOutstanding(now time.Time) {
@@ -376,17 +464,25 @@ func repairAddressKeyFromUDP(addr *net.UDPAddr) (repairAddressKey, bool) {
 
 func (c *repairClient) stats() RepairStats {
 	peers := c.cachedPeerCount()
+	cutoff := time.Now().Add(-repairResponderWindow)
 	c.mu.Lock()
 	outstanding := len(c.outstanding)
+	responding := 0
+	for _, rec := range c.perPeer {
+		if rec.lastMatched.After(cutoff) {
+			responding++
+		}
+	}
 	c.mu.Unlock()
 	return RepairStats{
-		Requests:    c.requests.Load(),
-		Responses:   c.responses.Load(),
-		Timeouts:    c.timeouts.Load(),
-		Pings:       c.pings.Load(),
-		Pongs:       c.pongs.Load(),
-		Errors:      c.errors.Load(),
-		Outstanding: outstanding,
-		Peers:       peers,
+		Requests:        c.requests.Load(),
+		Responses:       c.responses.Load(),
+		Timeouts:        c.timeouts.Load(),
+		Pings:           c.pings.Load(),
+		Pongs:           c.pongs.Load(),
+		Errors:          c.errors.Load(),
+		Outstanding:     outstanding,
+		Peers:           peers,
+		RespondingPeers: responding,
 	}
 }
