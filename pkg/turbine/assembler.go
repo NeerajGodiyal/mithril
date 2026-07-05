@@ -82,6 +82,16 @@ type slotState struct {
 	// its shreds arrived via repair rather than turbine.
 	firstShredAt   time.Time
 	repairedShreds int
+	// Assembly failures for this slot (mixed variants/signatures, FEC layout
+	// conflicts, ...). A slot frozen below completion while repair responses
+	// flow is usually poisoned state — the latest error names the poison.
+	errCount int
+	lastErr  string
+}
+
+func (s *slotState) noteError(err error) {
+	s.errCount++
+	s.lastErr = err.Error()
 }
 
 type fecLayout struct {
@@ -202,11 +212,13 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 		if errors.Is(err, ErrDuplicateShred) {
 			return nil, nil
 		}
+		state.noteError(err)
 		return nil, err
 	}
 
 	recovered, err := a.recoverFEC(state, shred.FECSetIndex)
 	if err != nil {
+		state.noteError(err)
 		return nil, err
 	}
 	for _, recoveredShred := range recovered {
@@ -614,6 +626,17 @@ func (a *SlotAssembler) IgnoredOldShreds() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.ignoredOldShreds
+}
+
+// SlotAssemblyErrors reports the failure count and latest failure text for a
+// slot's live assembly state (0/"" once the slot completes or is reset).
+func (a *SlotAssembler) SlotAssemblyErrors(slot uint64) (int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state := a.slots[slot]; state != nil {
+		return state.errCount, state.lastErr
+	}
+	return 0, ""
 }
 
 func (a *SlotAssembler) PriorityRepairSlots() int {

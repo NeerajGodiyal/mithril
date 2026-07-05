@@ -471,6 +471,12 @@ const (
 	repairCatchupPollInterval    = 250 * time.Millisecond
 	repairCatchupWindowSlots     = uint64(64) // matches the assembler's per-call priority range
 	repairCatchupStallWarnEvery  = 60 * time.Second
+	// Stuck-head self-heal: a head slot that holds shreds but cannot complete
+	// while repair responses flow is usually POISONED assembly state (a bad
+	// first shred pinning an FEC signature/variant/layout). Reset the slot's
+	// shred state and re-repair from scratch — bounded attempts, spaced out.
+	repairCatchupHeadResetAfter = 90 * time.Second
+	repairCatchupMaxHeadResets  = 2
 
 	lightbringerLiveEdgeHandoffMaxLag = 4
 	lightbringerGapFallbackWait       = 8 * time.Second
@@ -2625,7 +2631,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	lastWaiting := uint64(0)
 	lastProgress := time.Now()
 	headShreds := -1 // distinct data shreds seen for the current head (-1 = none yet)
+	headResets := 0  // shred-state resets performed on the current head
 	sawWindowFill := false
+	lastResponses := statsAtArm.Responses
 	var lastStallWarn time.Time
 	lastStatusLog := time.Now()
 
@@ -2673,6 +2681,15 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			sawWindowFill = true
 		}
 
+		// Feed the global 5-minute stall watchdog while repair is
+		// demonstrably exchanging data: a head-of-line block on one slot is
+		// a wait (the configured shreds-only behavior), not node death. If
+		// even repair traffic ceases, the watchdog fires as before.
+		if repairNow := receiver.Stats().Repair; repairNow.Responses != lastResponses {
+			lastResponses = repairNow.Responses
+			bs.lastProgress.Store(time.Now().Unix())
+		}
+
 		// The far-behind rule, re-evaluated live against the ADVANCING edge:
 		// the one and only condition that hands catchup back to RPC. In
 		// shreds-only mode there is nothing to hand it to — repair keeps
@@ -2699,13 +2716,33 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			lastWaiting = waiting
 			lastProgress = time.Now()
 			headShreds = -1
+			headResets = 0
 		} else {
 			if obs, ok := receiver.ShredObservation(waiting); ok {
 				headShreds = obs.DataShreds
 			}
+			stalled := time.Since(lastProgress)
+
+			// Stuck-head self-heal: shreds held but the slot cannot complete
+			// while responses flow means the assembly state is likely
+			// poisoned (bad first shred pinning an FEC signature, variant, or
+			// layout). Drop the slot's shred state and re-repair it from
+			// scratch — bounded attempts so a genuinely unserved slot does
+			// not thrash.
+			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter {
+				errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
+				if lastErr == "" {
+					lastErr = "none"
+				}
+				headResets++
+				receiver.ResetSlot(waiting)
+				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held but the slot cannot complete (assembly errors: %d, latest: %s); re-repairing from scratch",
+					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), errCount, lastErr)
+			}
+
 			// A stalled head stays on repair — loudly. The counters make the
 			// failure mode readable while the node keeps asking peers.
-			if stalled := time.Since(lastProgress); stalled >= repairCatchupStallWarnEvery && time.Since(lastStallWarn) >= repairCatchupStallWarnEvery {
+			if stalled >= repairCatchupStallWarnEvery && time.Since(lastStallWarn) >= repairCatchupStallWarnEvery {
 				lastStallWarn = time.Now()
 				repair := receiver.Stats().Repair
 				behind := uint64(0)
@@ -2716,9 +2753,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if !bs.rpcFallbackEnabled {
 					rpcNote = fmt.Sprintf("RPC block fetch is disabled; currently %d behind the edge", behind)
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+				errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
+				if lastErr == "" {
+					lastErr = "none"
+				}
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s), window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
 					waiting, stalled.Round(time.Second), rpcNote,
-					max(headShreds, 0), windowBlocks,
+					max(headShreds, 0), errCount, lastErr, windowBlocks,
 					repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
 					repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
 			}

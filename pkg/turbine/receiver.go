@@ -111,6 +111,12 @@ func (r *UDPReceiver) ShredEdges() (latestShredSlot, highestFullSlot uint64) {
 
 // ShredObservation reports partial shred arrivals for a slot that never
 // became full (skip observability).
+// SlotAssemblyErrors reports assembly-failure count and latest failure text
+// for a slot still being assembled.
+func (r *UDPReceiver) SlotAssemblyErrors(slot uint64) (int, string) {
+	return r.assembler.SlotAssemblyErrors(slot)
+}
+
 func (r *UDPReceiver) ShredObservation(slot uint64) (PartialShredObservation, bool) {
 	return r.assembler.ShredObservation(slot)
 }
