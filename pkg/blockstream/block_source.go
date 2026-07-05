@@ -445,16 +445,22 @@ const (
 	repairCatchupDecisionTimeout = 15 * time.Second
 	repairCatchupPollInterval    = 250 * time.Millisecond
 	repairCatchupWindowSlots     = uint64(64) // matches the assembler's per-call priority range
-	// Two-tier stall handling inside the drive. Head rescue: the head-of-line
-	// slot quiet this long opens a small RPC exception window at the head
-	// while repair keeps filling everything beyond it. Wholesale fallback:
-	// repair delivered NOTHING into the buffer for repairCatchupDeadAfter, or
-	// the head is unmoved for repairCatchupWholesaleAfter despite the RPC
-	// head rescue — RPC owns the whole catchup again (cooldown-gated re-arm).
-	repairCatchupHeadStuckAfter  = 8 * time.Second
+	// Two-tier stall handling inside the drive; every timer is deliberately
+	// patient — turbine repair is the native path and RPC steps in late, not
+	// early. Head rescue: NO NEW SHREDS arrived for the head-of-line slot for
+	// repairCatchupHeadShredQuiet (a big block actively accumulating shreds
+	// is progress, not a stall) opens a small RPC exception window at the
+	// head while repair keeps filling everything beyond it. Wholesale
+	// fallback: the priority window held zero shred-path blocks continuously
+	// for repairCatchupDeadAfter (repair contributing nothing at all — this
+	// timer does NOT reset on RPC-head-rescue progress, so a dead repair
+	// path cannot hide behind an RPC crawl), or the head is unmoved for
+	// repairCatchupWholesaleAfter despite the RPC head rescue — RPC owns the
+	// whole catchup again (cooldown-gated re-arm).
+	repairCatchupHeadShredQuiet  = 15 * time.Second
 	repairCatchupHeadRescueSlots = uint64(4)
-	repairCatchupDeadAfter       = 30 * time.Second
-	repairCatchupWholesaleAfter  = 90 * time.Second
+	repairCatchupDeadAfter       = 60 * time.Second
+	repairCatchupWholesaleAfter  = 120 * time.Second
 
 	lightbringerLiveEdgeHandoffMaxLag = 4
 	lightbringerGapFallbackWait       = 8 * time.Second
@@ -2510,18 +2516,24 @@ func (bs *BlockSource) sleepOrStop(ctx context.Context, d time.Duration) bool {
 //
 // Stall handling is two-tier, because "one slot is missing" and "repair is
 // dead" are different failures needing opposite responses:
-//   - Head rescue (surgical): the head-of-line slot quiet for
-//     repairCatchupHeadStuckAfter opens a repairCatchupHeadRescueSlots-wide
+//   - Head rescue (surgical): NO NEW SHREDS for the head-of-line slot for
+//     repairCatchupHeadShredQuiet opens a repairCatchupHeadRescueSlots-wide
 //     RPC exception at the head — peers may simply not serve that one slot's
 //     shreds anymore — while repair keeps filling everything beyond it. The
-//     window closes the moment the head moves past it; no teardown, no
-//     cooldown, no re-fetching of work repair already did.
+//     trigger is shred silence, NOT emission stall: a 60k-txn block slowly
+//     accumulating its thousands of shreds via repair is progress and must
+//     never invite RPC in. The window closes the moment the head moves past
+//     it; no teardown, no cooldown, no re-fetching of work repair already
+//     did.
 //   - Wholesale fallback (terminal): not one shred-path block materialized
 //     inside the priority window — staging and reorder buffer both empty of
-//     them — for repairCatchupDeadAfter (no peers, unserved range, blocked
-//     socket), or the head is unmoved for repairCatchupWholesaleAfter despite
-//     the RPC head rescue. RPC owns the whole catchup again; the cooldown
-//     stops thrash-re-arming. The fallback line carries the repair
+//     them — continuously for repairCatchupDeadAfter (no peers, unserved
+//     range, blocked socket). This timer resets only on shred-path inventory
+//     appearing, never on emission progress, so a dead repair path cannot
+//     crawl indefinitely behind the RPC head rescue. The backstop: head
+//     unmoved for repairCatchupWholesaleAfter despite the rescue. Either way
+//     RPC owns the whole catchup again and the cooldown stops
+//     thrash-re-arming. The fallback line carries the repair
 //     request/response counters — "no peers", "requests unanswered", and
 //     "responses that never complete a block" read differently there, and
 //     that difference is the first diagnostic to pull from the log.
@@ -2531,6 +2543,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	statsAtArm := receiver.Stats().Repair
 	lastWaiting := uint64(0)
 	lastProgress := time.Now()
+	headShreds := -1 // distinct data shreds seen for the current head (-1 = none yet)
+	headActivityAt := time.Now()
+	lastWindowFill := time.Now()
 	headRescueLogSlot := uint64(0)
 	lastStatusLog := time.Now()
 
@@ -2588,9 +2603,20 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			winEnd = edge
 		}
 
+		// Dead-repair timer: resets ONLY when shred-path inventory exists in
+		// the window — deliberately not on emission progress, so a dead
+		// repair path cannot crawl forever behind the RPC head rescue.
+		if bs.turbineCatchupBlocksInWindow(waiting, winEnd) > 0 {
+			lastWindowFill = time.Now()
+		} else if time.Since(lastWindowFill) > repairCatchupDeadAfter {
+			return wholesale(waiting, fmt.Sprintf("no shred-path block materialized in the %d-slot priority window for %s", winEnd-waiting+1, repairCatchupDeadAfter))
+		}
+
 		if waiting != lastWaiting {
 			lastWaiting = waiting
 			lastProgress = time.Now()
+			headShreds = -1
+			headActivityAt = time.Now()
 			// The head moved past an open rescue window: close it — repair
 			// owns the head again.
 			if headFrom := bs.repairCatchupHeadFrom.Load(); headFrom != 0 && waiting > bs.repairCatchupHeadUntil.Load() {
@@ -2598,23 +2624,27 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				bs.repairCatchupHeadUntil.Store(0)
 			}
 		} else {
-			stuck := time.Since(lastProgress)
-			if stuck > repairCatchupHeadStuckAfter && bs.repairCatchupHeadFrom.Load() == 0 {
+			// Shred arrivals for the head ARE progress: a monster block
+			// accumulating thousands of repair shreds must not trip the
+			// rescue. Only genuine shred silence at the head does.
+			if obs, ok := receiver.ShredObservation(waiting); ok && obs.DataShreds != headShreds {
+				headShreds = obs.DataShreds
+				headActivityAt = time.Now()
+			}
+			headQuiet := time.Since(headActivityAt)
+			if headQuiet > repairCatchupHeadShredQuiet && bs.repairCatchupHeadFrom.Load() == 0 {
 				until := waiting + repairCatchupHeadRescueSlots - 1
 				bs.repairCatchupHeadUntil.Store(until)
 				bs.repairCatchupHeadFrom.Store(waiting)
 				if headRescueLogSlot != waiting {
 					headRescueLogSlot = waiting
 					repair := receiver.Stats().Repair
-					mlog.Log.Infof("repair catchup: head slot %d quiet for %s; RPC fetches %d..%d while repair keeps filling ahead | repair since arming: requests +%d, responses +%d, peers %d",
-						waiting, stuck.Round(time.Second), waiting, until,
+					mlog.Log.Infof("repair catchup: no new shreds for head slot %d in %s (%d held); RPC fetches %d..%d while repair keeps filling ahead | repair since arming: requests +%d, responses +%d, peers %d",
+						waiting, headQuiet.Round(time.Second), max(headShreds, 0), waiting, until,
 						repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses, repair.Peers)
 				}
 			}
-			if stuck > repairCatchupDeadAfter && bs.turbineCatchupBlocksInWindow(waiting, winEnd) == 0 {
-				return wholesale(waiting, fmt.Sprintf("no shred-path block materialized in the %d-slot priority window for %s", winEnd-waiting+1, repairCatchupDeadAfter))
-			}
-			if stuck > repairCatchupWholesaleAfter {
+			if time.Since(lastProgress) > repairCatchupWholesaleAfter {
 				return wholesale(waiting, fmt.Sprintf("head slot unmoved for %s despite the RPC head rescue", repairCatchupWholesaleAfter))
 			}
 		}
