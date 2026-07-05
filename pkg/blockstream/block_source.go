@@ -69,9 +69,17 @@ type BlockSourceOpts struct {
 	// "finalized" commitment — and the whole RPC budget stays with the
 	// trailing verifier.
 	RepairCatchupMaxGapSlots uint64
-	StartSlot                uint64
-	EndSlot                  uint64
-	BlockDir                 string
+	// DisableRPCBlockFetch (config block.rpc_fallback=false): a live-shred
+	// source NEVER fetches blocks over RPC — shreds via turbine + repair are
+	// the only block path, no matter how far behind replay is, and every
+	// force-RPC recovery path routes to turbine repair or holds for
+	// certificate adjudication instead. RPC still serves tip polling and the
+	// trailing verifier. Ignored for non-shred sources (source = "rpc",
+	// "file"), which are their own block path.
+	DisableRPCBlockFetch bool
+	StartSlot            uint64
+	EndSlot              uint64
+	BlockDir             string
 	// When enabled, an active near-tip Lightbringer stream is delivered to replay
 	// as an observation feed for consensus buffering instead of requiring the
 	// block source to resolve every local gap before delivery.
@@ -350,9 +358,12 @@ type BlockSource struct {
 	// monitor keeps watching and re-arms once the gap closes back under the
 	// threshold, cooldown-gated.
 	repairCatchupMaxGapSlots uint64
+	rpcFallbackEnabled       bool // false (block.rpc_fallback=false): RPC never fetches blocks on a live-shred source
 	repairCatchupPending     atomic.Bool
 	repairCatchupFrom        atomic.Uint64 // first gap slot (0 = inactive)
 	repairCatchupUntil       atomic.Uint64 // live edge at activation (0 = inactive)
+	noRPCFallbackLogUnix     atomic.Int64  // rate limit: shreds-only recovery notices
+	parentMismatchHoldUnix   atomic.Int64  // rate limit: shreds-only parent-mismatch hold warns
 	// Catchup stall rescue: when RPC catchup is head-of-line blocked on one
 	// slot (typically a giant block the RPC is slow to serialize) and turbine
 	// is connected, pull that slot via turbine repair and deliver the
@@ -558,6 +569,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		lightbringerEndpoint:         opts.LightbringerEndpoint,
 		turbineBindAddr:              opts.TurbineBindAddr,
 		repairCatchupMaxGapSlots:     opts.RepairCatchupMaxGapSlots,
+		rpcFallbackEnabled:           !opts.DisableRPCBlockFetch,
 		turbineGossipEntrypoint:      opts.TurbineGossipEntrypoint,
 		turbineGossipBindAddr:        opts.TurbineGossipBindAddr,
 		turbineAdvertisedIP:          opts.TurbineAdvertisedIP,
@@ -607,8 +619,10 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 
 	// Repair-first catchup is decided once turbine reports its first shred
 	// edge; until then (bounded) RPC holds off the gap. Armed here so the
-	// fetch scheduler can never race ahead of the decision.
-	if bs.sourceType == BlockSourceTurbine && bs.repairCatchupMaxGapSlots > 0 {
+	// fetch scheduler can never race ahead of the decision. In shreds-only
+	// mode the monitor runs regardless of the threshold — repair is the only
+	// catchup there is.
+	if bs.sourceType == BlockSourceTurbine && (bs.repairCatchupMaxGapSlots > 0 || !bs.rpcFallbackEnabled) {
 		bs.repairCatchupPending.Store(true)
 	}
 
@@ -1341,6 +1355,20 @@ func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot
 	if !bs.usesLiveShredStream() {
 		return
 	}
+	// Shreds-only mode: there is no RPC resume, so setting the force flags
+	// would wedge the decode gates waiting for blocks that never come. Push
+	// turbine repair at the missing range instead and leave the live path
+	// fully open.
+	if !bs.rpcFallbackEnabled {
+		bs.prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot)
+		now := time.Now()
+		if last := time.Unix(bs.noRPCFallbackLogUnix.Load(), 0); now.Sub(last) >= 30*time.Second {
+			bs.noRPCFallbackLogUnix.Store(now.Unix())
+			mlog.Log.Warnf("live stream gap at slot %d: RPC block fetch is disabled (block.rpc_fallback=false); pushing turbine repair instead | first_buffered=%d | buffered_live_stream=%d",
+				waitingSlot, firstBufferedSlot, bufferedCount)
+		}
+		return
+	}
 
 	recoveryUntil := waitingSlot + lightbringerRecoverySlots
 	if recoveryUntil < waitingSlot {
@@ -1957,9 +1985,23 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 	return (bs.isNearTip.Load() || bs.repairCatchupActive()) && slot >= handoffSlot
 }
 
+// rpcBlockFetchAllowed reports whether RPC may fetch BLOCKS at all. With
+// block.rpc_fallback=false (the shipped default) a live-shred source never
+// fetches blocks over RPC — turbine + repair are the only block path, no
+// matter how far behind replay is; RPC serves only tip polling and the
+// trailing verifier. Non-shred sources are their own block path, unaffected.
+func (bs *BlockSource) rpcBlockFetchAllowed() bool {
+	return bs.rpcFallbackEnabled || !bs.usesLiveShredStream()
+}
+
 func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 	if !bs.usesLiveShredStream() {
 		return true
+	}
+	// Shreds-only mode: the single choke point — no slot is ever
+	// RPC-fetchable, so the scheduler idles and stray results are discarded.
+	if !bs.rpcFallbackEnabled {
+		return false
 	}
 	if bs.lightbringerForceRPCUntil.Load() != 0 {
 		return true
@@ -2253,6 +2295,23 @@ func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 				waitingSlot = bs.startSlot
 			}
 		}
+		if !bs.rpcBlockFetchAllowed() {
+			// Shreds-only mode: no RPC resume. Reset the live-path state for
+			// a clean re-handoff when the stream reconnects; replay waits on
+			// shreds, exactly as configured.
+			bs.lightbringerActive.Store(false)
+			bs.invalidateLightbringerResults()
+			cleared := bs.clearBufferedLightbringerBlocks()
+			bs.lightbringerHandoffSlot.Store(0)
+			bs.clearLightbringerGapWatch()
+			bs.resetLightbringerRepairSlot()
+			mlog.Log.Warnf("%s stream closed mid-handoff at slot %d; RPC block fetch is disabled — replay waits for the stream to reconnect and repair to refill",
+				bs.liveShredStreamName(), waitingSlot)
+			if reason != "" {
+				mlog.Log.Warnf("%s stream closed: %s", bs.liveShredStreamName(), reason)
+			}
+			return cleared
+		}
 		bs.forceRPCForLightbringerGap(waitingSlot, 0, 0, 0)
 		mlog.Log.Warnf("%s handoff interrupted; replay will resume RPC fallback from slot %d until a fresh stream runway is armed",
 			bs.liveShredStreamName(), waitingSlot)
@@ -2425,7 +2484,11 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 				edge = bs.repairCatchupEdge(receiver)
 			}
 			if edge == 0 {
-				mlog.Log.Warnf("repair catchup: no live-tip signal within %s; RPC catchup proceeds (repair re-arms when a signal appears and the gap is within threshold)", repairCatchupDecisionTimeout)
+				if bs.rpcFallbackEnabled {
+					mlog.Log.Warnf("repair catchup: no live-tip signal within %s; RPC catchup proceeds (repair re-arms when a signal appears and the gap is within threshold)", repairCatchupDecisionTimeout)
+				} else {
+					mlog.Log.Warnf("repair catchup: no live-tip signal within %s; waiting for shreds (RPC block fetch is disabled)", repairCatchupDecisionTimeout)
+				}
 			}
 		}
 		if edge == 0 || edge < from {
@@ -2437,8 +2500,11 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		}
 
 		gap := edge - from + 1
-		eligible := gap <= bs.repairCatchupMaxGapSlots &&
-			bs.repairCatchupMaxGapSlots > 0 &&
+		// Shreds-only mode ignores the gap threshold entirely: repair is the
+		// only catchup there is, whatever the distance.
+		gapOK := !bs.rpcFallbackEnabled ||
+			(bs.repairCatchupMaxGapSlots > 0 && gap <= bs.repairCatchupMaxGapSlots)
+		eligible := gapOK &&
 			bs.lightbringerHandoffSlot.Load() == 0 &&
 			!bs.isNearTip.Load() &&
 			bs.lightbringerForceRPCUntil.Load() == 0 &&
@@ -2459,15 +2525,18 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		}
 
 		if !eligible || !turbineReady {
-			if first && gap > bs.repairCatchupMaxGapSlots {
+			if first && !gapOK {
 				mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup — turbine repair takes over once the gap closes to within threshold", gap, from, edge, bs.repairCatchupMaxGapSlots)
 			}
 			if eligible && !turbineReady {
 				if time.Since(lastNotReadyLog) >= 30*time.Second {
 					lastNotReadyLog = time.Now()
-					if first {
+					switch {
+					case !bs.rpcFallbackEnabled:
+						mlog.Log.Infof("catchup: WAITING for turbine shreds (received: %v, repair peers: %d) — RPC block fetch is disabled (block.rpc_fallback=false); gap %d slots", shredEdge > 0, repairPeers, gap)
+					case first:
 						mlog.Log.Infof("catchup: gap %d slots is within the repair threshold (%d) — holding RPC block fetch and WAITING for turbine shreds (received: %v, repair peers: %d); RPC engages only if the gap outgrows the threshold", gap, bs.repairCatchupMaxGapSlots, shredEdge > 0, repairPeers)
-					} else {
+					default:
 						mlog.Log.Infof("repair catchup: gap %d slots is within threshold but turbine is not ready yet (shreds received: %v, repair peers: %d); RPC catchup continues — repair takes over when turbine wakes", gap, shredEdge > 0, repairPeers)
 					}
 				}
@@ -2599,8 +2668,10 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		}
 
 		// The far-behind rule, re-evaluated live against the ADVANCING edge:
-		// the one and only condition that hands catchup back to RPC.
-		if liveEdge := bs.repairCatchupEdge(receiver); liveEdge > waiting && liveEdge-waiting > bs.repairCatchupMaxGapSlots {
+		// the one and only condition that hands catchup back to RPC. In
+		// shreds-only mode there is nothing to hand it to — repair keeps
+		// going at any distance.
+		if liveEdge := bs.repairCatchupEdge(receiver); bs.rpcFallbackEnabled && liveEdge > waiting && liveEdge-waiting > bs.repairCatchupMaxGapSlots {
 			repair := receiver.Stats().Repair
 			bs.deactivateRepairCatchup(receiver)
 			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
@@ -2635,8 +2706,12 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				if liveEdge := bs.repairCatchupEdge(receiver); liveEdge > waiting {
 					behind = liveEdge - waiting
 				}
-				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (RPC takes over only if replay falls %d slots behind the edge; currently %d) | head shreds held %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
-					waiting, stalled.Round(time.Second), bs.repairCatchupMaxGapSlots, behind,
+				rpcNote := fmt.Sprintf("RPC takes over only if replay falls %d slots behind the edge; currently %d", bs.repairCatchupMaxGapSlots, behind)
+				if !bs.rpcFallbackEnabled {
+					rpcNote = fmt.Sprintf("RPC block fetch is disabled; currently %d behind the edge", behind)
+				}
+				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+					waiting, stalled.Round(time.Second), rpcNote,
 					max(headShreds, 0), windowBlocks,
 					repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
 					repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
@@ -4392,6 +4467,23 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 
 			if waitingSlot, observedParentSlot, expectedParentSlot, mismatch := bs.waitingLightbringerParentMismatchLocked(); mismatch {
+				// Shreds-only mode: no RPC arbiter exists for a parent
+				// mismatch. Hold emission — the block stays buffered — and
+				// let certificate adjudication resolve it: a decision naming
+				// a different block discards and re-repairs it; a skip cert
+				// clears it; a decision CONFIRMING it means our anchor is
+				// wrong and the certified-switch sweep re-replays. break, not
+				// continue: re-checking the same mismatch in this pass would
+				// spin.
+				if !bs.rpcBlockFetchAllowed() {
+					now := time.Now()
+					if last := time.Unix(bs.parentMismatchHoldUnix.Load(), 0); now.Sub(last) >= 30*time.Second {
+						bs.parentMismatchHoldUnix.Store(now.Unix())
+						mlog.Log.Warnf("turbine block at slot %d claims parent %d but the last emitted block is slot %d; RPC arbitration is disabled (block.rpc_fallback=false) — holding emission for certificate adjudication",
+							waitingSlot, observedParentSlot, expectedParentSlot)
+					}
+					break
+				}
 				bs.reorderMu.Unlock()
 				bs.forceRPCForLightbringerParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot)
 				bs.reorderMu.Lock()

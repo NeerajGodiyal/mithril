@@ -98,6 +98,49 @@ func TestRepairCatchupSuppressesRPCOverGap(t *testing.T) {
 	}
 }
 
+// Shreds-only mode (block.rpc_fallback=false, the shipped default): RPC never
+// fetches blocks on a live-shred source — any slot, any distance, any state —
+// and the live-gap recovery path must not arm the RPC force flags that would
+// close the shred decode gates waiting for an RPC resume that cannot happen.
+// Non-shred sources are unaffected: they ARE the RPC path. The repair monitor
+// arms even with the gap threshold at 0, because repair is the only catchup
+// there is.
+func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:               BlockSourceTurbine,
+		TurbineBindAddr:          "127.0.0.1:0",
+		RepairCatchupMaxGapSlots: 1024,
+		StartSlot:                1_000,
+		DisableRPCBlockFetch:     true,
+	})
+	bs.repairCatchupPending.Store(false)
+	for _, slot := range []uint64{1, 999, 1_000, 5_000, 900_000} {
+		if bs.shouldUseRPCForSlot(slot) {
+			t.Fatalf("shreds-only: slot %d must never be RPC-fetchable", slot)
+		}
+	}
+
+	bs.forceRPCForLightbringerGap(1_500, 0, 0, 0)
+	if bs.lightbringerForceRPCUntil.Load() != 0 || bs.lightbringerCooldownUntil.Load() != 0 {
+		t.Fatalf("shreds-only: live-gap recovery must not arm RPC force flags")
+	}
+
+	rpcSrc := NewBlockSource(&BlockSourceOpts{SourceType: BlockSourceRpc, StartSlot: 1_000, DisableRPCBlockFetch: true})
+	if !rpcSrc.shouldUseRPCForSlot(10) {
+		t.Fatalf("source=rpc must keep fetching blocks regardless of rpc_fallback")
+	}
+
+	noThreshold := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceTurbine,
+		TurbineBindAddr:      "127.0.0.1:0",
+		StartSlot:            1_000,
+		DisableRPCBlockFetch: true,
+	})
+	if !noThreshold.repairCatchupPending.Load() {
+		t.Fatalf("shreds-only must arm the repair monitor even with threshold 0")
+	}
+}
+
 // No timer-based RPC exception exists inside the repair gate: while the
 // drive is active, the ENTIRE gap — head included — is repair-owned. RPC
 // takes catchup back only via the far-behind rule (drive-internal) or

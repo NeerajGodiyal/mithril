@@ -72,6 +72,7 @@ var (
 	blockSource                 string // "turbine" (default), "rpc", or "lightbringer"
 	lightbringerEndpoint        string
 	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
+	blockRPCFallback            bool   // Allow RPC block fetch when > repairCatchupMaxGapSlots behind (default false: shreds only)
 	blockMaxRPS                 int    // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
@@ -330,6 +331,7 @@ func init() {
 	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
 	Run.Flags().StringVar(&turbineGossipBindAddr, "turbine-gossip-bind-addr", "", "UDP address for native turbine gossip traffic (only used when block-source=turbine)")
 	Run.Flags().IntVar(&repairCatchupMaxGapSlots, "repair-catchup-max-gap-slots", 8192, "Fill resume gaps up to this many slots via turbine repair instead of RPC getBlock (0 = always RPC catchup)")
+	Run.Flags().BoolVar(&blockRPCFallback, "rpc-fallback", false, "Allow RPC to fetch blocks when replay is more than repair-catchup-max-gap-slots behind (default false: shreds via turbine + repair are the only block path)")
 	Run.Flags().StringVar(&turbineAdvertisedIP, "turbine-advertised-ip", "", "Public IP advertised by native turbine gossip (optional)")
 	Run.Flags().IntVar(&turbineShredVersion, "turbine-shred-version", 0, "Shred version for native turbine gossip (0 = discover from entrypoint)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
@@ -620,6 +622,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if repairCatchupMaxGapSlots < 0 {
 		repairCatchupMaxGapSlots = 0
 	}
+	blockRPCFallback = getBool("rpc-fallback", "block.rpc_fallback")
 
 	// [lightbringer] section — sidecar management
 	lightbringerEnabled = config.GetBool("lightbringer.enabled")
@@ -1886,6 +1889,7 @@ postBootstrap:
 		NearTipLookahead: blockNearTipLookahead,
 
 		RepairCatchupMaxGapSlots: uint64(repairCatchupMaxGapSlots),
+		DisableRPCBlockFetch:     !blockRPCFallback,
 	}
 	// Alpenglow-only: the observer engine is the only consensus engine.
 	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{
