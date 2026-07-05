@@ -156,7 +156,16 @@ type repairClient struct {
 	outstanding map[repairRequestKey]outstandingRepairRequest
 	byResponse  map[repairResponseKey]repairRequestKey
 	perPeer     map[repairAddressKey]*peerRecord
-	peerCursor  uint64
+	// Selection counters. Three SEPARATE counters on purpose: gateCursor
+	// only decides exploit-vs-explore, rankedCursor rings the ranked set,
+	// exploreCursor rings the full set. Sharing one counter between the %4
+	// gate and a ring index locks the reachable indices to fixed residues
+	// whenever a ring length divides 4 — review caught the top-2 ranked
+	// peers receiving ZERO traffic at len(ranked)=8 via exactly that
+	// aliasing.
+	gateCursor    uint64
+	rankedCursor  uint64
+	exploreCursor uint64
 
 	// Quality-ranked responder cache (mu-guarded); see pickResponderLocked.
 	ranked   []gossip.RepairPeer
@@ -624,19 +633,18 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	if len(peers) == 0 {
 		return gossip.RepairPeer{}, false
 	}
-	c.peerCursor++
-	// 3 of 4 requests go to peers that answered recently; every 4th
+	c.gateCursor++
+	// 3 of 4 requests go to the quality-ranked responder set; every 4th
 	// round-robins the FULL set so new or newly-caught-up peers keep being
 	// discovered and the responder set can grow back after churn.
-	if c.peerCursor%4 != 0 {
-		if peer, ok := c.pickResponderLocked(peers, c.peerCursor); ok {
+	if c.gateCursor%4 != 0 {
+		if peer, ok := c.pickResponderLocked(peers); ok {
 			return peer, true
 		}
 	}
 	for attempts := 0; attempts < len(peers); attempts++ {
-		index := int(c.peerCursor % uint64(len(peers)))
-		c.peerCursor++
-		peer := peers[index]
+		c.exploreCursor++
+		peer := peers[int(c.exploreCursor%uint64(len(peers)))]
 		if peer.Addr != nil && peer.Addr.Port != 0 {
 			return peer, true
 		}
@@ -651,7 +659,7 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 // start, or the whole set went quiet) — the caller falls back to the full
 // round-robin. The ranking is cached briefly: selection runs once per
 // request and must not rebuild-and-sort the set per call.
-func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cursor uint64) (gossip.RepairPeer, bool) {
+func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer) (gossip.RepairPeer, bool) {
 	now := time.Now()
 	if now.Sub(c.rankedAt) > repairRankedRebuildTTL {
 		c.rebuildRankedLocked(peers, now)
@@ -659,7 +667,8 @@ func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cursor uin
 	if len(c.ranked) == 0 {
 		return gossip.RepairPeer{}, false
 	}
-	return c.ranked[int(cursor%uint64(len(c.ranked)))], true
+	c.rankedCursor++
+	return c.ranked[int(c.rankedCursor%uint64(len(c.ranked)))], true
 }
 
 func (c *repairClient) rebuildRankedLocked(peers []gossip.RepairPeer, now time.Time) {

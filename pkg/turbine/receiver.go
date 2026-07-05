@@ -290,6 +290,14 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		close(r.blocks)
 		close(r.errs)
 	})
+	// Everything Run spawns is bound to runCtx and dies with Run — on the
+	// cancel path AND the socket-error path (where the caller's ctx is
+	// still alive). The hydrator is additionally JOINED before the deferred
+	// channel close above runs (LIFO): an unjoined hydrator emitting into a
+	// just-closed blocks channel was a coin-flip panic on every stream
+	// restart or prewarm handover (found by review).
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
 
 	udpAddr, err := net.ResolveUDPAddr("udp", r.Addr)
 	if err != nil {
@@ -308,11 +316,11 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 	r.signalReady(nil)
 
 	go func() {
-		<-ctx.Done()
+		<-runCtx.Done()
 		_ = conn.Close()
 	}()
 	if r.repairClient != nil {
-		go r.repairClient.run(ctx, conn, r.assembler)
+		go r.repairClient.run(runCtx, conn, r.assembler)
 	}
 	if r.spool != nil {
 		// Flush buffered slot-file tails and close the completeness journal
@@ -321,14 +329,25 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		// restart) can only see what reached disk — and it truncate-rewrites
 		// the journal on open, so ours must be closed first.
 		defer r.spool.Close()
-		go r.hydrateLoop(ctx)
+		hydratorDone := make(chan struct{})
+		go func() {
+			defer close(hydratorDone)
+			r.hydrateLoop(runCtx)
+		}()
+		// LIFO: this join runs BEFORE spool.Close and the channel close.
+		// runCancel unblocks an emit in flight (emitAssembled selects on
+		// runCtx), then the wait guarantees no send can follow the close.
+		defer func() {
+			runCancel()
+			<-hydratorDone
+		}()
 	}
 
 	buf := make([]byte, packetDataSize)
 	for {
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if ctx.Err() != nil {
+			if runCtx.Err() != nil {
 				return nil
 			}
 			return err
@@ -417,7 +436,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		if blk == nil {
 			continue
 		}
-		if !r.emitAssembled(ctx, blk) {
+		if !r.emitAssembled(runCtx, blk) {
 			return nil
 		}
 	}

@@ -113,6 +113,56 @@ func TestPeerScoreTracksOutcomes(t *testing.T) {
 	}
 }
 
+// Selection distribution: every ranked peer receives real traffic. Review
+// caught (via simulation) that sharing one cursor between the 1-in-4
+// exploration gate and the ring indices locked responder picks to indices
+// {2,3} mod 4 — the top-2 ranked peers got ZERO requests whenever the
+// ranked set's size divided 4, which the min-peers floor made the common
+// steady state. Separate cursors per ring are the fix; this pins it.
+func TestSelectionCoversAllRankedPeers(t *testing.T) {
+	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	peers := make([]gossip.RepairPeer, 0, 12)
+	for i := byte(1); i <= 12; i++ {
+		peer := repairTestPeer(i, 9100+int(i))
+		peers = append(peers, peer)
+		key, _ := repairAddressKeyFromUDP(peer.Addr)
+		client.perPeer[key] = &peerRecord{
+			score:       1.0 - 0.05*float64(i),
+			lastMatched: time.Now(),
+		}
+	}
+
+	const picks = 4000
+	hits := make(map[string]int, 12)
+	client.mu.Lock()
+	for i := 0; i < picks; i++ {
+		peer, ok := client.nextPeerLocked(peers)
+		if !ok {
+			t.Fatal("selection must succeed with live peers")
+		}
+		hits[peer.Addr.String()]++
+	}
+	ranked := append([]gossip.RepairPeer(nil), client.ranked...)
+	client.mu.Unlock()
+
+	if len(ranked) != repairRankedMinPeers {
+		t.Fatalf("premise: ranked size = %d, want %d", len(ranked), repairRankedMinPeers)
+	}
+	// Each ranked peer must carry a fair share of the 3-in-4 exploit
+	// traffic: expected picks*3/4/8 = 375 each; require at least half that.
+	for i, peer := range ranked {
+		if got := hits[peer.Addr.String()]; got < picks*3/4/repairRankedMinPeers/2 {
+			t.Fatalf("ranked peer %d got %d/%d picks — ring aliasing starves it", i, got, picks)
+		}
+	}
+	// Exploration must still reach every peer, ranked or not.
+	for _, peer := range peers {
+		if hits[peer.Addr.String()] == 0 {
+			t.Fatalf("peer %s never picked — exploration ring broken", peer.Addr)
+		}
+	}
+}
+
 // Ranking narrows the responder set to the higher-scoring half (with a
 // floor so selection never overfits to a handful of peers): with 12
 // responders the 4 lowest-scoring are excluded, the floor of 8 kept.
