@@ -1394,12 +1394,19 @@ func runLive(c *cobra.Command, args []string) {
 					SlotsBehind:        slotsBehind,
 				})
 
-				if choice == 2 {
-					// User chose to start fresh from snapshot
+				if choice == 2 || choice == 3 {
+					// choice 2: rebuild from the best available snapshot (reuse
+					// the local full only if it is the freshest the cluster
+					// offers). choice 3: force a brand-new full download,
+					// ignoring any local snapshot.
 					if snapshotDownloadPath == "" {
 						klog.Fatalf("cannot rebuild from snapshot: no snapshot directory configured (set storage.snapshots or snapshot.download_path in config)")
 					}
-					mlog.Log.Infof("User chose to rebuild from latest snapshot")
+					if choice == 3 {
+						mlog.Log.Infof("User chose to download a brand-new full snapshot")
+					} else {
+						mlog.Log.Infof("User chose to rebuild from the best available snapshot")
+					}
 					if accountsPath != "" {
 						// Record rebuild in history before cleanup (history file is preserved)
 						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
@@ -1407,8 +1414,11 @@ func runLive(c *cobra.Command, args []string) {
 						mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
 						snapshot.CleanAccountsDbDir(accountsPath)
 					}
-					// Check for existing fresh snapshot
-					existingSnap := detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+					// choice 3 forces a fresh download: skip the local-reuse check.
+					var existingSnap *snapshotInfo
+					if choice == 2 {
+						existingSnap = detectFreshSnapshot(snapshotDownloadPath, fullThreshold, rpcEndpoints, ctx)
+					}
 					if existingSnap != nil {
 						mlog.Log.Infof("Reusing existing snapshot file at slot %d", existingSnap.slot)
 						accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)

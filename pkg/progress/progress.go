@@ -1015,7 +1015,8 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 
 	// Build option texts and calculate padding (78 chars inner width)
 	opt1Text := fmt.Sprintf(" [1] Continue from AccountsDB (replay %s slots)", slotsBehind)
-	opt2Text := " [2] Start fresh from latest snapshot (faster to catch up)"
+	opt2Text := " [2] Rebuild from the best available snapshot (reuse local if it's freshest)"
+	opt3Text := " [3] Download a brand-new full snapshot (clean re-download)"
 
 	// Print the prompt box (78 chars inner width)
 	fmt.Println()
@@ -1029,13 +1030,13 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, "OPTIONS:", c, r)
 	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, opt1Text, c, r)
 	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, opt2Text, c, r)
-	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, "", c, r)
+	fmt.Printf("%s│%s %-76s %s│%s\n", c, r, opt3Text, c, r)
 	fmt.Printf("%s└──────────────────────────────────────────────────────────────────────────────┘%s\n", c, r)
 
 	// Read user input
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("Enter choice (1 or 2): ")
+		fmt.Print("Enter choice (1, 2, or 3): ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			// On error (e.g., EOF), default to continuing with AccountsDB
@@ -1048,8 +1049,10 @@ func PromptStaleAccountsDB(info StaleInfo) int {
 			return 1
 		case "2":
 			return 2
+		case "3":
+			return 3
 		default:
-			fmt.Println("Invalid choice. Please enter 1 or 2.")
+			fmt.Println("Invalid choice. Please enter 1, 2, or 3.")
 		}
 	}
 }
