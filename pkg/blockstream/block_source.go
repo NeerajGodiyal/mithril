@@ -342,10 +342,21 @@ type BlockSource struct {
 	// fill via turbine repair; RPC never fetches at/above the gate while
 	// pending (decision in flight, RPC held ≤15s) or active. One attempt per
 	// process; stall or stream loss falls back to RPC catchup.
-	repairCatchupMaxGapSlots    uint64
-	repairCatchupPending        atomic.Bool
-	repairCatchupFrom           atomic.Uint64 // first gap slot (0 = inactive)
-	repairCatchupUntil          atomic.Uint64 // live edge at activation (0 = inactive)
+	repairCatchupMaxGapSlots uint64
+	repairCatchupPending     atomic.Bool
+	repairCatchupFrom        atomic.Uint64 // first gap slot (0 = inactive)
+	repairCatchupUntil       atomic.Uint64 // live edge at activation (0 = inactive)
+	// Catchup stall rescue: when RPC catchup is head-of-line blocked on one
+	// slot (typically a giant block the RPC is slow to serialize) and turbine
+	// is connected, pull that slot via turbine repair and deliver the
+	// assembled block directly — instead of waiting tens of seconds for RPC
+	// to serve data the shred path already has.
+	rescueFrom                  atomic.Uint64 // rescue window start (0 = inactive)
+	rescueUntil                 atomic.Uint64 // rescue window end
+	rescueWaitingSlot           atomic.Uint64 // slot the stall timer is tracking
+	rescueWaitingSince          atomic.Int64  // unix seconds the waiting slot was first seen stalled
+	lastRescueLogSlot           atomic.Uint64 // rate-limit: one rescue log per slot
+	lastReorderGapSlot          atomic.Uint64 // backoff: repeated warns for the same waiting slot slow down
 	alpenglowDecisionSource     func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	alpenglowCandidateBlockSink func(alpenglow.ReplayBlockObservation)
 	alpenglowWantedBlocksFn     func(afterSlot uint64, max int) []alpenglow.WantedBlock
@@ -418,6 +429,12 @@ const (
 	lightbringerMinHandoffRun     = 8
 
 	// Repair-first catchup pacing.
+	// Catchup stall rescue: how long the emitter must be head-of-line blocked
+	// on one slot before turbine repair is asked to fetch it, and how many
+	// slots ahead the rescue window covers.
+	catchupRescueAfterStall  = 10 * time.Second
+	catchupRescueWindowSlots = uint64(16)
+
 	repairCatchupDecisionTimeout      = 15 * time.Second
 	repairCatchupPollInterval         = 250 * time.Millisecond
 	repairCatchupStallTimeout         = 30 * time.Second
@@ -1910,6 +1927,9 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 		if (bs.repairCatchupPending.Load() || bs.repairCatchupActive()) && slot >= bs.repairCatchupGateSlot() {
 			return true
 		}
+		if bs.catchupRescueCovers(slot) {
+			return true // catchup stall rescue: this slot is being repair-pulled
+		}
 		return bs.isNearTip.Load() || bs.shouldStageLightbringerSlot(slot)
 	}
 	return (bs.isNearTip.Load() || bs.repairCatchupActive()) && slot >= handoffSlot
@@ -2160,6 +2180,18 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	}
 
 	if bs.lightbringerHandoffSlot.Load() == 0 {
+		// Catchup stall rescue: deliver a repair-assembled block for the
+		// blocked emitter directly. The parent-connect check at emission
+		// keeps this safe — a non-connecting block stays buffered and the
+		// RPC fetch still races it.
+		if bs.catchupRescueCovers(blk.Slot) && !bs.isNearTip.Load() {
+			select {
+			case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.lightbringerResultGeneration.Load()}:
+				return true
+			case <-bs.stopChan:
+				return false
+			}
+		}
 		// Stage a bounded runway before near-tip so handoff does not have
 		// to build its whole connected run while replay is already at tip.
 		bs.bufferLightbringerBlock(blk)
@@ -2248,6 +2280,57 @@ func (bs *BlockSource) deactivateRepairCatchup(receiver *turbine.UDPReceiver) {
 	bs.repairCatchupUntil.Store(0)
 	if receiver != nil {
 		receiver.SetRetentionFloor(0)
+	}
+}
+
+// catchupRescueCovers reports whether slot is inside the active catchup
+// stall-rescue window.
+func (bs *BlockSource) catchupRescueCovers(slot uint64) bool {
+	from := bs.rescueFrom.Load()
+	return from != 0 && slot >= from && slot <= bs.rescueUntil.Load()
+}
+
+// maybeRescueStalledCatchupSlot detects head-of-line blocking during RPC
+// catchup — the emitter waiting on ONE slot while the buffer grows (typical
+// cause: a 50k+-txn block the RPC takes tens of seconds to serialize) — and,
+// when turbine is connected, arms a small rescue window: the assembler is
+// pushed to repair-fetch the waiting slot and its immediate successors, and
+// blocks assembled inside the window are delivered to the emitter directly.
+// Rescued blocks carry Alpenglow block ids (which RPC blocks cannot), and a
+// rescued block that fails the parent-connect check simply stays buffered
+// with RPC still racing — strictly additive.
+func (bs *BlockSource) maybeRescueStalledCatchupSlot() {
+	if bs.isNearTip.Load() || bs.repairCatchupActive() || bs.repairCatchupPending.Load() {
+		return
+	}
+	if bs.lightbringerHandoffSlot.Load() != 0 || !bs.usesLiveShredStream() {
+		return
+	}
+	bs.reorderMu.Lock()
+	waiting := bs.nextSlotToSend
+	buffered := len(bs.reorderBuffer)
+	waitingMissing := waiting != 0 && bs.reorderBuffer[waiting] == nil && !bs.skippedSlots[waiting]
+	bs.reorderMu.Unlock()
+	if !waitingMissing || buffered < reorderGapWarnThreshold {
+		return
+	}
+
+	now := time.Now()
+	if bs.rescueWaitingSlot.Swap(waiting) != waiting {
+		bs.rescueWaitingSince.Store(now.Unix())
+		return
+	}
+	if now.Sub(time.Unix(bs.rescueWaitingSince.Load(), 0)) < catchupRescueAfterStall {
+		return
+	}
+
+	until := waiting + catchupRescueWindowSlots - 1
+	bs.rescueUntil.Store(until)
+	bs.rescueFrom.Store(waiting)
+	bs.prioritizeTurbineRepairRange(waiting, until)
+	if bs.lastRescueLogSlot.Swap(waiting) != waiting {
+		mlog.Log.Infof("catchup stall rescue: emitter blocked on slot %d for >%s (RPC slow — likely a large block); pulling slots %d..%d via turbine repair instead",
+			waiting, catchupRescueAfterStall, waiting, until)
 	}
 }
 
@@ -2813,10 +2896,18 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 
 	now := time.Now()
 	lastLogUnix := bs.lastReorderGapLog.Load()
-	if lastLogUnix != 0 && now.Sub(time.Unix(lastLogUnix, 0)) < reorderGapWarnInterval {
+	interval := reorderGapWarnInterval
+	if bs.lastReorderGapSlot.Load() == waitingSlot {
+		// Same head-of-line slot as the previous warn: the situation is known
+		// (and the rescue may already be pulling it) — back off 3x instead of
+		// repainting the same message every few seconds.
+		interval *= 3
+	}
+	if lastLogUnix != 0 && now.Sub(time.Unix(lastLogUnix, 0)) < interval {
 		return
 	}
 	bs.lastReorderGapLog.Store(now.Unix())
+	bs.lastReorderGapSlot.Store(waitingSlot)
 
 	var minSlot uint64
 	var maxSlot uint64
@@ -4178,6 +4269,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		if gapWaitingSlot != 0 {
 			bs.prioritizeTurbineRepairForLiveGap(gapWaitingSlot, gapFirstBufferedParentSlot)
 		}
+		bs.maybeRescueStalledCatchupSlot()
 		if shouldFallbackToRPC {
 			bs.handleDetectedLightbringerGap(gapWaitingSlot, gapFirstBufferedSlot, gapFirstBufferedParentSlot, gapBufferedCount)
 		}

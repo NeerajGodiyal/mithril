@@ -1,6 +1,10 @@
 package blockstream
 
-import "testing"
+import (
+	"testing"
+
+	b "github.com/Overclock-Validator/mithril/pkg/block"
+)
 
 func newRepairCatchupTestSource(maxGap uint64) *BlockSource {
 	return NewBlockSource(&BlockSourceOpts{
@@ -134,5 +138,67 @@ func TestRepairCatchupBypassesNearTipGates(t *testing.T) {
 	bs.deactivateRepairCatchup(nil)
 	if bs.shouldDecodeLightbringerSlot(2_050) {
 		t.Fatalf("after deactivation, decode gating must revert to near-tip rules")
+	}
+}
+
+// Catchup stall rescue: when RPC catchup is head-of-line blocked, slots in
+// the armed rescue window decode and deliver straight to the emitter — but
+// ONLY inside the window, only pre-handoff, only outside near-tip.
+func TestCatchupStallRescueGates(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: "127.0.0.1:0",
+		StartSlot:       1_000,
+	})
+
+	// Inactive: normal catchup gating (slot far from tip is dropped).
+	if bs.shouldDecodeLightbringerSlot(1_005) {
+		t.Fatalf("no rescue armed: catchup slots must not decode")
+	}
+
+	// Arm the window [1005, 1020].
+	bs.rescueUntil.Store(1_020)
+	bs.rescueFrom.Store(1_005)
+
+	if !bs.catchupRescueCovers(1_005) || !bs.catchupRescueCovers(1_020) {
+		t.Fatalf("window bounds must be covered")
+	}
+	if bs.catchupRescueCovers(1_004) || bs.catchupRescueCovers(1_021) {
+		t.Fatalf("outside the window must not be covered")
+	}
+	if !bs.shouldDecodeLightbringerSlot(1_010) {
+		t.Fatalf("rescue-window slot must decode during catchup")
+	}
+	if bs.shouldDecodeLightbringerSlot(1_030) {
+		t.Fatalf("slots beyond the window keep normal catchup gating")
+	}
+
+	// Delivery: an assembled block inside the window goes straight to the
+	// emitter's result queue (rpcIdx -1 marks it live-sourced).
+	blk := &b.Block{Slot: 1_006, FromLightbringer: true, SourceParentSlot: 1_005}
+	if !bs.ingestLiveShredBlock(blk) {
+		t.Fatalf("ingest must accept the rescued block")
+	}
+	select {
+	case res := <-bs.resultQueue:
+		if res.slot != 1_006 || res.rpcIdx != -1 || res.block != blk {
+			t.Fatalf("rescued block must be delivered as a live result, got %+v", res)
+		}
+	default:
+		t.Fatalf("rescued block must be in the result queue, not the staging buffer")
+	}
+
+	// Outside the window: staged in the runway buffer as before, not delivered.
+	other := &b.Block{Slot: 1_030, FromLightbringer: true, SourceParentSlot: 1_029}
+	// (1_030 fails shouldDecode in catchup, so the receiver would drop it
+	// before ingest; simulate the near-tip staging path being off by calling
+	// ingest directly — it must buffer, not deliver.)
+	if !bs.ingestLiveShredBlock(other) {
+		t.Fatalf("ingest must not error on non-rescue blocks")
+	}
+	select {
+	case res := <-bs.resultQueue:
+		t.Fatalf("non-rescue block must not be delivered directly, got slot %d", res.slot)
+	default:
 	}
 }
