@@ -31,10 +31,25 @@ type ShredSpool struct {
 	dir      string
 	open     map[uint64]*spoolFile
 	sizes    map[uint64]int64 // per-slot bytes on disk (open writers included)
+	complete map[uint64]SpoolSlotMeta
+	journal  *os.File // append-only completeness journal (complete.idx)
 	bytes    int64
 	maxBytes int64
 	floor    uint64
 }
+
+// SpoolSlotMeta records a slot proven FULLY assembled: every data shred
+// 0..LastIndex was held when the assembler completed it. The completeness
+// index is what turns the spool from a byte cache into the seed of a
+// repair-serving shredstore: complete slots need zero network on restart,
+// answer HighestWindowIndex honestly, and define the serving/retention set.
+type SpoolSlotMeta struct {
+	LastIndex uint32
+	Shreds    uint32
+}
+
+const spoolJournalName = "complete.idx"
+const spoolJournalRecordSize = 8 + 4 + 4
 
 type spoolFile struct {
 	f *os.File
@@ -62,6 +77,7 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 		dir:      dir,
 		open:     make(map[uint64]*spoolFile),
 		sizes:    make(map[uint64]int64),
+		complete: make(map[uint64]SpoolSlotMeta),
 		maxBytes: maxBytes,
 	}
 	entries, err := os.ReadDir(dir)
@@ -78,7 +94,79 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 			s.bytes += info.Size()
 		}
 	}
+	s.loadJournal()
 	return s, nil
+}
+
+// loadJournal restores completeness markers for slot files that still
+// exist, then rewrites the journal compacted (dropping entries for deleted
+// slots). A truncated tail record is discarded.
+func (s *ShredSpool) loadJournal() {
+	path := filepath.Join(s.dir, spoolJournalName)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		for off := 0; off+spoolJournalRecordSize <= len(data); off += spoolJournalRecordSize {
+			slot := binary.LittleEndian.Uint64(data[off:])
+			if _, exists := s.sizes[slot]; !exists {
+				continue // slot file gone: stale entry
+			}
+			s.complete[slot] = SpoolSlotMeta{
+				LastIndex: binary.LittleEndian.Uint32(data[off+8:]),
+				Shreds:    binary.LittleEndian.Uint32(data[off+12:]),
+			}
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return // journal unavailable: completeness degrades to per-run only
+	}
+	for slot, meta := range s.complete {
+		f.Write(spoolJournalRecord(slot, meta))
+	}
+	s.journal = f
+}
+
+func spoolJournalRecord(slot uint64, meta SpoolSlotMeta) []byte {
+	rec := make([]byte, spoolJournalRecordSize)
+	binary.LittleEndian.PutUint64(rec, slot)
+	binary.LittleEndian.PutUint32(rec[8:], meta.LastIndex)
+	binary.LittleEndian.PutUint32(rec[12:], meta.Shreds)
+	return rec
+}
+
+// MarkComplete records that the slot fully assembled (data shreds
+// 0..lastIndex all held). Called by the assembler's completion hook, so
+// hydrating an adopted file re-marks it for free. Idempotent.
+func (s *ShredSpool) MarkComplete(slot uint64, lastIndex uint32, shreds uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if slot < s.floor {
+		return
+	}
+	if _, done := s.complete[slot]; done {
+		return
+	}
+	meta := SpoolSlotMeta{LastIndex: lastIndex, Shreds: shreds}
+	s.complete[slot] = meta
+	if s.journal != nil {
+		s.journal.Write(spoolJournalRecord(slot, meta))
+	}
+}
+
+// IsComplete reports whether the slot was proven fully assembled, with its
+// metadata.
+func (s *ShredSpool) IsComplete(slot uint64) (SpoolSlotMeta, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta, ok := s.complete[slot]
+	return meta, ok
+}
+
+// CompleteSlots reports how many spooled slots are proven complete.
+func (s *ShredSpool) CompleteSlots() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.complete)
 }
 
 func spoolSlotFromName(name string) (uint64, bool) {
@@ -177,6 +265,7 @@ func (s *ShredSpool) dropSlotLocked(slot uint64) {
 	s.closeSlotLocked(slot)
 	s.bytes -= s.sizes[slot]
 	delete(s.sizes, slot)
+	delete(s.complete, slot)
 	_ = os.Remove(s.pathFor(slot))
 }
 
@@ -256,5 +345,9 @@ func (s *ShredSpool) Close() {
 	defer s.mu.Unlock()
 	for slot := range s.open {
 		s.closeSlotLocked(slot)
+	}
+	if s.journal != nil {
+		_ = s.journal.Close()
+		s.journal = nil
 	}
 }

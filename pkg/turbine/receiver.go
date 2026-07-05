@@ -145,6 +145,9 @@ func (r *UDPReceiver) ShredObservation(slot uint64) (PartialShredObservation, bo
 // SetShredSpool attaches the on-disk shred spool. Must be called before Run.
 func (r *UDPReceiver) SetShredSpool(spool *ShredSpool) {
 	r.spool = spool
+	// Journal completeness the moment a slot fully assembles — including
+	// during hydration of adopted files, which self-heals missing markers.
+	r.assembler.SetOnComplete(spool.MarkComplete)
 }
 
 // SetHydrationWindow bounds in-RAM assembly during catchup: verified shreds

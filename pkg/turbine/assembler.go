@@ -51,6 +51,9 @@ type SlotAssembler struct {
 	lastNonCanonicalWant solana.Hash
 	evictedSlots         uint64
 	ignoredOldShreds     uint64
+	// onComplete fires when a slot fully assembles (all data shreds
+	// 0..lastIndex held) — the completeness signal the shred spool journals.
+	onComplete func(slot uint64, lastIndex uint32, shreds uint32)
 }
 
 type SlotRepairRequest struct {
@@ -249,6 +252,9 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	}
 	delete(a.slots, shred.Slot)
 	a.completedSlots[shred.Slot] = struct{}{}
+	if a.onComplete != nil {
+		a.onComplete(shred.Slot, state.lastIndex, uint32(state.lastIndex)+1)
+	}
 	a.trackBlockIDLocked(blk)
 	// Shred-path observability: stamp when the slot's shreds started arriving
 	// and when it became full ("full" = reconstructable, Agave is_full sense).
@@ -335,6 +341,12 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 	}
 	a.slots[slot] = state
 	return state
+}
+
+// SetOnComplete registers the slot-completion hook (spool journaling).
+// Must be set before ingestion starts.
+func (a *SlotAssembler) SetOnComplete(fn func(slot uint64, lastIndex uint32, shreds uint32)) {
+	a.onComplete = fn
 }
 
 // SetEdgeRepairLag bounds the freshness-repair scan to slots within lag of
@@ -576,6 +588,9 @@ func (a *SlotAssembler) CompleteSlot(slot uint64) (*block.Block, error) {
 	}
 	delete(a.slots, slot)
 	a.completedSlots[slot] = struct{}{}
+	if a.onComplete != nil {
+		a.onComplete(slot, state.lastIndex, uint32(state.lastIndex)+1)
+	}
 	a.trackBlockIDLocked(blk)
 	return blk, nil
 }

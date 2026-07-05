@@ -81,3 +81,48 @@ func TestShredSpoolAdoptsExistingFiles(t *testing.T) {
 		t.Fatalf("ReadSlot after reopen = %v, %v", got, err)
 	}
 }
+
+// The completeness journal survives restarts and compacts away entries for
+// deleted slot files — the index that lets a rebooted node know which slots
+// need zero network, and the seed of repair-serving retention policy.
+func TestShredSpoolCompletenessJournal(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first.Append(700, []byte("full"))
+	first.Append(701, []byte("partial"))
+	first.MarkComplete(700, 41, 42)
+	first.Close()
+
+	second, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	meta, ok := second.IsComplete(700)
+	if !ok || meta.LastIndex != 41 || meta.Shreds != 42 {
+		t.Fatalf("journal must survive reopen: %+v ok=%v", meta, ok)
+	}
+	if _, ok := second.IsComplete(701); ok {
+		t.Fatalf("unmarked slot must not be complete")
+	}
+	// Deleting the slot (floor) drops the marker; the compacted journal on
+	// the NEXT reopen must not resurrect it.
+	second.SetFloor(701)
+	if _, ok := second.IsComplete(700); ok {
+		t.Fatalf("floor deletion must clear completeness")
+	}
+	second.Close()
+	third, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("third open: %v", err)
+	}
+	defer third.Close()
+	if _, ok := third.IsComplete(700); ok {
+		t.Fatalf("stale journal entry must not resurrect a deleted slot")
+	}
+	if third.CompleteSlots() != 0 {
+		t.Fatalf("no complete slots expected, got %d", third.CompleteSlots())
+	}
+}

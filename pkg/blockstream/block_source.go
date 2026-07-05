@@ -3236,7 +3236,7 @@ func (bs *BlockSource) runTurbineStream() {
 			} else {
 				receiver.SetShredSpool(spool)
 				if slots, bytes := spool.Stats(); slots > 0 {
-					mlog.Log.Infof("shred spool: adopted %d spooled slots (%.1f MiB) from a previous run", slots, float64(bytes)/(1<<20))
+					mlog.Log.Infof("shred spool: adopted %d spooled slots (%d proven complete, %.1f MiB) from a previous run — complete slots need zero network", slots, spool.CompleteSlots(), float64(bytes)/(1<<20))
 				}
 			}
 		}
