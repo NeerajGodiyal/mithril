@@ -183,13 +183,16 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	}
 
 	state := a.slotState(shred.Slot, shred.Version)
-	if fromRepair {
-		state.repairedShreds++
-	}
 	var err error
 	switch shred.Type {
 	case ShredTypeData:
 		err = state.addDataShred(shred)
+		// Count repair deliveries only for DISTINCT data shreds (after the
+		// duplicate check) so "repaired" can never exceed the distinct-shred
+		// count it is reported alongside.
+		if err == nil && fromRepair {
+			state.repairedShreds++
+		}
 	case ShredTypeCode:
 		err = state.addCodingShred(shred)
 	default:
