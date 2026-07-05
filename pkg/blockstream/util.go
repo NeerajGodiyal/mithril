@@ -24,8 +24,16 @@ func isHistoryUnavailableErr(err error) bool {
 		return false
 	}
 	errStr := err.Error()
+	// -32011: transaction history disabled on the node.
+	// -32001: "Block X cleaned up, does not exist on node. First available
+	// block: Y" — the RPC's ledger retention has pruned the slot. Without
+	// this match the error classifies as "other" and catchup retries the
+	// same pruned slot forever instead of failing with an actionable stop.
 	return strings.Contains(errStr, "Transaction history is not available from this node") ||
-		strings.Contains(errStr, "-32011")
+		strings.Contains(errStr, "-32011") ||
+		strings.Contains(errStr, "-32001") ||
+		strings.Contains(errStr, "cleaned up, does not exist") ||
+		strings.Contains(errStr, "First available block")
 }
 
 // isTransientNetworkErr returns true for common transient network/RPC errors

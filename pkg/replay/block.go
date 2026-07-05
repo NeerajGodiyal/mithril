@@ -1688,11 +1688,17 @@ func ReplayBlocks(
 			TurbineGossipBindAddr:   turbineGossipBindAddr,
 			TurbineAdvertisedIP:     turbineAdvertisedIP,
 			TurbineShredVersion:     turbineShredVersion,
-			LeaderForSlot:           global.LeaderForSlot,
-			BackupRpcEndpoints:      rpcBackups,
-			StartSlot:               startSlot,
-			EndSlot:                 endSlot,
-			BlockDir:                blockDir,
+			// Votor QUIC socket to advertise in CRDS and the gossip identity —
+			// without these the observer socket is never advertised
+			// (gossip logs alpenglow=disabled) and a configured validator
+			// identity never reaches turbine gossip (always ephemeral).
+			TurbineAlpenglowAddr: turbineAlpenglowAddr,
+			TurbineIdentity:      turbineIdentity,
+			LeaderForSlot:        global.LeaderForSlot,
+			BackupRpcEndpoints:   rpcBackups,
+			StartSlot:            startSlot,
+			EndSlot:              endSlot,
+			BlockDir:             blockDir,
 		}
 	} else {
 		opts = &blockstream.BlockSourceOpts{

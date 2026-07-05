@@ -131,6 +131,7 @@ const (
 	blockSourceStopReasonStalled
 	blockSourceStopReasonUnexpectedLiveEnd
 	blockSourceStopReasonAlpenglowConflict
+	blockSourceStopReasonHistoryUnavailable
 )
 
 // slotErrorInfo tracks error history for a specific slot (for stall diagnostics)
@@ -4515,6 +4516,16 @@ func (bs *BlockSource) scheduler() {
 
 				// Only log if slot is not currently inflight (stuck in retry cycle)
 				if !isInflight {
+					// Pruned history is not retryable: the RPC will never have
+					// this block again. Fail fast with an actionable stop
+					// instead of spinning on the same slot forever.
+					if waitingSlotInfo.lastErrorClass == "history_unavailable" && waitingSlotInfo.retryCount >= 6 {
+						mlog.Log.Errorf("catchup slot %d is pruned on the RPC endpoint (%d attempts, history unavailable) — halting: %s",
+							waitingSlot, waitingSlotInfo.retryCount, waitingSlotInfo.lastError)
+						bs.setStopReason(blockSourceStopReasonHistoryUnavailable, waitingSlot)
+						bs.stallError.Store(true)
+						return // exit scheduler — same shutdown path as the stall halt
+					}
 					lastLog := time.Unix(bs.lastPriorityBlockedLog.Load(), 0)
 					if time.Since(lastLog) >= 2*time.Second {
 						bs.lastPriorityBlockedLog.Store(time.Now().Unix())
@@ -4745,6 +4756,8 @@ func (bs *BlockSource) StopReason() string {
 		return fmt.Sprintf("scheduler terminated unexpectedly in live mode at slot %d (endSlot=%d)", stopSlot, endSlot)
 	case blockSourceStopReasonAlpenglowConflict:
 		return fmt.Sprintf("halted on Alpenglow consensus conflict (equivocation) at slot %d", stopSlot)
+	case blockSourceStopReasonHistoryUnavailable:
+		return fmt.Sprintf("RPC history unavailable for slot %d — the endpoint's ledger retention has pruned it. Options: (1) use an RPC endpoint that retains older blocks, (2) raise block.repair_catchup_max_gap_slots so the gap fills via turbine repair instead (peers serve repair from their blockstores), or (3) re-bootstrap from a fresher snapshot (--bootstrap new-snapshot)", stopSlot)
 	default:
 		return "stream closed without an explicit block-source stop reason"
 	}
