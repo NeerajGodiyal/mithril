@@ -1175,8 +1175,13 @@ func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
 	bs.reorderMu.Unlock()
 	latestStreamed := bs.lightbringerLastStreamSlot.Load()
 
-	mlog.Log.Warnf("%s stream reconnect requested: %s | waiting_slot=%d | last_emitted=%d | latest_streamed=%d",
-		bs.liveShredStreamName(), reason, waitingSlot, lastEmitted, latestStreamed)
+	action := "stream reconnect requested"
+	if bs.sourceType == BlockSourceTurbine {
+		// Not a remote stream: this restarts our LOCAL UDP receiver.
+		action = "local receiver restart requested"
+	}
+	mlog.Log.Warnf("%s %s: %s | waiting_slot=%d | last_emitted=%d | latest_streamed=%d",
+		bs.liveShredStreamName(), action, reason, waitingSlot, lastEmitted, latestStreamed)
 
 	bs.lightbringerCancelMu.Lock()
 	cancel := bs.lightbringerCancel
@@ -1330,6 +1335,17 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 			streamName, waitingSlot, streamName, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, waitReason, bs.currentModeString())
 	}
 
+	// Native turbine is NOT a connection: a missing live slot is repair's
+	// job, so pin repair on the hole and return — no reconnect reasoning at
+	// all. "Reconnecting" would tear down our LOCAL receiver/repair/gossip
+	// state (minutes of warmup) and re-stream nothing. Observed live: one
+	// missing slot ended the first shred-native replay 15s in. The idle
+	// watchdog still restarts a genuinely dead socket.
+	if bs.sourceType == BlockSourceTurbine {
+		bs.prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot)
+		return
+	}
+
 	shouldReconnect := false
 	reconnectReason := ""
 	switch {
@@ -1359,17 +1375,6 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 			gapAge.Round(time.Second), streamName, waitingSlot)
 	}
 
-	// Native turbine is NOT a connection: "reconnecting" tears down the
-	// receiver and re-joins gossip (minutes of warmup) without re-streaming
-	// anything — a missing live slot is repair's job, and the gap-detection
-	// path keeps repair pressure on the hole every pass. Observed live: a
-	// single missing slot triggered a full teardown 15s after the first
-	// turbine-sourced replay in the branch's history. Reconnect stays a
-	// Lightbringer-sidecar remedy; the idle watchdog still handles a
-	// genuinely dead turbine socket.
-	if bs.sourceType == BlockSourceTurbine {
-		return
-	}
 	if shouldReconnect && bs.lightbringerGapReconnectSlot.CompareAndSwap(0, waitingSlot) {
 		bs.requestLightbringerReconnect(reconnectReason)
 	}
@@ -2479,15 +2484,18 @@ func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 		}
 		if !bs.rpcBlockFetchAllowed() {
 			// Shreds-only mode: no RPC resume. Reset the live-path state for
-			// a clean re-handoff when the stream reconnects; replay waits on
-			// shreds, exactly as configured.
+			// a clean re-handoff when the receiver restarts; replay waits on
+			// shreds, exactly as configured. Re-arm the repair-catchup
+			// pending flag NOW so the replacement receiver starts its
+			// monitor with boot semantics.
+			bs.repairCatchupPending.Store(true)
 			bs.lightbringerActive.Store(false)
 			bs.invalidateLightbringerResults()
 			cleared := bs.clearBufferedLightbringerBlocks()
 			bs.lightbringerHandoffSlot.Store(0)
 			bs.clearLightbringerGapWatch()
 			bs.resetLightbringerRepairSlot()
-			mlog.Log.Warnf("%s stream closed mid-handoff at slot %d; RPC block fetch is disabled — replay waits for the stream to reconnect and repair to refill",
+			mlog.Log.Warnf("%s receiver stopped mid-handoff at slot %d; RPC block fetch is disabled — the local receiver restarts and repair catchup re-arms to refill",
 				bs.liveShredStreamName(), waitingSlot)
 			if reason != "" {
 				mlog.Log.Warnf("%s stream closed: %s", bs.liveShredStreamName(), reason)
