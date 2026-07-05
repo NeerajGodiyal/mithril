@@ -1942,7 +1942,10 @@ func ReplayBlocks(
 				}
 				if ok && rooted > lastRootedWatermark {
 					lastRootedWatermark = rooted
-					mlog.Log.Infof("forkchoice: rooted watermark advanced to slot %d", rooted)
+					// Terminal-quiet: the 100-slot summary's "consensus:
+					// finalized slot" line carries this signal; per-advance
+					// lines between slot rows are noise. Full detail in logs.
+					mlog.Log.FileOnlyf("forkchoice: rooted watermark advanced to slot %d", rooted)
 				}
 			}
 			// Fold the rooted RAM prefix onto disk (irreversible) through the
