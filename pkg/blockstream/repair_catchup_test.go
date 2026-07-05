@@ -98,6 +98,44 @@ func TestRepairCatchupSuppressesRPCOverGap(t *testing.T) {
 	}
 }
 
+// The stuck-head rescue window is a narrow RPC exception INSIDE the repair
+// gate: only the head slots the drive named are RPC-fetchable; everything
+// beyond stays repair-owned, and deactivation closes the window with the
+// rest of the drive state.
+func TestRepairCatchupHeadRescueWindow(t *testing.T) {
+	bs := newRepairCatchupTestSource(1024)
+	bs.repairCatchupPending.Store(false)
+	bs.repairCatchupFrom.Store(2_001)
+	bs.repairCatchupUntil.Store(2_800)
+
+	if bs.shouldUseRPCForSlot(2_050) {
+		t.Fatalf("premise: gap slots are gated before the head window opens")
+	}
+
+	// The drive opens the window at the stuck head (Until before From — a
+	// non-zero From is the open signal).
+	bs.repairCatchupHeadUntil.Store(2_053)
+	bs.repairCatchupHeadFrom.Store(2_050)
+
+	for slot := uint64(2_050); slot <= 2_053; slot++ {
+		if !bs.shouldUseRPCForSlot(slot) {
+			t.Fatalf("head window slot %d must be RPC-fetchable", slot)
+		}
+	}
+	if bs.shouldUseRPCForSlot(2_049) || bs.shouldUseRPCForSlot(2_054) {
+		t.Fatalf("slots outside the head window stay repair-owned")
+	}
+	if !bs.shouldUseRPCForSlot(2_000) {
+		t.Fatalf("slots below the gap keep normal RPC behavior")
+	}
+
+	// Fallback/teardown closes the head window along with the gate.
+	bs.deactivateRepairCatchup(nil)
+	if bs.repairCatchupHeadFrom.Load() != 0 || bs.repairCatchupHeadUntil.Load() != 0 {
+		t.Fatalf("deactivation must close the head rescue window")
+	}
+}
+
 // During catchup the handoff/decode gates bypass near-tip: gap blocks decode,
 // buffer, and arm the handoff at the gap start even though replay is far
 // behind the live edge.

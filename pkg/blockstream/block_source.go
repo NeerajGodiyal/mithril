@@ -340,12 +340,17 @@ type BlockSource struct {
 	activeTurbineReceiver          *turbine.UDPReceiver
 	// Repair-first catchup: gap slots [repairCatchupFrom, repairCatchupUntil]
 	// fill via turbine repair; RPC never fetches at/above the gate while
-	// pending (decision in flight, RPC held ≤15s) or active. One attempt per
-	// process; stall or stream loss falls back to RPC catchup.
+	// pending (decision in flight, RPC held ≤15s) or active — EXCEPT inside
+	// the stuck-head rescue window, a few-slot RPC exception the drive opens
+	// at the head-of-line slot when repair leaves it quiet (peers may no
+	// longer serve that slot's shreds). Stall or stream loss falls back to
+	// RPC catchup; the monitor keeps watching and re-arms after a cooldown.
 	repairCatchupMaxGapSlots uint64
 	repairCatchupPending     atomic.Bool
 	repairCatchupFrom        atomic.Uint64 // first gap slot (0 = inactive)
 	repairCatchupUntil       atomic.Uint64 // live edge at activation (0 = inactive)
+	repairCatchupHeadFrom    atomic.Uint64 // stuck-head RPC rescue window start (0 = closed)
+	repairCatchupHeadUntil   atomic.Uint64 // stuck-head RPC rescue window end
 	// Catchup stall rescue: when RPC catchup is head-of-line blocked on one
 	// slot (typically a giant block the RPC is slow to serialize) and turbine
 	// is connected, pull that slot via turbine repair and deliver the
@@ -436,11 +441,21 @@ const (
 	catchupRescueAfterStall  = 10 * time.Second
 	catchupRescueWindowSlots = uint64(16)
 
-	repairCatchupReArmCooldown        = 2 * time.Minute
-	repairCatchupDecisionTimeout      = 15 * time.Second
-	repairCatchupPollInterval         = 250 * time.Millisecond
-	repairCatchupStallTimeout         = 30 * time.Second
-	repairCatchupWindowSlots          = uint64(64) // matches the assembler's per-call priority range
+	repairCatchupReArmCooldown   = 2 * time.Minute
+	repairCatchupDecisionTimeout = 15 * time.Second
+	repairCatchupPollInterval    = 250 * time.Millisecond
+	repairCatchupWindowSlots     = uint64(64) // matches the assembler's per-call priority range
+	// Two-tier stall handling inside the drive. Head rescue: the head-of-line
+	// slot quiet this long opens a small RPC exception window at the head
+	// while repair keeps filling everything beyond it. Wholesale fallback:
+	// repair delivered NOTHING into the buffer for repairCatchupDeadAfter, or
+	// the head is unmoved for repairCatchupWholesaleAfter despite the RPC
+	// head rescue — RPC owns the whole catchup again (cooldown-gated re-arm).
+	repairCatchupHeadStuckAfter  = 8 * time.Second
+	repairCatchupHeadRescueSlots = uint64(4)
+	repairCatchupDeadAfter       = 30 * time.Second
+	repairCatchupWholesaleAfter  = 90 * time.Second
+
 	lightbringerLiveEdgeHandoffMaxLag = 4
 	lightbringerGapFallbackWait       = 8 * time.Second
 	lightbringerGapBufferDepth        = 32
@@ -1950,6 +1965,13 @@ func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 	if bs.isLightbringerRepairSlot(slot) {
 		return true
 	}
+	// Stuck-head rescue inside an active repair-catchup drive: the drive opens
+	// a tiny RPC window at the head-of-line slot when repair leaves it quiet;
+	// everything beyond the window stays repair-owned. Checked before the gap
+	// gate below, which would otherwise suppress the head too.
+	if headFrom := bs.repairCatchupHeadFrom.Load(); headFrom != 0 && slot >= headFrom && slot <= bs.repairCatchupHeadUntil.Load() {
+		return true
+	}
 	// Repair-first catchup: the gap belongs to turbine repair. While the
 	// decision is pending (bounded by repairCatchupDecisionTimeout) RPC holds
 	// off entirely; on fallback the pending flag clears and RPC resumes.
@@ -2278,6 +2300,8 @@ func (bs *BlockSource) repairCatchupGateSlot() uint64 {
 }
 
 func (bs *BlockSource) deactivateRepairCatchup(receiver *turbine.UDPReceiver) {
+	bs.repairCatchupHeadFrom.Store(0)
+	bs.repairCatchupHeadUntil.Store(0)
 	bs.repairCatchupFrom.Store(0)
 	bs.repairCatchupUntil.Store(0)
 	if receiver != nil {
@@ -2357,6 +2381,7 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		}
 	}
 	defer bs.repairCatchupPending.Store(false)
+	var lastNotReadyLog time.Time
 
 	for {
 		if bs.stopped.Load() || ctx.Err() != nil {
@@ -2413,9 +2438,27 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 			bs.lightbringerForceRPCUntil.Load() == 0 &&
 			time.Now().Unix() >= bs.repairCatchupCooldownUntil.Load()
 
-		if !eligible {
+		// Repair can only fill the gap if turbine is demonstrably alive: shreds
+		// actually received (proves the socket/gossip path) and repair peers
+		// known (proves there is someone to ask). Arming before that just
+		// stalls the drive and burns a re-arm cooldown while RPC is gated off
+		// the gap — the boot-time failure mode this guard exists for.
+		turbineReady := false
+		var shredEdge uint64
+		repairPeers := 0
+		if eligible {
+			shredEdge, _ = receiver.ShredEdges()
+			repairPeers = receiver.Stats().Repair.Peers
+			turbineReady = shredEdge > 0 && repairPeers > 0
+		}
+
+		if !eligible || !turbineReady {
 			if first && gap > bs.repairCatchupMaxGapSlots {
 				mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup — turbine repair takes over once the gap closes to within threshold", gap, from, edge, bs.repairCatchupMaxGapSlots)
+			}
+			if eligible && !turbineReady && time.Since(lastNotReadyLog) >= 30*time.Second {
+				lastNotReadyLog = time.Now()
+				mlog.Log.Infof("repair catchup: gap %d slots is within threshold but turbine is not ready yet (shreds received: %v, repair peers: %d); RPC catchup continues — repair takes over when turbine wakes", gap, shredEdge > 0, repairPeers)
 			}
 			releaseHold()
 			if !bs.sleepOrStop(ctx, 2*time.Second) {
@@ -2462,13 +2505,49 @@ func (bs *BlockSource) sleepOrStop(ctx context.Context, d time.Duration) bool {
 
 // driveRepairCatchup slides the priority-repair window ahead of replay until
 // replay reaches the (advancing) edge and near-tip mode engages (returns
-// true), or the window stalls and falls back to RPC catchup (returns false —
-// the monitor keeps watching, gated by a cooldown).
+// true), or repair proves unable to move the frontier and catchup falls back
+// to RPC (returns false — the monitor keeps watching, gated by a cooldown).
+//
+// Stall handling is two-tier, because "one slot is missing" and "repair is
+// dead" are different failures needing opposite responses:
+//   - Head rescue (surgical): the head-of-line slot quiet for
+//     repairCatchupHeadStuckAfter opens a repairCatchupHeadRescueSlots-wide
+//     RPC exception at the head — peers may simply not serve that one slot's
+//     shreds anymore — while repair keeps filling everything beyond it. The
+//     window closes the moment the head moves past it; no teardown, no
+//     cooldown, no re-fetching of work repair already did.
+//   - Wholesale fallback (terminal): not one shred-path block materialized
+//     inside the priority window — staging and reorder buffer both empty of
+//     them — for repairCatchupDeadAfter (no peers, unserved range, blocked
+//     socket), or the head is unmoved for repairCatchupWholesaleAfter despite
+//     the RPC head rescue. RPC owns the whole catchup again; the cooldown
+//     stops thrash-re-arming. The fallback line carries the repair
+//     request/response counters — "no peers", "requests unanswered", and
+//     "responses that never complete a block" read differently there, and
+//     that difference is the first diagnostic to pull from the log.
 func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver, from, edge uint64) bool {
 	ticker := time.NewTicker(repairCatchupPollInterval)
 	defer ticker.Stop()
+	statsAtArm := receiver.Stats().Repair
 	lastWaiting := uint64(0)
 	lastProgress := time.Now()
+	headRescueLogSlot := uint64(0)
+	lastStatusLog := time.Now()
+
+	wholesale := func(waiting uint64, reason string) bool {
+		repair := receiver.Stats().Repair
+		bs.deactivateRepairCatchup(receiver)
+		bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
+		// Cool down before the monitor may re-arm, so RPC gets a real chance
+		// to move the frontier past whatever repair stalled on.
+		bs.repairCatchupCooldownUntil.Store(time.Now().Add(repairCatchupReArmCooldown).Unix())
+		mlog.Log.Warnf("repair catchup: falling back to RPC catchup at slot %d — %s | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d (repair may re-arm after %s)",
+			waiting, reason,
+			repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
+			repair.Timeouts-statsAtArm.Timeouts, repair.Peers, repairCatchupReArmCooldown)
+		return false
+	}
+
 	for {
 		select {
 		case <-bs.stopChan:
@@ -2504,28 +2583,85 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			continue
 		}
 
+		winEnd := waiting + repairCatchupWindowSlots - 1
+		if winEnd > edge {
+			winEnd = edge
+		}
+
 		if waiting != lastWaiting {
 			lastWaiting = waiting
 			lastProgress = time.Now()
-		} else if time.Since(lastProgress) > repairCatchupStallTimeout {
-			bs.deactivateRepairCatchup(receiver)
-			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
-			// Cool down before the monitor may re-arm, so RPC gets a real
-			// chance to move the frontier past whatever repair stalled on.
-			bs.repairCatchupCooldownUntil.Store(time.Now().Add(repairCatchupReArmCooldown).Unix())
-			mlog.Log.Warnf("repair catchup stalled at slot %d for %s; falling back to RPC catchup (repair may re-arm after %s)", waiting, repairCatchupStallTimeout, repairCatchupReArmCooldown)
-			return false
+			// The head moved past an open rescue window: close it — repair
+			// owns the head again.
+			if headFrom := bs.repairCatchupHeadFrom.Load(); headFrom != 0 && waiting > bs.repairCatchupHeadUntil.Load() {
+				bs.repairCatchupHeadFrom.Store(0)
+				bs.repairCatchupHeadUntil.Store(0)
+			}
+		} else {
+			stuck := time.Since(lastProgress)
+			if stuck > repairCatchupHeadStuckAfter && bs.repairCatchupHeadFrom.Load() == 0 {
+				until := waiting + repairCatchupHeadRescueSlots - 1
+				bs.repairCatchupHeadUntil.Store(until)
+				bs.repairCatchupHeadFrom.Store(waiting)
+				if headRescueLogSlot != waiting {
+					headRescueLogSlot = waiting
+					repair := receiver.Stats().Repair
+					mlog.Log.Infof("repair catchup: head slot %d quiet for %s; RPC fetches %d..%d while repair keeps filling ahead | repair since arming: requests +%d, responses +%d, peers %d",
+						waiting, stuck.Round(time.Second), waiting, until,
+						repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses, repair.Peers)
+				}
+			}
+			if stuck > repairCatchupDeadAfter && bs.turbineCatchupBlocksInWindow(waiting, winEnd) == 0 {
+				return wholesale(waiting, fmt.Sprintf("no shred-path block materialized in the %d-slot priority window for %s", winEnd-waiting+1, repairCatchupDeadAfter))
+			}
+			if stuck > repairCatchupWholesaleAfter {
+				return wholesale(waiting, fmt.Sprintf("head slot unmoved for %s despite the RPC head rescue", repairCatchupWholesaleAfter))
+			}
 		}
 
 		// Slide the window: release retention behind replay, keep repair
 		// pressure on the slots immediately ahead of it.
 		receiver.SetRetentionFloor(waiting)
-		winEnd := waiting + repairCatchupWindowSlots - 1
-		if winEnd > edge {
-			winEnd = edge
-		}
 		receiver.PrioritizeRepairRange(waiting, winEnd)
+
+		// Repair-health heartbeat to the FILE log only: whether requests go
+		// out, whether responses come back, and whether the window is
+		// actually filling — the questions a stalled-catchup postmortem asks.
+		if time.Since(lastStatusLog) >= 15*time.Second {
+			lastStatusLog = time.Now()
+			repair := receiver.Stats().Repair
+			mlog.Log.FileOnlyf("repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d, timeouts +%d, peers %d",
+				waiting, edge, bs.turbineCatchupBlocksInWindow(waiting, winEnd),
+				repair.Requests-statsAtArm.Requests, repair.Responses-statsAtArm.Responses,
+				repair.Timeouts-statsAtArm.Timeouts, repair.Peers)
+		}
 	}
+}
+
+// turbineCatchupBlocksInWindow counts shred-path blocks the drive's priority
+// window has produced that are visible but not yet emitted — staged runway
+// blocks (pre-handoff blocks live in the staging buffer, NOT the reorder
+// buffer) and reorder-buffered live-stream blocks alike. Zero after a long
+// head stall means repair contributed nothing where it matters — the
+// wholesale-fallback signal. RPC-fetched blocks (head rescue, pre-arm
+// inflight leftovers) never count.
+func (bs *BlockSource) turbineCatchupBlocksInWindow(from, to uint64) int {
+	count := 0
+	bs.lightbringerBufferMu.Lock()
+	for slot := range bs.lightbringerBuffer {
+		if slot >= from && slot <= to {
+			count++
+		}
+	}
+	bs.lightbringerBufferMu.Unlock()
+	bs.reorderMu.Lock()
+	for slot, blk := range bs.reorderBuffer {
+		if blk != nil && blk.FromLightbringer && slot >= from && slot <= to {
+			count++
+		}
+	}
+	bs.reorderMu.Unlock()
+	return count
 }
 
 func (bs *BlockSource) runTurbineStream() {
