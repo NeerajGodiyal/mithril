@@ -93,13 +93,13 @@ Mithril requires a C compiler for the zstd compression library:
 sudo apt-get update && sudo apt-get install -y build-essential
 ```
 
-**Step 4: Install Go 1.25 or later**
+**Step 4: Install Go 1.26.4**
 
-Go 1.25 introduced the "green tea" garbage collector improvements which provide better performance for memory-intensive applications like Mithril.
+Mithril pins Go 1.26.4 (see `go.mod`); this is the version CI builds with. Go's "green tea" garbage collector (since 1.25) gives better performance for memory-intensive applications like Mithril.
 
 ```bash
 # Set Go version and detect architecture
-GO_VERSION="1.25.0"
+GO_VERSION="1.26.4"
 case $(uname -m) in
     x86_64)  GOARCH="amd64" ;;
     aarch64) GOARCH="arm64" ;;
