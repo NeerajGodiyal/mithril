@@ -197,6 +197,9 @@ func BuildAccountsDbAuto(
 		// Copy the manifest so the worker pool's pointer has the value.
 		*incrementalManifest = *incrementalManifestCopy
 		mlog.Log.FileOnlyf("Parsed incremental snapshot manifest")
+		if OnIncrementalManifestParsed != nil {
+			OnIncrementalManifestParsed(incrementalManifestCopy)
+		}
 
 		// Determine save path for incremental snapshot if streaming from HTTP
 		var incrSavePath string

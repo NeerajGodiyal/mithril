@@ -73,6 +73,9 @@ type BlockFetchOpts struct {
 	RepairCatchupMaxGapSlots uint64
 	// Shreds-only: RPC never fetches blocks (block.rpc_fallback=false).
 	DisableRPCBlockFetch bool
+	// TurbinePrewarm: boot-time shred collector to hand over (stop + drain)
+	// right before the block source starts. May be nil.
+	TurbinePrewarm *blockstream.TurbinePrewarm
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1783,6 +1786,17 @@ func ReplayBlocks(
 		opts.NearTipPollMs = blockFetchOpts.NearTipPollMs
 		opts.NearTipLookahead = blockFetchOpts.NearTipLookahead
 	}
+	// Hand the boot-time prewarm over as late as possible: every extra
+	// second collected is a slot repair never fetches. Handover stops the
+	// prewarm receiver, freeing the turbine bind port for the source.
+	if blockFetchOpts != nil && blockFetchOpts.TurbinePrewarm != nil {
+		prewarmBlocks, prewarmDropped := blockFetchOpts.TurbinePrewarm.Handover()
+		opts.PrewarmBlocks = prewarmBlocks
+		if len(prewarmBlocks) > 0 || prewarmDropped > 0 {
+			mlog.Log.Infof("turbine prewarm handover: %d blocks collected during boot (%d dropped over capacity)", len(prewarmBlocks), prewarmDropped)
+		}
+	}
+
 	blockStream := blockstream.NewBlockSource(opts)
 
 	if !isLive {

@@ -26,8 +26,10 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -1043,6 +1045,62 @@ func runLive(c *cobra.Command, args []string) {
 	if err != nil {
 		klog.Fatalf("%v", err)
 	}
+
+	// Turbine prewarm: the moment the incremental snapshot manifest is
+	// parsed we hold current-epoch stakes — enough to verify shreds. Start
+	// collecting live blocks right then, while the AccountsDB is still
+	// building: every slot collected live is a slot repair never has to
+	// fetch one shred per round trip (repair carries no coding shreds, so
+	// pre-join slots get zero FEC leverage). Fail-open: any error just
+	// means no prewarm.
+	var turbinePrewarm *blockstream.TurbinePrewarm
+	if useTurbine && turbineBindAddr != "" && turbineGossipEntrypoint != "" {
+		snapshot.OnIncrementalManifestParsed = func(m *snapshot.SnapshotManifest) {
+			if turbinePrewarm != nil || m == nil {
+				return
+			}
+			tmp := &state.MithrilState{}
+			snapshot.PopulateManifestSeed(tmp, m)
+			loaded := false
+			for epoch, data := range tmp.ManifestEpochStakes {
+				if _, err := global.DeserializeAndLoadEpochStakes([]byte(data)); err != nil {
+					mlog.Log.FileOnlyf("turbine prewarm: loading manifest epoch %d stakes: %v", epoch, err)
+					continue
+				}
+				loaded = true
+			}
+			if !loaded {
+				mlog.Log.Warnf("turbine prewarm: incremental manifest carried no loadable epoch stakes; prewarm skipped")
+				return
+			}
+			epochSchedule := m.Bank.EpochSchedule
+			epoch := epochSchedule.GetEpoch(m.Bank.Slot)
+			if _, ok := global.LeaderForSlot(m.Bank.Slot + 1); !ok {
+				if _, err := replay.PrepareLeaderScheduleLocal(epoch, &epochSchedule, ""); err != nil {
+					mlog.Log.Warnf("turbine prewarm: leader schedule for epoch %d: %v; prewarm skipped", epoch, err)
+					return
+				}
+				mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", epoch)
+			}
+			pw, err := blockstream.StartTurbinePrewarm(blockstream.TurbinePrewarmConfig{
+				BindAddr:         turbineBindAddr,
+				GossipEntrypoint: turbineGossipEntrypoint,
+				GossipBindAddr:   turbineGossipBindAddr,
+				AdvertisedIP:     turbineAdvertisedIP,
+				ShredVersion:     uint16(turbineShredVersion),
+				AlpenglowAddr:    alpenglowObserverBindAddr,
+				Identity:         validatorIdentity,
+				LeaderForSlot:    global.LeaderForSlot,
+				FloorSlot:        m.Bank.Slot + 1,
+			})
+			if err != nil {
+				mlog.Log.Warnf("turbine prewarm failed to start (continuing without): %v", err)
+				return
+			}
+			turbinePrewarm = pw
+			mlog.Log.Infof("turbine prewarm: collecting live shreds from slot %d while the AccountsDB builds", m.Bank.Slot+1)
+		}
+	}
 	if validatorVoteAccountKeypair != "" {
 		votePubkey, err := loadValidatorKeypairPubkey("vote account", validatorVoteAccountKeypair)
 		if err != nil {
@@ -1953,6 +2011,7 @@ postBootstrap:
 
 		RepairCatchupMaxGapSlots: uint64(repairCatchupMaxGapSlots),
 		DisableRPCBlockFetch:     !blockRPCFallback,
+		TurbinePrewarm:           turbinePrewarm,
 	}
 	// Alpenglow-only: the observer engine is the only consensus engine.
 	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{

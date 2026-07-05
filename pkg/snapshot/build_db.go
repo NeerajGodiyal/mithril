@@ -266,6 +266,9 @@ func BuildAccountsDbPaths(
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
 		}
 		mlog.Log.FileOnlyf("Parsed incremental snapshot manifest")
+		if OnIncrementalManifestParsed != nil {
+			OnIncrementalManifestParsed(incrementalManifest)
+		}
 	}
 
 	start := time.Now()

@@ -74,6 +74,10 @@ type BlockSourceOpts struct {
 	// "finalized" commitment — and the whole RPC budget stays with the
 	// trailing verifier.
 	RepairCatchupMaxGapSlots uint64
+	// PrewarmBlocks: turbine blocks collected by the boot-time prewarm
+	// receiver (see TurbinePrewarm), injected into the staging buffer at
+	// construction so the catchup handoff can arm from them immediately.
+	PrewarmBlocks []*b.Block
 	// DisableRPCBlockFetch (config block.rpc_fallback=false): a live-shred
 	// source NEVER fetches blocks over RPC — shreds via turbine + repair are
 	// the only block path, no matter how far behind replay is, and every
@@ -615,6 +619,19 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	// Initialize stats reset time for RPS calculation
 	bs.statsResetTime.Store(time.Now().Unix())
 	bs.confirmSlotAbsent = bs.confirmSlotAbsentViaRPC
+
+	// Prewarm handover: blocks the boot-time receiver collected while the
+	// AccountsDB built. Staged now so the handoff runway can arm the moment
+	// the drive starts — the pre-join repair hole these replace is the
+	// single most expensive thing repair-only catchup does.
+	if len(opts.PrewarmBlocks) > 0 {
+		for _, blk := range opts.PrewarmBlocks {
+			bs.bufferLightbringerBlock(blk)
+		}
+		first := opts.PrewarmBlocks[0].Slot
+		last := opts.PrewarmBlocks[len(opts.PrewarmBlocks)-1].Slot
+		mlog.Log.Infof("turbine prewarm: staged %d pre-collected blocks (slots %d..%d)", len(opts.PrewarmBlocks), first, last)
+	}
 
 	// Log RPC configuration
 	if len(rpcClients) > 1 {

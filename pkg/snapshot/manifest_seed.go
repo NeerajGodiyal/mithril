@@ -13,6 +13,12 @@ import (
 // PopulateManifestSeed copies manifest data to state file for replay context.
 // Called ONCE after AccountsDB build completes, before writing state file.
 // This eliminates the need to read the manifest at runtime.
+// OnIncrementalManifestParsed, when set, fires the moment an incremental
+// snapshot manifest is decoded — the earliest point current-epoch stakes
+// exist during a snapshot bootstrap. The turbine prewarm hooks here to start
+// collecting live shreds while the AccountsDB is still building.
+var OnIncrementalManifestParsed func(m *SnapshotManifest)
+
 func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	// Block config
 	s.ManifestParentSlot = m.Bank.Slot
