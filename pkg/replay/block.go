@@ -67,6 +67,10 @@ type BlockFetchOpts struct {
 	// Near-tip tuning
 	NearTipPollMs    int // Faster poll interval in near-tip, 0 = use default
 	NearTipLookahead int // Slots ahead to schedule in near-tip, 0 = use default
+
+	// Repair-first catchup: resume gaps up to this many slots fill via turbine
+	// repair instead of RPC getBlock (0 disables). Turbine source only.
+	RepairCatchupMaxGapSlots uint64
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -1729,6 +1733,7 @@ func ReplayBlocks(
 		opts.MaxInflight = blockFetchOpts.MaxInflight
 		opts.TipPollMs = blockFetchOpts.TipPollMs
 		opts.TipSafetyMargin = blockFetchOpts.TipSafetyMargin
+		opts.RepairCatchupMaxGapSlots = blockFetchOpts.RepairCatchupMaxGapSlots
 
 		// Mode thresholds
 		opts.NearTipThreshold = blockFetchOpts.NearTipThreshold

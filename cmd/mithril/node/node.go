@@ -71,6 +71,7 @@ var (
 	cluster                     string // "alpenglow" (the only cluster this build boots)
 	blockSource                 string // "turbine" (default), "rpc", or "lightbringer"
 	lightbringerEndpoint        string
+	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
 	blockMaxRPS                 int    // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
 	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
@@ -328,6 +329,7 @@ func init() {
 	Run.Flags().StringVar(&turbineBindAddr, "turbine-bind-addr", "", "UDP address for native turbine shred receiver (only used when block-source=turbine)")
 	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
 	Run.Flags().StringVar(&turbineGossipBindAddr, "turbine-gossip-bind-addr", "", "UDP address for native turbine gossip traffic (only used when block-source=turbine)")
+	Run.Flags().IntVar(&repairCatchupMaxGapSlots, "repair-catchup-max-gap-slots", 1024, "Fill resume gaps up to this many slots via turbine repair instead of RPC getBlock (0 = always RPC catchup)")
 	Run.Flags().StringVar(&turbineAdvertisedIP, "turbine-advertised-ip", "", "Public IP advertised by native turbine gossip (optional)")
 	Run.Flags().IntVar(&turbineShredVersion, "turbine-shred-version", 0, "Shred version for native turbine gossip (0 = discover from entrypoint)")
 	Run.Flags().IntVar(&blockMaxRPS, "block-max-rps", 0, "Max RPC requests per second for block fetching (0 = use default)")
@@ -614,6 +616,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	turbineGossipBindAddr = getString("turbine-gossip-bind-addr", "turbine.gossip_bind_addr")
 	turbineAdvertisedIP = getString("turbine-advertised-ip", "turbine.advertised_ip")
 	turbineShredVersion = getInt("turbine-shred-version", "turbine.shred_version")
+	repairCatchupMaxGapSlots = getInt("repair-catchup-max-gap-slots", "block.repair_catchup_max_gap_slots")
+	if repairCatchupMaxGapSlots < 0 {
+		repairCatchupMaxGapSlots = 0
+	}
 
 	// [lightbringer] section — sidecar management
 	lightbringerEnabled = config.GetBool("lightbringer.enabled")
@@ -1868,6 +1874,8 @@ postBootstrap:
 		// Near-tip tuning
 		NearTipPollMs:    blockNearTipPollMs,
 		NearTipLookahead: blockNearTipLookahead,
+
+		RepairCatchupMaxGapSlots: uint64(repairCatchupMaxGapSlots),
 	}
 	// Alpenglow-only: the observer engine is the only consensus engine.
 	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{

@@ -115,6 +115,13 @@ func (r *UDPReceiver) ShredObservation(slot uint64) (PartialShredObservation, bo
 	return r.assembler.ShredObservation(slot)
 }
 
+// SetRetentionFloor pins the assembler's age cutoff for repair catchup: slots
+// >= floor stay accepted however far they trail the live edge. 0 restores the
+// normal lag-based retention.
+func (r *UDPReceiver) SetRetentionFloor(slot uint64) {
+	r.assembler.SetRetentionFloor(slot)
+}
+
 func (r *UDPReceiver) PrioritizeRepairSlot(slot uint64) {
 	if r == nil || r.assembler == nil {
 		return

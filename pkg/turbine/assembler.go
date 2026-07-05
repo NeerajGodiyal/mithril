@@ -40,6 +40,7 @@ type SlotAssembler struct {
 	priorityRepairOrder  []uint64
 	encoders             map[fecLayout]reedsolomon.Encoder
 	partialShredObs      map[uint64]PartialShredObservation // shreds seen for slots that never became full (retained for skip observability)
+	retentionFloor       uint64                             // when non-zero, slots >= floor are never "too old" (repair catchup holds a window far behind the live edge)
 	maxObservedSlot      uint64
 	highestFullSlot      uint64 // monotonic: highest slot reconstructed from shreds ("full", Agave SlotMeta/is_full sense)
 	recoveredDataShreds  uint64
@@ -320,7 +321,22 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 	return state
 }
 
+// SetRetentionFloor pins the assembler's age cutoff: while floor is non-zero,
+// slots >= floor are accepted and retained even when they trail the live edge
+// by more than the normal lag window. Repair catchup uses this so shreds for a
+// gap far behind the edge are not discarded as "too old". Advance the floor as
+// replay progresses (releasing state behind it) and clear it (0) when caught
+// up. The absolute incomplete-slot cap still applies as the memory backstop.
+func (a *SlotAssembler) SetRetentionFloor(slot uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.retentionFloor = slot
+}
+
 func (a *SlotAssembler) slotTooOldLocked(slot uint64) bool {
+	if a.retentionFloor > 0 && slot >= a.retentionFloor {
+		return false
+	}
 	if a.maxObservedSlot <= maxRetainedIncompleteSlotLag {
 		return false
 	}
@@ -330,6 +346,9 @@ func (a *SlotAssembler) slotTooOldLocked(slot uint64) bool {
 func (a *SlotAssembler) pruneOldSlotsLocked() {
 	if len(a.slots) > 0 && a.maxObservedSlot > maxRetainedIncompleteSlotLag {
 		minSlot := a.maxObservedSlot - maxRetainedIncompleteSlotLag
+		if a.retentionFloor > 0 && a.retentionFloor < minSlot {
+			minSlot = a.retentionFloor // repair catchup: keep the whole window behind the edge
+		}
 		for slot, state := range a.slots {
 			if slot < minSlot {
 				a.recordPartialObsLocked(state)
@@ -340,6 +359,9 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 	}
 	if a.maxObservedSlot > maxRetainedCompletedSlotLag {
 		minSlot := a.maxObservedSlot - maxRetainedCompletedSlotLag
+		if a.retentionFloor > 0 && a.retentionFloor < minSlot {
+			minSlot = a.retentionFloor // keep completed markers + block-id hints for the catchup window
+		}
 		for slot := range a.completedSlots {
 			if slot < minSlot {
 				delete(a.completedSlots, slot)
@@ -387,6 +409,9 @@ func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
 	minSlot := uint64(0)
 	if a.maxObservedSlot > maxRetainedIncompleteSlotLag {
 		minSlot = a.maxObservedSlot - maxRetainedIncompleteSlotLag
+	}
+	if a.retentionFloor > 0 && a.retentionFloor < minSlot {
+		minSlot = a.retentionFloor // repair catchup: keep priority slots across the whole window
 	}
 
 	filtered := a.priorityRepairOrder[:0]

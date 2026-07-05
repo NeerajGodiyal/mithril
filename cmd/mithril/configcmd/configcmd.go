@@ -200,6 +200,7 @@ rpc = ["https://alpenglow.rpcpool.com"]
 # and durable folds stall without a Votor QUIC cert feed ([consensus] below).
 source = "turbine"   # "turbine" (live) | "rpc" (catch-up/debug) | "lightbringer"
 turbine_bind_addr = "0.0.0.0:8001"
+repair_catchup_max_gap_slots = 1024 # Resume gaps up to this fill via turbine repair, not RPC (0 = off)
 # lightbringer_endpoint = "localhost:9000"
 
 [turbine]

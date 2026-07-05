@@ -62,9 +62,16 @@ type BlockSourceOpts struct {
 	// certificate-skipped slots.
 	AlpenglowWantedBlocks  func(afterSlot uint64, max int) []alpenglow.WantedBlock
 	AlpenglowSkipCertified func(slot uint64) bool
-	StartSlot              uint64
-	EndSlot                uint64
-	BlockDir               string
+	// RepairCatchupMaxGapSlots: when resuming behind the live shred edge by at
+	// most this many slots, fill the gap via turbine repair instead of RPC
+	// getBlock (0 disables). Repaired shreds carry block ids + footer certs, so
+	// catchup finality is cryptographic rather than delegated to the RPC's
+	// "finalized" commitment — and the whole RPC budget stays with the
+	// trailing verifier.
+	RepairCatchupMaxGapSlots uint64
+	StartSlot                uint64
+	EndSlot                  uint64
+	BlockDir                 string
 	// When enabled, an active near-tip Lightbringer stream is delivered to replay
 	// as an observation feed for consensus buffering instead of requiring the
 	// block source to resolve every local gap before delivery.
@@ -330,10 +337,18 @@ type BlockSource struct {
 	knownAlpenglowBlockIDs         map[uint64]solana.Hash
 	knownAlpenglowBlockIDOrder     []uint64
 	activeTurbineReceiver          *turbine.UDPReceiver
-	alpenglowDecisionSource        func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
-	alpenglowCandidateBlockSink    func(alpenglow.ReplayBlockObservation)
-	alpenglowWantedBlocksFn        func(afterSlot uint64, max int) []alpenglow.WantedBlock
-	alpenglowSkipCertifiedFn       func(slot uint64) bool
+	// Repair-first catchup: gap slots [repairCatchupFrom, repairCatchupUntil]
+	// fill via turbine repair; RPC never fetches at/above the gate while
+	// pending (decision in flight, RPC held ≤15s) or active. One attempt per
+	// process; stall or stream loss falls back to RPC catchup.
+	repairCatchupMaxGapSlots    uint64
+	repairCatchupPending        atomic.Bool
+	repairCatchupFrom           atomic.Uint64 // first gap slot (0 = inactive)
+	repairCatchupUntil          atomic.Uint64 // live edge at activation (0 = inactive)
+	alpenglowDecisionSource     func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
+	alpenglowCandidateBlockSink func(alpenglow.ReplayBlockObservation)
+	alpenglowWantedBlocksFn     func(afterSlot uint64, max int) []alpenglow.WantedBlock
+	alpenglowSkipCertifiedFn    func(slot uint64) bool
 
 	// Stats tracking
 	stats          BlockSourceStats
@@ -390,16 +405,22 @@ const (
 	defaultTipGateThreshold = 128
 
 	// Lightbringer stream settings
-	lightbringerDialTimeout           = 10 * time.Second
-	lightbringerRetryBackoff          = 2 * time.Second
-	lightbringerMaxRetryBackoff       = 15 * time.Second
-	lightbringerBufferSlots           = 256
-	lightbringerFirstSlotWarn         = 10 * time.Second
-	lightbringerIdleReconnect         = 30 * time.Second
-	lightbringerNoEmitReconnect       = 30 * time.Second
-	lightbringerGapReconnectAfter     = 30 * time.Second
-	lightbringerDeepGapReconnect      = 15 * time.Second
-	lightbringerMinHandoffRun         = 8
+	lightbringerDialTimeout       = 10 * time.Second
+	lightbringerRetryBackoff      = 2 * time.Second
+	lightbringerMaxRetryBackoff   = 15 * time.Second
+	lightbringerBufferSlots       = 256
+	lightbringerFirstSlotWarn     = 10 * time.Second
+	lightbringerIdleReconnect     = 30 * time.Second
+	lightbringerNoEmitReconnect   = 30 * time.Second
+	lightbringerGapReconnectAfter = 30 * time.Second
+	lightbringerDeepGapReconnect  = 15 * time.Second
+	lightbringerMinHandoffRun     = 8
+
+	// Repair-first catchup pacing.
+	repairCatchupDecisionTimeout      = 15 * time.Second
+	repairCatchupPollInterval         = 250 * time.Millisecond
+	repairCatchupStallTimeout         = 30 * time.Second
+	repairCatchupWindowSlots          = uint64(64) // matches the assembler's per-call priority range
 	lightbringerLiveEdgeHandoffMaxLag = 4
 	lightbringerGapFallbackWait       = 8 * time.Second
 	lightbringerGapBufferDepth        = 32
@@ -496,6 +517,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		catchupTipSafety:             tipSafetyMargin, // Store original for switching back to catchup
 		lightbringerEndpoint:         opts.LightbringerEndpoint,
 		turbineBindAddr:              opts.TurbineBindAddr,
+		repairCatchupMaxGapSlots:     opts.RepairCatchupMaxGapSlots,
 		turbineGossipEntrypoint:      opts.TurbineGossipEntrypoint,
 		turbineGossipBindAddr:        opts.TurbineGossipBindAddr,
 		turbineAdvertisedIP:          opts.TurbineAdvertisedIP,
@@ -541,6 +563,13 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		if opts.TurbineGossipEntrypoint != "" {
 			mlog.Log.Infof("Native turbine gossip configured with entrypoint %s", opts.TurbineGossipEntrypoint)
 		}
+	}
+
+	// Repair-first catchup is decided once turbine reports its first shred
+	// edge; until then (bounded) RPC holds off the gap. Armed here so the
+	// fetch scheduler can never race ahead of the decision.
+	if bs.sourceType == BlockSourceTurbine && bs.repairCatchupMaxGapSlots > 0 {
+		bs.repairCatchupPending.Store(true)
 	}
 
 	return bs
@@ -698,8 +727,8 @@ func (bs *BlockSource) serviceAlpenglowWantedBlocks(nudged map[uint64]time.Time,
 	if bs.alpenglowWantedBlocksFn == nil || bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints {
 		return
 	}
-	if !bs.isNearTip.Load() {
-		return // catch-up fills gaps via ordinary backfill; hints would be noise
+	if !bs.isNearTip.Load() && !bs.repairCatchupActive() {
+		return // RPC catch-up fills gaps via ordinary backfill; hints would be noise
 	}
 
 	bs.reorderMu.Lock()
@@ -1614,14 +1643,16 @@ func (bs *BlockSource) lightbringerHandoffRequiredLastSlot(waitingSlot uint64) u
 }
 
 func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, bool) {
-	if !bs.isNearTip.Load() {
+	if !bs.isNearTip.Load() && !bs.repairCatchupActive() {
 		return nil, 0, false
 	}
 	if handoffSlot := bs.lightbringerHandoffSlot.Load(); handoffSlot != 0 {
 		return nil, handoffSlot, false
 	}
-	if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
-		return nil, 0, false
+	if !bs.repairCatchupActive() {
+		if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
+			return nil, 0, false
+		}
 	}
 
 	bs.lightbringerBufferMu.Lock()
@@ -1776,7 +1807,7 @@ func (bs *BlockSource) enqueueLightbringerBlocks(blocks []*b.Block) {
 }
 
 func (bs *BlockSource) maybePrepareLightbringerHandoff() {
-	if !bs.usesLiveShredStream() || !bs.isNearTip.Load() {
+	if !bs.usesLiveShredStream() || (!bs.isNearTip.Load() && !bs.repairCatchupActive()) {
 		return
 	}
 	if bs.lightbringerForceRPCUntil.Load() != 0 {
@@ -1791,8 +1822,21 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 	anchorSlot := bs.lastEmittedBlockSlot
 	bs.reorderMu.Unlock()
 
-	if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
-		return
+	// Resume-time anchor: nothing has emitted this process yet, but the
+	// runway's first block must parent-link to the resume block. This also
+	// chain-checks the repaired gap against our durable state.
+	if anchorSlot == 0 {
+		if lastExecuted := bs.lastExecutedSlot.Load(); lastExecuted != 0 {
+			anchorSlot = lastExecuted
+		}
+	}
+
+	// A large replay gap is the POINT of repair catchup; the gap check guards
+	// the ordinary near-tip handoff only.
+	if !bs.repairCatchupActive() {
+		if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
+			return
+		}
 	}
 
 	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(waitingSlot, anchorSlot)
@@ -1857,9 +1901,17 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 	}
 	handoffSlot := bs.lightbringerHandoffSlot.Load()
 	if handoffSlot == 0 {
+		// While repair catchup is pending or active, buffer everything above
+		// the resume frontier: the runway arms the handoff at the gap start,
+		// and edge blocks assembled meanwhile must not be dropped (a dropped
+		// block's slot is marked completed in the assembler and would need a
+		// cert-driven reset to re-fetch).
+		if (bs.repairCatchupPending.Load() || bs.repairCatchupActive()) && slot >= bs.repairCatchupGateSlot() {
+			return true
+		}
 		return bs.isNearTip.Load() || bs.shouldStageLightbringerSlot(slot)
 	}
-	return bs.isNearTip.Load() && slot >= handoffSlot
+	return (bs.isNearTip.Load() || bs.repairCatchupActive()) && slot >= handoffSlot
 }
 
 func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
@@ -1874,6 +1926,12 @@ func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 	}
 	if bs.isLightbringerRepairSlot(slot) {
 		return true
+	}
+	// Repair-first catchup: the gap belongs to turbine repair. While the
+	// decision is pending (bounded by repairCatchupDecisionTimeout) RPC holds
+	// off entirely; on fallback the pending flag clears and RPC resumes.
+	if (bs.repairCatchupPending.Load() || bs.repairCatchupActive()) && slot >= bs.repairCatchupGateSlot() {
+		return false
 	}
 	if !bs.isNearTip.Load() {
 		return true
@@ -2108,7 +2166,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		return true
 	}
 
-	if !bs.isNearTip.Load() || blk.Slot < bs.lightbringerHandoffSlot.Load() {
+	if (!bs.isNearTip.Load() && !bs.repairCatchupActive()) || blk.Slot < bs.lightbringerHandoffSlot.Load() {
 		return true
 	}
 
@@ -2123,6 +2181,9 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 	bs.lightbringerConnected.Store(false)
 	bs.clearLightbringerCancel()
+	// A dead stream ends any repair-catchup attempt: the receiver (and its
+	// retention floor) is gone; the interrupted-handoff path below forces RPC.
+	bs.deactivateRepairCatchup(nil)
 	interrupted := bs.lightbringerHandoffSlot.Load() != 0 || bs.lightbringerActive.Load()
 	if interrupted {
 		bs.reorderMu.Lock()
@@ -2151,6 +2212,168 @@ func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
 		mlog.Log.Warnf("%s stream closed: %s", bs.liveShredStreamName(), reason)
 	}
 	return clearedPrefetched
+}
+
+// repairCatchupActive reports whether the repair-first catchup window is
+// armed (gap slots fill via turbine repair; RPC stays off them).
+func (bs *BlockSource) repairCatchupActive() bool {
+	return bs.repairCatchupFrom.Load() != 0
+}
+
+// repairCatchupResumeFrontier is the slot replay resumes at: the durable /
+// snapshot frontier seeded into the block source at construction (startSlot =
+// manifest.Bank.Slot+1 on a fresh bootstrap, i.e. the incremental snapshot
+// slot; or GetResumeSlot() on a restart). This — NOT lastExecutedSlot, which
+// is 0 until replay executes its first block — is the baseline for the catchup
+// gap and the pending RPC gate. During the pending window RPC is suppressed
+// over the gap, so nextSlotToSend cannot advance past startSlot; reading the
+// immutable startSlot avoids taking reorderMu on the fetch hot path.
+func (bs *BlockSource) repairCatchupResumeFrontier() uint64 {
+	return bs.startSlot
+}
+
+// repairCatchupGateSlot is the first slot RPC must not fetch while repair
+// catchup is pending or active. While pending it is the resume frontier; once
+// active it is the armed gap start.
+func (bs *BlockSource) repairCatchupGateSlot() uint64 {
+	if from := bs.repairCatchupFrom.Load(); from != 0 {
+		return from
+	}
+	return bs.repairCatchupResumeFrontier()
+}
+
+func (bs *BlockSource) deactivateRepairCatchup(receiver *turbine.UDPReceiver) {
+	bs.repairCatchupFrom.Store(0)
+	bs.repairCatchupUntil.Store(0)
+	if receiver != nil {
+		receiver.SetRetentionFloor(0)
+	}
+}
+
+// runRepairCatchup decides whether the startup gap is repair-fillable and, if
+// so, drives a sliding priority-repair window across it until replay reaches
+// the live edge. The gap is measured from the RESUME FRONTIER (the snapshot /
+// durable slot replay restarts at) to the live tip — NOT from lastExecutedSlot,
+// which is still 0 here because replay has not executed its first block yet
+// (that is precisely why a fresh snapshot bootstrap must key off the resume
+// frontier). The live edge is whichever tip signal appears first: turbine's
+// observed shred edge or the RPC confirmed tip. Fallbacks are fail-open to RPC
+// catchup: no tip signal, gap too large, no resume frontier, or a stall.
+func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver) {
+	// Pending clears exactly once — repair catchup is attempted once per
+	// process; stream restarts afterwards use ordinary RPC catchup.
+	defer bs.repairCatchupPending.Store(false)
+
+	from := bs.repairCatchupResumeFrontier()
+	if from == 0 {
+		mlog.Log.Warnf("repair catchup: no resume frontier (replaying from genesis); using RPC catchup")
+		return
+	}
+
+	// Decide from whichever live-tip signal is available first: turbine's
+	// observed shred edge or the RPC confirmed tip. Either resolves the gap
+	// without waiting on the other.
+	deadline := time.Now().Add(repairCatchupDecisionTimeout)
+	var edge uint64
+	for {
+		if bs.stopped.Load() || ctx.Err() != nil {
+			return
+		}
+		turbineEdge, _ := receiver.ShredEdges()
+		edge = turbineEdge
+		if tip := bs.confirmedTip.Load(); tip > edge {
+			edge = tip
+		}
+		if edge > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			mlog.Log.Warnf("repair catchup: no live-tip signal within %s; falling back to RPC catchup", repairCatchupDecisionTimeout)
+			return
+		}
+		select {
+		case <-bs.stopChan:
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(repairCatchupPollInterval):
+		}
+	}
+
+	if edge < from {
+		mlog.Log.Infof("repair catchup: already at the live edge (edge %d, resume %d)", edge, from)
+		return
+	}
+	gap := edge - from + 1
+	if gap > bs.repairCatchupMaxGapSlots {
+		mlog.Log.Infof("repair catchup: gap %d slots (resume %d, tip %d) exceeds block.repair_catchup_max_gap_slots=%d; using RPC catchup with turbine handoff near tip", gap, from, edge, bs.repairCatchupMaxGapSlots)
+		return
+	}
+
+	bs.repairCatchupFrom.Store(from)
+	bs.repairCatchupUntil.Store(edge)
+	receiver.SetRetentionFloor(from)
+	mlog.Log.Infof("repair catchup: filling slots %d..%d (%d slots) via turbine repair — shreds carry block ids + footer certs (cryptographic finality); RPC reserved for the trailing verifier", from, edge, gap)
+
+	ticker := time.NewTicker(repairCatchupPollInterval)
+	defer ticker.Stop()
+	lastWaiting := uint64(0)
+	lastProgress := time.Now()
+	for {
+		select {
+		case <-bs.stopChan:
+			return
+		case <-ctx.Done():
+			// Stream died mid-catchup; handleLiveShredStreamClosed forces the
+			// RPC resume path and this attempt does not re-arm.
+			return
+		case <-ticker.C:
+		}
+
+		bs.reorderMu.Lock()
+		waiting := bs.nextSlotToSend
+		bs.reorderMu.Unlock()
+		if waiting == 0 {
+			waiting = from
+		}
+
+		if waiting > edge {
+			// Hand over to the normal near-tip machinery only once it is
+			// actually engaged — dropping the catchup flag earlier would
+			// close the decode/ingest gates for the second or two the tip
+			// hysteresis needs, and live blocks arriving in that window
+			// would be lost to completed-slot markers. Until then, chase
+			// the advancing edge under the catchup gates.
+			if bs.isNearTip.Load() {
+				bs.deactivateRepairCatchup(receiver)
+				mlog.Log.Infof("repair catchup complete: replay reached slot %d and near-tip mode is active", waiting-1)
+				return
+			}
+			if latest, _ := receiver.ShredEdges(); latest > edge {
+				edge = latest
+			}
+			continue
+		}
+
+		if waiting != lastWaiting {
+			lastWaiting = waiting
+			lastProgress = time.Now()
+		} else if time.Since(lastProgress) > repairCatchupStallTimeout {
+			bs.deactivateRepairCatchup(receiver)
+			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
+			mlog.Log.Warnf("repair catchup stalled at slot %d for %s; falling back to RPC catchup", waiting, repairCatchupStallTimeout)
+			return
+		}
+
+		// Slide the window: release retention behind replay, keep repair
+		// pressure on the slots immediately ahead of it.
+		receiver.SetRetentionFloor(waiting)
+		winEnd := waiting + repairCatchupWindowSlots - 1
+		if winEnd > edge {
+			winEnd = edge
+		}
+		receiver.PrioritizeRepairRange(waiting, winEnd)
+	}
 }
 
 func (bs *BlockSource) runTurbineStream() {
@@ -2249,6 +2472,10 @@ func (bs *BlockSource) runTurbineStream() {
 		bs.lightbringerConnected.Store(true)
 		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
 		backoff = lightbringerRetryBackoff
+
+		if bs.repairCatchupPending.Load() {
+			go bs.runRepairCatchup(streamCtx, receiver)
+		}
 
 		if gossipClient != nil {
 			done := make(chan error, 1)

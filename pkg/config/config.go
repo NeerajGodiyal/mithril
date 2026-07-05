@@ -84,6 +84,9 @@ type BlockConfig struct {
 	Source               string `toml:"source" mapstructure:"source"`                               // "rpc", "lightbringer", or "turbine"
 	LightbringerEndpoint string `toml:"lightbringer_endpoint" mapstructure:"lightbringer_endpoint"` // Lightbringer endpoint (optional)
 	TurbineBindAddr      string `toml:"turbine_bind_addr" mapstructure:"turbine_bind_addr"`         // Native turbine UDP receiver bind address (optional)
+	// Repair-first catchup: resume gaps up to this many slots fill via turbine
+	// repair instead of RPC getBlock (0 disables; default 1024).
+	RepairCatchupMaxGapSlots int `toml:"repair_catchup_max_gap_slots" mapstructure:"repair_catchup_max_gap_slots"`
 
 	// Global fetch tuning
 	MaxRPS          int `toml:"max_rps" mapstructure:"max_rps"`                           // Rate limit (requests per second)

@@ -199,6 +199,19 @@ name = "mithril"
     # (or use the [turbine].bind_addr equivalent). Must be reachable from the
     # cluster.
     turbine_bind_addr = "0.0.0.0:8001"
+
+    # Repair-first catchup: when resuming behind the live shred edge by at most
+    # this many slots, the gap fills via turbine REPAIR instead of RPC getBlock.
+    # Repaired shreds carry Alpenglow block ids and footer certificates, so
+    # catchup finality is cryptographic rather than delegated to the RPC's
+    # "finalized" commitment — and the whole RPC budget stays with the trailing
+    # execution verifier (usually the catchup bottleneck). Gaps larger than the
+    # threshold use RPC catchup with a turbine handoff near tip, as before.
+    # Repair stalls fail open to RPC automatically. 0 disables.
+    # Peers serve repair from their blockstores (no protocol age limit;
+    # retention is typically hours to days), so raising this is safe once the
+    # bulk-repair scheduler lands; 1024 slots (~7 min) suits restart gaps.
+    repair_catchup_max_gap_slots = 1024
     # Cluster-join / gossip settings for native turbine live under [turbine];
     # [turbine].gossip_entrypoint is also required to discover the shred version
     # and advertise this node into the turbine tree.
