@@ -76,9 +76,12 @@ func TestNextPeerPrefersRecentResponders(t *testing.T) {
 	}
 }
 
-// Outcome scoring: timely low-latency answers raise a peer's score, late
-// answers raise it less, timeouts decay it toward zero — the signal behind
-// quality-ranked selection.
+// Outcome scoring under the REAL request lifecycle. A late answer is not a
+// standalone outcome: the request first expires (timeout, score touch 0)
+// and the answer later matches (late, score touch 0.3) — so `late` is a
+// subset of `timeouts`, and an always-late peer settles near
+// 0.3*alpha/(1-(1-alpha)^2) ~ 0.16, deliberately between dead and the raw
+// late reward.
 func TestPeerScoreTracksOutcomes(t *testing.T) {
 	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
 	addr := repairAddressKey{port: 9000}
@@ -88,7 +91,9 @@ func TestPeerScoreTracksOutcomes(t *testing.T) {
 		client.notePeerTimelyLocked(addr, 100*time.Millisecond)
 	}
 	fast := client.perPeer[addr].score
-	for i := 0; i < 20; i++ {
+	// Always-late lifecycle: every request expires first, then answers.
+	for i := 0; i < 40; i++ {
+		client.notePeerTimeoutLocked(addr)
 		client.notePeerLateLocked(addr, 3*time.Second)
 	}
 	lateScore := client.perPeer[addr].score
@@ -101,15 +106,17 @@ func TestPeerScoreTracksOutcomes(t *testing.T) {
 	if fast < 0.8 {
 		t.Fatalf("fast responder score = %.2f, want near 1", fast)
 	}
-	if lateScore >= fast || lateScore < 0.2 {
-		t.Fatalf("late-heavy score = %.2f, want between timeout-dead and timely (%.2f)", lateScore, fast)
+	if lateScore < 0.10 || lateScore > 0.25 {
+		t.Fatalf("always-late steady state = %.3f, want ~0.16 (timeout touch + late touch per request)", lateScore)
 	}
 	if dead > 0.1 {
 		t.Fatalf("timeout-only score = %.2f, want decayed toward 0", dead)
 	}
 	rec := client.perPeer[addr]
-	if rec.timely != 20 || rec.late != 20 || rec.timeouts != 40 {
-		t.Fatalf("counters = timely %d late %d timeouts %d, want 20/20/40", rec.timely, rec.late, rec.timeouts)
+	// late (40) is a SUBSET of timeouts (40 late-answered + 40 never): the
+	// request total is timely+timeouts = 100, not the sum of all three.
+	if rec.timely != 20 || rec.late != 40 || rec.timeouts != 80 {
+		t.Fatalf("counters = timely %d late %d timeouts %d, want 20/40/80", rec.timely, rec.late, rec.timeouts)
 	}
 }
 
@@ -164,14 +171,16 @@ func TestSelectionCoversAllRankedPeers(t *testing.T) {
 }
 
 // The aggregate compresses per-peer records into the one-clause summary the
-// replay summary and catchup heartbeat print.
+// replay summary and catchup heartbeat print. Percentages are over
+// RESOLVED requests (timely + expired): late is a refinement of expired,
+// so a late-answered request must not be double-counted in the base.
 func TestPeerAggregateSummarizes(t *testing.T) {
 	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
 	now := time.Now()
 	for i := 0; i < 4; i++ {
 		client.perPeer[repairAddressKey{port: 9200 + i}] = &peerRecord{
 			timely:      8,
-			late:        1,
+			late:        1, // the one expired request below, answered late
 			timeouts:    1,
 			score:       0.2 * float64(i+1),
 			latEWMASec:  0.1 * float64(i+1),
@@ -184,9 +193,10 @@ func TestPeerAggregateSummarizes(t *testing.T) {
 	if agg.Tracked != 5 || agg.Responding != 4 {
 		t.Fatalf("tracked/responding = %d/%d, want 5/4", agg.Tracked, agg.Responding)
 	}
-	// timely 32, late 4, timeouts 14 -> of 50: 64% timely, 8% late.
-	if agg.TimelyPct != 64 || agg.LatePct != 8 {
-		t.Fatalf("timely/late = %d%%/%d%%, want 64%%/8%%", agg.TimelyPct, agg.LatePct)
+	// Resolved requests: timely 32 + timeouts 14 = 46 (late's 4 already
+	// inside the 14) -> 69% timely, 8% eventually-late.
+	if agg.TimelyPct != 69 || agg.LatePct != 8 {
+		t.Fatalf("timely/late = %d%%/%d%%, want 69%%/8%%", agg.TimelyPct, agg.LatePct)
 	}
 	if agg.ScoreP50 < 0.59 || agg.ScoreP50 > 0.61 {
 		t.Fatalf("score p50 = %.4f, want ~0.60", agg.ScoreP50)

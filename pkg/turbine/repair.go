@@ -55,12 +55,16 @@ const (
 	repairPeerStatsCap    = 1024
 	// Per-peer quality score: an EWMA over request outcomes in [0,1]. A
 	// timely answer at/below repairScoreFullLatency earns 1.0 (linearly
-	// less when slower), a late answer earns repairScoreLateReward (it DID
-	// serve, slower than the timeout), a timeout earns 0 — so the score
-	// decays naturally as a peer stops answering. Selection concentrates on
-	// the higher-scoring half of the responder set while the 1-in-4
-	// full-set round-robin keeps exploring; the floor stops overfitting to
-	// a handful of peers.
+	// less when slower), a timeout earns 0 — so the score decays naturally
+	// as a peer stops answering. A LATE answer is NOT a replacement
+	// outcome: the request already scored 0 when it expired, and the late
+	// match adds a second touch at repairScoreLateReward. An always-late
+	// peer therefore settles near lateReward*alpha/(1-(1-alpha)^2) ~ 0.16 —
+	// deliberately below the raw 0.3: from the requester's side a late
+	// answer still burned a timeout (and possibly a retry) before serving.
+	// Selection concentrates on the higher-scoring half of the responder
+	// set while the 1-in-4 full-set round-robin keeps exploring; the floor
+	// stops overfitting to a handful of peers.
 	repairScoreAlpha       = 0.1
 	repairScoreLateReward  = 0.3
 	repairScoreFullLatency = 300 * time.Millisecond
@@ -143,17 +147,24 @@ type outstandingRepairRequest struct {
 	sentAt time.Time
 }
 
+// peerRecord counters follow the request lifecycle: every request resolves
+// exactly once as timely OR expired (timeouts). A late answer REFINES an
+// expired request — late is a subset of timeouts, not a third disjoint
+// outcome — so timely+timeouts is the request total and late/timeouts is
+// the "expired but eventually served" share.
 type peerRecord struct {
 	sent        uint64
-	timely      uint64 // responses matched within the timeout
-	late        uint64 // responses matched from the expired-request memory
-	timeouts    uint64
+	timely      uint64  // responses matched within the timeout
+	late        uint64  // expired requests later answered (subset of timeouts)
+	timeouts    uint64  // requests that expired, INCLUDING the late-answered ones
 	latEWMASec  float64 // smoothed response latency, timely + late
 	score       float64 // rolling quality in [0,1]; see notePeerOutcomeLocked
 	lastMatched time.Time
 }
 
 // RepairPeerReport is one peer's service record, for file-log peer tables.
+// Timeouts includes the Late requests (a late answer is an expired request
+// that eventually served — see peerRecord).
 type RepairPeerReport struct {
 	Addr              string
 	Sent              uint64
@@ -869,12 +880,16 @@ func (c *repairClient) cachedPeerCount() int {
 
 // RepairPeerAggregate is the one-clause peer-quality picture: how many
 // peers serve us, how reliably, and how the quality mass is distributed —
-// enough to see the trend in a summary line without a table.
+// enough to see the trend in a summary line without a table. Percentages
+// are over resolved requests (timely + expired); a late answer is an
+// expired request that eventually served, so LatePct is the slice of that
+// same total, NOT a third bucket (timely% + expired-unanswered% +
+// late% = 100).
 type RepairPeerAggregate struct {
 	Tracked             int
 	Responding          int
-	TimelyPct           int // timely / (timely+late+timeouts), all peers
-	LatePct             int
+	TimelyPct           int   // timely / (timely + timeouts)
+	LatePct             int   // late / (timely + timeouts); late ⊂ timeouts
 	MedianLatencyMillis int64 // median of responding peers' latency EWMAs
 	ScoreP50            float64
 	ScoreP90            float64
@@ -900,7 +915,10 @@ func (c *repairClient) peerAggregate() RepairPeerAggregate {
 		}
 	}
 	c.mu.Unlock()
-	if total := timely + late + timeouts; total > 0 {
+	// Every request resolves exactly once as timely or expired; late refines
+	// expired. Summing all three would count late-answered requests twice
+	// and deflate the timely share.
+	if total := timely + timeouts; total > 0 {
 		agg.TimelyPct = int(100 * timely / total)
 		agg.LatePct = int(100 * late / total)
 	}
