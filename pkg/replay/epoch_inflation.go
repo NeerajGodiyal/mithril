@@ -2,8 +2,14 @@ package replay
 
 import (
 	"fmt"
+	"math"
 
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/rewards"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/wincode"
 )
 
@@ -94,4 +100,138 @@ func loadEpochInflationAccountState(acctsDb *accountsdb.AccountsDb, slot uint64)
 		return EpochInflationAccountState{}, fmt.Errorf("decode vote reward account at slot %d: %w", slot, err)
 	}
 	return state, nil
+}
+
+func encodeEpochInflationState(w *wincode.Writer, state EpochInflationState) {
+	w.WriteU64(state.MaxPossibleValidatorReward)
+	w.WriteU64(state.SlotsPerEpoch)
+	w.WriteU64(state.Epoch)
+}
+
+func encodeEpochInflationAccountState(state EpochInflationAccountState) []byte {
+	w := wincode.NewWriter(64)
+	encodeEpochInflationState(w, state.Current)
+	if state.Prev == nil {
+		w.WriteBytes([]byte{0})
+	} else {
+		w.WriteBytes([]byte{1})
+		encodeEpochInflationState(w, *state.Prev)
+	}
+	return w.Bytes()
+}
+
+func calculateEpochInflationRewards(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	inflation *rewards.Inflation,
+	capitalization, epoch uint64,
+	slotsPerYear float64,
+	f *features.Features,
+) uint64 {
+	slotInYear := rewards.SlotInYearForInflation(epochSchedule, slotsPerYear, epoch, f)
+	validatorRate := inflation.Validator(slotInYear)
+	epochDurationInYears := float64(epochSchedule.SlotsInEpoch(epoch)) / slotsPerYear
+	return uint64(validatorRate * float64(capitalization) * epochDurationInYears)
+}
+
+func newEpochInflationState(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	inflation *rewards.Inflation,
+	capitalization, additionalValidatorRewards, epoch uint64,
+	slotsPerYear float64,
+	f *features.Features,
+) EpochInflationState {
+	rewardBudget := capitalization
+	if additionalValidatorRewards > math.MaxUint64-capitalization {
+		rewardBudget = math.MaxUint64
+	} else {
+		rewardBudget += additionalValidatorRewards
+	}
+	return EpochInflationState{
+		MaxPossibleValidatorReward: calculateEpochInflationRewards(
+			epochSchedule, inflation, rewardBudget, epoch, slotsPerYear, f,
+		),
+		SlotsPerEpoch: epochSchedule.SlotsPerEpoch,
+		Epoch:         epoch,
+	}
+}
+
+func tryLoadEpochInflationAccountState(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx) (*EpochInflationAccountState, *accounts.Account) {
+	var acct *accounts.Account
+	var err error
+	if slotCtx != nil {
+		acct, err = slotCtx.GetAccount(VoteRewardAccountAddr())
+	}
+	if (err != nil || acct == nil) && slotCtx != nil {
+		acct, err = acctsDb.GetAccount(slotCtx.Slot, VoteRewardAccountAddr())
+	}
+	if err != nil || acct == nil || len(acct.Data) == 0 {
+		return nil, nil
+	}
+	state, err := decodeEpochInflationAccountState(acct.Data)
+	if err != nil {
+		return nil, acct
+	}
+	return &state, acct
+}
+
+// newEpochUpdateEpochInflationAccount mirrors Agave
+// EpochInflationAccountState::new_epoch_update_account at the epoch boundary.
+func newEpochUpdateEpochInflationAccount(
+	acctsDb *accountsdb.AccountsDb,
+	prevSlotCtx *sealevel.SlotCtx,
+	replayCtx *ReplayCtx,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	f *features.Features,
+	newEpoch uint64,
+	epochStartCapitalization, additionalValidatorRewards uint64,
+) ([]*accounts.Account, []*accounts.Account) {
+	existingState, existingAcct := tryLoadEpochInflationAccountState(acctsDb, prevSlotCtx)
+
+	var prev *EpochInflationState
+	if existingState != nil {
+		prev = &existingState.Current
+	}
+
+	current := newEpochInflationState(
+		epochSchedule, &replayCtx.Inflation, epochStartCapitalization, additionalValidatorRewards,
+		newEpoch, replayCtx.SlotsPerYear, f,
+	)
+	state := EpochInflationAccountState{Current: current, Prev: prev}
+
+	data := encodeEpochInflationAccountState(state)
+	rent, err := loadRentSysvar(acctsDb, prevSlotCtx)
+	if err != nil {
+		panic(fmt.Sprintf("load rent sysvar for vote reward account: %s", err))
+	}
+	lamports := rent.MinimumBalance(uint64(len(data)))
+	if lamports == 0 {
+		lamports = 1
+	}
+
+	var parentAcct *accounts.Account
+	if existingAcct != nil {
+		parentAcct = existingAcct.Clone()
+	} else {
+		parentAcct = &accounts.Account{
+			Key:   VoteRewardAccountAddr(),
+			Owner: a.SystemProgramAddr,
+		}
+	}
+
+	acct := parentAcct.Clone()
+	acct.Data = append([]byte(nil), data...)
+	acct.Lamports = lamports
+	acct.Owner = a.SystemProgramAddr
+
+	if lamports > parentAcct.Lamports {
+		replayCtx.Capitalization += lamports - parentAcct.Lamports
+	} else if parentAcct.Lamports > lamports {
+		replayCtx.Capitalization -= parentAcct.Lamports - lamports
+	}
+
+	if err := acctsDb.StoreAccounts([]*accounts.Account{acct}, prevSlotCtx.Slot, nil); err != nil {
+		panic(fmt.Sprintf("store vote reward account at slot %d: %s", prevSlotCtx.Slot, err))
+	}
+
+	return []*accounts.Account{acct.Clone()}, []*accounts.Account{parentAcct}
 }

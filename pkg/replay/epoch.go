@@ -250,7 +250,19 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t3 := time.Now()
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts, vatAllowedVotes, alpenglowReplayMode)
+		parentCapitalization := replayCtx.Capitalization
+		var voteRewardsDistributed uint64
+		var epochUpdatedAccts, parentEpochUpdatedAccts []*accounts.Account
+		partitionedRewardsInfo, epochUpdatedAccts, parentEpochUpdatedAccts, voteRewardsDistributed = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts, vatAllowedVotes, alpenglowReplayMode)
+		if alpenglowClockFeatureActive(f) || alpenglowReplayMode {
+			inflationUpdated, inflationParent := newEpochUpdateEpochInflationAccount(
+				acctsDb, prevSlotCtx, replayCtx, epochSchedule, f, newEpoch, parentCapitalization, voteRewardsDistributed,
+			)
+			epochUpdatedAccts = append(epochUpdatedAccts, inflationUpdated...)
+			parentEpochUpdatedAccts = append(parentEpochUpdatedAccts, inflationParent...)
+		}
+		block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, epochUpdatedAccts...)
+		block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentEpochUpdatedAccts...)
 	} else {
 		panic("only partitioned rewards supported")
 	}
