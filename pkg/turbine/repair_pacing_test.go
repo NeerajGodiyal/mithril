@@ -130,6 +130,63 @@ func TestLateResponseWrongSlotRejected(t *testing.T) {
 	}
 }
 
+// A response is credited only if the returned shred actually satisfies the
+// request. A WindowIndex answer must carry the EXACT requested data index; a
+// coding shred, a wrong index, or (for HWI) an index below the requested floor
+// is non-conforming and earns the peer NOTHING — the request stays outstanding
+// for a deserved timeout and keeps its in-flight retry slot. Without this a
+// peer could echo a valid nonce with a signed-but-wrong shred to farm responder
+// credit, poison ranking, and prematurely free the still-missing shred.
+func TestNonConformingResponseRejected(t *testing.T) {
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 21), Port: 8021}
+	addrKey, _ := repairAddressKeyFromUDP(from)
+
+	cases := []struct {
+		name  string
+		key   repairRequestKey
+		shred *Shred
+	}{
+		{"window wrong index", repairRequestKey{kind: repairRequestWindowIndex, slot: 80, index: 5},
+			&Shred{Slot: 80, Index: 9, Type: ShredTypeData}},
+		{"window coding shred", repairRequestKey{kind: repairRequestWindowIndex, slot: 80, index: 5},
+			&Shred{Slot: 80, Index: 5, Type: ShredTypeCode}},
+		{"highest below floor", repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 80, index: 40},
+			&Shred{Slot: 80, Index: 30, Type: ShredTypeData}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newPacingTestClient(t)
+			c.outstanding[tc.key] = outstandingRepairRequest{
+				key: tc.key, nonce: 111, addr: addrKey,
+				sentAt: time.Now(), accountAt: time.Now().Add(time.Second),
+			}
+			c.byResponse[repairResponseKey{addr: addrKey, nonce: 111}] = tc.key
+			c.mu.Lock()
+			c.addInflightLocked(tc.key.shred(), time.Now())
+			c.mu.Unlock()
+
+			if c.observeShredResponse(nil, nonceTrailer(111), from, tc.shred) {
+				t.Fatal("non-conforming answer must not be attributed as a repair delivery")
+			}
+			if c.responses.Load() != 0 || c.lateResponses.Load() != 0 {
+				t.Fatalf("responses=%d late=%d, want 0/0", c.responses.Load(), c.lateResponses.Load())
+			}
+			if rec := c.perPeer[addrKey]; rec != nil && (rec.timely != 0 || rec.late != 0) {
+				t.Fatalf("peer credited on a bad answer: %+v", rec)
+			}
+			if len(c.outstanding) != 1 {
+				t.Fatalf("outstanding = %d, want 1 (bad answer must not retire the request)", len(c.outstanding))
+			}
+			c.mu.Lock()
+			inf := c.inflight[tc.key.shred()]
+			c.mu.Unlock()
+			if inf == nil || inf.concurrent != 1 {
+				t.Fatalf("inflight = %v, want concurrent 1 (bad answer must not free the retry slot)", inf)
+			}
+		})
+	}
+}
+
 // A LATE HighestWindowIndex answer fires the same metered gap followups as a
 // timely one — the revealed missing range is the whole point of the probe.
 func TestLateHighestResponseFiresFollowups(t *testing.T) {

@@ -483,6 +483,30 @@ func (c *repairClient) handleRepairPing(conn *net.UDPConn, packet []byte, from *
 	return true
 }
 
+// shredSatisfiesRequest reports whether a returned shred actually answers the
+// request it is matched to by (responder, nonce). Serve-repair answers
+// WindowIndex/HighestWindowIndex with DATA shreds only: a WindowIndex response
+// must carry the exact requested data index; a HighestWindowIndex response
+// carries the highest data shred at or beyond the requested index. Anything
+// else — wrong slot, a coding shred, a different/short index — is a
+// non-conforming answer. Enforcing this BEFORE crediting stops a
+// malicious/buggy peer from echoing a valid nonce with a signed-but-wrong shred
+// to farm responder credit, poison peer ranking, inflate response stats, and
+// prematurely release the still-missing shred's in-flight retry slot.
+func shredSatisfiesRequest(key repairRequestKey, shred *Shred) bool {
+	if shred == nil || shred.Slot != key.slot || shred.Type != ShredTypeData {
+		return false
+	}
+	switch key.kind {
+	case repairRequestWindowIndex:
+		return shred.Index == key.index
+	case repairRequestHighestWindowIndex:
+		return shred.Index >= key.index
+	default:
+		return false
+	}
+}
+
 // observeShredResponse matches an incoming packet against outstanding repair
 // requests (responder address + nonce). Returns true when the shred was
 // delivered BY REPAIR — it answers one of our requests — so the caller can
@@ -504,29 +528,47 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	// A late answer — one arriving after its request expired — is matched
 	// from the expired-request memory and then treated EXACTLY like a
 	// timely one: peer credited as a responder, true tail latency fed to
-	// the adaptive timeout, slot validated, and HWI gap followups fired.
-	// Without this, a slow-but-serving cluster looks dead and its revealed
-	// gaps never get requested.
+	// the adaptive timeout, and HWI gap followups fired. Without this, a
+	// slow-but-serving cluster looks dead and its revealed gaps never get
+	// requested.
+	//
+	// Locate the request this response claims to answer, but DON'T mutate any
+	// state until the returned shred is proven to satisfy that exact request:
+	// a peer earns credit (and the shred's in-flight slot is released) only for
+	// a conforming answer. See shredSatisfiesRequest.
 	c.mu.Lock()
-	var outstanding outstandingRepairRequest
-	late := false
-	if reqKey, ok := c.byResponse[responseKey]; ok {
-		outstanding = c.outstanding[reqKey]
-		delete(c.byResponse, responseKey)
-		delete(c.outstanding, reqKey)
-		// A timely answer releases this attempt's inflight slot. Late
-		// answers do NOT: their slot was already released at accounting
-		// expiry, so decrementing again would underflow the shred's count.
-		c.decInflightLocked(reqKey.shred())
+	var (
+		outstanding outstandingRepairRequest
+		reqKey      repairRequestKey
+		late        bool
+		found       bool
+	)
+	if k, ok := c.byResponse[responseKey]; ok {
+		outstanding, reqKey, found = c.outstanding[k], k, true
 	} else if rec, ok := c.expiredCur[responseKey]; ok {
-		outstanding, late = rec, true
-		delete(c.expiredCur, responseKey)
+		outstanding, late, found = rec, true, true
 	} else if rec, ok := c.expiredPrev[responseKey]; ok {
-		outstanding, late = rec, true
-		delete(c.expiredPrev, responseKey)
-	} else {
+		outstanding, late, found = rec, true, true
+	}
+	if !found || !shredSatisfiesRequest(outstanding.key, shred) {
+		// Unmatched, or a non-conforming answer: leave the request outstanding
+		// so it still expires into a deserved timeout and keeps its in-flight
+		// slot for retry. The peer gets nothing.
 		c.mu.Unlock()
 		return false
+	}
+	if late {
+		// The expired record lives in exactly one generation; deleting from
+		// both is a harmless no-op on the other.
+		delete(c.expiredCur, responseKey)
+		delete(c.expiredPrev, responseKey)
+	} else {
+		delete(c.byResponse, responseKey)
+		delete(c.outstanding, reqKey)
+		// A timely answer releases this attempt's inflight slot. Late answers
+		// do NOT: their slot was already released at accounting expiry, so
+		// decrementing again would underflow the shred's count.
+		c.decInflightLocked(reqKey.shred())
 	}
 	latency := time.Since(outstanding.sentAt)
 	if late {
@@ -537,15 +579,14 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	c.observeLatencyLocked(latency)
 	c.mu.Unlock()
 
-	if outstanding.key.slot != shred.Slot {
-		return false
-	}
 	if late {
 		c.lateResponses.Add(1)
 	} else {
 		c.responses.Add(1)
 	}
-	if outstanding.key.kind != repairRequestHighestWindowIndex || shred.Type != ShredTypeData {
+	// shredSatisfiesRequest already guaranteed slot match and a data shred; the
+	// gap-backfill path below is HWI-only.
+	if outstanding.key.kind != repairRequestHighestWindowIndex {
 		return true
 	}
 
