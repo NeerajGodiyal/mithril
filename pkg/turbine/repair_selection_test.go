@@ -218,24 +218,32 @@ func TestTierSendDemand(t *testing.T) {
 		{Slot: 1, MissingDataShreds: []uint32{4, 7}, NeedHighestDataShred: true},
 		{Slot: 2, MissingDataShreds: []uint32{0}},
 	}
+	// headInitial multiplies only the first request's demand (its initial
+	// fanout); the rest count once. This is a generous token-draw estimate.
 	if got := tierSendDemand(requests, 2); got != 7 {
-		t.Fatalf("head demand = %d, want 7 (first request's 3 sends doubled by endgame fanout, plus 1)", got)
+		t.Fatalf("head demand = %d, want 7 (first request's 3 doubled, plus 1)", got)
 	}
 	if got := tierSendDemand(requests, 1); got != 4 {
-		t.Fatalf("edge demand = %d, want 4", got)
+		t.Fatalf("single-flight demand = %d, want 4", got)
 	}
+}
 
-	// The fanout DECISION (made by the caller on the full listing): bulk
-	// heads stay single-flight — doubling every request would halve
-	// distinct-shred throughput on the exact tokens that gate emission;
-	// endgame heads fan out to 2 peers because one slow peer IS the
-	// completion time there.
-	bulk := SlotRepairRequest{Slot: 3, MissingDataShreds: seq(0, uint32(repairHeadFanoutMaxMissing))}
-	if headFanout(bulk) != 1 {
-		t.Fatal("bulk head must be single-flight")
+// headPolicy scales retry aggression by the head's distance from completion:
+// endgame fans a shred across peers, a large head is fetched steadily.
+func TestHeadPolicy(t *testing.T) {
+	endgame := headPolicy(repairHeadFanoutMaxMissing)
+	if endgame.initialConcurrent != 2 || endgame.maxConcurrent != repairMaxAttemptsHeadEndgame {
+		t.Fatalf("endgame policy = %+v, want initial 2 / max %d", endgame, repairMaxAttemptsHeadEndgame)
 	}
-	endgame := SlotRepairRequest{Slot: 4, MissingDataShreds: seq(0, uint32(repairHeadFanoutMaxMissing-1))}
-	if headFanout(endgame) != 2 {
-		t.Fatal("endgame head must fan out to 2 peers")
+	if endgame.retryInterval != repairRetryHeadEndgame {
+		t.Fatalf("endgame retry = %v, want %v", endgame.retryInterval, repairRetryHeadEndgame)
+	}
+	near := headPolicy(repairRetryHeadNearMissing)
+	if near.initialConcurrent != 1 || near.retryInterval != repairRetryHeadNear {
+		t.Fatalf("near policy = %+v, want initial 1 / retry %v", near, repairRetryHeadNear)
+	}
+	far := headPolicy(repairRetryHeadNearMissing + 1)
+	if far.retryInterval != repairRetryHeadFar {
+		t.Fatalf("far policy retry = %v, want %v", far.retryInterval, repairRetryHeadFar)
 	}
 }

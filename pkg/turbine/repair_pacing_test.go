@@ -15,6 +15,7 @@ func newPacingTestClient(t *testing.T) *repairClient {
 	c := &repairClient{
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
+		inflight:    make(map[shredKey]*shredInflight),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
 		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest),
 	}
@@ -167,59 +168,52 @@ func TestLateHighestResponseFiresFollowups(t *testing.T) {
 	}
 }
 
-// The head is strictly first in line but holds at most its admission
-// SHARE; the fanout decision comes from the FULL listing (endgame is about
-// the slot's closeness to completion, not this scan's room), and the fill
-// SKIPS indices already in flight — a plain prefix truncation would
-// re-select the mostly-outstanding prefix and under-fill the share.
+// The head holds at most its admission SHARE (share = rate x queueSeconds x
+// headShare, minus what it already has outstanding), and the fill keeps
+// retryable shreds while skipping only those already at the tier's
+// concurrency cap — a plain prefix truncation would re-select the covered
+// prefix and under-fill; skipping ALL in-flight would starve fast retries.
 func TestBoundHeadToAdmissionShare(t *testing.T) {
 	share := int(float64(repairMaxRequestsPerSecond) * repairAdmissionQueueSeconds * repairHeadAdmissionShare)
 
+	// room = share - outstanding-for-slot; the listing is capped to it.
 	c := newPacingTestClient(t)
 	for i := 0; i < 100; i++ {
 		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 70, index: uint32(i)}
 		c.outstanding[key] = outstandingRepairRequest{key: key}
 	}
 	head := SlotRepairRequest{Slot: 70, MissingDataShreds: seq(100, 1099)}
-	if fanout := c.boundHeadToAdmissionShare(&head); fanout != 1 {
-		t.Fatal("bulk head must stay single-flight")
-	}
+	c.boundHeadToAdmissionShare(&head, repairMaxAttemptsBulk)
 	if got := len(head.MissingDataShreds); got != share-100 {
-		t.Fatalf("head listing = %d, want %d (share %d minus 100 in flight)", got, share-100, share)
+		t.Fatalf("head listing = %d, want %d (share %d minus 100 outstanding)", got, share-100, share)
 	}
 
-	// Overlap case (the codex-caught bug): the listing's prefix IS in
-	// flight. The fill must skip it and still use the whole room with NEW
-	// indices instead of returning a mostly-dedup'd prefix.
+	// Saturated shreds (at maxConcurrent) are skipped so the room fills with
+	// still-sendable indices, but the fill starts at the first non-saturated
+	// index rather than truncating the covered prefix.
 	c2 := newPacingTestClient(t)
-	inflight := share / 2
-	for i := 0; i < inflight; i++ {
-		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 72, index: uint32(i)}
-		c2.outstanding[key] = outstandingRepairRequest{key: key}
+	const maxC = uint8(2)
+	saturated := 50
+	for i := 0; i < saturated; i++ {
+		c2.inflight[shredKey{kind: repairRequestWindowIndex, slot: 72, index: uint32(i)}] = &shredInflight{concurrent: maxC}
 	}
-	overlap := SlotRepairRequest{Slot: 72, MissingDataShreds: seq(0, 999)}
-	c2.boundHeadToAdmissionShare(&overlap)
-	room := share - inflight
-	if got := len(overlap.MissingDataShreds); got != room {
-		t.Fatalf("overlap fill = %d indices, want the full room %d", got, room)
+	fill := SlotRepairRequest{Slot: 72, MissingDataShreds: seq(0, 999)}
+	c2.boundHeadToAdmissionShare(&fill, maxC)
+	if got := len(fill.MissingDataShreds); got != share {
+		t.Fatalf("fill = %d indices, want the full room %d", got, share)
 	}
-	if overlap.MissingDataShreds[0] != uint32(inflight) {
-		t.Fatalf("overlap fill starts at %d, want %d (first NOT-in-flight index)", overlap.MissingDataShreds[0], inflight)
+	if fill.MissingDataShreds[0] != uint32(saturated) {
+		t.Fatalf("fill starts at %d, want %d (first non-saturated index)", fill.MissingDataShreds[0], saturated)
 	}
 
-	// Endgame: fanout 2 survives the share bound, and the listing shrinks
-	// to the remaining room.
+	// A shred with room for another attempt (below maxConcurrent) is KEPT —
+	// retries must not be starved by the share fill.
 	c3 := newPacingTestClient(t)
-	for i := 0; i < share-4; i++ {
-		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 71, index: uint32(i)}
-		c3.outstanding[key] = outstandingRepairRequest{key: key}
-	}
-	small := SlotRepairRequest{Slot: 71, MissingDataShreds: seq(2000, 2009)}
-	if fanout := c3.boundHeadToAdmissionShare(&small); fanout != 2 {
-		t.Fatal("endgame head must keep 2-peer fanout after the share bound")
-	}
-	if got := len(small.MissingDataShreds); got != 4 {
-		t.Fatalf("endgame listing = %d, want 4 (room left in the share)", got)
+	c3.inflight[shredKey{kind: repairRequestWindowIndex, slot: 73, index: 5}] = &shredInflight{concurrent: 1}
+	retryable := SlotRepairRequest{Slot: 73, MissingDataShreds: []uint32{5}}
+	c3.boundHeadToAdmissionShare(&retryable, maxC)
+	if len(retryable.MissingDataShreds) != 1 || retryable.MissingDataShreds[0] != 5 {
+		t.Fatalf("retryable shred (below maxConcurrent) must be kept, got %v", retryable.MissingDataShreds)
 	}
 }
 
@@ -277,6 +271,134 @@ func TestPeerInflightLifecycle(t *testing.T) {
 		t.Fatalf("late answer double-decremented inflight: %d", c.perPeer[addr].inflight)
 	}
 	c.mu.Unlock()
+}
+
+// The retry model: an endgame head shred fans out immediately, then adds a
+// retry once the newest attempt goes stale — up to the concurrency cap —
+// while every attempt keeps the LONG accounting window (a fast retry never
+// shortens a peer's grace).
+func TestRetryModelEndgameEscalation(t *testing.T) {
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("sink: %v", err)
+	}
+	defer sink.Close()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+
+	c := newPacingTestClient(t)
+	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
+	peers := make([]gossip.RepairPeer, 0, 4)
+	for i := 0; i < 4; i++ {
+		peers = append(peers, gossip.RepairPeer{Addr: &net.UDPAddr{IP: sinkAddr.IP, Port: sinkAddr.Port}})
+	}
+	c.peerCache = peers
+	c.peerCacheAt = time.Now()
+
+	pol := headPolicy(10) // endgame: initial 2, max 3
+	const acct = time.Second
+	sk := shredKey{kind: repairRequestWindowIndex, slot: 50, index: 7}
+
+	sent := 0
+	for c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 50, 7, pol, acct) {
+		sent++
+	}
+	if sent != 2 {
+		t.Fatalf("initial endgame fanout sent %d, want 2 (initialConcurrent)", sent)
+	}
+	c.mu.Lock()
+	if inf := c.inflight[sk]; inf == nil || inf.concurrent != 2 || inf.nextAttempt != 2 {
+		t.Fatalf("inflight after fanout = %+v, want concurrent 2 / nextAttempt 2", inf)
+	}
+	for key, o := range c.outstanding {
+		if key.shred() == sk && o.accountAt.Sub(o.sentAt) != acct {
+			t.Fatalf("attempt accountAt window = %v, want the accounting timeout %v (retry must not shorten it)", o.accountAt.Sub(o.sentAt), acct)
+		}
+	}
+	c.mu.Unlock()
+
+	// Newest attempt still fresh → no retry.
+	if c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 50, 7, pol, acct) {
+		t.Fatal("attempt within the retry interval must not send")
+	}
+	// Age it past the retry interval → one retry, to the concurrency cap.
+	c.mu.Lock()
+	c.inflight[sk].lastSentAt = time.Now().Add(-2 * repairRetryHeadEndgame)
+	c.mu.Unlock()
+	if !c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 50, 7, pol, acct) {
+		t.Fatal("a stale attempt must spawn a retry")
+	}
+	c.mu.Lock()
+	if c.inflight[sk].concurrent != 3 {
+		t.Fatalf("concurrent after retry = %d, want 3 (maxConcurrent)", c.inflight[sk].concurrent)
+	}
+	c.inflight[sk].lastSentAt = time.Now().Add(-time.Second) // stale again
+	c.mu.Unlock()
+	if c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 50, 7, pol, acct) {
+		t.Fatal("must never exceed maxConcurrent, even when stale")
+	}
+}
+
+// A timely answer to the ORIGINAL attempt (after a retry went out) credits
+// that peer as timely — not late — and releases exactly one inflight slot.
+func TestRetryKeepsOriginalMatchableAsTimely(t *testing.T) {
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("sink: %v", err)
+	}
+	defer sink.Close()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+
+	c := newPacingTestClient(t)
+	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
+	peers := []gossip.RepairPeer{{Addr: &net.UDPAddr{IP: sinkAddr.IP, Port: sinkAddr.Port}}}
+	c.peerCache = peers
+	c.peerCacheAt = time.Now()
+
+	pol := bulkPolicy()
+	const acct = time.Second
+	sk := shredKey{kind: repairRequestWindowIndex, slot: 60, index: 3}
+
+	if !c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 60, 3, pol, acct) {
+		t.Fatal("first attempt must send")
+	}
+	// Capture attempt 0's nonce/addr, then age and retry (bulk max 2).
+	c.mu.Lock()
+	o0 := c.outstanding[repairRequestKey{kind: repairRequestWindowIndex, slot: 60, index: 3, attempt: 0}]
+	c.inflight[sk].lastSentAt = time.Now().Add(-2 * repairRetryBulk)
+	c.mu.Unlock()
+	if !c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 60, 3, pol, acct) {
+		t.Fatal("stale bulk attempt must retry to a new peer")
+	}
+	c.mu.Lock()
+	concurrent := c.inflight[sk].concurrent
+	c.mu.Unlock()
+	if concurrent != 2 {
+		t.Fatalf("concurrent = %d, want 2 after a bulk retry", concurrent)
+	}
+
+	// The ORIGINAL peer answers: timely (its attempt was never expired),
+	// inflight drops to 1, and the retry attempt is still outstanding.
+	from := &net.UDPAddr{IP: sinkAddr.IP, Port: sinkAddr.Port}
+	if !c.observeShredResponse(conn, nonceTrailer(o0.nonce), from, &Shred{Slot: 60, Index: 3, Type: ShredTypeData}) {
+		t.Fatal("original attempt's answer must match")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inflight[sk] == nil || c.inflight[sk].concurrent != 1 {
+		t.Fatalf("inflight after timely match = %v, want concurrent 1", c.inflight[sk])
+	}
+	addrKey, _ := repairAddressKeyFromUDP(from)
+	if rec := c.perPeer[addrKey]; rec == nil || rec.timely != 1 || rec.late != 0 || rec.timeouts != 0 {
+		t.Fatalf("answering peer = %+v, want timely 1 / late 0 / timeouts 0 (retry must not mis-score)", c.perPeer[addrKey])
+	}
 }
 
 // Admission cap: outstanding never exceeds ~1s of service rate no matter

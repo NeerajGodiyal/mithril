@@ -23,17 +23,42 @@ const (
 	repairMaxMissingPerSlot   = 256
 	repairMaxFollowupRequests = 64
 	repairMaxOutstanding      = 4096
-	// Adaptive request timeout: peers serve unstaked requesters from QoS
-	// queues whose depth tracks OUR OWN send rate, so a fixed short timeout
-	// under load re-requests shreds whose answers are already queued — and
-	// each duplicate deepens the queue (observed live: 80% "timeouts" while
-	// nearly every request was in fact answered late). The effective timeout
-	// is repairTimeoutLatencyFactor x the smoothed observed response latency,
-	// clamped to this range.
+	// TWO timeouts, deliberately separated (the key to head responsiveness):
+	//
+	//   RETRY timeout — how long ONE in-flight attempt for a missing shred
+	//   may sit before the scan sends ANOTHER attempt to a different peer.
+	//   Short for the emission-gating head (a silent peer must not block
+	//   replay for seconds), longer for bulk (avoid duplicating thousands
+	//   of shreds). See repairRetry* below.
+	//
+	//   ACCOUNTING timeout — how long the original attempt stays tracked so
+	//   a peer that answers LATER is still credited (timely if within this
+	//   window, so an aggressive retry never mis-scores a merely-slower peer)
+	//   and, if it never answers, debited exactly once as a real timeout.
+	//   This is the adaptive latency-driven value; retries do NOT touch it.
+	//
+	// Before the split, the accounting timeout gated retries too, so the
+	// head crawled: a request stretched to seconds before we asked anyone
+	// else. Now a stale head attempt spawns a fresh concurrent attempt fast
+	// while the original keeps its (correct) latency/scoring accounting.
 	repairMinRequestTimeout    = 1500 * time.Millisecond
 	repairMaxRequestTimeout    = 6 * time.Second
 	repairTimeoutLatencyFactor = 3
 	repairLatencyEWMAAlpha     = 0.1
+	// Retry intervals by tier and, for the head, by how close it is to
+	// completion. Firedancer/Agave re-ask missing shreds far faster than a
+	// multi-second timeout; these are the practical pieces.
+	repairRetryHeadEndgame     = 150 * time.Millisecond // head within the fanout window
+	repairRetryHeadNear        = 250 * time.Millisecond // head within repairRetryHeadNearMissing
+	repairRetryHeadFar         = 500 * time.Millisecond // large head — don't over-duplicate
+	repairRetryBulk            = 800 * time.Millisecond // window/edge slots
+	repairRetryHeadNearMissing = 128
+	// Concurrent in-flight attempts allowed per missing shred, by tier: the
+	// head endgame fans a shred across a few distinct peers (fastest wins);
+	// bulk allows one retry (a second peer) if the first goes silent.
+	repairMaxAttemptsHeadEndgame = 3
+	repairMaxAttemptsHead        = 2
+	repairMaxAttemptsBulk        = 2
 	// Expired-request memory: (responder, nonce) keys of timed-out requests,
 	// two rotating generations. A response landing after expiry is matched
 	// here instead of vanishing into ignored_old — it counts as a LATE
@@ -147,9 +172,33 @@ type repairRequestKey struct {
 	kind  repairRequestKind
 	slot  uint64
 	index uint32
-	// attempt distinguishes bounded redundant sends of the SAME shred to
-	// different peers (head-slot fanout). 0 for ordinary single-flight.
+	// attempt distinguishes concurrent in-flight sends of the SAME shred to
+	// different peers — head-slot fanout AND fast-retry (a stale attempt
+	// spawns the next one). Monotonic per shred; keyed so each attempt has
+	// its own outstanding entry and nonce.
 	attempt uint8
+}
+
+// shredKey identifies a missing shred independent of which attempt is asking
+// for it — the unit the retry logic reasons about.
+type shredKey struct {
+	kind  repairRequestKind
+	slot  uint64
+	index uint32
+}
+
+func (k repairRequestKey) shred() shredKey {
+	return shredKey{kind: k.kind, slot: k.slot, index: k.index}
+}
+
+// shredInflight is the per-shred retry bookkeeping: how many attempts are
+// live, the next attempt id to hand out, and when the newest attempt went to
+// the wire (the retry clock). Kept alongside `outstanding` so the retry
+// decision is O(1) instead of an O(outstanding) scan per missing shred.
+type shredInflight struct {
+	concurrent  uint8
+	nextAttempt uint8
+	lastSentAt  time.Time
 }
 
 type repairAddressKey struct {
@@ -167,6 +216,10 @@ type outstandingRepairRequest struct {
 	nonce  uint32
 	addr   repairAddressKey
 	sentAt time.Time
+	// accountAt: when this attempt is forgotten and (if still unanswered)
+	// the peer is debited a real timeout. A retry does NOT shorten this —
+	// the attempt stays matchable-as-timely until here.
+	accountAt time.Time
 }
 
 // peerRecord counters follow the request lifecycle: every request resolves
@@ -206,6 +259,7 @@ type repairClient struct {
 	mu          sync.Mutex
 	outstanding map[repairRequestKey]outstandingRepairRequest
 	byResponse  map[repairResponseKey]repairRequestKey
+	inflight    map[shredKey]*shredInflight
 	perPeer     map[repairAddressKey]*peerRecord
 	// Selection counters. Three SEPARATE counters on purpose: gateCursor
 	// only decides exploit-vs-explore, rankedCursor rings the ranked set,
@@ -274,6 +328,7 @@ func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (
 		peerSource:  peerSource,
 		outstanding: make(map[repairRequestKey]outstandingRepairRequest),
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
+		inflight:    make(map[shredKey]*shredInflight),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
 		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap),
 	}
@@ -305,21 +360,28 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 		return
 	}
 
-	// Head admission share: the head stays strictly first in line, but may
-	// hold at most its share of the admission window — the remainder keeps
-	// prefilling the window slots and patching the live edge.
-	headFanoutN := uint8(1)
+	// The head's retry aggression is set by how close the SLOT is to
+	// completion (full missing count, before the admission-share truncation
+	// caps the listing this scan may send).
+	var headPol *retryPolicy
 	if len(priority) > 0 {
-		headFanoutN = c.boundHeadToAdmissionShare(&priority[0])
+		p := headPolicy(len(priority[0].MissingDataShreds))
+		headPol = &p
+		// Head admission share: the head stays strictly first in line, but
+		// may hold at most its share of the admission window — the remainder
+		// keeps prefilling the window slots and patching the live edge.
+		c.boundHeadToAdmissionShare(&priority[0], p.maxConcurrent)
 	}
 
-	// Size the token grant by what this scan can actually put on the wire:
-	// granted tokens are consumed from the bucket whether used or not, and
-	// most scans re-list shreds whose requests are still outstanding (dedup
-	// sends nothing for them). Unused grant is returned after the send pass,
-	// so the rate cap means "requests sent", not "requests considered".
+	// Size the token grant by roughly what this scan could put on the wire
+	// (the retry policy usually sends far less — covered shreds no-op — and
+	// unused grant is returned, so the rate cap still means "requests sent").
+	headInitial := uint8(1)
+	if headPol != nil {
+		headInitial = headPol.initialConcurrent
+	}
 	edgeDemand := tierSendDemand(edge, 1)
-	want := tierSendDemand(priority, headFanoutN) + edgeDemand
+	want := tierSendDemand(priority, headInitial) + edgeDemand
 	if want > repairMaxOutstanding {
 		want = repairMaxOutstanding
 	}
@@ -327,6 +389,7 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	if budget <= 0 {
 		return
 	}
+	acct := c.accountingTimeout()
 
 	// Freshness split: most of the budget unblocks replay (the priority head
 	// window), but a reserved slice patches LIVE-EDGE holes while peers still
@@ -335,23 +398,16 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	// competes with the head for budget against colder peers. The reserve is
 	// sized by the edge's actual demand, so a blocked head is never capped
 	// below what the edge can use; leftover head budget flows to the edge.
-	spent := c.sendTier(conn, peers, priority, splitRepairBudget(budget, edgeDemand), headFanoutN)
-	spent += c.sendTier(conn, peers, edge, budget-spent, 1)
+	spent := c.sendTier(conn, peers, priority, splitRepairBudget(budget, edgeDemand), headPol, acct)
+	spent += c.sendTier(conn, peers, edge, budget-spent, nil, acct)
 	c.returnRateTokens(budget - spent)
 }
 
-// headFanout reports the redundancy for a tier's first (emission-gating)
-// request: 2-peer fanout in the endgame, single-flight during bulk fill.
-func headFanout(req SlotRepairRequest) uint8 {
-	if len(req.MissingDataShreds) <= repairHeadFanoutMaxMissing {
-		return 2
-	}
-	return 1
-}
-
-// tierSendDemand counts the packets sendTier would emit for a tier given
-// unlimited budget; headFanoutN multiplies the first request's sends.
-func tierSendDemand(requests []SlotRepairRequest, headFanoutN uint8) int {
+// tierSendDemand estimates the packets a tier could emit, for token-draw
+// sizing; headInitial multiplies the first (head) request's initial fanout.
+// The retry policy usually emits far less (covered shreds no-op), so this
+// over-estimates and the unused grant is returned.
+func tierSendDemand(requests []SlotRepairRequest, headInitial uint8) int {
 	demand := 0
 	for reqIdx, req := range requests {
 		per := len(req.MissingDataShreds)
@@ -359,7 +415,7 @@ func tierSendDemand(requests []SlotRepairRequest, headFanoutN uint8) int {
 			per++
 		}
 		if reqIdx == 0 {
-			per *= int(headFanoutN)
+			per *= int(headInitial)
 		}
 		demand += per
 	}
@@ -376,36 +432,32 @@ func splitRepairBudget(budget, edgeDemand int) int {
 	return budget - reserve
 }
 
-// sendTier sends one tier's requests within budget and returns how many
-// were actually sent. headFanoutN applies to the FIRST request (the
-// emission-gating head): 2-peer redundancy in the endgame, single-flight
-// otherwise (see repairHeadFanoutMaxMissing; the caller decides on the full
-// pre-truncation listing).
-func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, headFanoutN uint8) int {
+// sendTier drives one tier's per-shred retry sends within budget and returns
+// how many packets went out. When headPol != nil the FIRST request (the
+// emission-gating head) uses that policy; every other request in the tier
+// (and the whole edge tier) uses the bulk policy.
+func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, headPol *retryPolicy, acct time.Duration) int {
 	sent := 0
+	bulk := bulkPolicy()
 	for reqIdx, req := range requests {
-		fanout := uint8(1)
-		if reqIdx == 0 {
-			fanout = headFanoutN
+		pol := bulk
+		if headPol != nil && reqIdx == 0 {
+			pol = *headPol
 		}
 		for _, index := range req.MissingDataShreds {
-			for attempt := uint8(0); attempt < fanout; attempt++ {
-				if sent >= budget {
-					return sent
-				}
-				if c.sendRequest(conn, peers, repairRequestWindowIndex, req.Slot, index, attempt) {
-					sent++
-				}
+			for sent < budget && c.sendShredAttempt(conn, peers, repairRequestWindowIndex, req.Slot, index, pol, acct) {
+				sent++
+			}
+			if sent >= budget {
+				return sent
 			}
 		}
 		if req.NeedHighestDataShred {
-			for attempt := uint8(0); attempt < fanout; attempt++ {
-				if sent >= budget {
-					return sent
-				}
-				if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, req.Slot, req.HighestDataShredIndex, attempt) {
-					sent++
-				}
+			for sent < budget && c.sendShredAttempt(conn, peers, repairRequestHighestWindowIndex, req.Slot, req.HighestDataShredIndex, pol, acct) {
+				sent++
+			}
+			if sent >= budget {
+				return sent
 			}
 		}
 	}
@@ -462,6 +514,10 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 		outstanding = c.outstanding[reqKey]
 		delete(c.byResponse, responseKey)
 		delete(c.outstanding, reqKey)
+		// A timely answer releases this attempt's inflight slot. Late
+		// answers do NOT: their slot was already released at accounting
+		// expiry, so decrementing again would underflow the shred's count.
+		c.decInflightLocked(reqKey.shred())
 	} else if rec, ok := c.expiredCur[responseKey]; ok {
 		outstanding, late = rec, true
 		delete(c.expiredCur, responseKey)
@@ -526,14 +582,19 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	if chainProbe && windowBudget > 0 {
 		windowBudget-- // reserve the chained probe's token
 	}
+	// Discovery followups are bulk-paced and go through the same inflight
+	// dedup as the scan, so a window index already being repaired is not
+	// re-sent here.
+	bulk := bulkPolicy()
+	acct := c.accountingTimeout()
 	followups := 0
 	for index := start; index < shred.Index && followups < windowBudget; index++ {
-		if c.sendRequest(conn, peers, repairRequestWindowIndex, shred.Slot, index, 0) {
+		if c.sendShredAttempt(conn, peers, repairRequestWindowIndex, shred.Slot, index, bulk, acct) {
 			followups++
 		}
 	}
 	if chainProbe && followups < grant {
-		if c.sendRequest(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1, 0) {
+		if c.sendShredAttempt(conn, peers, repairRequestHighestWindowIndex, shred.Slot, shred.Index+1, bulk, acct) {
 			followups++
 		}
 	}
@@ -564,27 +625,96 @@ func (c *repairClient) observeLatencyLocked(lat time.Duration) {
 	c.timeoutNanos.Store(int64(eff))
 }
 
-func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer, kind repairRequestKind, slot uint64, index uint32, attempt uint8) bool {
+// retryPolicy governs how aggressively a tier re-asks for a still-missing
+// shred: initialConcurrent attempts go out immediately (fanout), further
+// attempts up to maxConcurrent are added once the newest is retryInterval
+// stale (a peer went quiet). See the repairRetry*/repairMaxAttempts* consts.
+type retryPolicy struct {
+	retryInterval     time.Duration
+	initialConcurrent uint8
+	maxConcurrent     uint8
+}
+
+// headPolicy scales the head's aggression by how close it is to completion:
+// a big head is fetched steadily (over-duplicating thousands of shreds only
+// wastes budget), a nearly-done head is fanned across peers so one slow peer
+// never gates emission.
+func headPolicy(missing int) retryPolicy {
+	switch {
+	case missing <= repairHeadFanoutMaxMissing:
+		return retryPolicy{repairRetryHeadEndgame, 2, repairMaxAttemptsHeadEndgame}
+	case missing <= repairRetryHeadNearMissing:
+		return retryPolicy{repairRetryHeadNear, 1, repairMaxAttemptsHead}
+	default:
+		return retryPolicy{repairRetryHeadFar, 1, repairMaxAttemptsHead}
+	}
+}
+
+func bulkPolicy() retryPolicy {
+	return retryPolicy{repairRetryBulk, 1, repairMaxAttemptsBulk}
+}
+
+// accountingTimeout is how long an attempt stays matchable-as-timely (and,
+// unanswered, counts as a real timeout) — the adaptive latency-driven value,
+// NOT the retry interval.
+func (c *repairClient) accountingTimeout() time.Duration {
+	t := time.Duration(c.timeoutNanos.Load())
+	if t <= 0 {
+		t = repairMinRequestTimeout
+	}
+	return t
+}
+
+// sendShredAttempt sends at most one NEW attempt for a missing shred, gated
+// by the tier's retry policy: covered (enough concurrent attempts, newest
+// still fresh) -> no send. The original attempt is left tracked under its
+// own accounting timeout, so a fast retry never shortens a peer's grace or
+// mis-scores it. Returns true iff a packet went to the wire.
+func (c *repairClient) sendShredAttempt(conn *net.UDPConn, peers []gossip.RepairPeer, kind repairRequestKind, slot uint64, index uint32, pol retryPolicy, acct time.Duration) bool {
 	if conn == nil || len(peers) == 0 {
 		return false
 	}
-	key := repairRequestKey{kind: kind, slot: slot, index: index, attempt: attempt}
+	sk := shredKey{kind: kind, slot: slot, index: index}
+	now := time.Now()
 
 	c.mu.Lock()
-	if _, exists := c.outstanding[key]; exists {
-		c.mu.Unlock()
-		return false
+	if inf := c.inflight[sk]; inf != nil {
+		if inf.concurrent >= pol.maxConcurrent {
+			c.mu.Unlock()
+			return false
+		}
+		// Beyond the initial fanout, a new attempt only fires once the
+		// newest one has gone retryInterval-stale.
+		if inf.concurrent >= pol.initialConcurrent && now.Sub(inf.lastSentAt) < pol.retryInterval {
+			c.mu.Unlock()
+			return false
+		}
 	}
 	if len(c.outstanding) >= repairMaxOutstanding {
 		c.mu.Unlock()
 		return false
 	}
 	peer, ok := c.nextPeerLocked(peers)
-	c.mu.Unlock()
 	if !ok {
+		c.mu.Unlock()
 		return false
 	}
+	addrKey, ok := repairAddressKeyFromUDP(peer.Addr)
+	if !ok {
+		c.mu.Unlock()
+		return false
+	}
+	attempt := uint8(0)
+	if inf := c.inflight[sk]; inf != nil {
+		attempt = inf.nextAttempt
+	}
+	key := repairRequestKey{kind: kind, slot: slot, index: index, attempt: attempt}
 
+	// Sign the request while holding the lock: the peer's pubkey is needed
+	// for the nonce, and registering under the same lock keeps inflight,
+	// outstanding, and byResponse coherent against the concurrent HWI-followup
+	// sender. Signing is ~tens of microseconds and sends are rate-capped, so
+	// the hold is negligible.
 	var (
 		packet []byte
 		nonce  uint32
@@ -596,41 +726,24 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 	case repairRequestHighestWindowIndex:
 		packet, nonce, err = repairproto.NewHighestWindowIndexRequest(c.identity, peer.Pubkey, slot, uint64(index))
 	default:
+		c.mu.Unlock()
 		return false
 	}
 	if err != nil {
+		c.mu.Unlock()
 		c.errors.Add(1)
 		return false
 	}
-
-	addrKey, ok := repairAddressKeyFromUDP(peer.Addr)
-	if !ok {
-		return false
-	}
 	responseKey := repairResponseKey{addr: addrKey, nonce: nonce}
-	c.mu.Lock()
-	if _, exists := c.outstanding[key]; exists {
-		c.mu.Unlock()
-		return false
-	}
-	if len(c.outstanding) >= repairMaxOutstanding {
-		c.mu.Unlock()
-		return false
-	}
-	// Re-check the peer's inflight cap under the registration lock: scan
-	// sends and HWI followups race between selection and here, so the
-	// selection-time check alone can overshoot the cap slightly.
-	if rec := c.perPeer[addrKey]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
-		c.mu.Unlock()
-		return false
-	}
 	c.outstanding[key] = outstandingRepairRequest{
-		key:    key,
-		nonce:  nonce,
-		addr:   addrKey,
-		sentAt: time.Now(),
+		key:       key,
+		nonce:     nonce,
+		addr:      addrKey,
+		sentAt:    now,
+		accountAt: now.Add(acct),
 	}
 	c.byResponse[responseKey] = key
+	c.addInflightLocked(sk, now)
 	c.notePeerSentLocked(addrKey)
 	c.mu.Unlock()
 
@@ -638,6 +751,7 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 		c.mu.Lock()
 		delete(c.outstanding, key)
 		delete(c.byResponse, responseKey)
+		c.decInflightLocked(sk)
 		c.notePeerSendAbortedLocked(addrKey)
 		c.mu.Unlock()
 		c.errors.Add(1)
@@ -646,6 +760,32 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 
 	c.requests.Add(1)
 	return true
+}
+
+func (c *repairClient) addInflightLocked(sk shredKey, now time.Time) {
+	inf := c.inflight[sk]
+	if inf == nil {
+		inf = &shredInflight{}
+		c.inflight[sk] = inf
+	}
+	inf.concurrent++
+	inf.nextAttempt++
+	inf.lastSentAt = now
+}
+
+// decInflightLocked drops one live attempt for a shred; the last one out
+// removes the entry so a shred that comes back around later starts fresh.
+func (c *repairClient) decInflightLocked(sk shredKey) {
+	inf := c.inflight[sk]
+	if inf == nil {
+		return
+	}
+	if inf.concurrent > 0 {
+		inf.concurrent--
+	}
+	if inf.concurrent == 0 {
+		delete(c.inflight, sk)
+	}
 }
 
 // rateLimitLocked is the effective requests-per-second ceiling.
@@ -891,20 +1031,22 @@ func (c *repairClient) notePeerTimeoutLocked(addr repairAddressKey) {
 	}
 }
 
+// expireOutstanding retires attempts past their per-request ACCOUNTING
+// deadline (not the short retry interval): the peer is debited a real
+// timeout exactly once here, the attempt moves to late-answer memory, and
+// its inflight slot is released. Retries happen in the scan while the
+// attempt is still alive; this is only the terminal "never answered" path.
 func (c *repairClient) expireOutstanding(now time.Time) {
-	timeout := time.Duration(c.timeoutNanos.Load())
-	if timeout <= 0 {
-		timeout = repairMinRequestTimeout
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for key, outstanding := range c.outstanding {
-		if now.Sub(outstanding.sentAt) < timeout {
+		if now.Before(outstanding.accountAt) {
 			continue
 		}
 		responseKey := repairResponseKey{addr: outstanding.addr, nonce: outstanding.nonce}
 		delete(c.outstanding, key)
 		delete(c.byResponse, responseKey)
+		c.decInflightLocked(key.shred())
 		c.rememberExpiredLocked(responseKey, outstanding)
 		c.notePeerTimeoutLocked(outstanding.addr)
 		c.timeouts.Add(1)
@@ -1038,8 +1180,7 @@ func (c *repairClient) outstandingForSlotLocked(slot uint64) int {
 // mostly-outstanding indices and the head under-fills its share whenever
 // room is small (observed live as head in-flight drooping to single
 // digits between response bursts).
-func (c *repairClient) boundHeadToAdmissionShare(head *SlotRepairRequest) uint8 {
-	fanout := headFanout(*head)
+func (c *repairClient) boundHeadToAdmissionShare(head *SlotRepairRequest, maxConcurrent uint8) {
 	c.mu.Lock()
 	room := int(c.rateLimitLocked()*repairAdmissionQueueSeconds*repairHeadAdmissionShare) - c.outstandingForSlotLocked(head.Slot)
 	if room < 0 {
@@ -1050,15 +1191,19 @@ func (c *repairClient) boundHeadToAdmissionShare(head *SlotRepairRequest) uint8 
 		if len(kept) >= room {
 			break
 		}
-		key := repairRequestKey{kind: repairRequestWindowIndex, slot: head.Slot, index: index}
-		if _, inFlight := c.outstanding[key]; inFlight {
+		sk := shredKey{kind: repairRequestWindowIndex, slot: head.Slot, index: index}
+		// Keep shreds that can still accept an attempt (a fresh send OR a
+		// fast retry); skip only those already at the head's concurrency
+		// cap. Skipping merely-in-flight shreds would starve retries — the
+		// whole point of the split — and re-selecting the fully-covered
+		// prefix would under-fill the share (the live-observed droop).
+		if inf := c.inflight[sk]; inf != nil && inf.concurrent >= maxConcurrent {
 			continue
 		}
 		kept = append(kept, index)
 	}
 	c.mu.Unlock()
 	head.MissingDataShreds = kept
-	return fanout
 }
 
 // peerReport snapshots the busiest peers' service records, sorted by sent
