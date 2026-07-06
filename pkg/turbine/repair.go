@@ -87,6 +87,23 @@ const (
 	// latency-graded peer scores meaningful, and the emission-gating head
 	// completing at network latency instead of queue depth.
 	repairAdmissionQueueSeconds = 1.0
+	// The head's share of the admission window. 1.0 was tried live and
+	// LOWERED emission throughput (6.5s/slot vs 3.8s on easier content):
+	// total fill rate is peer-service-bound either way, so a total head
+	// monopoly only removed the overlap — zero window prefill ("window
+	// blocks 0" on every heartbeat), zero freshness repair (disk-complete
+	// frozen), and every small slot re-paid full serial fill latency as it
+	// became the head. Half keeps the head strictly first in line while the
+	// remainder prefills what is next and patches the live edge.
+	repairHeadAdmissionShare = 0.5
+	// Per-peer in-flight cap. The peer set splits into fast (~300-500ms)
+	// and slow (~2-2.5s) service populations; without a cap, requests
+	// parked on slow peers occupy admission slots 5-8x longer than fast
+	// ones, letting the slow half clog the window — and once the adaptive
+	// timeout rises, those stale slots recycle even slower (observed as a
+	// 63ms<->4.9s latency sawtooth with throughput collapsing to ~160/s in
+	// the troughs). Sixteen bounds any one peer to a sliver of the window.
+	repairPerPeerInflightCap = 16
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
@@ -157,6 +174,7 @@ type peerRecord struct {
 	timely      uint64  // responses matched within the timeout
 	late        uint64  // expired requests later answered (subset of timeouts)
 	timeouts    uint64  // requests that expired, INCLUDING the late-answered ones
+	inflight    int     // requests currently outstanding at this peer
 	latEWMASec  float64 // smoothed response latency, timely + late
 	score       float64 // rolling quality in [0,1]; see notePeerOutcomeLocked
 	lastMatched time.Time
@@ -282,13 +300,21 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 		return
 	}
 
+	// Head admission share: the head stays strictly first in line, but may
+	// hold at most its share of the admission window — the remainder keeps
+	// prefilling the window slots and patching the live edge.
+	headFanoutN := uint8(1)
+	if len(priority) > 0 {
+		headFanoutN = c.boundHeadToAdmissionShare(&priority[0])
+	}
+
 	// Size the token grant by what this scan can actually put on the wire:
 	// granted tokens are consumed from the bucket whether used or not, and
 	// most scans re-list shreds whose requests are still outstanding (dedup
 	// sends nothing for them). Unused grant is returned after the send pass,
 	// so the rate cap means "requests sent", not "requests considered".
-	edgeDemand := tierSendDemand(edge, false)
-	want := tierSendDemand(priority, true) + edgeDemand
+	edgeDemand := tierSendDemand(edge, 1)
+	want := tierSendDemand(priority, headFanoutN) + edgeDemand
 	if want > repairMaxOutstanding {
 		want = repairMaxOutstanding
 	}
@@ -304,8 +330,8 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	// competes with the head for budget against colder peers. The reserve is
 	// sized by the edge's actual demand, so a blocked head is never capped
 	// below what the edge can use; leftover head budget flows to the edge.
-	spent := c.sendTier(conn, peers, priority, splitRepairBudget(budget, edgeDemand), true)
-	spent += c.sendTier(conn, peers, edge, budget-spent, false)
+	spent := c.sendTier(conn, peers, priority, splitRepairBudget(budget, edgeDemand), headFanoutN)
+	spent += c.sendTier(conn, peers, edge, budget-spent, 1)
 	c.returnRateTokens(budget - spent)
 }
 
@@ -319,16 +345,16 @@ func headFanout(req SlotRepairRequest) uint8 {
 }
 
 // tierSendDemand counts the packets sendTier would emit for a tier given
-// unlimited budget (endgame head fanout doubles the first request's sends).
-func tierSendDemand(requests []SlotRepairRequest, fanoutHead bool) int {
+// unlimited budget; headFanoutN multiplies the first request's sends.
+func tierSendDemand(requests []SlotRepairRequest, headFanoutN uint8) int {
 	demand := 0
 	for reqIdx, req := range requests {
 		per := len(req.MissingDataShreds)
 		if req.NeedHighestDataShred {
 			per++
 		}
-		if fanoutHead && reqIdx == 0 {
-			per *= int(headFanout(req))
+		if reqIdx == 0 {
+			per *= int(headFanoutN)
 		}
 		demand += per
 	}
@@ -346,15 +372,16 @@ func splitRepairBudget(budget, edgeDemand int) int {
 }
 
 // sendTier sends one tier's requests within budget and returns how many
-// were actually sent. fanoutHead gives the FIRST request (the
-// emission-gating head) bounded 2-peer redundancy — but only in the
-// endgame (see repairHeadFanoutMaxMissing).
-func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, fanoutHead bool) int {
+// were actually sent. headFanoutN applies to the FIRST request (the
+// emission-gating head): 2-peer redundancy in the endgame, single-flight
+// otherwise (see repairHeadFanoutMaxMissing; the caller decides on the full
+// pre-truncation listing).
+func (c *repairClient) sendTier(conn *net.UDPConn, peers []gossip.RepairPeer, requests []SlotRepairRequest, budget int, headFanoutN uint8) int {
 	sent := 0
 	for reqIdx, req := range requests {
 		fanout := uint8(1)
-		if fanoutHead && reqIdx == 0 {
-			fanout = headFanout(req)
+		if reqIdx == 0 {
+			fanout = headFanoutN
 		}
 		for _, index := range req.MissingDataShreds {
 			for attempt := uint8(0); attempt < fanout; attempt++ {
@@ -599,6 +626,7 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 		c.mu.Lock()
 		delete(c.outstanding, key)
 		delete(c.byResponse, responseKey)
+		c.notePeerSendAbortedLocked(addrKey)
 		c.mu.Unlock()
 		c.errors.Add(1)
 		return false
@@ -684,7 +712,10 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	c.gateCursor++
 	// 3 of 4 requests go to the quality-ranked responder set; every 4th
 	// round-robins the FULL set so new or newly-caught-up peers keep being
-	// discovered and the responder set can grow back after churn.
+	// discovered and the responder set can grow back after churn. Both
+	// rings skip SATURATED peers (per-peer inflight cap): a slow peer's
+	// admission slots recycle 5-8x slower than a fast one's, so unbounded
+	// per-peer queueing lets the slow population clog the whole window.
 	if c.gateCursor%4 != 0 {
 		if peer, ok := c.pickResponderLocked(peers); ok {
 			return peer, true
@@ -693,9 +724,15 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	for attempts := 0; attempts < len(peers); attempts++ {
 		c.exploreCursor++
 		peer := peers[int(c.exploreCursor%uint64(len(peers)))]
-		if peer.Addr != nil && peer.Addr.Port != 0 {
-			return peer, true
+		if peer.Addr == nil || peer.Addr.Port == 0 {
+			continue
 		}
+		if key, ok := repairAddressKeyFromUDP(peer.Addr); ok {
+			if rec := c.perPeer[key]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
+				continue
+			}
+		}
+		return peer, true
 	}
 	return gossip.RepairPeer{}, false
 }
@@ -712,11 +749,17 @@ func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer) (gossip.Re
 	if now.Sub(c.rankedAt) > repairRankedRebuildTTL {
 		c.rebuildRankedLocked(peers, now)
 	}
-	if len(c.ranked) == 0 {
-		return gossip.RepairPeer{}, false
+	for attempts := 0; attempts < len(c.ranked); attempts++ {
+		c.rankedCursor++
+		peer := c.ranked[int(c.rankedCursor%uint64(len(c.ranked)))]
+		if key, ok := repairAddressKeyFromUDP(peer.Addr); ok {
+			if rec := c.perPeer[key]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
+				continue // saturated: give the slot to a peer that can use it
+			}
+		}
+		return peer, true
 	}
-	c.rankedCursor++
-	return c.ranked[int(c.rankedCursor%uint64(len(c.ranked)))], true
+	return gossip.RepairPeer{}, false
 }
 
 func (c *repairClient) rebuildRankedLocked(peers []gossip.RepairPeer, now time.Time) {
@@ -771,6 +814,21 @@ func (c *repairClient) notePeerSentLocked(addr repairAddressKey) {
 		c.perPeer[addr] = rec
 	}
 	rec.sent++
+	rec.inflight++
+}
+
+// notePeerSendAbortedLocked undoes the inflight increment when a registered
+// request never reached the wire (socket write error).
+func (c *repairClient) notePeerSendAbortedLocked(addr repairAddressKey) {
+	if rec := c.perPeer[addr]; rec != nil && rec.inflight > 0 {
+		rec.inflight--
+	}
+}
+
+func (c *repairClient) notePeerInflightDoneLocked(addr repairAddressKey) {
+	if rec := c.perPeer[addr]; rec != nil && rec.inflight > 0 {
+		rec.inflight--
+	}
 }
 
 // notePeerOutcomeLocked folds one request outcome into the peer's rolling
@@ -802,6 +860,9 @@ func (c *repairClient) notePeerTimelyLocked(addr repairAddressKey, lat time.Dura
 	rec := c.notePeerOutcomeLocked(addr, quality, lat)
 	rec.timely++
 	rec.lastMatched = time.Now()
+	if rec.inflight > 0 {
+		rec.inflight-- // late answers don't decrement: expiry already did
+	}
 }
 
 func (c *repairClient) notePeerLateLocked(addr repairAddressKey, lat time.Duration) {
@@ -813,6 +874,9 @@ func (c *repairClient) notePeerLateLocked(addr repairAddressKey, lat time.Durati
 func (c *repairClient) notePeerTimeoutLocked(addr repairAddressKey) {
 	rec := c.notePeerOutcomeLocked(addr, 0, 0)
 	rec.timeouts++
+	if rec.inflight > 0 {
+		rec.inflight--
+	}
 }
 
 func (c *repairClient) expireOutstanding(now time.Time) {
@@ -935,10 +999,15 @@ func (c *repairClient) peerAggregate() RepairPeerAggregate {
 }
 
 // outstandingForSlot counts in-flight requests for one slot — the number
-// that proves (or disproves) head monopoly in the catchup heartbeat.
+// that proves (or disproves) the head's admission share in the catchup
+// heartbeat.
 func (c *repairClient) outstandingForSlot(slot uint64) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.outstandingForSlotLocked(slot)
+}
+
+func (c *repairClient) outstandingForSlotLocked(slot uint64) int {
 	n := 0
 	for key := range c.outstanding {
 		if key.slot == slot {
@@ -946,6 +1015,24 @@ func (c *repairClient) outstandingForSlot(slot uint64) int {
 		}
 	}
 	return n
+}
+
+// boundHeadToAdmissionShare truncates the head's listing to the room left in
+// its admission share and returns the head fanout — decided on the FULL
+// listing, because "endgame" is about how close the SLOT is to completion,
+// not how much room this particular scan has.
+func (c *repairClient) boundHeadToAdmissionShare(head *SlotRepairRequest) uint8 {
+	fanout := headFanout(*head)
+	c.mu.Lock()
+	room := int(c.rateLimitLocked()*repairAdmissionQueueSeconds*repairHeadAdmissionShare) - c.outstandingForSlotLocked(head.Slot)
+	c.mu.Unlock()
+	if room < 0 {
+		room = 0
+	}
+	if len(head.MissingDataShreds) > room {
+		head.MissingDataShreds = head.MissingDataShreds[:room]
+	}
+	return fanout
 }
 
 // peerReport snapshots the busiest peers' service records, sorted by sent

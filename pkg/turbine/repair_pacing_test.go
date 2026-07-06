@@ -159,14 +159,103 @@ func TestLateHighestResponseFiresFollowups(t *testing.T) {
 	if c.lateResponses.Load() != 1 || c.responses.Load() != 0 {
 		t.Fatalf("late=%d responses=%d, want 1/0", c.lateResponses.Load(), c.responses.Load())
 	}
-	want := uint64(repairMaxFollowupRequests + 1)
+	// Single sink peer: the per-peer inflight cap binds (same as the timely
+	// path) — parity is the point, the exact count is the cap.
+	want := uint64(repairPerPeerInflightCap)
 	if got := c.requests.Load(); got != want {
 		t.Fatalf("late HWI sent %d followups, want %d (same as timely)", got, want)
 	}
-	probeKey := repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 50, index: 201}
-	if _, ok := c.outstanding[probeKey]; !ok {
-		t.Fatal("chained highest probe must have gone out")
+}
+
+// The head is strictly first in line but holds at most its admission
+// SHARE; the fanout decision comes from the FULL listing (endgame is about
+// the slot's closeness to completion, not this scan's room).
+func TestBoundHeadToAdmissionShare(t *testing.T) {
+	share := int(float64(repairMaxRequestsPerSecond) * repairAdmissionQueueSeconds * repairHeadAdmissionShare)
+
+	c := newPacingTestClient(t)
+	for i := 0; i < 100; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 70, index: uint32(i)}
+		c.outstanding[key] = outstandingRepairRequest{key: key}
 	}
+	head := SlotRepairRequest{Slot: 70, MissingDataShreds: seq(100, 1099)}
+	if fanout := c.boundHeadToAdmissionShare(&head); fanout != 1 {
+		t.Fatal("bulk head must stay single-flight")
+	}
+	if got := len(head.MissingDataShreds); got != share-100 {
+		t.Fatalf("head listing = %d, want %d (share %d minus 100 in flight)", got, share-100, share)
+	}
+
+	// Endgame: fanout 2 survives truncation, and the listing shrinks to the
+	// remaining room.
+	c2 := newPacingTestClient(t)
+	for i := 0; i < share-4; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 71, index: uint32(i)}
+		c2.outstanding[key] = outstandingRepairRequest{key: key}
+	}
+	small := SlotRepairRequest{Slot: 71, MissingDataShreds: seq(0, 9)}
+	if fanout := c2.boundHeadToAdmissionShare(&small); fanout != 2 {
+		t.Fatal("endgame head must keep 2-peer fanout after truncation")
+	}
+	if got := len(small.MissingDataShreds); got != 4 {
+		t.Fatalf("endgame listing = %d, want 4 (room left in the share)", got)
+	}
+}
+
+// Selection skips peers at their inflight cap: a slow peer's admission
+// slots recycle 5-8x slower than a fast one's, so unbounded per-peer
+// queueing lets the slow population clog the whole window.
+func TestSelectionSkipsSaturatedPeers(t *testing.T) {
+	client := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	peers := []gossip.RepairPeer{
+		{Addr: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 41), Port: 9401}},
+		{Addr: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 42), Port: 9402}},
+	}
+	k1, _ := repairAddressKeyFromUDP(peers[0].Addr)
+	k2, _ := repairAddressKeyFromUDP(peers[1].Addr)
+	client.perPeer[k1] = &peerRecord{lastMatched: time.Now(), inflight: repairPerPeerInflightCap}
+	client.perPeer[k2] = &peerRecord{lastMatched: time.Now()}
+
+	client.mu.Lock()
+	for i := 0; i < 50; i++ {
+		peer, ok := client.nextPeerLocked(peers)
+		if !ok {
+			t.Fatal("pick must succeed while an unsaturated peer exists")
+		}
+		if peer.Addr.String() == peers[0].Addr.String() {
+			t.Fatal("saturated peer must be skipped")
+		}
+	}
+	client.perPeer[k2].inflight = repairPerPeerInflightCap
+	client.rankedAt = time.Time{} // force ranked rebuild after mutation
+	if _, ok := client.nextPeerLocked(peers); ok {
+		t.Fatal("all peers saturated must yield no pick (tokens return, retry next scan)")
+	}
+	client.mu.Unlock()
+}
+
+// The inflight counter follows the outstanding entry's lifecycle: one
+// decrement when the entry leaves (timely match or expiry) — a late answer
+// must NOT decrement again.
+func TestPeerInflightLifecycle(t *testing.T) {
+	c := &repairClient{perPeer: make(map[repairAddressKey]*peerRecord)}
+	addr := repairAddressKey{port: 9500}
+	c.mu.Lock()
+	c.notePeerSentLocked(addr)
+	c.notePeerSentLocked(addr)
+	if c.perPeer[addr].inflight != 2 {
+		t.Fatalf("inflight after 2 sends = %d, want 2", c.perPeer[addr].inflight)
+	}
+	c.notePeerTimelyLocked(addr, 100*time.Millisecond)
+	c.notePeerTimeoutLocked(addr)
+	if c.perPeer[addr].inflight != 0 {
+		t.Fatalf("inflight after match+expiry = %d, want 0", c.perPeer[addr].inflight)
+	}
+	c.notePeerLateLocked(addr, time.Second)
+	if c.perPeer[addr].inflight != 0 {
+		t.Fatalf("late answer double-decremented inflight: %d", c.perPeer[addr].inflight)
+	}
+	c.mu.Unlock()
 }
 
 // Admission cap: outstanding never exceeds ~1s of service rate no matter
@@ -238,13 +327,12 @@ func TestFollowupsAreMeteredByTokenBucket(t *testing.T) {
 	if !c.observeShredResponse(conn, packet, from, shred) {
 		t.Fatal("response itself must match")
 	}
-	want := uint64(repairMaxFollowupRequests + 1) // window cap + chained highest probe
+	// A SINGLE available peer binds on the per-peer inflight cap before the
+	// followup cap: 16 sends land, the rest (and the chained probe) are
+	// refused by saturation-aware selection, and their tokens return.
+	want := uint64(repairPerPeerInflightCap)
 	if got := c.requests.Load(); got != want {
-		t.Fatalf("full bucket sent %d requests, want %d", got, want)
-	}
-	probeKey := repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 50, index: 201}
-	if _, ok := c.outstanding[probeKey]; !ok {
-		t.Fatal("chained highest probe must have gone out (its token is reserved)")
+		t.Fatalf("full bucket sent %d requests, want %d (single peer capped at its inflight limit)", got, want)
 	}
 	c.mu.Lock()
 	remaining := c.rateTokens

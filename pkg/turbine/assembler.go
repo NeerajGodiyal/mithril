@@ -24,9 +24,10 @@ const (
 	maxDataShredsPerSlot         = 64 * 1024
 	maxRetainedIncompleteSlotLag = uint64(512)
 	// The emission-gating head slot may list this many missing indices per
-	// scan — enough to fill the whole in-flight admission window by itself
-	// (see RepairRequestsTiered: head monopoly). Window slots stay at the
-	// caller's per-slot cap.
+	// scan — enough to keep its admission SHARE full at any latency (the
+	// repair client bounds actual sends to that share; a total head
+	// monopoly was tried live and lowered emission throughput). Window
+	// slots stay at the caller's per-slot cap.
 	repairHeadMaxMissing         = 1024
 	maxRetainedIncompleteSlotCap = 1024
 	maxRetainedCompletedSlotLag  = uint64(512)
@@ -921,16 +922,15 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 
 	a.prunePriorityRepairSlotsLocked()
 	for _, slot := range a.priorityRepairOrder {
-		// HEAD MONOPOLY: the first priority slot — the one gating emission —
+		// HEAD FIRST: the first priority slot — the one gating emission —
 		// may list up to repairHeadMaxMissing, several times the per-slot
-		// cap, so it can occupy the ENTIRE in-flight admission window when
-		// it is far from complete. Repair is then sequential in effect: the
-		// window slots behind it receive only the sends the head cannot
-		// turn over (send order is head-first and every request is
-		// single-flight). Without this, degraded response latency capped
-		// the head at 256 in flight and the surplus drained into the
-		// window while emission starved — group progress at the head's
-		// expense.
+		// cap, so its admission share stays full at any response latency.
+		// Without this, degraded latency capped the head at 256 in flight
+		// and the surplus drained into the window while emission starved.
+		// The send side bounds the head to a SHARE of the admission window
+		// (repair.go boundHeadToAdmissionShare): a total monopoly was
+		// tried live and lowered throughput — no prefill, no freshness
+		// repair, every slot re-paying full serial fill latency.
 		maxMissing := maxMissingPerSlot
 		if len(priority) == 0 {
 			maxMissing = repairHeadMaxMissing
