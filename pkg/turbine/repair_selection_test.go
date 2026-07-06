@@ -165,6 +165,38 @@ func TestRepairSelectionRespectsMaxMissing(t *testing.T) {
 	}
 }
 
+// Head monopoly: the emission-gating head may list enough missing indices
+// to occupy the whole in-flight admission window by itself; the slots
+// behind it stay at the per-slot cap and only ever receive the sends the
+// head cannot turn over.
+func TestRepairRequestsTieredHeadMonopoly(t *testing.T) {
+	a := NewSlotAssembler()
+	a.maxObservedSlot = 5000
+	a.retentionFloor = 10
+
+	mkGappy := func(slot uint64, lastIndex uint32) {
+		s := newRepairSelectionSlot(slot)
+		s.haveLast = true
+		s.lastIndex = lastIndex
+		s.shreds[0] = &Shred{Slot: slot, Type: ShredTypeData}
+		a.slots[slot] = s
+	}
+	mkGappy(10, 1999) // head: 1999 missing
+	mkGappy(11, 999)  // next window slot: 999 missing
+	a.PrioritizeRepairRange(10, 11)
+
+	priority, _ := a.RepairRequestsTiered(32, 256)
+	if len(priority) < 2 || priority[0].Slot != 10 || priority[1].Slot != 11 {
+		t.Fatalf("priority = %+v, want slots 10 then 11", priority)
+	}
+	if got := len(priority[0].MissingDataShreds); got != repairHeadMaxMissing {
+		t.Fatalf("head listed %d missing, want the head cap %d", got, repairHeadMaxMissing)
+	}
+	if got := len(priority[1].MissingDataShreds); got != 256 {
+		t.Fatalf("window slot listed %d missing, want the per-slot cap 256", got)
+	}
+}
+
 func TestSplitRepairBudget(t *testing.T) {
 	cases := []struct {
 		budget, edgeDemand, wantHead int

@@ -934,6 +934,20 @@ func (c *repairClient) peerAggregate() RepairPeerAggregate {
 	return agg
 }
 
+// outstandingForSlot counts in-flight requests for one slot — the number
+// that proves (or disproves) head monopoly in the catchup heartbeat.
+func (c *repairClient) outstandingForSlot(slot uint64) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for key := range c.outstanding {
+		if key.slot == slot {
+			n++
+		}
+	}
+	return n
+}
+
 // peerReport snapshots the busiest peers' service records, sorted by sent
 // descending, for file-log peer tables.
 func (c *repairClient) peerReport(maxPeers int) []RepairPeerReport {

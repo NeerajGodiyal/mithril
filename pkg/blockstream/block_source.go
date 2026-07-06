@@ -3194,8 +3194,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			lastStatusLog = time.Now()
 			hb := receiver.Stats()
 			repair := hb.Repair
-			mlog.NamedFilef("catchup", "repair catchup status: head %d, edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
-				waiting, edge, windowBlocks,
+			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d), edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+				waiting, receiver.RepairOutstandingForSlot(waiting), edge, windowBlocks,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
 				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,

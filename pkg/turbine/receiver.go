@@ -137,6 +137,14 @@ func (r *UDPReceiver) RepairPeerQuality() (RepairPeerAggregate, bool) {
 	return r.repairClient.peerAggregate(), true
 }
 
+// RepairOutstandingForSlot counts in-flight repair requests for slot.
+func (r *UDPReceiver) RepairOutstandingForSlot(slot uint64) int {
+	if r.repairClient == nil {
+		return 0
+	}
+	return r.repairClient.outstandingForSlot(slot)
+}
+
 func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if r == nil || r.assembler == nil {
 		return

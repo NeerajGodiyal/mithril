@@ -23,6 +23,11 @@ var (
 const (
 	maxDataShredsPerSlot         = 64 * 1024
 	maxRetainedIncompleteSlotLag = uint64(512)
+	// The emission-gating head slot may list this many missing indices per
+	// scan — enough to fill the whole in-flight admission window by itself
+	// (see RepairRequestsTiered: head monopoly). Window slots stay at the
+	// caller's per-slot cap.
+	repairHeadMaxMissing         = 1024
 	maxRetainedIncompleteSlotCap = 1024
 	maxRetainedCompletedSlotLag  = uint64(512)
 	repairObservedSlotLag        = uint64(1)
@@ -885,7 +890,7 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 	}
 
 	seen := make(map[uint64]struct{}, maxSlots)
-	appendRequest := func(dst []SlotRepairRequest, slot uint64) []SlotRepairRequest {
+	appendRequest := func(dst []SlotRepairRequest, slot uint64, maxMissing int) []SlotRepairRequest {
 		if len(dst) >= maxSlots {
 			return dst
 		}
@@ -907,7 +912,7 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 				HighestDataShredIndex: 0,
 			})
 		}
-		if req, ok := state.repairRequest(maxMissingPerSlot); ok {
+		if req, ok := state.repairRequest(maxMissing); ok {
 			seen[slot] = struct{}{}
 			return append(dst, req)
 		}
@@ -916,13 +921,27 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 
 	a.prunePriorityRepairSlotsLocked()
 	for _, slot := range a.priorityRepairOrder {
-		priority = appendRequest(priority, slot)
+		// HEAD MONOPOLY: the first priority slot — the one gating emission —
+		// may list up to repairHeadMaxMissing, several times the per-slot
+		// cap, so it can occupy the ENTIRE in-flight admission window when
+		// it is far from complete. Repair is then sequential in effect: the
+		// window slots behind it receive only the sends the head cannot
+		// turn over (send order is head-first and every request is
+		// single-flight). Without this, degraded response latency capped
+		// the head at 256 in flight and the surplus drained into the
+		// window while emission starved — group progress at the head's
+		// expense.
+		maxMissing := maxMissingPerSlot
+		if len(priority) == 0 {
+			maxMissing = repairHeadMaxMissing
+		}
+		priority = appendRequest(priority, slot, maxMissing)
 		if len(priority) >= maxSlots {
 			break
 		}
 	}
 	for slot := start; slot <= repairThrough && len(edge) < maxSlots; slot++ {
-		edge = appendRequest(edge, slot)
+		edge = appendRequest(edge, slot, maxMissingPerSlot)
 	}
 	return priority, edge
 }
