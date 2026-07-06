@@ -169,6 +169,29 @@ func TestLateHighestResponseFiresFollowups(t *testing.T) {
 	}
 }
 
+// Admission cap: outstanding never exceeds ~1s of service rate no matter
+// what the token bucket would allow — queue DEPTH, not the timeout, bounds
+// peer-side queueing (the bufferbloat spiral observed live: outstanding
+// ~3000 at 500/s pushed avg latency to 4.4s with zero throughput gain).
+func TestAdmissionCapBoundsOutstanding(t *testing.T) {
+	c := newPacingTestClient(t)
+	admission := int(float64(repairMaxRequestsPerSecond) * repairAdmissionQueueSeconds)
+	for i := 0; i < admission-10; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 1, index: uint32(i)}
+		c.outstanding[key] = outstandingRepairRequest{key: key}
+	}
+	if got := c.takeRateTokens(100); got != 10 {
+		t.Fatalf("grant = %d, want 10 (admission room, not bucket balance)", got)
+	}
+	for i := admission - 10; i < admission; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 1, index: uint32(i)}
+		c.outstanding[key] = outstandingRepairRequest{key: key}
+	}
+	if got := c.takeRateTokens(100); got != 0 {
+		t.Fatalf("grant at cap = %d, want 0 (full token bucket must not override admission)", got)
+	}
+}
+
 // Followups draw from the shared token bucket: a drained bucket sends none
 // (the scan covers the slot on its own cadence), a full one sends the
 // followup cap plus the reserved chained probe and keeps the remainder.
@@ -200,7 +223,10 @@ func TestFollowupsAreMeteredByTokenBucket(t *testing.T) {
 	}
 
 	c, from, packet, shred := prime()
-	c.takeRateTokens(repairMaxRequestsPerSecond) // drain the bucket
+	// Drain the bucket. Two calls: the admission cap trims the first grant
+	// by the primed outstanding entry, leaving a stray token.
+	c.takeRateTokens(repairMaxRequestsPerSecond)
+	c.takeRateTokens(repairMaxRequestsPerSecond)
 	if !c.observeShredResponse(conn, packet, from, shred) {
 		t.Fatal("response itself must match")
 	}

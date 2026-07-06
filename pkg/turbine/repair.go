@@ -72,6 +72,17 @@ const (
 	// bound). Once the head is within this many missing shreds of
 	// completion, one slow peer IS the completion time — redundancy pays.
 	repairHeadFanoutMaxMissing = 32
+	// Admission cap (Little's law): at a fixed service rate, in-flight
+	// requests beyond rate x latency add ZERO throughput — they just sit in
+	// the peers' QoS queues inflating latency. Observed live: outstanding
+	// ~3000 at 500/s pushed average response latency to 4.4s and pinned the
+	// adaptive timeout at its ceiling (which in turn widened the in-flight
+	// window — a positive feedback loop), while the same wire rate at
+	// outstanding ~200 ran at ~300ms. Capping admission near one second of
+	// service keeps peer queues shallow, loss retries fast, the
+	// latency-graded peer scores meaningful, and the emission-gating head
+	// completing at network latency instead of queue depth.
+	repairAdmissionQueueSeconds = 1.0
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
@@ -604,12 +615,22 @@ func (c *repairClient) setRateLimit(perSecond int) {
 }
 
 // takeRateTokens refills the request-rate bucket and grants up to want
-// tokens, returning how many requests this scan may send.
+// tokens, returning how many requests this scan may send. The grant is
+// additionally bounded by the ADMISSION CAP: outstanding may never exceed
+// ~repairAdmissionQueueSeconds of service rate, whatever the rate bucket
+// would allow — the timeout bounds how long we wait, admission bounds how
+// deep we queue.
 func (c *repairClient) takeRateTokens(want int) int {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	limit := c.rateLimitLocked()
+	if room := int(limit*repairAdmissionQueueSeconds) - len(c.outstanding); want > room {
+		want = room
+	}
+	if want <= 0 {
+		return 0
+	}
 	if c.rateRefillAt.IsZero() {
 		c.rateRefillAt = now
 		c.rateTokens = limit
