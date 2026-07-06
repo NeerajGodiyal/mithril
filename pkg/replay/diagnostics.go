@@ -197,7 +197,7 @@ func consensusBlockDiagnostic(block *b.Block) map[string]any {
 		"source_parent_slot":          block.SourceParentSlot,
 		"block_height":                block.BlockHeight,
 		"epoch":                       block.Epoch,
-		"from_lightbringer":           block.FromLightbringer,
+		"from_lightbringer":           block.FromLiveStream,
 		"is_skipped":                  block.IsSkipped,
 		"leader":                      block.Leader.String(),
 		"blockhash":                   consensusHashString(block.Blockhash),

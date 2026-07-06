@@ -10,23 +10,23 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 )
 
-func (bs *BlockSource) bufferLightbringerBlock(blk *b.Block) {
+func (bs *BlockSource) bufferLiveStreamBlock(blk *b.Block) {
 	if blk == nil {
 		return
 	}
 
 	var evicted []uint64
-	bs.lightbringerBufferMu.Lock()
-	if _, exists := bs.lightbringerBuffer[blk.Slot]; exists {
-		bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingMu.Lock()
+	if _, exists := bs.liveStagingBuffer[blk.Slot]; exists {
+		bs.liveStagingMu.Unlock()
 		return
 	}
 
-	bs.lightbringerBuffer[blk.Slot] = blk
-	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, blk.Slot)
+	bs.liveStagingBuffer[blk.Slot] = blk
+	bs.liveStagingOrder = append(bs.liveStagingOrder, blk.Slot)
 
 	catchup := bs.repairCatchupActive()
-	for len(bs.lightbringerBufferOrder) > lightbringerBufferSlots {
+	for len(bs.liveStagingOrder) > liveStagingBufferSlots {
 		victimIdx := 0
 		if catchup {
 			// During catchup the staging buffer holds BOTH the repair-window
@@ -37,18 +37,18 @@ func (bs *BlockSource) bufferLightbringerBlock(blk *b.Block) {
 			// marker (observed: four consecutive catchups stuck at exactly
 			// the head slot). Evict the HIGHEST slot instead: the edge is
 			// cheap to re-fetch near tip; the window is what unblocks replay.
-			for i, slot := range bs.lightbringerBufferOrder {
-				if slot > bs.lightbringerBufferOrder[victimIdx] {
+			for i, slot := range bs.liveStagingOrder {
+				if slot > bs.liveStagingOrder[victimIdx] {
 					victimIdx = i
 				}
 			}
 		}
-		victim := bs.lightbringerBufferOrder[victimIdx]
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder[:victimIdx], bs.lightbringerBufferOrder[victimIdx+1:]...)
-		delete(bs.lightbringerBuffer, victim)
+		victim := bs.liveStagingOrder[victimIdx]
+		bs.liveStagingOrder = append(bs.liveStagingOrder[:victimIdx], bs.liveStagingOrder[victimIdx+1:]...)
+		delete(bs.liveStagingBuffer, victim)
 		evicted = append(evicted, victim)
 	}
-	bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingMu.Unlock()
 
 	// An evicted staged block leaves a completed-slot marker in the
 	// assembler, which then silently ignores every future shred AND skips
@@ -66,34 +66,34 @@ func (bs *BlockSource) bufferLightbringerBlock(blk *b.Block) {
 // it approaches.
 func (bs *BlockSource) drainStagedCatchupBlocks(from, to uint64) {
 	var ready []*b.Block
-	bs.lightbringerBufferMu.Lock()
-	for slot, blk := range bs.lightbringerBuffer {
+	bs.liveStagingMu.Lock()
+	for slot, blk := range bs.liveStagingBuffer {
 		if blk != nil && slot >= from && slot <= to {
 			ready = append(ready, blk)
-			delete(bs.lightbringerBuffer, slot)
+			delete(bs.liveStagingBuffer, slot)
 		}
 	}
 	if len(ready) > 0 {
-		order := bs.lightbringerBufferOrder[:0]
-		for _, slot := range bs.lightbringerBufferOrder {
-			if _, still := bs.lightbringerBuffer[slot]; still {
+		order := bs.liveStagingOrder[:0]
+		for _, slot := range bs.liveStagingOrder {
+			if _, still := bs.liveStagingBuffer[slot]; still {
 				order = append(order, slot)
 			}
 		}
-		bs.lightbringerBufferOrder = order
+		bs.liveStagingOrder = order
 	}
-	bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingMu.Unlock()
 	if len(ready) > 0 {
-		bs.enqueueLightbringerBlocks(ready)
+		bs.enqueueLiveBlocks(ready)
 	}
 }
 
-// stagedLightbringerBlock returns the staged (pre-handoff) block for slot,
+// stagedLiveBlock returns the staged (pre-handoff) block for slot,
 // nil when none is held.
-func (bs *BlockSource) stagedLightbringerBlock(slot uint64) *b.Block {
-	bs.lightbringerBufferMu.Lock()
-	defer bs.lightbringerBufferMu.Unlock()
-	return bs.lightbringerBuffer[slot]
+func (bs *BlockSource) stagedLiveBlock(slot uint64) *b.Block {
+	bs.liveStagingMu.Lock()
+	defer bs.liveStagingMu.Unlock()
+	return bs.liveStagingBuffer[slot]
 }
 
 // applyCertifiedSkipToCatchupHead marks the emitter's waiting slot as
@@ -122,22 +122,22 @@ func (bs *BlockSource) applyCertifiedSkipToCatchupHead(slot uint64) bool {
 	// Stop repairing a block that provably does not exist.
 	bs.resetTurbineSlotState(slot)
 	select {
-	case bs.resultQueue <- fetchResult{slot: slot, skipped: true, rpcIdx: -1, liveStreamGeneration: bs.lightbringerResultGeneration.Load()}:
+	case bs.resultQueue <- fetchResult{slot: slot, skipped: true, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
 		return true
 	case <-bs.stopChan:
 		return false
 	}
 }
 
-func (bs *BlockSource) clearBufferedLightbringerBlocks() int {
-	bs.lightbringerBufferMu.Lock()
-	cleared := make([]uint64, 0, len(bs.lightbringerBuffer))
-	for slot := range bs.lightbringerBuffer {
+func (bs *BlockSource) clearBufferedLiveStreamBlocks() int {
+	bs.liveStagingMu.Lock()
+	cleared := make([]uint64, 0, len(bs.liveStagingBuffer))
+	for slot := range bs.liveStagingBuffer {
 		cleared = append(cleared, slot)
 	}
-	bs.lightbringerBuffer = make(map[uint64]*b.Block)
-	bs.lightbringerBufferOrder = nil
-	bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingBuffer = make(map[uint64]*b.Block)
+	bs.liveStagingOrder = nil
+	bs.liveStagingMu.Unlock()
 
 	// A cleared staged block's assembler completed-slot marker would make
 	// the slot silently unfetchable forever; reset so it can be re-fetched.
@@ -157,14 +157,14 @@ func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
 		if bufferedSlot < slot {
 			continue
 		}
-		if blk == nil || !blk.FromLightbringer {
+		if blk == nil || !blk.FromLiveStream {
 			delete(bs.reorderBuffer, bufferedSlot)
 		}
 	}
 	for skippedSlot := range bs.skippedSlots {
 		if skippedSlot >= slot {
 			delete(bs.skippedSlots, skippedSlot)
-			delete(bs.lightbringerSynthesizedSkips, skippedSlot)
+			delete(bs.liveSynthesizedSkips, skippedSlot)
 			delete(bs.alpenglowCertifiedSkips, skippedSlot)
 		}
 	}
@@ -172,7 +172,7 @@ func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
 
 	bs.slotStateMu.Lock()
 	for trackedSlot := range bs.slotState {
-		if trackedSlot >= slot && !bs.isLightbringerRepairSlot(trackedSlot) {
+		if trackedSlot >= slot && !bs.isLiveRepairSlot(trackedSlot) {
 			delete(bs.slotState, trackedSlot)
 			delete(bs.inflightStart, trackedSlot)
 		}
@@ -183,7 +183,7 @@ func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
 	if len(bs.retrySlots) > 0 {
 		filtered := bs.retrySlots[:0]
 		for _, retrySlot := range bs.retrySlots {
-			if retrySlot < slot || bs.isLightbringerRepairSlot(retrySlot) {
+			if retrySlot < slot || bs.isLiveRepairSlot(retrySlot) {
 				filtered = append(filtered, retrySlot)
 			}
 		}
@@ -192,7 +192,7 @@ func (bs *BlockSource) purgeRPCStateAtOrBeyondSlot(slot uint64) {
 	bs.retryMu.Unlock()
 }
 
-func (bs *BlockSource) lightbringerHandoffMaxReplayGap() uint64 {
+func (bs *BlockSource) liveHandoffMaxReplayGap() uint64 {
 	// Arm Lightbringer only in the lower half of the near-tip window. Once
 	// forkchoice buffering starts, replay can wait for vote-confirmed path
 	// resolution; keeping this headroom prevents immediate lost-tip fallback.
@@ -206,19 +206,19 @@ func (bs *BlockSource) lightbringerHandoffMaxReplayGap() uint64 {
 	return maxGap
 }
 
-func (bs *BlockSource) lightbringerHandoffTipEstimate() uint64 {
+func (bs *BlockSource) liveHandoffTipEstimate() uint64 {
 	tip := bs.confirmedTip.Load()
-	if bs.lightbringerConnected.Load() {
-		if streamed := bs.lightbringerLastStreamSlot.Load(); streamed > tip {
+	if bs.liveStreamConnected.Load() {
+		if streamed := bs.liveLastStreamSlot.Load(); streamed > tip {
 			tip = streamed
 		}
 	}
 	return tip
 }
 
-func (bs *BlockSource) lightbringerHandoffReplayGapOK() (bool, uint64, uint64, uint64, uint64) {
-	maxGap := bs.lightbringerHandoffMaxReplayGap()
-	tip := bs.lightbringerHandoffTipEstimate()
+func (bs *BlockSource) liveHandoffReplayGapOK() (bool, uint64, uint64, uint64, uint64) {
+	maxGap := bs.liveHandoffMaxReplayGap()
+	tip := bs.liveHandoffTipEstimate()
 	lastExecuted := bs.lastExecutedSlot.Load()
 	if tip == 0 || lastExecuted == 0 {
 		return true, 0, maxGap, tip, lastExecuted
@@ -231,18 +231,18 @@ func (bs *BlockSource) lightbringerHandoffReplayGapOK() (bool, uint64, uint64, u
 	return gap <= maxGap, gap, maxGap, tip, lastExecuted
 }
 
-func lightbringerDefaultHandoffLastSlot(waitingSlot uint64) uint64 {
-	requiredLastSlot := waitingSlot + uint64(lightbringerMinHandoffRun) - 1
+func liveDefaultHandoffLastSlot(waitingSlot uint64) uint64 {
+	requiredLastSlot := waitingSlot + uint64(liveMinHandoffRun) - 1
 	if requiredLastSlot < waitingSlot {
 		requiredLastSlot = math.MaxUint64
 	}
 	return requiredLastSlot
 }
 
-func (bs *BlockSource) lightbringerLiveEdgeHandoffMaxLag() uint64 {
+func (bs *BlockSource) liveEdgeHandoffMaxLag() uint64 {
 	maxLag := bs.nearTipLookahead + 2
-	if maxLag < lightbringerLiveEdgeHandoffMaxLag {
-		maxLag = lightbringerLiveEdgeHandoffMaxLag
+	if maxLag < liveEdgeHandoffMaxLag {
+		maxLag = liveEdgeHandoffMaxLag
 	}
 	return maxLag
 }
@@ -251,7 +251,7 @@ func (bs *BlockSource) allowsLiveEdgeHandoff() bool {
 	return bs.sourceType == BlockSourceTurbine
 }
 
-func (bs *BlockSource) lightbringerHandoffRequiredLastSlot(waitingSlot uint64) uint64 {
+func (bs *BlockSource) liveHandoffRequiredLastSlot(waitingSlot uint64) uint64 {
 	// Repair catchup: arm the handoff the moment the HEAD slot is assembled
 	// and anchor-connected — replay should start executing immediately, not
 	// wait for a deep staged runway. The 8-block minimum run below exists to
@@ -262,18 +262,18 @@ func (bs *BlockSource) lightbringerHandoffRequiredLastSlot(waitingSlot uint64) u
 	if bs.repairCatchupActive() {
 		return waitingSlot
 	}
-	requiredLastSlot := lightbringerDefaultHandoffLastSlot(waitingSlot)
-	if !bs.allowsLiveEdgeHandoff() || !bs.lightbringerConnected.Load() {
+	requiredLastSlot := liveDefaultHandoffLastSlot(waitingSlot)
+	if !bs.allowsLiveEdgeHandoff() || !bs.liveStreamConnected.Load() {
 		return requiredLastSlot
 	}
 
-	latestStreamed := bs.lightbringerLastStreamSlot.Load()
+	latestStreamed := bs.liveLastStreamSlot.Load()
 	if latestStreamed < waitingSlot {
 		return requiredLastSlot
 	}
 
-	tip := bs.lightbringerHandoffTipEstimate()
-	if tip > latestStreamed && tip-latestStreamed > bs.lightbringerLiveEdgeHandoffMaxLag() {
+	tip := bs.liveHandoffTipEstimate()
+	if tip > latestStreamed && tip-latestStreamed > bs.liveEdgeHandoffMaxLag() {
 		return requiredLastSlot
 	}
 
@@ -283,41 +283,41 @@ func (bs *BlockSource) lightbringerHandoffRequiredLastSlot(waitingSlot uint64) u
 	return requiredLastSlot
 }
 
-func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, bool) {
+func (bs *BlockSource) prepareLiveHandoff(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, bool) {
 	if !bs.isNearTip.Load() && !bs.repairCatchupActive() {
 		return nil, 0, false
 	}
-	if handoffSlot := bs.lightbringerHandoffSlot.Load(); handoffSlot != 0 {
+	if handoffSlot := bs.liveHandoffSlot.Load(); handoffSlot != 0 {
 		return nil, handoffSlot, false
 	}
 	if !bs.repairCatchupActive() {
-		if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
+		if ok, _, _, _, _ := bs.liveHandoffReplayGapOK(); !ok {
 			return nil, 0, false
 		}
 	}
 
-	bs.lightbringerBufferMu.Lock()
+	bs.liveStagingMu.Lock()
 
-	_, coveredUntil, _, _, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
+	_, coveredUntil, _, _, ok := bs.connectedLiveRunwayLocked(waitingSlot, anchorSlot)
 	if !ok {
-		bs.lightbringerBufferMu.Unlock()
+		bs.liveStagingMu.Unlock()
 		return nil, 0, false
 	}
 
-	requiredLastSlot := bs.lightbringerHandoffRequiredLastSlot(waitingSlot)
+	requiredLastSlot := bs.liveHandoffRequiredLastSlot(waitingSlot)
 	if coveredUntil < requiredLastSlot {
-		bs.lightbringerBufferMu.Unlock()
+		bs.liveStagingMu.Unlock()
 		return nil, 0, false
 	}
 
 	handoffSlot := waitingSlot
-	if !bs.lightbringerHandoffSlot.CompareAndSwap(0, handoffSlot) {
-		current := bs.lightbringerHandoffSlot.Load()
-		bs.lightbringerBufferMu.Unlock()
+	if !bs.liveHandoffSlot.CompareAndSwap(0, handoffSlot) {
+		current := bs.liveHandoffSlot.Load()
+		bs.liveStagingMu.Unlock()
 		return nil, current, false
 	}
 
-	bs.lightbringerNeedRPCResume.Store(false)
+	bs.liveNeedRPCResume.Store(false)
 	bs.purgeRPCStateAtOrBeyondSlot(handoffSlot)
 
 	// Hand over EVERYTHING staged at/above the handoff slot, not just the
@@ -329,9 +329,9 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 	// slow re-repair (observed live: first buffered block 252 slots ahead
 	// of replay). The ARMING requirement stays runway-based — the head must
 	// parent-link to the anchor; only the payload widens.
-	blocks := make([]*b.Block, 0, len(bs.lightbringerBuffer))
+	blocks := make([]*b.Block, 0, len(bs.liveStagingBuffer))
 	var dropped []uint64
-	for slot, blk := range bs.lightbringerBuffer {
+	for slot, blk := range bs.liveStagingBuffer {
 		if slot >= handoffSlot && blk != nil {
 			blocks = append(blocks, blk)
 		} else {
@@ -341,9 +341,9 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 		}
 	}
 
-	bs.lightbringerBuffer = make(map[uint64]*b.Block)
-	bs.lightbringerBufferOrder = nil
-	bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingBuffer = make(map[uint64]*b.Block)
+	bs.liveStagingOrder = nil
+	bs.liveStagingMu.Unlock()
 
 	for _, slot := range dropped {
 		bs.resetTurbineSlotState(slot)
@@ -352,12 +352,12 @@ func (bs *BlockSource) prepareLightbringerHandoff(waitingSlot uint64, anchorSlot
 	return blocks, handoffSlot, true
 }
 
-func (bs *BlockSource) connectedLightbringerRunwayLocked(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, uint64, uint64, bool) {
-	candidates := make([]*b.Block, 0, len(bs.lightbringerBuffer))
+func (bs *BlockSource) connectedLiveRunwayLocked(waitingSlot uint64, anchorSlot uint64) ([]*b.Block, uint64, uint64, uint64, bool) {
+	candidates := make([]*b.Block, 0, len(bs.liveStagingBuffer))
 	var firstBufferedSlot uint64
 	var maxBufferedSlot uint64
 	foundFirstBuffered := false
-	for slot, blk := range bs.lightbringerBuffer {
+	for slot, blk := range bs.liveStagingBuffer {
 		if blk == nil || slot < waitingSlot {
 			continue
 		}
@@ -416,21 +416,21 @@ func (bs *BlockSource) connectedLightbringerRunwayLocked(waitingSlot uint64, anc
 	return runway, coveredUntil, firstBufferedSlot, maxBufferedSlot, len(runway) != 0
 }
 
-func (bs *BlockSource) lightbringerHandoffWaitReason(waitingSlot uint64, anchorSlot uint64) string {
-	bs.lightbringerBufferMu.Lock()
-	defer bs.lightbringerBufferMu.Unlock()
+func (bs *BlockSource) liveHandoffWaitReason(waitingSlot uint64, anchorSlot uint64) string {
+	bs.liveStagingMu.Lock()
+	defer bs.liveStagingMu.Unlock()
 
-	runway, coveredUntil, firstBufferedSlot, maxBufferedSlot, ok := bs.connectedLightbringerRunwayLocked(waitingSlot, anchorSlot)
+	runway, coveredUntil, firstBufferedSlot, maxBufferedSlot, ok := bs.connectedLiveRunwayLocked(waitingSlot, anchorSlot)
 	if !ok {
-		if len(bs.lightbringerBuffer) == 0 {
+		if len(bs.liveStagingBuffer) == 0 {
 			return fmt.Sprintf("waiting for first buffered %s slot", bs.liveShredStreamName())
 		}
 		return fmt.Sprintf("no buffered %s slot at or beyond waiting slot %d", bs.liveShredStreamName(), waitingSlot)
 	}
 
-	requiredLastSlot := bs.lightbringerHandoffRequiredLastSlot(waitingSlot)
+	requiredLastSlot := bs.liveHandoffRequiredLastSlot(waitingSlot)
 	if coveredUntil >= requiredLastSlot {
-		if ok, gap, maxGap, tip, lastExecuted := bs.lightbringerHandoffReplayGapOK(); !ok {
+		if ok, gap, maxGap, tip, lastExecuted := bs.liveHandoffReplayGapOK(); !ok {
 			return fmt.Sprintf("handoff-ready runway buffered through slot %d, but replay gap %d exceeds handoff arm threshold %d (last executed %d, live tip estimate %d)",
 				coveredUntil, gap, maxGap, lastExecuted, tip)
 		}
@@ -451,11 +451,11 @@ func (bs *BlockSource) lightbringerHandoffWaitReason(waitingSlot uint64, anchorS
 	return fmt.Sprintf("connected runway only covers through slot %d; need through slot %d before handoff", coveredUntil, requiredLastSlot)
 }
 
-func (bs *BlockSource) enqueueLightbringerBlocks(blocks []*b.Block) {
+func (bs *BlockSource) enqueueLiveBlocks(blocks []*b.Block) {
 	if len(blocks) == 0 {
 		return
 	}
-	generation := bs.lightbringerResultGeneration.Load()
+	generation := bs.liveResultGeneration.Load()
 
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].Slot < blocks[j].Slot
@@ -474,14 +474,14 @@ func (bs *BlockSource) enqueueLightbringerBlocks(blocks []*b.Block) {
 	}
 }
 
-func (bs *BlockSource) maybePrepareLightbringerHandoff() {
+func (bs *BlockSource) maybePrepareLiveHandoff() {
 	if !bs.usesLiveShredStream() || (!bs.isNearTip.Load() && !bs.repairCatchupActive()) {
 		return
 	}
-	if bs.lightbringerForceRPCUntil.Load() != 0 {
+	if bs.liveForceRPCUntil.Load() != 0 {
 		return
 	}
-	if bs.lightbringerCooldownUntil.Load() != 0 {
+	if bs.liveCooldownUntil.Load() != 0 {
 		return
 	}
 
@@ -512,12 +512,12 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 	// A large replay gap is the POINT of repair catchup; the gap check guards
 	// the ordinary near-tip handoff only.
 	if !bs.repairCatchupActive() {
-		if ok, _, _, _, _ := bs.lightbringerHandoffReplayGapOK(); !ok {
+		if ok, _, _, _, _ := bs.liveHandoffReplayGapOK(); !ok {
 			return
 		}
 	}
 
-	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(waitingSlot, anchorSlot)
+	blocks, handoffSlot, prepared := bs.prepareLiveHandoff(waitingSlot, anchorSlot)
 	if !prepared {
 		return
 	}
@@ -532,12 +532,12 @@ func (bs *BlockSource) maybePrepareLightbringerHandoff() {
 	}
 	mlog.Log.Infof("%s handoff ready at slot %d (connected runway buffered through slot %d; %s)",
 		bs.liveShredStreamName(), handoffSlot, runwayCoveredUntil, catchupNote)
-	bs.enqueueLightbringerBlocks(blocks)
+	bs.enqueueLiveBlocks(blocks)
 }
 
-func (bs *BlockSource) lightbringerStagingMaxReplayGap() uint64 {
+func (bs *BlockSource) liveStagingMaxReplayGap() uint64 {
 	maxGap := bs.catchupThreshold
-	minGap := bs.nearTipThreshold + uint64(lightbringerMinHandoffRun)
+	minGap := bs.nearTipThreshold + uint64(liveMinHandoffRun)
 	if minGap < bs.nearTipThreshold {
 		minGap = math.MaxUint64
 	}
@@ -547,11 +547,11 @@ func (bs *BlockSource) lightbringerStagingMaxReplayGap() uint64 {
 	return maxGap
 }
 
-func (bs *BlockSource) shouldStageLightbringerSlot(slot uint64) bool {
-	if bs.lightbringerForceRPCUntil.Load() != 0 {
+func (bs *BlockSource) shouldStageLiveSlot(slot uint64) bool {
+	if bs.liveForceRPCUntil.Load() != 0 {
 		return false
 	}
-	if bs.lightbringerCooldownUntil.Load() != 0 {
+	if bs.liveCooldownUntil.Load() != 0 {
 		return false
 	}
 
@@ -567,21 +567,21 @@ func (bs *BlockSource) shouldStageLightbringerSlot(slot uint64) bool {
 		return false
 	}
 
-	tip := bs.lightbringerHandoffTipEstimate()
+	tip := bs.liveHandoffTipEstimate()
 	if tip <= lastExecuted {
 		return false
 	}
-	return tip-lastExecuted <= bs.lightbringerStagingMaxReplayGap()
+	return tip-lastExecuted <= bs.liveStagingMaxReplayGap()
 }
 
-func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
-	if bs.lightbringerForceRPCUntil.Load() != 0 {
+func (bs *BlockSource) shouldDecodeLiveSlot(slot uint64) bool {
+	if bs.liveForceRPCUntil.Load() != 0 {
 		return false
 	}
-	if bs.lightbringerCooldownUntil.Load() != 0 {
+	if bs.liveCooldownUntil.Load() != 0 {
 		return false
 	}
-	handoffSlot := bs.lightbringerHandoffSlot.Load()
+	handoffSlot := bs.liveHandoffSlot.Load()
 	if handoffSlot == 0 {
 		// While repair catchup is pending or active, buffer everything above
 		// the resume frontier: the runway arms the handoff at the gap start,
@@ -594,18 +594,18 @@ func (bs *BlockSource) shouldDecodeLightbringerSlot(slot uint64) bool {
 		if bs.catchupRescueCovers(slot) {
 			return true // catchup stall rescue: this slot is being repair-pulled
 		}
-		return bs.isNearTip.Load() || bs.shouldStageLightbringerSlot(slot)
+		return bs.isNearTip.Load() || bs.shouldStageLiveSlot(slot)
 	}
 	return (bs.isNearTip.Load() || bs.repairCatchupActive()) && slot >= handoffSlot
 }
 
-// inspectLaterLightbringerBlocksLocked summarizes later buffered live shred
+// inspectLaterLiveBlocksLocked summarizes later buffered live shred
 // traffic for the currently waiting slot so diagnostics can distinguish
 // "we have later stream traffic" from "we have a descendant that reconnects
 // directly to the current anchor".
-func (bs *BlockSource) inspectLaterLightbringerBlocksLocked(waitingSlot uint64) (firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, firstConnectedSlot uint64, firstConnectedParentSlot uint64, foundConnected bool) {
+func (bs *BlockSource) inspectLaterLiveBlocksLocked(waitingSlot uint64) (firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, firstConnectedSlot uint64, firstConnectedParentSlot uint64, foundConnected bool) {
 	for slot, blk := range bs.reorderBuffer {
-		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+		if blk == nil || !blk.FromLiveStream || slot <= waitingSlot {
 			continue
 		}
 		bufferedCount++

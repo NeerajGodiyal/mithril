@@ -38,7 +38,7 @@ func FromLightbringerStreamMsg(resp *overcast.SlotResponse) *Block {
 	}
 
 	block.Blockhash = solana.HashFromBytes(resp.Entries[len(resp.Entries)-1].Hash[:])
-	block.FromLightbringer = true
+	block.FromLiveStream = true
 
 	return block
 }

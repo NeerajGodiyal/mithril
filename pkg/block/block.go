@@ -50,7 +50,7 @@ type Block struct {
 	LatestEvictedBlockhash              [32]byte
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
-	FromLightbringer                    bool
+	FromLiveStream                      bool
 	IsSkipped                           bool // True for slots that were skipped by the leader
 
 	// Shred-path observability (zero when the block did not come from shreds —

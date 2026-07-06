@@ -120,8 +120,8 @@ func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
 		}
 	}
 
-	bs.forceRPCForLightbringerGap(1_500, 0, 0, 0)
-	if bs.lightbringerForceRPCUntil.Load() != 0 || bs.lightbringerCooldownUntil.Load() != 0 {
+	bs.forceRPCForLiveGap(1_500, 0, 0, 0)
+	if bs.liveForceRPCUntil.Load() != 0 || bs.liveCooldownUntil.Load() != 0 {
 		t.Fatalf("shreds-only: live-gap recovery must not arm RPC force flags")
 	}
 
@@ -163,20 +163,20 @@ func TestHandoffArmsOnFreshResumeAnchor(t *testing.T) {
 	bs.repairCatchupFrom.Store(1_000)
 	bs.repairCatchupUntil.Store(1_800)
 
-	head := &b.Block{Slot: 1_000, SourceParentSlot: 999, FromLightbringer: true}
-	bs.bufferLightbringerBlock(head)
+	head := &b.Block{Slot: 1_000, SourceParentSlot: 999, FromLiveStream: true}
+	bs.bufferLiveStreamBlock(head)
 	// A staged block BEYOND a gap (1001 missing): the payload must include
 	// it anyway — the reorder buffer handles out-of-order, holes are the
 	// repair drive's job. Handing over only the connected runway threw away
 	// a whole prewarm spool at the first gap (observed live: first buffered
 	// block 252 slots ahead of replay while ~190 collected blocks were
 	// dropped for re-repair).
-	beyondGap := &b.Block{Slot: 1_002, SourceParentSlot: 1_001, FromLightbringer: true}
-	bs.bufferLightbringerBlock(beyondGap)
+	beyondGap := &b.Block{Slot: 1_002, SourceParentSlot: 1_001, FromLiveStream: true}
+	bs.bufferLiveStreamBlock(beyondGap)
 
-	bs.maybePrepareLightbringerHandoff()
+	bs.maybePrepareLiveHandoff()
 
-	if got := bs.lightbringerHandoffSlot.Load(); got != 1_000 {
+	if got := bs.liveHandoffSlot.Load(); got != 1_000 {
 		t.Fatalf("handoff must arm at the resume head on a fresh boot (anchor = startSlot-1); handoff_slot=%d", got)
 	}
 	gotSlots := map[uint64]bool{}
@@ -280,22 +280,22 @@ func TestRepairCatchupBypassesNearTipGates(t *testing.T) {
 	if bs.isNearTip.Load() {
 		t.Fatalf("test premise: far from tip")
 	}
-	if !bs.shouldDecodeLightbringerSlot(2_050) {
+	if !bs.shouldDecodeLiveSlot(2_050) {
 		t.Fatalf("gap blocks must decode during repair catchup despite !nearTip")
 	}
-	if bs.shouldDecodeLightbringerSlot(1_500) {
+	if bs.shouldDecodeLiveSlot(1_500) {
 		t.Fatalf("slots below the gap must not decode")
 	}
 
 	// Post-handoff: decode continues for slots >= handoff without nearTip.
-	bs.lightbringerHandoffSlot.Store(2_001)
-	if !bs.shouldDecodeLightbringerSlot(2_100) {
+	bs.liveHandoffSlot.Store(2_001)
+	if !bs.shouldDecodeLiveSlot(2_100) {
 		t.Fatalf("post-handoff decode must bypass nearTip during repair catchup")
 	}
 
 	// prepare path: nearTip + replay-gap guards bypassed while active.
-	bs.lightbringerHandoffSlot.Store(0)
-	if _, _, prepared := bs.prepareLightbringerHandoff(2_001, 2_000); prepared {
+	bs.liveHandoffSlot.Store(0)
+	if _, _, prepared := bs.prepareLiveHandoff(2_001, 2_000); prepared {
 		// Not prepared without buffered runway blocks — but it must get PAST
 		// the nearTip/replay-gap guards and fail only on the empty runway.
 		t.Fatalf("cannot prepare with an empty buffer")
@@ -305,7 +305,7 @@ func TestRepairCatchupBypassesNearTipGates(t *testing.T) {
 	// (identical empty-runway input, different guard outcome is unobservable —
 	// so assert via shouldDecode, which flips with the flag).
 	bs.deactivateRepairCatchup(nil)
-	if bs.shouldDecodeLightbringerSlot(2_050) {
+	if bs.shouldDecodeLiveSlot(2_050) {
 		t.Fatalf("after deactivation, decode gating must revert to near-tip rules")
 	}
 }
@@ -321,7 +321,7 @@ func TestCatchupStallRescueGates(t *testing.T) {
 	})
 
 	// Inactive: normal catchup gating (slot far from tip is dropped).
-	if bs.shouldDecodeLightbringerSlot(1_005) {
+	if bs.shouldDecodeLiveSlot(1_005) {
 		t.Fatalf("no rescue armed: catchup slots must not decode")
 	}
 
@@ -335,16 +335,16 @@ func TestCatchupStallRescueGates(t *testing.T) {
 	if bs.catchupRescueCovers(1_004) || bs.catchupRescueCovers(1_021) {
 		t.Fatalf("outside the window must not be covered")
 	}
-	if !bs.shouldDecodeLightbringerSlot(1_010) {
+	if !bs.shouldDecodeLiveSlot(1_010) {
 		t.Fatalf("rescue-window slot must decode during catchup")
 	}
-	if bs.shouldDecodeLightbringerSlot(1_030) {
+	if bs.shouldDecodeLiveSlot(1_030) {
 		t.Fatalf("slots beyond the window keep normal catchup gating")
 	}
 
 	// Delivery: an assembled block inside the window goes straight to the
 	// emitter's result queue (rpcIdx -1 marks it live-sourced).
-	blk := &b.Block{Slot: 1_006, FromLightbringer: true, SourceParentSlot: 1_005}
+	blk := &b.Block{Slot: 1_006, FromLiveStream: true, SourceParentSlot: 1_005}
 	if !bs.ingestLiveShredBlock(blk) {
 		t.Fatalf("ingest must accept the rescued block")
 	}
@@ -358,7 +358,7 @@ func TestCatchupStallRescueGates(t *testing.T) {
 	}
 
 	// Outside the window: staged in the runway buffer as before, not delivered.
-	other := &b.Block{Slot: 1_030, FromLightbringer: true, SourceParentSlot: 1_029}
+	other := &b.Block{Slot: 1_030, FromLiveStream: true, SourceParentSlot: 1_029}
 	// (1_030 fails shouldDecode in catchup, so the receiver would drop it
 	// before ingest; simulate the near-tip staging path being off by calling
 	// ingest directly — it must buffer, not deliver.)

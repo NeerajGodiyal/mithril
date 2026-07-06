@@ -43,11 +43,11 @@ type model struct {
 	allRows    []table.Row
 
 	// Log views
-	mithrilLogPath      string
-	lightbringerLogPath string
-	mithrilLogLines     []string
+	mithrilLogPath       string
+	lightbringerLogPath  string
+	mithrilLogLines      []string
 	lightbringerLogLines []string
-	logViewport         viewport.Model
+	logViewport          viewport.Model
 
 	// State
 	viewMode int

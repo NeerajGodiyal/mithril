@@ -67,7 +67,7 @@ func (bs *BlockSource) maybeRescueStalledCatchupSlot() {
 	if bs.isNearTip.Load() || bs.repairCatchupActive() || bs.repairCatchupPending.Load() {
 		return
 	}
-	if bs.lightbringerHandoffSlot.Load() != 0 || !bs.usesLiveShredStream() {
+	if bs.liveHandoffSlot.Load() != 0 || !bs.usesLiveShredStream() {
 		return
 	}
 	bs.reorderMu.Lock()
@@ -186,9 +186,9 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		gapOK := !bs.rpcFallbackEnabled ||
 			(bs.repairCatchupMaxGapSlots > 0 && gap <= bs.repairCatchupMaxGapSlots)
 		eligible := gapOK &&
-			bs.lightbringerHandoffSlot.Load() == 0 &&
+			bs.liveHandoffSlot.Load() == 0 &&
 			!bs.isNearTip.Load() &&
-			bs.lightbringerForceRPCUntil.Load() == 0 &&
+			bs.liveForceRPCUntil.Load() == 0 &&
 			time.Now().Unix() >= bs.repairCatchupCooldownUntil.Load()
 
 		// Repair can only fill the gap if turbine is demonstrably alive: shreds
@@ -263,7 +263,7 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 			// poll cadence via the eligibility check. The completed handoff
 			// is cleared so re-arming eligibility is not blocked by a stale
 			// boot-time marker.
-			bs.lightbringerHandoffSlot.Store(0)
+			bs.liveHandoffSlot.Store(0)
 			bs.repairCatchupPending.Store(false)
 			continue
 		}
@@ -414,7 +414,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		if liveEdge := bs.repairCatchupEdge(receiver); bs.rpcFallbackEnabled && liveEdge > waiting && liveEdge-waiting > bs.repairCatchupMaxGapSlots {
 			repair := receiver.Stats().Repair
 			bs.deactivateRepairCatchup(receiver)
-			bs.forceRPCForLightbringerGap(waiting, 0, 0, 0)
+			bs.forceRPCForLiveGap(waiting, 0, 0, 0)
 			repairAtArm := statsAtArm.Repair
 			cooldown := repairCatchupReArmCooldown
 			note := ""
@@ -489,7 +489,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				headCompletedSlot = waiting
 				headCompletedAt = time.Now()
 			} else if time.Since(headCompletedAt) >= time.Second {
-				staged := bs.stagedLightbringerBlock(waiting)
+				staged := bs.stagedLiveBlock(waiting)
 				bs.reorderMu.Lock()
 				buffered := bs.reorderBuffer[waiting] != nil
 				emittedAnchor := bs.lastEmittedBlockSlot
@@ -507,7 +507,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 							}
 						}
 						mlog.Log.Warnf("repair catchup: head slot %d is ASSEMBLED and staged but not emitting — staged parent %d, runway anchor %d, handoff_slot %d, alpenglow_block_id %v; waiting on handoff arming",
-							waiting, staged.SourceParentSlot, anchor, bs.lightbringerHandoffSlot.Load(), staged.HasAlpenglowBlockID)
+							waiting, staged.SourceParentSlot, anchor, bs.liveHandoffSlot.Load(), staged.HasAlpenglowBlockID)
 					}
 				case buffered:
 					// Emit loop owns it.
@@ -564,7 +564,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		// Post-handoff, far-future live blocks stage instead of flooding
 		// the reorder buffer; hand the ones replay is approaching to the
 		// emitter now.
-		if bs.lightbringerHandoffSlot.Load() != 0 {
+		if bs.liveHandoffSlot.Load() != 0 {
 			bs.drainStagedCatchupBlocks(waiting, waiting+repairCatchupLiveDeliverWindow)
 		}
 
@@ -665,16 +665,16 @@ func headShredDetailString(receiver *turbine.UDPReceiver, slot uint64) string {
 // blocks (pre-arm inflight leftovers) never count.
 func (bs *BlockSource) turbineCatchupBlocksInWindow(from, to uint64) int {
 	count := 0
-	bs.lightbringerBufferMu.Lock()
-	for slot := range bs.lightbringerBuffer {
+	bs.liveStagingMu.Lock()
+	for slot := range bs.liveStagingBuffer {
 		if slot >= from && slot <= to {
 			count++
 		}
 	}
-	bs.lightbringerBufferMu.Unlock()
+	bs.liveStagingMu.Unlock()
 	bs.reorderMu.Lock()
 	for slot, blk := range bs.reorderBuffer {
-		if blk != nil && blk.FromLightbringer && slot >= from && slot <= to {
+		if blk != nil && blk.FromLiveStream && slot >= from && slot <= to {
 			count++
 		}
 	}

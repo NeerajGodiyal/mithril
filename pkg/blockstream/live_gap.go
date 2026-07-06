@@ -13,34 +13,34 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func (bs *BlockSource) clearLightbringerGapWatch() {
+func (bs *BlockSource) clearLiveGapWatch() {
 	bs.lightbringerGapSlot.Store(0)
-	bs.lightbringerGapSinceUnix.Store(0)
-	bs.lightbringerGapLastLogUnix.Store(0)
+	bs.liveGapSinceUnix.Store(0)
+	bs.liveGapLastLogUnix.Store(0)
 	bs.lightbringerGapReconnectSlot.Store(0)
 }
 
-func (bs *BlockSource) invalidateLightbringerResults() uint64 {
-	return bs.lightbringerResultGeneration.Add(1)
+func (bs *BlockSource) invalidateLiveStreamResults() uint64 {
+	return bs.liveResultGeneration.Add(1)
 }
 
-func (bs *BlockSource) setLightbringerCancel(cancel context.CancelFunc) {
-	bs.lightbringerCancelMu.Lock()
-	bs.lightbringerCancel = cancel
-	bs.lightbringerCancelMu.Unlock()
+func (bs *BlockSource) setLiveStreamCancel(cancel context.CancelFunc) {
+	bs.liveCancelMu.Lock()
+	bs.liveCancel = cancel
+	bs.liveCancelMu.Unlock()
 }
 
-func (bs *BlockSource) clearLightbringerCancel() {
-	bs.lightbringerCancelMu.Lock()
-	bs.lightbringerCancel = nil
-	bs.lightbringerCancelMu.Unlock()
+func (bs *BlockSource) clearLiveStreamCancel() {
+	bs.liveCancelMu.Lock()
+	bs.liveCancel = nil
+	bs.liveCancelMu.Unlock()
 }
 
-func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
-	if !bs.lightbringerConnected.Load() {
+func (bs *BlockSource) requestLiveStreamReconnect(reason string) bool {
+	if !bs.liveStreamConnected.Load() {
 		return false
 	}
-	if !bs.lightbringerReconnectRequested.CompareAndSwap(false, true) {
+	if !bs.liveReconnectRequested.CompareAndSwap(false, true) {
 		return false
 	}
 
@@ -48,7 +48,7 @@ func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
 	waitingSlot := bs.nextSlotToSend
 	lastEmitted := bs.lastEmittedBlockSlot
 	bs.reorderMu.Unlock()
-	latestStreamed := bs.lightbringerLastStreamSlot.Load()
+	latestStreamed := bs.liveLastStreamSlot.Load()
 
 	action := "stream reconnect requested"
 	if bs.sourceType == BlockSourceTurbine {
@@ -58,18 +58,18 @@ func (bs *BlockSource) requestLightbringerReconnect(reason string) bool {
 	mlog.Log.Warnf("%s %s: %s | waiting_slot=%d | last_emitted=%d | latest_streamed=%d",
 		bs.liveShredStreamName(), action, reason, waitingSlot, lastEmitted, latestStreamed)
 
-	bs.lightbringerCancelMu.Lock()
-	cancel := bs.lightbringerCancel
-	bs.lightbringerCancelMu.Unlock()
+	bs.liveCancelMu.Lock()
+	cancel := bs.liveCancel
+	bs.liveCancelMu.Unlock()
 	if cancel == nil {
-		bs.lightbringerReconnectRequested.Store(false)
+		bs.liveReconnectRequested.Store(false)
 		return false
 	}
 	cancel()
 	return true
 }
 
-func isLightbringerReconnectCancel(err error) bool {
+func isLiveStreamReconnectCancel(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -79,14 +79,14 @@ func isLightbringerReconnectCancel(err error) bool {
 	return status.Code(err) == codes.Canceled
 }
 
-func (bs *BlockSource) maybeReconnectActiveLightbringerForNoProgress(stallDuration time.Duration) {
+func (bs *BlockSource) maybeReconnectActiveLiveStreamForNoProgress(stallDuration time.Duration) {
 	if !bs.usesLiveShredStream() {
 		return
 	}
-	if !bs.lightbringerActive.Load() || !bs.isNearTip.Load() {
+	if !bs.liveStreamActive.Load() || !bs.isNearTip.Load() {
 		return
 	}
-	if stallDuration < lightbringerNoEmitReconnect {
+	if stallDuration < liveNoEmitReconnect {
 		return
 	}
 
@@ -98,7 +98,7 @@ func (bs *BlockSource) maybeReconnectActiveLightbringerForNoProgress(stallDurati
 	bufferedLightbringer := 0
 	foundBuffered := false
 	for slot, blk := range bs.reorderBuffer {
-		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+		if blk == nil || !blk.FromLiveStream || slot <= waitingSlot {
 			continue
 		}
 		bufferedLightbringer++
@@ -120,26 +120,26 @@ func (bs *BlockSource) maybeReconnectActiveLightbringerForNoProgress(stallDurati
 			stallDuration.Round(time.Second), waitingSlot, firstBufferedSlot, bufferedLightbringer, lastEmitted)
 	}
 
-	bs.requestLightbringerReconnect(reason)
+	bs.requestLiveStreamReconnect(reason)
 }
 
-func (bs *BlockSource) isLightbringerRepairSlot(slot uint64) bool {
-	return slot != 0 && bs.lightbringerRepairSlot.Load() == slot
+func (bs *BlockSource) isLiveRepairSlot(slot uint64) bool {
+	return slot != 0 && bs.liveRepairSlot.Load() == slot
 }
 
-func (bs *BlockSource) clearLightbringerRepairSlot(slot uint64) {
+func (bs *BlockSource) clearLiveRepairSlot(slot uint64) {
 	if slot == 0 {
 		return
 	}
-	bs.lightbringerRepairSlot.CompareAndSwap(slot, 0)
+	bs.liveRepairSlot.CompareAndSwap(slot, 0)
 }
 
-func (bs *BlockSource) resetLightbringerRepairSlot() {
-	bs.lightbringerRepairSlot.Store(0)
+func (bs *BlockSource) resetLiveRepairSlot() {
+	bs.liveRepairSlot.Store(0)
 }
 
-func (bs *BlockSource) lightbringerBlockConnectsLocked(blk *b.Block) bool {
-	if blk == nil || !blk.FromLightbringer {
+func (bs *BlockSource) liveBlockConnectsLocked(blk *b.Block) bool {
+	if blk == nil || !blk.FromLiveStream {
 		return true
 	}
 	if bs.lastEmittedBlockSlot == 0 {
@@ -151,40 +151,40 @@ func (bs *BlockSource) lightbringerBlockConnectsLocked(blk *b.Block) bool {
 	return blk.SourceParentSlot == bs.lastEmittedBlockSlot
 }
 
-func (bs *BlockSource) shouldPreferIncomingLightbringerBlockLocked(existing, incoming *b.Block) bool {
+func (bs *BlockSource) shouldPreferIncomingLiveBlockLocked(existing, incoming *b.Block) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
-	if !existing.FromLightbringer || !incoming.FromLightbringer {
+	if !existing.FromLiveStream || !incoming.FromLiveStream {
 		return false
 	}
 	if existing.Slot != incoming.Slot {
 		return false
 	}
-	return !bs.lightbringerBlockConnectsLocked(existing) && bs.lightbringerBlockConnectsLocked(incoming)
+	return !bs.liveBlockConnectsLocked(existing) && bs.liveBlockConnectsLocked(incoming)
 }
 
-func (bs *BlockSource) waitingLightbringerParentMismatchLocked() (waitingSlot uint64, observedParentSlot uint64, expectedParentSlot uint64, mismatch bool) {
+func (bs *BlockSource) waitingLiveParentMismatchLocked() (waitingSlot uint64, observedParentSlot uint64, expectedParentSlot uint64, mismatch bool) {
 	blk := bs.reorderBuffer[bs.nextSlotToSend]
-	if blk == nil || !blk.FromLightbringer {
+	if blk == nil || !blk.FromLiveStream {
 		return 0, 0, 0, false
 	}
-	if bs.lightbringerBlockConnectsLocked(blk) {
+	if bs.liveBlockConnectsLocked(blk) {
 		return 0, 0, 0, false
 	}
 	return blk.Slot, blk.SourceParentSlot, bs.lastEmittedBlockSlot, true
 }
 
-func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+func (bs *BlockSource) repairLiveStreamGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
 	if !bs.usesLiveShredStream() {
 		return
 	}
-	if !bs.lightbringerActive.Load() {
-		bs.forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+	if !bs.liveStreamActive.Load() {
+		bs.forceRPCForLiveGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
 		return
 	}
 
-	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
+	gapSinceUnix := bs.liveGapSinceUnix.Load()
 	gapAge := time.Duration(0)
 	if gapSinceUnix != 0 {
 		gapAge = time.Since(time.Unix(0, gapSinceUnix))
@@ -203,9 +203,9 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 	}
 
 	now := time.Now()
-	lastLog := time.Unix(0, bs.lightbringerGapLastLogUnix.Load())
+	lastLog := time.Unix(0, bs.liveGapLastLogUnix.Load())
 	if lastLog.IsZero() || now.Sub(lastLog) >= reorderGapWarnInterval {
-		bs.lightbringerGapLastLogUnix.Store(now.UnixNano())
+		bs.liveGapLastLogUnix.Store(now.UnixNano())
 		// Expected catchup rhythm, not an operator problem: repair owns the
 		// hole and the per-slot lines show progress. The full picture —
 		// including the repair/hydration counters that explain WHY the head
@@ -255,11 +255,11 @@ func (bs *BlockSource) repairLightbringerGap(waitingSlot, firstBufferedSlot, fir
 	}
 
 	if shouldReconnect && bs.lightbringerGapReconnectSlot.CompareAndSwap(0, waitingSlot) {
-		bs.requestLightbringerReconnect(reconnectReason)
+		bs.requestLiveStreamReconnect(reconnectReason)
 	}
 }
 
-func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+func (bs *BlockSource) forceRPCForLiveGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
 	if !bs.usesLiveShredStream() {
 		return
 	}
@@ -278,25 +278,25 @@ func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot
 		return
 	}
 
-	recoveryUntil := waitingSlot + lightbringerRecoverySlots
+	recoveryUntil := waitingSlot + liveRecoverySlots
 	if recoveryUntil < waitingSlot {
 		recoveryUntil = ^uint64(0)
 	}
 
-	bs.lightbringerForceRPCUntil.Store(waitingSlot)
-	bs.lightbringerCooldownUntil.Store(recoveryUntil)
-	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
-	wasActive := bs.lightbringerActive.Swap(false)
-	resultGeneration := bs.invalidateLightbringerResults()
-	bs.lightbringerNeedRPCResume.Store(true)
-	bs.clearLightbringerGapWatch()
-	bs.resetLightbringerRepairSlot()
-	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+	bs.liveForceRPCUntil.Store(waitingSlot)
+	bs.liveCooldownUntil.Store(recoveryUntil)
+	oldHandoff := bs.liveHandoffSlot.Swap(0)
+	wasActive := bs.liveStreamActive.Swap(false)
+	resultGeneration := bs.invalidateLiveStreamResults()
+	bs.liveNeedRPCResume.Store(true)
+	bs.clearLiveGapWatch()
+	bs.resetLiveRepairSlot()
+	clearedPrefetched := bs.clearBufferedLiveStreamBlocks()
 
 	bs.reorderMu.Lock()
 	removedSlots := make([]uint64, 0)
 	for slot, blk := range bs.reorderBuffer {
-		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
+		if blk != nil && blk.FromLiveStream && slot >= waitingSlot {
 			delete(bs.reorderBuffer, slot)
 			removedSlots = append(removedSlots, slot)
 		}
@@ -322,38 +322,38 @@ func (bs *BlockSource) forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot
 		bs.liveShredStreamName(), waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, clearedPrefetched, waitingSlot, recoveryUntil, resultGeneration, bs.currentModeString())
 }
 
-func (bs *BlockSource) handleDetectedLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
-	if bs.lightbringerActive.Load() {
-		bs.repairLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+func (bs *BlockSource) handleDetectedLiveGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {
+	if bs.liveStreamActive.Load() {
+		bs.repairLiveStreamGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
 		return
 	}
-	bs.forceRPCForLightbringerGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
+	bs.forceRPCForLiveGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount)
 }
 
-func (bs *BlockSource) forceRPCForLightbringerParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot uint64) {
+func (bs *BlockSource) forceRPCForLiveParentMismatch(waitingSlot, observedParentSlot, expectedParentSlot uint64) {
 	if !bs.usesLiveShredStream() {
 		return
 	}
 
-	recoveryUntil := waitingSlot + lightbringerRecoverySlots
+	recoveryUntil := waitingSlot + liveRecoverySlots
 	if recoveryUntil < waitingSlot {
 		recoveryUntil = ^uint64(0)
 	}
 
-	bs.lightbringerForceRPCUntil.Store(waitingSlot)
-	bs.lightbringerCooldownUntil.Store(recoveryUntil)
-	oldHandoff := bs.lightbringerHandoffSlot.Swap(0)
-	wasActive := bs.lightbringerActive.Swap(false)
-	resultGeneration := bs.invalidateLightbringerResults()
-	bs.lightbringerNeedRPCResume.Store(true)
-	bs.clearLightbringerGapWatch()
-	bs.resetLightbringerRepairSlot()
-	clearedPrefetched := bs.clearBufferedLightbringerBlocks()
+	bs.liveForceRPCUntil.Store(waitingSlot)
+	bs.liveCooldownUntil.Store(recoveryUntil)
+	oldHandoff := bs.liveHandoffSlot.Swap(0)
+	wasActive := bs.liveStreamActive.Swap(false)
+	resultGeneration := bs.invalidateLiveStreamResults()
+	bs.liveNeedRPCResume.Store(true)
+	bs.clearLiveGapWatch()
+	bs.resetLiveRepairSlot()
+	clearedPrefetched := bs.clearBufferedLiveStreamBlocks()
 
 	bs.reorderMu.Lock()
 	removedSlots := make([]uint64, 0)
 	for slot, blk := range bs.reorderBuffer {
-		if blk != nil && blk.FromLightbringer && slot >= waitingSlot {
+		if blk != nil && blk.FromLiveStream && slot >= waitingSlot {
 			delete(bs.reorderBuffer, slot)
 			removedSlots = append(removedSlots, slot)
 		}
@@ -384,17 +384,17 @@ func (bs *BlockSource) forceRPCForLightbringerParentMismatch(waitingSlot, observ
 		bs.liveShredStreamName(), waitingSlot, reason, observedParentSlot, expectedParentSlot, clearedPrefetched, waitingSlot, recoveryUntil, resultGeneration, bs.currentModeString())
 }
 
-func (bs *BlockSource) logLightbringerModeState(mode string, gap uint64) {
+func (bs *BlockSource) logLiveStreamModeState(mode string, gap uint64) {
 	if !bs.usesLiveShredStream() {
 		return
 	}
 
-	handoffSlot := bs.lightbringerHandoffSlot.Load()
-	active := bs.lightbringerActive.Load()
-	cooldownUntil := bs.lightbringerCooldownUntil.Load()
-	connected := bs.lightbringerConnected.Load()
-	lastSlot := bs.lightbringerLastStreamSlot.Load()
-	started := bs.lightbringerStarted.Load()
+	handoffSlot := bs.liveHandoffSlot.Load()
+	active := bs.liveStreamActive.Load()
+	cooldownUntil := bs.liveCooldownUntil.Load()
+	connected := bs.liveStreamConnected.Load()
+	lastSlot := bs.liveLastStreamSlot.Load()
+	started := bs.liveStreamStarted.Load()
 
 	bs.reorderMu.Lock()
 	waitingSlot := bs.nextSlotToSend
@@ -468,7 +468,7 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 
 	var minSlot uint64
 	var maxSlot uint64
-	var lightbringerCount int
+	var liveStreamCount int
 	first := true
 	for slot, blk := range bs.reorderBuffer {
 		if first || slot < minSlot {
@@ -477,8 +477,8 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 		if first || slot > maxSlot {
 			maxSlot = slot
 		}
-		if blk != nil && blk.FromLightbringer {
-			lightbringerCount++
+		if blk != nil && blk.FromLiveStream {
+			liveStreamCount++
 		}
 		first = false
 	}
@@ -505,7 +505,7 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 		gapToFirst = minSlot - waitingSlot
 	}
 
-	firstLightbringerSlot, firstLightbringerParentSlot, _, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLightbringerBlocksLocked(waitingSlot)
+	firstLightbringerSlot, firstLightbringerParentSlot, _, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLiveBlocksLocked(waitingSlot)
 
 	firstLightbringerDesc := "none"
 	if firstLightbringerSlot != 0 {
@@ -518,43 +518,43 @@ func (bs *BlockSource) maybeLogReorderGapLocked() {
 	}
 
 	mlog.NamedFilef("catchup", "reorder buffer: waiting on missing slot %d | waiting_state=%s | buffered=%d slots (%d from live stream) | buffered_range=%d-%d | gap_to_first_buffered=%d (buffered blocks are the live edge, not the missing range — repair owns the hole) | first_live=%s | first_connected_to_anchor=%s | mode=%s%s",
-		waitingSlot, waitingState, len(bs.reorderBuffer), lightbringerCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString(), bs.catchupDiagSuffix())
+		waitingSlot, waitingState, len(bs.reorderBuffer), liveStreamCount, minSlot, maxSlot, gapToFirst, firstLightbringerDesc, firstConnectedDesc, bs.currentModeString(), bs.catchupDiagSuffix())
 }
 
-func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, shouldFallback bool) {
+func (bs *BlockSource) detectLiveGapLocked() (waitingSlot uint64, firstBufferedSlot uint64, firstBufferedParentSlot uint64, bufferedCount int, shouldFallback bool) {
 	if !bs.usesLiveShredStream() {
 		return 0, 0, 0, 0, false
 	}
-	if bs.lightbringerForceRPCUntil.Load() != 0 {
-		bs.clearLightbringerGapWatch()
+	if bs.liveForceRPCUntil.Load() != 0 {
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
-	handoffSlot := bs.lightbringerHandoffSlot.Load()
-	lightbringerActive := bs.lightbringerActive.Load()
-	if handoffSlot == 0 && !lightbringerActive {
-		bs.clearLightbringerGapWatch()
+	handoffSlot := bs.liveHandoffSlot.Load()
+	liveStreamActive := bs.liveStreamActive.Load()
+	if handoffSlot == 0 && !liveStreamActive {
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
 	waitingSlot = bs.nextSlotToSend
-	if !lightbringerActive && handoffSlot != 0 && waitingSlot < handoffSlot {
+	if !liveStreamActive && handoffSlot != 0 && waitingSlot < handoffSlot {
 		// RPC still owns slots before the pending handoff boundary. Buffered
 		// Lightbringer blocks beyond that boundary are expected and must not be
 		// treated as evidence that the current RPC-owned waiting slot is missing.
-		bs.clearLightbringerGapWatch()
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
 	if bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot] {
-		bs.clearLightbringerGapWatch()
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
-	if lightbringerActive && bs.isLightbringerRepairSlot(waitingSlot) {
-		bs.clearLightbringerGapWatch()
+	if liveStreamActive && bs.isLiveRepairSlot(waitingSlot) {
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
 
 	first := true
 	for slot, blk := range bs.reorderBuffer {
-		if blk == nil || !blk.FromLightbringer || slot <= waitingSlot {
+		if blk == nil || !blk.FromLiveStream || slot <= waitingSlot {
 			continue
 		}
 		bufferedCount++
@@ -566,25 +566,25 @@ func (bs *BlockSource) detectLightbringerGapLocked() (waitingSlot uint64, firstB
 	}
 
 	if bufferedCount == 0 || first {
-		bs.clearLightbringerGapWatch()
+		bs.clearLiveGapWatch()
 		return 0, 0, 0, 0, false
 	}
 
 	now := time.Now()
 	gapSlot := bs.lightbringerGapSlot.Load()
-	gapSinceUnix := bs.lightbringerGapSinceUnix.Load()
+	gapSinceUnix := bs.liveGapSinceUnix.Load()
 	if gapSlot != waitingSlot || gapSinceUnix == 0 {
 		bs.lightbringerGapSlot.Store(waitingSlot)
-		bs.lightbringerGapSinceUnix.Store(now.UnixNano())
-		bs.lightbringerGapLastLogUnix.Store(0)
+		bs.liveGapSinceUnix.Store(now.UnixNano())
+		bs.liveGapLastLogUnix.Store(0)
 		bs.lightbringerGapReconnectSlot.Store(0)
 		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, false
 	}
 
-	if bufferedCount >= lightbringerGapBufferDepth {
+	if bufferedCount >= liveGapBufferDepth {
 		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, true
 	}
-	if now.Sub(time.Unix(0, gapSinceUnix)) < lightbringerGapFallbackWait {
+	if now.Sub(time.Unix(0, gapSinceUnix)) < liveGapFallbackWait {
 		return waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, false
 	}
 

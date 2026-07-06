@@ -263,7 +263,7 @@ func BlockFromEntries(slot uint64, parentSlot uint64, entries []Entry) *block.Bl
 		SourceParentSlot: parentSlot,
 		Transactions:     make([]*solana.Transaction, 0, len(entries)*4),
 		Entries:          make([]*block.TxEntry, len(entries)),
-		FromLightbringer: true,
+		FromLiveStream:   true,
 	}
 
 	var txOffset uint64

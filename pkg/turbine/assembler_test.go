@@ -148,7 +148,7 @@ func TestSlotAssemblerBuildsBlockFromCompleteDataShreds(t *testing.T) {
 		if blk.SourceParentSlot != 102815959 {
 			t.Fatalf("source parent slot = %d, want 102815959", blk.SourceParentSlot)
 		}
-		if !blk.FromLightbringer {
+		if !blk.FromLiveStream {
 			t.Fatalf("expected block to be marked as live shred-stream sourced")
 		}
 		if len(fecRoots) == 0 && blk.HasAlpenglowBlockID {

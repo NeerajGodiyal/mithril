@@ -247,17 +247,17 @@ func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
 }
 
 func (bs *BlockSource) runTurbineStream() {
-	defer bs.lightbringerWg.Done()
+	defer bs.liveStreamWg.Done()
 
-	backoff := lightbringerRetryBackoff
+	backoff := liveRetryBackoff
 	for {
 		if bs.stopped.Load() {
 			return
 		}
 
-		bs.lightbringerConnected.Store(false)
+		bs.liveStreamConnected.Store(false)
 		streamCtx, cancelStream := context.WithCancel(context.Background())
-		bs.setLightbringerCancel(cancelStream)
+		bs.setLiveStreamCancel(cancelStream)
 
 		var gossipClient *gossipclient.Client
 		var gossipDone <-chan error
@@ -280,8 +280,8 @@ func (bs *BlockSource) runTurbineStream() {
 					return
 				}
 				backoff *= 2
-				if backoff > lightbringerMaxRetryBackoff {
-					backoff = lightbringerMaxRetryBackoff
+				if backoff > liveMaxRetryBackoff {
+					backoff = liveMaxRetryBackoff
 				}
 				continue
 			}
@@ -311,8 +311,8 @@ func (bs *BlockSource) runTurbineStream() {
 					return
 				}
 				backoff *= 2
-				if backoff > lightbringerMaxRetryBackoff {
-					backoff = lightbringerMaxRetryBackoff
+				if backoff > liveMaxRetryBackoff {
+					backoff = liveMaxRetryBackoff
 				}
 				continue
 			}
@@ -339,8 +339,8 @@ func (bs *BlockSource) runTurbineStream() {
 					return
 				}
 				backoff *= 2
-				if backoff > lightbringerMaxRetryBackoff {
-					backoff = lightbringerMaxRetryBackoff
+				if backoff > liveMaxRetryBackoff {
+					backoff = liveMaxRetryBackoff
 				}
 				continue
 			}
@@ -351,9 +351,9 @@ func (bs *BlockSource) runTurbineStream() {
 		}
 
 		mlog.Log.Infof("Native turbine receiver listening on %s", bs.turbineBindAddr)
-		bs.lightbringerConnected.Store(true)
-		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
-		backoff = lightbringerRetryBackoff
+		bs.liveStreamConnected.Store(true)
+		bs.liveLastRecvUnix.Store(time.Now().Unix())
+		backoff = liveRetryBackoff
 
 		// (Re)start the repair-catchup monitor with EVERY turbine stream,
 		// not just the construction-time one: a stream restart mid-run left
@@ -468,8 +468,8 @@ func (bs *BlockSource) runTurbineStream() {
 			return
 		}
 		backoff *= 2
-		if backoff > lightbringerMaxRetryBackoff {
-			backoff = lightbringerMaxRetryBackoff
+		if backoff > liveMaxRetryBackoff {
+			backoff = liveMaxRetryBackoff
 		}
 	}
 }

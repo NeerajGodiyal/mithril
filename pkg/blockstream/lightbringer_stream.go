@@ -19,8 +19,8 @@ func (bs *BlockSource) maybeStartLightbringerStream() {
 	if !bs.usesLiveShredStream() {
 		return
 	}
-	if bs.lightbringerStarted.CompareAndSwap(false, true) {
-		bs.lightbringerWg.Add(1)
+	if bs.liveStreamStarted.CompareAndSwap(false, true) {
+		bs.liveStreamWg.Add(1)
 		if bs.sourceType == BlockSourceTurbine {
 			go bs.runTurbineStream()
 		} else {
@@ -30,16 +30,16 @@ func (bs *BlockSource) maybeStartLightbringerStream() {
 }
 
 func (bs *BlockSource) runLightbringerStream() {
-	defer bs.lightbringerWg.Done()
+	defer bs.liveStreamWg.Done()
 
-	backoff := lightbringerRetryBackoff
+	backoff := liveRetryBackoff
 
 	for {
 		if bs.stopped.Load() {
 			return
 		}
 
-		bs.lightbringerConnected.Store(false)
+		bs.liveStreamConnected.Store(false)
 
 		conn, err := grpc.NewClient(bs.lightbringerEndpoint, grpc.WithInsecure())
 		if err != nil {
@@ -48,14 +48,14 @@ func (bs *BlockSource) runLightbringerStream() {
 				return
 			}
 			backoff *= 2
-			if backoff > lightbringerMaxRetryBackoff {
-				backoff = lightbringerMaxRetryBackoff
+			if backoff > liveMaxRetryBackoff {
+				backoff = liveMaxRetryBackoff
 			}
 			continue
 		}
 
 		streamCtx, cancelStream := context.WithCancel(context.Background())
-		bs.setLightbringerCancel(cancelStream)
+		bs.setLiveStreamCancel(cancelStream)
 		streamDone := make(chan struct{})
 		go func() {
 			defer close(streamDone)
@@ -71,23 +71,23 @@ func (bs *BlockSource) runLightbringerStream() {
 		if err != nil {
 			cancelStream()
 			<-streamDone
-			bs.clearLightbringerCancel()
+			bs.clearLiveStreamCancel()
 			_ = conn.Close()
 			mlog.Log.Warnf("Lightbringer stream setup failed for %s: %v", bs.lightbringerEndpoint, err)
 			if bs.waitForStopOrTimeout(backoff) {
 				return
 			}
 			backoff *= 2
-			if backoff > lightbringerMaxRetryBackoff {
-				backoff = lightbringerMaxRetryBackoff
+			if backoff > liveMaxRetryBackoff {
+				backoff = liveMaxRetryBackoff
 			}
 			continue
 		}
 
 		mlog.Log.Infof("Lightbringer stream connected to %s", bs.lightbringerEndpoint)
-		bs.lightbringerConnected.Store(true)
-		bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
-		backoff = lightbringerRetryBackoff
+		bs.liveStreamConnected.Store(true)
+		bs.liveLastRecvUnix.Store(time.Now().Unix())
+		backoff = liveRetryBackoff
 		firstSlotReceived := make(chan struct{})
 		firstSlotOnce := sync.Once{}
 		connectionClosed := make(chan struct{})
@@ -125,10 +125,10 @@ func (bs *BlockSource) runLightbringerStream() {
 				case <-connectionClosed:
 					return
 				case <-ticker.C:
-					if !bs.lightbringerActive.Load() || !bs.isNearTip.Load() {
+					if !bs.liveStreamActive.Load() || !bs.isNearTip.Load() {
 						continue
 					}
-					lastRecvUnix := bs.lightbringerLastRecvUnix.Load()
+					lastRecvUnix := bs.liveLastRecvUnix.Load()
 					if lastRecvUnix == 0 {
 						continue
 					}
@@ -143,7 +143,7 @@ func (bs *BlockSource) runLightbringerStream() {
 							continue
 						}
 						noEmitFor := time.Since(time.Unix(lastProgressUnix, 0))
-						if noEmitFor < lightbringerNoEmitReconnect {
+						if noEmitFor < liveNoEmitReconnect {
 							continue
 						}
 
@@ -155,11 +155,11 @@ func (bs *BlockSource) runLightbringerStream() {
 							continue
 						}
 
-						bs.requestLightbringerReconnect(fmt.Sprintf("no block emitted for %s while Lightbringer is active and replay is waiting on slot %d",
+						bs.requestLiveStreamReconnect(fmt.Sprintf("no block emitted for %s while Lightbringer is active and replay is waiting on slot %d",
 							noEmitFor.Round(time.Second), waitingSlot))
 						continue
 					}
-					bs.requestLightbringerReconnect(fmt.Sprintf("live stream idle for %s while near-tip replay is active",
+					bs.requestLiveStreamReconnect(fmt.Sprintf("live stream idle for %s while near-tip replay is active",
 						idleFor.Round(time.Second)))
 				}
 			}
@@ -176,10 +176,10 @@ func (bs *BlockSource) runLightbringerStream() {
 				<-streamDone
 				_ = conn.Close()
 
-				reconnectRequested := bs.lightbringerReconnectRequested.Swap(false)
-				canceledByReconnect := reconnectRequested && isLightbringerReconnectCancel(err)
+				reconnectRequested := bs.liveReconnectRequested.Swap(false)
+				canceledByReconnect := reconnectRequested && isLiveStreamReconnectCancel(err)
 
-				if bs.stopped.Load() || isLightbringerReconnectCancel(err) || errors.Is(err, io.EOF) {
+				if bs.stopped.Load() || isLiveStreamReconnectCancel(err) || errors.Is(err, io.EOF) {
 					if bs.stopped.Load() {
 						return
 					}
@@ -189,7 +189,7 @@ func (bs *BlockSource) runLightbringerStream() {
 						} else {
 							mlog.Log.Warnf("Lightbringer stream reconnecting after watchdog request (recv err: %v)", err)
 						}
-					} else if isLightbringerReconnectCancel(err) {
+					} else if isLiveStreamReconnectCancel(err) {
 						return
 					}
 					if !reconnectRequested {
@@ -207,8 +207,8 @@ func (bs *BlockSource) runLightbringerStream() {
 					return
 				}
 				backoff *= 2
-				if backoff > lightbringerMaxRetryBackoff {
-					backoff = lightbringerMaxRetryBackoff
+				if backoff > liveMaxRetryBackoff {
+					backoff = liveMaxRetryBackoff
 				}
 				break
 			}
@@ -220,15 +220,15 @@ func (bs *BlockSource) runLightbringerStream() {
 			firstSlotOnce.Do(func() {
 				close(firstSlotReceived)
 			})
-			bs.lightbringerLastStreamSlot.Store(resp.Slot)
-			bs.lightbringerLastRecvUnix.Store(time.Now().Unix())
+			bs.liveLastStreamSlot.Store(resp.Slot)
+			bs.liveLastRecvUnix.Store(time.Now().Unix())
 
 			if len(resp.Entries) == 0 {
 				mlog.Log.Warnf("Lightbringer delivered slot %d with no entries; ignoring", resp.Slot)
 				continue
 			}
 
-			if !bs.shouldDecodeLightbringerSlot(resp.Slot) {
+			if !bs.shouldDecodeLiveSlot(resp.Slot) {
 				continue
 			}
 

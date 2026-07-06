@@ -22,16 +22,16 @@ func TestLightbringerBlockConnectsLocked(t *testing.T) {
 
 	bs.lastEmittedBlockSlot = 150
 
-	if !bs.lightbringerBlockConnectsLocked(&b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}) {
+	if !bs.liveBlockConnectsLocked(&b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 150}) {
 		t.Fatalf("expected Lightbringer block with matching parent slot to connect")
 	}
-	if bs.lightbringerBlockConnectsLocked(&b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}) {
+	if bs.liveBlockConnectsLocked(&b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 149}) {
 		t.Fatalf("expected Lightbringer block with mismatched parent slot to be rejected")
 	}
-	if bs.lightbringerBlockConnectsLocked(&b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 0}) {
+	if bs.liveBlockConnectsLocked(&b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 0}) {
 		t.Fatalf("expected Lightbringer block without parent metadata to be rejected once an anchor exists")
 	}
-	if !bs.lightbringerBlockConnectsLocked(&b.Block{Slot: 151, FromLightbringer: false}) {
+	if !bs.liveBlockConnectsLocked(&b.Block{Slot: 151, FromLiveStream: false}) {
 		t.Fatalf("expected RPC block to pass through ancestry guard")
 	}
 }
@@ -45,16 +45,16 @@ func TestCurrentSourceSnapshotUsesTurbineSourceName(t *testing.T) {
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
-	bs.lightbringerLastStreamSlot.Store(150)
+	bs.liveStreamConnected.Store(true)
+	bs.liveLastStreamSlot.Store(150)
 
 	source, status, handoff := bs.currentSourceSnapshot()
 	if source != "rpc" || handoff != 0 || !strings.Contains(status, "turbine connected") {
 		t.Fatalf("expected pre-handoff turbine status, got source=%q status=%q handoff=%d", source, status, handoff)
 	}
 
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(151)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(151)
 
 	source, status, handoff = bs.currentSourceSnapshot()
 	if source != "turbine" || status != "turbine live stream" || handoff != 151 {
@@ -108,7 +108,7 @@ func TestApplyAlpenglowDecisionLockedMarksCertifiedSkip(t *testing.T) {
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 
 	bs.reorderMu.Lock()
 	changed := bs.applyAlpenglowDecisionLocked()
@@ -142,7 +142,7 @@ func TestApplyAlpenglowCertifiedSkipModeIndependent(t *testing.T) {
 	// NOT near-tip and NOT lightbringer-active: the pre-handoff / RPC-catchup
 	// case that the near-tip gate would otherwise skip.
 	bs.isNearTip.Store(false)
-	bs.lightbringerActive.Store(false)
+	bs.liveStreamActive.Store(false)
 
 	bs.reorderMu.Lock()
 	changed := bs.applyAlpenglowDecisionLocked()
@@ -178,10 +178,10 @@ func TestApplyAlpenglowDecisionLockedLeavesMatchingCertifiedBlock(t *testing.T) 
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.reorderBuffer[151] = &b.Block{
 		Slot:                151,
-		FromLightbringer:    true,
+		FromLiveStream:      true,
 		HasAlpenglowBlockID: true,
 		AlpenglowBlockID:    [32]byte(blockID),
 	}
@@ -216,10 +216,10 @@ func TestApplyAlpenglowDecisionLockedDiscardsMismatchedCertifiedBlock(t *testing
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.reorderBuffer[151] = &b.Block{
 		Slot:                151,
-		FromLightbringer:    true,
+		FromLiveStream:      true,
 		HasAlpenglowBlockID: true,
 		AlpenglowBlockID:    [32]byte(gotBlockID),
 	}
@@ -241,7 +241,7 @@ func TestApplyAlpenglowDecisionLockedDiscardsMismatchedCertifiedBlock(t *testing
 	if got := bs.knownAlpenglowBlockIDs[151]; got != wantBlockID {
 		t.Fatalf("known Alpenglow block id = %s, want %s", got, wantBlockID)
 	}
-	if got := bs.lightbringerRepairSlot.Load(); got != 0 {
+	if got := bs.liveRepairSlot.Load(); got != 0 {
 		t.Fatalf("expected certified mismatch to avoid RPC repair, got repair slot %d", got)
 	}
 	if len(bs.retrySlots) != 0 {
@@ -272,10 +272,10 @@ func TestRestartAdjudicationConvergesViaRetainedDecision(t *testing.T) {
 		AlpenglowDecisionSource:      tracker.NextDecision,
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.reorderBuffer[151] = &b.Block{
 		Slot:                151,
-		FromLightbringer:    true,
+		FromLiveStream:      true,
 		HasAlpenglowBlockID: true,
 		AlpenglowBlockID:    [32]byte{0xBB}, // the wrong version that caused the halt
 	}
@@ -314,7 +314,7 @@ func TestApplyAlpenglowDecisionLockedHaltsOnConflict(t *testing.T) {
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.reorderBuffer[151] = &b.Block{Slot: 151, HasAlpenglowBlockID: true}
 
 	bs.reorderMu.Lock()
@@ -341,33 +341,33 @@ func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) 
 		EndSlot:              200,
 	})
 
-	bs.lightbringerHandoffSlot.Store(101)
-	bs.lightbringerActive.Store(true)
+	bs.liveHandoffSlot.Store(101)
+	bs.liveStreamActive.Store(true)
 
-	bs.reorderBuffer[101] = &b.Block{Slot: 101, FromLightbringer: true, SourceParentSlot: 99}
-	bs.reorderBuffer[102] = &b.Block{Slot: 102, FromLightbringer: true, SourceParentSlot: 101}
-	bs.reorderBuffer[103] = &b.Block{Slot: 103, FromLightbringer: false}
+	bs.reorderBuffer[101] = &b.Block{Slot: 101, FromLiveStream: true, SourceParentSlot: 99}
+	bs.reorderBuffer[102] = &b.Block{Slot: 102, FromLiveStream: true, SourceParentSlot: 101}
+	bs.reorderBuffer[103] = &b.Block{Slot: 103, FromLiveStream: false}
 	bs.slotState[101] = slotDone
 	bs.slotState[102] = slotDone
 	bs.slotState[103] = slotDone
-	bs.lightbringerBuffer[104] = &b.Block{Slot: 104, FromLightbringer: true, SourceParentSlot: 102}
-	bs.lightbringerBufferOrder = []uint64{104}
+	bs.liveStagingBuffer[104] = &b.Block{Slot: 104, FromLiveStream: true, SourceParentSlot: 102}
+	bs.liveStagingOrder = []uint64{104}
 
-	bs.forceRPCForLightbringerParentMismatch(101, 99, 100)
+	bs.forceRPCForLiveParentMismatch(101, 99, 100)
 
-	if got := bs.lightbringerForceRPCUntil.Load(); got != 101 {
+	if got := bs.liveForceRPCUntil.Load(); got != 101 {
 		t.Fatalf("expected RPC to be forced until slot 101, got %d", got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got != 101+lightbringerRecoverySlots {
+	if got := bs.liveCooldownUntil.Load(); got != 101+liveRecoverySlots {
 		t.Fatalf("expected cooldown boundary to match configured recovery window, got %d", got)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected handoff slot to be cleared, got %d", got)
 	}
-	if bs.lightbringerActive.Load() {
+	if bs.liveStreamActive.Load() {
 		t.Fatalf("expected Lightbringer to be marked inactive after parent mismatch")
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected RPC resume flag to be raised after parent mismatch")
 	}
 	if _, exists := bs.reorderBuffer[101]; exists {
@@ -388,7 +388,7 @@ func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) 
 	if _, exists := bs.slotState[103]; !exists {
 		t.Fatalf("expected slot state for non-Lightbringer slot 103 to remain")
 	}
-	if len(bs.lightbringerBuffer) != 0 || len(bs.lightbringerBufferOrder) != 0 {
+	if len(bs.liveStagingBuffer) != 0 || len(bs.liveStagingOrder) != 0 {
 		t.Fatalf("expected prefetched Lightbringer buffer to be cleared")
 	}
 }
@@ -402,36 +402,36 @@ func TestHandleLiveShredStreamClosedForcesRPCAndInvalidatesBufferedRunway(t *tes
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
-	bs.lightbringerHandoffSlot.Store(121)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamConnected.Store(true)
+	bs.liveHandoffSlot.Store(121)
+	bs.liveStreamActive.Store(true)
 	bs.nextSlotToSend = 122
 	bs.lastEmittedBlockSlot = 121
-	bs.reorderBuffer[123] = &b.Block{Slot: 123, FromLightbringer: true, SourceParentSlot: 122}
-	bs.reorderBuffer[124] = &b.Block{Slot: 124, FromLightbringer: true, SourceParentSlot: 123}
-	bs.reorderBuffer[125] = &b.Block{Slot: 125, FromLightbringer: false}
+	bs.reorderBuffer[123] = &b.Block{Slot: 123, FromLiveStream: true, SourceParentSlot: 122}
+	bs.reorderBuffer[124] = &b.Block{Slot: 124, FromLiveStream: true, SourceParentSlot: 123}
+	bs.reorderBuffer[125] = &b.Block{Slot: 125, FromLiveStream: false}
 	bs.slotState[123] = slotDone
 	bs.slotState[124] = slotDone
 	bs.slotState[125] = slotDone
-	bs.lightbringerBuffer[126] = &b.Block{Slot: 126, FromLightbringer: true, SourceParentSlot: 125}
-	bs.lightbringerBufferOrder = []uint64{126}
-	oldGeneration := bs.lightbringerResultGeneration.Load()
+	bs.liveStagingBuffer[126] = &b.Block{Slot: 126, FromLiveStream: true, SourceParentSlot: 125}
+	bs.liveStagingOrder = []uint64{126}
+	oldGeneration := bs.liveResultGeneration.Load()
 
 	bs.handleLiveShredStreamClosed("test reconnect")
 
-	if got := bs.lightbringerResultGeneration.Load(); got != oldGeneration+1 {
+	if got := bs.liveResultGeneration.Load(); got != oldGeneration+1 {
 		t.Fatalf("expected live stream generation to advance, got %d want %d", got, oldGeneration+1)
 	}
-	if got := bs.lightbringerForceRPCUntil.Load(); got != 122 {
+	if got := bs.liveForceRPCUntil.Load(); got != 122 {
 		t.Fatalf("expected RPC to be forced from waiting slot 122, got %d", got)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected handoff slot to be cleared, got %d", got)
 	}
-	if bs.lightbringerActive.Load() {
+	if bs.liveStreamActive.Load() {
 		t.Fatalf("expected turbine to be marked inactive after stream close")
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected RPC resume flag after stream close")
 	}
 	if _, exists := bs.reorderBuffer[123]; exists {
@@ -452,7 +452,7 @@ func TestHandleLiveShredStreamClosedForcesRPCAndInvalidatesBufferedRunway(t *tes
 	if _, exists := bs.slotState[125]; !exists {
 		t.Fatalf("expected RPC slot state 125 to remain")
 	}
-	if len(bs.lightbringerBuffer) != 0 || len(bs.lightbringerBufferOrder) != 0 {
+	if len(bs.liveStagingBuffer) != 0 || len(bs.liveStagingOrder) != 0 {
 		t.Fatalf("expected prefetched turbine buffer to be cleared")
 	}
 }
@@ -472,18 +472,18 @@ func TestPrepareLightbringerHandoffAllowsSkippedGapFromParentSlot(t *testing.T) 
 		if slot == 152 {
 			parentSlot = 150
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150)
 	if !prepared {
 		t.Fatalf("expected handoff to prepare across a skipped gap")
 	}
 	if handoffSlot != 151 {
 		t.Fatalf("expected handoff slot 151, got %d", handoffSlot)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 151 {
+	if got := bs.liveHandoffSlot.Load(); got != 151 {
 		t.Fatalf("expected stored handoff slot 151, got %d", got)
 	}
 	if len(blocks) != 7 {
@@ -515,15 +515,15 @@ func TestPrepareLightbringerHandoffRequiresMinimumRunway(t *testing.T) {
 		if slot == 151 {
 			parentSlot = 150
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	if blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
+	if blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
 		t.Fatalf("expected handoff to stay unarmed without the minimum Lightbringer runway, got prepared=%v handoff=%d blocks=%+v",
 			prepared, handoffSlot, blocks)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected stored handoff slot to remain unset without enough runway, got %d", got)
 	}
 }
@@ -537,20 +537,20 @@ func TestPrepareTurbineHandoffAllowsLiveEdgeRunwayAtTipWithoutConsensusBuffering
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(150)
 	bs.confirmedTip.Store(151)
-	bs.lightbringerLastStreamSlot.Store(151)
+	bs.liveLastStreamSlot.Store(151)
 	bs.lastEmittedBlockSlot = 150
-	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
-	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, 151)
+	bs.liveStagingBuffer[151] = &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 150}
+	bs.liveStagingOrder = append(bs.liveStagingOrder, 151)
 
-	reason := bs.lightbringerHandoffWaitReason(151, 150)
+	reason := bs.liveHandoffWaitReason(151, 150)
 	if !strings.Contains(reason, "handoff-ready runway buffered through slot 151") {
 		t.Fatalf("expected live-edge turbine runway to be handoff-ready, got %q", reason)
 	}
 
-	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150)
 	if !prepared {
 		t.Fatalf("expected turbine handoff to prepare at the live edge")
 	}
@@ -571,15 +571,15 @@ func TestPrepareLightbringerHandoffKeepsMinimumRunwayWhenLightbringerLagsTip(t *
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(150)
 	bs.confirmedTip.Store(157)
-	bs.lightbringerLastStreamSlot.Store(151)
+	bs.liveLastStreamSlot.Store(151)
 	bs.lastEmittedBlockSlot = 150
-	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
-	bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, 151)
+	bs.liveStagingBuffer[151] = &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 150}
+	bs.liveStagingOrder = append(bs.liveStagingOrder, 151)
 
-	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150)
 	if prepared || handoffSlot != 0 || len(blocks) != 0 {
 		t.Fatalf("expected stale Lightbringer stream to require the full handoff runway, got prepared=%v handoff=%d blocks=%+v",
 			prepared, handoffSlot, blocks)
@@ -601,11 +601,11 @@ func TestPrepareLightbringerHandoffRequiresRunwayThroughConfiguredBoundary(t *te
 		if slot == 151 {
 			parentSlot = 150
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	if blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
+	if blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
 		t.Fatalf("expected handoff to stay unarmed when connected runway only covers through slot 157, got prepared=%v handoff=%d blocks=%+v",
 			prepared, handoffSlot, blocks)
 	}
@@ -621,11 +621,11 @@ func TestPrepareLightbringerHandoffRequiresConnectedRunway(t *testing.T) {
 
 	bs.isNearTip.Store(true)
 	bs.lastEmittedBlockSlot = 150
-	bs.lightbringerBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
-	bs.lightbringerBuffer[158] = &b.Block{Slot: 158, FromLightbringer: true, SourceParentSlot: 157}
-	bs.lightbringerBufferOrder = []uint64{151, 158}
+	bs.liveStagingBuffer[151] = &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 150}
+	bs.liveStagingBuffer[158] = &b.Block{Slot: 158, FromLiveStream: true, SourceParentSlot: 157}
+	bs.liveStagingOrder = []uint64{151, 158}
 
-	if blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
+	if blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150); prepared || handoffSlot != 0 || len(blocks) != 0 {
 		t.Fatalf("expected sparse Lightbringer buffer to stay unarmed without a connected runway, got prepared=%v handoff=%d blocks=%+v",
 			prepared, handoffSlot, blocks)
 	}
@@ -646,18 +646,18 @@ func TestPrepareLightbringerHandoffPurgesRPCOwnedStateAtBoundary(t *testing.T) {
 		if slot == 151 {
 			parentSlot = 150
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
-	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: false}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: false}
+	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLiveStream: false}
 	bs.skippedSlots[153] = true
 	bs.slotState[151] = slotInflight
 	bs.slotState[152] = slotDone
 	bs.retrySlots = []uint64{149, 151, 152}
 
-	blocks, handoffSlot, prepared := bs.prepareLightbringerHandoff(151, 150)
+	blocks, handoffSlot, prepared := bs.prepareLiveHandoff(151, 150)
 	if !prepared {
 		t.Fatalf("expected handoff to prepare")
 	}
@@ -669,7 +669,7 @@ func TestPrepareLightbringerHandoffPurgesRPCOwnedStateAtBoundary(t *testing.T) {
 	}
 	saw := make(map[uint64]bool, len(blocks))
 	for _, blk := range blocks {
-		if !blk.FromLightbringer {
+		if !blk.FromLiveStream {
 			t.Fatalf("expected only Lightbringer blocks in handoff runway, got %+v", blocks)
 		}
 		saw[blk.Slot] = true
@@ -708,10 +708,10 @@ func TestMaybePrepareLightbringerHandoffDefersWhenStreamTipShowsReplayGapTooLarg
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(101)
 	bs.confirmedTip.Store(117)
-	bs.lightbringerLastStreamSlot.Store(118)
+	bs.liveLastStreamSlot.Store(118)
 	bs.lastEmittedBlockSlot = 110
 	bs.nextSlotToSend = 111
 	for slot := uint64(111); slot <= 118; slot++ {
@@ -719,13 +719,13 @@ func TestMaybePrepareLightbringerHandoffDefersWhenStreamTipShowsReplayGapTooLarg
 		if slot == 111 {
 			parentSlot = 110
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	bs.maybePrepareLightbringerHandoff()
+	bs.maybePrepareLiveHandoff()
 
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected handoff to stay unarmed while replay gap exceeds handoff threshold, got %d", got)
 	}
 	if queued := len(bs.resultQueue); queued != 0 {
@@ -742,10 +742,10 @@ func TestMaybePrepareLightbringerHandoffArmsWhenReplayGapHasHeadroom(t *testing.
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(102)
 	bs.confirmedTip.Store(117)
-	bs.lightbringerLastStreamSlot.Store(118)
+	bs.liveLastStreamSlot.Store(118)
 	bs.lastEmittedBlockSlot = 110
 	bs.nextSlotToSend = 111
 	for slot := uint64(111); slot <= 118; slot++ {
@@ -753,13 +753,13 @@ func TestMaybePrepareLightbringerHandoffArmsWhenReplayGapHasHeadroom(t *testing.
 		if slot == 111 {
 			parentSlot = 110
 		}
-		bs.lightbringerBuffer[slot] = &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: parentSlot}
-		bs.lightbringerBufferOrder = append(bs.lightbringerBufferOrder, slot)
+		bs.liveStagingBuffer[slot] = &b.Block{Slot: slot, FromLiveStream: true, SourceParentSlot: parentSlot}
+		bs.liveStagingOrder = append(bs.liveStagingOrder, slot)
 	}
 
-	bs.maybePrepareLightbringerHandoff()
+	bs.maybePrepareLiveHandoff()
 
-	if got := bs.lightbringerHandoffSlot.Load(); got != 111 {
+	if got := bs.liveHandoffSlot.Load(); got != 111 {
 		t.Fatalf("expected handoff to arm at slot 111 once replay gap has headroom, got %d", got)
 	}
 	if queued := len(bs.resultQueue); queued != 8 {
@@ -776,16 +776,16 @@ func TestShouldDecodeLightbringerSlotStagesBeforeNearTipWithinCatchupWindow(t *t
 	})
 
 	bs.isNearTip.Store(false)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(100)
 	bs.confirmedTip.Store(164)
-	bs.lightbringerLastStreamSlot.Store(164)
+	bs.liveLastStreamSlot.Store(164)
 	bs.nextSlotToSend = 110
 
-	if !bs.shouldDecodeLightbringerSlot(120) {
+	if !bs.shouldDecodeLiveSlot(120) {
 		t.Fatalf("expected Lightbringer slot within catchup staging window to be decoded")
 	}
-	if bs.shouldDecodeLightbringerSlot(109) {
+	if bs.shouldDecodeLiveSlot(109) {
 		t.Fatalf("expected slot behind the emission frontier to stay unstaged")
 	}
 }
@@ -799,13 +799,13 @@ func TestShouldDecodeLightbringerSlotDoesNotStageWhenReplayGapTooLarge(t *testin
 	})
 
 	bs.isNearTip.Store(false)
-	bs.lightbringerConnected.Store(true)
+	bs.liveStreamConnected.Store(true)
 	bs.lastExecutedSlot.Store(100)
 	bs.confirmedTip.Store(165)
-	bs.lightbringerLastStreamSlot.Store(165)
+	bs.liveLastStreamSlot.Store(165)
 	bs.nextSlotToSend = 101
 
-	if bs.shouldDecodeLightbringerSlot(120) {
+	if bs.shouldDecodeLiveSlot(120) {
 		t.Fatalf("expected Lightbringer staging to wait until replay is inside the catchup staging window")
 	}
 }
@@ -819,11 +819,11 @@ func TestShouldPreferIncomingLightbringerBlockLockedPrefersConnectedSameSlotBloc
 	})
 
 	bs.lastEmittedBlockSlot = 150
-	disconnected := &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
-	connected := &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 150}
+	disconnected := &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 149}
+	connected := &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 150}
 
 	bs.reorderMu.Lock()
-	preferIncoming := bs.shouldPreferIncomingLightbringerBlockLocked(disconnected, connected)
+	preferIncoming := bs.shouldPreferIncomingLiveBlockLocked(disconnected, connected)
 	bs.reorderMu.Unlock()
 
 	if !preferIncoming {
@@ -841,10 +841,10 @@ func TestWaitingLightbringerParentMismatchLockedDetectsDisconnectedBufferedSlot(
 
 	bs.lastEmittedBlockSlot = 150
 	bs.nextSlotToSend = 151
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true, SourceParentSlot: 149}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: true, SourceParentSlot: 149}
 
 	bs.reorderMu.Lock()
-	waitingSlot, observedParent, expectedParent, mismatch := bs.waitingLightbringerParentMismatchLocked()
+	waitingSlot, observedParent, expectedParent, mismatch := bs.waitingLiveParentMismatchLocked()
 	bs.reorderMu.Unlock()
 
 	if !mismatch {
@@ -865,7 +865,7 @@ func TestShouldDiscardSkippedSlotAfterHandoffDropsRPCSkipMarker(t *testing.T) {
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerHandoffSlot.Store(151)
+	bs.liveHandoffSlot.Store(151)
 	bs.skippedSlots[151] = true
 
 	if !bs.shouldDiscardSkippedSlotAfterHandoff(151) {
@@ -889,8 +889,8 @@ func TestShouldDiscardSkippedSlotAfterHandoffKeepsAlpenglowCertifiedSkip(t *test
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(151)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(151)
 
 	bs.reorderMu.Lock()
 	bs.applyAlpenglowDecisionLocked()
@@ -923,8 +923,8 @@ func TestEmitOrderedBlocksMarksAlpenglowCertifiedSkipAsLiveStreamObservation(t *
 		},
 	})
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(151)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(151)
 
 	done := make(chan struct{})
 	go func() {
@@ -934,7 +934,7 @@ func TestEmitOrderedBlocksMarksAlpenglowCertifiedSkipAsLiveStreamObservation(t *
 
 	bs.resultQueue <- fetchResult{
 		slot:  152,
-		block: &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 151},
+		block: &b.Block{Slot: 152, FromLiveStream: true, SourceParentSlot: 151},
 	}
 	close(bs.resultQueue)
 	<-done
@@ -943,7 +943,7 @@ func TestEmitOrderedBlocksMarksAlpenglowCertifiedSkipAsLiveStreamObservation(t *
 	if skip == nil || !skip.IsSkipped || skip.Slot != 151 {
 		t.Fatalf("expected certified skip for slot 151, got %+v", skip)
 	}
-	if !skip.FromLightbringer {
+	if !skip.FromLiveStream {
 		t.Fatalf("expected certified skip to be marked as live-stream sourced")
 	}
 }
@@ -957,12 +957,12 @@ func TestInspectLaterLightbringerBlocksLockedFindsConnectedDescendant(t *testing
 	})
 
 	bs.lastEmittedBlockSlot = 150
-	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true, SourceParentSlot: 151}
-	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLightbringer: false}
-	bs.reorderBuffer[155] = &b.Block{Slot: 155, FromLightbringer: true, SourceParentSlot: 150}
-	bs.reorderBuffer[156] = &b.Block{Slot: 156, FromLightbringer: true, SourceParentSlot: 155}
+	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLiveStream: true, SourceParentSlot: 151}
+	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLiveStream: false}
+	bs.reorderBuffer[155] = &b.Block{Slot: 155, FromLiveStream: true, SourceParentSlot: 150}
+	bs.reorderBuffer[156] = &b.Block{Slot: 156, FromLiveStream: true, SourceParentSlot: 155}
 
-	firstBufferedSlot, firstBufferedParentSlot, bufferedCount, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLightbringerBlocksLocked(151)
+	firstBufferedSlot, firstBufferedParentSlot, bufferedCount, firstConnectedSlot, firstConnectedParentSlot, foundConnected := bs.inspectLaterLiveBlocksLocked(151)
 	if firstBufferedSlot != 152 || firstBufferedParentSlot != 151 {
 		t.Fatalf("expected earliest later Lightbringer block to be 152(parent=151), got slot=%d parent=%d", firstBufferedSlot, firstBufferedParentSlot)
 	}
@@ -985,24 +985,24 @@ func TestHandleDetectedLightbringerGapWaitsForStreamWhenLightbringerActive(t *te
 		EndSlot:              200,
 	})
 
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(120)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(120)
 
-	bs.handleDetectedLightbringerGap(125, 126, 125, 4)
+	bs.handleDetectedLiveGap(125, 126, 125, 4)
 
-	if got := bs.lightbringerForceRPCUntil.Load(); got != 0 {
+	if got := bs.liveForceRPCUntil.Load(); got != 0 {
 		t.Fatalf("expected active Lightbringer gap to avoid forcing RPC, got %d", got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got != 0 {
+	if got := bs.liveCooldownUntil.Load(); got != 0 {
 		t.Fatalf("expected active Lightbringer gap to avoid setting cooldown, got %d", got)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 120 {
+	if got := bs.liveHandoffSlot.Load(); got != 120 {
 		t.Fatalf("expected active Lightbringer gap to preserve handoff slot, got %d", got)
 	}
-	if !bs.lightbringerActive.Load() {
+	if !bs.liveStreamActive.Load() {
 		t.Fatalf("expected Lightbringer to remain active")
 	}
-	if got := bs.lightbringerRepairSlot.Load(); got != 0 {
+	if got := bs.liveRepairSlot.Load(); got != 0 {
 		t.Fatalf("expected active Lightbringer gap to avoid scheduling RPC repair, got %d", got)
 	}
 	if len(bs.retrySlots) != 0 {
@@ -1018,19 +1018,19 @@ func TestRepairLightbringerGapReconnectsForMissingAncestorRange(t *testing.T) {
 		EndSlot:              200,
 	})
 
-	bs.lightbringerConnected.Store(true)
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamConnected.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.isNearTip.Store(true)
 	bs.nextSlotToSend = 120
 	bs.lastEmittedBlockSlot = 119
-	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerDeepGapReconnect + time.Second)).UnixNano())
+	bs.liveGapSinceUnix.Store(time.Now().Add(-(lightbringerDeepGapReconnect + time.Second)).UnixNano())
 
 	reconnected := false
-	bs.setLightbringerCancel(func() {
+	bs.setLiveStreamCancel(func() {
 		reconnected = true
 	})
 
-	bs.repairLightbringerGap(120, 122, 121, reorderGapWarnThreshold)
+	bs.repairLiveStreamGap(120, 122, 121, reorderGapWarnThreshold)
 
 	if !reconnected {
 		t.Fatalf("expected reconnect to be requested for a missing Lightbringer ancestor range")
@@ -1048,14 +1048,14 @@ func TestDetectLightbringerGapWaitsForConfiguredFallbackDelay(t *testing.T) {
 		EndSlot:              200,
 	})
 
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.nextSlotToSend = 120
-	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true, SourceParentSlot: 120}
-	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLightbringer: true, SourceParentSlot: 121}
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLiveStream: true, SourceParentSlot: 120}
+	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLiveStream: true, SourceParentSlot: 121}
 	bs.lightbringerGapSlot.Store(120)
-	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-(lightbringerGapFallbackWait / 2)).UnixNano())
+	bs.liveGapSinceUnix.Store(time.Now().Add(-(liveGapFallbackWait / 2)).UnixNano())
 
-	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLightbringerGapLocked()
+	waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback := bs.detectLiveGapLocked()
 	if waitingSlot != 120 || firstBufferedSlot != 121 || firstBufferedParentSlot != 120 || bufferedCount != 2 || shouldFallback {
 		t.Fatalf("expected Lightbringer gap detection to report gap while staying patient before fallback delay expires, got waiting=%d first=%d parent=%d buffered=%d fallback=%v",
 			waitingSlot, firstBufferedSlot, firstBufferedParentSlot, bufferedCount, shouldFallback)
@@ -1071,15 +1071,15 @@ func TestSetLastExecutedSlotClearsRecoveryWindowImmediatelyWhenDisabled(t *testi
 	})
 
 	waitingSlot := uint64(125)
-	bs.lightbringerForceRPCUntil.Store(waitingSlot)
-	bs.lightbringerCooldownUntil.Store(waitingSlot + lightbringerRecoverySlots)
+	bs.liveForceRPCUntil.Store(waitingSlot)
+	bs.liveCooldownUntil.Store(waitingSlot + liveRecoverySlots)
 
 	bs.SetLastExecutedSlot(waitingSlot)
 
-	if got := bs.lightbringerForceRPCUntil.Load(); got != 0 {
+	if got := bs.liveForceRPCUntil.Load(); got != 0 {
 		t.Fatalf("expected forced RPC boundary to clear at slot %d, got %d", waitingSlot, got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got != 0 {
+	if got := bs.liveCooldownUntil.Load(); got != 0 {
 		t.Fatalf("expected disabled recovery window to clear immediately at slot %d, got %d", waitingSlot, got)
 	}
 }
@@ -1093,9 +1093,9 @@ func TestSetLastExecutedSlotAdvancesDeferredLightbringerFrontier(t *testing.T) {
 	})
 
 	bs.nextSlotToSend = 151
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: true}
-	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLightbringer: true}
-	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLightbringer: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: true}
+	bs.reorderBuffer[152] = &b.Block{Slot: 152, FromLiveStream: true}
+	bs.reorderBuffer[154] = &b.Block{Slot: 154, FromLiveStream: true}
 	bs.skippedSlots[153] = true
 	bs.slotState[151] = slotDone
 	bs.slotState[152] = slotDone
@@ -1141,12 +1141,12 @@ func TestForceRPCForCatchupRewindsConsensusManagedFrontier(t *testing.T) {
 		EndSlot:              200,
 	})
 
-	bs.lightbringerActive.Store(true)
+	bs.liveStreamActive.Store(true)
 	bs.lastExecutedSlot.Store(120)
 	bs.nextSlotToSend = 150
-	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
-	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLiveStream: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLiveStream: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: false}
 	bs.slotState[121] = slotDone
 	bs.slotState[149] = slotDone
 	bs.slotState[151] = slotInflight
@@ -1157,10 +1157,10 @@ func TestForceRPCForCatchupRewindsConsensusManagedFrontier(t *testing.T) {
 	if got := bs.nextSlotToSend; got != 121 {
 		t.Fatalf("expected RPC catchup frontier to rewind to replay's next slot 121, got %d", got)
 	}
-	if bs.lightbringerActive.Load() {
+	if bs.liveStreamActive.Load() {
 		t.Fatalf("expected Lightbringer to be marked inactive")
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected scheduler to be told to resume RPC from the rewound frontier")
 	}
 	if _, exists := bs.reorderBuffer[121]; exists {
@@ -1194,14 +1194,14 @@ func TestForceRPCFallbackRewindsConsensusManagedTurbineFrontier(t *testing.T) {
 		EndSlot:         200,
 	})
 
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(121)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(121)
 	bs.lastExecutedSlot.Store(120)
 	bs.confirmedTip.Store(180)
 	bs.nextSlotToSend = 150
-	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
-	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLiveStream: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLiveStream: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: false}
 	bs.slotState[121] = slotDone
 	bs.slotState[149] = slotDone
 	bs.slotState[151] = slotInflight
@@ -1212,13 +1212,13 @@ func TestForceRPCFallbackRewindsConsensusManagedTurbineFrontier(t *testing.T) {
 	if got := bs.nextSlotToSend; got != 121 {
 		t.Fatalf("expected RPC fallback frontier to rewind to replay's next slot 121, got %d", got)
 	}
-	if bs.lightbringerActive.Load() {
+	if bs.liveStreamActive.Load() {
 		t.Fatalf("expected turbine to be marked inactive")
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected turbine handoff to be cleared, got %d", got)
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected scheduler to resume RPC from the rewound frontier")
 	}
 	if _, exists := bs.reorderBuffer[121]; exists {
@@ -1246,14 +1246,14 @@ func TestForceRPCFallbackRewindsActiveTurbineFrontierToReplayProgress(t *testing
 		EndSlot:         200,
 	})
 
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(121)
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(121)
 	bs.lastExecutedSlot.Store(120)
 	bs.confirmedTip.Store(180)
 	bs.nextSlotToSend = 150
-	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true}
-	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLightbringer: true}
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLiveStream: true}
+	bs.reorderBuffer[149] = &b.Block{Slot: 149, FromLiveStream: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: false}
 	bs.slotState[121] = slotDone
 	bs.slotState[149] = slotDone
 	bs.slotState[151] = slotInflight
@@ -1264,10 +1264,10 @@ func TestForceRPCFallbackRewindsActiveTurbineFrontierToReplayProgress(t *testing
 	if got := bs.nextSlotToSend; got != 121 {
 		t.Fatalf("expected active turbine fallback to rewind to replay's next slot 121, got %d", got)
 	}
-	if bs.lightbringerActive.Load() {
+	if bs.liveStreamActive.Load() {
 		t.Fatalf("expected turbine to be marked inactive")
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected scheduler to resume RPC from the rewound frontier")
 	}
 	if _, exists := bs.reorderBuffer[121]; exists {
@@ -1295,11 +1295,11 @@ func TestForceRPCForCatchupKeepsPendingHandoffEmissionFrontier(t *testing.T) {
 		EndSlot:              200,
 	})
 
-	bs.lightbringerHandoffSlot.Store(121)
+	bs.liveHandoffSlot.Store(121)
 	bs.lastExecutedSlot.Store(120)
 	bs.nextSlotToSend = 150
-	bs.reorderBuffer[150] = &b.Block{Slot: 150, FromLightbringer: true}
-	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLightbringer: false}
+	bs.reorderBuffer[150] = &b.Block{Slot: 150, FromLiveStream: true}
+	bs.reorderBuffer[151] = &b.Block{Slot: 151, FromLiveStream: false}
 	bs.slotState[150] = slotDone
 	bs.slotState[151] = slotInflight
 
@@ -1308,10 +1308,10 @@ func TestForceRPCForCatchupKeepsPendingHandoffEmissionFrontier(t *testing.T) {
 	if got := bs.nextSlotToSend; got != 150 {
 		t.Fatalf("expected pending handoff fallback to keep emitted RPC frontier 150, got %d", got)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected pending handoff to be cleared, got %d", got)
 	}
-	if !bs.lightbringerNeedRPCResume.Load() {
+	if !bs.liveNeedRPCResume.Load() {
 		t.Fatalf("expected scheduler to resume RPC from the current emission frontier")
 	}
 	if _, exists := bs.reorderBuffer[150]; exists {
@@ -1331,10 +1331,10 @@ func TestEmitOrderedBlocksDropsStaleLiveStreamGeneration(t *testing.T) {
 	})
 
 	bs.isNearTip.Store(true)
-	bs.lightbringerActive.Store(true)
-	bs.lightbringerHandoffSlot.Store(100)
-	staleGeneration := bs.lightbringerResultGeneration.Load()
-	bs.invalidateLightbringerResults()
+	bs.liveStreamActive.Store(true)
+	bs.liveHandoffSlot.Store(100)
+	staleGeneration := bs.liveResultGeneration.Load()
+	bs.invalidateLiveStreamResults()
 
 	done := make(chan struct{})
 	go func() {
@@ -1344,7 +1344,7 @@ func TestEmitOrderedBlocksDropsStaleLiveStreamGeneration(t *testing.T) {
 
 	bs.resultQueue <- fetchResult{
 		slot:                 100,
-		block:                &b.Block{Slot: 100, FromLightbringer: true, SourceParentSlot: 99},
+		block:                &b.Block{Slot: 100, FromLiveStream: true, SourceParentSlot: 99},
 		liveStreamGeneration: staleGeneration,
 	}
 	close(bs.resultQueue)
@@ -1398,7 +1398,7 @@ func TestEmitOrderedBlocksDropsResultsBehindEmissionFrontier(t *testing.T) {
 
 func TestIsLightbringerReconnectCancelRecognizesGrpcCanceledStatus(t *testing.T) {
 	err := status.Error(codes.Canceled, "context canceled")
-	if !isLightbringerReconnectCancel(err) {
+	if !isLiveStreamReconnectCancel(err) {
 		t.Fatalf("expected gRPC canceled status to be treated as a reconnect cancel")
 	}
 }
@@ -1411,22 +1411,22 @@ func TestDetectLightbringerGapResetsReconnectLatchForNewWaitingSlot(t *testing.T
 		EndSlot:              200,
 	})
 
-	bs.lightbringerActive.Store(true)
-	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLightbringer: true, SourceParentSlot: 120}
-	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLightbringer: true, SourceParentSlot: 121}
+	bs.liveStreamActive.Store(true)
+	bs.reorderBuffer[121] = &b.Block{Slot: 121, FromLiveStream: true, SourceParentSlot: 120}
+	bs.reorderBuffer[122] = &b.Block{Slot: 122, FromLiveStream: true, SourceParentSlot: 121}
 	bs.nextSlotToSend = 120
 	bs.lightbringerGapSlot.Store(120)
-	bs.lightbringerGapSinceUnix.Store(time.Now().Add(-6 * time.Second).UnixNano())
-	bs.lightbringerGapLastLogUnix.Store(time.Now().Add(-3 * time.Second).Unix())
+	bs.liveGapSinceUnix.Store(time.Now().Add(-6 * time.Second).UnixNano())
+	bs.liveGapLastLogUnix.Store(time.Now().Add(-3 * time.Second).Unix())
 	bs.lightbringerGapReconnectSlot.Store(120)
 
 	delete(bs.reorderBuffer, 121)
 	delete(bs.reorderBuffer, 122)
-	bs.reorderBuffer[126] = &b.Block{Slot: 126, FromLightbringer: true, SourceParentSlot: 125}
-	bs.reorderBuffer[127] = &b.Block{Slot: 127, FromLightbringer: true, SourceParentSlot: 126}
+	bs.reorderBuffer[126] = &b.Block{Slot: 126, FromLiveStream: true, SourceParentSlot: 125}
+	bs.reorderBuffer[127] = &b.Block{Slot: 127, FromLiveStream: true, SourceParentSlot: 126}
 	bs.nextSlotToSend = 125
 
-	waitingSlot, _, _, _, shouldFallback := bs.detectLightbringerGapLocked()
+	waitingSlot, _, _, _, shouldFallback := bs.detectLiveGapLocked()
 	if waitingSlot != 125 || shouldFallback {
 		t.Fatalf("expected first observation of a new gap to arm tracking only while reporting the waiting slot, got waitingSlot=%d shouldFallback=%v", waitingSlot, shouldFallback)
 	}
@@ -1436,7 +1436,7 @@ func TestDetectLightbringerGapResetsReconnectLatchForNewWaitingSlot(t *testing.T
 	if got := bs.lightbringerGapReconnectSlot.Load(); got != 0 {
 		t.Fatalf("expected reconnect latch to reset for new gap, got %d", got)
 	}
-	if got := bs.lightbringerGapLastLogUnix.Load(); got != 0 {
+	if got := bs.liveGapLastLogUnix.Load(); got != 0 {
 		t.Fatalf("expected gap log throttle to reset for new gap, got %d", got)
 	}
 }
@@ -1449,17 +1449,17 @@ func TestHandleDetectedLightbringerGapForcesRPCBeforeLightbringerIsActive(t *tes
 		EndSlot:              200,
 	})
 
-	bs.lightbringerHandoffSlot.Store(120)
+	bs.liveHandoffSlot.Store(120)
 
-	bs.handleDetectedLightbringerGap(125, 126, 125, 4)
+	bs.handleDetectedLiveGap(125, 126, 125, 4)
 
-	if got := bs.lightbringerForceRPCUntil.Load(); got != 125 {
+	if got := bs.liveForceRPCUntil.Load(); got != 125 {
 		t.Fatalf("expected pending Lightbringer gap to force RPC until slot 125, got %d", got)
 	}
-	if got := bs.lightbringerCooldownUntil.Load(); got != 125+lightbringerRecoverySlots {
+	if got := bs.liveCooldownUntil.Load(); got != 125+liveRecoverySlots {
 		t.Fatalf("expected pending Lightbringer gap to set cooldown boundary from the configured recovery window, got %d", got)
 	}
-	if got := bs.lightbringerHandoffSlot.Load(); got != 0 {
+	if got := bs.liveHandoffSlot.Load(); got != 0 {
 		t.Fatalf("expected pending handoff to be cleared after forcing RPC, got %d", got)
 	}
 }

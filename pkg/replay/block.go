@@ -2898,7 +2898,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	txDurations := make([]time.Duration, txParallelism)
 
 	plannerBlock := block
-	if rblock.FromLightbringer {
+	if rblock.FromLiveStream {
 		plannerBlock = rblock
 	}
 
@@ -2940,7 +2940,7 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 		wg.Wait()
 		close(done)
-	} else if rblock.FromLightbringer {
+	} else if rblock.FromLiveStream {
 		batchWg := &sync.WaitGroup{}
 		workersWg := &sync.WaitGroup{}
 		do := make(chan uint64, txParallelism)
@@ -3071,7 +3071,7 @@ func ProcessBlock(
 					continue
 				}
 				mlog.Log.Warnf("REPLAY WATCHDOG: slot %d stuck in stage %s for %s | txs=%d | lightbringer=%t",
-					block.Slot, stage, stageDuration.Round(time.Second), len(block.Transactions), block.FromLightbringer)
+					block.Slot, stage, stageDuration.Round(time.Second), len(block.Transactions), block.FromLiveStream)
 				lastLoggedStage = stage
 				lastLoggedSince = sinceUnix
 			}
@@ -3098,7 +3098,7 @@ func ProcessBlock(
 			panic(fmt.Sprintf("unable to clone tx %s for unresolved block copy in slot %d: %v", block.Transactions[i].Signatures[0], block.Slot, cloneErr))
 		}
 		unresolvedBlock.Transactions[i] = clonedTx
-		if unresolvedBlock.TxMetas != nil && !block.FromLightbringer {
+		if unresolvedBlock.TxMetas != nil && !block.FromLiveStream {
 			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
 			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
 		}
