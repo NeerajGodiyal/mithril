@@ -77,7 +77,7 @@ func run(c *cobra.Command, args []string) {
 	}
 	if len(errs) > 0 {
 		for _, err := range errs {
-			mlog.Log.Errorf(err)
+			mlog.Log.Errorf("%s", err)
 		}
 		return
 	}
