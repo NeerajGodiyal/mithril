@@ -51,6 +51,7 @@ type SlotAssembler struct {
 	maxObservedSlot      uint64
 	highestFullSlot      uint64 // monotonic: highest slot reconstructed from shreds ("full", Agave SlotMeta/is_full sense)
 	recoveredDataShreds  uint64
+	usefulRepairShreds   uint64 // distinct data shreds delivered BY repair (the throughput signal)
 	nonCanonicalBlockIDs uint64
 	lastNonCanonicalSlot uint64
 	lastNonCanonicalGot  solana.Hash
@@ -209,9 +210,12 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 		err = state.addDataShred(shred)
 		// Count repair deliveries only for DISTINCT data shreds (after the
 		// duplicate check) so "repaired" can never exceed the distinct-shred
-		// count it is reported alongside.
+		// count it is reported alongside. The global tally drives the
+		// useful-distinct-shreds/sec rate — the true throughput signal
+		// (raw req/s says nothing about whether requests fetch new data).
 		if err == nil && fromRepair {
 			state.repairedShreds++
+			a.usefulRepairShreds++
 		}
 	case ShredTypeCode:
 		err = state.addCodingShred(shred)
@@ -755,6 +759,14 @@ func (a *SlotAssembler) RecoveredDataShreds() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.recoveredDataShreds
+}
+
+// UsefulRepairShreds is the cumulative count of distinct data shreds
+// delivered by repair — the numerator of useful-shreds/sec.
+func (a *SlotAssembler) UsefulRepairShreds() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.usefulRepairShreds
 }
 
 func (a *SlotAssembler) EvictedSlots() uint64 {

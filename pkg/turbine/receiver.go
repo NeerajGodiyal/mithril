@@ -64,6 +64,7 @@ type ReceiverStats struct {
 	AssemblyErrors       uint64
 	BlocksEmitted        uint64
 	RecoveredData        uint64
+	UsefulRepairShreds   uint64 // distinct data shreds delivered by repair (throughput signal)
 	EvictedSlots         uint64
 	IgnoredOldShreds     uint64
 	PriorityRepairSlots  int
@@ -269,6 +270,7 @@ func (r *UDPReceiver) Stats() ReceiverStats {
 		AssemblyErrors:       r.assemblyErrors.Load(),
 		BlocksEmitted:        r.blocksEmitted.Load(),
 		RecoveredData:        r.assembler.RecoveredDataShreds(),
+		UsefulRepairShreds:   r.assembler.UsefulRepairShreds(),
 		EvictedSlots:         r.assembler.EvictedSlots(),
 		IgnoredOldShreds:     r.assembler.IgnoredOldShreds(),
 		PriorityRepairSlots:  r.assembler.PriorityRepairSlots(),

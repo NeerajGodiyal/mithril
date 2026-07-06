@@ -584,6 +584,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			dReq := repair.Requests - hbPrev.Repair.Requests
 			dResp := repair.Responses - hbPrev.Repair.Responses
 			dTmo := repair.Timeouts - hbPrev.Repair.Timeouts
+			dUseful := hb.UsefulRepairShreds - hbPrev.UsefulRepairShreds
 			timelyPct := uint64(100)
 			if resolved := dResp + dTmo; resolved > 0 {
 				timelyPct = 100 * dResp / resolved
@@ -592,9 +593,9 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			if d, ok := receiver.HeadShredDetail(waiting); ok && d.HaveLast {
 				headMissing = int64(d.LastIndex) + 1 - int64(d.DataShreds)
 			}
-			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, USEFUL %.0f shreds/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
 				waiting, receiver.RepairOutstandingForSlot(waiting), headMissing, edge, windowBlocks,
-				float64(dReq)/interval, float64(dResp)/interval, timelyPct,
+				float64(dReq)/interval, float64(dResp)/interval, float64(dUseful)/interval, timelyPct,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
 				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,
