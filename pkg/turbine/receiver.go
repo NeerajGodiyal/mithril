@@ -40,6 +40,14 @@ type UDPReceiver struct {
 	// sufficient or the priority window needs widening.
 	hydratedSlots    atomic.Uint64
 	hydratedFromDisk atomic.Uint64
+	// Repair shreds written straight to the spool during deep catchup (slot
+	// beyond the hydration window): they never reach in-RAM assembly here, so
+	// the assembler's useful-repair counter — which increments in AddShredFrom
+	// — misses them, and hydration later re-adds them as fromRepair=false. This
+	// counter keeps them in the useful-repair throughput picture; without it,
+	// USEFUL shreds/s reads ~0 exactly when disk-bound catchup repair is doing
+	// all the work.
+	spooledRepairShreds atomic.Uint64
 
 	packets         atomic.Uint64
 	dataShreds      atomic.Uint64
@@ -64,7 +72,8 @@ type ReceiverStats struct {
 	AssemblyErrors       uint64
 	BlocksEmitted        uint64
 	RecoveredData        uint64
-	UsefulRepairShreds   uint64 // distinct data shreds delivered by repair (throughput signal)
+	UsefulRepairShreds   uint64 // distinct repair data shreds accepted into in-RAM assembly
+	SpooledRepairShreds  uint64 // repair data shreds written to the catchup spool (not yet assembled)
 	EvictedSlots         uint64
 	IgnoredOldShreds     uint64
 	PriorityRepairSlots  int
@@ -271,6 +280,7 @@ func (r *UDPReceiver) Stats() ReceiverStats {
 		BlocksEmitted:        r.blocksEmitted.Load(),
 		RecoveredData:        r.assembler.RecoveredDataShreds(),
 		UsefulRepairShreds:   r.assembler.UsefulRepairShreds(),
+		SpooledRepairShreds:  r.spooledRepairShreds.Load(),
 		EvictedSlots:         r.assembler.EvictedSlots(),
 		IgnoredOldShreds:     r.assembler.IgnoredOldShreds(),
 		PriorityRepairSlots:  r.assembler.PriorityRepairSlots(),
@@ -436,7 +446,15 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 			r.spool.Append(shred.Slot, pkt)
 			if r.skipAssemblyForSpool(shred.Slot) {
 				// Far-future slot during catchup: on disk is enough. The
-				// hydrator streams it into RAM when replay approaches.
+				// hydrator streams it into RAM when replay approaches. A repair
+				// delivery lands on disk and bypasses the assembler's useful
+				// counter, so count it as useful repair throughput here — else
+				// disk-bound catchup, where most repair goes straight to the
+				// spool, would read as ~zero useful/s while repair is in fact
+				// carrying the whole catchup.
+				if fromRepair {
+					r.spooledRepairShreds.Add(1)
+				}
 				continue
 			}
 		}

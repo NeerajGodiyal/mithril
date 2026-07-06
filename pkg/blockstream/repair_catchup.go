@@ -584,7 +584,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			dReq := repair.Requests - hbPrev.Repair.Requests
 			dResp := repair.Responses - hbPrev.Repair.Responses
 			dTmo := repair.Timeouts - hbPrev.Repair.Timeouts
-			dUseful := hb.UsefulRepairShreds - hbPrev.UsefulRepairShreds
+			// USEFUL is total distinct repair throughput: shreds accepted into
+			// in-RAM assembly PLUS those written to the catchup spool (disk-bound
+			// far slots). During deep catchup most repair lands on disk, so the
+			// spool term is what keeps this from reading ~0 while repair carries
+			// the whole gap.
+			dUseful := (hb.UsefulRepairShreds - hbPrev.UsefulRepairShreds) +
+				(hb.SpooledRepairShreds - hbPrev.SpooledRepairShreds)
 			timelyPct := uint64(100)
 			if resolved := dResp + dTmo; resolved > 0 {
 				timelyPct = 100 * dResp / resolved
