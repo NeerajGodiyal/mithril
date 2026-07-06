@@ -1385,7 +1385,6 @@ func ReplayBlocks(
 	var promotionHolds int // iterations promotion was fully stalled while finality ran a chunk ahead
 	windowStart := time.Now()
 	var lastGCCount uint32
-	var liveShredAnchor int64 // cadence anchor for live per-slot shred deltas; rebased each window
 	var justCrossedEpochBoundary bool
 
 	// Preallocate slices for 100 blocks
@@ -1770,6 +1769,7 @@ func ReplayBlocks(
 		var (
 			block    *b.Block
 			waitTime time.Duration
+			neededAt time.Time // when replay asked the source for this slot
 		)
 
 		{
@@ -1802,9 +1802,9 @@ func ReplayBlocks(
 				}()
 			}
 
-			waitStart := time.Now()
+			neededAt = time.Now()
 			block = blockStream.NextBlock()
-			waitTime = time.Since(waitStart)
+			waitTime = time.Since(neededAt)
 
 			if stallDone != nil {
 				close(stallDone)
@@ -1958,18 +1958,8 @@ func ReplayBlocks(
 			// Terminal: aligned skipped-slot line, reporting any PARTIAL shred
 			// arrivals (leader sent something but the slot never became full).
 			// Full detail (wait) stays in logs.
-			partialShreds, repairedShreds, firstNanos, haveObs := blockStream.TurbineShredObservation(block.Slot)
-			haveFirst := false
-			firstMs := 0.0
-			if haveObs && firstNanos > 0 && liveShredAnchor != 0 {
-				expected := liveShredAnchor + int64(block.Slot)*nominalSlotNanos
-				firstMs = float64(firstNanos-expected) / 1e6
-				if firstMs < 0 {
-					firstMs = 0
-				}
-				haveFirst = true
-			}
-			mlog.Log.InfofPrecise("%s", buildSkippedStatsLine(block.Slot, leaderStr, partialShreds, repairedShreds, haveFirst, firstMs))
+			partialShreds, repairedShreds, _, _ := blockStream.TurbineShredObservation(block.Slot)
+			mlog.Log.InfofPrecise("%s", buildSkippedStatsLine(block.Slot, leaderStr, partialShreds, repairedShreds))
 			if partialShreds > 0 {
 				windowSkippedWithShreds++
 			}
@@ -2275,27 +2265,17 @@ func ReplayBlocks(
 		}
 
 		// Terminal: concise per-slot line. Shred timings only for shred-sourced
-		// blocks (never fabricated for RPC/file); deltas are cadence-adjusted
-		// against the fastest arrival seen (rebased each summary window).
+		// blocks (never fabricated for RPC/file). ready = assembly completion
+		// minus when replay asked for the slot (negative: ready that long
+		// early; positive: replay waited); asm = first shred -> full.
 		execMsLine := slotReplayDuration.Seconds() * 1000
-		hasShreds := block.ShredFirstNanos > 0
-		var firstMsLine, fullMsLine float64
+		hasShreds := block.ShredFirstNanos > 0 && block.ShredFullNanos > 0
+		var readySecsLine, asmSecsLine float64
 		if hasShreds {
-			cand := shredAnchorCandidate(shredSample{slot: block.Slot, firstNanos: block.ShredFirstNanos})
-			if liveShredAnchor == 0 || cand < liveShredAnchor {
-				liveShredAnchor = cand
-			}
-			expected := liveShredAnchor + int64(block.Slot)*nominalSlotNanos
-			firstMsLine = float64(block.ShredFirstNanos-expected) / 1e6
-			if firstMsLine < 0 {
-				firstMsLine = 0
-			}
-			fullMsLine = float64(block.ShredFullNanos-expected) / 1e6
-			if fullMsLine < 0 {
-				fullMsLine = 0
-			}
+			readySecsLine = float64(block.ShredFullNanos-neededAt.UnixNano()) / 1e9
+			asmSecsLine = float64(block.ShredFullNanos-block.ShredFirstNanos) / 1e9
 		}
-		mlog.Log.InfofPrecise("%s", buildSlotStatsLine(block.Slot, leaderStr, txnCount, totalCU, execMsLine, hasShreds, firstMsLine, fullMsLine, block.RepairedShreds))
+		mlog.Log.InfofPrecise("%s", buildSlotStatsLine(block.Slot, leaderStr, txnCount, totalCU, execMsLine, hasShreds, readySecsLine, asmSecsLine, block.RepairedShreds))
 		// Full detail (wait, vote split) stays in file logs for debugging.
 		var voteTxCount int
 		for _, tx := range block.Transactions {
@@ -2329,7 +2309,7 @@ func ReplayBlocks(
 				windowEmptyBlocks++
 			}
 			if hasShreds {
-				shredSamples = append(shredSamples, shredSample{slot: block.Slot, firstNanos: block.ShredFirstNanos, fullNanos: block.ShredFullNanos})
+				shredSamples = append(shredSamples, shredSample{readySecs: readySecsLine, asmSecs: asmSecsLine})
 				if block.RepairedShreds > 0 {
 					windowRepairedSlots++
 					windowRepairedShreds += block.RepairedShreds
@@ -2419,10 +2399,14 @@ func ReplayBlocks(
 				mlog.Log.InfofPrecise("  safety: exec checked slot %s | holds %d", checkedStr, promotionHolds)
 
 				if len(shredSamples) > 0 {
-					firstMs, fullMs, windowAnchor := computeShredDeltas(shredSamples)
-					liveShredAnchor = windowAnchor // rebase the live per-slot anchor (cadence drift)
-					mlog.Log.InfofPrecise("  shreds: first median +%.0fms, max +%.0fms | full median +%.0fms, max +%.0fms",
-						medianF(firstMs), maxF(firstMs), medianF(fullMs), maxF(fullMs))
+					ready := make([]float64, 0, len(shredSamples))
+					asm := make([]float64, 0, len(shredSamples))
+					for _, s := range shredSamples {
+						ready = append(ready, s.readySecs)
+						asm = append(asm, s.asmSecs)
+					}
+					mlog.Log.InfofPrecise("  shreds: ready median %+.1fs, worst %+.1fs (neg = assembled before replay needed it) | asm median %.1fs, max %.1fs",
+						medianF(ready), maxF(ready), medianF(asm), maxF(asm))
 					mlog.Log.InfofPrecise("  repair: %d slots, %d shreds", windowRepairedSlots, windowRepairedShreds)
 				}
 

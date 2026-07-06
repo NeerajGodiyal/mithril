@@ -12,62 +12,25 @@ import (
 // follows Agave: a slot is "full" when all its data shreds are present and the
 // block is reconstructable (SlotMeta/is_full) — NOT finalized/consensus-safe.
 //
-// Shred timings are self-anchored: the cluster's slot start times are not
-// directly observable (no PoH clock), so deltas are measured against an anchor
-// chosen so the fastest-arriving slot in the window reads +0ms, assuming the
-// nominal slot cadence. That makes "first +18ms" mean "18ms later than the
-// fastest slot, cadence-adjusted" — a jitter/lateness signal, not an absolute
-// leader-to-us latency.
+// Shred timings are replay-relative, the only clock the operator actually
+// cares about:
+//
+//	ready = when the block finished assembling MINUS when replay asked for
+//	        it. Negative: it was ready that long BEFORE replay needed it
+//	        (the pipeline is ahead). Positive: replay sat idle that long
+//	        waiting for shreds (the pipeline is the bottleneck).
+//	asm   = first shred seen -> fully assembled. How long the slot took to
+//	        collect, i.e. the repair grind for holes and pre-join slots;
+//	        near-live slots read a few hundred ms (one broadcast pass).
+//
+// Both come from two timestamps the receiver already stamps per block plus
+// one time.Now() replay already takes — no added tracking cost.
 
-// nominalSlotNanos is Alpenglow's nominal slot duration used for cadence
-// adjustment in shred-timing anchors.
-const nominalSlotNanos = int64(400_000_000) // 400ms
-
-// shredSample is one executed slot's shred timing record.
+// shredSample is one executed slot's shred timing record for the summary
+// window.
 type shredSample struct {
-	slot       uint64
-	firstNanos int64
-	fullNanos  int64
-}
-
-// shredAnchorCandidate is the anchor a sample implies: the wall time slot 0
-// "would have started" if this sample's first shred arrived exactly on time.
-func shredAnchorCandidate(s shredSample) int64 {
-	return s.firstNanos - int64(s.slot)*nominalSlotNanos
-}
-
-// computeShredDeltas converts samples to per-slot first/full lateness (ms)
-// against the window's fastest arrival, and returns that window anchor so the
-// live per-slot display can rebase (correcting slow cadence drift). Returns
-// nil slices and a zero anchor when no samples.
-func computeShredDeltas(samples []shredSample) (firstMs, fullMs []float64, anchor int64) {
-	if len(samples) == 0 {
-		return nil, nil, 0
-	}
-	anchor = shredAnchorCandidate(samples[0])
-	for _, s := range samples[1:] {
-		if c := shredAnchorCandidate(s); c < anchor {
-			anchor = c
-		}
-	}
-	firstMs = make([]float64, 0, len(samples))
-	fullMs = make([]float64, 0, len(samples))
-	for _, s := range samples {
-		expected := anchor + int64(s.slot)*nominalSlotNanos
-		f := float64(s.firstNanos-expected) / 1e6
-		if f < 0 {
-			f = 0
-		}
-		firstMs = append(firstMs, f)
-		if s.fullNanos > 0 {
-			fl := float64(s.fullNanos-expected) / 1e6
-			if fl < 0 {
-				fl = 0
-			}
-			fullMs = append(fullMs, fl)
-		}
-	}
-	return firstMs, fullMs, anchor
+	readySecs float64
+	asmSecs   float64
 }
 
 // medianF / percentileF / maxF operate on a copy; empty input returns 0.
@@ -90,8 +53,11 @@ func percentileF(vals []float64, pct int) float64 {
 }
 
 func maxF(vals []float64) float64 {
-	m := 0.0
-	for _, v := range vals {
+	if len(vals) == 0 {
+		return 0
+	}
+	m := vals[0]
+	for _, v := range vals[1:] {
 		if v > m {
 			m = v
 		}
@@ -120,37 +86,59 @@ func shortPubkey(s string) string {
 	return s[:4] + "..." + s[len(s)-3:]
 }
 
+// Dash cells for fields with no value, padded to the exact content width of
+// their populated counterparts (txns %5d, cu %5s, exec %4.0f+"ms",
+// eff %5.1f+"ms/Mcu") so the pipe separators land in the same terminal
+// columns down a mixed stream of executed, zero-txn, and skipped lines. The
+// dashes right-align under the digits.
+const (
+	dashTxns = "   --"
+	dashCU   = "   --"
+	dashExec = "  --  "
+	dashEff  = "   --      "
+)
+
 // buildSlotStatsLine renders the per-slot terminal line. The shreds segment is
-// omitted for blocks that did not come from shreds (never fabricated).
-func buildSlotStatsLine(slot uint64, leader string, txns int, cu uint64, execMs float64, hasShreds bool, firstMs, fullMs float64, repaired int) string {
+// omitted for blocks that did not come from shreds (never fabricated). Value
+// fields use fixed cell widths (see dash constants); an extreme value
+// overflows its cell and shifts only its own line's tail.
+//
+// ready < 0: block was assembled |ready| before replay asked for it (good —
+// the pipeline runs ahead). ready > 0: replay waited that long for shreds.
+// asm: first shred seen -> fully assembled (the collection/repair grind).
+func buildSlotStatsLine(slot uint64, leader string, txns int, cu uint64, execMs float64, hasShreds bool, readySecs, asmSecs float64, repaired int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "slot %d | leader %s | txns %d | cu %s | exec %.0fms", slot, shortPubkey(leader), txns, fmtMcu(cu), execMs)
+	fmt.Fprintf(&b, "slot %d | leader %s | txns %5d | cu %5s | exec %4.0fms", slot, shortPubkey(leader), txns, fmtMcu(cu), execMs)
 	if cu > 0 {
-		fmt.Fprintf(&b, " | eff %.1fms/Mcu", execMs/(float64(cu)/1e6))
+		fmt.Fprintf(&b, " | eff %5.1fms/Mcu", execMs/(float64(cu)/1e6))
 	} else {
-		b.WriteString(" | eff --")
+		b.WriteString(" | eff " + dashEff)
 	}
 	if hasShreds {
-		fmt.Fprintf(&b, " | shreds(first +%.0fms, full +%.0fms, repair %d)", firstMs, fullMs, repaired)
+		fmt.Fprintf(&b, " | shreds(ready %+6.1fs, asm %5.1fs, repair %d)", readySecs, asmSecs, repaired)
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), " ")
 }
 
-// buildSkippedStatsLine renders the skipped-slot terminal line, visually
-// aligned with the executed line. When PARTIAL shreds arrived for the slot
-// before it was skipped, they are reported — "the leader sent 12 shreds then
-// stopped" is a different operator story from "the leader never transmitted".
-// A slot with no observed shreds shows dashes; nothing is ever fabricated.
-func buildSkippedStatsLine(slot uint64, leader string, partialShreds, repairedShreds int, haveFirst bool, firstMs float64) string {
-	prefix := fmt.Sprintf("slot %d | leader %s | skipped | txns -- | cu -- | exec -- | eff --", slot, shortPubkey(leader))
-	if partialShreds <= 0 {
-		return prefix + " | shreds(first --, full --, repair --)"
+// buildSkippedStatsLine renders the skipped-slot terminal line with the SAME
+// field order as executed lines (slot | leader | txns | cu | exec | eff) so
+// the columns read straight down a mixed stream; "skipped" trails as the
+// status. A shreds segment appears ONLY when partial shreds actually arrived
+// — "the leader sent 12 shreds then stopped" is a different operator story
+// from "the leader never transmitted" — matching executed lines, which also
+// omit the segment when there is no shred data. Nothing is ever fabricated.
+func buildSkippedStatsLine(slot uint64, leader string, partialShreds, repairedShreds int) string {
+	line := fmt.Sprintf("slot %d | leader %s | txns %s | cu %s | exec %s | eff %s | skipped",
+		slot, shortPubkey(leader), dashTxns, dashCU, dashExec, dashEff)
+	if partialShreds > 0 {
+		// Turbine's independent observation of the skipped slot: the leader
+		// DID transmit (we hold this many distinct data shreds, this many of
+		// them repair-fetched) but the block never completed and consensus
+		// skipped it. Plain words — "seen/repaired" — because "partial" read
+		// as jargon.
+		line += fmt.Sprintf(" | shreds seen %d (repaired %d) — block never completed", partialShreds, repairedShreds)
 	}
-	first := "--"
-	if haveFirst {
-		first = fmt.Sprintf("+%.0fms", firstMs)
-	}
-	return prefix + fmt.Sprintf(" | shreds(first %s, full --, repair %d, partial %d)", first, repairedShreds, partialShreds)
+	return line
 }
 
 // processRSSBytes reads the resident set size on Linux (/proc/self/statm,
