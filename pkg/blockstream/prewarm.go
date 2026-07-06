@@ -28,12 +28,13 @@ type TurbinePrewarm struct {
 	done     chan struct{}
 	receiver *turbine.UDPReceiver
 
-	mu       sync.Mutex
-	spool    map[uint64]*b.Block
-	floor    uint64
-	capacity int
-	dropped  int
-	stopped  bool
+	mu        sync.Mutex
+	spool     map[uint64]*b.Block
+	floor     uint64
+	probeNext uint64 // next frontier slot the rolling probe will pin
+	capacity  int
+	dropped   int
+	stopped   bool
 }
 
 // prewarmProbeSlots: the replay frontier slots the prewarm actively repairs
@@ -44,8 +45,11 @@ type TurbinePrewarm struct {
 // the normal repair client (priority pins -> HighestWindowIndex discovery ->
 // metered followups -> assembler/spool), so everything it fetches is kept,
 // and its response statistics double as the boot-time peer-quality
-// measurement behind the rate recommendation logged at handover.
-const prewarmProbeSlots = 16
+// measurement behind the rate recommendation logged at handover. The
+// window ROLLS: each completed probe slot pins the next frontier slot, so
+// a long snapshot build keeps the repair budget on the frontier instead of
+// idling after a fixed prefix completes.
+const prewarmProbeSlots = 64
 
 // TurbinePrewarmConfig mirrors the BlockSource's turbine wiring; the
 // prewarm receiver is torn down (freeing the bind port) before the
@@ -130,12 +134,13 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	}
 
 	pw := &TurbinePrewarm{
-		cancel:   cancel,
-		done:     make(chan struct{}),
-		receiver: receiver,
-		spool:    make(map[uint64]*b.Block),
-		floor:    cfg.FloorSlot,
-		capacity: cfg.MaxSpoolBlocks,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		receiver:  receiver,
+		spool:     make(map[uint64]*b.Block),
+		floor:     cfg.FloorSlot,
+		probeNext: cfg.FloorSlot + prewarmProbeSlots,
+		capacity:  cfg.MaxSpoolBlocks,
 	}
 
 	go func() {
@@ -207,6 +212,13 @@ func (pw *TurbinePrewarm) add(blk *b.Block) {
 		return
 	}
 	pw.spool[blk.Slot] = blk
+	// Roll the probe frontier: a completed slot inside the probe window
+	// frees repair budget — pin the next frontier slot so a long build
+	// keeps filling forward instead of idling once the prefix completes.
+	if pw.floor > 0 && blk.Slot < pw.probeNext && pw.receiver != nil {
+		pw.receiver.PrioritizeRepairSlot(pw.probeNext)
+		pw.probeNext++
+	}
 	// Over capacity: evict the HIGHEST slot. The low end borders the resume
 	// frontier and is what emission needs first — and what repair would
 	// otherwise fetch one shred at a time; the high end is re-fetchable

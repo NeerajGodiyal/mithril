@@ -486,6 +486,13 @@ const (
 	// shred-path block produced) re-arms on the long one, so wholesale RPC
 	// can genuinely close a big gap before repair is retried instead of
 	// oscillating at the threshold boundary.
+	// Auto-tuned repair rate bounds (active only when the operator has not
+	// pinned block.repair_max_requests_per_second): step size and hard
+	// ceiling, both well below the ~2000/s serve-repair QoS ban observed
+	// live.
+	repairAutoRateStep = 250
+	repairAutoRateMax  = 1000
+
 	repairCatchupReArmCooldown   = 2 * time.Minute
 	repairCatchupBarrenCooldown  = 30 * time.Minute
 	repairCatchupDecisionTimeout = 15 * time.Second
@@ -2958,6 +2965,16 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	var lastStagedWarn time.Time
 	lastStatusLog := time.Now()
 	lastPeerTableLog := time.Now()
+	hbPrev := statsAtArm
+	hbPrevAt := time.Now()
+	// AIMD rate controller: active only when the operator has NOT pinned
+	// block.repair_max_requests_per_second — an explicit knob is a decision,
+	// the default is a starting point. Steps the ceiling up while the peer
+	// set demonstrably absorbs it, snaps back to the default on degradation.
+	autoRate := 0
+	if bs.repairMaxRequestsPerSecond == 0 {
+		autoRate = turbine.DefaultRepairRequestsPerSecond
+	}
 
 	for {
 		select {
@@ -3190,18 +3207,57 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 		// Repair-health heartbeat to the FILE log only: whether requests go
 		// out, whether responses come back, and whether the window is
 		// actually filling — the questions a stalled-catchup postmortem asks.
+		// Interval rates (this heartbeat vs the previous one) sit next to
+		// the cumulative deltas: rates answer "how is it going NOW".
 		if time.Since(lastStatusLog) >= 15*time.Second {
 			lastStatusLog = time.Now()
 			hb := receiver.Stats()
 			repair := hb.Repair
-			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d), edge %d, window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration since arming: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
-				waiting, receiver.RepairOutstandingForSlot(waiting), edge, windowBlocks,
+			interval := time.Since(hbPrevAt).Seconds()
+			if interval <= 0 {
+				interval = 1
+			}
+			dReq := repair.Requests - hbPrev.Repair.Requests
+			dResp := repair.Responses - hbPrev.Repair.Responses
+			dTmo := repair.Timeouts - hbPrev.Repair.Timeouts
+			timelyPct := uint64(100)
+			if resolved := dResp + dTmo; resolved > 0 {
+				timelyPct = 100 * dResp / resolved
+			}
+			headMissing := int64(-1)
+			if d, ok := receiver.HeadShredDetail(waiting); ok && d.HaveLast {
+				headMissing = int64(d.LastIndex) + 1 - int64(d.DataShreds)
+			}
+			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+				waiting, receiver.RepairOutstandingForSlot(waiting), headMissing, edge, windowBlocks,
+				float64(dReq)/interval, float64(dResp)/interval, timelyPct,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
 				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,
 				repair.Peers, repair.RespondingPeers,
 				hb.HydratedSlots-statsAtArm.HydratedSlots, hb.HydratedFromDisk-statsAtArm.HydratedFromDisk,
 				hb.SigVerifies-statsAtArm.SigVerifies, hb.SigVerifyCached-statsAtArm.SigVerifyCached)
+
+			// Step the ceiling up only when the interval shows the peer set
+			// absorbing the current rate cleanly AND the budget actually
+			// being used; snap back to the default the moment timeliness
+			// degrades. Bounds: default..repairAutoRateMax, always below
+			// the observed ~2000/s serve-repair QoS ban.
+			if autoRate > 0 {
+				utilized := float64(dReq)/interval >= 0.7*float64(autoRate)
+				switch {
+				case timelyPct >= 85 && repair.RespondingPeers >= 80 && utilized && autoRate < repairAutoRateMax:
+					autoRate += repairAutoRateStep
+					receiver.SetRepairRequestRate(autoRate)
+					mlog.NamedFilef("catchup", "repair rate: ceiling up to %d/s (interval timely %d%%, responding %d) — backs off automatically if timeouts spike", autoRate, timelyPct, repair.RespondingPeers)
+				case timelyPct < 60 && autoRate > turbine.DefaultRepairRequestsPerSecond:
+					mlog.NamedFilef("catchup", "repair rate: interval timely fell to %d%% — ceiling back %d/s -> %d/s", timelyPct, autoRate, turbine.DefaultRepairRequestsPerSecond)
+					autoRate = turbine.DefaultRepairRequestsPerSecond
+					receiver.SetRepairRequestRate(autoRate)
+				}
+			}
+			hbPrev = hb
+			hbPrevAt = time.Now()
 		}
 		// Peer service table to its own file on a slower cadence: which
 		// peers actually answer, how fast, and their rolling quality score
@@ -3792,7 +3848,7 @@ func repairPeerQualityLine(receiver *turbine.UDPReceiver) string {
 	if !ok || agg.Tracked == 0 || agg.Responding == 0 {
 		return ""
 	}
-	return fmt.Sprintf("peers %d/%d (timely %d%%, late %d%%, avg %dms, score p50 %.2f p90 %.2f)",
+	return fmt.Sprintf("peers %d/%d (timely %d%%, late %d%%, lat p50 %dms, score p50 %.2f p90 %.2f)",
 		agg.Responding, agg.Tracked, agg.TimelyPct, agg.LatePct,
 		agg.MedianLatencyMillis, agg.ScoreP50, agg.ScoreP90)
 }

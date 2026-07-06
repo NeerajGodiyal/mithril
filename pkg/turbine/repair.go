@@ -82,11 +82,12 @@ const (
 	// ~3000 at 500/s pushed average response latency to 4.4s and pinned the
 	// adaptive timeout at its ceiling (which in turn widened the in-flight
 	// window — a positive feedback loop), while the same wire rate at
-	// outstanding ~200 ran at ~300ms. Capping admission near one second of
-	// service keeps peer queues shallow, loss retries fast, the
-	// latency-graded peer scores meaningful, and the emission-gating head
-	// completing at network latency instead of queue depth.
-	repairAdmissionQueueSeconds = 1.0
+	// outstanding ~200 ran at ~300ms. The target sits above the healthy
+	// median latency (~0.7s observed with the per-peer cap in place) so
+	// admission never binds in the good regime, but bounds queue depth the
+	// moment service degrades; the per-peer inflight cap keeps the slow
+	// population from absorbing the extra room this allows.
+	repairAdmissionQueueSeconds = 1.5
 	// The head's share of the admission window. 1.0 was tried live and
 	// LOWERED emission throughput (6.5s/slot vs 3.8s on easier content):
 	// total fill rate is peer-service-bound either way, so a total head
@@ -105,6 +106,10 @@ const (
 	// the troughs). Sixteen bounds any one peer to a sliver of the window.
 	repairPerPeerInflightCap = 16
 )
+
+// DefaultRepairRequestsPerSecond is the built-in rate ceiling, exported as
+// the floor/starting point for the catchup auto-tuner.
+const DefaultRepairRequestsPerSecond = repairMaxRequestsPerSecond
 
 type RepairPeerSource func() []gossip.RepairPeer
 
@@ -612,6 +617,13 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 		c.mu.Unlock()
 		return false
 	}
+	// Re-check the peer's inflight cap under the registration lock: scan
+	// sends and HWI followups race between selection and here, so the
+	// selection-time check alone can overshoot the cap slightly.
+	if rec := c.perPeer[addrKey]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
+		c.mu.Unlock()
+		return false
+	}
 	c.outstanding[key] = outstandingRepairRequest{
 		key:    key,
 		nonce:  nonce,
@@ -1017,21 +1029,35 @@ func (c *repairClient) outstandingForSlotLocked(slot uint64) int {
 	return n
 }
 
-// boundHeadToAdmissionShare truncates the head's listing to the room left in
-// its admission share and returns the head fanout — decided on the FULL
-// listing, because "endgame" is about how close the SLOT is to completion,
-// not how much room this particular scan has.
+// boundHeadToAdmissionShare fills the head's listing with up to
+// share-room indices that are NOT already in flight, and returns the head
+// fanout — decided on the FULL listing, because "endgame" is about how
+// close the SLOT is to completion, not how much room this particular scan
+// has. Filtering (rather than truncating) matters: the listing's prefix is
+// exactly the indices sent first, so a plain prefix truncation re-selects
+// mostly-outstanding indices and the head under-fills its share whenever
+// room is small (observed live as head in-flight drooping to single
+// digits between response bursts).
 func (c *repairClient) boundHeadToAdmissionShare(head *SlotRepairRequest) uint8 {
 	fanout := headFanout(*head)
 	c.mu.Lock()
 	room := int(c.rateLimitLocked()*repairAdmissionQueueSeconds*repairHeadAdmissionShare) - c.outstandingForSlotLocked(head.Slot)
-	c.mu.Unlock()
 	if room < 0 {
 		room = 0
 	}
-	if len(head.MissingDataShreds) > room {
-		head.MissingDataShreds = head.MissingDataShreds[:room]
+	kept := head.MissingDataShreds[:0]
+	for _, index := range head.MissingDataShreds {
+		if len(kept) >= room {
+			break
+		}
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: head.Slot, index: index}
+		if _, inFlight := c.outstanding[key]; inFlight {
+			continue
+		}
+		kept = append(kept, index)
 	}
+	c.mu.Unlock()
+	head.MissingDataShreds = kept
 	return fanout
 }
 

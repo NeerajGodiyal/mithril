@@ -169,7 +169,9 @@ func TestLateHighestResponseFiresFollowups(t *testing.T) {
 
 // The head is strictly first in line but holds at most its admission
 // SHARE; the fanout decision comes from the FULL listing (endgame is about
-// the slot's closeness to completion, not this scan's room).
+// the slot's closeness to completion, not this scan's room), and the fill
+// SKIPS indices already in flight — a plain prefix truncation would
+// re-select the mostly-outstanding prefix and under-fill the share.
 func TestBoundHeadToAdmissionShare(t *testing.T) {
 	share := int(float64(repairMaxRequestsPerSecond) * repairAdmissionQueueSeconds * repairHeadAdmissionShare)
 
@@ -186,16 +188,35 @@ func TestBoundHeadToAdmissionShare(t *testing.T) {
 		t.Fatalf("head listing = %d, want %d (share %d minus 100 in flight)", got, share-100, share)
 	}
 
-	// Endgame: fanout 2 survives truncation, and the listing shrinks to the
-	// remaining room.
+	// Overlap case (the codex-caught bug): the listing's prefix IS in
+	// flight. The fill must skip it and still use the whole room with NEW
+	// indices instead of returning a mostly-dedup'd prefix.
 	c2 := newPacingTestClient(t)
-	for i := 0; i < share-4; i++ {
-		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 71, index: uint32(i)}
+	inflight := share / 2
+	for i := 0; i < inflight; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 72, index: uint32(i)}
 		c2.outstanding[key] = outstandingRepairRequest{key: key}
 	}
-	small := SlotRepairRequest{Slot: 71, MissingDataShreds: seq(0, 9)}
-	if fanout := c2.boundHeadToAdmissionShare(&small); fanout != 2 {
-		t.Fatal("endgame head must keep 2-peer fanout after truncation")
+	overlap := SlotRepairRequest{Slot: 72, MissingDataShreds: seq(0, 999)}
+	c2.boundHeadToAdmissionShare(&overlap)
+	room := share - inflight
+	if got := len(overlap.MissingDataShreds); got != room {
+		t.Fatalf("overlap fill = %d indices, want the full room %d", got, room)
+	}
+	if overlap.MissingDataShreds[0] != uint32(inflight) {
+		t.Fatalf("overlap fill starts at %d, want %d (first NOT-in-flight index)", overlap.MissingDataShreds[0], inflight)
+	}
+
+	// Endgame: fanout 2 survives the share bound, and the listing shrinks
+	// to the remaining room.
+	c3 := newPacingTestClient(t)
+	for i := 0; i < share-4; i++ {
+		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 71, index: uint32(i)}
+		c3.outstanding[key] = outstandingRepairRequest{key: key}
+	}
+	small := SlotRepairRequest{Slot: 71, MissingDataShreds: seq(2000, 2009)}
+	if fanout := c3.boundHeadToAdmissionShare(&small); fanout != 2 {
+		t.Fatal("endgame head must keep 2-peer fanout after the share bound")
 	}
 	if got := len(small.MissingDataShreds); got != 4 {
 		t.Fatalf("endgame listing = %d, want 4 (room left in the share)", got)
