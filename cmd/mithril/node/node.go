@@ -979,11 +979,12 @@ func runLive(c *cobra.Command, args []string) {
 		logCfg.MaxSizeMB = 100
 	}
 
-	// MaxAgeDays: default 7, but 0 means never delete
+	// MaxAgeDays: default 0 = never delete by age (retention is bounded by
+	// max_size_mb per file x max_backups). Set >0 to also prune by age.
 	if config.IsSet("log.max_age_days") {
 		logCfg.MaxAgeDays = config.GetInt("log.max_age_days")
 	} else {
-		logCfg.MaxAgeDays = 7
+		logCfg.MaxAgeDays = 0
 	}
 
 	// MaxBackups: default 10, but 0 means unlimited

@@ -230,7 +230,7 @@ dir = %q  # Log files (created if missing)
 level = "info"             # "debug" | "info" | "warn" | "error"
 to_stdout = true           # Also write to stdout
 max_size_mb = 100          # Max log file size before rotation
-max_age_days = 7           # Delete logs older than this
+# max_age_days = 0         # Delete logs older than N days (0/unset = never delete by age)
 
 # Advanced options (defaults work well for most setups)
 # See config.example.toml for: [tuning], [debug], [snapshot], [reporting]

@@ -164,8 +164,8 @@ name = "mithril"
     #
     # Example with primary + fallback:
     #   rpc = [
-    #       "https://your-alpenglow-rpc.example.com",  # Primary
-    #       "https://alpenglow.rpcpool.com"            # Fallback
+    #       "https://your-primary-alpenglow-rpc.example.com",  # Primary
+    #       "https://your-fallback-alpenglow-rpc.example.com"  # Fallback
     #   ]
     rpc = ["https://alpenglow.rpcpool.com"]
 
@@ -699,8 +699,9 @@ name = "mithril"
     # Maximum log file size in MB before rotation (0 = no limit)
     max_size_mb = 100
 
-    # Delete log files older than this many days (0 = never delete)
-    max_age_days = 30
+    # Delete log files older than this many days (0 = never delete, the
+    # default). Retention is otherwise bounded by max_size_mb x max_backups.
+    max_age_days = 0
 
     # Maximum number of old log files to keep (0 = unlimited)
     max_backups = 100
