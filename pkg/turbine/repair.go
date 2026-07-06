@@ -21,7 +21,7 @@ const (
 	repairMaxSlotsPerScan     = 32
 	repairMaxMissingPerSlot   = 256
 	repairMaxFollowupRequests = 256
-	repairMaxOutstanding      = 2048
+	repairMaxOutstanding      = 65536
 )
 
 type RepairPeerSource func() []gossip.RepairPeer
