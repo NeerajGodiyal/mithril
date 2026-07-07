@@ -331,6 +331,15 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	lastPeerTableLog := time.Now()
 	hbPrev := statsAtArm
 	hbPrevAt := time.Now()
+	// QoS-throttle detector state: the observed serve-repair ban signature is
+	// "requests keep flowing but responses freeze" — a sharp collapse in the
+	// response rate while we are still pushing hard. Low timely% alone is NOT
+	// the signal (a resume-gap catchup legitimately sees ~95% timeouts when
+	// only a few peers still retain old shreds); the signal is the DROP from a
+	// previously-healthy response rate. prevRespRate carries last interval's
+	// responses/s to spot that collapse; qosThrottleIntervals counts trips.
+	prevRespRate := 0.0
+	qosThrottleIntervals := 0
 	// AIMD rate controller: active only when the operator has NOT pinned
 	// block.repair_max_requests_per_second — an explicit knob is a decision,
 	// the default is a starting point. Steps the ceiling up while the peer
@@ -595,19 +604,37 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			if resolved := dResp + dTmo; resolved > 0 {
 				timelyPct = 100 * dResp / resolved
 			}
+			// QoS-throttle detection: sending hard, WAS being served, response
+			// rate just collapsed. See the repairQoS* thresholds in block_source.go.
+			sendRate := float64(dReq) / interval
+			respRate := float64(dResp) / interval
+			qosSuspect := sendRate >= repairQoSMinSendRate &&
+				prevRespRate >= repairQoSHealthyRespRate &&
+				respRate < prevRespRate*repairQoSCollapseFraction
+			if qosSuspect {
+				qosThrottleIntervals++
+			}
 			headMissing := int64(-1)
 			if d, ok := receiver.HeadShredDetail(waiting); ok && d.HaveLast {
 				headMissing = int64(d.LastIndex) + 1 - int64(d.DataShreds)
 			}
-			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, USEFUL %.0f shreds/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d",
+			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, USEFUL %.0f shreds/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d | qos: throttle-suspect intervals %d",
 				waiting, receiver.RepairOutstandingForSlot(waiting), headMissing, edge, windowBlocks,
-				float64(dReq)/interval, float64(dResp)/interval, float64(dUseful)/interval, timelyPct,
+				sendRate, respRate, float64(dUseful)/interval, timelyPct,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
 				repair.Timeouts-statsAtArm.Repair.Timeouts, repair.TimeoutMillis, repair.AvgResponseMillis,
 				repair.Peers, repair.RespondingPeers,
 				hb.HydratedSlots-statsAtArm.HydratedSlots, hb.HydratedFromDisk-statsAtArm.HydratedFromDisk,
-				hb.SigVerifies-statsAtArm.SigVerifies, hb.SigVerifyCached-statsAtArm.SigVerifyCached)
+				hb.SigVerifies-statsAtArm.SigVerifies, hb.SigVerifyCached-statsAtArm.SigVerifyCached, qosThrottleIntervals)
+
+			// The throttle event itself goes to the terminal (not just the file):
+			// it is the actionable signal that the aggressive rate has tripped a
+			// serve-repair ban, and it tells the operator exactly which knob to turn.
+			if qosSuspect {
+				mlog.Log.Warnf("repair catchup: POSSIBLE serve-repair QoS THROTTLE at slot %d — sending %.0f/s but responses collapsed %.0f/s -> %.0f/s (timely %d%%, responding %d/%d, avg resp %dms). Peers may be rate-banning us; lower block.repair_max_requests_per_second if this persists.",
+					waiting, sendRate, prevRespRate, respRate, timelyPct, repair.RespondingPeers, repair.Peers, repair.AvgResponseMillis)
+			}
 
 			// Step the ceiling up only when the interval shows the peer set
 			// absorbing the current rate cleanly AND the budget actually
@@ -629,6 +656,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 					receiver.SetRepairRequestRate(autoRate)
 				}
 			}
+			prevRespRate = respRate
 			hbPrev = hb
 			hbPrevAt = time.Now()
 		}

@@ -25,8 +25,10 @@ const (
 	// old 256 cap the emission-gating head could only ever have ~256 distinct
 	// shreds in flight (once listed, dedup no-ops the rest), so head throughput
 	// was pinned at 256/latency however much rate/admission it was allowed.
-	// Raised so the head can saturate its admission window on huge blocks.
-	repairMaxMissingPerSlot   = 4096
+	// Sized to hold a whole monster slot's missing set so the head can put its
+	// entire admission window (up to peers x per-peer cap outstanding) on the
+	// wire in one wave — the point of the fast-repair push.
+	repairMaxMissingPerSlot   = 16384
 	repairMaxFollowupRequests = 256
 	// Outstanding hard ceiling — matched to cavey's kv-block-production
 	// (= maxDataShredsPerSlot, "a full slot in flight"). This is only the
@@ -79,12 +81,15 @@ const (
 	// sustained froze serve-repair responses after ~90s (Agave QoS effectively
 	// bans heavy unstaked requesters), which is why this used to sit at 500.
 	// But cavey's kv-block-production runs repair with NO rate limiter at all
-	// and does not stall on the same clusters, and 500/s left monster-block
-	// catchup crawling at ~80 useful shreds/s. Raised to an aggressive default
-	// so the peer set — not our own throttle — is the binder. It stays fully
-	// configurable via block.repair_max_requests_per_second; dial it back down
-	// if serve-repair responses freeze (watch timely% collapse in the heartbeat).
-	repairMaxRequestsPerSecond = 5000
+	// and does not stall on the same clusters, and low caps left monster-block
+	// catchup crawling at ~80 useful shreds/s. Set high enough that our own
+	// throttle no longer binds — the goal is to fetch a whole monster slot in
+	// well under a slot time (a 15k-shred block at 400ms = ~38k shreds/s), so
+	// the PEER SET's serving capacity is the intended limiter, not this number.
+	// Fully configurable via block.repair_max_requests_per_second; dial it back
+	// down if serve-repair responses freeze (watch timely% collapse in the
+	// heartbeat — that is the QoS-ban signal).
+	repairMaxRequestsPerSecond = 50000
 	// Success-weighted peer selection: a peer that answered within this
 	// window counts as a responder, and 3 of 4 requests go to responders.
 	// Blind round-robin across a cluster where only a few peers still
@@ -136,14 +141,20 @@ const (
 	// became the head. Half keeps the head strictly first in line while the
 	// remainder prefills what is next and patches the live edge.
 	repairHeadAdmissionShare = 0.5
-	// Per-peer in-flight cap. The peer set splits into fast (~300-500ms)
-	// and slow (~2-2.5s) service populations; without a cap, requests
-	// parked on slow peers occupy admission slots 5-8x longer than fast
-	// ones, letting the slow half clog the window — and once the adaptive
-	// timeout rises, those stale slots recycle even slower (observed as a
-	// 63ms<->4.9s latency sawtooth with throughput collapsing to ~160/s in
-	// the troughs). Sixteen bounds any one peer to a sliver of the window.
-	repairPerPeerInflightCap = 16
+	// Per-peer in-flight cap FLOOR. The cap itself is ADAPTIVE — each peer gets
+	// a fair share of the admission window, cap = max(floor, window/peerCount)
+	// where window = rate x queueSeconds (see adaptivePerPeerCapLocked). This is
+	// the fix for a small validator set: a fixed cap times a ~60-80 peer count
+	// is the hard ceiling on total outstanding, so a low fixed cap throttled us
+	// below the peer set's real serving capacity no matter how high the rate
+	// went (at 16 the ceiling was ~1000 outstanding). The fair-share cap tracks
+	// the rate, so cranking the rate automatically lets each peer hold more,
+	// while still bounding any one peer to its share so a slow peer can't clog
+	// the whole window (the 63ms<->4.9s sawtooth that motivated the cap). The
+	// old fixed 16 was, not by coincidence, ~= window/peers for the old 500/s
+	// rate; this generalizes it. The floor preserves that behavior on very
+	// large peer sets.
+	repairPerPeerInflightFloor = 16
 )
 
 // DefaultRepairRequestsPerSecond is the built-in rate ceiling, exported as
@@ -916,6 +927,10 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	if len(peers) == 0 {
 		return gossip.RepairPeer{}, false
 	}
+	// Adaptive per-peer inflight cap: each peer's fair share of the admission
+	// window, so the cap tracks the rate and the peer count rather than being
+	// a fixed number that throttles a small validator set.
+	cap := c.adaptivePerPeerCapLocked(len(peers))
 	c.gateCursor++
 	// 3 of 4 requests go to the quality-ranked responder set; every 4th
 	// round-robins the FULL set so new or newly-caught-up peers keep being
@@ -924,7 +939,7 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 	// admission slots recycle 5-8x slower than a fast one's, so unbounded
 	// per-peer queueing lets the slow population clog the whole window.
 	if c.gateCursor%4 != 0 {
-		if peer, ok := c.pickResponderLocked(peers); ok {
+		if peer, ok := c.pickResponderLocked(peers, cap); ok {
 			return peer, true
 		}
 	}
@@ -935,13 +950,30 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 			continue
 		}
 		if key, ok := repairAddressKeyFromUDP(peer.Addr); ok {
-			if rec := c.perPeer[key]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
+			if rec := c.perPeer[key]; rec != nil && rec.inflight >= cap {
 				continue
 			}
 		}
 		return peer, true
 	}
 	return gossip.RepairPeer{}, false
+}
+
+// adaptivePerPeerCapLocked is each peer's fair share of the admission window
+// (rate x queueSeconds), floored so very large peer sets keep a sane minimum.
+// peerCount x cap >= the window, so the per-peer cap never throttles total
+// outstanding below what the peers can serve — the whole point on a small
+// validator set — while still bounding any one peer to ~its share.
+func (c *repairClient) adaptivePerPeerCapLocked(peerCount int) int {
+	if peerCount <= 0 {
+		return repairPerPeerInflightFloor
+	}
+	window := int(c.rateLimitLocked() * repairAdmissionQueueSeconds)
+	cap := window/peerCount + 1
+	if cap < repairPerPeerInflightFloor {
+		cap = repairPerPeerInflightFloor
+	}
+	return cap
 }
 
 // pickResponderLocked round-robins among the QUALITY-RANKED responder set:
@@ -951,7 +983,7 @@ func (c *repairClient) nextPeerLocked(peers []gossip.RepairPeer) (gossip.RepairP
 // start, or the whole set went quiet) — the caller falls back to the full
 // round-robin. The ranking is cached briefly: selection runs once per
 // request and must not rebuild-and-sort the set per call.
-func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer) (gossip.RepairPeer, bool) {
+func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer, cap int) (gossip.RepairPeer, bool) {
 	now := time.Now()
 	if now.Sub(c.rankedAt) > repairRankedRebuildTTL {
 		c.rebuildRankedLocked(peers, now)
@@ -960,7 +992,7 @@ func (c *repairClient) pickResponderLocked(peers []gossip.RepairPeer) (gossip.Re
 		c.rankedCursor++
 		peer := c.ranked[int(c.rankedCursor%uint64(len(c.ranked)))]
 		if key, ok := repairAddressKeyFromUDP(peer.Addr); ok {
-			if rec := c.perPeer[key]; rec != nil && rec.inflight >= repairPerPeerInflightCap {
+			if rec := c.perPeer[key]; rec != nil && rec.inflight >= cap {
 				continue // saturated: give the slot to a peer that can use it
 			}
 		}

@@ -217,11 +217,12 @@ func TestLateHighestResponseFiresFollowups(t *testing.T) {
 	if c.lateResponses.Load() != 1 || c.responses.Load() != 0 {
 		t.Fatalf("late=%d responses=%d, want 1/0", c.lateResponses.Load(), c.responses.Load())
 	}
-	// Single sink peer: the per-peer inflight cap binds (same as the timely
-	// path) — parity is the point, the exact count is the cap.
-	want := uint64(repairPerPeerInflightCap)
+	// Single sink peer: under the adaptive per-peer cap a lone peer's share is
+	// the whole admission window, so it no longer binds — the followups fill the
+	// entire revealed gap (200) plus the chained probe = 201, same as timely.
+	want := uint64(201)
 	if got := c.requests.Load(); got != want {
-		t.Fatalf("late HWI sent %d followups, want %d (same as timely)", got, want)
+		t.Fatalf("late HWI sent %d followups, want %d (full gap + chain probe)", got, want)
 	}
 }
 
@@ -286,7 +287,10 @@ func TestSelectionSkipsSaturatedPeers(t *testing.T) {
 	}
 	k1, _ := repairAddressKeyFromUDP(peers[0].Addr)
 	k2, _ := repairAddressKeyFromUDP(peers[1].Addr)
-	client.perPeer[k1] = &peerRecord{lastMatched: time.Now(), inflight: repairPerPeerInflightCap}
+	// Saturation is now the ADAPTIVE per-peer cap (fair share of the admission
+	// window), not a fixed constant.
+	cap := client.adaptivePerPeerCapLocked(len(peers))
+	client.perPeer[k1] = &peerRecord{lastMatched: time.Now(), inflight: cap}
 	client.perPeer[k2] = &peerRecord{lastMatched: time.Now()}
 
 	client.mu.Lock()
@@ -299,7 +303,7 @@ func TestSelectionSkipsSaturatedPeers(t *testing.T) {
 			t.Fatal("saturated peer must be skipped")
 		}
 	}
-	client.perPeer[k2].inflight = repairPerPeerInflightCap
+	client.perPeer[k2].inflight = cap
 	client.rankedAt = time.Time{} // force ranked rebuild after mutation
 	if _, ok := client.nextPeerLocked(peers); ok {
 		t.Fatal("all peers saturated must yield no pick (tokens return, retry next scan)")
@@ -528,12 +532,12 @@ func TestFollowupsAreMeteredByTokenBucket(t *testing.T) {
 	if !c.observeShredResponse(conn, packet, from, shred) {
 		t.Fatal("response itself must match")
 	}
-	// A SINGLE available peer binds on the per-peer inflight cap before the
-	// followup cap: 16 sends land, the rest (and the chained probe) are
-	// refused by saturation-aware selection, and their tokens return.
-	want := uint64(repairPerPeerInflightCap)
+	// A full bucket sends the whole revealed gap: under the adaptive per-peer
+	// cap a lone peer no longer saturates at a fixed 16, so the 200-shred gap
+	// plus the chained probe (201) all land, metered only by the token budget.
+	want := uint64(201)
 	if got := c.requests.Load(); got != want {
-		t.Fatalf("full bucket sent %d requests, want %d (single peer capped at its inflight limit)", got, want)
+		t.Fatalf("full bucket sent %d requests, want %d (full gap + chain probe)", got, want)
 	}
 	c.mu.Lock()
 	remaining := c.rateTokens

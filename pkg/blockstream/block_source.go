@@ -487,8 +487,21 @@ const (
 	// freezes. (Note: the AIMD step only fires on large peer sets — see the
 	// RespondingPeers gate in repair_catchup.go — so on small testnets the base
 	// block.repair_max_requests_per_second is the effective ceiling.)
-	repairAutoRateStep = 1000
-	repairAutoRateMax  = 10000
+	repairAutoRateStep = 5000
+	repairAutoRateMax  = 50000
+
+	// QoS-throttle detector thresholds (evaluated per heartbeat interval). The
+	// serve-repair rate-ban signature is "responses freeze while requests keep
+	// flowing", so we flag a suspected throttle only when all three hold: we are
+	// actually pushing (send >= repairQoSMinSendRate), the PREVIOUS interval was
+	// being served well (resp >= repairQoSHealthyRespRate — rules out steady
+	// scarcity, which never had a healthy response rate), and this interval's
+	// response rate collapsed below repairQoSCollapseFraction of that. This
+	// catches the freeze at onset without false-flagging a legitimate
+	// high-timeout resume-gap catchup where only a few peers retain old shreds.
+	repairQoSMinSendRate      = 300.0
+	repairQoSHealthyRespRate  = 150.0
+	repairQoSCollapseFraction = 0.35
 
 	repairCatchupReArmCooldown   = 2 * time.Minute
 	repairCatchupBarrenCooldown  = 30 * time.Minute
