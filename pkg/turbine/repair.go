@@ -20,9 +20,18 @@ const (
 	repairScanInterval        = 100 * time.Millisecond
 	repairPeerRefreshInterval = 2 * time.Second
 	repairMaxSlotsPerScan     = 32
-	repairMaxMissingPerSlot   = 256
-	repairMaxFollowupRequests = 64
-	repairMaxOutstanding      = 4096
+	// Per-slot missing-shred listing cap. A monster slot (tens of thousands of
+	// data shreds, e.g. a 65k-tx block) has thousands missing at once; with the
+	// old 256 cap the emission-gating head could only ever have ~256 distinct
+	// shreds in flight (once listed, dedup no-ops the rest), so head throughput
+	// was pinned at 256/latency however much rate/admission it was allowed.
+	// Raised so the head can saturate its admission window on huge blocks.
+	repairMaxMissingPerSlot   = 4096
+	repairMaxFollowupRequests = 256
+	// Outstanding hard ceiling — matched to cavey's kv-block-production
+	// (= maxDataShredsPerSlot, "a full slot in flight"). This is only the
+	// backstop; the rate x admission window below is the real governor.
+	repairMaxOutstanding = 64 * 1024
 	// TWO timeouts, deliberately separated (the key to head responsiveness):
 	//
 	//   RETRY timeout — how long ONE in-flight attempt for a missing shred
@@ -65,12 +74,17 @@ const (
 	// answer, credits the peer as a responder, and feeds its true latency to
 	// the adaptive timeout.
 	repairExpiredGenCap = 8192
-	// Global request-rate ceiling. Serve-repair QoS on Agave-family peers
-	// deprioritizes and then effectively BANS heavy unstaked requesters —
-	// observed live: ~2000 req/s sustained answered normally for ~90s, then
-	// responses froze entirely while requests kept flowing. A bounded rate
-	// with a longer per-request timeout yields more than an unbounded flood.
-	repairMaxRequestsPerSecond = 500
+	// Global request-rate ceiling (base; the AIMD controller may raise it).
+	// HISTORY: an earlier observation on one cluster was that ~2000 req/s
+	// sustained froze serve-repair responses after ~90s (Agave QoS effectively
+	// bans heavy unstaked requesters), which is why this used to sit at 500.
+	// But cavey's kv-block-production runs repair with NO rate limiter at all
+	// and does not stall on the same clusters, and 500/s left monster-block
+	// catchup crawling at ~80 useful shreds/s. Raised to an aggressive default
+	// so the peer set — not our own throttle — is the binder. It stays fully
+	// configurable via block.repair_max_requests_per_second; dial it back down
+	// if serve-repair responses freeze (watch timely% collapse in the heartbeat).
+	repairMaxRequestsPerSecond = 5000
 	// Success-weighted peer selection: a peer that answered within this
 	// window counts as a responder, and 3 of 4 requests go to responders.
 	// Blind round-robin across a cluster where only a few peers still

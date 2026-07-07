@@ -481,10 +481,14 @@ const (
 	// oscillating at the threshold boundary.
 	// Auto-tuned repair rate bounds (active only when the operator has not
 	// pinned block.repair_max_requests_per_second): step size and hard
-	// ceiling, both well below the ~2000/s serve-repair QoS ban observed
-	// live.
-	repairAutoRateStep = 250
-	repairAutoRateMax  = 1000
+	// ceiling. Raised to an aggressive posture matching cavey's kv-block-
+	// production, which runs repair with no rate limiter; the peer set is meant
+	// to be the binder, not our throttle. Dial back via config if serve-repair
+	// freezes. (Note: the AIMD step only fires on large peer sets — see the
+	// RespondingPeers gate in repair_catchup.go — so on small testnets the base
+	// block.repair_max_requests_per_second is the effective ceiling.)
+	repairAutoRateStep = 1000
+	repairAutoRateMax  = 10000
 
 	repairCatchupReArmCooldown   = 2 * time.Minute
 	repairCatchupBarrenCooldown  = 30 * time.Minute

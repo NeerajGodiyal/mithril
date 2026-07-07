@@ -239,7 +239,8 @@ func TestBoundHeadToAdmissionShare(t *testing.T) {
 		key := repairRequestKey{kind: repairRequestWindowIndex, slot: 70, index: uint32(i)}
 		c.outstanding[key] = outstandingRepairRequest{key: key}
 	}
-	head := SlotRepairRequest{Slot: 70, MissingDataShreds: seq(100, 1099)}
+	// More missing than the room, so the room (share-100) is what binds.
+	head := SlotRepairRequest{Slot: 70, MissingDataShreds: seq(100, uint32(100+share+200))}
 	c.boundHeadToAdmissionShare(&head, repairMaxAttemptsBulk)
 	if got := len(head.MissingDataShreds); got != share-100 {
 		t.Fatalf("head listing = %d, want %d (share %d minus 100 outstanding)", got, share-100, share)
@@ -254,7 +255,7 @@ func TestBoundHeadToAdmissionShare(t *testing.T) {
 	for i := 0; i < saturated; i++ {
 		c2.inflight[shredKey{kind: repairRequestWindowIndex, slot: 72, index: uint32(i)}] = &shredInflight{concurrent: maxC}
 	}
-	fill := SlotRepairRequest{Slot: 72, MissingDataShreds: seq(0, 999)}
+	fill := SlotRepairRequest{Slot: 72, MissingDataShreds: seq(0, uint32(share+500))}
 	c2.boundHeadToAdmissionShare(&fill, maxC)
 	if got := len(fill.MissingDataShreds); got != share {
 		t.Fatalf("fill = %d indices, want the full room %d", got, share)

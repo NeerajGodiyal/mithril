@@ -612,8 +612,10 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			// Step the ceiling up only when the interval shows the peer set
 			// absorbing the current rate cleanly AND the budget actually
 			// being used; snap back to the default the moment timeliness
-			// degrades. Bounds: default..repairAutoRateMax, always below
-			// the observed ~2000/s serve-repair QoS ban.
+			// degrades. Bounds: default..repairAutoRateMax. The old ceiling
+			// stayed under an observed ~2000/s serve-repair freeze, but cavey
+			// runs unthrottled without stalling, so the bounds are now
+			// aggressive and the peer set is meant to be the binder.
 			if autoRate > 0 {
 				utilized := float64(dReq)/interval >= 0.7*float64(autoRate)
 				switch {
