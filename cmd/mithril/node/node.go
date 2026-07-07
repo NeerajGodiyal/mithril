@@ -1543,7 +1543,7 @@ postBootstrap:
 
 				// Decode blockhash context
 				if mithrilState.LastRecentBlockhashes != nil && len(mithrilState.LastRecentBlockhashes) > 0 {
-					recentBlockhashes := decodeRecentBlockhashes(mithrilState.LastRecentBlockhashes)
+					recentBlockhashes := replay.DecodeRecentBlockhashes(mithrilState.LastRecentBlockhashes)
 					resumeState.RecentBlockhashes = &recentBlockhashes
 
 					if mithrilState.LastEvictedBlockhash != "" {
@@ -1563,7 +1563,7 @@ postBootstrap:
 
 				// Decode SlotHashes context (vote program needs accurate slot→hash mappings)
 				if mithrilState.LastSlotHashes != nil && len(mithrilState.LastSlotHashes) > 0 {
-					slotHashes := decodeSlotHashes(mithrilState.LastSlotHashes)
+					slotHashes := replay.DecodeSlotHashes(mithrilState.LastSlotHashes)
 					resumeState.SlotHashes = &slotHashes
 				}
 
@@ -2555,52 +2555,6 @@ func killExistingMithrilProcesses() int {
 	return killed
 }
 
-// decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes
-func decodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
-	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
-	dropped := 0
-	for _, entry := range entries {
-		hashBytes, err := base58.Decode(entry.Blockhash)
-		if err != nil || len(hashBytes) != 32 {
-			dropped++
-			continue
-		}
-		var blockhash [32]byte
-		copy(blockhash[:], hashBytes)
-		result = append(result, sealevel.RecentBlockHashesEntry{
-			Blockhash:     blockhash,
-			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: entry.LamportsPerSignature},
-		})
-	}
-	if dropped > 0 {
-		mlog.Log.Errorf("dropped %d/%d RecentBlockhashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
-	}
-	return result
-}
-
-// decodeSlotHashes converts state.SlotHashEntry list to sealevel.SysvarSlotHashes
-func decodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
-	result := make(sealevel.SysvarSlotHashes, 0, len(entries))
-	dropped := 0
-	for _, entry := range entries {
-		hashBytes, err := base58.Decode(entry.Hash)
-		if err != nil || len(hashBytes) != 32 {
-			dropped++
-			continue
-		}
-		var hash [32]byte
-		copy(hash[:], hashBytes)
-		result = append(result, sealevel.SlotHash{
-			Slot: entry.Slot,
-			Hash: hash,
-		})
-	}
-	if dropped > 0 {
-		mlog.Log.Errorf("dropped %d/%d SlotHashes entries due to invalid base58 - state file may be corrupted", dropped, len(entries))
-	}
-	return result
-}
-
 // resumeStateFromRootedContext builds a replay.ResumeState from the context
 // captured at promotion (as of the last rooted slot); the next block is the slot
 // after the last rooted slot, whose parent is the last rooted slot.
@@ -2634,7 +2588,7 @@ func resumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint6
 	}
 
 	if len(rc.RecentBlockhashes) > 0 {
-		recentBlockhashes := decodeRecentBlockhashes(rc.RecentBlockhashes)
+		recentBlockhashes := replay.DecodeRecentBlockhashes(rc.RecentBlockhashes)
 		rs.RecentBlockhashes = &recentBlockhashes
 		if rc.EvictedBlockhash != "" {
 			if evb, err := base58.Decode(rc.EvictedBlockhash); err == nil && len(evb) == 32 {
@@ -2648,7 +2602,7 @@ func resumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint6
 		}
 	}
 	if len(rc.SlotHashes) > 0 {
-		slotHashes := decodeSlotHashes(rc.SlotHashes)
+		slotHashes := replay.DecodeSlotHashes(rc.SlotHashes)
 		rs.SlotHashes = &slotHashes
 	}
 	if rc.Clock != "" {

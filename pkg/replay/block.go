@@ -261,6 +261,12 @@ txResolveLoop:
 		if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
 			continue
 		}
+		// Re-execution of an already-loaded block (shadow branch differential):
+		// lookups were resolved by the first pass against the same parent view;
+		// SetAddressTables errors on re-set and ResolveLookups is a no-op.
+		if tx.Message.IsResolved() {
+			continue
+		}
 		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
 			if _, ok := tables[addrTableKey]; !ok {
 				continue txResolveLoop
@@ -2150,6 +2156,13 @@ func ReplayBlocks(
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
 		alpenglowClock := useAlpenglowClockSemantics(alpenglowReplayMode, replayCtx.CurrentFeatures)
+		// Branch-execution differential: capture the pre-block shared state so the
+		// block can be re-executed as a sibling branch from the parent's exact state.
+		var shadowPreBlock *execGlobalsSnapshot
+		if shadowBranchCheckEnabled() && unrootedTailState != nil {
+			shadowPreBlock = snapshotExecGlobals()
+			shadowPreBlock.captureBlockFeeState(block)
+		}
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, alpenglowClock)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
@@ -2157,6 +2170,16 @@ func ReplayBlocks(
 			// Clear any pending stake pubkeys from this failed block
 			global.ClearPendingStakePubkeys()
 			break
+		}
+		if shadowPreBlock != nil &&
+			epochSchedule.GetEpoch(block.ParentSlot) == block.Epoch && // no cross-epoch branches
+			(partitionedRewardsInfo == nil || partitionedRewardsInfo.NumRewardPartitionsRemaining == 0) { // no rewards window
+			if serr := runShadowBranchCheck(acctsDb, unrootedTailState, block, lastSlotCtx.FinalBankhash,
+				shadowPreBlock, epochSchedule, txParallelism, dbgOpts, alpenglowClock); serr != nil {
+				result.Error = fmt.Errorf("BRANCH DIFFERENTIAL: %w", serr)
+				mlog.Log.Errorf("%v", result.Error)
+				break
+			}
 		}
 
 		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
@@ -2798,6 +2821,11 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		slotCtx.UnrootedRead = tail
 	}
 
+	// Branch-scoped sysvar cache, shallow-seeded from the global (same underlying
+	// structs, byte-identical execution). Per-branch instances take over here once
+	// competing branches execute.
+	slotCtx.SeedSysvarsFromGlobal()
+
 	return slotCtx
 }
 
@@ -3183,7 +3211,7 @@ func ProcessBlock(
 
 	start = time.Now()
 	setReplayStage("collect_rent")
-	rentSysvar := sealevel.SysvarCache.Rent.Sysvar
+	rentSysvar := slotCtx.Sysvars().Rent.Sysvar
 	rentAccts := rent.CollectRentEagerly(slotCtx, rentSysvar, epochSchedule)
 	metrics.GlobalBlockReplay.Rent.AddTimingSince(start)
 
@@ -3212,9 +3240,17 @@ func ProcessBlock(
 	// because forkchoice is fed after ProcessBlock returns — checking here would
 	// never see votes from recently submitted blocks and could deadlock.
 
+	// Shadow re-execution (branch differential) performs no durable writes: stay out
+	// of the crash-recovery commit window (a panic during the shadow must not mark
+	// the already-committed slot corrupted) and drop rather than flush its
+	// re-enqueued stake pubkeys so the on-disk index isn't appended twice.
+	_, shadowPass := tail.(*captureTail)
+
 	// Enter critical commit window - panics here may leave AccountsDB inconsistent
-	commitSlot.Store(slotCtx.Slot)
-	commitInProgress.Store(true)
+	if !shadowPass {
+		commitSlot.Store(slotCtx.Slot)
+		commitInProgress.Store(true)
+	}
 	start = time.Now()
 	setReplayStage("store_accounts")
 	persistedSlot := slotCtx.Slot
@@ -3237,18 +3273,24 @@ func ProcessBlock(
 				mlog.Log.Infof("unable to store bankhash for slot %d", persistedSlot)
 			}
 		}
-		flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
-		if err != nil {
-			mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
-		} else if flushed > 0 {
-			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+		if shadowPass {
+			global.ClearPendingStakePubkeys()
+		} else {
+			flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
+			if err != nil {
+				mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
+			} else if flushed > 0 {
+				mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+			}
 		}
 
 		persistedHashes.Set(persistedBlockSlot, persistedBankhash)
 
 		// Exit critical commit window - AccountsDB is now consistent
-		commitInProgress.Store(false)
-		commitSlot.Store(0)
+		if !shadowPass {
+			commitInProgress.Store(false)
+			commitSlot.Store(0)
+		}
 	}
 
 	if tail != nil {

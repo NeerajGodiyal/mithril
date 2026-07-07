@@ -90,6 +90,14 @@ func (t *forkTail) promote(through uint64) (uint64, *state.ResumeContext, error)
 	return promotedThrough, ctx, err
 }
 
+// branchOf returns the branch holding an executed slot (false if not in the tree,
+// e.g. already promoted). The shadow branch check uses it to pin re-execution reads
+// to the parent branch's view.
+func (t *forkTail) branchOf(slot uint64) (uint64, bool) {
+	id, ok := t.slotBranch[slot]
+	return id, ok
+}
+
 func (t *forkTail) OverCap() bool {
 	return t.fc.OverCap()
 }

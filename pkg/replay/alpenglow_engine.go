@@ -152,6 +152,9 @@ func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochS
 	}
 	sealevel.SysvarCache.Clock.Sysvar = &clock
 	sealevel.SysvarCache.Clock.Acct = clockAcct
+	// The slot's branch cache was seeded before this rewrite replaced the global's
+	// Clock pointer — update it too, or this slot's reads keep the pre-footer clock.
+	slotCtx.SetBranchClock(&clock, clockAcct)
 	return nil
 }
 
