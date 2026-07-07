@@ -93,6 +93,23 @@ func IncrTransactionCount(num uint64) {
 	instance.IncrTransactionCount(num)
 }
 
+// SetTransactionCount restores the cumulative transaction count to a snapshot;
+// serial branch re-execution uses it to undo a speculative execution's counting.
+func SetTransactionCount(count uint64) {
+	instance.mu.Lock()
+	defer instance.mu.Unlock()
+	instance.transactionCount = count
+}
+
+// RestoreVoteCache swap-restores the vote cache to a snapshot (from
+// VoteCacheSnapshot). Sound because execution never mutates cached vote states in
+// place — it only Puts fresh allocations or Deletes entries.
+func RestoreVoteCache(snapshot map[solana.PublicKey]*sealevel.VoteStateVersions) {
+	instance.voteCacheMutex.Lock()
+	defer instance.voteCacheMutex.Unlock()
+	instance.voteCache = snapshot
+}
+
 // EnqueuePendingStakePubkey records a stake pubkey for later append to the index file.
 // Called during tx processing when a stake account is created or modified.
 // Deduplication happens at index load time (LoadStakePubkeyIndex keeps last occurrence).

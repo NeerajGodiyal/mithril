@@ -86,7 +86,11 @@ func (t *BranchTree) Get(branchID uint64, pubkey [32]byte) (*Account, bool) {
 	defer t.mu.RUnlock()
 	for b := t.byID[branchID]; b != nil; b = b.parent {
 		if a, ok := b.delta[pubkey]; ok {
-			return a, true
+			// Return a clone: stored branch state is an immutable snapshot. A caller
+			// that mutates a read in place (e.g. crediting the slot leader's fees)
+			// must not corrupt this branch or, via copy-on-write ancestry, its
+			// descendants — that would silently break fork isolation.
+			return a.Clone(), true
 		}
 	}
 	return nil, false

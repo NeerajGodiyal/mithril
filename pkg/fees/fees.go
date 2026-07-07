@@ -8,6 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/wide"
@@ -177,10 +178,15 @@ func DistributeTxFeesToSlotLeader(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 		// Leader didn't appear in the block: fetch its latest state via the
 		// speculative-state-aware read (recent unrooted fee credits live in RAM,
 		// not on disk) and add it to the parent accts object.
+		mlog.Log.FileOnlyf("fee distribution: leader %s not in block, fallback read at slot %d", leader, slotCtx.Slot)
 		leaderAcct, err = slotCtx.GetAccountFromAccountsDb(leader)
 		if err != nil {
 			panic(fmt.Sprintf("unable to get leader acct %s from both slotCtx and accountsdb", leader))
 		}
+		// The read may resolve to a shared cache object (accountsdb read caches
+		// return stored pointers); crediting it in place would poison the cache
+		// and double-credit sibling-fork executions reading the same object.
+		leaderAcct = leaderAcct.Clone()
 		slotCtx.ParentAccts.SetAccountWithoutLock(leader, leaderAcct.Clone())
 	}
 
