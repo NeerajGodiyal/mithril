@@ -142,8 +142,8 @@ func (sh *SysvarSlotHashes) Update(slot uint64, parentSlot uint64, hash [32]byte
 }
 
 func ReadSlotHashesSysvar(execCtx *ExecutionCtx) (SysvarSlotHashes, error) {
-	if SysvarCache.SlotHashes.Sysvar != nil {
-		return *SysvarCache.SlotHashes.Sysvar, nil
+	if sc := sysvarCacheFor(execCtx); sc.SlotHashes.Sysvar != nil {
+		return *sc.SlotHashes.Sysvar, nil
 	}
 
 	accts := addrObjectForLookup(execCtx)

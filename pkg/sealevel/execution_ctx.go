@@ -102,6 +102,12 @@ type SlotCtx struct {
 	SerializedParameterArena *arena.Arena[byte]
 
 	TraceCtx context.Context
+
+	// sysvars is the branch-scoped sysvar cache for this slot's execution. nil means
+	// "use the shared process-global SysvarCache" (the single-branch default). Once
+	// multi-branch execution lands, each branch's SlotCtx gets its own instance so
+	// speculative sysvar state never leaks across forks. Read via sysvarCacheFor.
+	sysvars *sysvarCache
 }
 
 func (execCtx *ExecutionCtx) PrepareInstruction(ix Instruction, signers []solana.PublicKey) ([]InstructionAccount, []uint64, error) {

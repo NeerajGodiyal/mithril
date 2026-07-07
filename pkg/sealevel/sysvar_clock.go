@@ -97,8 +97,8 @@ func (sc *SysvarClock) MustMarshal() []byte {
 }
 
 func ReadClockSysvar(execCtx *ExecutionCtx) (SysvarClock, error) {
-	if SysvarCache.Clock.Sysvar != nil {
-		return *SysvarCache.Clock.Sysvar, nil
+	if sc := sysvarCacheFor(execCtx); sc.Clock.Sysvar != nil {
+		return *sc.Clock.Sysvar, nil
 	}
 
 	accts := addrObjectForLookup(execCtx)

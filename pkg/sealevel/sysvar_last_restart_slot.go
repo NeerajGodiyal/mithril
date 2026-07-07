@@ -36,8 +36,8 @@ func (sr *SysvarLastRestartSlot) MustUnmarshalWithDecoder(decoder *bin.Decoder) 
 }
 
 func ReadLastRestartSlotSysvar(execCtx *ExecutionCtx) (SysvarLastRestartSlot, error) {
-	if SysvarCache.LastRestartSlot.Sysvar != nil {
-		return *SysvarCache.LastRestartSlot.Sysvar, nil
+	if sc := sysvarCacheFor(execCtx); sc.LastRestartSlot.Sysvar != nil {
+		return *sc.LastRestartSlot.Sysvar, nil
 	}
 
 	accts := addrObjectForLookup(execCtx)

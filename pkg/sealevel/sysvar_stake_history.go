@@ -153,8 +153,8 @@ func (sh *SysvarStakeHistory) String() string {
 }
 
 func ReadStakeHistorySysvar(execCtx *ExecutionCtx) (SysvarStakeHistory, error) {
-	if SysvarCache.StakeHistory.Sysvar != nil {
-		return *SysvarCache.StakeHistory.Sysvar, nil
+	if sc := sysvarCacheFor(execCtx); sc.StakeHistory.Sysvar != nil {
+		return *sc.StakeHistory.Sysvar, nil
 	}
 
 	accts := addrObjectForLookup(execCtx)

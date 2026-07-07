@@ -144,8 +144,8 @@ func (sr *SysvarSlotHistory) SetNextSlot(nextSlot uint64) {
 }
 
 func ReadSlotHistorySysvar(execCtx *ExecutionCtx) SysvarSlotHistory {
-	if SysvarCache.SlotHistory.Sysvar != nil {
-		return *SysvarCache.SlotHistory.Sysvar
+	if sc := sysvarCacheFor(execCtx); sc.SlotHistory.Sysvar != nil {
+		return *sc.SlotHistory.Sysvar
 	}
 
 	accts := addrObjectForLookup(execCtx)
