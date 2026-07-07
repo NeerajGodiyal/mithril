@@ -46,3 +46,53 @@ func TestDistributeTxFeesUsesSpeculativeRead(t *testing.T) {
 		t.Fatalf("leader balance = %d, want latest(10000000) + fees(%d) — stale base means the speculative read was bypassed", got.Lamports, wantFees)
 	}
 }
+
+// sharedTailReader returns the SAME object on every read, as the real accountsdb
+// read caches do (VoteAcctCache/CommonAcctsCache return stored pointers).
+type sharedTailReader struct {
+	acct *accounts.Account
+}
+
+func (r *sharedTailReader) GetAccount(slot uint64, pk solana.PublicKey) (*accounts.Account, error) {
+	return r.acct, nil
+}
+
+// Regression for the branch-differential divergence (alpenglow slot 5917835): the
+// fallback leader read resolves to a SHARED cache object; crediting fees in place
+// poisons it, so a sibling-fork or shadow re-execution reading the same object
+// double-credits the leader. The source object must never be mutated.
+func TestDistributeTxFeesDoesNotMutateSharedRead(t *testing.T) {
+	leader := solana.PublicKey{0xAC}
+	shared := &accounts.Account{Key: leader, Lamports: 5_150_492_500}
+	reader := &sharedTailReader{acct: shared}
+	acc := TxFeeInfoAccumulator{TotalFees: 3_375_000}
+	const want = 5_150_492_500 + 1_687_500 // base + (total - burn half)
+
+	runOnce := func() uint64 {
+		slotCtx := &sealevel.SlotCtx{
+			Slot:         5917835,
+			Accounts:     accounts.NewMemAccounts(), // leader NOT in the block
+			ParentAccts:  accounts.NewMemAccounts(),
+			UnrootedRead: reader,
+			Features:     features.NewFeaturesDefault(),
+		}
+		DistributeTxFeesToSlotLeader(nil, slotCtx, leader, &acc)
+		got, err := slotCtx.GetAccount(leader)
+		if err != nil {
+			t.Fatalf("leader must be set on slotCtx: %v", err)
+		}
+		return got.Lamports
+	}
+
+	if got := runOnce(); got != want {
+		t.Fatalf("first execution: leader = %d, want %d", got, want)
+	}
+	if shared.Lamports != 5_150_492_500 {
+		t.Fatalf("shared cache object mutated in place (now %d): sibling forks reading it double-credit", shared.Lamports)
+	}
+	// A sibling branch / shadow re-execution from the same parent state must
+	// produce the identical result.
+	if got := runOnce(); got != want {
+		t.Fatalf("second execution from same parent state: leader = %d, want %d (double credit)", got, want)
+	}
+}

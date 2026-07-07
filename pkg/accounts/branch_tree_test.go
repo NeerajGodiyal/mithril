@@ -329,3 +329,30 @@ func TestBranchTreeLen(t *testing.T) {
 		t.Fatalf("expected 2, got %d", tree.Len())
 	}
 }
+
+// Branch-tree reads are immutable snapshots: mutating a returned account in place
+// (as fee/rent crediting does) must not corrupt the branch's stored state or leak
+// into sibling branches via copy-on-write ancestry.
+func TestBranchTreeGetReturnsImmutableClone(t *testing.T) {
+	tree := NewBranchTree()
+	parent, _ := tree.AddBranch(0, 1, [32]byte{})
+	tree.Commit(parent, []*Account{uoAcct(1, 100)})
+	a, _ := tree.AddBranch(parent, 2, key32(0xA))
+	b, _ := tree.AddBranch(parent, 2, key32(0xB))
+
+	// Read the shared parent account through branch A and mutate it in place.
+	got, ok := tree.Get(a, key32(1))
+	if !ok {
+		t.Fatal("expected parent account via branch A")
+	}
+	got.Lamports += 50
+	got.Data = append(got.Data, 0xFF)
+
+	// Neither branch, nor the parent, may reflect that mutation.
+	for name, br := range map[string]uint64{"parent": parent, "A": a, "B": b} {
+		acct, ok := tree.Get(br, key32(1))
+		if !ok || acct.Lamports != 100 || len(acct.Data) != 0 {
+			t.Fatalf("branch %s corrupted by in-place mutation of a read: lamports=%d dataLen=%d", name, acct.Lamports, len(acct.Data))
+		}
+	}
+}
