@@ -284,7 +284,7 @@ func (pw *TurbinePrewarm) logProbeOutcome() {
 	var verdict string
 	switch {
 	case timeoutPct <= 10 && r.RespondingPeers >= 30:
-		verdict = "healthy with headroom — consider raising block.repair_max_requests_per_second to 750, then 1000, watching the timeout share"
+		verdict = "healthy with headroom — the auto rate controller will ramp toward its ceiling on its own; pin block.repair_max_requests_per_second only if you need to cap it lower"
 	case timeoutPct <= 25:
 		verdict = "healthy at the current rate ceiling"
 	case timeoutPct <= 50:

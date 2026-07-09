@@ -502,7 +502,22 @@ const (
 	repairQoSMinSendRate      = 300.0
 	repairQoSHealthyRespRate  = 150.0
 	repairQoSCollapseFraction = 0.35
+)
 
+// qosThrottleSuspected reports whether an interval looks like a serve-repair
+// throttle rather than ordinary scarcity or a latency blip. All three must
+// hold: we are pushing hard (sendRate), the PREVIOUS interval was answered well
+// (prevAnswerRate — rules out steady scarcity that never had a healthy rate),
+// and this interval's answer rate collapsed below a fraction of that. Callers
+// pass ANSWER rate = (timely + late)/s, not timely-only: a latency spike shifts
+// timely to late without a real throttle, so timely-only would false-fire.
+func qosThrottleSuspected(sendRate, prevAnswerRate, answerRate float64) bool {
+	return sendRate >= repairQoSMinSendRate &&
+		prevAnswerRate >= repairQoSHealthyRespRate &&
+		answerRate < prevAnswerRate*repairQoSCollapseFraction
+}
+
+const (
 	repairCatchupReArmCooldown   = 2 * time.Minute
 	repairCatchupBarrenCooldown  = 30 * time.Minute
 	repairCatchupDecisionTimeout = 15 * time.Second

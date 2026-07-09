@@ -20,15 +20,22 @@ const (
 	repairScanInterval        = 100 * time.Millisecond
 	repairPeerRefreshInterval = 2 * time.Second
 	repairMaxSlotsPerScan     = 32
-	// Per-slot missing-shred listing cap. A monster slot (tens of thousands of
-	// data shreds, e.g. a 65k-tx block) has thousands missing at once; with the
-	// old 256 cap the emission-gating head could only ever have ~256 distinct
-	// shreds in flight (once listed, dedup no-ops the rest), so head throughput
-	// was pinned at 256/latency however much rate/admission it was allowed.
-	// Sized to hold a whole monster slot's missing set so the head can put its
-	// entire admission window (up to peers x per-peer cap outstanding) on the
-	// wire in one wave — the point of the fast-repair push.
-	repairMaxMissingPerSlot   = 16384
+	// Max NEW requests one scan may put on the wire, independent of how many
+	// tokens the bucket has accumulated. Each send does a random-nonce Ed25519
+	// signature (~13us measured, BenchmarkRepairRequestSign); without this cap a
+	// full one-second token burst (tens of thousands at the aggressive rate)
+	// would make a single scan sign for hundreds of ms, delaying the expiry scan
+	// and flooding the socket. 6000/scan x 10 scans/s = 60k/s leaves headroom
+	// above the rate ceiling so this only bounds bursts, never steady state, and
+	// 6000 signs (~80ms) stays under the 100ms scan interval.
+	repairMaxSendsPerScan = 6000
+	// Per-slot missing-shred listing cap for NON-head (window/edge) slots. The
+	// emission-gating HEAD is capped separately and much higher by the assembler
+	// (repairHeadMaxMissing) so it can list a whole monster slot; window slots
+	// only prefill what is coming next off leftover budget, so a moderate cap
+	// keeps one big window slot from hogging the window's share. (Raising THIS
+	// alone was the bug in the first cut — it fed window slots, not the head.)
+	repairMaxMissingPerSlot   = 2048
 	repairMaxFollowupRequests = 256
 	// Outstanding hard ceiling — matched to cavey's kv-block-production
 	// (= maxDataShredsPerSlot, "a full slot in flight"). This is only the
@@ -75,21 +82,29 @@ const (
 	// here instead of vanishing into ignored_old — it counts as a LATE
 	// answer, credits the peer as a responder, and feeds its true latency to
 	// the adaptive timeout.
-	repairExpiredGenCap = 8192
-	// Global request-rate ceiling (base; the AIMD controller may raise it).
-	// HISTORY: an earlier observation on one cluster was that ~2000 req/s
-	// sustained froze serve-repair responses after ~90s (Agave QoS effectively
-	// bans heavy unstaked requesters), which is why this used to sit at 500.
-	// But cavey's kv-block-production runs repair with NO rate limiter at all
-	// and does not stall on the same clusters, and low caps left monster-block
-	// catchup crawling at ~80 useful shreds/s. Set high enough that our own
-	// throttle no longer binds — the goal is to fetch a whole monster slot in
-	// well under a slot time (a 15k-shred block at 400ms = ~38k shreds/s), so
-	// the PEER SET's serving capacity is the intended limiter, not this number.
-	// Fully configurable via block.repair_max_requests_per_second; dial it back
-	// down if serve-repair responses freeze (watch timely% collapse in the
-	// heartbeat — that is the QoS-ban signal).
-	repairMaxRequestsPerSecond = 50000
+	//
+	// The generation SIZE is rate-scaled (expiredGenCapLocked) so the two
+	// generations retain a roughly fixed WALL-CLOCK window of expirations at the
+	// current rate. A fixed small cap was fine at 500/s but at tens of thousands
+	// of req/s it rotates out in a fraction of a second, so late answers could
+	// no longer be matched during the exact congestion this is meant to observe.
+	repairExpiredRetentionSeconds = 4.0
+	repairExpiredGenMin           = 8192
+	repairExpiredGenMax           = 131072
+	// Global request-rate BASE (the starting point; the AIMD controller ramps
+	// it up toward repairAutoRateMax when the peer set absorbs it cleanly and
+	// multiplicatively backs it off on a QoS-throttle signal — see
+	// repair_catchup.go). It is deliberately NOT the experimental ceiling:
+	// pinning default==max would disable the controller (can't ramp, can't back
+	// off). This base is already aggressive — 20x the old 500 and well past the
+	// ~2000/s that once froze serve-repair — so catchup moves immediately, then
+	// the controller finds the peer set's real ceiling and retreats if it trips
+	// a ban. Fully overridable via block.repair_max_requests_per_second, which
+	// pins a fixed rate and turns the controller OFF (an explicit operator
+	// decision). HISTORY: cavey's kv-block-production runs repair unthrottled and
+	// does not stall on these clusters; low caps left monster-block catchup
+	// crawling at ~80 useful shreds/s, hence the aggressive posture.
+	repairMaxRequestsPerSecond = 10000
 	// Success-weighted peer selection: a peer that answered within this
 	// window counts as a responder, and 3 of 4 requests go to responders.
 	// Blind round-robin across a cluster where only a few peers still
@@ -355,7 +370,7 @@ func newRepairClient(identity ed25519.PrivateKey, peerSource RepairPeerSource) (
 		byResponse:  make(map[repairResponseKey]repairRequestKey),
 		inflight:    make(map[shredKey]*shredInflight),
 		perPeer:     make(map[repairAddressKey]*peerRecord),
-		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap),
+		expiredCur:  make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenMin),
 	}
 	c.timeoutNanos.Store(int64(repairMinRequestTimeout))
 	return c, nil
@@ -409,6 +424,11 @@ func (c *repairClient) repairOnce(conn *net.UDPConn, assembler *SlotAssembler) {
 	want := tierSendDemand(priority, headInitial) + edgeDemand
 	if want > repairMaxOutstanding {
 		want = repairMaxOutstanding
+	}
+	// Bound the per-scan burst so a full token bucket can't make one scan sign
+	// tens of thousands of requests (see repairMaxSendsPerScan).
+	if want > repairMaxSendsPerScan {
+		want = repairMaxSendsPerScan
 	}
 	budget := c.takeRateTokens(want)
 	if budget <= 0 {
@@ -770,17 +790,34 @@ func (c *repairClient) sendShredAttempt(conn *net.UDPConn, peers []gossip.Repair
 		c.mu.Unlock()
 		return false
 	}
+	if kind != repairRequestWindowIndex && kind != repairRequestHighestWindowIndex {
+		c.mu.Unlock()
+		return false
+	}
 	attempt := uint8(0)
 	if inf := c.inflight[sk]; inf != nil {
 		attempt = inf.nextAttempt
 	}
 	key := repairRequestKey{kind: kind, slot: slot, index: index, attempt: attempt}
+	// RESERVE the attempt slot under the lock (bumps inflight + this peer's
+	// count), then release BEFORE signing. Ed25519 signing is ~tens of
+	// microseconds; at tens of thousands of req/s, holding the lock across it
+	// serialized every send against the response-processing path
+	// (observeShredResponse needs the same lock) and could stall the UDP
+	// receive loop into kernel drops. The reserve is enough for coherence: a
+	// response for this attempt cannot arrive until after we WriteToUDP below,
+	// which is strictly after we register outstanding/byResponse.
+	c.addInflightLocked(sk, now)
+	c.notePeerSentLocked(addrKey)
+	c.mu.Unlock()
 
-	// Sign the request while holding the lock: the peer's pubkey is needed
-	// for the nonce, and registering under the same lock keeps inflight,
-	// outstanding, and byResponse coherent against the concurrent HWI-followup
-	// sender. Signing is ~tens of microseconds and sends are rate-capped, so
-	// the hold is negligible.
+	undoReserve := func() {
+		c.mu.Lock()
+		c.decInflightLocked(sk)
+		c.notePeerSendAbortedLocked(addrKey)
+		c.mu.Unlock()
+	}
+
 	var (
 		packet []byte
 		nonce  uint32
@@ -791,16 +828,15 @@ func (c *repairClient) sendShredAttempt(conn *net.UDPConn, peers []gossip.Repair
 		packet, nonce, err = repairproto.NewWindowIndexRequest(c.identity, peer.Pubkey, slot, uint64(index))
 	case repairRequestHighestWindowIndex:
 		packet, nonce, err = repairproto.NewHighestWindowIndexRequest(c.identity, peer.Pubkey, slot, uint64(index))
-	default:
-		c.mu.Unlock()
-		return false
 	}
 	if err != nil {
-		c.mu.Unlock()
+		undoReserve()
 		c.errors.Add(1)
 		return false
 	}
+
 	responseKey := repairResponseKey{addr: addrKey, nonce: nonce}
+	c.mu.Lock()
 	c.outstanding[key] = outstandingRepairRequest{
 		key:       key,
 		nonce:     nonce,
@@ -809,8 +845,6 @@ func (c *repairClient) sendShredAttempt(conn *net.UDPConn, peers []gossip.Repair
 		accountAt: now.Add(acct),
 	}
 	c.byResponse[responseKey] = key
-	c.addInflightLocked(sk, now)
-	c.notePeerSentLocked(addrKey)
 	c.mu.Unlock()
 
 	if _, err := conn.WriteToUDP(packet, peer.Addr); err != nil {
@@ -1140,16 +1174,33 @@ func (c *repairClient) expireOutstanding(now time.Time) {
 	}
 }
 
+// expiredGenCapLocked sizes each expired-memory generation so the two
+// generations together retain ~repairExpiredRetentionSeconds of expirations at
+// the current rate: cap = rate x retention / 2, clamped. This keeps late-answer
+// matching working at high rates instead of rotating out in a fraction of a
+// second (see the repairExpired* const block).
+func (c *repairClient) expiredGenCapLocked() int {
+	genCap := int(c.rateLimitLocked() * repairExpiredRetentionSeconds / 2)
+	if genCap < repairExpiredGenMin {
+		genCap = repairExpiredGenMin
+	}
+	if genCap > repairExpiredGenMax {
+		genCap = repairExpiredGenMax
+	}
+	return genCap
+}
+
 // rememberExpiredLocked keeps an expired request's full record so a late
 // answer can still be recognized and handled like a timely one. Two
-// rotating generations bound memory.
+// rotating, rate-scaled generations bound memory to a time window.
 func (c *repairClient) rememberExpiredLocked(key repairResponseKey, req outstandingRepairRequest) {
+	genCap := c.expiredGenCapLocked()
 	if c.expiredCur == nil {
-		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap)
+		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, genCap)
 	}
-	if len(c.expiredCur) >= repairExpiredGenCap {
+	if len(c.expiredCur) >= genCap {
 		c.expiredPrev = c.expiredCur
-		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, repairExpiredGenCap)
+		c.expiredCur = make(map[repairResponseKey]outstandingRepairRequest, genCap)
 	}
 	c.expiredCur[key] = req
 }

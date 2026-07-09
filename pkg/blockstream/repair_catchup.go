@@ -333,12 +333,13 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	hbPrevAt := time.Now()
 	// QoS-throttle detector state: the observed serve-repair ban signature is
 	// "requests keep flowing but responses freeze" — a sharp collapse in the
-	// response rate while we are still pushing hard. Low timely% alone is NOT
-	// the signal (a resume-gap catchup legitimately sees ~95% timeouts when
-	// only a few peers still retain old shreds); the signal is the DROP from a
-	// previously-healthy response rate. prevRespRate carries last interval's
-	// responses/s to spot that collapse; qosThrottleIntervals counts trips.
-	prevRespRate := 0.0
+	// ANSWER rate (timely + late) while we are still pushing hard. Low timely%
+	// alone is NOT the signal (a resume-gap catchup legitimately sees ~95%
+	// timeouts when only a few peers still retain old shreds; a latency spike
+	// shifts timely to late); the signal is the DROP from a previously-healthy
+	// answer rate. prevAnswerRate carries last interval's (timely+late)/s to
+	// spot that collapse; qosThrottleIntervals counts trips.
+	prevAnswerRate := 0.0
 	qosThrottleIntervals := 0
 	// AIMD rate controller: active only when the operator has NOT pinned
 	// block.repair_max_requests_per_second — an explicit knob is a decision,
@@ -592,6 +593,7 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			}
 			dReq := repair.Requests - hbPrev.Repair.Requests
 			dResp := repair.Responses - hbPrev.Repair.Responses
+			dLate := repair.LateResponses - hbPrev.Repair.LateResponses
 			dTmo := repair.Timeouts - hbPrev.Repair.Timeouts
 			// USEFUL is total distinct repair throughput: shreds accepted into
 			// in-RAM assembly PLUS those written to the catchup spool (disk-bound
@@ -604,13 +606,16 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			if resolved := dResp + dTmo; resolved > 0 {
 				timelyPct = 100 * dResp / resolved
 			}
-			// QoS-throttle detection: sending hard, WAS being served, response
-			// rate just collapsed. See the repairQoS* thresholds in block_source.go.
+			// QoS-throttle detection: sending hard, WAS being served, and the
+			// ANSWER rate (timely + late) just collapsed. Using total answers,
+			// not timely-only, is deliberate: a latency spike shifts responses
+			// from timely to late without a real throttle, so timely-only would
+			// false-fire — but total answers only collapses when peers actually
+			// stop responding. See qosThrottleSuspected / the repairQoS* thresholds.
 			sendRate := float64(dReq) / interval
-			respRate := float64(dResp) / interval
-			qosSuspect := sendRate >= repairQoSMinSendRate &&
-				prevRespRate >= repairQoSHealthyRespRate &&
-				respRate < prevRespRate*repairQoSCollapseFraction
+			respRate := float64(dResp) / interval // timely, for the heartbeat display
+			answerRate := float64(dResp+dLate) / interval
+			qosSuspect := qosThrottleSuspected(sendRate, prevAnswerRate, answerRate)
 			if qosSuspect {
 				qosThrottleIntervals++
 			}
@@ -632,31 +637,48 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			// it is the actionable signal that the aggressive rate has tripped a
 			// serve-repair ban, and it tells the operator exactly which knob to turn.
 			if qosSuspect {
-				mlog.Log.Warnf("repair catchup: POSSIBLE serve-repair QoS THROTTLE at slot %d — sending %.0f/s but responses collapsed %.0f/s -> %.0f/s (timely %d%%, responding %d/%d, avg resp %dms). Peers may be rate-banning us; lower block.repair_max_requests_per_second if this persists.",
-					waiting, sendRate, prevRespRate, respRate, timelyPct, repair.RespondingPeers, repair.Peers, repair.AvgResponseMillis)
+				mlog.Log.Warnf("repair catchup: POSSIBLE serve-repair QoS THROTTLE at slot %d — sending %.0f/s but answers (timely+late) collapsed %.0f/s -> %.0f/s (timely %d%%, responding %d/%d, avg resp %dms). Peers may be rate-banning us; the auto rate controller is backing off — pin a lower block.repair_max_requests_per_second if this persists.",
+					waiting, sendRate, prevAnswerRate, answerRate, timelyPct, repair.RespondingPeers, repair.Peers, repair.AvgResponseMillis)
 			}
 
-			// Step the ceiling up only when the interval shows the peer set
-			// absorbing the current rate cleanly AND the budget actually
-			// being used; snap back to the default the moment timeliness
-			// degrades. Bounds: default..repairAutoRateMax. The old ceiling
-			// stayed under an observed ~2000/s serve-repair freeze, but cavey
-			// runs unthrottled without stalling, so the bounds are now
-			// aggressive and the peer set is meant to be the binder.
+			// AIMD rate control (active only when the operator has NOT pinned the
+			// rate). Additive increase toward repairAutoRateMax while the peer set
+			// cleanly absorbs the current rate; MULTIPLICATIVE decrease on a
+			// throttle signal (the QoS detector firing, or timely collapsing) so
+			// it actually recovers instead of only warning. base < max, so it can
+			// both climb and retreat.
 			if autoRate > 0 {
+				base := turbine.DefaultRepairRequestsPerSecond
 				utilized := float64(dReq)/interval >= 0.7*float64(autoRate)
+				// A FRACTION of the live peers answering — works on a small
+				// validator set, unlike the old fixed >=80 gate that never fired
+				// on a ~62-peer cluster (so the rate never moved).
+				healthyPeers := repair.Peers > 0 && repair.RespondingPeers*10 >= repair.Peers*8
 				switch {
-				case timelyPct >= 85 && repair.RespondingPeers >= 80 && utilized && autoRate < repairAutoRateMax:
+				case qosSuspect || timelyPct < 60:
+					if autoRate > base {
+						next := autoRate / 2
+						if next < base {
+							next = base
+						}
+						if qosSuspect {
+							mlog.NamedFilef("catchup", "repair rate: throttle-suspect — backing off %d/s -> %d/s", autoRate, next)
+						} else {
+							mlog.NamedFilef("catchup", "repair rate: timely fell to %d%% — backing off %d/s -> %d/s", timelyPct, autoRate, next)
+						}
+						autoRate = next
+						receiver.SetRepairRequestRate(autoRate)
+					}
+				case timelyPct >= 75 && healthyPeers && utilized && autoRate < repairAutoRateMax:
 					autoRate += repairAutoRateStep
+					if autoRate > repairAutoRateMax {
+						autoRate = repairAutoRateMax
+					}
 					receiver.SetRepairRequestRate(autoRate)
-					mlog.NamedFilef("catchup", "repair rate: ceiling up to %d/s (interval timely %d%%, responding %d) — backs off automatically if timeouts spike", autoRate, timelyPct, repair.RespondingPeers)
-				case timelyPct < 60 && autoRate > turbine.DefaultRepairRequestsPerSecond:
-					mlog.NamedFilef("catchup", "repair rate: interval timely fell to %d%% — ceiling back %d/s -> %d/s", timelyPct, autoRate, turbine.DefaultRepairRequestsPerSecond)
-					autoRate = turbine.DefaultRepairRequestsPerSecond
-					receiver.SetRepairRequestRate(autoRate)
+					mlog.NamedFilef("catchup", "repair rate: stepping up to %d/s (timely %d%%, responding %d/%d) — backs off automatically on a throttle signal", autoRate, timelyPct, repair.RespondingPeers, repair.Peers)
 				}
 			}
-			prevRespRate = respRate
+			prevAnswerRate = answerRate
 			hbPrev = hb
 			hbPrevAt = time.Now()
 		}

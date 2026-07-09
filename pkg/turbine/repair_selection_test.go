@@ -181,8 +181,8 @@ func TestRepairRequestsTieredHeadMonopoly(t *testing.T) {
 		s.shreds[0] = &Shred{Slot: slot, Type: ShredTypeData}
 		a.slots[slot] = s
 	}
-	mkGappy(10, 1999) // head: 1999 missing
-	mkGappy(11, 999)  // next window slot: 999 missing
+	mkGappy(10, 20000) // head: 20000 missing, above the head cap
+	mkGappy(11, 999)   // next window slot: 999 missing
 	a.PrioritizeRepairRange(10, 11)
 
 	priority, _ := a.RepairRequestsTiered(32, 256)

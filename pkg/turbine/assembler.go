@@ -27,8 +27,12 @@ const (
 	// scan — enough to keep its admission SHARE full at any latency (the
 	// repair client bounds actual sends to that share; a total head
 	// monopoly was tried live and lowered emission throughput). Window
-	// slots stay at the caller's per-slot cap.
-	repairHeadMaxMissing         = 1024
+	// slots stay at the caller's per-slot cap. Sized to cover a whole monster
+	// slot's missing set (a 65k-tx block is ~15k data shreds): the head is the
+	// slot that gates replay, so it must never be listing-capped below what its
+	// admission share and the peer set can actually fetch — that was the real
+	// bottleneck a 256/1024 cap left in place.
+	repairHeadMaxMissing         = 16384
 	maxRetainedIncompleteSlotCap = 1024
 	maxRetainedCompletedSlotLag  = uint64(512)
 	repairObservedSlotLag        = uint64(1)
