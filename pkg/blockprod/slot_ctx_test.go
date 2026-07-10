@@ -5,6 +5,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,11 +15,14 @@ func TestNewLeaderSlotCtxInheritsAcctsLtHashAndFeatures(t *testing.T) {
 	parentFeatures.EnableFeature(features.AccountsLtHash, 1)
 	parentFeatures.EnableFeature(features.RemoveAccountsDeltaHash, 2)
 
+	epochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch: 54000,
+	}
 	slotCtx, err := NewLeaderSlotCtx(100, 99, nil, ParentContext{
 		PrevNumSigs: 42,
 		AcctsLtHash: parentLtHash,
 		Features:    parentFeatures,
-	})
+	}, epochSchedule)
 	require.NoError(t, err)
 	require.NotNil(t, slotCtx.AcctsLtHash)
 	require.True(t, slotCtx.AcctsLtHash.Equals(parentLtHash))
@@ -26,4 +30,5 @@ func TestNewLeaderSlotCtxInheritsAcctsLtHashAndFeatures(t *testing.T) {
 	require.True(t, slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash))
 	require.True(t, slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize))
 	require.Equal(t, uint64(42), slotCtx.NumSignatures)
+	require.Equal(t, uint64(0), slotCtx.Epoch) // slot 100 with default schedule
 }

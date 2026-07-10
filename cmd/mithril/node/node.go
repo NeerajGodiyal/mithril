@@ -43,7 +43,6 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/tpu"
-	"github.com/Overclock-Validator/mithril/pkg/tpu/quicserver"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/Overclock-Validator/mithril/pkg/version"
 	"crypto/ed25519"
@@ -1673,28 +1672,6 @@ postBootstrap:
 		}
 		forgeSink := forge.NewSink(blockProdController)
 		tpuCfg.Pipeline.Sink = forgeSink
-		// TODO(cavey-debug): remove forgeCounters closure after debugging.
-		forgeCounters := func() blockprod.ForgeCounters {
-			s := forgeSink.Stats()
-			return blockprod.ForgeCounters{
-				InPackets:          s.InPackets,
-				InBytes:            s.InBytes,
-				Accepted:           s.Accepted,
-				DroppedNoBank:      s.DroppedNoBank,
-				DroppedVote:        s.DroppedVote,
-				DroppedParse:       s.DroppedParse,
-				DroppedCost:        s.DroppedCost,
-				DroppedExecution:   s.DroppedExecution,
-				DroppedBlockCost:   s.DroppedBlockCost,
-				DroppedAccountCost: s.DroppedAccountCost,
-				DroppedAllocCost:   s.DroppedAllocCost,
-				DroppedBatchBytes:  s.DroppedBatchBytes,
-			}
-		}
-
-		// TODO(cavey-debug): remove startup debug log after debugging.
-		mlog.Log.Infof("cavey debug: block production enabled identity=%s gossip_entrypoint=%s turbine_bind=%s votor_bind=%s",
-			solana.PrivateKey(identity).PublicKey(), turbineGossipEntrypoint, turbineBindAddr, blockProductionVotorBindAddr)
 
 		var broadcaster turbine.PacketBroadcaster
 		epochSchedule := epochScheduleFromState(mithrilState)
@@ -1814,10 +1791,6 @@ postBootstrap:
 			},
 			CurrentSlot:   global.WallClockSlot,
 			LeaderForSlot: global.LeaderForSlot,
-			// TODO(cavey-debug): remove NextLeaderSlot wiring after debugging.
-			NextLeaderSlot: func(fromSlot uint64) (uint64, bool) {
-				return global.NextLeaderSlotForIdentity(solana.PrivateKey(identity).PublicKey(), fromSlot)
-			},
 			ParentBlockID: func(slot uint64) (solana.Hash, bool) {
 				parentSlot := slot
 				if slot > 0 {
@@ -1827,23 +1800,12 @@ postBootstrap:
 			},
 			BankHash:    blockprod.DefaultBankHash,
 			RewardCerts: rewardCertBuilder,
-			// TODO(cavey-debug): remove ForgeCounters wiring after debugging.
-			ForgeCounters: forgeCounters,
-			// TODO(cavey-debug): remove TVUPeerCount wiring after debugging.
-			TVUPeerCount: func() int {
-				if sharedGossip == nil {
-					return 0
-				}
-				return len(sharedGossip.TVUPeers())
-			},
 		})
 		go leaderLoop.Run(leaderStop)
 		tpuSvc, err := tpu.Start(ctx, tpuCfg)
 		if err != nil {
 			klog.Fatalf("start TPU: %v", err)
 		}
-		// TODO(cavey-debug): remove periodic TPU stats goroutine after debugging.
-		go runCaveyBlockProductionStats(ctx, tpuSvc, blockProdController, forgeCounters, alpenglowConsensusEngine, rewardCertBuilder, rewardCertVotorActive, solana.PrivateKey(identity).PublicKey())
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -1885,16 +1847,6 @@ postBootstrap:
 		blockFetchOpts.HasLocalLeaderCommit = replay.HasLocalLeaderCommit
 	}
 	blockFetchOpts.TurbineRepairOnly = turbineRepairOnly
-	if len(gossipIdentity) > 0 {
-		// TODO(cavey-debug): remove wall-clock seed after debugging (used by blockprod leader loop).
-		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {
-			global.SeedWallClockSlot(slot)
-			mlog.Log.Infof("cavey debug: wall-clock slot seeded from RPC for leader-loop timing: %d", slot)
-		} else if mithrilState != nil {
-			global.SeedWallClockSlot(mithrilState.GetCurrentSlot())
-			mlog.Log.Warnf("cavey debug: wall-clock slot seeded from state (%d) for leader-loop timing; RPC unavailable: %v", mithrilState.GetCurrentSlot(), err)
-		}
-	}
 	_ = validatorVotePath
 	_ = validatorWithdrawerPath
 	// Build consensus options from config
@@ -2580,92 +2532,6 @@ func queryCurrentSlot(ctx context.Context, rpcEndpoints []string) (uint64, error
 // Confirmed commitment tracks near-tip slot more closely than finalized.
 func queryWallClockSeedSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
 	return querySlotFromRPC(ctx, rpcEndpoints, solrpc.CommitmentConfirmed)
-}
-
-// TODO(cavey-debug): remove runCaveyBlockProductionStats and quicOpenConns/quicActiveStreams after debugging.
-func runCaveyBlockProductionStats(ctx context.Context, tpuSvc *tpu.TPU, controller *blockprod.Controller, forgeCounters func() blockprod.ForgeCounters, consensusEngine consensusengine.Engine, rewardCertBuilder *rewardcerts.Builder, rewardCertListenerActive bool, identity solana.PublicKey) {
-	if tpuSvc == nil {
-		return
-	}
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			stats := tpuSvc.Stats()
-			workingSlot := uint64(0)
-			if bank := controller.WorkingBank(); bank != nil {
-				workingSlot = bank.Slot()
-			}
-			forgeInfo := ""
-			if forgeCounters != nil {
-				forgeInfo = " " + blockprod.FormatForgeCounters(forgeCounters())
-			}
-			votorInfo := formatCaveyVotorStats(consensusEngine)
-			rewardCertInfo := formatCaveyRewardCertStats(rewardCertBuilder, rewardCertListenerActive, identity, workingSlot)
-			quic := stats.QUIC
-			p := stats.Pipeline
-			mlog.Log.Infof(
-				"cavey debug: TPU stats quic_open_conns=%d quic_streams=%d ingress_pkts=%d ingress_bytes=%d ingress_dropped=%d dedup_out=%d dedup_sanitize_drop=%d dedup_dedup_drop=%d sigverify_in=%d sigverify_ok=%d sigverify_drop=%d working_bank_slot=%d replay_slot=%d wall_clock_slot=%d%s%s%s",
-				quicOpenConns(quic), quicActiveStreams(quic),
-				p.Ingress.EnqueuedPackets, p.Ingress.EnqueuedBytes, p.Ingress.DroppedFull,
-				p.Dedup.OutPackets, p.Dedup.DroppedSanitize, p.Dedup.DroppedDedup,
-				p.Sigverify.InPackets, p.Sigverify.VerifiedPackets, p.Sigverify.DroppedSigverify,
-				workingSlot, global.Slot(), global.WallClockSlot(), forgeInfo, votorInfo, rewardCertInfo,
-			)
-		}
-	}
-}
-
-// TODO(cavey-debug): remove formatCaveyVotorStats after debugging.
-func formatCaveyVotorStats(engine consensusengine.Engine) string {
-	if engine == nil {
-		return " votor=disabled"
-	}
-	snapshot := engine.Snapshot()
-	if snapshot.Receiver == nil {
-		return " votor=listener_disabled"
-	}
-	r := snapshot.Receiver
-	chainCerts := uint64(0)
-	if snapshot.AlpenglowChain != nil {
-		chainCerts = snapshot.AlpenglowChain.CertificatesAccepted
-	}
-	return fmt.Sprintf(" votor_conns=%d votor_streams=%d votor_certs=%d votor_votes=%d chain_certs=%d known_block_ids=%d latest_cert_slot=%d",
-		r.ConnectionsAccepted, r.StreamsReceived, r.CertificatesDecoded, r.VotesDecoded,
-		chainCerts, global.AlpenglowBlockIDCount(), r.LatestCertSlot)
-}
-
-// TODO(cavey-debug): remove formatCaveyRewardCertStats after debugging.
-func formatCaveyRewardCertStats(builder *rewardcerts.Builder, listenerActive bool, identity solana.PublicKey, workingBankSlot uint64) string {
-	if builder == nil {
-		return " reward_cert_listener=unconfigured"
-	}
-	leaderSlot := workingBankSlot
-	if leaderSlot == 0 && !identity.IsZero() {
-		if next, ok := global.NextLeaderSlotForIdentity(identity, global.WallClockSlot()); ok {
-			leaderSlot = next
-		}
-	}
-	return builder.ReadinessForLeaderSlot(leaderSlot).Format(listenerActive)
-}
-
-// TODO(cavey-debug): remove quicOpenConns after debugging.
-func quicOpenConns(stats *quicserver.ServerStats) uint64 {
-	if stats == nil {
-		return 0
-	}
-	return stats.OpenConnections.Load()
-}
-
-// TODO(cavey-debug): remove quicActiveStreams after debugging.
-func quicActiveStreams(stats *quicserver.ServerStats) uint64 {
-	if stats == nil {
-		return 0
-	}
-	return stats.ActiveStreams.Load()
 }
 
 func querySlotFromRPC(ctx context.Context, rpcEndpoints []string, commitment solrpc.CommitmentType) (uint64, error) {

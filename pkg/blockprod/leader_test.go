@@ -114,16 +114,3 @@ func TestLeaderLoopProducesMissedLeaderSlotAfterWallClockPasses(t *testing.T) {
 
 	close(stop)
 }
-
-// TODO(cavey-debug): remove TestFormatNextLeaderInfo with formatNextLeaderInfo/formatLeaderETA after debugging.
-func TestFormatNextLeaderInfo(t *testing.T) {
-	next := func(from uint64) (uint64, bool) {
-		if from < 100 {
-			return 150, true
-		}
-		return 0, false
-	}
-	assert.Equal(t, " next_leader_slot=150 slots_until=51 eta=20s", formatNextLeaderInfo(next, 99))
-	assert.Equal(t, " next_leader_slot=none", formatNextLeaderInfo(next, 200))
-	assert.Equal(t, "", formatNextLeaderInfo(nil, 100))
-}

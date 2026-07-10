@@ -41,8 +41,7 @@ func (s *ShredSink) OnEntryBatch(entries []turbine.Entry, _ int) {
 		return
 	}
 	if err := s.session.BroadcastEntryBatch(entries); err != nil {
-		// TODO(cavey-debug): remove after debugging — revert to silent ignore or use mlog.Log.Warnf.
-		caveyDebugf("blockprod shred broadcast entry batch failed: %v", err)
+		mlog.Log.Warnf("blockprod shred broadcast entry batch failed: %v", err)
 	}
 }
 
@@ -64,16 +63,10 @@ type LeaderLoop struct {
 	alpenglowClock bool
 	parentContext  func(uint64) ParentContext
 
-	currentSlot    func() uint64
-	leaderForSlot  func(uint64) (solana.PublicKey, bool)
-	// TODO(cavey-debug): remove NextLeaderSlot field after debugging.
-	nextLeaderSlot func(fromSlot uint64) (uint64, bool)
-	parentBlockID  func(uint64) (solana.Hash, bool)
-	bankHash       func(*WorkingBank) solana.Hash
-	// TODO(cavey-debug): remove ForgeCounters field after debugging.
-	forgeCounters func() ForgeCounters
-	// TODO(cavey-debug): remove TVUPeerCount field after debugging.
-	tvuPeerCount func() int
+	currentSlot   func() uint64
+	leaderForSlot func(uint64) (solana.PublicKey, bool)
+	parentBlockID func(uint64) (solana.Hash, bool)
+	bankHash      func(*WorkingBank) solana.Hash
 
 	pollInterval time.Duration
 
@@ -82,11 +75,7 @@ type LeaderLoop struct {
 	activeBank *WorkingBank
 	activeSess *turbine.BroadcastSession
 	parentCtx  ParentContext
-	// TODO(cavey-debug): remove lastNotLeaderLogSlot and lastActiveLogAt after debugging.
-	lastNotLeaderLogSlot uint64
-	lastActiveLogAt      time.Time
-	lastWaitingLogSlot   uint64
-	finishedLeaderSlots  map[uint64]struct{}
+	finishedLeaderSlots map[uint64]struct{}
 }
 
 type LeaderLoopConfig struct {
@@ -99,17 +88,11 @@ type LeaderLoopConfig struct {
 	EpochSchedule  *sealevel.SysvarEpochSchedule
 	AlpenglowClock bool
 	ParentContext  func(uint64) ParentContext
-	CurrentSlot    func() uint64
+	CurrentSlot   func() uint64
 	LeaderForSlot func(uint64) (solana.PublicKey, bool)
-	// TODO(cavey-debug): remove NextLeaderSlot config field after debugging.
-	NextLeaderSlot func(fromSlot uint64) (uint64, bool)
-	ParentBlockID  func(slot uint64) (solana.Hash, bool)
-	BankHash       func(*WorkingBank) solana.Hash
-	RewardCerts    RewardCertBuilder
-	// TODO(cavey-debug): remove ForgeCounters config field after debugging.
-	ForgeCounters func() ForgeCounters
-	// TODO(cavey-debug): remove TVUPeerCount config field after debugging.
-	TVUPeerCount func() int
+	ParentBlockID func(slot uint64) (solana.Hash, bool)
+	BankHash      func(*WorkingBank) solana.Hash
+	RewardCerts   RewardCertBuilder
 	PollInterval  time.Duration
 }
 
@@ -130,15 +113,12 @@ func NewLeaderLoop(cfg LeaderLoopConfig) *LeaderLoop {
 		epochSchedule:  cfg.EpochSchedule,
 		alpenglowClock: cfg.AlpenglowClock,
 		parentContext:  cfg.ParentContext,
-		currentSlot:    cfg.CurrentSlot,
-		leaderForSlot:  cfg.LeaderForSlot,
-		nextLeaderSlot: cfg.NextLeaderSlot,
-		parentBlockID:  cfg.ParentBlockID,
-		bankHash:       cfg.BankHash,
-		rewardCerts:    cfg.RewardCerts,
-		forgeCounters:  cfg.ForgeCounters,
-		tvuPeerCount:   cfg.TVUPeerCount,
-		pollInterval:        cfg.PollInterval,
+		currentSlot:   cfg.CurrentSlot,
+		leaderForSlot: cfg.LeaderForSlot,
+		parentBlockID: cfg.ParentBlockID,
+		bankHash:      cfg.BankHash,
+		rewardCerts:   cfg.RewardCerts,
+		pollInterval:  cfg.PollInterval,
 		finishedLeaderSlots: make(map[uint64]struct{}),
 	}
 }
@@ -171,7 +151,6 @@ func (l *LeaderLoop) tick() {
 
 		if l.activeBank != nil {
 			if wallSlot <= l.activeSlot {
-				l.maybeLogActiveLeaderLocked(l.activeSlot)
 				return
 			}
 			l.finishActiveSlotLocked()
@@ -193,14 +172,11 @@ func (l *LeaderLoop) tick() {
 			return
 		}
 
-		if ready, err := l.pocLeaderSlotReplayReady(targetSlot); !ready {
-			l.maybeLogWaitingForParentLocked(targetSlot, err)
+		if ready, _ := l.pocLeaderSlotReplayReady(targetSlot); !ready {
 			return
 		}
 
 		if err := l.startSlotLocked(targetSlot); err != nil {
-			caveyDebugf("blockprod leader start failed slot=%d replay_slot=%d:%s %v",
-				targetSlot, global.Slot(), formatTVUPeersSuffix(l.tvuPeerCount), err)
 			return
 		}
 
@@ -253,38 +229,6 @@ func (l *LeaderLoop) nextPendingLeaderSlotLocked() (uint64, bool) {
 	return 0, false
 }
 
-func (l *LeaderLoop) maybeLogWaitingForParentLocked(slot uint64, err error) {
-	if l.lastWaitingLogSlot == slot {
-		return
-	}
-	l.lastWaitingLogSlot = slot
-	// TODO(cavey-debug): remove after debugging.
-	caveyDebugf("blockprod leader waiting slot=%d replay_slot=%d:%s %v",
-		slot, global.Slot(), formatTVUPeersSuffix(l.tvuPeerCount), err)
-}
-
-// TODO(cavey-debug): remove maybeLogActiveLeaderLocked after debugging.
-func (l *LeaderLoop) maybeLogActiveLeaderLocked(slot uint64) {
-	if time.Since(l.lastActiveLogAt) < time.Second {
-		return
-	}
-	l.lastActiveLogAt = time.Now()
-	forgeInfo := ""
-	if l.forgeCounters != nil {
-		forgeInfo = " " + formatForgeCounters(l.forgeCounters())
-	}
-	caveyDebugf("blockprod leader in progress slot=%d replay_slot=%d txs=%d sigs=%d%s",
-		slot, global.Slot(), len(l.activeBank.ForgedTransactions()), l.activeBank.NumSignatures(), forgeInfo)
-}
-
-// TODO(cavey-debug): remove forgeCountersSnapshot after debugging.
-func (l *LeaderLoop) forgeCountersSnapshot() ForgeCounters {
-	if l.forgeCounters != nil {
-		return l.forgeCounters()
-	}
-	return ForgeCounters{}
-}
-
 func (l *LeaderLoop) finishActiveSlot() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -325,10 +269,6 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		return
 	}
 	slot := l.activeSlot
-	txCount := len(l.activeBank.ForgedTransactions())
-	sigCount := l.activeBank.NumSignatures()
-	// TODO(cavey-debug): remove forgeSnap and leader-finished log after debugging.
-	forgeSnap := l.forgeCountersSnapshot()
 
 	l.activeBank.FlushEntries()
 
@@ -342,7 +282,6 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		footerRewards = l.rewardCerts.BuildForLeaderSlot(slot)
 	}
 
-	commitStatus := "skipped_no_accountsdb_or_epoch_schedule"
 	if l.accountsDb != nil && l.epochSchedule != nil {
 		block := BuildLeaderBlock(LeaderBlockInput{
 			Bank:             l.activeBank,
@@ -364,40 +303,20 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 			EpochSchedule:           l.epochSchedule,
 			TxFeeAccumulator:        l.activeBank.TxFeeAccumulator(),
 			AlpenglowClock:          l.alpenglowClock,
+			AlpenglowShredVersion:   l.shredVersion,
 			FooterTimestamp:         footerTimestamp,
 			FooterProducerTimeNanos: producerTimeNanos,
 		}); err != nil {
-			commitStatus = fmt.Sprintf("failed:%v", err)
 			mlog.Log.Errorf("leader slot %d commit failed: %v", slot, err)
-		} else {
-			commitStatus = "ok"
 		}
-	} else if l.accountsDb == nil {
-		commitStatus = "skipped_accountsdb_nil"
-	} else if l.epochSchedule == nil {
-		commitStatus = "skipped_epoch_schedule_nil"
 	}
 
-	tickStatus := "ok"
-	footerStatus := "ok"
-	bankHash := l.bankHash(l.activeBank)
-	var skipCertLen, notarCertLen int
-	rewardSlot := uint64(0)
-	if rs, ok := rewardcerts.RewardSlotForLeader(slot); ok {
-		rewardSlot = rs
-	}
 	if l.activeSess != nil {
-		skipCertLen = len(footerRewards.Skip)
-		notarCertLen = len(footerRewards.Notar)
-		if err := l.activeSess.BroadcastFooter(bankHash, producerTimeNanos, footerRewards.Skip, footerRewards.Notar); err != nil {
-			footerStatus = fmt.Sprintf("failed:%v", err)
-			// TODO(cavey-debug): remove after debugging — keep footerStatus in leader-finished log or revert.
-			caveyDebugf("blockprod footer broadcast failed slot=%d: %v", slot, err)
+		if err := l.activeSess.BroadcastFooter(l.bankHash(l.activeBank), producerTimeNanos, footerRewards.Skip, footerRewards.Notar); err != nil {
+			mlog.Log.Warnf("leader slot %d footer broadcast failed: %v", slot, err)
 		}
 		if err := l.activeSess.BroadcastEndingTickLast(tickHash); err != nil {
-			tickStatus = fmt.Sprintf("failed:%v", err)
-			// TODO(cavey-debug): remove after debugging — keep tickStatus in leader-finished log or revert.
-			caveyDebugf("blockprod ending tick broadcast failed slot=%d: %v", slot, err)
+			mlog.Log.Warnf("leader slot %d ending tick broadcast failed: %v", slot, err)
 		} else if slot > 0 {
 			parentSlot := slot - 1
 			if parentID, ok := global.AlpenglowBlockID(parentSlot); ok {
@@ -407,14 +326,7 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 				global.SetAlpenglowChainedMerkleRoot(slot, chained)
 			}
 		}
-	} else {
-		tickStatus = "skipped_no_session"
-		footerStatus = "skipped_no_session"
 	}
-
-	// TODO(cavey-debug): remove leader-finished log after debugging.
-	caveyDebugf("blockprod leader finished slot=%d txs=%d sigs=%d commit=%s tick=%s footer=%s bank_hash=%s footer_reward_slot=%d skip_cert_bytes=%d notar_cert_bytes=%d %s",
-		slot, txCount, sigCount, commitStatus, tickStatus, footerStatus, bankHash, rewardSlot, skipCertLen, notarCertLen, FormatForgeCounters(forgeSnap))
 
 	l.markLeaderSlotFinished(slot)
 
@@ -476,7 +388,7 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 		return fmt.Errorf("broadcast header parent_block_id=%s: %w", parentID, err)
 	}
 
-	slotCtx, err := NewLeaderSlotCtx(slot, parentSlot, l.accountsDb, parentCtx)
+	slotCtx, err := NewLeaderSlotCtx(slot, parentSlot, l.accountsDb, parentCtx, l.epochSchedule)
 	if err != nil {
 		return fmt.Errorf("new leader slot ctx: %w", err)
 	}
@@ -495,48 +407,6 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 	l.activeSlot = slot
 	l.activeBank = bank
 	l.activeSess = session
-	// TODO(cavey-debug): remove lastActiveLogAt reset after debugging.
-	l.lastActiveLogAt = time.Time{}
-	l.lastWaitingLogSlot = 0
 	l.controller.SetWorkingBank(bank)
-
-	parentBH := "missing"
-	if parentCtx.ParentBankhash != (solana.Hash{}) {
-		parentBH = parentCtx.ParentBankhash.String()
-	}
-	// TODO(cavey-debug): remove leader-active log after debugging.
-	caveyDebugf("blockprod leader active slot=%d replay_slot=%d identity=%s parent_slot=%d parent_bankhash=%s parent_block_id=%s parent_chained_root=%s shred_version=%d accountsdb=%t epoch_schedule=%t",
-		slot, global.Slot(), l.identity.PublicKey(), parentSlot, parentBH, parentID, parentChainedRoot, l.shredVersion,
-		l.accountsDb != nil, l.epochSchedule != nil)
 	return nil
-}
-
-// TODO(cavey-debug): remove formatNextLeaderInfo and formatLeaderETA after debugging.
-func formatNextLeaderInfo(nextLeaderSlot func(fromSlot uint64) (uint64, bool), currentSlot uint64) string {
-	if nextLeaderSlot == nil {
-		return ""
-	}
-	next, ok := nextLeaderSlot(currentSlot)
-	if !ok {
-		return " next_leader_slot=none"
-	}
-	slotsUntil := next - currentSlot
-	return fmt.Sprintf(" next_leader_slot=%d slots_until=%d eta=%s", next, slotsUntil, formatLeaderETA(slotsUntil))
-}
-
-func formatLeaderETA(slotsUntil uint64) string {
-	d := time.Duration(slotsUntil) * slotDuration
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-	if h > 0 {
-		return fmt.Sprintf("%dh%02dm", h, m)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm%02ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
 }

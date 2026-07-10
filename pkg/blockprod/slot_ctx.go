@@ -23,8 +23,13 @@ type ParentContext struct {
 }
 
 // NewLeaderSlotCtx builds a forge-ready slot context at the chain tip.
-func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, parent ParentContext) (*sealevel.SlotCtx, error) {
+func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, parent ParentContext, epochSchedule *sealevel.SysvarEpochSchedule) (*sealevel.SlotCtx, error) {
 	feats := leaderFeatures(parent.Features)
+
+	var epoch uint64
+	if epochSchedule != nil {
+		epoch = epochSchedule.GetEpoch(slot)
+	}
 
 	lastBlockhash := global.LatestBlockHash()
 	prevFee := parent.PrevFeeGovernor
@@ -39,6 +44,7 @@ func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, p
 	slotCtx := &sealevel.SlotCtx{
 		Slot:            slot,
 		ParentSlot:      parentSlot,
+		Epoch:           epoch,
 		Accounts:        accounts.NewMemAccounts(),
 		AccountsDb:      acctsDb,
 		Features:        feats,
