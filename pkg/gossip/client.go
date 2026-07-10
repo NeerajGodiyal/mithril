@@ -394,7 +394,11 @@ func (c *Client) SetTPUQUIC(addr *net.UDPAddr) error {
 }
 
 func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
-	shredVersion := c.cfg.ShredVersion
+	configuredShred := c.cfg.ShredVersion
+	shredVersion, err := ResolveShredVersion(c.entrypoint, configuredShred, c.cfg.EntrypointTimeout)
+	if err != nil {
+		return err
+	}
 	var advertisedIP net.IP
 	if c.cfg.AdvertisedIP != "" {
 		advertisedIP = net.ParseIP(c.cfg.AdvertisedIP)
@@ -402,20 +406,12 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 			return fmt.Errorf("invalid advertised IP %q", c.cfg.AdvertisedIP)
 		}
 	}
-
-	if shredVersion == 0 || advertisedIP == nil {
-		echo, err := QueryEntrypoint(c.entrypoint, c.cfg.EntrypointTimeout)
-		if err != nil {
-			if shredVersion == 0 {
-				return fmt.Errorf("query gossip entrypoint %s: %w", c.entrypoint.String(), err)
-			}
+	if advertisedIP == nil {
+		echo, echoErr := QueryEntrypoint(c.entrypoint, c.cfg.EntrypointTimeout)
+		if echoErr != nil {
+			advertisedIP = localGossipAddr.IP
 		} else {
-			if shredVersion == 0 {
-				shredVersion = echo.ShredVersion
-			}
-			if advertisedIP == nil {
-				advertisedIP = echo.Address
-			}
+			advertisedIP = echo.Address
 		}
 	}
 	if advertisedIP == nil {
@@ -425,8 +421,9 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 	if advertisedIP == nil || advertisedIP.IsUnspecified() {
 		return fmt.Errorf("could not determine advertised gossip IP")
 	}
-	if shredVersion == 0 {
-		return fmt.Errorf("could not determine shred version")
+	if configuredShred != 0 && configuredShred != shredVersion {
+		mlog.Log.Warnf("gossip peer acceptance and advertised ContactInfo will use shred_version=%d (configured=%d)",
+			shredVersion, configuredShred)
 	}
 
 	gossipAddr := &net.UDPAddr{IP: advertisedIP, Port: localGossipAddr.Port}
