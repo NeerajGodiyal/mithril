@@ -216,6 +216,44 @@ func TestPingPongRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodePullRequestUsesDefaultFilter(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	pubkey, err := pubkeyFromPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("pubkeyFromPrivateKey returned error: %v", err)
+	}
+	contact, err := NewContactInfo(
+		pubkey,
+		1234,
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 65400},
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8001},
+	)
+	if err != nil {
+		t.Fatalf("NewContactInfo returned error: %v", err)
+	}
+	value, err := signCrdsContactInfo(contact, priv)
+	if err != nil {
+		t.Fatalf("signCrdsContactInfo returned error: %v", err)
+	}
+	packet, err := encodePullRequest(value)
+	if err != nil {
+		t.Fatalf("encodePullRequest returned error: %v", err)
+	}
+	decoded, err := decodePacket(packet)
+	if err != nil {
+		t.Fatalf("decodePacket returned error: %v", err)
+	}
+	if decoded.Kind != packetPullRequest {
+		t.Fatalf("decoded kind = %v, want pull request", decoded.Kind)
+	}
+	if len(packet) <= len(defaultCrdsFilterBytes)+4 {
+		t.Fatalf("pull request too small: %d bytes", len(packet))
+	}
+}
+
 func TestDecodeContactInfoV4SkipsExtensions(t *testing.T) {
 	// v4 ContactInfo records append TLV extensions after the socket table.
 	_, priv, err := ed25519.GenerateKey(rand.Reader)

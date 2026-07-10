@@ -18,6 +18,7 @@ import (
 const (
 	DefaultBindAddr      = "0.0.0.0:0"
 	defaultPushInterval  = 2 * time.Second
+	defaultPullInterval  = 2 * time.Second
 	defaultPingInterval  = 10 * time.Second
 	defaultEchoTimeout   = 5 * time.Second
 	maxKnownGossipPeers  = 128
@@ -33,6 +34,7 @@ type Config struct {
 	ShredVersion      uint16
 	Identity          ed25519.PrivateKey
 	PushInterval      time.Duration
+	PullInterval      time.Duration
 	PingInterval      time.Duration
 	EntrypointTimeout time.Duration
 	Name              string
@@ -76,6 +78,7 @@ type Client struct {
 	txPushMessages   atomic.Uint64
 	txPingMessages   atomic.Uint64
 	txPongMessages   atomic.Uint64
+	txPullRequests   atomic.Uint64
 	txPullResponses  atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
@@ -119,6 +122,7 @@ type Stats struct {
 	TxPushMessages   uint64
 	TxPingMessages   uint64
 	TxPongMessages   uint64
+	TxPullRequests   uint64
 	TxPullResponses  uint64
 	LastRxUnix       int64
 	LastTxUnix       int64
@@ -138,6 +142,9 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if cfg.PushInterval == 0 {
 		cfg.PushInterval = defaultPushInterval
+	}
+	if cfg.PullInterval == 0 {
+		cfg.PullInterval = defaultPullInterval
 	}
 	if cfg.PingInterval == 0 {
 		cfg.PingInterval = defaultPingInterval
@@ -267,9 +274,12 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	_ = c.sendPing(conn, c.entrypoint)
+	_ = c.sendPullRequest(conn, c.entrypoint)
 
 	pushTicker := time.NewTicker(c.cfg.PushInterval)
 	defer pushTicker.Stop()
+	pullTicker := time.NewTicker(c.cfg.PullInterval)
+	defer pullTicker.Stop()
 	pingTicker := time.NewTicker(c.cfg.PingInterval)
 	defer pingTicker.Stop()
 	statsTicker := time.NewTicker(10 * time.Second)
@@ -288,14 +298,19 @@ func (c *Client) Run(ctx context.Context) error {
 			if err := c.pushContact(conn); err != nil {
 				return err
 			}
+		case <-pullTicker.C:
+			_ = c.sendPullRequest(conn, c.entrypoint)
+			for _, peer := range c.currentPeers() {
+				_ = c.sendPullRequest(conn, peer)
+			}
 		case <-pingTicker.C:
 			_ = c.sendPing(conn, c.entrypoint)
 		case <-statsTicker.C:
 			stats := c.Stats()
-			mlog.Log.FileOnlyf("gossip client stats: rx=%d tx=%d peers=%d repair_peers=%d decode_errors=%d tx_errors=%d pings=%d/%d pongs=%d/%d contacts_rx=%d contacts_accepted=%d pull_requests=%d pull_responses=%d last_rx=%s last_tx=%s",
+			mlog.Log.FileOnlyf("gossip client stats: rx=%d tx=%d peers=%d repair_peers=%d decode_errors=%d tx_errors=%d pings=%d/%d pongs=%d/%d contacts_rx=%d contacts_accepted=%d pull_requests_rx=%d pull_requests_tx=%d pull_responses_tx=%d last_rx=%s last_tx=%s",
 				stats.RxPackets, stats.TxPackets, stats.Peers, stats.RepairPeers, stats.RxDecodeErrors, stats.TxErrors,
 				stats.RxPings, stats.TxPingMessages, stats.RxPongs, stats.TxPongMessages,
-				stats.RxContacts, stats.AcceptedContacts, stats.RxPullRequests, stats.TxPullResponses,
+				stats.RxContacts, stats.AcceptedContacts, stats.RxPullRequests, stats.TxPullRequests, stats.TxPullResponses,
 				formatAge(stats.LastRxUnix), formatAge(stats.LastTxUnix))
 		}
 	}
@@ -321,6 +336,7 @@ func (c *Client) Stats() Stats {
 		TxPushMessages:   c.txPushMessages.Load(),
 		TxPingMessages:   c.txPingMessages.Load(),
 		TxPongMessages:   c.txPongMessages.Load(),
+		TxPullRequests:   c.txPullRequests.Load(),
 		TxPullResponses:  c.txPullResponses.Load(),
 		LastRxUnix:       c.lastRxUnix.Load(),
 		LastTxUnix:       c.lastTxUnix.Load(),
@@ -467,6 +483,24 @@ func (c *Client) pushContact(conn *net.UDPConn) error {
 		c.recordTx()
 		c.txPushMessages.Add(1)
 	}
+	return nil
+}
+
+func (c *Client) sendPullRequest(conn *net.UDPConn, addr *net.UDPAddr) error {
+	value, err := c.currentContactValue()
+	if err != nil {
+		return err
+	}
+	packet, err := encodePullRequest(value)
+	if err != nil {
+		return err
+	}
+	if err := sendUDP(conn, packet, addr); err != nil {
+		c.txErrors.Add(1)
+		return err
+	}
+	c.recordTx()
+	c.txPullRequests.Add(1)
 	return nil
 }
 

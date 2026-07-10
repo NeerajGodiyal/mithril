@@ -89,6 +89,27 @@ func encodePushMessage(from Pubkey, values []CrdsValue) ([]byte, error) {
 	return e.bytes(), nil
 }
 
+// defaultCrdsFilterBytes is the wincode serialization of the default CRDS pull filter.
+var defaultCrdsFilterBytes = []byte{
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0x00, 0x00, 0x00, 0x00,
+}
+
+func encodePullRequest(caller CrdsValue) ([]byte, error) {
+	var e encoder
+	e.variant(protocolPullRequest)
+	e.fixed(defaultCrdsFilterBytes)
+	caller.encode(&e)
+	if len(e.bytes()) > packetDataSize {
+		return nil, fmt.Errorf("pull request size %d exceeds packet size %d", len(e.bytes()), packetDataSize)
+	}
+	return e.bytes(), nil
+}
+
 func encodePullResponse(from Pubkey, values []CrdsValue) ([]byte, error) {
 	var e encoder
 	e.variant(protocolPullResponse)
