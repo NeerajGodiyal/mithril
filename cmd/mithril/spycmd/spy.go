@@ -165,8 +165,10 @@ func printSpyResults(client *gossip.Client, opts spyOptions) error {
 
 	fmt.Printf("\ngossip spy summary: discovered=%d with_gossip=%d with_repair=%d with_tvu=%d tvu_peers=%d\n",
 		summary.Total, summary.WithGossip, summary.WithRepair, summary.WithTVU, summary.TVUPeers)
-	fmt.Printf("gossip stats: rx=%d accepted=%d rx_contacts=%d pull_requests=%d pull_responses=%d decode_errors=%d\n",
-		stats.RxPackets, stats.AcceptedContacts, stats.RxContacts, stats.RxPullRequests, stats.TxPullResponses, stats.RxDecodeErrors)
+	fmt.Printf("gossip stats: rx=%d tx=%d accepted=%d rx_contacts=%d reject_shred=%d reject_no_gossip=%d reject_entrypoint=%d pull_requests_rx=%d pull_requests_tx=%d pull_responses_tx=%d decode_errors=%d\n",
+		stats.RxPackets, stats.TxPackets, stats.AcceptedContacts, stats.RxContacts,
+		stats.RejectShredVersion, stats.RejectNoGossip, stats.RejectEntrypoint,
+		stats.RxPullRequests, stats.TxPullRequests, stats.TxPullResponses, stats.RxDecodeErrors)
 	if len(summary.UniqueTags) > 0 {
 		fmt.Printf("socket tags seen: %s\n", formatTagCounts(summary.UniqueTags))
 	}

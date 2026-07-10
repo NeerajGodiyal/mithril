@@ -80,6 +80,9 @@ type Client struct {
 	txPongMessages   atomic.Uint64
 	txPullRequests   atomic.Uint64
 	txPullResponses  atomic.Uint64
+	rejectShredVersion atomic.Uint64
+	rejectNoGossip     atomic.Uint64
+	rejectEntrypoint   atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
 	running          atomic.Bool
@@ -124,6 +127,9 @@ type Stats struct {
 	TxPongMessages   uint64
 	TxPullRequests   uint64
 	TxPullResponses  uint64
+	RejectShredVersion uint64
+	RejectNoGossip     uint64
+	RejectEntrypoint   uint64
 	LastRxUnix       int64
 	LastTxUnix       int64
 	Peers            int
@@ -338,6 +344,9 @@ func (c *Client) Stats() Stats {
 		TxPongMessages:   c.txPongMessages.Load(),
 		TxPullRequests:   c.txPullRequests.Load(),
 		TxPullResponses:  c.txPullResponses.Load(),
+		RejectShredVersion: c.rejectShredVersion.Load(),
+		RejectNoGossip:     c.rejectNoGossip.Load(),
+		RejectEntrypoint:   c.rejectEntrypoint.Load(),
 		LastRxUnix:       c.lastRxUnix.Load(),
 		LastTxUnix:       c.lastTxUnix.Load(),
 		Peers:            peers,
@@ -599,14 +608,27 @@ func (c *Client) handlePacket(conn *net.UDPConn, packet []byte, from *net.UDPAdd
 }
 
 func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) {
-	if record.ShredVer != shredVersion || !record.GossipAddr.ok {
+	if record.ShredVer != shredVersion {
+		c.rejectShredVersion.Add(1)
+		if c.rejectShredVersion.Load() == 1 {
+			mlog.Log.Warnf("gossip contact rejected (shred): got=%d want=%d gossip_ok=%v repair_ok=%v tvu_ok=%v",
+				record.ShredVer, shredVersion, record.GossipAddr.ok, record.ServeRepairAddr.ok, record.TVUAddr.ok)
+		}
+		return
+	}
+	c.recordRepairPeerRecord(record)
+	if !record.GossipAddr.ok {
+		c.rejectNoGossip.Add(1)
+		if record.TVUAddr.ok {
+			c.recordTVUPeerRecord(record)
+		}
 		return
 	}
 	if sameEndpointUDPAddr(record.GossipAddr, c.entrypoint) {
+		c.rejectEntrypoint.Add(1)
 		return
 	}
 	c.recordPeerEndpoint(record.GossipAddr)
-	c.recordRepairPeerRecord(record)
 	c.recordTVUPeerRecord(record)
 	c.recordDiscoveredContact(record)
 	c.acceptedContacts.Add(1)
@@ -699,13 +721,19 @@ func (c *Client) recordTVUPeerRecord(record contactRecord) {
 }
 
 func (c *Client) recordRepairPeerRecord(record contactRecord) {
-	if !record.ServeRepairAddr.ok || record.ServeRepairAddr.port == 0 {
+	repairEndpoint := record.ServeRepairAddr
+	if !repairEndpoint.ok || repairEndpoint.port == 0 {
+		if quic, ok := record.Sockets[socketTagServeRepairQuic]; ok {
+			repairEndpoint = quic
+		}
+	}
+	if !repairEndpoint.ok || repairEndpoint.port == 0 {
 		return
 	}
 	now := time.Now()
 	key := record.Pubkey
 	c.repairPeerMu.Lock()
-	if existing, ok := c.repairPeers[key]; ok && sameEndpointUDPAddr(record.ServeRepairAddr, existing.Addr) {
+	if existing, ok := c.repairPeers[key]; ok && sameEndpointUDPAddr(repairEndpoint, existing.Addr) {
 		existing.LastSeen = now
 		c.repairPeers[key] = existing
 		c.repairPeerMu.Unlock()
@@ -713,7 +741,7 @@ func (c *Client) recordRepairPeerRecord(record contactRecord) {
 	}
 	c.repairPeers[key] = RepairPeer{
 		Pubkey:   record.Pubkey,
-		Addr:     record.ServeRepairAddr.UDPAddr(),
+		Addr:     repairEndpoint.UDPAddr(),
 		LastSeen: now,
 	}
 	c.repairPeerMu.Unlock()
