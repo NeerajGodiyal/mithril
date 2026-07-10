@@ -13,20 +13,28 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+// ParentAccountLoader resolves an account from parent-slot state when it is not
+// already present in the in-slot working set. Replay passes a speculative-store
+// aware loader so fee deposits see unfinalized parent balances.
+type ParentAccountLoader func(pk solana.PublicKey) (*accounts.Account, error)
+
 // TxFeeDistribution is the result of routing collected tx fees at end-of-slot.
 type TxFeeDistribution struct {
 	LamportsBurnt uint64
 	FeeCollector  solana.PublicKey // set when deposit succeeded; zero when burned instead
 }
 
-// DistributeTxFeesToSlotLeader routes execution/priority fees per Agave bank/fee_distribution.rs.
+// DistributeTxFeesToSlotLeader routes execution/priority fees at end of slot.
 // When SIMD-0232 (CustomCommissionCollector) is active, deposit goes to the leader vote
 // account's block_revenue_collector; otherwise the leader identity receives fees.
+// loadParent may be nil; when set, it is used instead of AccountsDB for accounts
+// missing from the in-slot working set (needed under speculative replay).
 func DistributeTxFeesToSlotLeader(
 	acctsDb *accountsdb.AccountsDb,
 	slotCtx *sealevel.SlotCtx,
 	leaderNode solana.PublicKey,
 	txFeeAccumulator *TxFeeInfoAccumulator,
+	loadParent ParentAccountLoader,
 ) TxFeeDistribution {
 	var feesToBurn uint64
 	var feesToDeposit uint64
@@ -44,8 +52,8 @@ func DistributeTxFeesToSlotLeader(
 		return TxFeeDistribution{LamportsBurnt: feesToBurn}
 	}
 
-	collector, leaderVote := resolveTxFeeCollector(slotCtx, acctsDb, leaderNode)
-	deposited, err := depositTxFees(acctsDb, slotCtx, collector, leaderVote, feesToDeposit)
+	collector, leaderVote := resolveTxFeeCollector(slotCtx, acctsDb, leaderNode, loadParent)
+	deposited, err := depositTxFees(acctsDb, slotCtx, collector, leaderVote, feesToDeposit, loadParent)
 	if err != nil {
 		feesToBurn = safemath.SaturatingAddU64(feesToBurn, feesToDeposit)
 		return TxFeeDistribution{LamportsBurnt: feesToBurn}
@@ -61,6 +69,7 @@ func resolveTxFeeCollector(
 	slotCtx *sealevel.SlotCtx,
 	acctsDb *accountsdb.AccountsDb,
 	leaderNode solana.PublicKey,
+	loadParent ParentAccountLoader,
 ) (collector solana.PublicKey, leaderVote solana.PublicKey) {
 	collector = leaderNode
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.CustomCommissionCollector) {
@@ -73,7 +82,7 @@ func resolveTxFeeCollector(
 	}
 	leaderVote = votePubkey
 
-	if revenueCollector, ok := blockRevenueCollectorForVote(slotCtx, acctsDb, votePubkey); ok && !revenueCollector.IsZero() {
+	if revenueCollector, ok := blockRevenueCollectorForVote(slotCtx, acctsDb, votePubkey, loadParent); ok && !revenueCollector.IsZero() {
 		collector = revenueCollector
 	}
 	return collector, leaderVote
@@ -92,13 +101,11 @@ func blockRevenueCollectorForVote(
 	slotCtx *sealevel.SlotCtx,
 	acctsDb *accountsdb.AccountsDb,
 	votePubkey solana.PublicKey,
+	loadParent ParentAccountLoader,
 ) (solana.PublicKey, bool) {
-	acct, err := slotCtx.GetAccount(votePubkey)
+	acct, _, err := loadFeeAccount(slotCtx, acctsDb, votePubkey, loadParent)
 	if err != nil {
-		acct, err = acctsDb.GetAccount(slotCtx.Slot, votePubkey)
-		if err != nil {
-			return solana.PublicKey{}, false
-		}
+		return solana.PublicKey{}, false
 	}
 
 	versioned, err := sealevel.UnmarshalVersionedVoteState(acct.Data)
@@ -108,22 +115,49 @@ func blockRevenueCollectorForVote(
 	return versioned.V4.BlockRevenueCollector, true
 }
 
+func loadFeeAccount(
+	slotCtx *sealevel.SlotCtx,
+	acctsDb *accountsdb.AccountsDb,
+	pk solana.PublicKey,
+	loadParent ParentAccountLoader,
+) (*accounts.Account, bool, error) {
+	if acct, err := slotCtx.GetAccount(pk); err == nil {
+		return acct, true, nil
+	}
+	if loadParent != nil {
+		acct, err := loadParent(pk)
+		if err != nil {
+			return nil, false, err
+		}
+		return acct, false, nil
+	}
+	if acctsDb != nil {
+		acct, err := acctsDb.GetAccount(slotCtx.Slot, pk)
+		if err == nil {
+			return acct, false, nil
+		}
+	}
+	return &accounts.Account{Key: pk, Owner: a.SystemProgramAddr}, false, nil
+}
+
 func depositTxFees(
 	acctsDb *accountsdb.AccountsDb,
 	slotCtx *sealevel.SlotCtx,
 	collector solana.PublicKey,
 	leaderVote solana.PublicKey,
 	amount uint64,
+	loadParent ParentAccountLoader,
 ) (solana.PublicKey, error) {
-	acct, err := slotCtx.GetAccount(collector)
+	acct, fromWorkingSet, err := loadFeeAccount(slotCtx, acctsDb, collector, loadParent)
 	if err != nil {
-		acct, err = acctsDb.GetAccount(slotCtx.Slot, collector)
-		if err != nil {
-			acct = &accounts.Account{Key: collector, Owner: a.SystemProgramAddr}
-		}
+		acct = &accounts.Account{Key: collector, Owner: a.SystemProgramAddr}
+		fromWorkingSet = false
+	}
+	if !fromWorkingSet {
 		if slotCtx.ParentAccts != nil {
-			slotCtx.ParentAccts.SetAccountWithoutLock(collector, acct.Clone())
+			_ = slotCtx.ParentAccts.SetAccountWithoutLock(collector, acct.Clone())
 		}
+		acct = acct.Clone()
 	}
 
 	if err := validateFeeCollector(collector, leaderVote, acct); err != nil {

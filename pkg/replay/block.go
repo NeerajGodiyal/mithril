@@ -461,6 +461,22 @@ func loadAccountLiveOrParentForReplay(
 	return acct.Clone(), nil
 }
 
+// feeParentAccountLoader returns a fees.ParentAccountLoader that resolves missing
+// fee-collector accounts from speculative parent state when needed.
+func feeParentAccountLoader(
+	acctsDb *accountsdb.AccountsDb,
+	spec *SpeculativeReplay,
+	slotCtx *sealevel.SlotCtx,
+) fees.ParentAccountLoader {
+	return func(pk solana.PublicKey) (*accounts.Account, error) {
+		acct, err := loadAccountForBlockReplay(acctsDb, spec, slotCtx.ParentSlot, slotCtx.Slot, pk)
+		if err != nil {
+			return nil, err
+		}
+		return acct.Clone(), nil
+	}
+}
+
 func loadBlockAccountsAndUpdateSysvars(
 	accountsDb *accountsdb.AccountsDb,
 	block *b.Block,
@@ -3096,14 +3112,15 @@ func ProcessBlock(
 
 	// distribute tx fees to the slot leader
 	// skip leader handling if there are zero transactions in this block
+	loadFeeParent := feeParentAccountLoader(acctsDb, spec, slotCtx)
 	if !global.ManageLeaderSchedule() && block.BlockReward != nil && len(block.Transactions) > 0 {
-		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator)
+		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.BlockReward.Leader, &txFeeAccumulator, loadFeeParent)
 		slotCtx.LamportsBurnt = feeDist.LamportsBurnt
 		if !feeDist.FeeCollector.IsZero() {
 			slotCtx.RecordModifiedAcct(feeDist.FeeCollector)
 		}
 	} else if global.ManageLeaderSchedule() && len(block.Transactions) > 0 {
-		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator)
+		feeDist := fees.DistributeTxFeesToSlotLeader(acctsDb, slotCtx, block.Leader, &txFeeAccumulator, loadFeeParent)
 		slotCtx.LamportsBurnt = feeDist.LamportsBurnt
 		if !feeDist.FeeCollector.IsZero() {
 			slotCtx.RecordModifiedAcct(feeDist.FeeCollector)
