@@ -26,6 +26,7 @@ type CommitLeaderInput struct {
 	EpochSchedule    *sealevel.SysvarEpochSchedule
 	TxFeeAccumulator fees.TxFeeInfoAccumulator
 	AlpenglowClock          bool
+	AlpenglowShredVersion   uint16
 	FooterTimestamp         int64
 	FooterProducerTimeNanos uint64
 }
@@ -38,6 +39,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 
 	slotCtx := in.SlotCtx
 	block := in.Block
+	slotCtx.Epoch = block.Epoch
 	slotCtx.Blockhash = block.Blockhash
 	// Propagate the derived fee rate governor onto the committed slot context so the
 	// RecentBlockhashes push uses the correct lamports_per_signature and the chain tip
@@ -54,7 +56,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	}
 
 	if in.AlpenglowClock {
-		if err := ApplyAlpenglowVoteRewards(in.AcctsDb, slotCtx, block, in.EpochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert); err != nil {
+		if err := ApplyAlpenglowVoteRewards(in.AcctsDb, nil, slotCtx, block, in.EpochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert, in.AlpenglowShredVersion); err != nil {
 			return nil, err
 		}
 	}
@@ -72,7 +74,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	runIncinerator(slotCtx)
 
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts, true)
-	if err := ensureParentAcctsForModified(in.AcctsDb, slotCtx); err != nil {
+	if err := ensureParentAcctsForModified(in.AcctsDb, slotCtx, nil); err != nil {
 		return nil, err
 	}
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
@@ -158,13 +160,6 @@ func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochS
 		return fmt.Errorf("slot %d alpenglow footer clock: %w", block.Slot, err)
 	}
 	if !ok {
-		if block.FromLightbringer && block.FooterProducerTimeNanos > 0 {
-			mlog.Log.Infof(
-				"cavey debug: alpenglow footer clock skipped slot=%d footer_producer_time_nanos=%d block_unix_timestamp=0 (Agave uses producer time for clock)",
-				block.Slot,
-				block.FooterProducerTimeNanos,
-			) // cavey TODO: remove once we are done debugging.
-		}
 		return nil
 	}
 
@@ -296,10 +291,10 @@ func updateLeaderSysvars(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotC
 }
 
 func ensureLeaderParentAccts(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx) error {
-	return ensureParentAcctsForModified(acctsDb, slotCtx)
+	return ensureParentAcctsForModified(acctsDb, slotCtx, nil)
 }
 
-func ensureParentAcctsForModified(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx) error {
+func ensureParentAcctsForModified(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, spec *SpeculativeReplay) error {
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.AccountsLtHash) {
 		return nil
 	}
@@ -325,10 +320,7 @@ func ensureParentAcctsForModified(acctsDb *accountsdb.AccountsDb, slotCtx *seale
 		if _, err := slotCtx.GetParentAccount(pk); err == nil {
 			continue
 		}
-		acct, err := acctsDb.GetAccount(slotCtx.ParentSlot, pk)
-		if err != nil {
-			acct, err = acctsDb.GetAccount(slotCtx.Slot, pk)
-		}
+		acct, err := loadAccountForBlockReplay(acctsDb, spec, slotCtx.ParentSlot, slotCtx.Slot, pk)
 		if err != nil {
 			return fmt.Errorf("load parent acct %s for slot %d: %w", pk, slotCtx.Slot, err)
 		}

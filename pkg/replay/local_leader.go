@@ -13,8 +13,9 @@ type LocalLeaderCommit struct {
 }
 
 var (
-	localLeaderMu      sync.RWMutex
-	localLeaderCommits = map[uint64]LocalLeaderCommit{}
+	localLeaderMu               sync.RWMutex
+	localLeaderCommits            = map[uint64]LocalLeaderCommit{}
+	localLeaderCommitNotifier     func(slot uint64)
 )
 
 func RegisterLocalLeaderCommit(slotCtx *sealevel.SlotCtx) {
@@ -25,6 +26,17 @@ func RegisterLocalLeaderCommit(slotCtx *sealevel.SlotCtx) {
 	localLeaderCommits[slotCtx.Slot] = LocalLeaderCommit{SlotCtx: slotCtx}
 	localLeaderMu.Unlock()
 	UpdateChainTipFromSlotCtx(slotCtx, slotCtx.Features)
+	if localLeaderCommitNotifier != nil {
+		localLeaderCommitNotifier(slotCtx.Slot)
+	}
+}
+
+func SetLocalLeaderCommitNotifier(fn func(slot uint64)) {
+	localLeaderCommitNotifier = fn
+}
+
+func ClearLocalLeaderCommitNotifier() {
+	localLeaderCommitNotifier = nil
 }
 
 func TakeLocalLeaderCommit(slot uint64) (LocalLeaderCommit, bool) {

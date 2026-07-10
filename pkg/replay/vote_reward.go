@@ -26,21 +26,17 @@ var agMigrationEpochCredit = sealevel.EpochCredits{
 // ApplyAlpenglowVoteRewards updates vote account state from validated footer reward and final certs.
 func ApplyAlpenglowVoteRewards(
 	acctsDb *accountsdb.AccountsDb,
+	spec *SpeculativeReplay,
 	slotCtx *sealevel.SlotCtx,
 	block *b.Block,
 	epochSchedule *sealevel.SysvarEpochSchedule,
 	skipRaw, notarRaw, finalCertRaw []byte,
+	shredVersion uint16,
 ) error {
 	if len(skipRaw) == 0 && len(notarRaw) == 0 && len(finalCertRaw) == 0 {
 		return nil
 	}
 	if slotCtx.Features == nil || !(slotCtx.Features.IsActive(features.Alpenglow) || slotCtx.Features.IsActive(features.AlpenglowDevContext)) {
-		if block.FromLightbringer && (len(skipRaw) > 0 || len(notarRaw) > 0 || len(finalCertRaw) > 0) {
-			mlog.Log.Infof(
-				"cavey debug: vote rewards skipped slot=%d skip_len=%d notar_len=%d final_len=%d reason=alpenglow_feature_inactive",
-				block.Slot, len(skipRaw), len(notarRaw), len(finalCertRaw),
-			) // cavey TODO: remove once we are done debugging.
-		}
 		return nil
 	}
 
@@ -67,23 +63,16 @@ func ApplyAlpenglowVoteRewards(
 			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
 		}
 
-		validated, err := rewardcerts.ValidateRewardCertificates(block.Slot, skipRaw, notarRaw, validatorSet)
+		validated, err := rewardcerts.ValidateRewardCertificates(block.Slot, skipRaw, notarRaw, validatorSet, shredVersion)
 		if err != nil {
 			return fmt.Errorf("slot %d validate reward certs: %w", block.Slot, err)
 		}
-		if validated == nil {
-			if block.FromLightbringer {
-				mlog.Log.Infof(
-					"cavey debug: vote rewards skipped slot=%d skip_len=%d notar_len=%d reason=validate_returned_nil",
-					block.Slot, len(skipRaw), len(notarRaw),
-				) // cavey TODO: remove once we are done debugging.
-			}
-		} else {
+		if validated != nil {
 			rewardValidators = validated.Validators
 			rewardSlot = validated.RewardSlot
 		}
 
-		inflationAcct, err := loadEpochInflationAccountState(acctsDb, block.Slot)
+		inflationAcct, err := loadEpochInflationAccountStateForReplay(acctsDb, spec, block.ParentSlot, block.Slot)
 		if err != nil {
 			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
 		}
@@ -124,7 +113,7 @@ func ApplyAlpenglowVoteRewards(
 		if err != nil {
 			return fmt.Errorf("slot %d final cert: %w", block.Slot, err)
 		}
-		validatedFinal, err := rewardcerts.ValidateBlockFinalCertificate(finalCertRaw, finalValidatorSet)
+		validatedFinal, err := rewardcerts.ValidateBlockFinalCertificate(finalCertRaw, finalValidatorSet, shredVersion)
 		if err != nil {
 			return fmt.Errorf("slot %d validate final cert: %w", block.Slot, err)
 		}
@@ -138,6 +127,22 @@ func ApplyAlpenglowVoteRewards(
 		return nil
 	}
 
+	producerTimeNanos, ok, err := alpenglowFooterProducerTimeNanos(block)
+	if err != nil {
+		return fmt.Errorf("slot %d vote rewards: footer producer time: %w", block.Slot, err)
+	}
+	if !ok {
+		return fmt.Errorf("slot %d vote rewards: missing footer producer time for LastTimestamp", block.Slot)
+	}
+	var rewardSlotTimestampNs int64
+	if len(rewardValidators) > 0 {
+		rewardSlotTimestampNs = calcSlotTimestampNanos(rewardSlot, block.Slot, producerTimeNanos)
+	}
+	var finalSlotTimestampNs int64
+	if len(finalSigners) > 0 {
+		finalSlotTimestampNs = calcSlotTimestampNanos(finalSlot, block.Slot, producerTimeNanos)
+	}
+
 	currentEpoch := block.Epoch
 	var leaderRewardAccum uint64
 	var voteAccountsUpdated int
@@ -147,7 +152,7 @@ func ApplyAlpenglowVoteRewards(
 		// Vote Withdraw) and fall back to the persisted parent state otherwise. Rewards are
 		// then a normal in-slot account write: SetAccount + RecordModifiedAcct, and the
 		// end-of-slot batch lt-hash computes -h(parent)+h(final) once from the true parent.
-		acct, err := slotCtx.GetAccountLiveOrPersisted(votePubkey)
+		acct, err := loadAccountLiveOrParentForReplay(acctsDb, spec, slotCtx, votePubkey)
 		if err != nil {
 			mlog.Log.Infof("slot %d vote rewards: skip missing vote account %s: %v", block.Slot, votePubkey, err)
 			continue
@@ -160,6 +165,7 @@ func ApplyAlpenglowVoteRewards(
 			applied, err = applyVoteRewardToAccount(
 				acct,
 				rewardSlot,
+				rewardSlotTimestampNs,
 				currentEpoch,
 				migrationEpoch,
 				inflationState,
@@ -173,7 +179,7 @@ func ApplyAlpenglowVoteRewards(
 			}
 		}
 		if inFinal {
-			if err := applyFinalCertToAccount(acct, finalSlot); err != nil {
+			if err := applyFinalCertToAccount(acct, finalSlot, finalSlotTimestampNs); err != nil {
 				mlog.Log.Infof("slot %d vote rewards: skip %s: %v", block.Slot, votePubkey, err)
 				continue
 			}
@@ -195,9 +201,9 @@ func ApplyAlpenglowVoteRewards(
 		}
 		// Read the live account so the leader reward stacks on top of any update the union loop
 		// (or a same-slot transaction) already applied to the leader's vote account, mirroring
-		// Agave's single-map Entry::Occupied/Vacant handling.
+		// single-map Occupied/Vacant handling.
 		_, leaderAlreadyUpdated := slotCtx.ModifiedAccts[leaderVote]
-		acct, err := slotCtx.GetAccountLiveOrPersisted(leaderVote)
+		acct, err := loadAccountLiveOrParentForReplay(acctsDb, spec, slotCtx, leaderVote)
 		if err != nil {
 			return fmt.Errorf("slot %d vote rewards: load leader vote %s: %w", block.Slot, leaderVote, err)
 		}
@@ -215,28 +221,6 @@ func ApplyAlpenglowVoteRewards(
 		if !leaderAlreadyUpdated {
 			voteAccountsUpdated++
 		}
-		if block.FromLightbringer {
-			mlog.Log.Infof(
-				"cavey debug: leader vote reward slot=%d leader_vote=%s already_updated=%t leader_reward=%d",
-				block.Slot, leaderVote, leaderAlreadyUpdated, leaderRewardAccum,
-			) // cavey TODO: remove once we are done debugging.
-		}
-	}
-
-	if block.FromLightbringer {
-		mlog.Log.Infof(
-			"cavey debug: vote rewards applied slot=%d reward_slot=%d reward_epoch=%d skip_len=%d notar_len=%d final_len=%d validated_validators=%d final_signers=%d vote_accounts_updated=%d leader_reward_accum=%d",
-			block.Slot,
-			rewardSlot,
-			rewardEpoch,
-			len(skipRaw),
-			len(notarRaw),
-			len(finalCertRaw),
-			len(rewardValidators),
-			len(finalSigners),
-			voteAccountsUpdated,
-			leaderRewardAccum,
-		) // cavey TODO: remove once we are done debugging.
 	}
 
 	return nil
@@ -289,7 +273,9 @@ func leaderVotePubkey(epoch uint64, leaderNode solana.PublicKey) (solana.PublicK
 
 func applyVoteRewardToAccount(
 	acct *accounts.Account,
-	rewardSlot, currentEpoch, migrationEpoch uint64,
+	rewardSlot uint64,
+	rewardSlotTimestampNs int64,
+	currentEpoch, migrationEpoch uint64,
 	inflation EpochInflationState,
 	totalStake, validatorStake uint64,
 	leaderRewardAccum *uint64,
@@ -302,7 +288,7 @@ func applyVoteRewardToAccount(
 		return false, fmt.Errorf("unsupported vote state version %d", versioned.Type)
 	}
 
-	maybeUpdateVotesV4(&versioned.V4, rewardSlot)
+	maybeUpdateVotesV4(&versioned.V4, rewardSlot, rewardSlotTimestampNs)
 	validatorReward, leaderReward := calculateAlpenglowReward(inflation, totalStake, validatorStake)
 	*leaderRewardAccum += leaderReward
 	if validatorReward > 0 {
@@ -333,7 +319,21 @@ func applyLeaderVoteReward(
 	return true, nil
 }
 
-func maybeUpdateVotesV4(vs *sealevel.VoteState4, slot uint64) {
+// calcSlotTimestampNanos returns producer_ns - duration(targetSlot+1..=bankSlot).
+// With constant nsPerSlot this is (bankSlot - targetSlot) * nsPerSlot.
+func calcSlotTimestampNanos(targetSlot, bankSlot uint64, producerTimeNanos int64) int64 {
+	if targetSlot >= bankSlot {
+		return producerTimeNanos
+	}
+	slots := bankSlot - targetSlot
+	duration := int64(slots) * int64(nsPerSlot)
+	if producerTimeNanos < duration {
+		return 0
+	}
+	return producerTimeNanos - duration
+}
+
+func maybeUpdateVotesV4(vs *sealevel.VoteState4, slot uint64, slotTimestampNs int64) {
 	latest := slot
 	if last, ok := lastVotedSlotV4(vs); ok && last > latest {
 		latest = last
@@ -347,9 +347,15 @@ func maybeUpdateVotesV4(vs *sealevel.VoteState4, slot uint64) {
 		Latency: 0,
 		Lockout: sealevel.VoteLockout{Slot: latest, ConfirmationCount: 1},
 	})
+
+	// Advance last_timestamp when the derived slot wall-clock second is strictly newer.
+	timestamp := slotTimestampNs / 1_000_000_000
+	if timestamp > vs.LastTimestamp.Timestamp {
+		vs.LastTimestamp = sealevel.BlockTimestamp{Slot: slot, Timestamp: timestamp}
+	}
 }
 
-func applyFinalCertToAccount(acct *accounts.Account, finalSlot uint64) error {
+func applyFinalCertToAccount(acct *accounts.Account, finalSlot uint64, finalSlotTimestampNs int64) error {
 	versioned, err := sealevel.UnmarshalVersionedVoteState(acct.Data)
 	if err != nil {
 		return err
@@ -358,7 +364,7 @@ func applyFinalCertToAccount(acct *accounts.Account, finalSlot uint64) error {
 		return fmt.Errorf("unsupported vote state version %d", versioned.Type)
 	}
 	maybeUpdateRootV4(&versioned.V4, finalSlot)
-	maybeUpdateVotesV4(&versioned.V4, finalSlot)
+	maybeUpdateVotesV4(&versioned.V4, finalSlot, finalSlotTimestampNs)
 	return sealevel.WriteVersionedVoteStateInPlace(acct.Data, versioned)
 }
 

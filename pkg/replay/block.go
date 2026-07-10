@@ -25,6 +25,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/bankhash"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
@@ -129,13 +130,6 @@ func formatBlockSourceStatus(fetchStats blockstream.FetchStatsSnapshot) string {
 		return fetchStats.CurrentSource
 	}
 	return fetchStats.SourceStatus
-}
-
-func nextLeaderSuffix(opts *BlockFetchOpts, slot uint64) string {
-	if opts == nil || len(opts.GossipIdentity) == 0 {
-		return ""
-	}
-	return global.FormatNextLeaderSuffix(solana.PrivateKey(opts.GossipIdentity).PublicKey(), slot)
 }
 
 // ReplayResult contains the result of a replay operation, including shutdown state
@@ -437,17 +431,68 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	}
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, error) {
+func loadAccountForBlockReplay(
+	accountsDb *accountsdb.AccountsDb,
+	spec *SpeculativeReplay,
+	parentSlot, blockSlot uint64,
+	pk solana.PublicKey,
+) (*accounts.Account, error) {
+	if spec != nil && spec.UseStoreForParent(parentSlot) {
+		return spec.Resolve(parentSlot, pk, accountsDb)
+	}
+	return accountsDb.GetAccount(blockSlot, pk)
+}
+
+// loadAccountLiveOrParentForReplay returns the in-slot working account when present,
+// otherwise parent state at parentSlot (via speculative store when parent is unfinalized).
+func loadAccountLiveOrParentForReplay(
+	acctsDb *accountsdb.AccountsDb,
+	spec *SpeculativeReplay,
+	slotCtx *sealevel.SlotCtx,
+	pk solana.PublicKey,
+) (*accounts.Account, error) {
+	if acct, err := slotCtx.GetAccount(pk); err == nil {
+		return acct, nil
+	}
+	acct, err := loadAccountForBlockReplay(acctsDb, spec, slotCtx.ParentSlot, slotCtx.Slot, pk)
+	if err != nil {
+		return nil, err
+	}
+	return acct.Clone(), nil
+}
+
+func loadBlockAccountsAndUpdateSysvars(
+	accountsDb *accountsdb.AccountsDb,
+	block *b.Block,
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	alpenglowClock bool,
+	spec *SpeculativeReplay,
+) (accounts.Accounts, accounts.Accounts, error) {
 	err := resolveAddrTableLookups(accountsDb, block)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
-	ctx := context.Background()
-	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
-	if err != nil {
-		return nil, nil, err
+	useSpecStore := spec != nil && spec.UseStoreForParent(block.ParentSlot)
+
+	var slotAccts []*accounts.Account
+	if useSpecStore {
+		slotAccts = make([]*accounts.Account, 0, len(dedupedAccts))
+		for _, pk := range dedupedAccts {
+			acct, err := spec.Resolve(block.ParentSlot, pk, accountsDb)
+			if err != nil {
+				return nil, nil, err
+			}
+			slotAccts = append(slotAccts, acct)
+		}
+	} else {
+		ctx := context.Background()
+		var err error
+		slotAccts, err = accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	numAccts := uint64(len(slotAccts))
@@ -475,22 +520,36 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 	{
 		// update and cache clock sysvar
 		{
-			clockAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
+			clockAcct, err := loadAccountForBlockReplay(accountsDb, spec, block.ParentSlot, block.Slot, sealevel.SysvarClockAddr)
 			if err != nil {
 				panic("unable to retrieve clock sysvar when updating clock")
+			}
+			clockAcct = clockAcct.Clone()
+
+			var clock sealevel.SysvarClock
+			if useSpecStore {
+				decoder := bin.NewBinDecoder(clockAcct.Data)
+				if err := clock.UnmarshalWithDecoder(decoder); err != nil {
+					panic("unable to unmarshal clock sysvar")
+				}
+			} else if sealevel.SysvarCache.Clock.Sysvar != nil {
+				clock = *sealevel.SysvarCache.Clock.Sysvar
+				newClockBytes := clock.MustMarshal()
+				if len(newClockBytes) != len(clockAcct.Data) {
+					panic(fmt.Sprintf("Clock data length mismatch: marshaled=%d, account=%d",
+						len(newClockBytes), len(clockAcct.Data)))
+				}
+				copy(clockAcct.Data, newClockBytes)
+			} else {
+				decoder := bin.NewBinDecoder(clockAcct.Data)
+				if err := clock.UnmarshalWithDecoder(decoder); err != nil {
+					panic("unable to unmarshal clock sysvar")
+				}
 			}
 
 			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarClockAddr, clockAcct.Clone())
 			if err != nil {
 				panic("unable to set clock sysvar to accts")
-			}
-
-			decoder := bin.NewBinDecoder(clockAcct.Data)
-			var clock sealevel.SysvarClock
-
-			err = clock.UnmarshalWithDecoder(decoder)
-			if err != nil {
-				panic("unable to unmarshal clock sysvar")
 			}
 
 			err = updateClockSysvarForMode(&clock, block, epochSchedule, alpenglowClock)
@@ -511,26 +570,21 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 		// update and cache SlotHashes sysvar
 		{
-			slotHashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHashesAddr)
+			slotHashesAcct, err := loadAccountForBlockReplay(accountsDb, spec, block.ParentSlot, block.Slot, sealevel.SysvarSlotHashesAddr)
 			if err != nil {
 				panic("unable to retrieve slothashes sysvar from acctsdb")
 			}
+			slotHashesAcct = slotHashesAcct.Clone()
 
 			var slotHashes sealevel.SysvarSlotHashes
 
-			if sealevel.SysvarCache.SlotHashes.Sysvar == nil {
-				// Fresh start (first slot): unmarshal from AccountsDB
+			if useSpecStore || sealevel.SysvarCache.SlotHashes.Sysvar == nil {
 				decoder := bin.NewBinDecoder(slotHashesAcct.Data)
 				err = slotHashes.UnmarshalWithDecoder(decoder)
 				if err != nil {
 					panic("unable to unmarshal slothashes sysvar")
 				}
-
 			} else {
-				// SysvarCache already populated (either from resume state file or from previous slot).
-				// The account data from AccountsDB may be stale (appendvec writes are not fsynced),
-				// so overwrite it with the authoritative data from SysvarCache.
-				// This ensures BPF programs reading the account data directly see correct values.
 				slotHashes = *sealevel.SysvarCache.SlotHashes.Sysvar
 				newData := slotHashes.MustMarshal()
 				if len(newData) != len(slotHashesAcct.Data) {
@@ -561,25 +615,24 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 		// cache RecentBlockhashes sysvar
 		{
-			recentBlockhashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarRecentBlockHashesAddr)
+			recentBlockhashesAcct, err := loadAccountForBlockReplay(accountsDb, spec, block.ParentSlot, block.Slot, sealevel.SysvarRecentBlockHashesAddr)
 			if err != nil {
 				panic("unable to get recentblockhashes")
 			}
+			recentBlockhashesAcct = recentBlockhashesAcct.Clone()
 
-			if sealevel.SysvarCache.RecentBlockHashes.Sysvar == nil {
-				// Fresh start (first slot): unmarshal from AccountsDB snapshot account.
+			if useSpecStore || sealevel.SysvarCache.RecentBlockHashes.Sysvar == nil {
 				decoder := bin.NewBinDecoder(recentBlockhashesAcct.Data)
 				var recentBlockhashes sealevel.SysvarRecentBlockhashes
 				recentBlockhashes.MustUnmarshalWithDecoder(decoder)
 				sealevel.SysvarCache.RecentBlockHashes.Sysvar = &recentBlockhashes
 				sealevel.SysvarCache.RecentBlockHashes.Acct = recentBlockhashesAcct
 
-				if len(recentBlockhashes) > 0 {
+				if !useSpecStore && len(recentBlockhashes) > 0 {
 					mlog.Log.Infof("loaded RecentBlockhashes sysvar: %d entries, newest=%x, oldest=%x",
 						len(recentBlockhashes), recentBlockhashes[0].Blockhash[:8], recentBlockhashes[len(recentBlockhashes)-1].Blockhash[:8])
 				}
 			} else {
-				// SysvarCache is authoritative during replay; sync account data from cache.
 				recentBlockhashes := sealevel.SysvarCache.RecentBlockHashes.Sysvar
 				newData := recentBlockhashes.MustMarshal()
 				if len(newData) != len(recentBlockhashesAcct.Data) {
@@ -604,25 +657,36 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb *accountsdb.AccountsDb, block 
 
 		// cache SlotHistory sysvar
 		{
-			slotHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHistoryAddr)
+			slotHistoryAcct, err := loadAccountForBlockReplay(accountsDb, spec, block.ParentSlot, block.Slot, sealevel.SysvarSlotHistoryAddr)
 			if err != nil {
 				panic("unable to get slothistory")
 			}
+			slotHistoryAcct = slotHistoryAcct.Clone()
 
 			err = parentAccts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct.Clone())
 			if err != nil {
 				panic("unable to set slothistory sysvar to accts")
 			}
 
-			decoder := bin.NewBinDecoder(slotHistoryAcct.Data)
 			var slotHistory sealevel.SysvarSlotHistory
-			slotHistory.MustUnmarshalWithDecoder(decoder)
+			if useSpecStore || sealevel.SysvarCache.SlotHistory.Sysvar == nil {
+				decoder := bin.NewBinDecoder(slotHistoryAcct.Data)
+				slotHistory.MustUnmarshalWithDecoder(decoder)
+			} else {
+				slotHistory = *sealevel.SysvarCache.SlotHistory.Sysvar
+				newData := slotHistory.MustMarshal()
+				if len(newData) != len(slotHistoryAcct.Data) {
+					panic(fmt.Sprintf("SlotHistory data length mismatch: marshaled=%d, account=%d",
+						len(newData), len(slotHistoryAcct.Data)))
+				}
+				copy(slotHistoryAcct.Data, newData)
+			}
 			sealevel.SysvarCache.SlotHistory.Sysvar = &slotHistory
 			sealevel.SysvarCache.SlotHistory.Acct = slotHistoryAcct
 
 			err = accts.SetAccountWithoutLock(sealevel.SysvarSlotHistoryAddr, slotHistoryAcct)
 			if err != nil {
-				panic("unable to set clock sysvar to accts")
+				panic("unable to set slothistory sysvar to accts")
 			}
 		}
 
@@ -973,7 +1037,7 @@ func configureBlock(block *b.Block,
 
 	if global.ManageLeaderSchedule() {
 		// epoch boundary. do not set leader
-		if epochSchedule.GetEpoch(block.Slot) == lastSlotCtx.Epoch {
+		if epochSchedule.GetEpoch(block.Slot) == epochSchedule.GetEpoch(lastSlotCtx.Slot) {
 			var hasLeader bool
 			block.Leader, hasLeader = global.LeaderForSlot(block.Slot)
 			if !hasLeader {
@@ -1580,26 +1644,46 @@ func ReplayBlocks(
 		}
 	}
 	blockStream := blockstream.NewBlockSource(opts)
+	SetLocalLeaderCommitNotifier(blockStream.NotifyLocalLeaderCommit)
+	defer ClearLocalLeaderCommitNotifier()
+
+	speculative := NewSpeculativeReplay()
+	var alpenglowNextDecision func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
+	speculativeEnabled := useTurbine && turbAlpenglowBind != "" && blockFetchOpts != nil && blockFetchOpts.TurbineRepairOnly
+	if speculativeEnabled {
+		if decisionSource, ok := consensusEngine.(consensusengine.AlpenglowDecisionSource); ok {
+			alpenglowNextDecision = decisionSource.NextAlpenglowDecision
+			speculative.Enable()
+			blockStream.SetParentMismatchHandler(func(waitingSlot, observedParent, expectedParent uint64) bool {
+				return speculative.HandleParentMismatch(waitingSlot, observedParent, expectedParent, SpeculativeRollbackParams{
+					AcctsDb:     acctsDb,
+					PT:          pt,
+					ReplayCtx:   replayCtx,
+					LastSlotCtx: &lastSlotCtx,
+					BlockStream: blockStream,
+					ForkChoice:  forkChoice,
+					RPCServer:   rpcServer,
+				})
+			})
+			mlog.Log.Infof("speculative replay enabled: deferring AccountsDB persistence until Alpenglow finalizes turbine blocks")
+			if resumeState == nil {
+				speculative.SeedFromManifest(mithrilState, replayCtx)
+			}
+		} else {
+			speculativeEnabled = false
+		}
+	}
 	if publisher, ok := consensusEngine.(consensusengine.AlpenglowBlockIDPublisher); ok && useTurbine && turbAlpenglowBind != "" {
 		publisher.SetAlpenglowBlockIDSink(blockStream.SetKnownAlpenglowBlockID)
+	}
+	if repairPublisher, ok := consensusEngine.(consensusengine.AlpenglowRepairPriorityPublisher); ok && useTurbine && turbAlpenglowBind != "" {
+		repairPublisher.SetAlpenglowRepairPrioritySink(blockStream.PrioritizeTurbineRepairSlot)
 	}
 
 	if !isLive {
 		blockStream.DownloadInitialBlocks()
 	}
 	go blockStream.Start()
-
-	// TODO(cavey-debug): remove block-source lag registration once we are done debugging.
-	// cavey TODO: remove once we are done debugging.
-	global.SetBlockSourceLagSnapshot(func() global.BlockSourceLagSnapshot {
-		return blockStream.LagSnapshotForGlobal()
-	})
-	defer global.ClearBlockSourceLagSnapshot()
-
-	var lagTracker *replayLagTracker // cavey TODO: remove once we are done debugging.
-	if blockFetchOpts != nil && len(blockFetchOpts.GossipIdentity) > 0 {
-		lagTracker = newReplayLagTracker(solana.PrivateKey(blockFetchOpts.GossipIdentity).PublicKey())
-	}
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
@@ -1801,6 +1885,10 @@ func ReplayBlocks(
 				}
 			}
 
+			if speculativeEnabled && alpenglowNextDecision != nil {
+				speculative.TryFlushPending(acctsDb, pt, replayCtx, alpenglowNextDecision)
+			}
+
 			syncConsensusBufferedExecutionMode(block.Slot)
 
 			if block.FromLightbringer {
@@ -1887,8 +1975,8 @@ func ReplayBlocks(
 				if leader, exists := global.LeaderForSlot(block.Slot); exists {
 					leaderStr = leader.String()
 				}
-				mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: local           | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (local leader commit)%s",
-					block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds(), nextLeaderSuffix(blockFetchOpts, block.Slot))
+				mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: local           | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (local leader commit)",
+					block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 				if rpcServer != nil {
 					rpcServer.SetSlotCtx(lastSlotCtx)
 				}
@@ -1901,15 +1989,12 @@ func ReplayBlocks(
 			}
 			// Log skipped slot in same format as regular blocks (with N/A for missing values)
 			// Padding: cu=10 chars, txns fields, exec/wait/total=%7.3fs = 8 chars (7 for number + 's')
-			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)%s",
-				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds(), nextLeaderSuffix(blockFetchOpts, block.Slot))
+			mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: N/A              | cu: N/A        | exec:     N/A | wait:%7.3fs | total:%7.3fs (skip)",
+				block.Slot, leaderStr, waitTime.Seconds(), waitTime.Seconds())
 			skippedSlotsCount++
 			// A resolved skip still advances replay progress for near-tip mode and
 			// consensus-managed Lightbringer delivery.
 			blockStream.SetLastExecutedSlot(block.Slot)
-			if lagTracker != nil { // cavey TODO: remove once we are done debugging.
-				lagTracker.maybeLogSlotLag(block.Slot, true)
-			}
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -1947,6 +2032,9 @@ func ReplayBlocks(
 			mlog.Log.Errorf("Triggering graceful shutdown to preserve AccountsDB state.")
 			result.Error = configErr
 			break
+		}
+		if initialBlockConfigured && resumeState != nil && speculativeEnabled {
+			speculative.SeedFromResume(resumeState, replayCtx)
 		}
 		if initialBlockConfigured {
 			// Initial block configuration rebuilds VoteCache and EpochAuthorizedVoters
@@ -2056,13 +2144,23 @@ func ReplayBlocks(
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt, alpenglowClock)
+		deferPersist := speculativeEnabled && block.FromLightbringer
+		var deferred *DeferredBlockCommit
+		lastSlotCtx, deferred, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, pt, alpenglowClock, deferPersist, speculative, turbineShredVersion)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
 			// Clear any pending stake pubkeys from this failed block
 			global.ClearPendingStakePubkeys()
 			break
+		}
+		if deferred != nil {
+			speculative.TrackPending(deferred)
+			if speculative.TryCommitPending(acctsDb, pt, block, block.BlockHeight, replayCtx, alpenglowNextDecision) {
+				deferred = nil
+			}
+		} else {
+			speculative.UpdateCommittedHead(lastSlotCtx, replayCtx, block.BlockHeight)
 		}
 		UpdateChainTipFromSlotCtx(lastSlotCtx, replayCtx.CurrentFeatures)
 		global.SetBlockHeight(block.BlockHeight)
@@ -2200,8 +2298,8 @@ func ReplayBlocks(
 		// Fixed-width format for consistent alignment (use precise timing for block replay)
 		// exec/wait/total use 7 char width to handle times up to 99.999s without breaking alignment
 		totalSlotTime := waitTime + slotReplayDuration
-		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: v:%-5d nv:%-5d | cu: %-10d | exec:%7.3fs | wait:%7.3fs | total:%7.3fs%s",
-			block.Slot, leaderStr, voteTxCount, nonVoteTxCount, totalCU, slotReplayDuration.Seconds(), waitTime.Seconds(), totalSlotTime.Seconds(), nextLeaderSuffix(blockFetchOpts, block.Slot))
+		mlog.Log.InfofPrecise("slot %-10d | leader: %-44s | txns: v:%-5d nv:%-5d | cu: %-10d | exec:%7.3fs | wait:%7.3fs | total:%7.3fs",
+			block.Slot, leaderStr, voteTxCount, nonVoteTxCount, totalCU, slotReplayDuration.Seconds(), waitTime.Seconds(), totalSlotTime.Seconds())
 
 		// Write bankhash to log file
 		if bankhashLogFile != nil {
@@ -2216,9 +2314,6 @@ func ReplayBlocks(
 
 		// Track last executed slot for accurate tip distance calculation and mode switching
 		blockStream.SetLastExecutedSlot(block.Slot)
-		if lagTracker != nil { // cavey TODO: remove once we are done debugging.
-			lagTracker.maybeLogSlotLag(block.Slot, false)
-		}
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
@@ -2890,7 +2985,10 @@ func ProcessBlock(
 	// Must be non-nil.
 	pt *persistedTracker,
 	alpenglowClock bool,
-) (*sealevel.SlotCtx, error) {
+	deferPersist bool,
+	spec *SpeculativeReplay,
+	alpenglowShredVersion uint16,
+) (*sealevel.SlotCtx, *DeferredBlockCommit, error) {
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
 	trace.Log(ctx, "slot", fmt.Sprintf("%d", block.Slot))
@@ -2969,7 +3067,7 @@ func ProcessBlock(
 	start = time.Now()
 	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule, alpenglowClock)
+	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(acctsDb, block, epochSchedule, alpenglowClock, spec)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -3026,10 +3124,10 @@ func ProcessBlock(
 
 	if alpenglowClock {
 		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if err := ApplyAlpenglowVoteRewards(acctsDb, slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert); err != nil {
-			return nil, err
+		if err := ApplyAlpenglowVoteRewards(acctsDb, spec, slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert, alpenglowShredVersion); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -3037,8 +3135,8 @@ func ProcessBlock(
 	setReplayStage("compile_accounts")
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts, false)
 
-	if err := ensureParentAcctsForModified(acctsDb, slotCtx); err != nil {
-		return nil, err
+	if err := ensureParentAcctsForModified(acctsDb, slotCtx, spec); err != nil {
+		return nil, nil, err
 	}
 
 	start = time.Now()
@@ -3047,18 +3145,29 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 
 	if alpenglowClock {
-		if block.HasExpectedBankhash {
-			logReplayDiagCompare(slotCtx, block, epochSchedule) // cavey TODO: remove once we are done debugging.
-		}
 		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
-			logFooterBankhashMismatchDiag(slotCtx, block, modifiedAccts, len(writableAccts)) // cavey TODO: remove once we are done debugging.
-			return nil, err
+			logFooterBankHashMismatchDiagnostics(slotCtx, block, modifiedAccts, spec, acctsDb.AcctsDir)
+			return nil, nil, err
 		}
 	}
 
 	// Bankhash consensus enforcement is handled in the replay loop (not here)
 	// because forkchoice is fed after ProcessBlock returns — checking here would
 	// never see votes from recently submitted blocks and could deadlock.
+
+	if deferPersist {
+		global.IncrTransactionCount(uint64(len(block.Transactions)))
+		setReplayStage("done")
+		return slotCtx, &DeferredBlockCommit{
+			SlotCtx:             slotCtx,
+			ModifiedAccts:       modifiedAccts,
+			BlockSlot:           block.Slot,
+			BlockHeight:         block.BlockHeight,
+			Bankhash:              append([]byte(nil), slotCtx.FinalBankhash...),
+			HasAlpenglowBlockID:   block.HasAlpenglowBlockID,
+			AlpenglowBlockID:      solana.Hash(block.AlpenglowBlockID),
+		}, nil
+	}
 
 	// Enter critical commit window - panics here may leave AccountsDB inconsistent
 	commitSlot.Store(slotCtx.Slot)
@@ -3095,5 +3204,5 @@ func ProcessBlock(
 
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	setReplayStage("done")
-	return slotCtx, err
+	return slotCtx, nil, err
 }

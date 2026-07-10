@@ -47,6 +47,35 @@ func TestCalculateAlpenglowRewardSplit(t *testing.T) {
 	assert.Equal(t, validator, leader)
 }
 
+func TestCalcSlotTimestampNanosInclusiveRange(t *testing.T) {
+	// producer_ns - slot_range_duration(target+1, bank) with constant 400ms:
+	// (bank - target) * nsPerSlot
+	const producer int64 = 1783652064462318754
+	got := calcSlotTimestampNanos(961073, 961081, producer)
+	want := producer - int64(961081-961073)*int64(nsPerSlot)
+	assert.Equal(t, want, got)
+	assert.Equal(t, want/1_000_000_000, got/1_000_000_000)
+
+	assert.Equal(t, producer, calcSlotTimestampNanos(961081, 961081, producer))
+	assert.Equal(t, int64(0), calcSlotTimestampNanos(10, 20, 100))
+}
+
+func TestMaybeUpdateVotesV4AdvancesLastTimestamp(t *testing.T) {
+	vs := &sealevel.VoteState4{
+		LastTimestamp: sealevel.BlockTimestamp{Slot: 100, Timestamp: 1_000},
+	}
+	maybeUpdateVotesV4(vs, 200, 1_500_000_000_000)
+	assert.Equal(t, uint64(200), vs.LastTimestamp.Slot)
+	assert.Equal(t, int64(1_500), vs.LastTimestamp.Timestamp)
+	require.Equal(t, 1, vs.Votes.Len())
+	assert.Equal(t, uint64(200), vs.Votes.At(0).Lockout.Slot)
+
+	// Strictly greater timestamp required; equal/older must not rewrite.
+	prev := vs.LastTimestamp
+	maybeUpdateVotesV4(vs, 300, 1_500_000_000_000)
+	assert.Equal(t, prev, vs.LastTimestamp)
+}
+
 func TestEnsureMigrationMarker(t *testing.T) {
 	var credits []sealevel.EpochCredits
 	ensureMigrationMarker(&credits)

@@ -15,7 +15,7 @@ type ValidatedRewardCert struct {
 }
 
 // ValidateRewardCertificates verifies footer reward certs and returns participating vote accounts.
-func ValidateRewardCertificates(currentSlot uint64, skipRaw, notarRaw []byte, validatorSet alpenglow.ValidatorSet) (*ValidatedRewardCert, error) {
+func ValidateRewardCertificates(currentSlot uint64, skipRaw, notarRaw []byte, validatorSet alpenglow.ValidatorSet, shredVersion uint16) (*ValidatedRewardCert, error) {
 	var skipCert *SkipRewardCertificate
 	var notarCert *NotarRewardCertificate
 
@@ -47,6 +47,7 @@ func ValidateRewardCertificates(currentSlot uint64, skipRaw, notarRaw []byte, va
 	if err := verifier.SetValidatorSet(validatorSet); err != nil {
 		return nil, fmt.Errorf("configure validator set: %w", err)
 	}
+	verifier.SetShredVersion(shredVersion)
 
 	if skipCert != nil {
 		if err := verifyAndCollectRewardCert(verifier, validatorSet, skipCertToCertificate(*skipCert), validators); err != nil {

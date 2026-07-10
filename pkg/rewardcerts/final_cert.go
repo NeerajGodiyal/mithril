@@ -87,6 +87,7 @@ func decodeVotesAggregate(raw []byte) (VotesAggregateWire, int, error) {
 func ValidateBlockFinalCertificate(
 	finalCertRaw []byte,
 	validatorSet alpenglow.ValidatorSet,
+	shredVersion uint16,
 ) (*ValidatedFinalCert, error) {
 	if len(finalCertRaw) == 0 {
 		return nil, nil
@@ -100,6 +101,7 @@ func ValidateBlockFinalCertificate(
 	if err := verifier.SetValidatorSet(validatorSet); err != nil {
 		return nil, fmt.Errorf("configure validator set: %w", err)
 	}
+	verifier.SetShredVersion(shredVersion)
 
 	signers := make(map[solana.PublicKey]struct{})
 	if fc.NotarAggregate != nil {

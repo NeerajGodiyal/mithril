@@ -92,6 +92,22 @@ func loadEpochInflationAccountState(acctsDb *accountsdb.AccountsDb, slot uint64)
 	if err != nil {
 		return EpochInflationAccountState{}, fmt.Errorf("load vote reward account at slot %d: %w", slot, err)
 	}
+	return decodeEpochInflationAccountFromAcct(acct, slot)
+}
+
+func loadEpochInflationAccountStateForReplay(
+	acctsDb *accountsdb.AccountsDb,
+	spec *SpeculativeReplay,
+	parentSlot, blockSlot uint64,
+) (EpochInflationAccountState, error) {
+	acct, err := loadAccountForBlockReplay(acctsDb, spec, parentSlot, blockSlot, VoteRewardAccountAddr())
+	if err != nil {
+		return EpochInflationAccountState{}, fmt.Errorf("load vote reward account at parent slot %d: %w", parentSlot, err)
+	}
+	return decodeEpochInflationAccountFromAcct(acct, parentSlot)
+}
+
+func decodeEpochInflationAccountFromAcct(acct *accounts.Account, slot uint64) (EpochInflationAccountState, error) {
 	if len(acct.Data) == 0 {
 		return EpochInflationAccountState{}, fmt.Errorf("vote reward account missing at slot %d", slot)
 	}

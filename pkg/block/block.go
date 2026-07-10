@@ -29,6 +29,8 @@ type Block struct {
 	Blockhash                           [32]byte
 	AlpenglowBlockID                    [32]byte // Turbine Merkle-root block id used by Alpenglow/Votor.
 	HasAlpenglowBlockID                 bool
+	AlpenglowParentBlockID              [32]byte // Parent's Alpenglow block id from the parent marker (or known-parent hint).
+	HasAlpenglowParentBlockID           bool
 	AlpenglowLastChainedRoot            [32]byte // Last data-shred merkle root; chained into child slots.
 	HasAlpenglowLastChainedRoot         bool
 	ExpectedBankhash                    [32]byte

@@ -21,6 +21,10 @@ func (w *Writer) Bytes() []byte {
 	return w.buf
 }
 
+func (w *Writer) WriteU8(v uint8) {
+	w.buf = append(w.buf, v)
+}
+
 func (w *Writer) WriteU16(v uint16) {
 	w.buf = binary.LittleEndian.AppendUint16(w.buf, v)
 }
@@ -75,6 +79,15 @@ func (r *Reader) EnsureEOF() error {
 		return fmt.Errorf("wincode: %d trailing bytes at offset %d", r.Remaining(), r.off)
 	}
 	return nil
+}
+
+func (r *Reader) ReadU8() (uint8, error) {
+	if err := r.require(1); err != nil {
+		return 0, err
+	}
+	v := r.data[r.off]
+	r.off++
+	return v, nil
 }
 
 func (r *Reader) ReadU16() (uint16, error) {

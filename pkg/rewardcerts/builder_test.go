@@ -146,7 +146,7 @@ func testBLSKeys(t *testing.T, n int) []*big.Int {
 
 func testSignedVote(t *testing.T, vote alpenglow.Vote, rank int, key *big.Int) alpenglow.VoteMessage {
 	t.Helper()
-	payload, err := alpenglow.EncodeVote(vote)
+	payload, err := alpenglow.EncodeVotePayloadToSign(vote, 0)
 	require.NoError(t, err)
 	message, err := bls12381.HashToG2(payload, []byte(testBLSHashDST))
 	require.NoError(t, err)
@@ -165,6 +165,7 @@ func assertAggregateMatchesVotes(t *testing.T, aggregate []byte, votes []alpengl
 	set, keys := testValidatorSetForVotes(t, votes)
 	verifier := alpenglow.NewCertificateVerifier()
 	require.NoError(t, verifier.SetValidatorSet(set))
+	verifier.SetShredVersion(0)
 
 	var certType alpenglow.CertificateType
 	switch votes[0].Vote.Type {
