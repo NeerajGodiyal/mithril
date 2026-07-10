@@ -160,7 +160,7 @@ func decodeContactRecords(d *decoder, handleContact func(contactRecord)) (int, [
 		record, err := decodeCrdsContactRecord(d)
 		if err != nil {
 			if errors.Is(err, errUnsupportedCRDSValue) {
-				return contactCount, contacts, errUnsupportedCRDSValue
+				continue
 			}
 			return contactCount, contacts, err
 		}
@@ -215,9 +215,6 @@ func decodePacketWithContactHandler(packet []byte, handleContact func(contactRec
 		}
 		contactCount, contacts, err := decodeContactRecords(d, handleContact)
 		if err != nil {
-			if errors.Is(err, errUnsupportedCRDSValue) {
-				return decodedPacket{Kind: packetIgnored}, nil
-			}
 			return decodedPacket{}, err
 		}
 		return decodedPacket{Kind: packetContacts, Contacts: contacts, ContactCount: contactCount}, nil

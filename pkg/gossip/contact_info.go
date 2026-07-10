@@ -26,6 +26,7 @@ const (
 	protocolPongMessage  = 5
 
 	socketTagGossip            = 0
+	socketTagServeRepairQuic   = 1
 	socketTagServeRepair       = 4
 	socketTagTPUQUICForwards   = 7
 	socketTagTPUQUIC           = 8
@@ -34,7 +35,7 @@ const (
 	socketTagTPUVoteQuic       = 12
 	socketTagAlpenglow         = 13
 
-	// Agave's Version has a numeric ClientId, not a string. Unknown IDs are
+	// Version carries a numeric ClientId, not a string. Unknown IDs are
 	// accepted, so use a stable "MI" marker while keeping ClientName in logs.
 	versionClientMithril = 0x4d49
 )
@@ -351,8 +352,8 @@ func decodeContactInfo(d *decoder) (*ContactInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < numExt; i++ {
-		return nil, errUnsupportedCRDSValue
+	if err := skipContactExtensions(d, numExt); err != nil {
+		return nil, err
 	}
 	return info, nil
 }
@@ -454,10 +455,26 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 	if err != nil {
 		return contactRecord{}, err
 	}
-	if numExt > 0 {
-		return contactRecord{}, errUnsupportedCRDSValue
+	if err := skipContactExtensions(d, numExt); err != nil {
+		return contactRecord{}, err
 	}
 	return record, nil
+}
+
+func skipContactExtensions(d *decoder, numExt int) error {
+	for i := 0; i < numExt; i++ {
+		if _, err := d.u8(); err != nil {
+			return err
+		}
+		length, err := d.shortLen()
+		if err != nil {
+			return err
+		}
+		if _, err := d.read(length); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeContactIP(d *decoder) (contactEndpoint, error) {
@@ -490,6 +507,7 @@ func decodeContactIP(d *decoder) (contactEndpoint, error) {
 
 func encodeVersion(e *encoder, version Version) {
 	e.varint(uint64(version.Major))
+	// Prerelease tag is packed into the high bits of the minor field.
 	e.varint(uint64(version.Minor))
 	e.varint(uint64(version.Patch))
 	e.u32(version.Commit)
@@ -502,7 +520,7 @@ func decodeVersion(d *decoder) (Version, error) {
 	if err != nil {
 		return Version{}, err
 	}
-	minor, err := d.varint(3)
+	packedMinor, err := d.varint(3)
 	if err != nil {
 		return Version{}, err
 	}
@@ -522,9 +540,12 @@ func decodeVersion(d *decoder) (Version, error) {
 	if err != nil {
 		return Version{}, err
 	}
+	const prereleaseBitsOffset = 14
+	const prereleaseMask = uint64(3)
+	minor := uint16(packedMinor &^ (prereleaseMask << prereleaseBitsOffset))
 	return Version{
 		Major:      uint16(major),
-		Minor:      uint16(minor),
+		Minor:      minor,
 		Patch:      uint16(patch),
 		Commit:     commit,
 		FeatureSet: featureSet,

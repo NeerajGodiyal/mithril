@@ -43,8 +43,8 @@ func SocketTagName(tag uint8) string {
 		return "gossip"
 	case socketTagServeRepair:
 		return "repair"
-	case 1:
-		return "rpc"
+	case socketTagServeRepairQuic:
+		return "repair_quic"
 	case 2:
 		return "rpc_pubsub"
 	case 3:

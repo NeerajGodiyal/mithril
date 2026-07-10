@@ -216,6 +216,56 @@ func TestPingPongRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeContactInfoV4SkipsExtensions(t *testing.T) {
+	// v4 ContactInfo records append TLV extensions after the socket table.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	pubkey, err := pubkeyFromPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("pubkeyFromPrivateKey returned error: %v", err)
+	}
+	contact, err := NewContactInfo(
+		pubkey,
+		63812,
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 65400},
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8001},
+	)
+	if err != nil {
+		t.Fatalf("NewContactInfo returned error: %v", err)
+	}
+	if err := contact.SetSocket(socketTagServeRepair, &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 8008}); err != nil {
+		t.Fatalf("SetSocket serve repair returned error: %v", err)
+	}
+	data, err := encodeCrdsDataContactInfo(contact)
+	if err != nil {
+		t.Fatalf("encodeCrdsDataContactInfo returned error: %v", err)
+	}
+	var ext encoder
+	if err := ext.shortLen(1); err != nil {
+		t.Fatalf("shortLen returned error: %v", err)
+	}
+	ext.u8(9)
+	if err := ext.shortLen(3); err != nil {
+		t.Fatalf("shortLen returned error: %v", err)
+	}
+	ext.fixed([]byte{1, 2, 3})
+	data = append(data, ext.bytes()...)
+	sig := ed25519.Sign(priv, data)
+
+	var packet encoder
+	packet.fixed(sig)
+	packet.fixed(data)
+	record, err := decodeCrdsContactRecord(newDecoder(packet.bytes()))
+	if err != nil {
+		t.Fatalf("decodeCrdsContactRecord returned error: %v", err)
+	}
+	if !record.ServeRepairAddr.ok || record.ServeRepairAddr.port != 8008 {
+		t.Fatalf("serve repair endpoint = %+v", record.ServeRepairAddr)
+	}
+}
+
 func TestQueryEntrypointParsesEchoResponse(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
