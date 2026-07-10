@@ -2215,6 +2215,21 @@ func (bs *BlockSource) runTurbineStream() {
 		receiver := turbine.NewUDPReceiver(bs.turbineBindAddr)
 		bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
 		receiver.SetLeaderForSlot(bs.leaderForSlot)
+		shredVersion := bs.turbineShredVersion
+		if gossipClient != nil {
+			if gossipShred := gossipClient.ShredVersion(); gossipShred != 0 {
+				shredVersion = gossipShred
+			}
+		} else if bs.turbineGossipEntrypoint != "" {
+			if entrypoint, err := net.ResolveUDPAddr("udp", bs.turbineGossipEntrypoint); err == nil {
+				if resolved, err := gossipclient.ResolveShredVersion(entrypoint, shredVersion, 5*time.Second); err == nil {
+					shredVersion = resolved
+				}
+			}
+		}
+		if shredVersion != 0 {
+			receiver.SetExpectedShredVersion(shredVersion)
+		}
 		if gossipClient != nil {
 			if err := receiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err != nil {
 				cancelStream()
@@ -2327,9 +2342,9 @@ func (bs *BlockSource) runTurbineStream() {
 				if stats.LastPacketUnix != 0 {
 					lastPacketAge = time.Since(time.Unix(stats.LastPacketUnix, 0)).Round(time.Second).String()
 				}
-				mlog.Log.FileOnlyf("native turbine receiver stats: packets=%d data=%d coding=%d recovered=%d blocks=%d active_slots=%d evicted_slots=%d ignored_old_shreds=%d repair_requests=%d repair_responses=%d repair_timeouts=%d repair_outstanding=%d repair_peers=%d repair_pings=%d/%d repair_errors=%d parse_errors=%d sig_errors=%d missing_leaders=%d assembly_errors=%d last_packet=%s last_data_slot=%d last_block_slot=%d",
+				mlog.Log.FileOnlyf("native turbine receiver stats: packets=%d data=%d coding=%d recovered=%d blocks=%d active_slots=%d evicted_slots=%d ignored_old_shreds=%d ignored_far_slot=%d ignored_shred_version=%d repair_requests=%d repair_responses=%d repair_timeouts=%d repair_outstanding=%d repair_peers=%d repair_pings=%d/%d repair_errors=%d parse_errors=%d sig_errors=%d missing_leaders=%d assembly_errors=%d last_packet=%s last_data_slot=%d last_block_slot=%d",
 					stats.Packets, stats.DataShreds, stats.CodingShreds, stats.RecoveredData, stats.BlocksEmitted, stats.ActiveSlots,
-					stats.EvictedSlots, stats.IgnoredOldShreds, stats.Repair.Requests, stats.Repair.Responses, stats.Repair.Timeouts, stats.Repair.Outstanding, stats.Repair.Peers,
+					stats.EvictedSlots, stats.IgnoredOldShreds, stats.IgnoredFarSlot, stats.IgnoredShredVersion, stats.Repair.Requests, stats.Repair.Responses, stats.Repair.Timeouts, stats.Repair.Outstanding, stats.Repair.Peers,
 					stats.Repair.Pings, stats.Repair.Pongs, stats.Repair.Errors, stats.ParseErrors, stats.SignatureErrors, stats.MissingLeaders, stats.AssemblyErrors,
 					lastPacketAge, stats.LastDataSlot, stats.LastBlockSlot)
 			case err := <-streamDone:

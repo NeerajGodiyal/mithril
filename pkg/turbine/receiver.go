@@ -20,9 +20,10 @@ type LeaderForSlotFunc func(slot uint64) (solana.PublicKey, bool)
 type UDPReceiver struct {
 	Addr string
 
-	assembler     *SlotAssembler
-	leaderForSlot LeaderForSlotFunc
-	repairClient  *repairClient
+	assembler            *SlotAssembler
+	leaderForSlot        LeaderForSlotFunc
+	repairClient         *repairClient
+	expectedShredVersion uint16
 	blocks        chan *block.Block
 	errs          chan error
 	ready         chan error
@@ -32,10 +33,12 @@ type UDPReceiver struct {
 	packets         atomic.Uint64
 	dataShreds      atomic.Uint64
 	codingShreds    atomic.Uint64
-	parseErrors     atomic.Uint64
-	signatureErrors atomic.Uint64
-	missingLeaders  atomic.Uint64
-	assemblyErrors  atomic.Uint64
+	parseErrors         atomic.Uint64
+	signatureErrors     atomic.Uint64
+	missingLeaders      atomic.Uint64
+	ignoredFarSlot      atomic.Uint64
+	ignoredShredVersion atomic.Uint64
+	assemblyErrors      atomic.Uint64
 	blocksEmitted   atomic.Uint64
 	lastPacketUnix  atomic.Int64
 	lastDataSlot    atomic.Uint64
@@ -49,11 +52,13 @@ type ReceiverStats struct {
 	ParseErrors          uint64
 	SignatureErrors      uint64
 	MissingLeaders       uint64
+	IgnoredFarSlot       uint64
 	AssemblyErrors       uint64
 	BlocksEmitted        uint64
 	RecoveredData        uint64
 	EvictedSlots         uint64
 	IgnoredOldShreds     uint64
+	IgnoredShredVersion  uint64
 	PriorityRepairSlots  int
 	NonCanonicalBlockIDs uint64
 	LastNonCanonicalSlot uint64
@@ -67,13 +72,39 @@ type ReceiverStats struct {
 }
 
 func NewUDPReceiver(addr string) *UDPReceiver {
+	return NewUDPReceiverWithAssembler(addr, nil)
+}
+
+// NewUDPReceiverWithAssembler creates a receiver bound to an existing
+// assembler. Reconnect loops pass the previous assembler so partially
+// repaired slots survive receiver restarts instead of restarting repair from
+// zero shreds; shred/repair state is independent of connection churn.
+func NewUDPReceiverWithAssembler(addr string, assembler *SlotAssembler) *UDPReceiver {
+	if assembler == nil {
+		assembler = NewSlotAssembler()
+	}
 	return &UDPReceiver{
 		Addr:      addr,
-		assembler: NewSlotAssembler(),
+		assembler: assembler,
 		blocks:    make(chan *block.Block, 1024),
 		errs:      make(chan error, 16),
 		ready:     make(chan error, 1),
 	}
+}
+
+// Assembler returns the receiver's slot assembler for reuse across restarts.
+func (r *UDPReceiver) Assembler() *SlotAssembler {
+	if r == nil {
+		return nil
+	}
+	return r.assembler
+}
+
+func (r *UDPReceiver) SetExpectedShredVersion(version uint16) {
+	if r == nil {
+		return
+	}
+	r.expectedShredVersion = version
 }
 
 func (r *UDPReceiver) SetLeaderForSlot(fn LeaderForSlotFunc) {
@@ -124,6 +155,15 @@ func (r *UDPReceiver) SeedRepairObservedSlot(slot uint64) {
 	r.assembler.SeedRepairObservedSlot(slot)
 }
 
+// SetRepairFloor pins the replay frontier so the assembler never evicts or
+// ignores slots replay is still waiting on.
+func (r *UDPReceiver) SetRepairFloor(slot uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetRepairFloor(slot)
+}
+
 func (r *UDPReceiver) Blocks() <-chan *block.Block {
 	return r.blocks
 }
@@ -145,11 +185,13 @@ func (r *UDPReceiver) Stats() ReceiverStats {
 		ParseErrors:          r.parseErrors.Load(),
 		SignatureErrors:      r.signatureErrors.Load(),
 		MissingLeaders:       r.missingLeaders.Load(),
+		IgnoredFarSlot:       r.ignoredFarSlot.Load(),
 		AssemblyErrors:       r.assemblyErrors.Load(),
 		BlocksEmitted:        r.blocksEmitted.Load(),
 		RecoveredData:        r.assembler.RecoveredDataShreds(),
 		EvictedSlots:         r.assembler.EvictedSlots(),
 		IgnoredOldShreds:     r.assembler.IgnoredOldShreds(),
+		IgnoredShredVersion:  r.ignoredShredVersion.Load(),
 		PriorityRepairSlots:  r.assembler.PriorityRepairSlots(),
 		NonCanonicalBlockIDs: nonCanonicalCount,
 		LastNonCanonicalSlot: nonCanonicalSlot,
@@ -194,6 +236,12 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	if err := conn.SetReadBuffer(8 * 1024 * 1024); err != nil {
+		select {
+		case r.errs <- fmt.Errorf("set turbine read buffer: %w", err):
+		default:
+		}
+	}
 	r.signalReady(nil)
 
 	go func() {
@@ -230,6 +278,14 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 			case r.errs <- err:
 			default:
 			}
+			continue
+		}
+		if r.expectedShredVersion != 0 && shred.Version != r.expectedShredVersion {
+			r.ignoredShredVersion.Add(1)
+			continue
+		}
+		if !r.assembler.ShouldAcceptIngressShred(shred.Slot) {
+			r.ignoredFarSlot.Add(1)
 			continue
 		}
 		switch shred.Type {

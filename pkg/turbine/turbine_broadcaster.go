@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -104,11 +103,6 @@ func (b *TurbineBroadcaster) broadcastPacket(packet []byte) error {
 	nodes := b.clusterNodesForSlot(shredID.Slot)
 	dests := b.broadcastDestinations(shredID, nodes)
 	if len(dests) == 0 {
-		if pick, ok := nodes.BroadcastPeerPick(shredID); ok {
-			// cavey TODO: maybe remove
-			mlog.Log.Infof("cavey debug: turbine broadcast skipped shred slot=%d index=%d weighted_pick=%s",
-				shredID.Slot, shredID.Index, pick)
-		}
 		return nil
 	}
 	for _, peer := range dests {
@@ -171,27 +165,7 @@ func (b *TurbineBroadcaster) clusterNodesForSlot(slot uint64) *ClusterNodes {
 		UseChaCha8:   b.useChaCha8,
 	})
 	b.cacheEpoch = epoch
-	logClusterNodesWithoutTVU(b.cacheNodes, epoch, slot, len(tvuPeers), len(stakes))
 	return b.cacheNodes
-}
-
-// cavey TODO: maybe remove after reporting ag nodes
-func logClusterNodesWithoutTVU(nodes *ClusterNodes, epoch, slot uint64, gossipTVUPeers, stakedEntries int) {
-	if nodes == nil {
-		return
-	}
-	without := nodes.StakedWithoutBroadcastTVU()
-	withTVU := 0
-	for _, node := range nodes.nodes {
-		if node.stake > 0 && node.canBroadcastTVU() {
-			withTVU++
-		}
-	}
-	mlog.Log.Infof("cavey debug: turbine cluster table epoch=%d slot=%d nodes=%d staked=%d gossip_tvu_peers=%d staked_with_broadcast_tvu=%d staked_without_broadcast_tvu=%d",
-		epoch, slot, len(nodes.nodes), stakedEntries, gossipTVUPeers, withTVU, len(without))
-	for _, node := range without {
-		mlog.Log.Infof("cavey debug:   no_tvu %s", node)
-	}
 }
 
 func (b *TurbineBroadcaster) sendTo(packet []byte, peer *net.UDPAddr) error {

@@ -61,10 +61,11 @@ type repairResponseKey struct {
 }
 
 type outstandingRepairRequest struct {
-	key    repairRequestKey
-	nonce  uint32
-	addr   repairAddressKey
-	sentAt time.Time
+	key       repairRequestKey
+	nonce     uint32
+	addr      repairAddressKey
+	recipient gossip.Pubkey
+	sentAt    time.Time
 }
 
 type repairClient struct {
@@ -174,6 +175,9 @@ func (c *repairClient) handleRepairPing(conn *net.UDPConn, packet []byte, from *
 		return true
 	}
 	c.pongs.Add(1)
+	if addrKey, ok := repairAddressKeyFromUDP(from); ok {
+		c.resendOutstandingToAddr(conn, addrKey)
+	}
 	return true
 }
 
@@ -280,10 +284,11 @@ func (c *repairClient) sendRequest(conn *net.UDPConn, peers []gossip.RepairPeer,
 		return false
 	}
 	c.outstanding[key] = outstandingRepairRequest{
-		key:    key,
-		nonce:  nonce,
-		addr:   addrKey,
-		sentAt: time.Now(),
+		key:       key,
+		nonce:     nonce,
+		addr:      addrKey,
+		recipient: peer.Pubkey,
+		sentAt:    time.Now(),
 	}
 	c.byResponse[responseKey] = key
 	c.mu.Unlock()
@@ -367,6 +372,61 @@ func repairAddressKeyFromUDP(addr *net.UDPAddr) (repairAddressKey, bool) {
 	copy(key.ip[:], ip)
 	key.port = addr.Port
 	return key, true
+}
+
+func (c *repairClient) resendOutstandingToAddr(conn *net.UDPConn, addr repairAddressKey) {
+	if conn == nil {
+		return
+	}
+	c.mu.Lock()
+	toResend := make([]outstandingRepairRequest, 0, len(c.outstanding))
+	for _, outstanding := range c.outstanding {
+		if outstanding.addr == addr {
+			toResend = append(toResend, outstanding)
+		}
+	}
+	c.mu.Unlock()
+	for _, outstanding := range toResend {
+		c.resendOutstandingRequest(conn, outstanding)
+	}
+}
+
+func (c *repairClient) resendOutstandingRequest(conn *net.UDPConn, outstanding outstandingRepairRequest) {
+	peerAddr := &net.UDPAddr{
+		IP:   net.IP(outstanding.addr.ip[:]),
+		Port: outstanding.addr.port,
+	}
+	if peerAddr.IP.To4() != nil {
+		peerAddr.IP = peerAddr.IP.To4()
+	}
+	var (
+		packet []byte
+		err    error
+	)
+	switch outstanding.key.kind {
+	case repairRequestWindowIndex:
+		packet, err = repairproto.BuildWindowIndexRequest(
+			c.identity, outstanding.recipient, outstanding.key.slot, uint64(outstanding.key.index), outstanding.nonce)
+	case repairRequestHighestWindowIndex:
+		packet, err = repairproto.BuildHighestWindowIndexRequest(
+			c.identity, outstanding.recipient, outstanding.key.slot, uint64(outstanding.key.index), outstanding.nonce)
+	default:
+		return
+	}
+	if err != nil {
+		c.errors.Add(1)
+		return
+	}
+	if _, err := conn.WriteToUDP(packet, peerAddr); err != nil {
+		c.errors.Add(1)
+		return
+	}
+	c.mu.Lock()
+	if existing, ok := c.outstanding[outstanding.key]; ok && existing.nonce == outstanding.nonce {
+		existing.sentAt = time.Now()
+		c.outstanding[outstanding.key] = existing
+	}
+	c.mu.Unlock()
 }
 
 func (c *repairClient) stats() RepairStats {

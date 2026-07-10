@@ -727,6 +727,59 @@ func TestSlotAssemblerRepairRequestsIncludeAbsentAndIncompleteSlots(t *testing.T
 	}
 }
 
+func TestSlotAssemblerShouldAcceptIngressShred(t *testing.T) {
+	assembler := NewSlotAssembler()
+	if !assembler.ShouldAcceptIngressShred(915_000) {
+		t.Fatalf("expected ingress accept before repair floor is set")
+	}
+
+	assembler.SetRepairFloor(6_465_466)
+	assembler.PrioritizeRepairRange(6_465_466, 6_465_530)
+
+	if assembler.ShouldAcceptIngressShred(915_000) {
+		t.Fatalf("expected old-fork slot to be rejected")
+	}
+	if !assembler.ShouldAcceptIngressShred(6_465_466) {
+		t.Fatalf("expected frontier slot to be accepted")
+	}
+	if !assembler.ShouldAcceptIngressShred(6_465_500) {
+		t.Fatalf("expected slot inside repair horizon to be accepted")
+	}
+	if assembler.ShouldAcceptIngressShred(6_466_000) {
+		t.Fatalf("expected slot far ahead of repair horizon to be rejected")
+	}
+	if got := assembler.IgnoredFarSlotShreds(); got != 2 {
+		t.Fatalf("ignored far slot shreds = %d, want 2", got)
+	}
+}
+
+func TestSlotAssemblerPrioritizeRepairRangeCapsHorizon(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 300
+	assembler.PrioritizeRepairRange(100, 200)
+
+	if assembler.repairHorizonSlot != 164 {
+		t.Fatalf("repair horizon = %d, want 164", assembler.repairHorizonSlot)
+	}
+	if _, ok := assembler.priorityRepairSlots[200]; ok {
+		t.Fatalf("did not expect distant end slot 200 to stay prioritized")
+	}
+}
+
+func TestSlotAssemblerRepairRequestsRespectRepairHorizon(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 300
+	assembler.repairFloorSlot = 100
+	assembler.PrioritizeRepairRange(100, 120)
+
+	requests := assembler.RepairRequests(32, 8)
+	for _, req := range requests {
+		if req.Slot > 120 {
+			t.Fatalf("repair request slot %d exceeds horizon 120", req.Slot)
+		}
+	}
+}
+
 func TestSlotAssemblerRepairRequestsPrioritizeRequestedSlot(t *testing.T) {
 	assembler := NewSlotAssembler()
 	assembler.maxObservedSlot = 220

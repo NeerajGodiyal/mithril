@@ -24,9 +24,12 @@ const (
 	maxRetainedIncompleteSlotCap = 1024
 	maxRetainedCompletedSlotLag  = uint64(512)
 	repairObservedSlotLag        = uint64(1)
-	repairScanSlotWindow         = uint64(96)
+	repairScanSlotWindow         = uint64(64)
 	maxPriorityRepairSlots       = 512
 	maxPriorityRepairRange       = uint64(256)
+	// ingressSlotMargin allows live shreds slightly ahead of the prioritized
+	// repair window while dropping far-away fork noise (e.g. pre-regenesis slots).
+	ingressSlotMargin = uint64(256)
 )
 
 type SlotAssembler struct {
@@ -38,6 +41,8 @@ type SlotAssembler struct {
 	priorityRepairOrder  []uint64
 	encoders             map[fecLayout]reedsolomon.Encoder
 	maxObservedSlot      uint64
+	repairFloorSlot      uint64
+	repairHorizonSlot    uint64
 	recoveredDataShreds  uint64
 	nonCanonicalBlockIDs uint64
 	lastNonCanonicalSlot uint64
@@ -45,6 +50,7 @@ type SlotAssembler struct {
 	lastNonCanonicalWant solana.Hash
 	evictedSlots         uint64
 	ignoredOldShreds     uint64
+	ignoredFarSlotShreds uint64
 }
 
 type SlotRepairRequest struct {
@@ -191,6 +197,22 @@ func (a *SlotAssembler) ResetSlot(slot uint64) {
 	delete(a.completedSlots, slot)
 }
 
+// ResetCompletedFrom clears completion markers for slot and above while
+// keeping partial shred state. Used when an assembler is reused across a
+// receiver restart: blocks emitted but lost in the teardown (drained channel,
+// invalidated result generation) must become assemblable again, otherwise the
+// completion marker would suppress re-emitting them forever.
+func (a *SlotAssembler) ResetCompletedFrom(slot uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for completed := range a.completedSlots {
+		if completed >= slot {
+			delete(a.completedSlots, completed)
+		}
+	}
+}
+
 // SeedRepairObservedSlot advances the repair scan horizon before any live shreds arrive.
 // Repair only considers slots <= maxObservedSlot-repairObservedSlotLag; seed from the
 // snapshot/resume frontier (or tip) so cold-start repair can fetch the next slots.
@@ -206,7 +228,28 @@ func (a *SlotAssembler) SeedRepairObservedSlot(slot uint64) {
 }
 
 func (a *SlotAssembler) PrioritizeRepairSlot(slot uint64) {
-	a.PrioritizeRepairRange(slot, slot)
+	if slot == 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.prioritizeRepairSlotLocked(slot)
+	a.prunePriorityRepairSlotsLocked()
+}
+
+// SetRepairFloor records the replay frontier. Slots at or above the floor are
+// never treated as "too old" and never evicted, even when the live tip races
+// far ahead of replay. Without this, a stall longer than
+// maxRetainedIncompleteSlotLag slots became permanently unrecoverable: the
+// waiting slot's shreds were ignored, its partial state pruned, and repair
+// requests for it suppressed.
+func (a *SlotAssembler) SetRepairFloor(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	a.mu.Lock()
+	a.repairFloorSlot = slot
+	a.mu.Unlock()
 }
 
 func (a *SlotAssembler) PrioritizeRepairRange(start, end uint64) {
@@ -219,22 +262,55 @@ func (a *SlotAssembler) PrioritizeRepairRange(start, end uint64) {
 	if end-start > maxPriorityRepairRange {
 		end = start + maxPriorityRepairRange
 	}
+	horizonEnd := end
+	if horizonEnd > start+repairScanSlotWindow {
+		horizonEnd = start + repairScanSlotWindow
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	a.repairHorizonSlot = horizonEnd
+	a.clearPriorityRepairAboveLocked(horizonEnd)
+
 	for slot := start; ; slot++ {
-		if _, completed := a.completedSlots[slot]; !completed {
-			if _, exists := a.priorityRepairSlots[slot]; !exists {
-				a.priorityRepairSlots[slot] = struct{}{}
-				a.priorityRepairOrder = append(a.priorityRepairOrder, slot)
-			}
-		}
-		if slot == end {
+		a.prioritizeRepairSlotLocked(slot)
+		if slot == horizonEnd {
 			break
 		}
 	}
 	a.prunePriorityRepairSlotsLocked()
+}
+
+func (a *SlotAssembler) clearPriorityRepairAboveLocked(maxSlot uint64) {
+	if maxSlot == 0 {
+		return
+	}
+	filtered := a.priorityRepairOrder[:0]
+	for _, slot := range a.priorityRepairOrder {
+		if slot > maxSlot {
+			delete(a.priorityRepairSlots, slot)
+			continue
+		}
+		if _, exists := a.priorityRepairSlots[slot]; !exists {
+			continue
+		}
+		filtered = append(filtered, slot)
+	}
+	a.priorityRepairOrder = filtered
+}
+
+func (a *SlotAssembler) prioritizeRepairSlotLocked(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	if _, completed := a.completedSlots[slot]; completed {
+		return
+	}
+	if _, exists := a.priorityRepairSlots[slot]; !exists {
+		a.priorityRepairSlots[slot] = struct{}{}
+		a.priorityRepairOrder = append(a.priorityRepairOrder, slot)
+	}
 }
 
 func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
@@ -253,25 +329,43 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 	return state
 }
 
-func (a *SlotAssembler) slotTooOldLocked(slot uint64) bool {
+// minRetainedIncompleteSlotLocked returns the slot below which incomplete
+// state may be evicted. The lag from the live tip is clamped by the repair
+// floor (replay frontier) so the head slot replay is waiting on always stays
+// repairable no matter how far the tip runs ahead.
+func (a *SlotAssembler) minRetainedIncompleteSlotLocked() uint64 {
 	if a.maxObservedSlot <= maxRetainedIncompleteSlotLag {
-		return false
+		return 0
 	}
-	return slot < a.maxObservedSlot-maxRetainedIncompleteSlotLag
+	minSlot := a.maxObservedSlot - maxRetainedIncompleteSlotLag
+	if a.repairFloorSlot != 0 && minSlot > a.repairFloorSlot {
+		minSlot = a.repairFloorSlot
+	}
+	return minSlot
+}
+
+func (a *SlotAssembler) slotTooOldLocked(slot uint64) bool {
+	return slot < a.minRetainedIncompleteSlotLocked()
 }
 
 func (a *SlotAssembler) pruneOldSlotsLocked() {
-	if len(a.slots) > 0 && a.maxObservedSlot > maxRetainedIncompleteSlotLag {
-		minSlot := a.maxObservedSlot - maxRetainedIncompleteSlotLag
-		for slot := range a.slots {
-			if slot < minSlot {
-				delete(a.slots, slot)
-				a.evictedSlots++
+	if len(a.slots) > 0 {
+		if minSlot := a.minRetainedIncompleteSlotLocked(); minSlot > 0 {
+			for slot := range a.slots {
+				if slot < minSlot {
+					delete(a.slots, slot)
+					a.evictedSlots++
+				}
 			}
 		}
 	}
 	if a.maxObservedSlot > maxRetainedCompletedSlotLag {
 		minSlot := a.maxObservedSlot - maxRetainedCompletedSlotLag
+		// Keep completion markers and expected block IDs at/above the replay
+		// frontier so reconnects and canonical checks still work there.
+		if a.repairFloorSlot != 0 && minSlot > a.repairFloorSlot {
+			minSlot = a.repairFloorSlot
+		}
 		for slot := range a.completedSlots {
 			if slot < minSlot {
 				delete(a.completedSlots, slot)
@@ -289,18 +383,21 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 		return
 	}
 	for len(a.slots) > maxRetainedIncompleteSlotCap {
-		var oldest uint64
+		// Evict the newest incomplete slot: the oldest slots are the replay
+		// frontier and must survive for replay to make forward progress. Tip
+		// data evicted here is re-fetched by the live stream or later repair.
+		var newest uint64
 		first := true
 		for slot := range a.slots {
-			if first || slot < oldest {
-				oldest = slot
+			if first || slot > newest {
+				newest = slot
 				first = false
 			}
 		}
 		if first {
 			return
 		}
-		delete(a.slots, oldest)
+		delete(a.slots, newest)
 		a.evictedSlots++
 	}
 }
@@ -310,10 +407,7 @@ func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
 		return
 	}
 
-	minSlot := uint64(0)
-	if a.maxObservedSlot > maxRetainedIncompleteSlotLag {
-		minSlot = a.maxObservedSlot - maxRetainedIncompleteSlotLag
-	}
+	minSlot := a.minRetainedIncompleteSlotLocked()
 
 	filtered := a.priorityRepairOrder[:0]
 	for _, slot := range a.priorityRepairOrder {
@@ -514,6 +608,38 @@ func (a *SlotAssembler) IgnoredOldShreds() uint64 {
 	return a.ignoredOldShreds
 }
 
+func (a *SlotAssembler) IgnoredFarSlotShreds() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ignoredFarSlotShreds
+}
+
+// ShouldAcceptIngressShred drops turbine shreds far outside the replay/repair
+// window so unrelated fork traffic does not drown repair pings and frontier work.
+func (a *SlotAssembler) ShouldAcceptIngressShred(slot uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.repairFloorSlot == 0 {
+		return true
+	}
+	minSlot := a.repairFloorSlot
+	if minSlot > ingressSlotMargin {
+		minSlot -= ingressSlotMargin
+	}
+	if slot < minSlot {
+		a.ignoredFarSlotShreds++
+		return false
+	}
+	if a.repairHorizonSlot != 0 {
+		maxSlot := a.repairHorizonSlot + ingressSlotMargin
+		if slot > maxSlot {
+			a.ignoredFarSlotShreds++
+			return false
+		}
+	}
+	return true
+}
+
 func (a *SlotAssembler) PriorityRepairSlots() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -542,15 +668,15 @@ func (a *SlotAssembler) RepairRequests(maxSlots int, maxMissingPerSlot int) []Sl
 		return nil
 	}
 	repairThrough := a.maxObservedSlot - repairObservedSlotLag
+	if a.repairHorizonSlot != 0 && repairThrough > a.repairHorizonSlot {
+		repairThrough = a.repairHorizonSlot
+	}
 	start := uint64(0)
 	if repairThrough > repairScanSlotWindow {
 		start = repairThrough - repairScanSlotWindow
 	}
-	if a.maxObservedSlot > maxRetainedIncompleteSlotLag {
-		minRetained := a.maxObservedSlot - maxRetainedIncompleteSlotLag
-		if start < minRetained {
-			start = minRetained
-		}
+	if minRetained := a.minRetainedIncompleteSlotLocked(); start < minRetained {
+		start = minRetained
 	}
 
 	requests := make([]SlotRepairRequest, 0, maxSlots)
@@ -875,6 +1001,10 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	}
 
 	blk := BlockFromEntries(s.slot, effectiveParentSlot, entries)
+	if effectiveParentKnown && effectiveParentBlockID != (solana.Hash{}) {
+		blk.AlpenglowParentBlockID = effectiveParentBlockID
+		blk.HasAlpenglowParentBlockID = true
+	}
 	if blockID, ok, err := s.alpenglowBlockID(effectiveParentSlot, effectiveParentBlockID, effectiveParentKnown); err != nil {
 		return nil, err
 	} else if ok {
