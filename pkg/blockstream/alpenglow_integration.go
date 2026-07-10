@@ -10,6 +10,23 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+const (
+	// maxFrontierRepairAhead caps turbine repair to a window starting at the
+	// replay waiting slot instead of the live tip.
+	maxFrontierRepairAhead = uint64(64)
+)
+
+func frontierRepairEndSlot(waitingSlot, gapParentSlot uint64) uint64 {
+	if waitingSlot == 0 {
+		return 0
+	}
+	end := waitingSlot + maxFrontierRepairAhead
+	if gapParentSlot > waitingSlot && gapParentSlot < end {
+		end = gapParentSlot
+	}
+	return end
+}
+
 func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if !bs.turbineAlpenglowBlockIDHints || slot == 0 || blockID == (solana.Hash{}) {
 		return
@@ -72,15 +89,30 @@ func (bs *BlockSource) prioritizeTurbineRepairRange(start, end uint64) {
 	receiver := bs.activeTurbineReceiver
 	bs.alpenglowMu.Unlock()
 	if receiver != nil {
+		// start is the replay frontier (waiting slot): pin it as the repair
+		// floor so the assembler never evicts it while the tip races ahead.
+		receiver.SetRepairFloor(start)
 		receiver.PrioritizeRepairRange(start, end)
 	}
 }
 
-func (bs *BlockSource) prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot uint64) {
-	end := waitingSlot
-	if firstBufferedParentSlot > waitingSlot {
-		end = firstBufferedParentSlot
+func (bs *BlockSource) PrioritizeTurbineRepairSlot(slot uint64) {
+	if bs.sourceType != BlockSourceTurbine || slot == 0 {
+		return
 	}
+	if !bs.turbineRepairOnly && !bs.turbineAlpenglowBlockIDHints {
+		return
+	}
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver != nil {
+		receiver.PrioritizeRepairSlot(slot)
+	}
+}
+
+func (bs *BlockSource) prioritizeTurbineRepairForLiveGap(waitingSlot, firstBufferedParentSlot uint64) {
+	end := frontierRepairEndSlot(waitingSlot, firstBufferedParentSlot)
 	bs.prioritizeTurbineRepairRange(waitingSlot, end)
 }
 
@@ -89,6 +121,19 @@ func (bs *BlockSource) registerActiveTurbineReceiver(receiver *turbine.UDPReceiv
 	bs.activeTurbineReceiver = receiver
 	bs.alpenglowMu.Unlock()
 	bs.seedTurbineRepairObservedSlot(bs.repairObservedSeedSlot())
+
+	if receiver == nil || !bs.turbineRepairOnlyMode() {
+		return
+	}
+	bs.reorderMu.Lock()
+	waitingSlot := bs.waitingSlotLocked()
+	bs.reorderMu.Unlock()
+	if waitingSlot == 0 {
+		return
+	}
+	end := frontierRepairEndSlot(waitingSlot, 0)
+	receiver.SetRepairFloor(waitingSlot)
+	receiver.PrioritizeRepairRange(waitingSlot, end)
 }
 
 func (bs *BlockSource) repairObservedSeedSlot() uint64 {
@@ -99,6 +144,9 @@ func (bs *BlockSource) repairObservedSeedSlot() uint64 {
 	bs.reorderMu.Unlock()
 
 	seed := waitingSlot + repairObservedSlotLag
+	if frontierEnd := frontierRepairEndSlot(waitingSlot, 0); frontierEnd != 0 && seed > frontierEnd {
+		seed = frontierEnd
+	}
 	if bs.startSlot > seed {
 		seed = bs.startSlot
 	}
@@ -109,8 +157,8 @@ func (bs *BlockSource) repairObservedSeedSlot() uint64 {
 	} else if bs.startSlot > 0 && bs.startSlot > seed {
 		seed = bs.startSlot
 	}
-	if tip := bs.confirmedTip.Load(); tip > seed {
-		seed = tip
+	if frontierEnd := frontierRepairEndSlot(waitingSlot, 0); frontierEnd != 0 && seed > frontierEnd {
+		seed = frontierEnd
 	}
 	return seed
 }
@@ -162,13 +210,19 @@ func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) {
 	if parentSlot == 0 {
 		parentSlot = blk.ParentSlot
 	}
+	// ParentHash is the parent's Alpenglow block id (zero when unknown) so the
+	// chain tracker can link observed blocks into finalized ancestor chains.
+	var parentBlockID solana.Hash
+	if blk.HasAlpenglowParentBlockID {
+		parentBlockID = solana.Hash(blk.AlpenglowParentBlockID)
+	}
 	bs.alpenglowCandidateBlockSink(alpenglow.ReplayBlockObservation{
 		Block: alpenglow.BlockID{
 			Slot: blk.Slot,
 			Hash: solana.Hash(blk.AlpenglowBlockID),
 		},
 		ParentSlot: parentSlot,
-		ParentHash: solana.Hash(blk.LastBlockhash),
+		ParentHash: parentBlockID,
 		Source:     bs.liveShredStreamName(),
 		At:         time.Now(),
 	})
@@ -204,16 +258,6 @@ func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
 			bs.slotStateMu.Unlock()
 			bs.clearSlotErrors(waitingSlot)
 			bs.stats.FetchSkipped.Add(1)
-			if bs.isLocalLeaderSlot(waitingSlot) {
-				// TODO(cavey-debug): remove once we are done debugging local leader skips.
-				// cavey TODO: remove once we are done debugging.
-				mlog.Log.Infof(
-					"cavey debug: ALPENGLOW certified skip on LOCAL leader slot %d (%s) exec=%d confirmed_tip=%d next_send=%d has_local_commit=%t",
-					waitingSlot, decision.Reason,
-					bs.lastExecutedSlot.Load(), bs.confirmedTip.Load(), waitingSlot,
-					bs.hasLocalLeaderCommit != nil && bs.hasLocalLeaderCommit(waitingSlot),
-				)
-			}
 			mlog.Log.FileOnlyf("ALPENGLOW consensus decision: slot %d is skipped (%s)", waitingSlot, decision.Reason)
 		}
 		return false

@@ -1,6 +1,7 @@
 package blockstream
 
 import (
+	"crypto/ed25519"
 	"math"
 	"strings"
 	"testing"
@@ -271,6 +272,216 @@ func TestForceRPCForLightbringerParentMismatchClearsBufferedState(t *testing.T) 
 	}
 	if len(bs.lightbringerBuffer) != 0 || len(bs.lightbringerBufferOrder) != 0 {
 		t.Fatalf("expected prefetched Lightbringer buffer to be cleared")
+	}
+}
+
+func TestRollbackEmissionFrontierMarksSkippedRange(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		TurbineRepairOnly:            true,
+		StartSlot:                    100,
+		EndSlot:                      200,
+	})
+
+	bs.lastEmittedBlockSlot = 6378242
+	bs.nextSlotToSend = 6378244
+	bs.reorderBuffer[6378244] = &b.Block{
+		Slot:             6378244,
+		FromLightbringer: true,
+		SourceParentSlot: 6378241,
+	}
+	bs.slotState[6378244] = slotDone
+
+	bs.RollbackEmissionFrontier(6378241, 6378243)
+
+	if bs.lastEmittedBlockSlot != 6378241 {
+		t.Fatalf("lastEmittedBlockSlot = %d, want 6378241", bs.lastEmittedBlockSlot)
+	}
+	if bs.nextSlotToSend != 6378244 {
+		t.Fatalf("nextSlotToSend = %d, want 6378244", bs.nextSlotToSend)
+	}
+	if !bs.skippedSlots[6378242] || !bs.skippedSlots[6378243] {
+		t.Fatalf("expected slots 6378242 and 6378243 to be marked skipped")
+	}
+	if _, exists := bs.reorderBuffer[6378244]; !exists {
+		t.Fatalf("expected waiting block 6378244 to remain buffered")
+	}
+	if got := bs.lastExecutedSlot.Load(); got != 6378241 {
+		t.Fatalf("lastExecutedSlot = %d, want 6378241", got)
+	}
+}
+
+func TestForceRPCForLightbringerParentMismatchRepairOnlyUsesHandler(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		TurbineRepairOnly:            true,
+		StartSlot:                    100,
+		EndSlot:                      200,
+	})
+
+	bs.lastEmittedBlockSlot = 6378242
+	bs.nextSlotToSend = 6378244
+	bs.reorderBuffer[6378244] = &b.Block{
+		Slot:             6378244,
+		FromLightbringer: true,
+		SourceParentSlot: 6378241,
+	}
+
+	handled := false
+	bs.SetParentMismatchHandler(func(waiting, observed, expected uint64) bool {
+		if waiting != 6378244 || observed != 6378241 || expected != 6378242 {
+			t.Fatalf("unexpected mismatch args: waiting=%d observed=%d expected=%d", waiting, observed, expected)
+		}
+		bs.RollbackEmissionFrontier(observed, waiting-1)
+		handled = true
+		return true
+	})
+
+	bs.forceRPCForLightbringerParentMismatch(6378244, 6378241, 6378242)
+
+	if !handled {
+		t.Fatalf("expected parent mismatch handler to run")
+	}
+	if _, exists := bs.reorderBuffer[6378244]; !exists {
+		t.Fatalf("expected handler rollback to keep waiting block 6378244")
+	}
+	if !bs.skippedSlots[6378242] {
+		t.Fatalf("expected slot 6378242 to be marked skipped")
+	}
+}
+
+func TestForceRPCForLightbringerParentMismatchRepairOnlyDiscardsWaitingBlock(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		TurbineRepairOnly:            true,
+		StartSlot:                    100,
+		EndSlot:                      200,
+	})
+
+	bs.lastEmittedBlockSlot = 6378242
+	bs.nextSlotToSend = 6378244
+	bs.reorderBuffer[6378244] = &b.Block{
+		Slot:             6378244,
+		FromLightbringer: true,
+		SourceParentSlot: 6378241,
+	}
+	bs.slotState[6378244] = slotDone
+
+	bs.forceRPCForLightbringerParentMismatch(6378244, 6378241, 6378242)
+
+	if _, exists := bs.reorderBuffer[6378244]; exists {
+		t.Fatalf("expected disconnected repair-only block to be dropped from reorder buffer")
+	}
+	if _, exists := bs.slotState[6378244]; exists {
+		t.Fatalf("expected slot state for disconnected block to be cleared")
+	}
+	if got := bs.lightbringerForceRPCUntil.Load(); got != 0 {
+		t.Fatalf("expected repair-only parent mismatch to avoid RPC fallback, got force_rpc_until=%d", got)
+	}
+}
+
+func localLeaderBlockSourceTest(t *testing.T, slot uint64, hasCommit bool) *BlockSource {
+	t.Helper()
+	_, identity, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	leader := solana.PublicKey(identity.Public().(ed25519.PublicKey))
+	return NewBlockSource(&BlockSourceOpts{
+		SourceType:        BlockSourceTurbine,
+		TurbineBindAddr:   "127.0.0.1:0",
+		TurbineRepairOnly: true,
+		StartSlot:         100,
+		EndSlot:           200,
+		GossipIdentity:    identity,
+		LeaderForSlot: func(s uint64) (solana.PublicKey, bool) {
+			if s == slot {
+				return leader, true
+			}
+			return solana.PublicKey{}, false
+		},
+		HasLocalLeaderCommit: func(s uint64) bool {
+			return hasCommit && s == slot
+		},
+	})
+}
+
+func TestSynthesizeLocalLeaderSkipClearsBufferedTurbineBlock(t *testing.T) {
+	const slot = uint64(105)
+	bs := localLeaderBlockSourceTest(t, slot, true)
+	bs.lastEmittedBlockSlot = slot - 1
+	bs.nextSlotToSend = slot
+	bs.reorderBuffer[slot] = &b.Block{
+		Slot:             slot,
+		FromLightbringer: true,
+		SourceParentSlot: slot - 1,
+	}
+	bs.slotState[slot] = slotDone
+
+	bs.reorderMu.Lock()
+	if !bs.synthesizeLocalLeaderSkipLocked() {
+		t.Fatal("expected local leader skip synthesis")
+	}
+	bs.reorderMu.Unlock()
+
+	if _, exists := bs.reorderBuffer[slot]; exists {
+		t.Fatal("expected buffered turbine block to be cleared")
+	}
+	if !bs.skippedSlots[slot] || !bs.lightbringerSynthesizedSkips[slot] {
+		t.Fatal("expected local leader skip markers")
+	}
+	if _, exists := bs.slotState[slot]; exists {
+		t.Fatal("expected slot state to be cleared after releasing turbine slot")
+	}
+}
+
+func TestIngestLiveShredBlockDefersOwnLeaderSlot(t *testing.T) {
+	const slot = uint64(105)
+	bs := localLeaderBlockSourceTest(t, slot, false)
+	bs.nextSlotToSend = slot
+	bs.lightbringerHandoffSlot.Store(slot)
+	bs.isNearTip.Store(true)
+	bs.lightbringerActive.Store(true)
+
+	blk := &b.Block{Slot: slot, FromLightbringer: true, SourceParentSlot: slot - 1}
+	if !bs.ingestLiveShredBlock(blk) {
+		t.Fatal("expected ingest to succeed without blocking")
+	}
+	select {
+	case <-bs.resultQueue:
+		t.Fatal("expected own-leader turbine block to be dropped before result queue")
+	default:
+	}
+}
+
+func TestNotifyLocalLeaderCommitWakesSkipSynthesis(t *testing.T) {
+	const slot = uint64(105)
+	bs := localLeaderBlockSourceTest(t, slot, true)
+	bs.nextSlotToSend = slot
+	bs.lastEmittedBlockSlot = slot - 1
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+
+	bs.NotifyLocalLeaderCommit(slot)
+	close(bs.resultQueue)
+	<-done
+
+	skip := bs.NextBlock()
+	if skip == nil || !skip.IsSkipped || skip.Slot != slot {
+		t.Fatalf("expected local leader skip for slot %d, got %+v", slot, skip)
+	}
+	if !skip.FromLightbringer {
+		t.Fatal("expected local leader skip to be marked as live-stream sourced")
 	}
 }
 
@@ -1783,5 +1994,17 @@ func TestTurbineRepairOnlyDisablesRPCBlockFetch(t *testing.T) {
 	source, status, _ := bs.currentSourceSnapshot()
 	if source != "turbine" || !strings.Contains(status, "repair-only") {
 		t.Fatalf("expected repair-only source status, got source=%q status=%q", source, status)
+	}
+}
+
+func TestFrontierRepairEndSlot(t *testing.T) {
+	if end := frontierRepairEndSlot(100, 0); end != 164 {
+		t.Fatalf("default end = %d, want 164", end)
+	}
+	if end := frontierRepairEndSlot(100, 103); end != 103 {
+		t.Fatalf("gap parent end = %d, want 103", end)
+	}
+	if end := frontierRepairEndSlot(100, 200); end != 164 {
+		t.Fatalf("distant gap parent end = %d, want capped 164", end)
 	}
 }
