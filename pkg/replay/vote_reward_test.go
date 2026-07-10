@@ -48,15 +48,15 @@ func TestCalculateAlpenglowRewardSplit(t *testing.T) {
 }
 
 func TestCalcSlotTimestampNanosInclusiveRange(t *testing.T) {
-	// producer_ns - slot_range_duration(target+1, bank) with constant 400ms:
-	// (bank - target) * nsPerSlot
-	const producer int64 = 1783652064462318754
-	got := calcSlotTimestampNanos(961073, 961081, producer)
-	want := producer - int64(961081-961073)*int64(nsPerSlot)
+	// producer_ns - slot_range_duration(target+1, bank) with constant 200ms:
+	// (bank - target) * alpenglowNsPerSlot
+	const producer int64 = 1783653042790683871
+	got := calcSlotTimestampNanos(965552, 965560, producer)
+	want := producer - int64(965560-965552)*int64(alpenglowNsPerSlot)
 	assert.Equal(t, want, got)
-	assert.Equal(t, want/1_000_000_000, got/1_000_000_000)
+	assert.Equal(t, int64(1783653041), got/1_000_000_000)
 
-	assert.Equal(t, producer, calcSlotTimestampNanos(961081, 961081, producer))
+	assert.Equal(t, producer, calcSlotTimestampNanos(965560, 965560, producer))
 	assert.Equal(t, int64(0), calcSlotTimestampNanos(10, 20, 100))
 }
 

@@ -144,6 +144,58 @@ func WriteLeaderBankHashDetails(accountsDbDir string, in SlotDetailsInput) error
 	return nil
 }
 
+type SlotDetailsSnapshot struct {
+	Slot                   uint64
+	BankHash               string
+	ParentBankHash         string
+	SignatureCount         uint64
+	LastBlockhash          string
+	AccountsLtHashChecksum string
+	ModifiedAccountCount   int
+}
+
+// SnapshotSlotDetails returns log/compare-friendly bank hash components.
+func SnapshotSlotDetails(in SlotDetailsInput) SlotDetailsSnapshot {
+	details := BuildSlotDetails(in)
+	return SlotDetailsSnapshot{
+		Slot:                   details.Slot,
+		BankHash:               details.BankHash,
+		ParentBankHash:         details.ParentBankHash,
+		SignatureCount:         details.SignatureCount,
+		LastBlockhash:          details.LastBlockhash,
+		AccountsLtHashChecksum: details.AccountsLtHashChecksum,
+		ModifiedAccountCount:   len(details.Accounts),
+	}
+}
+
+// WriteMismatchBankHashDetails writes Agave-compatible components for offline diff.
+func WriteMismatchBankHashDetails(accountsDbDir string, in SlotDetailsInput) error {
+	if accountsDbDir == "" {
+		return nil
+	}
+	details := BuildSlotDetails(in)
+	payload := bankHashDetailsFile{
+		Version:             fmt.Sprintf("mithril %s (commit:%s)", version.Version, version.GitCommit),
+		AccountDataEncoding: "base64",
+		BankHashDetails:     []slotDetails{details},
+	}
+	dir := filepath.Join(accountsDbDir, "bank_hash_details")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create bank_hash_details dir: %w", err)
+	}
+	filename := fmt.Sprintf("%d-computed-%s.json", in.Slot, details.BankHash)
+	path := filepath.Join(dir, filename)
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal bank hash details: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write bank hash details: %w", err)
+	}
+	mlog.Log.Errorf("footer bank hash mismatch wrote bank_hash_details: %s", path)
+	return nil
+}
+
 // SlotDetailsFromLeaderCommit builds detail input from a committed leader slot context.
 func SlotDetailsFromLeaderCommit(
 	slotCtx *sealevel.SlotCtx,

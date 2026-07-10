@@ -23,6 +23,10 @@ var agMigrationEpochCredit = sealevel.EpochCredits{
 	PrevCredits: math.MaxUint64,
 }
 
+// alpenglowNsPerSlot is the fixed slot duration used when deriving reward/final
+// LastTimestamp from footer producer time (200ms).
+const alpenglowNsPerSlot = 200_000_000
+
 // ApplyAlpenglowVoteRewards updates vote account state from validated footer reward and final certs.
 func ApplyAlpenglowVoteRewards(
 	acctsDb *accountsdb.AccountsDb,
@@ -320,13 +324,13 @@ func applyLeaderVoteReward(
 }
 
 // calcSlotTimestampNanos returns producer_ns - duration(targetSlot+1..=bankSlot).
-// With constant nsPerSlot this is (bankSlot - targetSlot) * nsPerSlot.
+// Alpenglow community cluster uses 200ms slots for this derivation.
 func calcSlotTimestampNanos(targetSlot, bankSlot uint64, producerTimeNanos int64) int64 {
 	if targetSlot >= bankSlot {
 		return producerTimeNanos
 	}
 	slots := bankSlot - targetSlot
-	duration := int64(slots) * int64(nsPerSlot)
+	duration := int64(slots) * int64(alpenglowNsPerSlot)
 	if producerTimeNanos < duration {
 		return 0
 	}
