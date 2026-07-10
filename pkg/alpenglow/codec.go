@@ -21,6 +21,13 @@ const (
 )
 
 const (
+	votePayloadTagNotarize         uint8 = 1
+	votePayloadTagFinalize         uint8 = 2
+	votePayloadTagSkip             uint8 = 3
+	votePayloadTagNotarizeFallback uint8 = 4
+	votePayloadTagSkipFallback     uint8 = 5
+	votePayloadTagGenesis          uint8 = 6
+
 	votorVoteTagNotarize         uint32 = 0
 	votorVoteTagFinalize         uint32 = 1
 	votorVoteTagSkip             uint32 = 2
@@ -117,6 +124,19 @@ func EncodeVote(vote Vote) ([]byte, error) {
 	return w.Bytes(), nil
 }
 
+// EncodeVotePayloadToSign matches agave_votor_messages::wire::get_vote_payload_to_sign.
+// BLS signatures on votes and aggregated reward/footer certificates are over this payload.
+func EncodeVotePayloadToSign(vote Vote, shredVersion uint16) ([]byte, error) {
+	if err := vote.ValidateBasic(); err != nil {
+		return nil, err
+	}
+	w := wincode.NewWriter(48)
+	if err := encodeVotePayloadToSignInto(w, vote, shredVersion); err != nil {
+		return nil, err
+	}
+	return w.Bytes(), nil
+}
+
 func DecodeVote(data []byte) (Vote, error) {
 	r := wincode.NewReader(data)
 	vote, err := decodeVoteFrom(r)
@@ -205,6 +225,41 @@ func decodeVoteMessageFrom(r *wincode.Reader) (VoteMessage, error) {
 		return VoteMessage{}, err
 	}
 	return VoteMessage{Vote: vote, Signature: signature, Rank: rank}, nil
+}
+
+func encodeVotePayloadToSignInto(w *wincode.Writer, vote Vote, shredVersion uint16) error {
+	switch vote.Type {
+	case VoteTypeNotarize:
+		w.WriteU8(votePayloadTagNotarize)
+		w.WriteU64(vote.Slot)
+		writeHash(w, vote.BlockHash)
+		w.WriteU16(shredVersion)
+	case VoteTypeFinalize:
+		w.WriteU8(votePayloadTagFinalize)
+		w.WriteU64(vote.Slot)
+		w.WriteU16(shredVersion)
+	case VoteTypeSkip:
+		w.WriteU8(votePayloadTagSkip)
+		w.WriteU64(vote.Slot)
+		w.WriteU16(shredVersion)
+	case VoteTypeNotarizeFallback:
+		w.WriteU8(votePayloadTagNotarizeFallback)
+		w.WriteU64(vote.Slot)
+		writeHash(w, vote.BlockHash)
+		w.WriteU16(shredVersion)
+	case VoteTypeSkipFallback:
+		w.WriteU8(votePayloadTagSkipFallback)
+		w.WriteU64(vote.Slot)
+		w.WriteU16(shredVersion)
+	case VoteTypeGenesis:
+		w.WriteU8(votePayloadTagGenesis)
+		w.WriteU64(vote.Slot)
+		writeHash(w, vote.BlockHash)
+		w.WriteU16(shredVersion)
+	default:
+		return fmt.Errorf("alpenglow: invalid vote type %q", vote.Type)
+	}
+	return nil
 }
 
 func encodeVoteInto(w *wincode.Writer, vote Vote) error {

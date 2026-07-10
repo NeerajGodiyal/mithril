@@ -11,6 +11,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 )
@@ -47,6 +48,12 @@ type AlpenglowBlockIDSink func(slot uint64, blockID solana.Hash)
 
 type AlpenglowBlockIDPublisher interface {
 	SetAlpenglowBlockIDSink(sink AlpenglowBlockIDSink)
+}
+
+type AlpenglowRepairPrioritySink func(slot uint64)
+
+type AlpenglowRepairPriorityPublisher interface {
+	SetAlpenglowRepairPrioritySink(sink AlpenglowRepairPrioritySink)
 }
 
 type AlpenglowDecisionSource interface {
@@ -176,6 +183,8 @@ type AlpenglowObserverEngine struct {
 	receiver                *alpenglow.Receiver
 	blockIDSinkMu           sync.RWMutex
 	blockIDSink             AlpenglowBlockIDSink
+	repairPrioritySinkMu    sync.RWMutex
+	repairPrioritySink      AlpenglowRepairPrioritySink
 	recentBlockIDs          map[uint64]solana.Hash
 	recentBlockIDOrder      []uint64
 	epochLookupMu           sync.RWMutex
@@ -248,13 +257,15 @@ func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObser
 		replayObs := alpenglow.ReplayBlockObservation{
 			Block:      blockID,
 			ParentSlot: alpenglowParentSlot(obs.Block),
-			ParentHash: solana.Hash(obs.Block.LastBlockhash),
+			ParentHash: alpenglowParentBlockID(obs.Block),
 			Source:     obs.Source,
 			At:         obs.At,
 		}
+		e.enrichReplayBlockObservation(&replayObs)
 		e.ensureObserver().ObserveReplayBlock(replayObs)
 		if blockID.HasHash() {
-			e.ensureChain().ObserveReplayBlock(replayObs)
+			e.observeChainReplayBlock(replayObs)
+			e.rememberRecentAlpenglowBlockID(blockID.Slot, blockID.Hash)
 		}
 	}
 	return nil
@@ -318,6 +329,12 @@ func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDS
 	}
 }
 
+func (e *AlpenglowObserverEngine) SetAlpenglowRepairPrioritySink(sink AlpenglowRepairPrioritySink) {
+	e.repairPrioritySinkMu.Lock()
+	e.repairPrioritySink = sink
+	e.repairPrioritySinkMu.Unlock()
+}
+
 func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 	e.votorMessageHookMu.RLock()
 	hook := e.votorMessageHook
@@ -364,6 +381,12 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 		if sink != nil {
 			sink(blockID.Slot, blockID.Hash)
 		}
+		e.repairPrioritySinkMu.Lock()
+		repairSink := e.repairPrioritySink
+		e.repairPrioritySinkMu.Unlock()
+		if repairSink != nil {
+			repairSink(blockID.Slot)
+		}
 		return
 	}
 	e.recentBlockIDs[blockID.Slot] = blockID.Hash
@@ -377,17 +400,109 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 	if sink != nil {
 		sink(blockID.Slot, blockID.Hash)
 	}
+
+	e.repairPrioritySinkMu.Lock()
+	repairSink := e.repairPrioritySink
+	e.repairPrioritySinkMu.Unlock()
+	if repairSink != nil {
+		repairSink(blockID.Slot)
+	}
 }
 
 func (e *AlpenglowObserverEngine) NextAlpenglowDecision(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
 	return e.ensureChain().NextDecision(anchorSlot)
 }
 
+func (e *AlpenglowObserverEngine) prioritizeRepairSlot(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	e.repairPrioritySinkMu.Lock()
+	sink := e.repairPrioritySink
+	e.repairPrioritySinkMu.Unlock()
+	if sink != nil {
+		sink(slot)
+	}
+}
+
 func (e *AlpenglowObserverEngine) ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation) {
 	if !obs.Block.HasHash() {
 		return
 	}
+	e.enrichReplayBlockObservation(&obs)
+	if obs.ParentSlot != 0 && obs.ParentHash != (solana.Hash{}) {
+		e.rememberRecentAlpenglowBlockID(obs.ParentSlot, obs.ParentHash)
+		e.prioritizeRepairSlot(obs.ParentSlot)
+	}
+	e.observeChainReplayBlock(obs)
+	e.rememberRecentAlpenglowBlockID(obs.Block.Slot, obs.Block.Hash)
+}
+
+func (e *AlpenglowObserverEngine) observeChainReplayBlock(obs alpenglow.ReplayBlockObservation) {
 	e.ensureChain().ObserveReplayBlock(obs)
+}
+
+func (e *AlpenglowObserverEngine) enrichReplayBlockObservation(obs *alpenglow.ReplayBlockObservation) {
+	if obs == nil || !obs.Block.HasHash() {
+		return
+	}
+	if obs.ParentSlot == 0 || obs.ParentHash != (solana.Hash{}) {
+		return
+	}
+	if parentID, ok := e.lookupParentAlpenglowBlockID(obs.ParentSlot); ok {
+		obs.ParentHash = parentID
+	}
+}
+
+func (e *AlpenglowObserverEngine) lookupParentAlpenglowBlockID(parentSlot uint64) (solana.Hash, bool) {
+	if parentSlot == 0 {
+		return solana.Hash{}, false
+	}
+
+	e.blockIDSinkMu.Lock()
+	if id, ok := e.recentBlockIDs[parentSlot]; ok && id != (solana.Hash{}) {
+		e.blockIDSinkMu.Unlock()
+		return id, true
+	}
+	e.blockIDSinkMu.Unlock()
+
+	if id, ok := global.AlpenglowBlockID(parentSlot); ok && id != (solana.Hash{}) {
+		return id, true
+	}
+
+	if block, ok := e.ensureChain().KnownBlockAtSlot(parentSlot); ok && block.HasHash() {
+		return block.Hash, true
+	}
+	return solana.Hash{}, false
+}
+
+func (e *AlpenglowObserverEngine) rememberRecentAlpenglowBlockID(slot uint64, blockID solana.Hash) {
+	if slot == 0 || blockID == (solana.Hash{}) {
+		return
+	}
+	e.blockIDSinkMu.Lock()
+	if e.recentBlockIDs == nil {
+		e.recentBlockIDs = make(map[uint64]solana.Hash)
+	}
+	if existing, exists := e.recentBlockIDs[slot]; exists && existing == blockID {
+		e.blockIDSinkMu.Unlock()
+		return
+	}
+	if _, exists := e.recentBlockIDs[slot]; !exists {
+		e.recentBlockIDOrder = append(e.recentBlockIDOrder, slot)
+	}
+	e.recentBlockIDs[slot] = blockID
+	for len(e.recentBlockIDOrder) > maxRecentAlpenglowBlockIDs {
+		old := e.recentBlockIDOrder[0]
+		e.recentBlockIDOrder = e.recentBlockIDOrder[1:]
+		delete(e.recentBlockIDs, old)
+	}
+	sink := e.blockIDSink
+	e.blockIDSinkMu.Unlock()
+	if sink != nil {
+		sink(slot, blockID)
+	}
+	e.ensureChain().RefreshParentLinkagesFromSlot(slot, blockID)
 }
 
 func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.ValidatorSet) error {
@@ -648,6 +763,16 @@ func alpenglowParentSlot(block *block.Block) uint64 {
 		return block.SourceParentSlot
 	}
 	return block.ParentSlot
+}
+
+// alpenglowParentBlockID returns the parent's Alpenglow block id when known,
+// or a zero hash. The chain tracker uses this to link observed blocks into
+// finalized ancestor chains, so it must never be an unrelated hash.
+func alpenglowParentBlockID(block *block.Block) solana.Hash {
+	if block == nil || !block.HasAlpenglowParentBlockID {
+		return solana.Hash{}
+	}
+	return solana.Hash(block.AlpenglowParentBlockID)
 }
 
 type AlpenglowEngine struct{}

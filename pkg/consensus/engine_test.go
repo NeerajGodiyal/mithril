@@ -228,7 +228,8 @@ func testAlpenglowBLSKey() *big.Int {
 func testAlpenglowCertificateSignature(t *testing.T, cert alpenglow.Certificate) []byte {
 	t.Helper()
 	vote := testAlpenglowCertificateVote(t, cert)
-	payload, err := alpenglow.EncodeVote(vote)
+	// Match CertificateVerifier's default shred version (0) and signed payload layout.
+	payload, err := alpenglow.EncodeVotePayloadToSign(vote, 0)
 	if err != nil {
 		t.Fatalf("encode certificate vote: %v", err)
 	}

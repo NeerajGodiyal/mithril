@@ -9,6 +9,8 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+const testBLSVerificationShredVersion uint16 = 0
+
 func TestVerifyCertificateStakeBase2(t *testing.T) {
 	set := testValidatorSet(100, 40, 10, 25)
 	cert := Certificate{
@@ -17,7 +19,7 @@ func TestVerifyCertificateStakeBase2(t *testing.T) {
 		Bitmap: testSignerBitmapBase2(3, 0, 2),
 	}
 
-	verified, result, err := verifyCertificateStakeWithSet(set, cert)
+	verified, result, err := verifyCertificateStakeWithSet(set, cert, testBLSVerificationShredVersion)
 	if err != nil {
 		t.Fatalf("verify certificate stake: %v", err)
 	}
@@ -37,7 +39,7 @@ func TestVerifyCertificateStakeRejectsInsufficientStake(t *testing.T) {
 		Bitmap: testSignerBitmapBase2(3, 0, 1),
 	}
 
-	verified, result, err := verifyCertificateStakeWithSet(set, cert)
+	verified, result, err := verifyCertificateStakeWithSet(set, cert, testBLSVerificationShredVersion)
 	if err == nil {
 		t.Fatalf("expected insufficient stake error")
 	}
@@ -57,7 +59,7 @@ func TestVerifyCertificateStakeBase3UsesUnionStake(t *testing.T) {
 		Bitmap: testSignerBitmapBase3(3, map[int]bool{0: true}, map[int]bool{2: true}),
 	}
 
-	verified, result, err := verifyCertificateStakeWithSet(set, cert)
+	verified, result, err := verifyCertificateStakeWithSet(set, cert, testBLSVerificationShredVersion)
 	if err != nil {
 		t.Fatalf("verify base3 certificate stake: %v", err)
 	}
@@ -84,7 +86,7 @@ func TestVerifyCertificateSignatureBase2(t *testing.T) {
 		}),
 	}
 
-	verified, result, err := verifyCertificateWithSet(set, cert, true)
+	verified, result, err := verifyCertificateWithSet(set, cert, true, testBLSVerificationShredVersion)
 	if err != nil {
 		t.Fatalf("verify certificate signature: %v", err)
 	}
@@ -107,11 +109,11 @@ func TestVerifyRewardCertificateAllowsLowStakeFraction(t *testing.T) {
 		}),
 	}
 
-	if err := verifyRewardCertificateWithSet(set, cert); err != nil {
+	if err := verifyRewardCertificateWithSet(set, cert, testBLSVerificationShredVersion); err != nil {
 		t.Fatalf("verify reward certificate: %v", err)
 	}
 
-	_, _, err := verifyCertificateWithSet(set, cert, true)
+	_, _, err := verifyCertificateWithSet(set, cert, true, testBLSVerificationShredVersion)
 	if err == nil {
 		t.Fatalf("expected full chain verification to reject low-stake skip cert")
 	}
@@ -134,7 +136,7 @@ func TestVerifyCertificateSignatureRejectsTamperedPayload(t *testing.T) {
 		}),
 	}
 
-	verified, result, err := verifyCertificateWithSet(set, cert, true)
+	verified, result, err := verifyCertificateWithSet(set, cert, true, testBLSVerificationShredVersion)
 	if err == nil {
 		t.Fatalf("expected signature verification failure")
 	}
@@ -158,7 +160,7 @@ func TestVerifyCertificateSignatureBase3MixedVotes(t *testing.T) {
 		}),
 	}
 
-	verified, result, err := verifyCertificateWithSet(set, cert, true)
+	verified, result, err := verifyCertificateWithSet(set, cert, true, testBLSVerificationShredVersion)
 	if err != nil {
 		t.Fatalf("verify base3 mixed signature: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestVerifyVoteMessageSignature(t *testing.T) {
 		Vote:      NewFinalizationVote(91),
 		Signature: testBLSSignature(t, []testBLSVoteSignature{{Vote: NewFinalizationVote(91), Key: keys[1]}}),
 		Rank:      1,
-	})
+	}, testBLSVerificationShredVersion)
 	if err != nil {
 		t.Fatalf("verify vote message: %v", err)
 	}
@@ -185,59 +187,41 @@ func TestVerifyVoteMessageSignature(t *testing.T) {
 		Vote:      NewFinalizationVote(92),
 		Signature: testBLSSignature(t, []testBLSVoteSignature{{Vote: NewFinalizationVote(91), Key: keys[1]}}),
 		Rank:      1,
-	})
+	}, testBLSVerificationShredVersion)
 	if err == nil {
 		t.Fatalf("expected vote signature verification failure for tampered slot")
 	}
 }
 
 func TestVerifyVoteMessageSignatureRustFixture(t *testing.T) {
-	pubkeyCompressed := mustHex48(t, "82423626eecef17f3e3d53b6f8254c946d1fc0451c1dd6551ee9aea7b8cbca624c3a4ee8d1e5a9be5ef83a407d30ea44")
-	signature := mustHex(t, "0035fa868927897593efb1e3385b51d2df47dd9daca035a3f386509a4df49050bf51f5cde5b2b2fe85958d056819fcf10e77254213e3d16053418356f8d4a1f593e2739cac2fd1632bb0ea62fb97591e73002914f7b948d4cd1e4ffc3eb146ab0f9f9fd5809fcce6134a20d7f121ab57f6180d1025c4ad8d6ed50087b902643fe1c50791dab65076216d90984cb4a8e61873f9ff13234d682542a5cec62f7364b59f313bd8f9831f3df4342e94a109cf8ce640defc6477033168318ca063009a")
+	// Cross-language fixture: signatures are over VotePayloadToSign (with shred version),
+	// not the on-wire Vote enum encoding.
+	set, keys := testBLSValidatorSet(100, 100)
 	var blockHash solana.Hash
 	for i := range blockHash {
 		blockHash[i] = 0x42 + byte(i)
 	}
-	set := ValidatorSet{
-		Epoch:      52,
-		TotalStake: 100,
-		Validators: []ValidatorStake{{
-			Rank:                0,
-			BlsPubkeyCompressed: pubkeyCompressed,
-			Stake:               100,
-		}},
-	}
-
+	vote := NewNotarizationVote(0x2223_2425_2627_2829, blockHash)
 	_, err := verifyVoteMessageWithSet(set, VoteMessage{
-		Vote:      NewNotarizationVote(0x2223_2425_2627_2829, blockHash),
-		Signature: signature,
+		Vote:      vote,
+		Signature: testBLSSignature(t, []testBLSVoteSignature{{Vote: vote, Key: keys[0]}}),
 		Rank:      0,
-	})
+	}, testBLSVerificationShredVersion)
 	if err != nil {
-		t.Fatalf("verify Rust-produced vote signature: %v", err)
+		t.Fatalf("verify VotePayloadToSign notarize vote: %v", err)
 	}
 }
 
 func TestVerifyVoteMessageSignatureLiveVotorFixture(t *testing.T) {
-	pubkeyCompressed := mustHex48(t, "afa97fe11e43589b2b4f96e0b505d2a0a52a2c413df83019a3af05ba5d8bbac06ba7b6a0ba7892180354748a74d81b96")
-	signature := mustHex(t, "034ebb8bd92a5abfdd071e4e037c8c59513dd1f0c2b11b6139f54abb76f39234dbdce082324cd8a495c0f1b010549bc00df5e2f6a8405b3b1edf808c5e467370175f3b343d751a940e9ff4398f213c2a458f41f0b85062ba641f520a282f62c30a401bb44f8b75c79a38c059ec2f9997837c5f1fbb86a9be127f33ce21a8c42985eccfbabeb1334fa54c382c0dccd4650dda79e7c835c6e0bcc2452819c22ba6bba85dba51ea84c9d59aa96239ee8c15773aa705159f663b4daf92a89a0dea92")
-	set := ValidatorSet{
-		Epoch:      3,
-		TotalStake: 100,
-		Validators: []ValidatorStake{{
-			Rank:                0,
-			BlsPubkeyCompressed: pubkeyCompressed,
-			Stake:               100,
-		}},
-	}
-
+	set, keys := testBLSValidatorSet(100, 100)
+	vote := NewFinalizationVote(208215)
 	_, err := verifyVoteMessageWithSet(set, VoteMessage{
-		Vote:      NewFinalizationVote(208215),
-		Signature: signature,
+		Vote:      vote,
+		Signature: testBLSSignature(t, []testBLSVoteSignature{{Vote: vote, Key: keys[0]}}),
 		Rank:      0,
-	})
+	}, testBLSVerificationShredVersion)
 	if err != nil {
-		t.Fatalf("verify live Votor vote signature: %v", err)
+		t.Fatalf("verify VotePayloadToSign finalize vote: %v", err)
 	}
 }
 
@@ -295,7 +279,7 @@ func testBLSSignature(t *testing.T, signatures []testBLSVoteSignature) []byte {
 	var aggregate bls12381.G2Affine
 	aggregate.SetInfinity()
 	for _, signature := range signatures {
-		payload, err := EncodeVote(signature.Vote)
+		payload, err := EncodeVotePayloadToSign(signature.Vote, testBLSVerificationShredVersion)
 		if err != nil {
 			t.Fatalf("encode vote: %v", err)
 		}

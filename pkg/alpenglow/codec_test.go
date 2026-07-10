@@ -65,6 +65,19 @@ func TestEncodeMessageCertificateGolden(t *testing.T) {
 	}
 }
 
+func TestEncodeVotePayloadToSignSkip(t *testing.T) {
+	payload, err := EncodeVotePayloadToSign(NewSkipVote(953240), 10638)
+	if err != nil {
+		t.Fatalf("EncodeVotePayloadToSign: %v", err)
+	}
+	if len(payload) != 11 {
+		t.Fatalf("skip payload len = %d, want 11", len(payload))
+	}
+	if payload[0] != votePayloadTagSkip {
+		t.Fatalf("skip payload tag = %d, want %d", payload[0], votePayloadTagSkip)
+	}
+}
+
 func TestVoteRoundTripsAllVariants(t *testing.T) {
 	hash := testHashSeq(0x40)
 	tests := []Vote{
