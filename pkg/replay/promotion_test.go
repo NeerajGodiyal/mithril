@@ -233,6 +233,35 @@ func TestUnrootedTailGetAccountsBatch(t *testing.T) {
 	assert.Equal(t, 1, durable.batchCalls, "misses fetched in a single durable batch")
 }
 
+// Reads must never expose the WorkingSet's retained historical account. Several
+// legitimate replay paths mutate an account returned by GetAccount before
+// writing it into the current bank; aliasing that mutation into an older slot
+// makes a later fold persist future state and double-apply it after restart.
+func TestUnrootedTailReadsDoNotMutateHeldState(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	stored := testAccount(1, 51)
+	stored.Data = []byte{1, 2, 3}
+	tail.Add(5, []*accounts.Account{stored}, testHashBytes(5))
+
+	single, err := tail.GetAccount(6, stored.Key)
+	require.NoError(t, err)
+	single.Lamports = 99
+	single.Data[0] = 9
+
+	batch, err := tail.GetAccountsBatch(context.Background(), 6, []solana.PublicKey{stored.Key})
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	assert.Equal(t, uint64(51), batch[0].Lamports)
+	assert.Equal(t, []byte{1, 2, 3}, batch[0].Data)
+	batch[0].Lamports = 100
+	batch[0].Data[1] = 8
+
+	again, err := tail.GetAccount(6, stored.Key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(51), again.Lamports)
+	assert.Equal(t, []byte{1, 2, 3}, again.Data)
+}
+
 // OverCap trips only when held slots exceed the cap (backpressure on stalled rooting).
 func TestUnrootedTailOverCap(t *testing.T) {
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 2, 1, "")

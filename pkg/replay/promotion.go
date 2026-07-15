@@ -92,7 +92,10 @@ func newUnrootedTail(durable blockAccountSource, committer batchCommitter, haltC
 // (rooted) value read at slot.
 func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
-		return a, nil
+		// Match AccountsDB's ownership semantics: callers receive a mutable
+		// account, never the WorkingSet's retained historical value. Fee and
+		// reward paths legitimately mutate values returned by this method.
+		return a.Clone(), nil
 	}
 	return t.durable.GetAccount(slot, pubkey)
 }
@@ -101,7 +104,13 @@ func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accoun
 // unrooted value and falling through to a single durable batch for the misses.
 func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
 	return batchOverDurable(ctx, slot, pks, t.durable, func(pk solana.PublicKey) (*accounts.Account, bool) {
-		return t.overlay.Lookup([32]byte(pk))
+		a, ok := t.overlay.Lookup([32]byte(pk))
+		if !ok {
+			return nil, false
+		}
+		// The block loader treats batch results as its owned parent snapshot.
+		// Do not let that snapshot alias state retained for later promotion.
+		return a.Clone(), true
 	})
 }
 
@@ -196,9 +205,10 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 //
 // Safety notes:
 // - While a fold is in flight the chunk's overlay layers are retained (reads
-//   stay correct: overlay wins over durable) and are immutable — Add only
-//   appends new slots, and the fork-switch unwind DRAINS the promoter before
-//   evicting (block.go), so EvictFrom can never race the worker's reads.
+//   stay correct: overlay wins over durable) and are immutable — tail reads
+//   return deep copies, Add only appends new slots, and the fork-switch unwind
+//   DRAINS the promoter before evicting (block.go), so EvictFrom can never race
+//   the worker's reads.
 // - One job in flight at a time; the next chunk builds only after apply, so
 //   the alpenglow promotion gate re-checks every span it folds.
 // - A completed-but-unapplied fold on exit is identical to the supported
@@ -208,7 +218,9 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 //   next iteration rebuilds the same chunk. The stake-index flush that already
 //   landed is a harmless superset (second flush is a no-op).
 
-// foldJob is an immutable snapshot of one K-slot fold chunk.
+// foldJob is an immutable snapshot of one K-slot fold chunk. Account values
+// reference retained WorkingSet layers, whose read boundary returns deep copies;
+// the layers are not removed until this job completes and applies.
 type foldJob struct {
 	chunk       []accounts.SlotDelta
 	through     uint64
