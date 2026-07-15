@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -15,7 +16,7 @@ import (
 func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) {
 	deltaLtHash := calculateDeltaLtHash(slotCtx, modifiedAccts)
 	slotCtx.AcctsLtHash.Add(deltaLtHash)
-	if ltDebug {
+	if ltDebug && (ltDebugSlot == 0 || ltDebugSlot == slotCtx.Slot) {
 		dumpPerAcctDeltas(slotCtx, modifiedAccts)
 	}
 }
@@ -23,6 +24,7 @@ func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Acco
 // ltDebug (MITHRIL_LTHASH_DEBUG=1) dumps every account's (key, old, new) state per
 // slot so two runs can be diffed to the exact diverging account.
 var ltDebug = os.Getenv("MITHRIL_LTHASH_DEBUG") == "1"
+var ltDebugSlot, _ = strconv.ParseUint(os.Getenv("MITHRIL_LTHASH_DEBUG_SLOT"), 10, 64)
 
 func dumpPerAcctDeltas(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) {
 	for _, a := range dedupeModifiedAccts(modifiedAccts) {
