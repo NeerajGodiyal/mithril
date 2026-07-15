@@ -241,7 +241,8 @@ type ReplayDivergenceRecord struct {
 
 type ResumeContext struct {
 	Slot                    uint64           `json:"slot"`
-	Bankhash                string           `json:"bankhash"` // base58
+	Bankhash                string           `json:"bankhash"`                     // base58
+	AlpenglowBlockID        string           `json:"alpenglow_block_id,omitempty"` // double-merkle identity of Slot
 	BlockHeight             uint64           `json:"block_height"`
 	Epoch                   uint64           `json:"epoch"`
 	AcctsLtHash             string           `json:"accts_lt_hash"` // base64

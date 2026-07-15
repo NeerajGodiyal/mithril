@@ -131,6 +131,69 @@ func TestLightbringerBlockConnectsLocked(t *testing.T) {
 	}
 }
 
+func TestAlpenglowLiveBlockConnectsByExactParentID(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    100,
+		EndSlot:                      200,
+	})
+	bs.lastEmittedBlockSlot = 150
+	bs.lastEmittedAlpenglowBlockID = solana.Hash{1}
+	bs.hasLastEmittedAlpenglowBlockID = true
+
+	child := &b.Block{
+		Slot:                      151,
+		FromLiveStream:            true,
+		SourceParentSlot:          150,
+		HasAlpenglowParentBlockID: true,
+		AlpenglowParentBlockID:    solana.Hash{2},
+	}
+	if bs.liveBlockConnectsLocked(child) {
+		t.Fatal("same parent slot with a different Alpenglow parent ID connected")
+	}
+	child.AlpenglowParentBlockID = solana.Hash{1}
+	if !bs.liveBlockConnectsLocked(child) {
+		t.Fatal("exact Alpenglow parent ID did not connect")
+	}
+}
+
+func TestAlpenglowCheckpointResumeSeedsSkipInferenceAnchor(t *testing.T) {
+	anchorID := solana.Hash{0x31}
+	childID := solana.Hash{0x36}
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    312,
+		EndSlot:                      400,
+		InitialAlpenglowBlockID:      anchorID,
+		HasInitialAlpenglowBlockID:   true,
+	})
+	if bs.lastEmittedBlockSlot != 311 || !bs.hasLastEmittedAlpenglowBlockID || bs.lastEmittedAlpenglowBlockID != anchorID {
+		t.Fatalf("resume anchor = slot %d id %s present=%v, want slot 311 id %s",
+			bs.lastEmittedBlockSlot, bs.lastEmittedAlpenglowBlockID, bs.hasLastEmittedAlpenglowBlockID, anchorID)
+	}
+	bs.reorderBuffer[316] = &b.Block{
+		Slot:                      316,
+		FromLiveStream:            true,
+		SourceParentSlot:          311,
+		AlpenglowBlockID:          childID,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    anchorID,
+		HasAlpenglowParentBlockID: true,
+	}
+	if !bs.synthesizeAlpenglowParentLinkedSkipsLocked() {
+		t.Fatal("rooted resume anchor did not enable exact parent-linked skip inference")
+	}
+	for slot := uint64(312); slot <= 315; slot++ {
+		if !bs.skippedSlots[slot] || !bs.liveSynthesizedSkips[slot] {
+			t.Fatalf("slot %d was not marked as a provisional Alpenglow skip", slot)
+		}
+	}
+}
+
 func TestCurrentSourceSnapshotUsesTurbineSourceName(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:      BlockSourceTurbine,
@@ -1036,6 +1099,131 @@ func TestRewindForAlpenglowSwitchRestoresLastRealAnchorAcrossSkips(t *testing.T)
 	}
 	if _, exists := bs.emittedAlpenglowBlockIDs[155]; exists {
 		t.Fatal("rewind retained a discarded descendant block ID")
+	}
+}
+
+func TestAlpenglowParentLinkedForkRewindsAndEmitsAlternateBranch(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    344,
+		EndSlot:                      400,
+	})
+	parentID := solana.Hash{0x43}
+	wrong344 := solana.Hash{0x44}
+	wrong345 := solana.Hash{0x45}
+	childID := solana.Hash{0x48}
+	child := &b.Block{
+		Slot:                      348,
+		FromLiveStream:            true,
+		SourceParentSlot:          343,
+		AlpenglowBlockID:          childID,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    parentID,
+		HasAlpenglowParentBlockID: true,
+	}
+
+	bs.emittedAlpenglowBlockIDs[343] = parentID
+	bs.emittedAlpenglowBlockIDs[344] = wrong344
+	bs.emittedAlpenglowBlockIDs[345] = wrong345
+	bs.emittedAlpenglowBlockIDOrder = []uint64{343, 344, 345}
+	bs.lastEmittedBlockSlot = 345
+	bs.lastEmittedAlpenglowBlockID = wrong345
+	bs.hasLastEmittedAlpenglowBlockID = true
+	// Replay is blocked on absent slot 346; the alternate child is buffered
+	// later at 348 and links behind the already-emitted 344-345 suffix.
+	bs.nextSlotToSend = 346
+	bs.reorderBuffer[348] = child
+	bs.slotState[348] = slotDone
+
+	bs.reorderMu.Lock()
+	if !bs.queueBufferedAlpenglowParentSwitchLocked() {
+		bs.reorderMu.Unlock()
+		t.Fatal("buffered exact child-to-emitted-ancestor link did not queue a switch across absent head slots")
+	}
+	bs.reorderMu.Unlock()
+
+	var event AlpenglowParentSwitch
+	select {
+	case event = <-bs.alpenglowParentSwitchCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parent-linked switch event")
+	}
+	if event.SwitchSlot != 344 || event.ParentSlot != 343 || event.ChildSlot != 348 || event.ParentID != parentID || event.ChildID != childID {
+		t.Fatalf("unexpected switch event: %+v", event)
+	}
+	// Model speculative emissions already queued for replay when the alternate
+	// child exposed the fork. The source rewind must purge them.
+	bs.streamChan <- &b.Block{Slot: 346, IsSkipped: true, FromLiveStream: true}
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+	if !bs.RewindForAlpenglowParentSwitch(event) {
+		t.Fatal("source rejected the pending parent-linked switch")
+	}
+
+	for slot := uint64(344); slot <= 347; slot++ {
+		select {
+		case got := <-bs.streamChan:
+			if got == nil || got.Slot != slot || !got.IsSkipped || !got.FromLiveStream {
+				t.Fatalf("slot %d emission = %+v, want provisional live skip", slot, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for replayed skip slot %d", slot)
+		}
+	}
+	select {
+	case got := <-bs.streamChan:
+		if got != child {
+			t.Fatalf("alternate child emission = %+v, want original child %+v", got, child)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for alternate child emission")
+	}
+
+	close(bs.resultQueue)
+	<-done
+	if bs.lastEmittedBlockSlot != 348 || bs.lastEmittedAlpenglowBlockID != childID {
+		t.Fatalf("emission anchor = slot %d id %s, want slot 348 id %s", bs.lastEmittedBlockSlot, bs.lastEmittedAlpenglowBlockID, childID)
+	}
+	if _, exists := bs.emittedAlpenglowBlockIDs[344]; exists {
+		t.Fatal("discarded fork identity at slot 344 survived the rewind")
+	}
+}
+
+func TestAlpenglowParentLinkedForkRequiresExactIDAndAlpenglowMode(t *testing.T) {
+	newSource := func(alpenglowMode bool) *BlockSource {
+		bs := NewBlockSource(&BlockSourceOpts{
+			SourceType:                   BlockSourceTurbine,
+			TurbineBindAddr:              "127.0.0.1:0",
+			TurbineAlpenglowBlockIDHints: alpenglowMode,
+			StartSlot:                    151,
+			EndSlot:                      200,
+		})
+		bs.nextSlotToSend = 155
+		bs.lastEmittedBlockSlot = 154
+		bs.emittedAlpenglowBlockIDs[150] = solana.Hash{1}
+		return bs
+	}
+	child := &b.Block{
+		Slot:                      155,
+		FromLiveStream:            true,
+		SourceParentSlot:          150,
+		AlpenglowBlockID:          solana.Hash{2},
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    solana.Hash{9}, // does not match emitted ancestor
+		HasAlpenglowParentBlockID: true,
+	}
+	if bs := newSource(true); bs.queueAlpenglowParentSwitchLocked(child) {
+		t.Fatal("slot-only ancestry mismatch queued a speculative switch")
+	}
+	child.AlpenglowParentBlockID = solana.Hash{1}
+	if bs := newSource(false); bs.queueAlpenglowParentSwitchLocked(child) {
+		t.Fatal("classic turbine mode queued an Alpenglow speculative switch")
 	}
 }
 

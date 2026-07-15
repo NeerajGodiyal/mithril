@@ -30,3 +30,14 @@ func TestPruneAlpenglowChainedRootsBeforeKeepsRoot(t *testing.T) {
 	assert.True(t, rootOK)
 	assert.Equal(t, solana.Hash{2}, root)
 }
+
+func TestDeleteAlpenglowChainedRootsFromDropsSuffix(t *testing.T) {
+	ResetAlpenglowChainMetadata()
+	SetAlpenglowChainedMerkleRoot(41, solana.Hash{1})
+	SetAlpenglowChainedMerkleRoot(42, solana.Hash{2})
+	DeleteAlpenglowChainedRootsFrom(42)
+	_, parentOK := AlpenglowChainedMerkleRoot(41)
+	_, suffixOK := AlpenglowChainedMerkleRoot(42)
+	assert.True(t, parentOK)
+	assert.False(t, suffixOK)
+}

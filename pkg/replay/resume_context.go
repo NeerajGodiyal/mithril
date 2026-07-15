@@ -8,6 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	"github.com/gagliardetto/solana-go"
 	"github.com/mr-tron/base58"
 )
 
@@ -103,6 +104,14 @@ func ResumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint6
 		InflationTaper:           rc.InflationTaper,
 		InflationFoundation:      rc.InflationFoundation,
 		InflationFoundationTerm:  rc.InflationFoundationTerm,
+	}
+	if rc.AlpenglowBlockID != "" {
+		blockID, err := solana.HashFromBase58(rc.AlpenglowBlockID)
+		if err != nil {
+			return nil, fmt.Errorf("decode rooted alpenglow_block_id: %w", err)
+		}
+		rs.ParentAlpenglowBlockID = blockID
+		rs.HasParentAlpenglowBlockID = true
 	}
 	if rc.TransactionCount != nil {
 		txc := *rc.TransactionCount // deep copy: contexts must not share pointers

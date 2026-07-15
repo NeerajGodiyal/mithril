@@ -44,3 +44,15 @@ func PruneAlpenglowChainedRootsBefore(root uint64) {
 		}
 	}
 }
+
+// DeleteAlpenglowChainedRootsFrom removes parent-root metadata belonging to a
+// discarded speculative suffix during an in-process fork switch.
+func DeleteAlpenglowChainedRootsFrom(from uint64) {
+	alpenglowChainedRootsMu.Lock()
+	defer alpenglowChainedRootsMu.Unlock()
+	for slot := range alpenglowChainedRoots {
+		if slot >= from {
+			delete(alpenglowChainedRoots, slot)
+		}
+	}
+}

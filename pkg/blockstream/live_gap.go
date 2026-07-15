@@ -154,7 +154,17 @@ func (bs *BlockSource) liveBlockConnectsLocked(blk *b.Block) bool {
 	if blk.SourceParentSlot == 0 {
 		return false
 	}
-	return blk.SourceParentSlot == bs.lastEmittedBlockSlot
+	if blk.SourceParentSlot != bs.lastEmittedBlockSlot {
+		return false
+	}
+	// Classic turbine/lightbringer blocks have only slot ancestry. In
+	// Alpenglow, use the exact parent identity whenever both sides provide it;
+	// accepting a same-slot/different-ID parent would immediately put replay
+	// back onto the suffix it just unwound.
+	if bs.turbineAlpenglowBlockIDHints && blk.HasAlpenglowParentBlockID && bs.hasLastEmittedAlpenglowBlockID {
+		return solana.Hash(blk.AlpenglowParentBlockID) == bs.lastEmittedAlpenglowBlockID
+	}
+	return true
 }
 
 func (bs *BlockSource) recordEmittedAlpenglowBlockIDLocked(blk *b.Block) {
@@ -264,6 +274,93 @@ func (bs *BlockSource) waitingLiveParentMismatchLocked() (waitingSlot uint64, ob
 		return 0, 0, 0, false
 	}
 	return blk.Slot, blk.SourceParentSlot, bs.lastEmittedBlockSlot, true
+}
+
+// queueAlpenglowParentSwitchLocked bridges a post-emission fork observation to
+// replay. The child must carry an exact parent block-ID link to an emitted
+// historical ancestor; slot numbers alone are not enough to rewind state.
+//
+// The event remains pending until replay acknowledges it by rewinding the
+// source. Keeping one pending event prevents a busy repair stream from flooding
+// replay with the same transition while the source deliberately holds child.
+func (bs *BlockSource) queueAlpenglowParentSwitchLocked(blk *b.Block) bool {
+	if bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints || blk == nil ||
+		!blk.FromLiveStream || !blk.HasAlpenglowBlockID || !blk.HasAlpenglowParentBlockID {
+		return false
+	}
+	if blk.SourceParentSlot == 0 || blk.SourceParentSlot >= bs.lastEmittedBlockSlot || blk.SourceParentSlot >= blk.Slot {
+		return false
+	}
+	parentID, ok := bs.emittedAlpenglowBlockIDs[blk.SourceParentSlot]
+	if !ok || parentID != solana.Hash(blk.AlpenglowParentBlockID) {
+		return false
+	}
+	childID := solana.Hash(blk.AlpenglowBlockID)
+	if emittedID, emitted := bs.emittedAlpenglowBlockIDs[blk.Slot]; emitted && emittedID == childID {
+		// A delayed duplicate from our current branch is not a fork.
+		return false
+	}
+
+	event := AlpenglowParentSwitch{
+		SwitchSlot: blk.SourceParentSlot + 1,
+		ParentSlot: blk.SourceParentSlot,
+		ParentID:   parentID,
+		ChildSlot:  blk.Slot,
+		ChildID:    childID,
+	}
+	if pending := bs.pendingAlpenglowParentSwitch; pending != nil {
+		return *pending == event
+	}
+	bs.pendingAlpenglowParentSwitch = &event
+	select {
+	case bs.alpenglowParentSwitchCh <- event:
+		mlog.Log.Warnf("ALPENGLOW speculative fork: assembled block %s at slot %d links back to emitted ancestor %s at slot %d; requesting replay branch selection from slot %d",
+			event.ChildID, event.ChildSlot, event.ParentID, event.ParentSlot, event.SwitchSlot)
+	default:
+		// A stale notification can only exist while its matching pending event
+		// is set. Do not replace it and risk reordering two replay rewinds.
+	}
+	return true
+}
+
+// queueBufferedAlpenglowParentSwitchLocked finds an alternate child even when
+// replay is currently waiting on an earlier absent slot. This is the common
+// fork shape: wrong suffix A has already been emitted (and may have executed),
+// canonical child B jumps back to A's parent, and the slots before B do not
+// exist on B's branch. If we inspect only reorderBuffer[nextSlotToSend], B can
+// sit buffered forever behind those absent slots and replay never receives the
+// branch-selection signal.
+func (bs *BlockSource) queueBufferedAlpenglowParentSwitchLocked() bool {
+	if bs.pendingAlpenglowParentSwitch != nil {
+		return true
+	}
+	var earliest *b.Block
+	for _, candidate := range bs.reorderBuffer {
+		if candidate == nil || candidate.Slot < bs.nextSlotToSend {
+			continue
+		}
+		if earliest != nil && candidate.Slot >= earliest.Slot {
+			continue
+		}
+		// Test eligibility without publishing a later event merely because Go
+		// map iteration happened to encounter it first.
+		if bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints ||
+			!candidate.FromLiveStream || !candidate.HasAlpenglowBlockID || !candidate.HasAlpenglowParentBlockID ||
+			candidate.SourceParentSlot == 0 || candidate.SourceParentSlot >= bs.lastEmittedBlockSlot ||
+			candidate.SourceParentSlot >= candidate.Slot {
+			continue
+		}
+		parentID, ok := bs.emittedAlpenglowBlockIDs[candidate.SourceParentSlot]
+		if !ok || parentID != solana.Hash(candidate.AlpenglowParentBlockID) {
+			continue
+		}
+		childID := solana.Hash(candidate.AlpenglowBlockID)
+		if emittedID, emitted := bs.emittedAlpenglowBlockIDs[candidate.Slot]; emitted && emittedID == childID {
+			continue
+		}
+		earliest = candidate
+	}
+	return earliest != nil && bs.queueAlpenglowParentSwitchLocked(earliest)
 }
 
 func (bs *BlockSource) repairLiveStreamGap(waitingSlot, firstBufferedSlot, firstBufferedParentSlot uint64, bufferedCount int) {

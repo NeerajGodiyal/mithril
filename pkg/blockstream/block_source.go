@@ -63,6 +63,11 @@ type BlockSourceOpts struct {
 	// proving decisions for older slots (including skips) arrive inside
 	// LATER blocks that cannot emit until those very decisions are known.
 	AlpenglowFooterCertSink func(raw []byte)
+	// Exact identity of StartSlot-1 on checkpoint resume. This is Alpenglow-
+	// only and lets a fresh source validate a parent-linked skip run before it
+	// has emitted its first post-resume block.
+	InitialAlpenglowBlockID    solana.Hash
+	HasInitialAlpenglowBlockID bool
 	// RepairCatchupMaxGapSlots: when resuming behind the live shred edge by at
 	// most this many slots, fill the gap via turbine repair instead of RPC
 	// getBlock (0 disables). Repaired shreds carry block ids + footer certs, so
@@ -146,6 +151,24 @@ type fetchResult struct {
 	latencyMs            int64  // fetch latency in milliseconds (for stall diagnostics)
 	liveStreamGeneration uint64 // live-stream result generation, used to discard stale handoff blocks
 	local                bool
+	wakeEmitter          bool // control event: re-run ordered emission after an Alpenglow rewind
+}
+
+// AlpenglowParentSwitch is an exact, shred-derived fork transition. Child's
+// parent block ID matches a block we previously emitted, but that parent is
+// older than the current speculative tip. Replay must select the replacement
+// branch from SwitchSlot before the source may emit ChildSlot and descendants;
+// account state is unwound only if replay already executed the divergence.
+//
+// This is deliberately not a certificate decision. It selects a coherent
+// speculative branch for liveness; later certificates remain authoritative
+// and can switch replay again through the normal certified-switch sweep.
+type AlpenglowParentSwitch struct {
+	SwitchSlot uint64
+	ParentSlot uint64
+	ParentID   solana.Hash
+	ChildSlot  uint64
+	ChildID    solana.Hash
 }
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
@@ -292,6 +315,8 @@ type BlockSource struct {
 	hasLastEmittedAlpenglowBlockID bool
 	emittedAlpenglowBlockIDs       map[uint64]solana.Hash
 	emittedAlpenglowBlockIDOrder   []uint64
+	alpenglowParentSwitchCh        chan AlpenglowParentSwitch
+	pendingAlpenglowParentSwitch   *AlpenglowParentSwitch // guarded by reorderMu
 	maxPending                     int
 
 	// Slot state tracking (prevents duplicates)
@@ -647,6 +672,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		liveSynthesizedSkips:         make(map[uint64]bool),
 		alpenglowCertifiedSkips:      make(map[uint64]bool),
 		emittedAlpenglowBlockIDs:     make(map[uint64]solana.Hash),
+		alpenglowParentSwitchCh:      make(chan AlpenglowParentSwitch, 1),
 		nextSlotToSend:               opts.StartSlot,
 		maxPending:                   defaultMaxPending,
 		slotState:                    make(map[uint64]slotStatus),
@@ -698,6 +724,15 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	// Initialize stats reset time for RPS calculation
 	bs.statsResetTime.Store(time.Now().Unix())
 	bs.confirmSlotAbsent = bs.confirmSlotAbsentViaRPC
+	if opts.HasInitialAlpenglowBlockID && opts.StartSlot > 0 && opts.TurbineAlpenglowBlockIDHints {
+		anchorSlot := opts.StartSlot - 1
+		bs.lastEmittedBlockSlot = anchorSlot
+		bs.lastEmittedAlpenglowBlockID = opts.InitialAlpenglowBlockID
+		bs.hasLastEmittedAlpenglowBlockID = true
+		bs.emittedAlpenglowBlockIDs[anchorSlot] = opts.InitialAlpenglowBlockID
+		bs.emittedAlpenglowBlockIDOrder = append(bs.emittedAlpenglowBlockIDOrder, anchorSlot)
+		mlog.Log.Infof("ALPENGLOW resume anchor: seeded block id %s at rooted slot %d", opts.InitialAlpenglowBlockID, anchorSlot)
+	}
 
 	// Prewarm handover: blocks the boot-time receiver collected while the
 	// AccountsDB built. Staged now so the handoff runway can arm the moment
@@ -1760,13 +1795,39 @@ func (bs *BlockSource) pollTip() {
 	}
 }
 
-// SetLastExecutedSlot is called by the replay loop after each block is fully executed.
-// This allows accurate tip distance calculation without blocking on replay progress.
-// Also triggers mode switching based on replay progress (not just tip polling).
-//
-// In near-tip mode, this also:
-// - Schedules N+2 (prefetch while N+1 executes)
-// - Immediately retries N+1 if it failed (don't wait for 200ms ticker)
+// rewindAlpenglowEmissionAnchorLocked drops emitted identities at and above
+// slot and restores the newest real block below it as the ancestry anchor.
+// Caller holds reorderMu.
+func (bs *BlockSource) rewindAlpenglowEmissionAnchorLocked(slot uint64) {
+	if slot == 0 || bs.lastEmittedBlockSlot < slot {
+		return
+	}
+	anchorSlot := uint64(0)
+	anchorID := solana.Hash{}
+	kept := bs.emittedAlpenglowBlockIDOrder[:0]
+	for _, emittedSlot := range bs.emittedAlpenglowBlockIDOrder {
+		if emittedSlot >= slot {
+			delete(bs.emittedAlpenglowBlockIDs, emittedSlot)
+			continue
+		}
+		kept = append(kept, emittedSlot)
+		if emittedSlot > anchorSlot {
+			anchorSlot = emittedSlot
+			anchorID = bs.emittedAlpenglowBlockIDs[emittedSlot]
+		}
+	}
+	bs.emittedAlpenglowBlockIDOrder = kept
+	if anchorSlot != 0 {
+		bs.lastEmittedBlockSlot = anchorSlot
+		bs.lastEmittedAlpenglowBlockID = anchorID
+		bs.hasLastEmittedAlpenglowBlockID = true
+	} else {
+		bs.lastEmittedBlockSlot = slot - 1
+		bs.lastEmittedAlpenglowBlockID = solana.Hash{}
+		bs.hasLastEmittedAlpenglowBlockID = false
+	}
+}
+
 // RewindForAlpenglowSwitch rewinds the emission frontier to re-serve `slot`
 // after certificates named a different outcome than the executed one (wrong
 // sibling or certificate-skipped). Buffered and in-flight state at or above
@@ -1781,32 +1842,7 @@ func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Ha
 	if bs.nextSlotToSend > slot {
 		bs.nextSlotToSend = slot
 	}
-	if bs.lastEmittedBlockSlot >= slot {
-		anchorSlot := uint64(0)
-		anchorID := solana.Hash{}
-		kept := bs.emittedAlpenglowBlockIDOrder[:0]
-		for _, emittedSlot := range bs.emittedAlpenglowBlockIDOrder {
-			if emittedSlot >= slot {
-				delete(bs.emittedAlpenglowBlockIDs, emittedSlot)
-				continue
-			}
-			kept = append(kept, emittedSlot)
-			if emittedSlot > anchorSlot {
-				anchorSlot = emittedSlot
-				anchorID = bs.emittedAlpenglowBlockIDs[emittedSlot]
-			}
-		}
-		bs.emittedAlpenglowBlockIDOrder = kept
-		if anchorSlot != 0 {
-			bs.lastEmittedBlockSlot = anchorSlot
-			bs.lastEmittedAlpenglowBlockID = anchorID
-			bs.hasLastEmittedAlpenglowBlockID = true
-		} else {
-			bs.lastEmittedBlockSlot = slot - 1
-			bs.lastEmittedAlpenglowBlockID = solana.Hash{}
-			bs.hasLastEmittedAlpenglowBlockID = false
-		}
-	}
+	bs.rewindAlpenglowEmissionAnchorLocked(slot)
 	for bufferedSlot := range bs.reorderBuffer {
 		if bufferedSlot >= slot {
 			delete(bs.reorderBuffer, bufferedSlot)
@@ -1853,6 +1889,135 @@ func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Ha
 	mlog.Log.Warnf("BLOCK SOURCE REWIND: re-serving slot %d after certificate switch (certified=%s)", slot, certified)
 }
 
+// RewindForAlpenglowParentSwitch acknowledges a parent-linked speculative fork
+// event after replay accepts the replacement branch. The alternate child and
+// already-buffered descendants are retained; the discarded source suffix is
+// cleared and ordered emission is kicked from the restored parent anchor.
+func (bs *BlockSource) RewindForAlpenglowParentSwitch(event AlpenglowParentSwitch) bool {
+	if event.SwitchSlot == 0 || event.ParentSlot+1 != event.SwitchSlot || event.ChildSlot < event.SwitchSlot {
+		return false
+	}
+
+	bs.reorderMu.Lock()
+	pending := bs.pendingAlpenglowParentSwitch
+	if pending == nil || *pending != event {
+		bs.reorderMu.Unlock()
+		return false
+	}
+	parentID, ok := bs.emittedAlpenglowBlockIDs[event.ParentSlot]
+	child := bs.reorderBuffer[event.ChildSlot]
+	if !ok || parentID != event.ParentID || child == nil || !child.HasAlpenglowBlockID ||
+		solana.Hash(child.AlpenglowBlockID) != event.ChildID || !child.HasAlpenglowParentBlockID ||
+		solana.Hash(child.AlpenglowParentBlockID) != event.ParentID {
+		bs.pendingAlpenglowParentSwitch = nil
+		bs.reorderMu.Unlock()
+		return false
+	}
+
+	discardedTip := bs.lastEmittedBlockSlot
+	bs.nextSlotToSend = event.SwitchSlot
+	bs.rewindAlpenglowEmissionAnchorLocked(event.SwitchSlot)
+	for slot := range bs.reorderBuffer {
+		if slot >= event.SwitchSlot && slot < event.ChildSlot {
+			delete(bs.reorderBuffer, slot)
+		}
+	}
+	for slot := range bs.skippedSlots {
+		if slot >= event.SwitchSlot && slot < event.ChildSlot {
+			delete(bs.skippedSlots, slot)
+			delete(bs.liveSynthesizedSkips, slot)
+			delete(bs.alpenglowCertifiedSkips, slot)
+		}
+	}
+	bs.pendingAlpenglowParentSwitch = nil
+	bs.reorderMu.Unlock()
+
+	bs.slotStateMu.Lock()
+	for slot := range bs.slotState {
+		if slot >= event.SwitchSlot && slot < event.ChildSlot {
+			delete(bs.slotState, slot)
+			delete(bs.inflightStart, slot)
+		}
+	}
+	bs.slotStateMu.Unlock()
+
+	bs.retryMu.Lock()
+	if len(bs.retrySlots) > 0 {
+		kept := bs.retrySlots[:0]
+		for _, slot := range bs.retrySlots {
+			if slot < event.SwitchSlot || slot >= event.ChildSlot {
+				kept = append(kept, slot)
+			}
+		}
+		bs.retrySlots = kept
+	}
+	bs.retryMu.Unlock()
+
+	// If the alternate child arrived late, the assembler may already have
+	// marked descendants on the discarded branch complete. Re-open those
+	// slots so the new branch can arrive; exact parent-ID checks reject any
+	// stale sibling that the spool happens to hydrate first.
+	if discardedTip > event.ChildSlot {
+		bs.alpenglowMu.Lock()
+		receiver := bs.activeTurbineReceiver
+		bs.alpenglowMu.Unlock()
+		if receiver != nil {
+			for slot := event.ChildSlot + 1; slot <= discardedTip; slot++ {
+				receiver.ResetSlot(slot)
+			}
+		}
+	}
+
+	// Results emitted before replay saw the control event belong to the
+	// discarded suffix. Remove them before replay resumes. No producer can
+	// advance beyond child while the ancestry guard is holding it.
+	retained := make([]*b.Block, 0)
+drainStream:
+	for {
+		select {
+		case blk, open := <-bs.streamChan:
+			if !open {
+				break drainStream
+			}
+			if blk != nil && blk.Slot < event.SwitchSlot {
+				retained = append(retained, blk)
+			}
+		default:
+			break drainStream
+		}
+	}
+	for _, blk := range retained {
+		bs.streamChan <- blk
+	}
+	for {
+		select {
+		case <-bs.alpenglowParentSwitchCh:
+		default:
+			goto switchChannelDrained
+		}
+	}
+switchChannelDrained:
+
+	bs.invalidateLiveStreamResults()
+	bs.lastProgress.Store(time.Now().Unix())
+	select {
+	case bs.resultQueue <- fetchResult{wakeEmitter: true}:
+	default:
+		// A full queue already guarantees an emitter iteration, which is all
+		// the wake is needed for.
+	}
+	mlog.Log.Warnf("BLOCK SOURCE REWIND: restored parent-linked ancestor %s at slot %d; re-serving speculative branch from slot %d toward child %s at slot %d",
+		event.ParentID, event.ParentSlot, event.SwitchSlot, event.ChildID, event.ChildSlot)
+	return true
+}
+
+// SetLastExecutedSlot is called by the replay loop after each block is fully executed.
+// This allows accurate tip distance calculation without blocking on replay progress.
+// Also triggers mode switching based on replay progress (not just tip polling).
+//
+// In near-tip mode, this also:
+// - Schedules N+2 (prefetch while N+1 executes)
+// - Immediately retries N+1 if it failed (don't wait for 200ms ticker)
 func (bs *BlockSource) SetLastExecutedSlot(slot uint64) {
 	bs.lastExecutedSlot.Store(slot)
 
@@ -2210,18 +2375,37 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 // emitOrderedBlocks receives results and emits blocks in order
 func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
-		if result.block != nil {
-			bs.observeAlpenglowCandidateBlock(result.block)
-		}
-
-		bs.reorderMu.Lock()
 		var gapWaitingSlot uint64
 		var gapFirstBufferedSlot uint64
 		var gapFirstBufferedParentSlot uint64
 		var gapBufferedCount int
 		var shouldFallbackToRPC bool
+		var isDuplicate bool
+		var isHardErr bool
+		var isHistoryErr bool
+		var isRetriable bool
+
+		if result.wakeEmitter {
+			bs.reorderMu.Lock()
+			goto emitConsecutive
+		}
+		if result.block != nil {
+			bs.observeAlpenglowCandidateBlock(result.block)
+		}
+
+		bs.reorderMu.Lock()
 
 		if result.slot < bs.nextSlotToSend {
+			// A late alternate child may arrive only after the source already
+			// emitted farther down a competing suffix. Preserve it and notify
+			// replay before the ordinary stale-result path drops it.
+			if result.block != nil && result.block.FromLiveStream &&
+				!bs.shouldDiscardLiveStreamResult(result.slot, result.liveStreamGeneration) &&
+				bs.queueAlpenglowParentSwitchLocked(result.block) {
+				bs.reorderBuffer[result.slot] = result.block
+				bs.reorderMu.Unlock()
+				continue
+			}
 			bs.slotStateMu.Lock()
 			delete(bs.slotState, result.slot)
 			delete(bs.inflightStart, result.slot)
@@ -2255,7 +2439,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		// Check if this is a duplicate result (from backup request)
 		// If slot is already done or we already have the block, discard this result
 		bs.slotStateMu.Lock()
-		isDuplicate := bs.slotState[result.slot] == slotDone
+		isDuplicate = bs.slotState[result.slot] == slotDone
 		bs.slotStateMu.Unlock()
 		if !result.local && (isDuplicate || bs.reorderBuffer[result.slot] != nil || bs.skippedSlots[result.slot]) {
 			bs.reorderMu.Unlock()
@@ -2302,8 +2486,8 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		// Track error buckets
 		// Note: isHardConnectivityErr is checked independently because hard errors
 		// (connection refused, no such host) are NOT in isTransientNetworkErr anymore
-		isHardErr := false
-		isHistoryErr := false
+		isHardErr = false
+		isHistoryErr = false
 		if result.err != nil {
 			if result.err == errBeyondTip {
 				// Already tracked in worker
@@ -2362,7 +2546,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 
 		// Handle result
 		// CRITICAL: All errors except SlotSkipped are retriable.
-		isRetriable := result.err != nil && !result.skipped
+		isRetriable = result.err != nil && !result.skipped
 
 		if result.err != nil {
 			bs.trackSlotError(result.slot, result.err, result.rpcIdx, result.latencyMs)
@@ -2426,14 +2610,49 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			bs.slotStateMu.Unlock()
 		}
 
+	emitConsecutive:
 		// Emit consecutive blocks
 		for {
 			if bs.applyAlpenglowDecisionLocked() {
 				continue
 			}
 			bs.synthesizeAlpenglowParentLinkedSkipsLocked()
+			if bs.queueBufferedAlpenglowParentSwitchLocked() {
+				// Replay must unwind before any block on the selected alternate
+				// branch can be emitted. The control event wakes NextBlock.
+				break
+			}
 
 			if waitingSlot, observedParentSlot, expectedParentSlot, mismatch := bs.waitingLiveParentMismatchLocked(); mismatch {
+				// A complete Alpenglow child can expose a fork only after we have
+				// emitted its competing suffix. Exact block-ID ancestry is enough
+				// to choose that coherent branch speculatively, but replay owns the
+				// account-state unwind. Hold child and wake replay through the
+				// control channel; certificates can still override this branch.
+				if bs.queueAlpenglowParentSwitchLocked(bs.reorderBuffer[waitingSlot]) {
+					break
+				}
+				candidate := bs.reorderBuffer[waitingSlot]
+				if bs.turbineAlpenglowBlockIDHints && observedParentSlot == expectedParentSlot &&
+					candidate != nil && candidate.HasAlpenglowParentBlockID && bs.hasLastEmittedAlpenglowBlockID {
+					// Same parent SLOT but a different parent ID is a stale sibling
+					// from the discarded branch. It cannot become connected without
+					// another rewind, so release the assembler's completed marker and
+					// repair the slot again instead of holding forever.
+					observedParentID := solana.Hash(candidate.AlpenglowParentBlockID)
+					if observedParentID != bs.lastEmittedAlpenglowBlockID {
+						delete(bs.reorderBuffer, waitingSlot)
+						bs.slotStateMu.Lock()
+						delete(bs.slotState, waitingSlot)
+						delete(bs.inflightStart, waitingSlot)
+						bs.slotStateMu.Unlock()
+						bs.resetTurbineSlotState(waitingSlot)
+						bs.prioritizeTurbineRepairRange(waitingSlot, waitingSlot)
+						mlog.Log.Warnf("ALPENGLOW stale sibling: dropping block %s at slot %d because parent id %s does not match selected parent %s at slot %d; re-repairing",
+							solana.Hash(candidate.AlpenglowBlockID), waitingSlot, observedParentID, bs.lastEmittedAlpenglowBlockID, expectedParentSlot)
+						continue
+					}
+				}
 				// Shreds-only mode: no RPC arbiter exists for a parent
 				// mismatch. Hold emission — the block stays buffered — and
 				// let certificate adjudication resolve it: a decision naming
@@ -3142,6 +3361,26 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 func (bs *BlockSource) NextBlock() *b.Block {
 	block := <-bs.streamChan
 	return block
+}
+
+// NextBlockOrAlpenglowParentSwitch lets replay react to a parent-linked fork
+// while normal block emission is intentionally held. The fast pre-check gives
+// an already-queued switch priority over speculative blocks buffered just
+// before the alternate child exposed the fork.
+func (bs *BlockSource) NextBlockOrAlpenglowParentSwitch(ctx context.Context) (*b.Block, *AlpenglowParentSwitch) {
+	select {
+	case event := <-bs.alpenglowParentSwitchCh:
+		return nil, &event
+	default:
+	}
+	select {
+	case event := <-bs.alpenglowParentSwitchCh:
+		return nil, &event
+	case block := <-bs.streamChan:
+		return block, nil
+	case <-ctx.Done():
+		return nil, nil
+	}
 }
 
 func (bs *BlockSource) BufferDepth() int {

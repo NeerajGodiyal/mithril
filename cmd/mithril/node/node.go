@@ -3673,9 +3673,12 @@ func runReplayWithRecovery(
 		switch {
 		case errors.As(result.Error, &certSwitch):
 			// Execute-on-receipt ran the wrong sibling (or a certified-skipped
-			// slot); the certified version replays from the rooted checkpoint.
+			// slot), or a later parent-linked child exposed a competing
+			// speculative suffix; the selected version replays from the rooted
+			// checkpoint when the in-RAM unwind was guarded out.
 			divSlot = certSwitch.Slot
-			key = fmt.Sprintf("sw:%d/%x/%x/%v", certSwitch.Slot, certSwitch.Executed, certSwitch.Certified, certSwitch.Skip)
+			key = fmt.Sprintf("sw:%d/%x/%x/%v/%v/%d/%x", certSwitch.Slot, certSwitch.Executed, certSwitch.Certified,
+				certSwitch.Skip, certSwitch.ParentLinked, certSwitch.ChildSlot, certSwitch.ChildID)
 		case errors.As(result.Error, &finMismatch):
 			if finMismatch.Conflict {
 				// Conflict-shaped (equivocation evidence, not a wrong local block):

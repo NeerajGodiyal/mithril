@@ -51,6 +51,18 @@ func PruneAlpenglowBlockIDsBefore(root uint64) {
 	}
 }
 
+// DeleteAlpenglowBlockIDsFrom removes a discarded speculative suffix during
+// an in-process fork switch. Replay repopulates the selected branch as it runs.
+func DeleteAlpenglowBlockIDsFrom(from uint64) {
+	alpenglowBlockIDsMu.Lock()
+	defer alpenglowBlockIDsMu.Unlock()
+	for slot := range alpenglowBlockIDs {
+		if slot >= from {
+			delete(alpenglowBlockIDs, slot)
+		}
+	}
+}
+
 // ResetAlpenglowChainMetadata clears run-local block IDs and chained roots.
 // Replay repopulates both from successfully executed blocks.
 func ResetAlpenglowChainMetadata() {

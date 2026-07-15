@@ -21,10 +21,16 @@ import (
 // (configureInitialBlockFromResume or the ReplayBlocks seed path), (3) restore
 // it on the in-loop unwind, and (4) bump the count below.
 func TestResumeContextFieldTripwire(t *testing.T) {
-	const wired = 21 // fields consciously wired through resume + unwind
+	const wired = 22 // fields consciously wired through resume + unwind
 	if n := reflect.TypeOf(state.ResumeContext{}).NumField(); n != wired {
 		t.Fatalf("state.ResumeContext has %d fields but %d are wired through the resume/unwind restoration path — wire the new field(s) end-to-end, then update this count", n, wired)
 	}
+}
+
+func TestParentSwitchNeedsStateUnwind(t *testing.T) {
+	assert.False(t, parentSwitchNeedsStateUnwind(101, 100), "fork discovered ahead of replay is source-only")
+	assert.True(t, parentSwitchNeedsStateUnwind(100, 100), "executed divergence slot must unwind")
+	assert.True(t, parentSwitchNeedsStateUnwind(99, 100), "executed suffix beyond divergence must unwind")
 }
 
 // Full-fidelity mapping: every restorable ResumeContext field survives into
@@ -39,6 +45,8 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 	evicted[1] = 0xBB
 	lastBH := make([]byte, 32)
 	lastBH[2] = 0xCC
+	alpenglowID := make([]byte, 32)
+	alpenglowID[4] = 0xAE
 	entryBH := make([]byte, 32)
 	entryBH[3] = 0xDD
 	clock := []byte{9, 8, 7, 6}
@@ -47,6 +55,7 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 	rc := &state.ResumeContext{
 		Slot:                    900,
 		Bankhash:                base58.Encode(bankhash),
+		AlpenglowBlockID:        base58.Encode(alpenglowID),
 		BlockHeight:             880,
 		Epoch:                   2,
 		AcctsLtHash:             base64.StdEncoding.EncodeToString(lt),
@@ -74,6 +83,8 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 	assert.Equal(t, uint64(900), rs.ParentSlot)
 	assert.Equal(t, uint64(880), rs.ParentBlockHeight)
 	assert.Equal(t, bankhash, rs.ParentBankhash)
+	assert.True(t, rs.HasParentAlpenglowBlockID)
+	assert.Equal(t, alpenglowID, rs.ParentAlpenglowBlockID[:])
 	require.NotNil(t, rs.AcctsLtHash)
 	assert.Equal(t, lt, rs.AcctsLtHash.Hash(), "lt-hash restored byte-exact")
 	assert.Equal(t, uint64(5000), rs.LamportsPerSignature)

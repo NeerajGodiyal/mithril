@@ -38,6 +38,14 @@ func markVoteStakeDirty(slot uint64) {
 // resetVoteStakeDirty clears the watermark at the start of a replay run.
 func resetVoteStakeDirty() { voteStakeDirtySlot.Store(0) }
 
+// parentSwitchNeedsStateUnwind distinguishes an already-executed divergence
+// from a fork that repair discovered ahead of replay. The latter only needs a
+// block-source branch replacement; replay's account state is still on the
+// common ancestor.
+func parentSwitchNeedsStateUnwind(switchSlot, executedAnchor uint64) bool {
+	return switchSlot <= executedAnchor
+}
+
 // Execute-on-receipt runs blocks the moment they're assembled, which means a
 // certificate can land AFTER the slot already executed and name a different
 // outcome: a sibling block we lost the shred race on, or a skip over a block
@@ -50,16 +58,27 @@ func resetVoteStakeDirty() { voteStakeDirtySlot.Store(0) }
 // rooted checkpoint; repair re-fetches the certified version via the
 // block-id hints). The in-loop unwind replaces that coarse path.
 
-// CertifiedSwitch reports an executed slot contradicted by a decisive
-// certificate.
+// CertifiedSwitch reports an executed suffix contradicted either by a
+// decisive certificate or by an exact parent-linked speculative branch. The
+// historical name is retained because node recovery treats both as the same
+// unwind/replay operation.
 type CertifiedSwitch struct {
-	Slot      uint64
-	Executed  solana.Hash // zero when Skip
-	Certified solana.Hash // zero when Skip
-	Skip      bool        // a skip cert contradicts an executed block
+	Slot         uint64
+	Executed     solana.Hash // zero when Skip
+	Certified    solana.Hash // zero when Skip
+	Skip         bool        // a skip cert contradicts an executed block
+	ParentLinked bool        // speculative child links to an older emitted ancestor
+	ParentSlot   uint64
+	ParentID     solana.Hash
+	ChildSlot    uint64
+	ChildID      solana.Hash
 }
 
 func (e *CertifiedSwitch) Error() string {
+	if e.ParentLinked {
+		return fmt.Sprintf("alpenglow speculative switch: block %s at slot %d links to ancestor %s at slot %d; discarding executed suffix from slot %d",
+			e.ChildID, e.ChildSlot, e.ParentID, e.ParentSlot, e.Slot)
+	}
 	if e.Skip {
 		return fmt.Sprintf("alpenglow switch: slot %d executed locally but is certificate-skipped", e.Slot)
 	}

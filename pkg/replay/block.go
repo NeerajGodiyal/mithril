@@ -185,6 +185,11 @@ type ResumeState struct {
 	ParentBlockHeight uint64
 	// ParentBankhash is the bankhash of the parent slot
 	ParentBankhash []byte
+	// ParentAlpenglowBlockID is the exact double-merkle identity of ParentSlot.
+	// It seeds the live block source after checkpoint restart so a skip run can
+	// be validated before the first post-resume block is emitted.
+	ParentAlpenglowBlockID    solana.Hash
+	HasParentAlpenglowBlockID bool
 	// AcctsLtHash is the cumulative LtHash at the end of the parent slot
 	AcctsLtHash *lthash.LtHash
 	// LamportsPerSignature for reconstructing FeeRateGovernor
@@ -1802,6 +1807,10 @@ func ReplayBlocks(
 			ingestAlpenglowFooterCertificate(consensusEngine, raw)
 		}
 	}
+	if alpenglowMode && resumeState != nil && resumeState.HasParentAlpenglowBlockID {
+		opts.InitialAlpenglowBlockID = resumeState.ParentAlpenglowBlockID
+		opts.HasInitialAlpenglowBlockID = true
+	}
 
 	// Apply block fetching options if provided
 	if blockFetchOpts != nil {
@@ -1858,6 +1867,68 @@ func ReplayBlocks(
 		return mithrilState.ManifestParentSlot
 	}
 
+	// handleAlpenglowSwitch is shared by certificate contradictions and exact
+	// parent-linked speculative fork transitions. Account-state correction is
+	// identical; only the source rewind differs (certified sibling re-fetch vs
+	// retaining an already assembled alternate child).
+	handleAlpenglowSwitch := func(sw *CertifiedSwitch, rewindSource func() bool) bool {
+		windowSwitches++
+		if unrootedTailState == nil || promoter == nil {
+			windowSwitchFallback++
+			switchFallbackReasons["no-unrooted-tail"]++
+			result.Error = sw
+			mlog.Log.Warnf("%v — no speculative account-state tail is available for unwind", sw)
+			return false
+		}
+		if !rewindSource() {
+			windowSwitchFallback++
+			switchFallbackReasons["source-rewind"]++
+			result.Error = fmt.Errorf("%w: block source rejected fork rewind", sw)
+			mlog.Log.Warnf("%v — block source rejected the fork rewind", sw)
+			return false
+		}
+		// Settle the in-flight fold before touching the overlay: the worker
+		// reads chunk layers the unwind would evict. If the applied fold moved
+		// the durable frontier past the switch slot, use node-level recovery.
+		applyFoldOutcome(promoter.drain())
+		if sw.Slot <= mithrilState.LastRootedSlot {
+			windowSwitchFallback++
+			switchFallbackReasons["durable-overlap"]++
+			result.Error = sw
+			mlog.Log.Warnf("%v — switch slot is at/below the durable watermark %d after settling the in-flight fold; deferring to the recovery loop", sw, mithrilState.LastRootedSlot)
+			return false
+		}
+		rs, fallbackReason := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo)
+		if rs == nil {
+			windowSwitchFallback++
+			switchFallbackReasons[fallbackReason]++
+			result.Error = sw
+			mlog.Log.Warnf("%v — in-RAM unwind unavailable (%s); re-replaying from the rooted checkpoint", sw, fallbackReason)
+			return false
+		}
+
+		for slot := range alpenglowExecutedBlockIDs {
+			if slot >= sw.Slot {
+				delete(alpenglowExecutedBlockIDs, slot)
+			}
+		}
+		global.DeleteAlpenglowBlockIDsFrom(sw.Slot)
+		global.DeleteAlpenglowChainedRootsFrom(sw.Slot)
+		resumeState = rs
+		lastSlotCtx = nil // next block configures from the rebuilt resume context
+		replayCtx.Capitalization = rs.Capitalization
+		global.SetBlockHeight(rs.ParentBlockHeight)
+		if rs.TransactionCount != nil {
+			global.SetTransactionCount(*rs.TransactionCount) // drop the discarded fork's txs
+		}
+		blockStream.SetLastExecutedSlot(rs.ParentSlot)
+		global.SetReplayFrontier(rs.ParentSlot)
+		ResetChainTip()
+		windowSwitchInRAM++
+		mlog.Log.Warnf("%v — unwound in RAM to executed parent slot %d; re-executing the selected chain (in-RAM switches this window: %d)", sw, rs.ParentSlot, windowSwitchInRAM)
+		return true
+	}
+
 	for {
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
@@ -1866,9 +1937,10 @@ func ReplayBlocks(
 		}
 
 		var (
-			block    *b.Block
-			waitTime time.Duration
-			neededAt time.Time // when replay asked the source for this slot
+			block        *b.Block
+			parentSwitch *blockstream.AlpenglowParentSwitch
+			waitTime     time.Duration
+			neededAt     time.Time // when replay asked the source for this slot
 		)
 
 		{
@@ -1902,11 +1974,50 @@ func ReplayBlocks(
 			}
 
 			neededAt = time.Now()
-			block = blockStream.NextBlock()
+			block, parentSwitch = blockStream.NextBlockOrAlpenglowParentSwitch(ctx)
 			waitTime = time.Since(neededAt)
 
 			if stallDone != nil {
 				close(stallDone)
+			}
+			if ctx.Err() != nil {
+				mlog.Log.Infof("context cancelled while waiting for the next block: %v", ctx.Err())
+				result.WasCancelled = true
+				break
+			}
+
+			if parentSwitch != nil {
+				if !parentSwitchNeedsStateUnwind(parentSwitch.SwitchSlot, currentExecutedAnchorSlot()) {
+					// Repair can assemble far ahead of replay. If the alternate
+					// branch is exposed before replay reaches the divergence, only
+					// the source's queued speculative suffix needs replacement;
+					// account state has nothing to unwind yet.
+					windowSwitches++
+					if !blockStream.RewindForAlpenglowParentSwitch(*parentSwitch) {
+						windowSwitchFallback++
+						switchFallbackReasons["source-rewind"]++
+						result.Error = fmt.Errorf("alpenglow speculative switch at slot %d: block source rejected pre-execution branch selection", parentSwitch.SwitchSlot)
+						break
+					}
+					mlog.Log.Warnf("ALPENGLOW speculative fork selected before execution: replaced queued suffix from slot %d with child %s at slot %d (replay currently at slot %d; no account-state unwind needed)",
+						parentSwitch.SwitchSlot, parentSwitch.ChildID, parentSwitch.ChildSlot, currentExecutedAnchorSlot())
+					continue
+				}
+				sw := &CertifiedSwitch{
+					Slot:         parentSwitch.SwitchSlot,
+					Executed:     alpenglowExecutedBlockIDs[parentSwitch.SwitchSlot],
+					ParentLinked: true,
+					ParentSlot:   parentSwitch.ParentSlot,
+					ParentID:     parentSwitch.ParentID,
+					ChildSlot:    parentSwitch.ChildSlot,
+					ChildID:      parentSwitch.ChildID,
+				}
+				if handleAlpenglowSwitch(sw, func() bool {
+					return blockStream.RewindForAlpenglowParentSwitch(*parentSwitch)
+				}) {
+					continue
+				}
+				break
 			}
 
 			if block == nil {
@@ -1957,54 +2068,12 @@ func ReplayBlocks(
 			// re-fetches the certified version either way).
 			if unrootedTailState != nil {
 				if sw := switchSweeper.sweep(alpenglowExecutedBlockIDs, mithrilState.LastRootedSlot, currentExecutedAnchorSlot()); sw != nil {
-					windowSwitches++
-					blockStream.RewindForAlpenglowSwitch(sw.Slot, sw.Certified)
-					// Settle the in-flight fold before touching the overlay: the
-					// worker reads chunk layers the unwind would evict. If the
-					// applied fold moved the durable frontier past the switch
-					// slot, the contradiction is now at/below durable state —
-					// that is the node-level rewind/recovery path, not an
-					// in-RAM unwind.
-					applyFoldOutcome(promoter.drain())
-					if sw.Slot <= mithrilState.LastRootedSlot {
-						windowSwitchFallback++
-						switchFallbackReasons["durable-overlap"]++
-						result.Error = sw
-						mlog.Log.Warnf("%v — switch slot is at/below the durable watermark %d after settling the in-flight fold; deferring to the recovery loop", sw, mithrilState.LastRootedSlot)
-						break
-					}
-					rs, fallbackReason := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo)
-					if rs != nil {
-						// In-RAM unwind: drop the wrong suffix, rebuild execution state
-						// from the retained parent context, and let the certified
-						// version re-execute — no process restart, cost = the unwound
-						// blocks' re-execution.
-						for slot := range alpenglowExecutedBlockIDs {
-							if slot >= sw.Slot {
-								delete(alpenglowExecutedBlockIDs, slot)
-							}
-						}
-						resumeState = rs
-						lastSlotCtx = nil // next block configures from the rebuilt resume context
-						replayCtx.Capitalization = rs.Capitalization
-						global.SetBlockHeight(rs.ParentBlockHeight)
-						if rs.TransactionCount != nil {
-							global.SetTransactionCount(*rs.TransactionCount) // drop the discarded fork's txs
-						}
-						blockStream.SetLastExecutedSlot(sw.Slot - 1)
-						global.SetReplayFrontier(sw.Slot - 1)
-						ResetChainTip()
-						windowSwitchInRAM++
-						mlog.Log.Warnf("%v — unwound in RAM to slot %d; re-executing the certified chain (in-RAM switches this window: %d)", sw, sw.Slot-1, windowSwitchInRAM)
+					if handleAlpenglowSwitch(sw, func() bool {
+						blockStream.RewindForAlpenglowSwitch(sw.Slot, sw.Certified)
+						return true
+					}) {
 						continue
 					}
-					// Guarded out: fall back to the rooted-checkpoint re-replay,
-					// recording WHY (the signal for whether the in-RAM engine
-					// suffices or FD-style branching is actually needed).
-					windowSwitchFallback++
-					switchFallbackReasons[fallbackReason]++
-					result.Error = sw
-					mlog.Log.Warnf("%v — in-RAM unwind unavailable (%s); re-replaying the certified chain from the rooted checkpoint", sw, fallbackReason)
 					break
 				}
 			}
@@ -2321,6 +2390,9 @@ func ReplayBlocks(
 				InflationFoundation:     replayCtx.Inflation.FoundationVal,
 				InflationFoundationTerm: replayCtx.Inflation.FoundationTerm,
 				TransactionCount:        &txCountAtSlot,
+			}
+			if block.HasAlpenglowBlockID {
+				resumeCtx.AlpenglowBlockID = solana.Hash(block.AlpenglowBlockID).String()
 			}
 			if lastSlotCtx.AcctsLtHash != nil {
 				resumeCtx.AcctsLtHash = base64.StdEncoding.EncodeToString(lastSlotCtx.AcctsLtHash.Hash())

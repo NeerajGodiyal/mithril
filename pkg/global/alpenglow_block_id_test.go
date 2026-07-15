@@ -30,3 +30,14 @@ func TestPruneAlpenglowBlockIDsBeforeKeepsRoot(t *testing.T) {
 	assert.True(t, rootOK)
 	assert.Equal(t, solana.Hash{2}, root)
 }
+
+func TestDeleteAlpenglowBlockIDsFromDropsSuffix(t *testing.T) {
+	ResetAlpenglowChainMetadata()
+	SetAlpenglowBlockID(41, solana.Hash{1})
+	SetAlpenglowBlockID(42, solana.Hash{2})
+	DeleteAlpenglowBlockIDsFrom(42)
+	_, parentOK := AlpenglowBlockID(41)
+	_, suffixOK := AlpenglowBlockID(42)
+	assert.True(t, parentOK)
+	assert.False(t, suffixOK)
+}
