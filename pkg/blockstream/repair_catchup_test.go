@@ -5,6 +5,7 @@ import (
 	"time"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/turbine"
 )
 
 func newRepairCatchupTestSource(maxGap uint64) *BlockSource {
@@ -212,6 +213,54 @@ func TestLostLiveBlockRefetchClearsEmitterDoneState(t *testing.T) {
 	}
 	if _, ok := bs.inflightStart[slot]; ok {
 		t.Fatal("inflight timestamp survived live-block refetch reset")
+	}
+}
+
+func TestRepairCatchupDoesNotPurgeSlowErrorFreeHead(t *testing.T) {
+	// Live slot 3256396 held 8189/8192 verified data shreds with no assembly
+	// errors. The old time-only heuristic purged it, throwing away the whole
+	// valid set; the second fetch eventually assembled the exact same slot.
+	detail := turbine.HeadShredDetail{
+		DataShreds:        8189,
+		MaxIndex:          8191,
+		ContiguousThrough: 7905,
+		HaveLast:          true,
+		LastIndex:         8191,
+	}
+	reset, decodeFailure := shouldResetRepairHead(
+		0, detail, true, 10*time.Minute, 5*time.Minute, 0)
+	if reset || decodeFailure {
+		t.Fatalf("an error-free partial head must retain verified shreds: reset=%v decode_failure=%v", reset, decodeFailure)
+	}
+}
+
+func TestRepairCatchupPurgesOnlyErrorBackedPoison(t *testing.T) {
+	partial := turbine.HeadShredDetail{
+		DataShreds:        79,
+		MaxIndex:          79,
+		ContiguousThrough: 63,
+		HaveLast:          false,
+	}
+	if reset, decodeFailure := shouldResetRepairHead(
+		3, partial, true, 2*repairCatchupHeadResetAfter, repairCatchupHeadGrowthGrace, 0); !reset || decodeFailure {
+		t.Fatalf("stalled head with recorded assembly errors must reset: reset=%v decode_failure=%v", reset, decodeFailure)
+	}
+
+	complete := turbine.HeadShredDetail{
+		DataShreds:        80,
+		MaxIndex:          79,
+		ContiguousThrough: 79,
+		HaveLast:          true,
+		LastIndex:         79,
+	}
+	if reset, decodeFailure := shouldResetRepairHead(
+		1, complete, true, repairCatchupDecodeErrorResetAfter, 0, 0); !reset || !decodeFailure {
+		t.Fatalf("complete set with deterministic decode error must reset quickly: reset=%v decode_failure=%v", reset, decodeFailure)
+	}
+
+	if reset, _ := shouldResetRepairHead(
+		1, partial, true, 10*time.Minute, 10*time.Minute, repairCatchupMaxHeadResets); reset {
+		t.Fatal("error-backed resets must remain bounded")
 	}
 }
 

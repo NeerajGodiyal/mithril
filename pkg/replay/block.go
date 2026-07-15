@@ -3357,6 +3357,7 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 	if alpenglowClock {
 		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
+			writeFooterBankhashMismatchArtifact(err, block, slotCtx, writableAccts, modifiedAccts)
 			return nil, err
 		}
 	}

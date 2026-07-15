@@ -1,16 +1,20 @@
 package replay
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
@@ -18,9 +22,11 @@ import (
 type consensusTxDiagnostic struct {
 	Index                  int      `json:"index"`
 	Signatures             []string `json:"signatures"`
+	WireBase64             string   `json:"wire_base64,omitempty"`
 	IsVote                 bool     `json:"is_vote"`
 	Version                string   `json:"version"`
 	RecentBlockhash        string   `json:"recent_blockhash"`
+	AccountKeys            []string `json:"account_keys,omitempty"`
 	AccountKeyCount        int      `json:"account_key_count"`
 	WritableAccountCount   int      `json:"writable_account_count,omitempty"`
 	ReadonlyAccountCount   int      `json:"readonly_account_count,omitempty"`
@@ -29,6 +35,7 @@ type consensusTxDiagnostic struct {
 	AddressTableLookupKeys []string `json:"address_table_lookup_keys,omitempty"`
 	InstructionCount       int      `json:"instruction_count"`
 	ProgramIDs             []string `json:"program_ids,omitempty"`
+	Instructions           []any    `json:"instructions,omitempty"`
 	Meta                   any      `json:"meta"`
 }
 
@@ -40,6 +47,23 @@ type consensusEntryDiagnostic struct {
 	FirstTxIndex uint64   `json:"first_tx_index,omitempty"`
 	LastTxIndex  uint64   `json:"last_tx_index,omitempty"`
 	TxIndices    []uint64 `json:"tx_indices,omitempty"`
+}
+
+type consensusAccountDiagnostic struct {
+	Key        string `json:"key"`
+	Slot       uint64 `json:"slot"`
+	Lamports   uint64 `json:"lamports"`
+	Owner      string `json:"owner"`
+	Executable bool   `json:"executable"`
+	RentEpoch  uint64 `json:"rent_epoch"`
+	DataLen    int    `json:"data_len"`
+	DataSHA256 string `json:"data_sha256"`
+	IsDummy    bool   `json:"is_dummy"`
+}
+
+type consensusBlobDiagnostic struct {
+	Length int    `json:"length"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 func consensusHashString(hash [32]byte) string {
@@ -64,6 +88,38 @@ func consensusLtHashChecksum(ltHash *lthash.LtHash) string {
 		return ""
 	}
 	return consensusByteHashString(ltHash.Checksum())
+}
+
+func consensusBlob(data []byte) consensusBlobDiagnostic {
+	out := consensusBlobDiagnostic{Length: len(data)}
+	if len(data) != 0 {
+		sum := sha256.Sum256(data)
+		out.SHA256 = hex.EncodeToString(sum[:])
+	}
+	return out
+}
+
+func consensusAccountDiagnostics(accts []*accounts.Account) []consensusAccountDiagnostic {
+	out := make([]consensusAccountDiagnostic, 0, len(accts))
+	for _, acct := range accts {
+		if acct == nil {
+			continue
+		}
+		dataSum := sha256.Sum256(acct.Data)
+		out = append(out, consensusAccountDiagnostic{
+			Key:        acct.Key.String(),
+			Slot:       acct.Slot,
+			Lamports:   acct.Lamports,
+			Owner:      solana.PublicKey(acct.Owner).String(),
+			Executable: acct.Executable,
+			RentEpoch:  acct.RentEpoch,
+			DataLen:    len(acct.Data),
+			DataSHA256: hex.EncodeToString(dataSum[:]),
+			IsDummy:    acct.IsDummy,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }
 
 func consensusSignatureStrings(tx *solana.Transaction) []string {
@@ -154,6 +210,20 @@ func consensusTxDiagnostics(block *b.Block) []consensusTxDiagnostic {
 			ProgramIDs:         consensusProgramIDs(tx),
 			Meta:               consensusTxMetaDiagnostic(txMeta),
 		}
+		if wire, err := tx.ToBase64(); err == nil {
+			txDiag.WireBase64 = wire
+		}
+		for _, key := range tx.Message.AccountKeys {
+			txDiag.AccountKeys = append(txDiag.AccountKeys, key.String())
+		}
+		for _, instr := range tx.Message.Instructions {
+			txDiag.Instructions = append(txDiag.Instructions, map[string]any{
+				"program_id_index": instr.ProgramIDIndex,
+				"account_indices":  append([]uint16(nil), instr.Accounts...),
+				"data_base58":      instr.Data.String(),
+				"data_hex":         hex.EncodeToString(instr.Data),
+			})
+		}
 		if canDeriveAccountsFromMessage(tx) {
 			txDiag.WritableAccountCount = len(messageWritableAccounts(&tx.Message))
 			txDiag.ReadonlyAccountCount = len(messageReadonlyAccounts(&tx.Message))
@@ -223,6 +293,40 @@ func consensusBlockDiagnostic(block *b.Block) map[string]any {
 		"updated_account_count":       len(block.UpdatedAccts),
 		"epoch_updated_account_count": len(block.EpochUpdatedAccts),
 	}
+}
+
+// writeFooterBankhashMismatchArtifact captures the exact locally computed end-of-slot
+// state when a certified Alpenglow footer disagrees with replay. It deliberately stores
+// hashes rather than raw account or certificate data so the artifact remains bounded.
+// Like all consensus diagnostics, failure to write it must not affect replay behavior.
+func writeFooterBankhashMismatchArtifact(
+	verifyErr error,
+	block *b.Block,
+	slotCtx *sealevel.SlotCtx,
+	writableAccts []*accounts.Account,
+	modifiedAccts []*accounts.Account,
+) {
+	if block == nil || slotCtx == nil {
+		return
+	}
+
+	artifact := consensusBlockDiagnostic(block)
+	artifact["error"] = verifyErr.Error()
+	artifact["computed_bankhash"] = consensusByteHashString(slotCtx.FinalBankhash)
+	artifact["computed_accts_lthash_checksum"] = consensusLtHashChecksum(slotCtx.AcctsLtHash)
+	artifact["total_compute_units_consumed"] = slotCtx.TotalComputeUnitsConsumed
+	artifact["lamports_burnt"] = slotCtx.LamportsBurnt
+	artifact["footer_producer_time_nanos"] = block.FooterProducerTimeNanos
+	artifact["has_alpenglow_footer"] = block.HasAlpenglowFooter
+	artifact["has_expected_bankhash"] = block.HasExpectedBankhash
+	artifact["skip_reward_cert"] = consensusBlob(block.SkipRewardCert)
+	artifact["notar_reward_cert"] = consensusBlob(block.NotarRewardCert)
+	artifact["block_final_cert"] = consensusBlob(block.BlockFinalCert)
+	artifact["alpenglow_final_cert"] = consensusBlob(block.AlpenglowFinalCert)
+	artifact["writable_accounts"] = consensusAccountDiagnostics(writableAccts)
+	artifact["modified_accounts"] = consensusAccountDiagnostics(modifiedAccts)
+
+	writeConsensusArtifact(fmt.Sprintf("footer-bankhash-mismatch-slot-%d.json", block.Slot), artifact)
 }
 
 // writeConsensusArtifact writes a best-effort JSON diagnostic artifact to the

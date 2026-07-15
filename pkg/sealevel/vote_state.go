@@ -29,7 +29,7 @@ const (
 )
 
 func sizeOfVersionedVoteState(f features.Features) uint64 {
-	if f.IsActive(features.VoteStateAddVoteLatency) {
+	if f.IsActive(features.VoteStateAddVoteLatency) || f.IsActive(features.VoteStateV4) {
 		return VoteStateV3Size
 	} else {
 		return VoteStateV2Size
@@ -1254,7 +1254,7 @@ func (voteState *VoteState) Credits() uint64 {
 	}
 }
 
-func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, currentEpoch uint64, targetEpoch uint64, verify func(epochAuthorizedVoter solana.PublicKey) error, f features.Features) error {
+func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, currentEpoch uint64, targetEpoch uint64, blsPubkey *[blsPublicKeyCompressedSize]byte, verify func(epochAuthorizedVoter solana.PublicKey) error, f features.Features) error {
 	epochAuthorizedVoter, err := voteState.GetAndUpdateAuthorizedVoter(currentEpoch, f)
 	if err != nil {
 		return err
@@ -1299,6 +1299,10 @@ func (voteState *VoteState) SetNewAuthorizedVoter(authorized solana.PublicKey, c
 	}
 
 	voteState.AuthorizedVoters.AuthorizedVoters.Set(targetEpoch, authorized)
+	if blsPubkey != nil {
+		copied := *blsPubkey
+		voteState.v4BlsPubkeyCompressed = &copied
+	}
 	return nil
 }
 

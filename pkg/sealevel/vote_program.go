@@ -35,6 +35,7 @@ const (
 	VoteProgramInstrTypeCompactUpdateVoteStateSwitch
 	VoteProgramInstrTypeTowerSync
 	VoteProgramInstrTypeTowerSyncSwitch
+	VoteProgramInstrTypeInitializeAccountV2 = 16
 )
 
 var (
@@ -67,14 +68,24 @@ type VoteInstrVoteInit struct {
 	Commission           byte
 }
 
+type VoteInstrVoteInitV2 struct {
+	NodePubkey                          solana.PublicKey
+	AuthorizedVoter                     solana.PublicKey
+	AuthorizedVoterBLSPubkey            [blsPublicKeyCompressedSize]byte
+	AuthorizedVoterBLSProofOfPossession [blsProofOfPossessionCompressedSize]byte
+	AuthorizedWithdrawer                solana.PublicKey
+	InflationRewardsCommissionBps       uint16
+	BlockRevenueCommissionBps           uint16
+}
+
 const (
 	VoteAuthorizeTypeVoter = iota
 	VoteAuthorizeTypeWithdrawer
 )
 
 type VoteInstrVoteAuthorize struct {
-	Pubkey        solana.PublicKey
-	VoteAuthorize uint32
+	Pubkey    solana.PublicKey
+	Authorize VoteAuthorizeKind
 }
 
 type VoteInstrVote struct {
@@ -97,8 +108,7 @@ type VoteInstrVoteSwitch struct {
 }
 
 type VoteInstrVoteAuthorizeChecked struct {
-	Pubkey        solana.PublicKey
-	VoteAuthorize uint32
+	Authorize VoteAuthorizeKind
 }
 
 type VoteInstrUpdateVoteState struct {
@@ -114,14 +124,14 @@ type VoteInstrUpdateVoteStateSwitch struct {
 }
 
 type VoteInstrAuthorizeWithSeed struct {
-	AuthorizationType               uint32
+	Authorize                       VoteAuthorizeKind
 	CurrentAuthorityDerivedKeyOwner solana.PublicKey
 	CurrentAuthorityDerivedKeySeed  string
 	NewAuthority                    solana.PublicKey
 }
 
 type VoteInstrAuthorizeCheckedWithSeed struct {
-	AuthorizationType               uint32
+	Authorize                       VoteAuthorizeKind
 	CurrentAuthorityDerivedKeyOwner solana.PublicKey
 	CurrentAuthorityDerivedKeySeed  string
 }
@@ -183,6 +193,45 @@ func (voteInit *VoteInstrVoteInit) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	return err
 }
 
+func (voteInit *VoteInstrVoteInitV2) UnmarshalWithDecoder(decoder *bin.Decoder) error {
+	nodePubkey, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteInit.NodePubkey[:], nodePubkey)
+
+	authorizedVoter, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteInit.AuthorizedVoter[:], authorizedVoter)
+
+	blsPubkey, err := decoder.ReadBytes(blsPublicKeyCompressedSize)
+	if err != nil {
+		return err
+	}
+	copy(voteInit.AuthorizedVoterBLSPubkey[:], blsPubkey)
+
+	blsProof, err := decoder.ReadBytes(blsProofOfPossessionCompressedSize)
+	if err != nil {
+		return err
+	}
+	copy(voteInit.AuthorizedVoterBLSProofOfPossession[:], blsProof)
+
+	authorizedWithdrawer, err := decoder.ReadBytes(solana.PublicKeyLength)
+	if err != nil {
+		return err
+	}
+	copy(voteInit.AuthorizedWithdrawer[:], authorizedWithdrawer)
+
+	voteInit.InflationRewardsCommissionBps, err = decoder.ReadUint16(bin.LE)
+	if err != nil {
+		return err
+	}
+	voteInit.BlockRevenueCommissionBps, err = decoder.ReadUint16(bin.LE)
+	return err
+}
+
 func (voteAuthorize *VoteInstrVoteAuthorize) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	pk, err := decoder.ReadBytes(solana.PublicKeyLength)
 	if err != nil {
@@ -190,16 +239,7 @@ func (voteAuthorize *VoteInstrVoteAuthorize) UnmarshalWithDecoder(decoder *bin.D
 	}
 	copy(voteAuthorize.Pubkey[:], pk)
 
-	voteAuthorize.VoteAuthorize, err = decoder.ReadUint32(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	if voteAuthorize.VoteAuthorize != VoteAuthorizeTypeVoter && voteAuthorize.VoteAuthorize != VoteAuthorizeTypeWithdrawer {
-		return invalidEnumValue
-	}
-
-	return err
+	return voteAuthorize.Authorize.UnmarshalWithDecoder(decoder)
 }
 
 func (vote *VoteInstrVote) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -277,23 +317,7 @@ func (voteSwitch *VoteInstrVoteSwitch) UnmarshalWithDecoder(decoder *bin.Decoder
 }
 
 func (voteAuthChecked *VoteInstrVoteAuthorizeChecked) UnmarshalWithDecoder(decoder *bin.Decoder) error {
-	/*pk, err := decoder.ReadBytes(solana.PublicKeyLength)
-	if err != nil {
-		return err
-	}
-	copy(voteAuthChecked.Pubkey[:], pk)*/
-
-	var err error
-	voteAuthChecked.VoteAuthorize, err = decoder.ReadUint32(bin.LE)
-	if err != nil {
-		return err
-	}
-
-	if voteAuthChecked.VoteAuthorize != VoteAuthorizeTypeVoter && voteAuthChecked.VoteAuthorize != VoteAuthorizeTypeWithdrawer {
-		return invalidEnumValue
-	}
-
-	return err
+	return voteAuthChecked.Authorize.UnmarshalWithDecoder(decoder)
 }
 
 func (updateVoteState *VoteInstrUpdateVoteState) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -433,9 +457,7 @@ func (compactUpdateVoteState *VoteInstrCompactUpdateVoteStateSwitch) UnmarshalWi
 }
 
 func (authWithSeed *VoteInstrAuthorizeWithSeed) UnmarshalWithDecoder(decoder *bin.Decoder) error {
-	var err error
-	authWithSeed.AuthorizationType, err = decoder.ReadUint32(bin.LE)
-	if err != nil {
+	if err := authWithSeed.Authorize.UnmarshalWithDecoder(decoder); err != nil {
 		return err
 	}
 
@@ -463,9 +485,7 @@ func (authWithSeed *VoteInstrAuthorizeWithSeed) UnmarshalWithDecoder(decoder *bi
 }
 
 func (acws *VoteInstrAuthorizeCheckedWithSeed) UnmarshalWithDecoder(decoder *bin.Decoder) error {
-	var err error
-	acws.AuthorizationType, err = decoder.ReadUint32(bin.LE)
-	if err != nil {
+	if err := acws.Authorize.UnmarshalWithDecoder(decoder); err != nil {
 		return err
 	}
 
@@ -483,7 +503,7 @@ func (acws *VoteInstrAuthorizeCheckedWithSeed) UnmarshalWithDecoder(decoder *bin
 		return InstrErrInvalidInstructionData
 	}
 
-	return err
+	return nil
 }
 
 func (lockoutOffset *LockoutOffset) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -724,7 +744,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(execCtx, me, voteAuthorize.Pubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
+			err = VoteProgramAuthorize(execCtx, me, voteAuthorize.Pubkey, voteAuthorize.Authorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeAuthorizeWithSeed:
@@ -740,7 +760,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorizeWithSeed(execCtx, instrCtx, me, voteAuthWithSeed.NewAuthority, voteAuthWithSeed.AuthorizationType, voteAuthWithSeed.CurrentAuthorityDerivedKeyOwner, voteAuthWithSeed.CurrentAuthorityDerivedKeySeed)
+			err = VoteProgramAuthorizeWithSeed(execCtx, instrCtx, me, voteAuthWithSeed.NewAuthority, voteAuthWithSeed.Authorize, voteAuthWithSeed.CurrentAuthorityDerivedKeyOwner, voteAuthWithSeed.CurrentAuthorityDerivedKeySeed)
 		}
 
 	case VoteProgramInstrTypeAuthorizeCheckedWithSeed:
@@ -778,7 +798,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return InstrErrMissingRequiredSignature
 			}
 
-			err = VoteProgramAuthorizeWithSeed(execCtx, instrCtx, me, newAuthority, voteAuthCheckedWithSeed.AuthorizationType, voteAuthCheckedWithSeed.CurrentAuthorityDerivedKeyOwner, voteAuthCheckedWithSeed.CurrentAuthorityDerivedKeySeed)
+			err = VoteProgramAuthorizeWithSeed(execCtx, instrCtx, me, newAuthority, voteAuthCheckedWithSeed.Authorize, voteAuthCheckedWithSeed.CurrentAuthorityDerivedKeyOwner, voteAuthCheckedWithSeed.CurrentAuthorityDerivedKeySeed)
 		}
 
 	case VoteProgramInstrTypeUpdateValidatorIdentity:
@@ -1018,7 +1038,7 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 				return err
 			}
 
-			err = VoteProgramAuthorize(execCtx, me, voterPubkey, voteAuthorize.VoteAuthorize, signers, clock, execCtx.Features)
+			err = VoteProgramAuthorize(execCtx, me, voterPubkey, voteAuthorize.Authorize, signers, clock, execCtx.Features)
 		}
 
 	case VoteProgramInstrTypeTowerSyncSwitch:
@@ -1063,6 +1083,41 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 			err = VoteProgramProcessTowerSync(execCtx, me, slotHashes, clock, towerSyncInstr, signers, execCtx.Features)
 		}
 
+	case VoteProgramInstrTypeInitializeAccountV2:
+		{
+			if !voteProgramInitializeAccountV2Enabled(execCtx.Features) {
+				return InstrErrInvalidInstructionData
+			}
+			if err = instrCtx.CheckNumOfInstructionAccounts(4); err != nil {
+				return err
+			}
+
+			var voteInit VoteInstrVoteInitV2
+			if err = voteInit.UnmarshalWithDecoder(decoder); err != nil {
+				return InstrErrInvalidInstructionData
+			}
+
+			clock, clockErr := ReadClockSysvar(execCtx)
+			if clockErr != nil {
+				return clockErr
+			}
+			rent, rentErr := ReadRentSysvar(execCtx)
+			if rentErr != nil {
+				return rentErr
+			}
+
+			err = VoteProgramInitializeAccountV2(
+				txCtx,
+				instrCtx,
+				voteInit,
+				signers,
+				clock,
+				rent,
+				execCtx,
+				execCtx.Features,
+			)
+		}
+
 	default: // invalid instruction
 		{
 			err = InstrErrInvalidInstructionData
@@ -1070,6 +1125,14 @@ func VoteProgramExecute(execCtx *ExecutionCtx) error {
 	}
 
 	return err
+}
+
+func voteProgramInitializeAccountV2Enabled(f features.Features) bool {
+	return f.IsActive(features.BlsPubkeyManagementInVoteAccount) &&
+		f.IsActive(features.CommissionRateInBasisPoints) &&
+		f.IsActive(features.CustomCommissionCollector) &&
+		f.IsActive(features.BlockRevenueSharing) &&
+		f.IsActive(features.VoteAccountInitializeV2)
 }
 
 func VoteProgramInitializeAccount(execCtx *ExecutionCtx, voteAccount *BorrowedAccount, voteInit VoteInstrVoteInit, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
@@ -1095,7 +1158,118 @@ func VoteProgramInitializeAccount(execCtx *ExecutionCtx, voteAccount *BorrowedAc
 	return setVoteAccountState(execCtx, voteAccount, voteState, f)
 }
 
-func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, authorized solana.PublicKey, voteAuthorize uint32, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
+func VoteProgramInitializeAccountV2(
+	txCtx *TransactionCtx,
+	instrCtx *InstructionCtx,
+	voteInit VoteInstrVoteInitV2,
+	signers []solana.PublicKey,
+	clock SysvarClock,
+	rent SysvarRent,
+	execCtx *ExecutionCtx,
+	f features.Features,
+) error {
+	voteAccount, err := instrCtx.BorrowInstructionAccount(txCtx, 0)
+	if err != nil {
+		return err
+	}
+	defer voteAccount.Drop()
+
+	if uint64(len(voteAccount.Data())) != sizeOfVersionedVoteState(f) {
+		return InstrErrInvalidAccountData
+	}
+	versionedVoteState, err := UnmarshalVersionedVoteState(voteAccount.Data())
+	if err != nil {
+		return err
+	}
+	if versionedVoteState.IsInitialized() {
+		return InstrErrAccountAlreadyInitialized
+	}
+	if err := verifySigner(voteInit.NodePubkey, signers); err != nil {
+		return err
+	}
+
+	voteKey := voteAccount.Key()
+	inflationCollector, err := resolveVoteCommissionCollector(txCtx, instrCtx, voteKey, 2, rent)
+	if err != nil {
+		return err
+	}
+	blockRevenueCollector, err := resolveVoteCommissionCollector(txCtx, instrCtx, voteKey, 3, rent)
+	if err != nil {
+		return err
+	}
+
+	if err := execCtx.ComputeMeter.Consume(voteBLSProofOfPossessionComputeUnits); err != nil {
+		return InstrErrComputationalBudgetExceeded
+	}
+	blsArgs := &VoterWithBLSArgs{
+		BlsPubkeyCompressed:  voteInit.AuthorizedVoterBLSPubkey,
+		BlsProofOfPossession: voteInit.AuthorizedVoterBLSProofOfPossession,
+	}
+	if err := verifyVoteBLSProofOfPossession(voteKey, blsArgs); err != nil {
+		return err
+	}
+
+	voteState := newVoteStateFromVoteInitV2(voteInit, inflationCollector, blockRevenueCollector, clock)
+	return setVoteAccountState(execCtx, voteAccount, voteState, f)
+}
+
+func resolveVoteCommissionCollector(
+	txCtx *TransactionCtx,
+	instrCtx *InstructionCtx,
+	voteKey solana.PublicKey,
+	accountIndex uint64,
+	rent SysvarRent,
+) (solana.PublicKey, error) {
+	accountKey, err := instrCtx.KeyOfInstructionAccount(txCtx, accountIndex)
+	if err != nil {
+		return solana.PublicKey{}, err
+	}
+	if accountKey == voteKey {
+		return voteKey, nil
+	}
+
+	collectorAccount, err := instrCtx.BorrowInstructionAccount(txCtx, accountIndex)
+	if err != nil {
+		return solana.PublicKey{}, err
+	}
+	defer collectorAccount.Drop()
+
+	if collectorAccount.Owner() != a.SystemProgramAddr {
+		return solana.PublicKey{}, InstrErrInvalidAccountOwner
+	}
+	if !rent.IsExempt(collectorAccount.Lamports(), uint64(len(collectorAccount.Data()))) {
+		return solana.PublicKey{}, InstrErrInsufficientFunds
+	}
+	if !collectorAccount.IsWritable() {
+		return solana.PublicKey{}, InstrErrInvalidArgument
+	}
+	return accountKey, nil
+}
+
+func newVoteStateFromVoteInitV2(
+	voteInit VoteInstrVoteInitV2,
+	inflationCollector solana.PublicKey,
+	blockRevenueCollector solana.PublicKey,
+	clock SysvarClock,
+) *VoteState {
+	voteState := newVoteStateFromVoteInit(VoteInstrVoteInit{
+		NodePubkey:           voteInit.NodePubkey,
+		AuthorizedVoter:      voteInit.AuthorizedVoter,
+		AuthorizedWithdrawer: voteInit.AuthorizedWithdrawer,
+		Commission:           0,
+	}, clock)
+
+	voteState.wasV4 = true
+	voteState.v4InflationRewardsCollector = inflationCollector
+	voteState.v4BlockRevenueCollector = blockRevenueCollector
+	voteState.v4InflationRewardsCommBps = voteInit.InflationRewardsCommissionBps
+	voteState.v4BlockRevenueCommBps = voteInit.BlockRevenueCommissionBps
+	blsPubkey := voteInit.AuthorizedVoterBLSPubkey
+	voteState.v4BlsPubkeyCompressed = &blsPubkey
+	return voteState
+}
+
+func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, authorized solana.PublicKey, authorize VoteAuthorizeKind, signers []solana.PublicKey, clock SysvarClock, f features.Features) error {
 	voteStateVersions, err := UnmarshalVersionedVoteState(voteAcct.Data())
 	if err != nil {
 		return err
@@ -1103,15 +1277,18 @@ func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, auth
 
 	voteState := voteStateVersions.ConvertToCurrent()
 
-	switch voteAuthorize {
+	switch authorize.Type {
 	case VoteAuthorizeTypeVoter:
 		{
+			if f.IsActive(features.BlsPubkeyManagementInVoteAccount) && voteStateHasBLSPubkey(voteState) {
+				return InstrErrInvalidInstructionData
+			}
 			var authorizedWithDrawerSigner bool
 			if verifySigner(voteState.AuthorizedWithdrawer, signers) == nil {
 				authorizedWithDrawerSigner = true
 			}
 
-			err = voteState.SetNewAuthorizedVoter(authorized, clock.Epoch, clock.LeaderScheduleEpoch+1, func(epochAuthorizedVoter solana.PublicKey) error {
+			err = voteState.SetNewAuthorizedVoter(authorized, clock.Epoch, clock.LeaderScheduleEpoch+1, nil, func(epochAuthorizedVoter solana.PublicKey) error {
 				if authorizedWithDrawerSigner {
 					return nil
 				} else {
@@ -1132,17 +1309,40 @@ func VoteProgramAuthorize(execCtx *ExecutionCtx, voteAcct *BorrowedAccount, auth
 			voteState.AuthorizedWithdrawer = authorized
 		}
 
-	default:
+	case VoteAuthorizeTypeVoterWithBLS:
 		{
-			panic("shouldn't be possible")
+			if !f.IsActive(features.BlsPubkeyManagementInVoteAccount) || authorize.VoterWithBLS == nil {
+				return InstrErrInvalidInstructionData
+			}
+			if err := execCtx.ComputeMeter.Consume(voteBLSProofOfPossessionComputeUnits); err != nil {
+				return InstrErrComputationalBudgetExceeded
+			}
+			if err := verifyVoteBLSProofOfPossession(voteAcct.Key(), authorize.VoterWithBLS); err != nil {
+				return err
+			}
+
+			authorizedWithDrawerSigner := verifySigner(voteState.AuthorizedWithdrawer, signers) == nil
+			blsPubkey := authorize.VoterWithBLS.BlsPubkeyCompressed
+			err = voteState.SetNewAuthorizedVoter(authorized, clock.Epoch, clock.LeaderScheduleEpoch+1, &blsPubkey, func(epochAuthorizedVoter solana.PublicKey) error {
+				if authorizedWithDrawerSigner {
+					return nil
+				}
+				return verifySigner(epochAuthorizedVoter, signers)
+			}, f)
+			if err != nil {
+				return err
+			}
 		}
+
+	default:
+		return InstrErrInvalidInstructionData
 	}
 
 	err = setVoteAccountState(execCtx, voteAcct, voteState, f)
 	return err
 }
 
-func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCtx, voteAcct *BorrowedAccount, newAuthority solana.PublicKey, authorizationType uint32, currentAuthorityDerivedKeyOwner solana.PublicKey, currentAuthorityDerivedKeySeed string) error {
+func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCtx, voteAcct *BorrowedAccount, newAuthority solana.PublicKey, authorize VoteAuthorizeKind, currentAuthorityDerivedKeyOwner solana.PublicKey, currentAuthorityDerivedKeySeed string) error {
 	txCtx := execCtx.TransactionContext
 
 	err := checkAcctForClockSysvar(txCtx, instrCtx, 1)
@@ -1178,7 +1378,7 @@ func VoteProgramAuthorizeWithSeed(execCtx *ExecutionCtx, instrCtx *InstructionCt
 		expectedAuthorityKeys = append(expectedAuthorityKeys, authKey)
 	}
 
-	err = VoteProgramAuthorize(execCtx, voteAcct, newAuthority, authorizationType, expectedAuthorityKeys, clock, execCtx.Features)
+	err = VoteProgramAuthorize(execCtx, voteAcct, newAuthority, authorize, expectedAuthorityKeys, clock, execCtx.Features)
 	return err
 }
 

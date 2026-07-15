@@ -74,6 +74,11 @@ var SyscallParameterAddressRestrictions = FeatureGate{Name: "SyscallParameterAdd
 var VirtualAddressSpaceAdjustments = FeatureGate{Name: "VirtualAddressSpaceAdjustments", Address: base58.MustDecodeFromString("7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz")}
 var AccountDataDirectMapping = FeatureGate{Name: "AccountDataDirectMapping", Address: base58.MustDecodeFromString("CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE")}
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
+var BlsPubkeyManagementInVoteAccount = FeatureGate{Name: "BlsPubkeyManagementInVoteAccount", Address: base58.MustDecodeFromString("AnAP9zPV4KL7czAPQbFhpDKV2tx7g4UGNbK9wvXwjaRo")}
+var CommissionRateInBasisPoints = FeatureGate{Name: "CommissionRateInBasisPoints", Address: base58.MustDecodeFromString("Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj")}
+var CustomCommissionCollector = FeatureGate{Name: "CustomCommissionCollector", Address: base58.MustDecodeFromString("CustomCommissionCo11ector111111111111111111")}
+var BlockRevenueSharing = FeatureGate{Name: "BlockRevenueSharing", Address: base58.MustDecodeFromString("B1ockRevenueSharing111111111111111111111111")}
+var VoteAccountInitializeV2 = FeatureGate{Name: "VoteAccountInitializeV2", Address: base58.MustDecodeFromString("VoteAccount1nitia1izeV211111111111111111111")}
 var RelaxProgramdataAccountCheckMigration = FeatureGate{Name: "RelaxProgramdataAccountCheckMigration", Address: base58.MustDecodeFromString("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h")}
 var ReplaceSplTokenWithPToken = FeatureGate{Name: "ReplaceSplTokenWithPToken", Address: base58.MustDecodeFromString("ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP")}
 var CreateAccountAllowPrefund = FeatureGate{Name: "CreateAccountAllowPrefund", Address: base58.MustDecodeFromString("6sPDzwyARRExKH52LECxcGoqziH8G7SZofwuxi8Ja331")}
@@ -104,6 +109,7 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, Alpenglow, AlpenglowDevContext, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2, SyscallParameterAddressRestrictions, VirtualAddressSpaceAdjustments, AccountDataDirectMapping,
-	VoteStateV4, RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
+	VoteStateV4, BlsPubkeyManagementInVoteAccount, CommissionRateInBasisPoints, CustomCommissionCollector, BlockRevenueSharing, VoteAccountInitializeV2,
+	RelaxProgramdataAccountCheckMigration, ReplaceSplTokenWithPToken, CreateAccountAllowPrefund,
 	RemoveSimpleVoteFromCostModel, DisableZkElgamalProofProgram, ReenableZkElgamalProofProgram, AltBn128LittleEndian, EnableAltBn128G2Syscalls,
 	EnableBls12_381Syscall, UpgradeBpfStakeProgramToV5, DelayCommissionUpdates, ValidateChainedBlockId, DiscardUnexpectedDataCompleteShreds}

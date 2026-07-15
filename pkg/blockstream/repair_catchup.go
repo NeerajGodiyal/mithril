@@ -477,33 +477,34 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			stalled := time.Since(lastProgress)
 			headStalled := time.Since(headGrowthAt)
 
-			// Stuck-head self-heal: shreds held but the slot cannot complete
-			// while responses flow means the assembly state is likely
-			// poisoned (bad first shred pinning an FEC signature, variant, or
-			// layout). Drop the slot's shred state and re-repair it from
-			// scratch — bounded attempts so a genuinely unserved slot does
-			// not thrash. Two guards: a COMPLETED head is never reset (it
-			// assembled fine — the staged/buffered/lost classification below
-			// owns it), and a head whose shred count is still GROWING is
-			// never reset (it is rate-limited, not poisoned; the reset would
-			// discard progress the repair budget already paid for).
+			// Stuck-head self-heal is deliberately evidence-based. A partial
+			// slot with no assembly errors is not poisoned merely because its
+			// last few data shreds are slow or temporarily unavailable. Purging
+			// that state discards thousands of verified shreds and makes a
+			// scarcity stall start over from zero. Only recorded assembly/decode
+			// failures can trigger a purge; a COMPLETED head and a head whose
+			// shred count is still growing remain protected as before.
 			errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
 			headDetail, haveHeadDetail := receiver.HeadShredDetail(waiting)
-			completeDecodeFailure := errCount > 0 && haveHeadDetail && headDetail.HaveLast &&
-				headDetail.ContiguousThrough == int64(headDetail.LastIndex) &&
-				headDetail.DataShreds == int(headDetail.LastIndex)+1
-			genericPoisonTimeout := stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter &&
-				headStalled >= repairCatchupHeadGrowthGrace
-			fastDecodeTimeout := completeDecodeFailure && stalled >= repairCatchupDecodeErrorResetAfter
-			if headResets < repairCatchupMaxHeadResets && (genericPoisonTimeout || fastDecodeTimeout) &&
+			resetForAssemblyFailure, completeDecodeFailure := shouldResetRepairHead(
+				errCount, headDetail, haveHeadDetail, stalled, headStalled, headResets)
+			if resetForAssemblyFailure &&
 				!receiver.SlotCompleted(waiting) {
 				if lastErr == "" {
 					lastErr = "none"
 				}
 				headResets++
 				detail := headShredDetailString(receiver, waiting)
+				heldShreds := max(headShreds, 0)
+				stalledFor := headStalled.Round(time.Second)
 				receiver.ResetSlotAndDiscardSpool(waiting)
-				reason := fmt.Sprintf("%d shreds held with no growth for %s", max(headShreds, 0), headStalled.Round(time.Second))
+				// The next tick observes the newly empty state. Do not compare it
+				// with the pre-purge count or reuse the old growth deadline: doing
+				// so consumed both bounded reset attempts back-to-back in one live
+				// incident before a single repair response could arrive.
+				headShreds = -1
+				headGrowthAt = time.Now()
+				reason := fmt.Sprintf("%d shreds held with no growth for %s", heldShreds, stalledFor)
 				if completeDecodeFailure {
 					reason = "the complete contiguous shred set failed deterministic block decoding"
 				}
@@ -758,6 +759,25 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			}
 		}
 	}
+}
+
+// shouldResetRepairHead distinguishes corrupt assembly state from an ordinary
+// incomplete slot. Time without growth is only meaningful after the assembler
+// itself recorded an error; otherwise Turbine repair must retain every verified
+// shred and keep requesting the holes.
+func shouldResetRepairHead(errCount int, detail turbine.HeadShredDetail, haveDetail bool, stalled, headStalled time.Duration, headResets int) (reset, completeDecodeFailure bool) {
+	if errCount <= 0 || headResets >= repairCatchupMaxHeadResets {
+		return false, false
+	}
+	completeDecodeFailure = haveDetail && detail.HaveLast &&
+		detail.ContiguousThrough == int64(detail.LastIndex) &&
+		detail.DataShreds == int(detail.LastIndex)+1
+	if completeDecodeFailure && stalled >= repairCatchupDecodeErrorResetAfter {
+		return true, true
+	}
+	genericPoisonTimeout := stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter &&
+		headStalled >= repairCatchupHeadGrowthGrace
+	return genericPoisonTimeout, false
 }
 
 // headShredDetailString renders the stuck-head completion picture: how far

@@ -61,6 +61,18 @@ func TestAlpenglowFeatureGate(t *testing.T) {
 	assert.Contains(t, AllFeatureGates, Alpenglow)
 }
 
+func TestVoteAccountInitializeV2FeatureGates(t *testing.T) {
+	for _, gate := range []FeatureGate{
+		BlsPubkeyManagementInVoteAccount,
+		CommissionRateInBasisPoints,
+		CustomCommissionCollector,
+		BlockRevenueSharing,
+		VoteAccountInitializeV2,
+	} {
+		assert.Contains(t, AllFeatureGates, gate)
+	}
+}
+
 func TestSyscallParameterAddressRestrictionsFeatureGate(t *testing.T) {
 	assert.Equal(t, "SyscallParameterAddressRestrictions", SyscallParameterAddressRestrictions.Name)
 	assert.Equal(t, base58.MustDecodeFromString("EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF"), SyscallParameterAddressRestrictions.Address)

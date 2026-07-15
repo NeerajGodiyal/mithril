@@ -142,8 +142,13 @@ func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uin
 	}
 }
 
-func isBuiltin(instr Instruction) bool {
+func isBuiltin(instr Instruction, f *features.Features) bool {
 	programPubkey := instr.ProgramId
+	// SIMD-0387: BLS proof-of-possession verification can consume 34,500 CUs,
+	// so the vote program leaves the minimal builtin allocation once active.
+	if programPubkey == a.VoteProgramAddr && f != nil && f.IsActive(features.BlsPubkeyManagementInVoteAccount) {
+		return false
+	}
 	if migration.IsNonMigratingBuiltinProgram(programPubkey) {
 		return true
 	}
@@ -171,7 +176,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 	var updatedComputeUnitPrice uint64
 
 	for idx, instr := range instructions {
-		if isBuiltin(instr) {
+		if isBuiltin(instr, f) {
 			numBuiltinInstrs++
 		} else {
 			numNonBuiltinInstrs++

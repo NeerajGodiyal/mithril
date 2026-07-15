@@ -595,14 +595,12 @@ const (
 	repairCatchupLiveDeliverWindow = uint64(256)
 	// On-disk shred spool byte cap (highest slots dropped first).
 	shredSpoolMaxBytes = int64(8) << 30
-	// Stuck-head self-heal: a head slot that holds shreds but cannot complete
-	// while repair responses flow is usually POISONED assembly state (a bad
-	// first shred pinning an FEC signature/variant/layout). Reset the slot's
-	// shred state and re-repair from scratch — bounded attempts, spaced out.
-	// The reset requires the head to have stopped GROWING too: a head still
-	// accumulating shreds is rate-limited, not poisoned, and resetting it
-	// throws away paid-for progress (observed live: a 7392-shred slot wiped
-	// at 6434 held, mid-climb).
+	// Stuck-head self-heal: only a recorded assembly/decode failure is evidence
+	// of poisoned state (for example a bad first shred pinning an FEC signature,
+	// variant, or layout). A merely incomplete slot is never reset: the missing
+	// shreds may be scarce, and throwing away verified progress makes repair
+	// start the entire slot over. Error-backed resets remain bounded and require
+	// the head to have stopped growing.
 	repairCatchupHeadResetAfter = 90 * time.Second
 	// A full contiguous shred set with a recorded decode failure cannot gain
 	// anything from more repair responses. Purge its persisted packets quickly
