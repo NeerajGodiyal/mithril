@@ -131,6 +131,7 @@ func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 		verifier:                verifier,
 		receiverBindAddr:        strings.TrimSpace(cfg.AlpenglowObserverBindAddr),
 		receiverMaxMessageBytes: cfg.AlpenglowMaxMessageBytes,
+		shredVersion:            cfg.AlpenglowShredVersion,
 		recentBlockIDs:          make(map[uint64]solana.Hash),
 	}
 	// The cert pool assembles certificates locally from raw Votor votes;
@@ -155,6 +156,7 @@ type AlpenglowObserverEngine struct {
 	verifier                *alpenglow.CertificateVerifier
 	receiverBindAddr        string
 	receiverMaxMessageBytes int64
+	shredVersion            uint16
 	receiver                *alpenglow.Receiver
 	blockIDSinkMu           sync.RWMutex
 	blockIDSink             AlpenglowBlockIDSink
@@ -206,6 +208,7 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 	receiver, err := alpenglow.NewReceiver(alpenglow.ReceiverConfig{
 		BindAddr:        e.receiverBindAddr,
 		MaxMessageBytes: e.receiverMaxMessageBytes,
+		ShredVersion:    e.shredVersion,
 		OnMessage:       e.observeVotorMessage,
 	}, observer)
 	if err != nil {

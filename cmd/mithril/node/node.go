@@ -1081,6 +1081,19 @@ func runLive(c *cobra.Command, args []string) {
 		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
 	}
 
+	// Discover once, before constructing any turbine, consensus, or production
+	// component. Gossip clients can discover a missing version internally, but
+	// leaving the shared CLI value at zero makes Alpenglow BLS verification hash
+	// a different vote payload than the cluster and makes every certificate fail.
+	if blockSource == "turbine" && turbineShredVersion == 0 {
+		discovered, err := resolveTurbineShredVersion(0, turbineGossipEntrypoint, gossip.QueryEntrypoint)
+		if err != nil {
+			klog.Fatalf("discover turbine shred version: %v", err)
+		}
+		turbineShredVersion = discovered
+		mlog.Log.Infof("discovered turbine shred version %d from gossip entrypoint %s", turbineShredVersion, turbineGossipEntrypoint)
+	}
+
 	// Override bootstrap mode display when explicit snapshot paths are provided
 	if snapshotArchivePath != "" {
 		bootstrapMode = "explicit"
@@ -2476,6 +2489,29 @@ postBootstrap:
 
 	mlog.Log.Infof("Done replaying, closing DB")
 	accountsDb.CloseDb()
+}
+
+type turbineEntrypointQuery func(*net.UDPAddr, time.Duration) (gossip.EchoResponse, error)
+
+func resolveTurbineShredVersion(configured int, entrypoint string, query turbineEntrypointQuery) (int, error) {
+	if configured != 0 {
+		return configured, nil
+	}
+	if strings.TrimSpace(entrypoint) == "" {
+		return 0, fmt.Errorf("turbine gossip entrypoint is required when shred version is auto-discovered")
+	}
+	addr, err := net.ResolveUDPAddr("udp", entrypoint)
+	if err != nil {
+		return 0, fmt.Errorf("resolve gossip entrypoint %q: %w", entrypoint, err)
+	}
+	if query == nil {
+		query = gossip.QueryEntrypoint
+	}
+	response, err := query(addr, 5*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("query gossip entrypoint %s: %w", addr, err)
+	}
+	return int(response.ShredVersion), nil
 }
 
 // getVersion returns the build version from the shared version package.

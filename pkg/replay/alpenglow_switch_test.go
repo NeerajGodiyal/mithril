@@ -71,6 +71,29 @@ func TestSweepSkipOverExecuted(t *testing.T) {
 	assert.Equal(t, uint64(101), sw.Slot)
 }
 
+func TestSweepCertifiedSkipMatchesLocalSkip(t *testing.T) {
+	q := &fakeChainQuery{certified: map[uint64]alpenglow.BlockID{}, skipped: map[uint64]bool{101: true}, version: 1}
+	s := newTestSweeper(q)
+	executed := map[uint64]solana.Hash{101: {}}
+	assert.Nil(t, s.sweep(executed, 100, 101))
+}
+
+func TestSweepCertifiedBlockContradictsLocalSkip(t *testing.T) {
+	q := &fakeChainQuery{
+		certified: map[uint64]alpenglow.BlockID{101: {Slot: 101, Hash: swHash(9)}},
+		skipped:   map[uint64]bool{},
+		version:   1,
+	}
+	s := newTestSweeper(q)
+	executed := map[uint64]solana.Hash{101: {}}
+	sw := s.sweep(executed, 100, 101)
+	require.NotNil(t, sw)
+	assert.True(t, sw.Executed.IsZero())
+	assert.Equal(t, swHash(9), sw.Certified)
+	assert.False(t, sw.Skip)
+	assert.Contains(t, sw.Error(), "treated as skipped locally")
+}
+
 // The FIRST contradiction wins (ancestors before descendants).
 func TestSweepReportsFirstContradiction(t *testing.T) {
 	q := &fakeChainQuery{

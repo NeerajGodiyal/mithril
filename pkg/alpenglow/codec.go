@@ -15,9 +15,21 @@ const (
 	hashSize = 32
 )
 
+const votorWireVersionV1 uint8 = 1
+
 const (
-	votorMessageTagVote        uint32 = 0
-	votorMessageTagCertificate uint32 = 1
+	votorWireKindNotarVote         uint8 = 1
+	votorWireKindFinalizeVote      uint8 = 2
+	votorWireKindSkipVote          uint8 = 3
+	votorWireKindNotarFallbackVote uint8 = 4
+	votorWireKindSkipFallbackVote  uint8 = 5
+	votorWireKindGenesisVote       uint8 = 6
+	votorWireKindFinalizeCert      uint8 = 7
+	votorWireKindFastFinalizeCert  uint8 = 8
+	votorWireKindNotarCert         uint8 = 9
+	votorWireKindNotarFallbackCert uint8 = 10
+	votorWireKindSkipCert          uint8 = 11
+	votorWireKindGenesisCert       uint8 = 12
 )
 
 const (
@@ -59,18 +71,18 @@ func EncodeMessage(msg Message) ([]byte, error) {
 	}
 
 	w := wincode.NewWriter(256)
+	w.WriteU8(votorWireVersionV1)
 	switch {
 	case msg.Vote != nil:
-		w.WriteU32(votorMessageTagVote)
-		if err := encodeVoteMessageInto(w, *msg.Vote); err != nil {
+		if err := encodeWireVoteMessageInto(w, *msg.Vote); err != nil {
 			return nil, err
 		}
 	case msg.Certificate != nil:
-		w.WriteU32(votorMessageTagCertificate)
-		if err := encodeCertificateInto(w, *msg.Certificate); err != nil {
+		if err := encodeWireCertificateInto(w, *msg.Certificate); err != nil {
 			return nil, err
 		}
 	}
+	w.WriteU16(msg.ShredVersion)
 	return w.Bytes(), nil
 }
 
@@ -81,27 +93,21 @@ func DecodeMessage(data []byte) (Message, error) {
 func DecodeMessageWithOptions(data []byte, opts DecodeOptions) (Message, error) {
 	opts = normalizeDecodeOptions(opts)
 	r := wincode.NewReader(data)
-	tag, err := r.ReadU32()
+	version, err := r.ReadU8()
 	if err != nil {
 		return Message{}, err
 	}
+	if version != votorWireVersionV1 {
+		return Message{}, fmt.Errorf("alpenglow: unknown Votor wire version %d", version)
+	}
 
-	var msg Message
-	switch tag {
-	case votorMessageTagVote:
-		vote, err := decodeVoteMessageFrom(r)
-		if err != nil {
-			return Message{}, err
-		}
-		msg.Vote = &vote
-	case votorMessageTagCertificate:
-		cert, err := decodeCertificateFrom(r, opts)
-		if err != nil {
-			return Message{}, err
-		}
-		msg.Certificate = &cert
-	default:
-		return Message{}, fmt.Errorf("alpenglow: unknown Votor consensus message tag %d", tag)
+	msg, err := decodeWireMessageV1From(r, opts)
+	if err != nil {
+		return Message{}, err
+	}
+	msg.ShredVersion, err = r.ReadU16()
+	if err != nil {
+		return Message{}, err
 	}
 
 	if err := r.EnsureEOF(); err != nil {
@@ -111,6 +117,146 @@ func DecodeMessageWithOptions(data []byte, opts DecodeOptions) (Message, error) 
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+func encodeWireVoteMessageInto(w *wincode.Writer, msg VoteMessage) error {
+	var kind uint8
+	switch msg.Vote.Type {
+	case VoteTypeNotarize:
+		kind = votorWireKindNotarVote
+	case VoteTypeFinalize:
+		kind = votorWireKindFinalizeVote
+	case VoteTypeSkip:
+		kind = votorWireKindSkipVote
+	case VoteTypeNotarizeFallback:
+		kind = votorWireKindNotarFallbackVote
+	case VoteTypeSkipFallback:
+		kind = votorWireKindSkipFallbackVote
+	case VoteTypeGenesis:
+		kind = votorWireKindGenesisVote
+	default:
+		return fmt.Errorf("alpenglow: invalid vote type %q", msg.Vote.Type)
+	}
+	w.WriteU8(kind)
+	w.WriteU64(msg.Vote.Slot)
+	if msg.Vote.Type == VoteTypeNotarize || msg.Vote.Type == VoteTypeNotarizeFallback || msg.Vote.Type == VoteTypeGenesis {
+		writeHash(w, msg.Vote.BlockHash)
+	}
+	if err := w.WriteFixedBytes("vote signature", msg.Signature, BLSSignatureSize); err != nil {
+		return err
+	}
+	w.WriteU16(msg.Rank)
+	return nil
+}
+
+func encodeWireCertificateInto(w *wincode.Writer, cert Certificate) error {
+	var kind uint8
+	switch cert.Type {
+	case CertificateFinalize:
+		kind = votorWireKindFinalizeCert
+	case CertificateFinalizeFast:
+		kind = votorWireKindFastFinalizeCert
+	case CertificateNotarize:
+		kind = votorWireKindNotarCert
+	case CertificateNotarizeFallback:
+		kind = votorWireKindNotarFallbackCert
+	case CertificateSkip:
+		kind = votorWireKindSkipCert
+	case CertificateGenesis:
+		kind = votorWireKindGenesisCert
+	default:
+		return fmt.Errorf("alpenglow: invalid certificate type %q", cert.Type)
+	}
+	w.WriteU8(kind)
+	w.WriteU64(cert.Slot)
+	if cert.Type == CertificateFinalizeFast || cert.Type == CertificateNotarize || cert.Type == CertificateNotarizeFallback || cert.Type == CertificateGenesis {
+		writeHash(w, cert.BlockHash)
+	}
+	if err := w.WriteFixedBytes("certificate signature", cert.Signature, BLSSignatureSize); err != nil {
+		return err
+	}
+	w.WriteByteVec(cert.Bitmap)
+	return nil
+}
+
+func decodeWireMessageV1From(r *wincode.Reader, opts DecodeOptions) (Message, error) {
+	kind, err := r.ReadU8()
+	if err != nil {
+		return Message{}, err
+	}
+	slot, err := r.ReadU64()
+	if err != nil {
+		return Message{}, err
+	}
+
+	var hash solana.Hash
+	switch kind {
+	case votorWireKindNotarVote, votorWireKindNotarFallbackVote, votorWireKindGenesisVote,
+		votorWireKindFastFinalizeCert, votorWireKindNotarCert, votorWireKindNotarFallbackCert, votorWireKindGenesisCert:
+		hash, err = readHash(r)
+		if err != nil {
+			return Message{}, err
+		}
+	}
+
+	switch kind {
+	case votorWireKindNotarVote, votorWireKindFinalizeVote, votorWireKindSkipVote,
+		votorWireKindNotarFallbackVote, votorWireKindSkipFallbackVote, votorWireKindGenesisVote:
+		signature, err := r.ReadBytes(BLSSignatureSize)
+		if err != nil {
+			return Message{}, err
+		}
+		rank, err := r.ReadU16()
+		if err != nil {
+			return Message{}, err
+		}
+		var vote Vote
+		switch kind {
+		case votorWireKindNotarVote:
+			vote = NewNotarizationVote(slot, hash)
+		case votorWireKindFinalizeVote:
+			vote = NewFinalizationVote(slot)
+		case votorWireKindSkipVote:
+			vote = NewSkipVote(slot)
+		case votorWireKindNotarFallbackVote:
+			vote = NewNotarizationFallbackVote(slot, hash)
+		case votorWireKindSkipFallbackVote:
+			vote = NewSkipFallbackVote(slot)
+		case votorWireKindGenesisVote:
+			vote = NewGenesisVote(slot, hash)
+		}
+		msg := VoteMessage{Vote: vote, Signature: signature, Rank: rank}
+		return Message{Vote: &msg}, nil
+
+	case votorWireKindFinalizeCert, votorWireKindFastFinalizeCert, votorWireKindNotarCert,
+		votorWireKindNotarFallbackCert, votorWireKindSkipCert, votorWireKindGenesisCert:
+		signature, err := r.ReadBytes(BLSSignatureSize)
+		if err != nil {
+			return Message{}, err
+		}
+		bitmap, err := r.ReadByteVec(opts.MaxBitmapSize)
+		if err != nil {
+			return Message{}, err
+		}
+		cert := Certificate{Slot: slot, BlockHash: hash, Signature: signature, Bitmap: bitmap}
+		switch kind {
+		case votorWireKindFinalizeCert:
+			cert.Type = CertificateFinalize
+		case votorWireKindFastFinalizeCert:
+			cert.Type = CertificateFinalizeFast
+		case votorWireKindNotarCert:
+			cert.Type = CertificateNotarize
+		case votorWireKindNotarFallbackCert:
+			cert.Type = CertificateNotarizeFallback
+		case votorWireKindSkipCert:
+			cert.Type = CertificateSkip
+		case votorWireKindGenesisCert:
+			cert.Type = CertificateGenesis
+		}
+		return Message{Certificate: &cert}, nil
+	default:
+		return Message{}, fmt.Errorf("alpenglow: unknown Votor wire message kind %d", kind)
+	}
 }
 
 func EncodeVote(vote Vote) ([]byte, error) {

@@ -15,6 +15,7 @@ func TestEncodeMessageVoteGolden(t *testing.T) {
 	hash := testHashSeq(0x20)
 	sig := testSignatureSeq(0x80)
 	msg := NewVoteMessage(NewNotarizationVote(0x0102030405060708, hash), sig, 0xbeef)
+	msg.ShredVersion = 0xcafe
 
 	got, err := EncodeMessage(msg)
 	if err != nil {
@@ -44,6 +45,7 @@ func TestEncodeMessageCertificateGolden(t *testing.T) {
 		Signature: sig,
 		Bitmap:    []byte{0xaa, 0xbb, 0xcc},
 	})
+	msg.ShredVersion = 0xcafe
 
 	got, err := EncodeMessage(msg)
 	if err != nil {
@@ -118,7 +120,43 @@ func TestCertificateRoundTripsAllVariants(t *testing.T) {
 	}
 }
 
+func TestVersionedWireMessageRoundTripsAllVariants(t *testing.T) {
+	hash := testHashSeq(0x30)
+	sig := testSignatureSeq(0x70)
+	messages := []Message{
+		NewVoteMessage(NewNotarizationVote(10, hash), sig, 1),
+		NewVoteMessage(NewFinalizationVote(11), sig, 2),
+		NewVoteMessage(NewSkipVote(12), sig, 3),
+		NewVoteMessage(NewNotarizationFallbackVote(13, hash), sig, 4),
+		NewVoteMessage(NewSkipFallbackVote(14), sig, 5),
+		NewVoteMessage(NewGenesisVote(15, hash), sig, 6),
+		NewCertificateMessage(Certificate{Type: CertificateFinalize, Slot: 20, Signature: sig, Bitmap: []byte{1}}),
+		NewCertificateMessage(Certificate{Type: CertificateFinalizeFast, Slot: 21, BlockHash: hash, Signature: sig, Bitmap: []byte{2}}),
+		NewCertificateMessage(Certificate{Type: CertificateNotarize, Slot: 22, BlockHash: hash, Signature: sig, Bitmap: []byte{3}}),
+		NewCertificateMessage(Certificate{Type: CertificateNotarizeFallback, Slot: 23, BlockHash: hash, Signature: sig, Bitmap: []byte{4}}),
+		NewCertificateMessage(Certificate{Type: CertificateSkip, Slot: 24, Signature: sig, Bitmap: []byte{5}}),
+		NewCertificateMessage(Certificate{Type: CertificateGenesis, Slot: 25, BlockHash: hash, Signature: sig, Bitmap: []byte{6}}),
+	}
+	for i := range messages {
+		messages[i].ShredVersion = 10638
+		encoded, err := EncodeMessage(messages[i])
+		if err != nil {
+			t.Fatalf("message %d encode: %v", i, err)
+		}
+		decoded, err := DecodeMessage(encoded)
+		if err != nil {
+			t.Fatalf("message %d decode: %v", i, err)
+		}
+		if !reflect.DeepEqual(decoded, messages[i]) {
+			t.Fatalf("message %d roundtrip mismatch:\n got %#v\nwant %#v", i, decoded, messages[i])
+		}
+	}
+}
+
 func TestCodecRejectsInvalidInputs(t *testing.T) {
+	if _, err := DecodeMessage([]byte{2}); err == nil {
+		t.Fatalf("expected invalid wire version error")
+	}
 	if _, err := DecodeVote([]byte{
 		0x99, 0x00, 0x00, 0x00,
 		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

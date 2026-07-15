@@ -289,8 +289,9 @@ type CertificateKey struct {
 }
 
 type Message struct {
-	Vote        *VoteMessage `json:"vote,omitempty"`
-	Certificate *Certificate `json:"certificate,omitempty"`
+	Vote         *VoteMessage `json:"vote,omitempty"`
+	Certificate  *Certificate `json:"certificate,omitempty"`
+	ShredVersion uint16       `json:"shred_version,omitempty"`
 }
 
 func NewVoteMessage(vote Vote, signature []byte, rank uint16) Message {

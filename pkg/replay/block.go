@@ -2054,6 +2054,12 @@ func ReplayBlocks(
 
 		// Handle skipped slots - log and continue without execution
 		if block.IsSkipped {
+			// Zero is the explicit locally executed outcome for a skip. Parent-ID
+			// gap inference is provisional; recording it lets a later certificate
+			// naming a real block trigger the same in-RAM switch as a wrong sibling.
+			if consensusEngine != nil && unrootedTailState != nil {
+				alpenglowExecutedBlockIDs[block.Slot] = solana.Hash{}
+			}
 			// Look up leader for informational logging
 			leaderStr := "unknown"
 			if leader, exists := global.LeaderForSlot(block.Slot); exists {

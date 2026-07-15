@@ -67,6 +67,9 @@ func TestNewEngineConfiguresAlpenglowShredVersion(t *testing.T) {
 	if got := engine.verifier.ShredVersion(); got != 0x1234 {
 		t.Fatalf("verifier shred version = %#x, want %#x", got, uint16(0x1234))
 	}
+	if got := engine.shredVersion; got != 0x1234 {
+		t.Fatalf("receiver shred version = %#x, want %#x", got, uint16(0x1234))
+	}
 }
 
 // A certificate that arrives before its epoch's validator set is installed must be

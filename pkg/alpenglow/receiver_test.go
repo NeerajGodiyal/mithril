@@ -13,8 +13,9 @@ import (
 func TestReceiverDecodesVotorVoteFromQUICUniStream(t *testing.T) {
 	observer := NewObserver()
 	receiver, err := NewReceiver(ReceiverConfig{
-		BindAddr:    "127.0.0.1:0",
-		LogInterval: -1,
+		BindAddr:     "127.0.0.1:0",
+		ShredVersion: 0x1234,
+		LogInterval:  -1,
 	}, observer)
 	require.NoError(t, err)
 	defer receiver.Close()
@@ -28,6 +29,7 @@ func TestReceiverDecodesVotorVoteFromQUICUniStream(t *testing.T) {
 	}()
 
 	msg := NewVoteMessage(NewFinalizationVote(42), testSignatureSeq(0x55), 7)
+	msg.ShredVersion = 0x1234
 	payload, err := EncodeMessage(msg)
 	require.NoError(t, err)
 
@@ -44,6 +46,39 @@ func TestReceiverDecodesVotorVoteFromQUICUniStream(t *testing.T) {
 	require.EqualValues(t, 1, stats.MessagesDecoded)
 	require.EqualValues(t, 1, stats.VotesDecoded)
 	require.EqualValues(t, 42, stats.LatestVoteSlot)
+
+	cancel()
+	require.NoError(t, receiver.Close())
+	require.NoError(t, <-runErr)
+}
+
+func TestReceiverRejectsMismatchedShredVersionBeforeObservation(t *testing.T) {
+	observer := NewObserver()
+	receiver, err := NewReceiver(ReceiverConfig{
+		BindAddr:     "127.0.0.1:0",
+		ShredVersion: 0x1234,
+		LogInterval:  -1,
+	}, observer)
+	require.NoError(t, err)
+	defer receiver.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- receiver.Run(ctx) }()
+
+	msg := NewVoteMessage(NewFinalizationVote(42), testSignatureSeq(0x55), 7)
+	msg.ShredVersion = 0x5678
+	payload, err := EncodeMessage(msg)
+	require.NoError(t, err)
+	conn := sendVotorQUICPayload(t, receiver.Addr().String(), payload)
+	defer conn.CloseWithError(0, "test done")
+
+	require.Eventually(t, func() bool {
+		return receiver.Stats().ShredVersionMismatches == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Zero(t, observer.Snapshot().VotesObserved)
+	require.Zero(t, receiver.Stats().DecodeErrors)
 
 	cancel()
 	require.NoError(t, receiver.Close())

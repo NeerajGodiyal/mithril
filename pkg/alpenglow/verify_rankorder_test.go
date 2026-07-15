@@ -67,3 +67,41 @@ func TestBuildValidatorSetEqualStakeRanksByCompressedPubkey(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildValidatorSetExcludesDuplicateBLSAndNodeKeys(t *testing.T) {
+	stakes := make(map[solana.PublicKey]uint64)
+	voteAccts := make(map[solana.PublicKey]*epochstakes.VoteAccount)
+
+	compressed := func(scalar int64) [48]byte {
+		var pub bls12381.G1Affine
+		pub.ScalarMultiplicationBase(big.NewInt(scalar))
+		return pub.Bytes()
+	}
+	add := func(index byte, stake uint64, node solana.PublicKey, bls [48]byte) {
+		var vote solana.PublicKey
+		vote[0] = index
+		stakes[vote] = stake
+		key := bls
+		voteAccts[vote] = &epochstakes.VoteAccount{NodePubkey: node, BlsPubkeyCompressed: &key}
+	}
+	var nodeA, nodeB, nodeC, nodeD solana.PublicKey
+	nodeA[0], nodeB[0], nodeC[0], nodeD[0] = 1, 2, 3, 4
+
+	duplicateBLS := compressed(11)
+	add(1, 100, nodeA, duplicateBLS)
+	add(2, 200, nodeB, duplicateBLS)
+	add(3, 300, nodeC, compressed(12))
+	add(4, 400, nodeC, compressed(13))
+	add(5, 500, nodeD, compressed(14))
+
+	set, err := BuildValidatorSet(9, stakes, voteAccts, 1_500)
+	if err != nil {
+		t.Fatalf("BuildValidatorSet: %v", err)
+	}
+	if len(set.Validators) != 1 || set.Validators[0].VoteAccount[0] != 5 {
+		t.Fatalf("validators = %+v, want only the unique BLS/node candidate", set.Validators)
+	}
+	if set.TotalStake != 500 {
+		t.Fatalf("ranked total stake = %d, want 500", set.TotalStake)
+	}
+}

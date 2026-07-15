@@ -29,6 +29,7 @@ const (
 type ReceiverConfig struct {
 	BindAddr        string
 	MaxMessageBytes int64
+	ShredVersion    uint16
 	Decode          DecodeOptions
 	LogInterval     time.Duration
 	OnMessage       func(Message)
@@ -44,18 +45,19 @@ func DefaultReceiverConfig() ReceiverConfig {
 }
 
 type ReceiverStats struct {
-	ConnectionsAccepted uint64    `json:"connections_accepted"`
-	StreamsReceived     uint64    `json:"streams_received"`
-	MessagesDecoded     uint64    `json:"messages_decoded"`
-	VotesDecoded        uint64    `json:"votes_decoded"`
-	CertificatesDecoded uint64    `json:"certificates_decoded"`
-	DecodeErrors        uint64    `json:"decode_errors"`
-	ReadErrors          uint64    `json:"read_errors"`
-	AcceptErrors        uint64    `json:"accept_errors"`
-	OversizeMessages    uint64    `json:"oversize_messages"`
-	LastMessageAt       time.Time `json:"last_message_at,omitempty"`
-	LatestVoteSlot      uint64    `json:"latest_vote_slot,omitempty"`
-	LatestCertSlot      uint64    `json:"latest_certificate_slot,omitempty"`
+	ConnectionsAccepted    uint64    `json:"connections_accepted"`
+	StreamsReceived        uint64    `json:"streams_received"`
+	MessagesDecoded        uint64    `json:"messages_decoded"`
+	VotesDecoded           uint64    `json:"votes_decoded"`
+	CertificatesDecoded    uint64    `json:"certificates_decoded"`
+	DecodeErrors           uint64    `json:"decode_errors"`
+	ShredVersionMismatches uint64    `json:"shred_version_mismatches"`
+	ReadErrors             uint64    `json:"read_errors"`
+	AcceptErrors           uint64    `json:"accept_errors"`
+	OversizeMessages       uint64    `json:"oversize_messages"`
+	LastMessageAt          time.Time `json:"last_message_at,omitempty"`
+	LatestVoteSlot         uint64    `json:"latest_vote_slot,omitempty"`
+	LatestCertSlot         uint64    `json:"latest_certificate_slot,omitempty"`
 }
 
 type Receiver struct {
@@ -119,8 +121,8 @@ func (r *Receiver) Run(ctx context.Context) error {
 	defer cancel()
 	go r.logStatsLoop(runCtx)
 
-	mlog.Log.FileOnlyf("ALPENGLOW Votor receiver listening on %s (transport=quic alpn=%s max_message=%d)",
-		r.listener.Addr(), VotorQUICALPN, r.cfg.MaxMessageBytes)
+	mlog.Log.FileOnlyf("ALPENGLOW Votor receiver listening on %s (transport=quic alpn=%s max_message=%d shred_version=%d)",
+		r.listener.Addr(), VotorQUICALPN, r.cfg.MaxMessageBytes, r.cfg.ShredVersion)
 
 	for {
 		conn, err := r.listener.Accept(ctx)
@@ -210,6 +212,10 @@ func (r *Receiver) handleStream(stream *quic.ReceiveStream) {
 		r.recordDecodeError()
 		return
 	}
+	if r.cfg.ShredVersion != 0 && msg.ShredVersion != r.cfg.ShredVersion {
+		r.recordShredVersionMismatch()
+		return
+	}
 	if _, err := r.observer.ObserveMessage(msg); err != nil {
 		r.recordDecodeError()
 		return
@@ -234,9 +240,9 @@ func (r *Receiver) logStatsLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			stats := r.Stats()
-			mlog.Log.FileOnlyf("alpenglow Votor receiver stats: connections=%d streams=%d messages=%d votes=%d certificates=%d decode_errors=%d read_errors=%d accept_errors=%d oversize=%d latest_vote_slot=%d latest_certificate_slot=%d last_message=%s",
+			mlog.Log.FileOnlyf("alpenglow Votor receiver stats: connections=%d streams=%d messages=%d votes=%d certificates=%d decode_errors=%d shred_version_mismatches=%d read_errors=%d accept_errors=%d oversize=%d latest_vote_slot=%d latest_certificate_slot=%d last_message=%s",
 				stats.ConnectionsAccepted, stats.StreamsReceived, stats.MessagesDecoded, stats.VotesDecoded, stats.CertificatesDecoded,
-				stats.DecodeErrors, stats.ReadErrors, stats.AcceptErrors, stats.OversizeMessages, stats.LatestVoteSlot, stats.LatestCertSlot,
+				stats.DecodeErrors, stats.ShredVersionMismatches, stats.ReadErrors, stats.AcceptErrors, stats.OversizeMessages, stats.LatestVoteSlot, stats.LatestCertSlot,
 				formatStatsTime(stats.LastMessageAt))
 		}
 	}
@@ -283,6 +289,12 @@ func (r *Receiver) recordMessage(msg Message) {
 func (r *Receiver) recordDecodeError() {
 	r.mu.Lock()
 	r.stats.DecodeErrors++
+	r.mu.Unlock()
+}
+
+func (r *Receiver) recordShredVersionMismatch() {
+	r.mu.Lock()
+	r.stats.ShredVersionMismatches++
 	r.mu.Unlock()
 }
 

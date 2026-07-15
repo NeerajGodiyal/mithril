@@ -63,6 +63,9 @@ func (e *CertifiedSwitch) Error() string {
 	if e.Skip {
 		return fmt.Sprintf("alpenglow switch: slot %d executed locally but is certificate-skipped", e.Slot)
 	}
+	if e.Executed.IsZero() {
+		return fmt.Sprintf("alpenglow switch: slot %d was treated as skipped locally but certificates name block %s", e.Slot, e.Certified)
+	}
 	return fmt.Sprintf("alpenglow switch: slot %d executed block %s but certificates name %s", e.Slot, e.Executed, e.Certified)
 }
 
@@ -102,7 +105,10 @@ func (s *alpenglowSwitchSweeper) sweep(executed map[uint64]solana.Hash, lastRoot
 			continue
 		}
 		if s.query.SkipCertifiedAt(slot) {
-			return &CertifiedSwitch{Slot: slot, Skip: true}
+			if !executedID.IsZero() {
+				return &CertifiedSwitch{Slot: slot, Executed: executedID, Skip: true}
+			}
+			continue
 		}
 		if certified, _, ok := s.query.CertifiedBlockAt(slot); ok {
 			if solana.Hash(certified.Hash) != executedID {

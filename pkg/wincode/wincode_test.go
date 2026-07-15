@@ -7,12 +7,14 @@ import (
 
 func TestWriterReaderPrimitives(t *testing.T) {
 	w := NewWriter(0)
+	w.WriteU8(0xff)
 	w.WriteU16(0x0102)
 	w.WriteU32(0x03040506)
 	w.WriteU64(0x0708090a0b0c0d0e)
 	w.WriteByteVec([]byte{0xaa, 0xbb})
 
 	want := []byte{
+		0xff,
 		0x02, 0x01,
 		0x06, 0x05, 0x04, 0x03,
 		0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07,
@@ -24,6 +26,9 @@ func TestWriterReaderPrimitives(t *testing.T) {
 	}
 
 	r := NewReader(w.Bytes())
+	if got, err := r.ReadU8(); err != nil || got != 0xff {
+		t.Fatalf("ReadU8 got %x err %v", got, err)
+	}
 	if got, err := r.ReadU16(); err != nil || got != 0x0102 {
 		t.Fatalf("ReadU16 got %x err %v", got, err)
 	}

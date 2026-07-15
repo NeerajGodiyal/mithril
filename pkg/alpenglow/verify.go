@@ -169,20 +169,14 @@ func (v *CertificateVerifier) ShredVersion() uint16 {
 	return v.shredVersion
 }
 
-func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAccounts map[solana.PublicKey]*epochstakes.VoteAccount, totalStake uint64) (ValidatorSet, error) {
+func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAccounts map[solana.PublicKey]*epochstakes.VoteAccount, _ uint64) (ValidatorSet, error) {
 	if len(stakes) == 0 {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no epoch stakes for epoch %d", epoch)
 	}
-	if totalStake == 0 {
-		for _, stake := range stakes {
-			totalStake += stake
-		}
-	}
-	if totalStake == 0 {
-		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: total stake is zero for epoch %d", epoch)
-	}
 
-	entries := make([]ValidatorStake, 0, len(stakes))
+	candidates := make([]ValidatorStake, 0, len(stakes))
+	blsPubkeyCounts := make(map[[48]byte]uint32)
+	nodePubkeyCounts := make(map[solana.PublicKey]uint32)
 	for voteAcct, stake := range stakes {
 		if stake == 0 {
 			continue
@@ -195,19 +189,42 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 		if err != nil {
 			continue
 		}
-		entries = append(entries, ValidatorStake{
+		candidate := ValidatorStake{
 			VoteAccount:           voteAcct,
 			NodePubkey:            voteMeta.NodePubkey,
 			BlsPubkeyCompressed:   *voteMeta.BlsPubkeyCompressed,
 			BlsPubkeyUncompressed: blsRaw,
 			Stake:                 stake,
-		})
+		}
+		candidates = append(candidates, candidate)
+		blsPubkeyCounts[candidate.BlsPubkeyCompressed]++
+		nodePubkeyCounts[candidate.NodePubkey]++
+	}
+
+	// Match Agave's BLSPubkeyToRankMap exactly: every validator involved in a
+	// duplicate BLS key or duplicate node identity is excluded, rather than
+	// choosing one based on map iteration order.
+	entries := make([]ValidatorStake, 0, len(candidates))
+	var totalStake uint64
+	for _, candidate := range candidates {
+		if blsPubkeyCounts[candidate.BlsPubkeyCompressed] != 1 || nodePubkeyCounts[candidate.NodePubkey] != 1 {
+			continue
+		}
+		entries = append(entries, candidate)
+		if ^uint64(0)-totalStake < candidate.Stake {
+			totalStake = ^uint64(0)
+		} else {
+			totalStake += candidate.Stake
+		}
 	}
 	if len(entries) == 0 {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no BLS-ranked validators for epoch %d", epoch)
 	}
 	if len(entries) > MaximumValidators {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: %d validators exceeds max %d", len(entries), MaximumValidators)
+	}
+	if totalStake == 0 {
+		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: total BLS-ranked stake is zero for epoch %d", epoch)
 	}
 
 	sort.Slice(entries, func(i, j int) bool {

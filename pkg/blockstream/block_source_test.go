@@ -926,6 +926,119 @@ func TestShouldPreferIncomingLightbringerBlockLockedPrefersConnectedSameSlotBloc
 	}
 }
 
+func TestSynthesizeAlpenglowParentLinkedSkipsLocked(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+	})
+	anchorID := solana.Hash{1}
+	childID := solana.Hash{2}
+	bs.lastEmittedBlockSlot = 150
+	bs.lastEmittedAlpenglowBlockID = anchorID
+	bs.hasLastEmittedAlpenglowBlockID = true
+	bs.reorderBuffer[155] = &b.Block{
+		Slot:                      155,
+		FromLiveStream:            true,
+		SourceParentSlot:          150,
+		AlpenglowBlockID:          childID,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    anchorID,
+		HasAlpenglowParentBlockID: true,
+	}
+
+	bs.reorderMu.Lock()
+	changed := bs.synthesizeAlpenglowParentLinkedSkipsLocked()
+	bs.reorderMu.Unlock()
+	if !changed {
+		t.Fatal("expected exact Alpenglow parent link to resolve the absent slot run")
+	}
+	for slot := uint64(151); slot < 155; slot++ {
+		if !bs.skippedSlots[slot] || !bs.liveSynthesizedSkips[slot] {
+			t.Fatalf("slot %d was not marked as a provisional live skip", slot)
+		}
+	}
+}
+
+func TestSynthesizeAlpenglowParentLinkedSkipsRejectsWeakEvidence(t *testing.T) {
+	newSource := func() *BlockSource {
+		bs := NewBlockSource(&BlockSourceOpts{
+			SourceType:                   BlockSourceTurbine,
+			TurbineBindAddr:              "127.0.0.1:0",
+			TurbineAlpenglowBlockIDHints: true,
+			StartSlot:                    151,
+			EndSlot:                      200,
+		})
+		bs.lastEmittedBlockSlot = 150
+		bs.lastEmittedAlpenglowBlockID = solana.Hash{1}
+		bs.hasLastEmittedAlpenglowBlockID = true
+		return bs
+	}
+
+	t.Run("parent slot alone", func(t *testing.T) {
+		bs := newSource()
+		bs.reorderBuffer[155] = &b.Block{
+			Slot:                      155,
+			FromLiveStream:            true,
+			SourceParentSlot:          150,
+			AlpenglowBlockID:          solana.Hash{2},
+			HasAlpenglowBlockID:       true,
+			AlpenglowParentBlockID:    solana.Hash{9},
+			HasAlpenglowParentBlockID: true,
+		}
+		if bs.synthesizeAlpenglowParentLinkedSkipsLocked() {
+			t.Fatal("parent slot with a different parent block ID must not synthesize skips")
+		}
+	})
+
+	t.Run("observed candidate in gap", func(t *testing.T) {
+		bs := newSource()
+		bs.reorderBuffer[153] = &b.Block{Slot: 153, FromLiveStream: true}
+		bs.reorderBuffer[155] = &b.Block{
+			Slot:                      155,
+			FromLiveStream:            true,
+			SourceParentSlot:          150,
+			AlpenglowBlockID:          solana.Hash{2},
+			HasAlpenglowBlockID:       true,
+			AlpenglowParentBlockID:    solana.Hash{1},
+			HasAlpenglowParentBlockID: true,
+		}
+		if bs.synthesizeAlpenglowParentLinkedSkipsLocked() {
+			t.Fatal("a later reconnecting branch must not skip over an observed candidate")
+		}
+	})
+}
+
+func TestRewindForAlpenglowSwitchRestoresLastRealAnchorAcrossSkips(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    151,
+		EndSlot:                      200,
+	})
+	anchorID := solana.Hash{1}
+	childID := solana.Hash{2}
+	bs.emittedAlpenglowBlockIDs[150] = anchorID
+	bs.emittedAlpenglowBlockIDs[155] = childID
+	bs.emittedAlpenglowBlockIDOrder = []uint64{150, 155}
+	bs.lastEmittedBlockSlot = 155
+	bs.lastEmittedAlpenglowBlockID = childID
+	bs.hasLastEmittedAlpenglowBlockID = true
+	bs.nextSlotToSend = 156
+
+	bs.RewindForAlpenglowSwitch(153, solana.Hash{})
+	if bs.lastEmittedBlockSlot != 150 || !bs.hasLastEmittedAlpenglowBlockID || bs.lastEmittedAlpenglowBlockID != anchorID {
+		t.Fatalf("rewind anchor = slot %d id %s present=%v, want slot 150 id %s",
+			bs.lastEmittedBlockSlot, bs.lastEmittedAlpenglowBlockID, bs.hasLastEmittedAlpenglowBlockID, anchorID)
+	}
+	if _, exists := bs.emittedAlpenglowBlockIDs[155]; exists {
+		t.Fatal("rewind retained a discarded descendant block ID")
+	}
+}
+
 func TestWaitingLightbringerParentMismatchLockedDetectsDisconnectedBufferedSlot(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType:           BlockSourceLightbringer,

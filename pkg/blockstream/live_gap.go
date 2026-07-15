@@ -5,12 +5,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"time"
 
+	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/gagliardetto/solana-go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	alpenglowEmittedBlockIDHistory  = 65_536
+	alpenglowMaxParentLinkedSkipRun = 65_536
 )
 
 func (bs *BlockSource) clearLiveGapWatch() {
@@ -149,6 +155,91 @@ func (bs *BlockSource) liveBlockConnectsLocked(blk *b.Block) bool {
 		return false
 	}
 	return blk.SourceParentSlot == bs.lastEmittedBlockSlot
+}
+
+func (bs *BlockSource) recordEmittedAlpenglowBlockIDLocked(blk *b.Block) {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		bs.lastEmittedAlpenglowBlockID = solana.Hash{}
+		bs.hasLastEmittedAlpenglowBlockID = false
+		return
+	}
+	id := solana.Hash(blk.AlpenglowBlockID)
+	bs.lastEmittedAlpenglowBlockID = id
+	bs.hasLastEmittedAlpenglowBlockID = true
+	if _, exists := bs.emittedAlpenglowBlockIDs[blk.Slot]; !exists {
+		bs.emittedAlpenglowBlockIDOrder = append(bs.emittedAlpenglowBlockIDOrder, blk.Slot)
+	}
+	bs.emittedAlpenglowBlockIDs[blk.Slot] = id
+	if len(bs.emittedAlpenglowBlockIDOrder) > alpenglowEmittedBlockIDHistory {
+		oldest := bs.emittedAlpenglowBlockIDOrder[0]
+		bs.emittedAlpenglowBlockIDOrder = bs.emittedAlpenglowBlockIDOrder[1:]
+		delete(bs.emittedAlpenglowBlockIDs, oldest)
+	}
+}
+
+// synthesizeAlpenglowParentLinkedSkipsLocked advances over a missing slot run
+// only when a later turbine block carries an exact Alpenglow parent block ID
+// matching the last emitted block. The inference is deliberately provisional:
+// replay records the skipped outcome and the certificate switch sweep unwinds
+// it if Votor later names a real block in the range.
+func (bs *BlockSource) synthesizeAlpenglowParentLinkedSkipsLocked() bool {
+	if bs.sourceType != BlockSourceTurbine || !bs.turbineAlpenglowBlockIDHints || !bs.hasLastEmittedAlpenglowBlockID {
+		return false
+	}
+	waitingSlot := bs.nextSlotToSend
+	if waitingSlot == 0 || bs.reorderBuffer[waitingSlot] != nil || bs.skippedSlots[waitingSlot] {
+		return false
+	}
+
+	childSlot := uint64(0)
+	var child *b.Block
+	for slot, candidate := range bs.reorderBuffer {
+		if slot <= waitingSlot || candidate == nil || !candidate.HasAlpenglowBlockID || !candidate.HasAlpenglowParentBlockID {
+			continue
+		}
+		if candidate.SourceParentSlot != bs.lastEmittedBlockSlot || solana.Hash(candidate.AlpenglowParentBlockID) != bs.lastEmittedAlpenglowBlockID {
+			continue
+		}
+		if child == nil || slot < childSlot {
+			childSlot = slot
+			child = candidate
+		}
+	}
+	if child == nil {
+		return false
+	}
+	if childSlot-waitingSlot > alpenglowMaxParentLinkedSkipRun {
+		return false
+	}
+	// Never skip over an observed candidate, even if a later branch reconnects
+	// to the anchor. A certificate must adjudicate that fork explicitly.
+	for slot, candidate := range bs.reorderBuffer {
+		if candidate != nil && slot >= waitingSlot && slot < childSlot {
+			return false
+		}
+	}
+
+	newSkips := uint64(0)
+	for slot := waitingSlot; slot < childSlot; slot++ {
+		if !bs.skippedSlots[slot] {
+			newSkips++
+			bs.stats.FetchSkipped.Add(1)
+		}
+		bs.skippedSlots[slot] = true
+		bs.liveSynthesizedSkips[slot] = true
+		delete(bs.alpenglowCertifiedSkips, slot)
+		bs.slotStateMu.Lock()
+		bs.slotState[slot] = slotDone
+		delete(bs.inflightStart, slot)
+		bs.slotStateMu.Unlock()
+		bs.clearSlotErrors(slot)
+	}
+	if newSkips == 0 {
+		return false
+	}
+	mlog.Log.Infof("ALPENGLOW speculative skip: slots %d-%d are absent on parent-linked branch %s -> %s at slot %d; certificate decisions remain authoritative",
+		waitingSlot, childSlot-1, bs.lastEmittedAlpenglowBlockID, solana.Hash(child.AlpenglowBlockID), childSlot)
+	return true
 }
 
 func (bs *BlockSource) shouldPreferIncomingLiveBlockLocked(existing, incoming *b.Block) bool {

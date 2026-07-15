@@ -279,15 +279,20 @@ type BlockSource struct {
 	reorderMu     sync.Mutex
 	reorderBuffer map[uint64]*b.Block
 	skippedSlots  map[uint64]bool
-	// Tracks skipped slots inferred from a reconnecting Lightbringer descendant.
-	// These are not provisional RPC skip results and must not be discarded at handoff.
+	// Tracks provisional skipped slots inferred from an exact Alpenglow parent
+	// block-ID link. These are not RPC skip results and survive handoff, but a
+	// later certificate can unwind them through replay's switch sweep.
 	liveSynthesizedSkips map[uint64]bool
 	// Tracks skips certified by Alpenglow consensus. These are not provisional
 	// RPC skip results and must not be discarded after a Turbine handoff.
-	alpenglowCertifiedSkips map[uint64]bool
-	nextSlotToSend          uint64
-	lastEmittedBlockSlot    uint64 // Last non-skipped block emitted to replay; used to validate Lightbringer ancestry at handoff.
-	maxPending              int
+	alpenglowCertifiedSkips        map[uint64]bool
+	nextSlotToSend                 uint64
+	lastEmittedBlockSlot           uint64 // Last non-skipped block emitted to replay; used to validate live ancestry at handoff.
+	lastEmittedAlpenglowBlockID    solana.Hash
+	hasLastEmittedAlpenglowBlockID bool
+	emittedAlpenglowBlockIDs       map[uint64]solana.Hash
+	emittedAlpenglowBlockIDOrder   []uint64
+	maxPending                     int
 
 	// Slot state tracking (prevents duplicates)
 	slotStateMu   sync.Mutex
@@ -641,6 +646,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		skippedSlots:                 make(map[uint64]bool),
 		liveSynthesizedSkips:         make(map[uint64]bool),
 		alpenglowCertifiedSkips:      make(map[uint64]bool),
+		emittedAlpenglowBlockIDs:     make(map[uint64]solana.Hash),
 		nextSlotToSend:               opts.StartSlot,
 		maxPending:                   defaultMaxPending,
 		slotState:                    make(map[uint64]slotStatus),
@@ -1776,7 +1782,30 @@ func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Ha
 		bs.nextSlotToSend = slot
 	}
 	if bs.lastEmittedBlockSlot >= slot {
-		bs.lastEmittedBlockSlot = slot - 1
+		anchorSlot := uint64(0)
+		anchorID := solana.Hash{}
+		kept := bs.emittedAlpenglowBlockIDOrder[:0]
+		for _, emittedSlot := range bs.emittedAlpenglowBlockIDOrder {
+			if emittedSlot >= slot {
+				delete(bs.emittedAlpenglowBlockIDs, emittedSlot)
+				continue
+			}
+			kept = append(kept, emittedSlot)
+			if emittedSlot > anchorSlot {
+				anchorSlot = emittedSlot
+				anchorID = bs.emittedAlpenglowBlockIDs[emittedSlot]
+			}
+		}
+		bs.emittedAlpenglowBlockIDOrder = kept
+		if anchorSlot != 0 {
+			bs.lastEmittedBlockSlot = anchorSlot
+			bs.lastEmittedAlpenglowBlockID = anchorID
+			bs.hasLastEmittedAlpenglowBlockID = true
+		} else {
+			bs.lastEmittedBlockSlot = slot - 1
+			bs.lastEmittedAlpenglowBlockID = solana.Hash{}
+			bs.hasLastEmittedAlpenglowBlockID = false
+		}
 	}
 	for bufferedSlot := range bs.reorderBuffer {
 		if bufferedSlot >= slot {
@@ -2402,6 +2431,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			if bs.applyAlpenglowDecisionLocked() {
 				continue
 			}
+			bs.synthesizeAlpenglowParentLinkedSkipsLocked()
 
 			if waitingSlot, observedParentSlot, expectedParentSlot, mismatch := bs.waitingLiveParentMismatchLocked(); mismatch {
 				// Shreds-only mode: no RPC arbiter exists for a parent
@@ -2435,6 +2465,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 
 				delete(bs.reorderBuffer, bs.nextSlotToSend)
 				bs.lastEmittedBlockSlot = blk.Slot
+				bs.recordEmittedAlpenglowBlockIDLocked(blk)
 				bs.reorderMu.Unlock()
 
 				repairingSlot := bs.isLiveRepairSlot(blk.Slot)
