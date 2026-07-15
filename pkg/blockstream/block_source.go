@@ -16,6 +16,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
@@ -48,6 +49,8 @@ type BlockSourceOpts struct {
 	TurbineAlpenglowBlockIDHints bool
 	TurbineIdentity              ed25519.PrivateKey
 	LeaderForSlot                func(slot uint64) (solana.PublicKey, bool)
+	LocalLeaderForSlot           func(slot uint64) bool
+	GossipClient                 *gossip.Client
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
 	// Cert-driven repair feed: certified-but-unobserved blocks the repair loop
@@ -80,6 +83,10 @@ type BlockSourceOpts struct {
 	// receiver (see TurbinePrewarm), injected into the staging buffer at
 	// construction so the catchup handoff can arm from them immediately.
 	PrewarmBlocks []*b.Block
+	// LocalBlocks carries fully frozen blocks from this node's producer. The
+	// source owns the consumer for exactly its own lifetime, avoiding stale
+	// consumers across a replay/fork-recovery restart.
+	LocalBlocks <-chan *b.Block
 	// DisableRPCBlockFetch (config block.rpc_fallback=false): a live-shred
 	// source NEVER fetches blocks over RPC — shreds via turbine + repair are
 	// the only block path, no matter how far behind replay is, and every
@@ -138,6 +145,7 @@ type fetchResult struct {
 	rpcIdx               int32  // which RPC endpoint produced this result (for error attribution)
 	latencyMs            int64  // fetch latency in milliseconds (for stall diagnostics)
 	liveStreamGeneration uint64 // live-stream result generation, used to discard stale handoff blocks
+	local                bool
 }
 
 var errBeyondTip = errors.New("slot beyond confirmed tip")
@@ -332,6 +340,9 @@ type BlockSource struct {
 	turbineAlpenglowBlockIDHints bool
 	turbineIdentity              ed25519.PrivateKey
 	leaderForSlot                func(slot uint64) (solana.PublicKey, bool)
+	localLeaderForSlot           func(slot uint64) bool
+	localBlocks                  <-chan *b.Block
+	gossipClient                 *gossip.Client
 	liveStreamStarted            atomic.Bool
 	liveStreamConnected          atomic.Bool
 	liveLastStreamSlot           atomic.Uint64
@@ -653,6 +664,9 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		turbineAlpenglowBlockIDHints: opts.TurbineAlpenglowBlockIDHints,
 		turbineIdentity:              clonePrivateKey(opts.TurbineIdentity),
 		leaderForSlot:                opts.LeaderForSlot,
+		localLeaderForSlot:           opts.LocalLeaderForSlot,
+		localBlocks:                  opts.LocalBlocks,
+		gossipClient:                 opts.GossipClient,
 		alpenglowDecisionSource:      opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:  opts.AlpenglowCandidateBlockSink,
 		alpenglowFooterCertSink:      opts.AlpenglowFooterCertSink,
@@ -1024,6 +1038,9 @@ func (bs *BlockSource) rpcBlockFetchAllowed() bool {
 }
 
 func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
+	if bs.localLeaderForSlot != nil && bs.localLeaderForSlot(slot) {
+		return false
+	}
 	if !bs.usesLiveShredStream() {
 		return true
 	}
@@ -1063,6 +1080,9 @@ func (bs *BlockSource) shouldUseRPCForSlot(slot uint64) bool {
 }
 
 func (bs *BlockSource) shouldDiscardRPCResultAfterHandoff(slot uint64, blk *b.Block) bool {
+	if blk != nil && blk.FromLocalProduction {
+		return false
+	}
 	if !bs.usesLiveShredStream() {
 		return false
 	}
@@ -2208,9 +2228,15 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		bs.slotStateMu.Lock()
 		isDuplicate := bs.slotState[result.slot] == slotDone
 		bs.slotStateMu.Unlock()
-		if isDuplicate || bs.reorderBuffer[result.slot] != nil || bs.skippedSlots[result.slot] {
+		if !result.local && (isDuplicate || bs.reorderBuffer[result.slot] != nil || bs.skippedSlots[result.slot]) {
 			bs.reorderMu.Unlock()
 			continue
+		}
+		if result.local {
+			delete(bs.reorderBuffer, result.slot)
+			delete(bs.skippedSlots, result.slot)
+			delete(bs.liveSynthesizedSkips, result.slot)
+			delete(bs.alpenglowCertifiedSkips, result.slot)
 		}
 
 		if bs.shouldDiscardRPCResultAfterHandoff(result.slot, result.block) {
@@ -2329,7 +2355,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			isRetriable = false
 		} else if result.block != nil {
 			// Success! This takes priority over any pending error results.
-			if !result.block.FromLiveStream {
+			if !result.block.FromLiveStream && !result.block.FromLocalProduction {
 				bs.stats.FetchSuccesses.Add(1)
 			}
 			bs.reorderBuffer[result.slot] = result.block
@@ -2424,6 +2450,9 @@ func (bs *BlockSource) emitOrderedBlocks() {
 								mlog.Log.Infof("BLOCK SOURCE: %s live block emission active at slot %d | mode=%s", bs.liveShredStreamName(), blk.Slot, bs.currentModeString())
 							}
 						}
+					} else if blk.FromLocalProduction {
+						// Local production is an authoritative input to replay, not a
+						// source handoff away from the turbine stream.
 					} else if repairingSlot {
 						bs.clearLiveRepairSlot(blk.Slot)
 						mlog.Log.Infof("BLOCK SOURCE STATUS: missing streamed slot recovered via RPC at slot %d; staying on %s stream", blk.Slot, bs.liveShredStreamName())
@@ -2919,6 +2948,22 @@ func (bs *BlockSource) DownloadInitialBlocks() {
 	// No-op - parallel scheduler handles this
 }
 
+// InjectLocalBlock queues a fully frozen locally produced block through the
+// same ordered emitter used by network blocks. Replay and forkchoice remain the
+// only path that can accept its state.
+func (bs *BlockSource) InjectLocalBlock(blk *b.Block) bool {
+	if bs == nil || blk == nil {
+		return false
+	}
+	blk.FromLocalProduction = true
+	select {
+	case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, local: true}:
+		return true
+	case <-bs.stopChan:
+		return false
+	}
+}
+
 // Start begins parallel block fetching
 func (bs *BlockSource) Start() {
 	// File-backed blocks still use the old sequential approach.
@@ -2957,6 +3002,24 @@ func (bs *BlockSource) Start() {
 		close(emitterDone)
 	}()
 
+	var localBlocksWg sync.WaitGroup
+	if bs.localBlocks != nil {
+		localBlocksWg.Add(1)
+		go func() {
+			defer localBlocksWg.Done()
+			for {
+				select {
+				case <-bs.stopChan:
+					return
+				case blk, ok := <-bs.localBlocks:
+					if !ok || bs.stopped.Load() || !bs.InjectLocalBlock(blk) {
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	// Start scheduler (runs until all slots done)
 	bs.scheduler()
 
@@ -2973,6 +3036,7 @@ func (bs *BlockSource) Start() {
 	close(bs.workQueue)
 	wg.Wait()
 	bs.liveStreamWg.Wait()
+	localBlocksWg.Wait()
 	close(bs.resultQueue)
 	<-emitterDone
 	close(bs.streamChan)

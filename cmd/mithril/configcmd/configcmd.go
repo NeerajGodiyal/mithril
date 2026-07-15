@@ -33,11 +33,11 @@ customize the storage paths for your setup.
 Two profiles:
   mithril config init              Verifying node (non-voting) — the default.
   mithril config init --validator  Validator — consensus.mode=validator with the
-                                   required keypair/socket fields laid out
-                                   (identity + vote-account keypairs, turbine
-                                   gossip entrypoint, Votor QUIC listener).
-                                   The voting engine is not yet active; the
-                                   node runs verify-only until it lands.
+	                                   required keypair/socket fields laid out
+	                                   (identity + vote-account keypairs, turbine
+	                                   gossip entrypoint, advertised IP, TPU and
+	                                   Votor QUIC listeners). Block production is
+	                                   active; consensus voting is not yet active.
 
 If config.toml already exists, this command will not overwrite it.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -124,7 +124,7 @@ func runConfigInit() {
 	fmt.Println("  1. Edit the [storage] paths for your setup")
 	fmt.Println("  2. Set [network].rpc and [turbine].gossip_entrypoint for your Alpenglow cluster")
 	if initValidator {
-		fmt.Println("  3. Set [validator].identity_keypair and vote_account_keypair —")
+		fmt.Println("  3. Set [validator] identity_keypair, vote_account_keypair, and advertised_ip —")
 		fmt.Println("     validator mode refuses to start without them")
 		fmt.Println("     (keep the authorized withdrawer keypair OFFLINE; it is not needed at runtime)")
 	} else {
@@ -155,6 +155,9 @@ func generateStarterConfig(validator bool) string {
 identity_keypair = ""              # Validator identity — advertises this node into turbine gossip; set for a staked Alpenglow node
 vote_account_keypair = ""          # Vote account keypair path (used once voting activates)
 authorized_withdrawer_keypair = "" # Authorized withdrawer keypair path (diagnostics only)
+tpu_quic_bind_addr = "0.0.0.0:8004"
+advertised_ip = ""                 # Required only in validator mode; public IP advertised for TPU QUIC
+tpu_sigverify_workers = 0          # 0 = GOMAXPROCS
 
 [consensus]
 mode = "verifying"                # "verifying" (default, non-voting) | "validator"
@@ -168,12 +171,13 @@ identity_keypair = "/path/to/validator-keypair.json"        # Signs gossip/turbi
 vote_account_keypair = "/path/to/vote-account-keypair.json" # The vote account votes are cast for
 # NOT required at runtime — keep the withdrawer keypair OFFLINE.
 authorized_withdrawer_keypair = ""
+tpu_quic_bind_addr = "0.0.0.0:8004"
+advertised_ip = "" # REQUIRED: public IP advertised for TPU QUIC
+tpu_sigverify_workers = 0
 
 [consensus]
-# Validator mode enforces the full voting-deployment shape (keypairs above,
-# turbine source + gossip entrypoint, Votor QUIC listener below) so the
-# deployment is provisioned before the voting engine activates. Until it
-# lands the node runs the same verifying pipeline and casts NO votes.
+# Validator mode enables TPU ingress and block production. Consensus votes
+# remain observer-only until BLS signing and durable own-vote history land.
 mode = "validator"
 alpenglow_observer_bind_addr = "0.0.0.0:8010" # REQUIRED: Votor QUIC vote/cert listener
 alpenglow_max_message_bytes = 0               # 0 = default
@@ -202,7 +206,7 @@ rewind_horizon_batches = 64 # Fold batches of undo pointers kept actionable (~55
 
 # ── Network ──────────────────────────────────────────────────────────────
 [network]
-cluster = "alpenglow"     # This build boots Alpenglow only
+cluster = "alpenglow"     # Also supports mainnet-beta/testnet/devnet in verifying-only RPC mode
 rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Used for catchup, tip polling, and the trailing verifier.
 
 # ── Block source ─────────────────────────────────────────────────────────

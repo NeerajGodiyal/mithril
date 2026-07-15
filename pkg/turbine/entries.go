@@ -80,13 +80,20 @@ func (b *entryBatch) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 }
 
 func DecodeEntriesFromDataShreds(shreds []*Shred) ([]Entry, error) {
-	entries, _, err := DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds)
+	entries, _, _, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds)
 	return entries, err
 }
 
 func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry, *AlpenglowParentInfo, error) {
+	entries, parentInfo, _, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds)
+	return entries, parentInfo, err
+}
+
+// DecodeEntriesAndAlpenglowMarkersFromDataShreds decodes both transaction
+// entry batches and Alpenglow header/update/footer marker batches.
+func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *AlpenglowParentInfo, *BlockFooter, error) {
 	if len(shreds) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	sort.Slice(shreds, func(i, j int) bool {
 		return shreds[i].Index < shreds[j].Index
@@ -94,6 +101,7 @@ func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry
 
 	var entries []Entry
 	var parentInfo *AlpenglowParentInfo
+	var blockFooter *BlockFooter
 	var batchBytes []byte
 	var batchStart uint32
 	var haveBatch bool
@@ -109,12 +117,17 @@ func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry
 		if !shred.DataComplete() {
 			continue
 		}
-		if marker, ok, err := decodeAlpenglowParentMarker(batchBytes, batchStart); err != nil {
-			return nil, nil, fmt.Errorf("decode alpenglow block marker ending at shred %d: %w", shred.Index, err)
+		if parent, footer, ok, err := decodeAlpenglowMarker(batchBytes, batchStart); err != nil {
+			return nil, nil, nil, fmt.Errorf("decode alpenglow block marker ending at shred %d: %w", shred.Index, err)
 		} else if ok {
-			parentInfo, err = mergeAlpenglowParentInfo(parentInfo, marker)
-			if err != nil {
-				return nil, nil, fmt.Errorf("merge alpenglow parent marker ending at shred %d: %w", shred.Index, err)
+			if parent != nil {
+				parentInfo, err = mergeAlpenglowParentInfo(parentInfo, parent)
+				if err != nil {
+					return nil, nil, nil, fmt.Errorf("merge alpenglow parent marker ending at shred %d: %w", shred.Index, err)
+				}
+			}
+			if footer != nil {
+				blockFooter = footer
 			}
 			batchBytes = nil
 			haveBatch = false
@@ -122,7 +135,7 @@ func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry
 		}
 		batchEntries, err := decodeEntryBatch(batchBytes)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decode entry batch ending at shred %d: %w", shred.Index, err)
+			return nil, nil, nil, fmt.Errorf("decode entry batch ending at shred %d: %w", shred.Index, err)
 		}
 		entries = append(entries, batchEntries...)
 		// Decoded transactions retain slices into the batch buffer for instruction data.
@@ -131,9 +144,9 @@ func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry
 		haveBatch = false
 	}
 	if len(batchBytes) != 0 {
-		return nil, nil, fmt.Errorf("slot ended with %d undecoded entry bytes", len(batchBytes))
+		return nil, nil, nil, fmt.Errorf("slot ended with %d undecoded entry bytes", len(batchBytes))
 	}
-	return entries, parentInfo, nil
+	return entries, parentInfo, blockFooter, nil
 }
 
 func decodeEntryBatch(data []byte) ([]Entry, error) {
@@ -148,61 +161,70 @@ func decodeEntryBatch(data []byte) ([]Entry, error) {
 }
 
 func decodeAlpenglowParentMarker(data []byte, batchStart uint32) (*AlpenglowParentInfo, bool, error) {
+	parent, _, ok, err := decodeAlpenglowMarker(data, batchStart)
+	return parent, ok && parent != nil, err
+}
+
+func decodeAlpenglowMarker(data []byte, batchStart uint32) (*AlpenglowParentInfo, *BlockFooter, bool, error) {
 	if len(data) < 8 {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if binary.LittleEndian.Uint64(data[:8]) != 0 {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if len(data) < 13 {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	markerVersion := binary.LittleEndian.Uint16(data[8:10])
 	if markerVersion != blockComponentMarkerVersionV1 {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	variant := data[10]
 	innerLen := int(binary.LittleEndian.Uint16(data[11:13]))
 	if len(data) < 13+innerLen {
-		return nil, false, fmt.Errorf("marker payload length %d exceeds remaining %d", innerLen, len(data)-13)
+		return nil, nil, false, fmt.Errorf("marker payload length %d exceeds remaining %d", innerLen, len(data)-13)
 	}
 	inner := data[13 : 13+innerLen]
 	if len(inner) < 1 {
-		return nil, false, fmt.Errorf("empty marker payload")
+		return nil, nil, false, fmt.Errorf("empty marker payload")
 	}
 
 	switch variant {
 	case blockMarkerVariantHeader:
 		if batchStart != 0 {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
 		parentSlot, parentBlockID, err := decodeVersionedParentInfo(inner)
 		if err != nil {
-			return nil, false, fmt.Errorf("block header: %w", err)
+			return nil, nil, false, fmt.Errorf("block header: %w", err)
 		}
 		return &AlpenglowParentInfo{
 			ParentSlot:        parentSlot,
 			ParentBlockID:     parentBlockID,
 			ReplayFECSetIndex: 0,
-		}, true, nil
+		}, nil, true, nil
 	case blockMarkerVariantUpdateParent:
 		if batchStart == 0 || batchStart%dataShredsPerFECBlock != 0 {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
 		parentSlot, parentBlockID, err := decodeVersionedParentInfo(inner)
 		if err != nil {
-			return nil, false, fmt.Errorf("update parent: %w", err)
+			return nil, nil, false, fmt.Errorf("update parent: %w", err)
 		}
 		return &AlpenglowParentInfo{
 			ParentSlot:        parentSlot,
 			ParentBlockID:     parentBlockID,
 			ReplayFECSetIndex: batchStart,
 			FromUpdateParent:  true,
-		}, true, nil
+		}, nil, true, nil
 	case blockMarkerVariantFooter:
-		return nil, false, nil
+		footer, err := unmarshalVersionedBlockFooter(inner)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("block footer: %w", err)
+		}
+		return nil, footer, true, nil
 	default:
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 }
 

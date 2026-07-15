@@ -1742,6 +1742,26 @@ func marshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, er
 	}
 }
 
+// MarshalVersionedVoteState serializes a versioned vote account state.
+func MarshalVersionedVoteState(voteStateVersions *VoteStateVersions) ([]byte, error) {
+	return marshalVersionedVoteState(voteStateVersions)
+}
+
+// WriteVersionedVoteStateInPlace serializes a vote state without changing the
+// account data length. Vote accounts retain zero padding after the encoded state.
+func WriteVersionedVoteStateInPlace(data []byte, voteStateVersions *VoteStateVersions) error {
+	marshaled, err := marshalVersionedVoteState(voteStateVersions)
+	if err != nil {
+		return err
+	}
+	if len(marshaled) > len(data) {
+		return fmt.Errorf("vote state serialized length %d exceeds account data capacity %d", len(marshaled), len(data))
+	}
+	copy(data, marshaled)
+	clear(data[len(marshaled):])
+	return nil
+}
+
 func newVoteState1_14_11FromCurrent(voteState *VoteState) *VoteState1_14_11 {
 	newVoteState := new(VoteState1_14_11)
 	newVoteState.NodePubkey = voteState.NodePubkey

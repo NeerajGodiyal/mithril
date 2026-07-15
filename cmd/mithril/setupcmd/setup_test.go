@@ -1,6 +1,9 @@
 package setupcmd
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,4 +66,35 @@ func TestNewSetupModel_StoragePathsPopulated(t *testing.T) {
 	assert.NotEmpty(t, m.shredstorePath)
 	// Specific paths depend on the host's /mnt/mithril-accounts writability;
 	// the all-or-nothing invariant is covered by pkg/config tests.
+}
+
+func TestValidatorClusterMenuIsAlpenglowOnly(t *testing.T) {
+	m := setupModel{screen: scrCluster, nodeType: "validator"}
+	items := m.currentItems()
+	assert.Equal(t, "alpenglow", items[0].value)
+	for _, item := range items {
+		assert.NotContains(t, []string{"mainnet-beta", "testnet", "devnet"}, item.value)
+	}
+}
+
+func TestQuickClassicSetupSkipsTurbineGossip(t *testing.T) {
+	m := setupModel{screen: scrRPC, mode: "quick", nodeType: "verifying", cluster: "mainnet-beta"}
+	m.advanceFromInput()
+	assert.Equal(t, scrReview, m.screen)
+}
+
+func TestClassicSetupGeneratesRPCSource(t *testing.T) {
+	m := newSetupModel()
+	m.mode = "quick"
+	m.nodeType = "verifying"
+	m.cluster = "mainnet-beta"
+	m.rpcEndpoint = "https://api.mainnet-beta.solana.com"
+	m.configPath = filepath.Join(t.TempDir(), "config.toml")
+
+	m.generateConfig()
+	raw, err := os.ReadFile(m.configPath)
+	assert.NoError(t, err)
+	content := string(raw)
+	assert.Contains(t, content, "source = \"rpc\"")
+	assert.False(t, strings.Contains(content, "[turbine]"))
 }

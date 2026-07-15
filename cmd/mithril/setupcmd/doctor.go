@@ -47,17 +47,15 @@ func runDoctor() {
 		return
 	}
 
-	// 2. Cluster — this build boots Alpenglow only.
+	// 2. Cluster and protocol path.
 	total++
 	cluster := config.GetString("network.cluster")
-	if cluster == "alpenglow" {
+	if cluster == "alpenglow" || cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" {
 		fmt.Printf("  %s Network: %s\n", successStyle.Render("✓"), cluster)
 		passed++
 	} else if cluster == "" {
 		fmt.Printf("  %s Network: alpenglow (default; network.cluster not set)\n", successStyle.Render("✓"))
 		passed++
-	} else if cluster == "mainnet-beta" || cluster == "testnet" || cluster == "devnet" {
-		fmt.Printf("  %s Cluster %q needs a dev-branch (TowerBFT) build until it upgrades to Alpenglow — this build boots \"alpenglow\" only\n", errorStyle.Render("✗"), cluster)
 	} else {
 		fmt.Printf("  %s Invalid cluster: %s\n", errorStyle.Render("✗"), cluster)
 	}
@@ -72,6 +70,9 @@ func runDoctor() {
 		passed++
 	case "validator":
 		var missing []string
+		if cluster != "alpenglow" {
+			missing = append(missing, "network.cluster=alpenglow")
+		}
 		if config.GetString("validator.identity_keypair") == "" {
 			missing = append(missing, "validator.identity_keypair")
 		}
@@ -84,8 +85,14 @@ func runDoctor() {
 		if config.GetString("consensus.alpenglow_observer_bind_addr") == "" {
 			missing = append(missing, "consensus.alpenglow_observer_bind_addr")
 		}
+		if config.GetString("validator.advertised_ip") == "" && config.GetString("turbine.advertised_ip") == "" {
+			missing = append(missing, "validator.advertised_ip or turbine.advertised_ip")
+		}
+		if source := config.GetString("block.source"); source != "" && source != "turbine" {
+			missing = append(missing, "block.source=turbine")
+		}
 		if len(missing) == 0 {
-			fmt.Printf("  %s Node mode: validator (voting engine not yet active — runs verify-only)\n", successStyle.Render("✓"))
+			fmt.Printf("  %s Node mode: Alpenglow validator (block production active; voting not yet active)\n", successStyle.Render("✓"))
 			passed++
 		} else {
 			fmt.Printf("  %s validator mode is missing: %s\n", errorStyle.Render("✗"), strings.Join(missing, ", "))

@@ -117,7 +117,7 @@ type editModel struct {
 func newEditModel(cf string, v *viper.Viper) editModel {
 	cluster := v.GetString("network.cluster")
 	if cluster == "" {
-		cluster = "alpenglow" // the only cluster this build boots
+		cluster = "alpenglow"
 	}
 	rpcSlice := v.GetStringSlice("network.rpc")
 	rpcEndpoint := ""
@@ -274,11 +274,18 @@ func (m editModel) currentItems() []edItem {
 			{label: "Save & exit", value: "save"},
 		}
 	case edScrCluster:
+		if m.v.GetString("consensus.mode") == "validator" {
+			return []edItem{
+				{label: "alpenglow", value: "alpenglow", desc: "Required for validator and block-production mode"},
+				{isSep: true},
+				{label: "← Back", value: "_back"},
+			}
+		}
 		return []edItem{
-			{label: "alpenglow", value: "alpenglow", desc: "The only cluster this build boots"},
-			{label: "mainnet-beta", value: "mainnet-beta", desc: "Requires a dev-branch (TowerBFT) build"},
-			{label: "testnet", value: "testnet", desc: "Requires a dev-branch (TowerBFT) build"},
-			{label: "devnet", value: "devnet", desc: "Requires a dev-branch (TowerBFT) build"},
+			{label: "alpenglow", value: "alpenglow", desc: "Certificate fork choice and speculative replay"},
+			{label: "mainnet-beta", value: "mainnet-beta", desc: "Classic verifying-only RPC replay"},
+			{label: "testnet", value: "testnet", desc: "Classic verifying-only RPC replay"},
+			{label: "devnet", value: "devnet", desc: "Classic verifying-only RPC replay"},
 			{isSep: true},
 			{label: "← Back", value: "_back"},
 		}
@@ -676,10 +683,13 @@ func (m *editModel) saveConfig() {
 		}
 	} else {
 		// Only force a source change if no external lightbringer_endpoint is
-		// configured. External LB mode (enabled=false + endpoint set) is a valid
-		// runtime config. Turbine is the default live Alpenglow source.
+		// configured. External LB mode (enabled=false + endpoint set) is valid.
 		if m.v.GetString("block.lightbringer_endpoint") == "" {
-			content = setTomlValue(content, "block", "source", "\"turbine\"")
+			source := "rpc"
+			if m.cluster == "alpenglow" {
+				source = "turbine"
+			}
+			content = setTomlValue(content, "block", "source", fmt.Sprintf("%q", source))
 		}
 		if strings.Contains(content, "[lightbringer]") {
 			content = setTomlValue(content, "lightbringer", "enabled", "false")

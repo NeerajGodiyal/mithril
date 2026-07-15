@@ -13,6 +13,101 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func waitForBlockSourceCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for block source condition")
+}
+
+func TestInjectLocalBlockReplacesBufferedNetworkBlock(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  10,
+		EndSlot:    12,
+	})
+	emitterDone := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(emitterDone)
+	}()
+
+	network := &b.Block{Slot: 11}
+	bs.resultQueue <- fetchResult{slot: 11, block: network}
+	waitForBlockSourceCondition(t, func() bool {
+		bs.reorderMu.Lock()
+		defer bs.reorderMu.Unlock()
+		return bs.reorderBuffer[11] == network
+	})
+
+	local := &b.Block{Slot: 11}
+	if !bs.InjectLocalBlock(local) {
+		t.Fatal("local block injection failed")
+	}
+	waitForBlockSourceCondition(t, func() bool {
+		bs.reorderMu.Lock()
+		defer bs.reorderMu.Unlock()
+		return bs.reorderBuffer[11] == local
+	})
+
+	bs.resultQueue <- fetchResult{slot: 10, block: &b.Block{Slot: 10}}
+	if got := <-bs.streamChan; got.Slot != 10 {
+		t.Fatalf("first emitted slot = %d, want 10", got.Slot)
+	}
+	if got := <-bs.streamChan; got != local || !got.FromLocalProduction {
+		t.Fatalf("second emitted block = %#v, want locally produced block", got)
+	}
+
+	close(bs.resultQueue)
+	<-emitterDone
+}
+
+func TestInjectLocalBlockReplacesProvisionalSkip(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  20,
+		EndSlot:    22,
+	})
+	emitterDone := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(emitterDone)
+	}()
+
+	bs.resultQueue <- fetchResult{slot: 21, skipped: true}
+	waitForBlockSourceCondition(t, func() bool {
+		bs.reorderMu.Lock()
+		defer bs.reorderMu.Unlock()
+		return bs.skippedSlots[21]
+	})
+
+	local := &b.Block{Slot: 21}
+	if !bs.InjectLocalBlock(local) {
+		t.Fatal("local block injection failed")
+	}
+	waitForBlockSourceCondition(t, func() bool {
+		bs.reorderMu.Lock()
+		defer bs.reorderMu.Unlock()
+		return bs.reorderBuffer[21] == local && !bs.skippedSlots[21]
+	})
+
+	bs.resultQueue <- fetchResult{slot: 20, block: &b.Block{Slot: 20}}
+	if got := <-bs.streamChan; got.Slot != 20 {
+		t.Fatalf("first emitted slot = %d, want 20", got.Slot)
+	}
+	if got := <-bs.streamChan; got != local || got.IsSkipped {
+		t.Fatalf("second emitted block = %#v, want local non-skipped block", got)
+	}
+
+	close(bs.resultQueue)
+	<-emitterDone
+}
+
 func TestLightbringerBlockConnectsLocked(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType: BlockSourceLightbringer,

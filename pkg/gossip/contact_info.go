@@ -25,12 +25,15 @@ const (
 	protocolPingMessage  = 4
 	protocolPongMessage  = 5
 
-	socketTagGossip      = 0
-	socketTagServeRepair = 4
-	socketTagTPUVote     = 9
-	socketTagTVU         = 10
-	socketTagTPUVoteQuic = 12
-	socketTagAlpenglow   = 13
+	socketTagGossip          = 0
+	socketTagServeRepairQuic = 1
+	socketTagServeRepair     = 4
+	socketTagTPUQUICForwards = 7
+	socketTagTPUQUIC         = 8
+	socketTagTPUVote         = 9
+	socketTagTVU             = 10
+	socketTagTPUVoteQuic     = 12
+	socketTagAlpenglow       = 13
 
 	// Agave's Version has a numeric ClientId, not a string. Unknown IDs are
 	// accepted, so use a stable "MI" marker while keeping ClientName in logs.
@@ -81,9 +84,12 @@ type contactEndpoint struct {
 
 type contactRecord struct {
 	Pubkey          Pubkey
+	Wallclock       uint64
 	ShredVer        uint16
 	GossipAddr      contactEndpoint
 	ServeRepairAddr contactEndpoint
+	TVUAddr         contactEndpoint
+	Sockets         map[uint8]contactEndpoint
 	signature       Signature
 	data            []byte
 }
@@ -123,6 +129,7 @@ func (r contactRecord) ContactInfo() *ContactInfo {
 		ShredVer:        r.ShredVer,
 		GossipAddr:      r.GossipAddr.UDPAddr(),
 		ServeRepairAddr: r.ServeRepairAddr.UDPAddr(),
+		TVUAddr:         r.TVUAddr.UDPAddr(),
 	}
 }
 
@@ -172,6 +179,14 @@ func (c *ContactInfo) SetTPUVoteQuicAddr(addr *net.UDPAddr) error {
 	}
 	c.TPUVoteQuicAddr = cloneUDPAddr(addr)
 	return nil
+}
+
+// SetTPUQUIC publishes the same endpoint for normal and forwarding TPU QUIC.
+func (c *ContactInfo) SetTPUQUIC(addr *net.UDPAddr) error {
+	if err := c.SetSocket(socketTagTPUQUICForwards, addr); err != nil {
+		return err
+	}
+	return c.SetSocket(socketTagTPUQUIC, addr)
 }
 
 func (c *ContactInfo) SetSocket(key uint8, addr *net.UDPAddr) error {
@@ -337,8 +352,8 @@ func decodeContactInfo(d *decoder) (*ContactInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < numExt; i++ {
-		return nil, errUnsupportedCRDSValue
+	if err := skipContactExtensions(d, numExt); err != nil {
+		return nil, err
 	}
 	return info, nil
 }
@@ -350,7 +365,7 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 		return contactRecord{}, err
 	}
 	copy(record.Pubkey[:], pubkey)
-	if _, err := d.varint(10); err != nil {
+	if record.Wallclock, err = d.varint(10); err != nil {
 		return contactRecord{}, err
 	}
 	if _, err := d.u64(); err != nil {
@@ -422,11 +437,17 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 		}
 		addr.port = int(port)
 		addr.ok = true
+		if record.Sockets == nil {
+			record.Sockets = make(map[uint8]contactEndpoint)
+		}
+		record.Sockets[key] = addr
 		switch key {
 		case socketTagGossip:
 			record.GossipAddr = addr
 		case socketTagServeRepair:
 			record.ServeRepairAddr = addr
+		case socketTagTVU:
+			record.TVUAddr = addr
 		}
 	}
 
@@ -434,10 +455,26 @@ func decodeContactRecord(d *decoder) (contactRecord, error) {
 	if err != nil {
 		return contactRecord{}, err
 	}
-	if numExt > 0 {
-		return contactRecord{}, errUnsupportedCRDSValue
+	if err := skipContactExtensions(d, numExt); err != nil {
+		return contactRecord{}, err
 	}
 	return record, nil
+}
+
+func skipContactExtensions(d *decoder, count int) error {
+	for i := 0; i < count; i++ {
+		if _, err := d.u8(); err != nil {
+			return err
+		}
+		length, err := d.shortLen()
+		if err != nil {
+			return err
+		}
+		if _, err := d.read(length); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeContactIP(d *decoder) (contactEndpoint, error) {

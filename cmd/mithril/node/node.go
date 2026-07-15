@@ -26,15 +26,20 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
+	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/blockprod"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/forge"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -42,6 +47,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/tpu"
+	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/Overclock-Validator/mithril/pkg/version"
 	solana "github.com/gagliardetto/solana-go"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
@@ -70,8 +77,8 @@ var (
 	accountsPath                string
 	scratchDirectory            string
 	rpcEndpoints                []string
-	cluster                     string // "alpenglow" (the only cluster this build boots)
-	blockSource                 string // "turbine" (default), "rpc", or "lightbringer"
+	cluster                     string // "alpenglow", "mainnet-beta", "testnet", or "devnet"
+	blockSource                 string // "turbine", "rpc", or "lightbringer"
 	lightbringerEndpoint        string
 	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
 	repairMaxRequestsPerSecond  int    // Repair request-rate ceiling override (0 = default 500)
@@ -88,6 +95,9 @@ var (
 	validatorIdentityKeypair    string
 	validatorVoteAccountKeypair string
 	validatorWithdrawerKeypair  string
+	validatorTPUQUICBind        string
+	validatorAdvertisedIP       string
+	validatorSigverifyWorkers   int
 
 	// Mode thresholds
 	blockNearTipThreshold        int // Enter near-tip when gap <= this
@@ -177,6 +187,24 @@ func epochForStateSlot(s *state.MithrilState, slot uint64) uint64 {
 		return epochSchedule.GetEpoch(slot)
 	}
 	return 0
+}
+
+func alpenglowModeForCluster(cluster string) (bool, error) {
+	switch cluster {
+	case "alpenglow":
+		return true, nil
+	case "mainnet-beta", "testnet", "devnet":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid network.cluster %q - must be 'alpenglow', 'mainnet-beta', 'testnet', or 'devnet'", cluster)
+	}
+}
+
+func defaultBlockSourceForMode(alpenglow bool) string {
+	if alpenglow {
+		return "turbine"
+	}
+	return "rpc"
 }
 
 // alpenglowAddrForGossip returns the Votor QUIC address to advertise in gossip,
@@ -293,7 +321,7 @@ func init() {
 
 	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
-	Run.Flags().StringVar(&cluster, "cluster", "alpenglow", "Solana cluster: 'alpenglow' (default; the only cluster this build boots — 'mainnet-beta'/'testnet'/'devnet' need a dev-branch TowerBFT build until they upgrade to Alpenglow)")
+	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'alpenglow' (default), 'mainnet-beta', 'testnet', or 'devnet'")
 
 	// [rpc] section flags (Mithril's RPC server)
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
@@ -304,13 +332,16 @@ func init() {
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
 
 	// [consensus] section flags
-	Run.Flags().StringVar(&consensusModeFlag, "consensus-mode", "verifying", "Node mode: 'verifying' (default; non-voting — observe, execute, and verify) or 'validator' (requires identity + vote-account keypairs, turbine source, gossip entrypoint, and the Votor QUIC listener; voting engine not yet active)")
+	Run.Flags().StringVar(&consensusModeFlag, "consensus-mode", "verifying", "Node mode: 'verifying' (default; non-voting) or Alpenglow-only 'validator' (TPU/block production active; voting not yet active; requires keypairs, advertised IP, turbine/gossip, and Votor listener)")
 	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address")
 	Run.Flags().StringVar(&alpenglowBLSDST, "alpenglow-bls-dst", "", "BLS hash-to-curve DST override (must match cluster's solana-bls version; empty = default)")
 	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
 	Run.Flags().StringVar(&validatorIdentityKeypair, "identity-keypair", "", "Validator identity keypair for native turbine gossip (Solana keygen JSON)")
 	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "Vote account keypair path for validator diagnostics (Solana keygen JSON)")
 	Run.Flags().StringVar(&validatorWithdrawerKeypair, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair path for validator diagnostics (Solana keygen JSON)")
+	Run.Flags().StringVar(&validatorTPUQUICBind, "tpu-quic-bind-addr", "", "Validator TPU QUIC listen address (default 0.0.0.0:8004)")
+	Run.Flags().StringVar(&validatorAdvertisedIP, "validator-advertised-ip", "", "Public IP advertised for validator TPU QUIC")
+	Run.Flags().IntVar(&validatorSigverifyWorkers, "tpu-sigverify-workers", 0, "TPU signature verification workers (0 = GOMAXPROCS)")
 
 	// [tuning] section flags
 	Run.Flags().Uint64Var(&paramArenaSizeMB, "param-arena-size-mb", 512, "Size in MB for serialized parameter arena (0 to disable)")
@@ -340,7 +371,7 @@ func init() {
 	Run.Flags().StringVar(&scratchDirectory, "scratch-directory", "/tmp", "Path for downloads (e.g. snapshots) and other temp state")
 
 	// [block] section flags
-	Run.Flags().StringVar(&blockSource, "block-source", "turbine", "Block source: 'turbine' (default, live), 'rpc' (catch-up/debug), or 'lightbringer'")
+	Run.Flags().StringVar(&blockSource, "block-source", "", "Block source: 'turbine', 'rpc', or 'lightbringer' (default: turbine for Alpenglow, rpc otherwise)")
 	Run.Flags().StringVar(&lightbringerEndpoint, "lightbringer-endpoint", "", "Address for Lightbringer endpoint (only used when block-source=lightbringer)")
 	Run.Flags().StringVar(&turbineBindAddr, "turbine-bind-addr", "", "UDP address for native turbine shred receiver (only used when block-source=turbine)")
 	Run.Flags().StringVar(&turbineGossipEntrypoint, "turbine-gossip-entrypoint", "", "Solana gossip entrypoint for native turbine tree joining")
@@ -560,21 +591,18 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		rpcEndpoints = getStringSlice("rpc", "rpc.rpc")
 	}
 
-	// Cluster is required for safety (prevents mainnet/testnet mixups).
-	// This build is Alpenglow-only: replay applies Alpenglow clock/feature
-	// semantics unconditionally, which would diverge the bankhash on a
-	// TowerBFT cluster. Refuse anything except an Alpenglow cluster.
+	// Cluster selects the protocol path as well as protecting against
+	// mainnet/testnet AccountsDB mixups. Alpenglow uses certificate forkchoice
+	// and rooted speculative replay; the established clusters retain the
+	// classic verifying flow.
 	cluster = getString("cluster", "network.cluster")
 	if cluster == "" {
-		cluster = "alpenglow" // the only cluster this build boots
+		cluster = "alpenglow"
 		mlog.Log.Infof("network.cluster not set; defaulting to %q", cluster)
 	}
-	if cluster != "alpenglow" {
-		src := config.FileUsed()
-		if src == "" {
-			src = "CLI/defaults (no config file loaded)"
-		}
-		return fmt.Errorf("network.cluster %q (read from %s) is not supported by this Alpenglow-only build (TowerBFT clusters need a mithril build from the dev branch until they upgrade to Alpenglow)", cluster, src)
+	alpenglowMode, err := alpenglowModeForCluster(cluster)
+	if err != nil {
+		return err
 	}
 
 	// Must be decided before any OpenDb call: with the WAL off, the fold
@@ -610,18 +638,24 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	validatorIdentityKeypair = getString("identity-keypair", "validator.identity_keypair")
 	validatorVoteAccountKeypair = getString("vote-account-keypair", "validator.vote_account_keypair")
 	validatorWithdrawerKeypair = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
+	validatorTPUQUICBind = getString("tpu-quic-bind-addr", "validator.tpu_quic_bind_addr")
+	if validatorTPUQUICBind == "" {
+		validatorTPUQUICBind = "0.0.0.0:8004"
+	}
+	validatorAdvertisedIP = getString("validator-advertised-ip", "validator.advertised_ip")
+	validatorSigverifyWorkers = getInt("tpu-sigverify-workers", "validator.tpu_sigverify_workers")
 
 	// [block] section
 	blockSource = getString("block-source", "block.source")
 	blockSourceExplicit := blockSource != "" // operator chose (flag or config) vs defaulted
 	if blockSource == "" {
-		blockSource = "turbine" // default: native turbine is the live Alpenglow source
+		blockSource = defaultBlockSourceForMode(alpenglowMode)
 	}
 	// RPC is a catch-up/debug source on Alpenglow, not a live one: RPC blocks
 	// carry no Alpenglow block ids or footer certificates, so certificate
 	// gating cannot adjudicate their identity near tip, and durable folds only
 	// advance if certificates arrive some other way (the Votor QUIC listener).
-	if blockSource == "rpc" {
+	if alpenglowMode && blockSource == "rpc" {
 		if alpenglowObserverBindAddr == "" {
 			mlog.Log.Warnf("block source \"rpc\" with no consensus.alpenglow_observer_bind_addr: no certificate feed exists, so durable folds will NOT advance (fail-closed halt once the in-RAM tail fills); use block source \"turbine\" for live operation")
 		} else {
@@ -734,6 +768,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// and the config stays valid when voting activates.
 	if consensusMode == "validator" {
 		var missing []string
+		if !alpenglowMode {
+			missing = append(missing, "network.cluster=alpenglow (classic clusters remain verifying-only)")
+		}
 		if validatorIdentityKeypair == "" {
 			missing = append(missing, "validator.identity_keypair (signs gossip/turbine identity and, later, votes)")
 		}
@@ -749,12 +786,15 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		if alpenglowObserverBindAddr == "" {
 			missing = append(missing, "consensus.alpenglow_observer_bind_addr (receive Votor vote/cert traffic)")
 		}
+		if validatorAdvertisedIP == "" && turbineAdvertisedIP == "" {
+			missing = append(missing, "validator.advertised_ip or turbine.advertised_ip (publish TPU QUIC)")
+		}
 		if len(missing) > 0 {
 			return fmt.Errorf("consensus.mode=validator requires:\n  - %s", strings.Join(missing, "\n  - "))
 		}
 		// The authorized withdrawer is deliberately NOT required at runtime —
 		// best practice keeps it offline.
-		mlog.Log.Warnf("consensus.mode=validator: the voting engine is not implemented yet in this build — running the verifying pipeline, NO votes will be cast")
+		mlog.Log.Infof("consensus.mode=validator: Alpenglow block production and TPU ingress enabled; consensus votes remain observer-only until the signing engine is enabled")
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -964,6 +1004,7 @@ func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 }
 
 func runLive(c *cobra.Command, args []string) {
+	alpenglowMode := cluster == "alpenglow"
 	if pprofPort != -1 {
 		startPprofHandlers(int(pprofPort))
 	}
@@ -1396,8 +1437,10 @@ func runLive(c *cobra.Command, args []string) {
 		refreshManifestSeedFromManifest(accountsPath, mithrilState, manifest)
 		// Restore the durable fold frontier (index tail + NoSync bankhash rows)
 		// from the manifests before the integrity check reads those rows.
-		foldRecovery = mustRecoverFoldState(accountsDb)
-		foldRecovered = true
+		if alpenglowMode {
+			foldRecovery = mustRecoverFoldState(accountsDb)
+			foldRecovered = true
+		}
 		// Run integrity check if we have a state file (warn only, don't fail - user chose force mode)
 		if hasValidState {
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
@@ -1657,8 +1700,10 @@ func runLive(c *cobra.Command, args []string) {
 			// rows) from the manifests BEFORE the integrity check reads those
 			// rows — otherwise a hard kill that dropped a NoSync bankhash row
 			// would falsely condemn a healthy store and force a re-bootstrap.
-			foldRecovery = mustRecoverFoldState(accountsDb)
-			foldRecovered = true
+			if alpenglowMode {
+				foldRecovery = mustRecoverFoldState(accountsDb)
+				foldRecovered = true
+			}
 
 			// Validate state file matches AccountsDB (detect Ctrl+Z / kill -9 corruption)
 			if err := mithrilState.ValidateAgainstBankhashDB(accountsDb); err != nil {
@@ -1757,12 +1802,12 @@ postBootstrap:
 			mlog.Log.Infof("state file snapshot_slot (%d) doesn't match manifest (%d), ignoring state file",
 				mithrilState.SnapshotSlot, manifest.Bank.Slot)
 			mithrilState = nil
-		} else if mithrilState.LastRootedContext != nil {
+		} else if alpenglowMode && mithrilState.LastRootedContext != nil {
 			// Rooted-durable resume: durable position is the last rooted slot; the in-RAM
 			// slots above it were lost. Resume from the slot after the last rooted slot
 			// (GetResumeSlot returns it when LastRootedSlot > 0).
 			startSlot = int64(mithrilState.GetResumeSlot())
-		} else if mithrilState.LastSlot > 0 {
+		} else if !alpenglowMode && mithrilState.LastSlot > 0 {
 			// Validate last_slot is reasonable
 			if mithrilState.LastSlot < manifest.Bank.Slot {
 				mlog.Log.Infof("state file last_slot (%d) is before snapshot slot (%d), ignoring",
@@ -1776,7 +1821,7 @@ postBootstrap:
 
 	// Create ResumeState if we have resume context from state file
 	var resumeState *replay.ResumeState
-	if mithrilState != nil && mithrilState.LastRootedContext != nil {
+	if alpenglowMode && mithrilState != nil && mithrilState.LastRootedContext != nil {
 		// Rooted-durable resume: build from the context as of the last rooted slot
 		// (durable), not the Last* fields at the replayed tip (lost in RAM on restart).
 		rs, err := replay.ResumeStateFromRootedContext(mithrilState.LastRootedContext, mithrilState.ComputedEpochStakes)
@@ -1787,7 +1832,7 @@ postBootstrap:
 			resumeState = rs
 			mlog.Log.Infof("rooted-durable resume: continuing from rooted slot R=%d (durable checkpoint)", mithrilState.LastRootedContext.Slot)
 		}
-	} else if mithrilState != nil && mithrilState.HasResumeData() {
+	} else if !alpenglowMode && mithrilState != nil && mithrilState.HasResumeData() {
 		// Decode parent bankhash
 		parentBankhash, err := base58.Decode(mithrilState.LastBankhash)
 		if err != nil {
@@ -1888,16 +1933,16 @@ postBootstrap:
 	}
 	accountsDb.InitCaches()
 
-	// Alpenglow-only build: rooted-durable is the ONLY storage mode. Durable
-	// state holds finalized slots exclusively; replayed slots buffer in RAM and
-	// fold to disk in batches (storage.fold_batch_slots) once rooted.
+	// Alpenglow buffers replayed slots in a fork-aware WorkingSet and folds only
+	// finalized prefixes. Classic verifying mode retains the established
+	// per-slot AccountsDB persistence path.
 	if config.IsSet("storage.durable_commit") {
 		klog.Fatalf("storage.durable_commit was removed: batch folds replaced the per-slot redo-log commit path — delete the key (rooted-durable batching is always on)")
 	}
-	if config.IsSet("storage.rooted_durable") && !config.GetBool("storage.rooted_durable") {
-		klog.Fatalf("storage.rooted_durable=false is not supported by this build (durable state is rooted-only by design) — delete the key")
+	if config.IsSet("storage.rooted_durable") && config.GetBool("storage.rooted_durable") != alpenglowMode {
+		klog.Fatalf("storage.rooted_durable must be %t for network.cluster=%s", alpenglowMode, cluster)
 	}
-	accountsDb.RootedDurable = true
+	accountsDb.RootedDurable = alpenglowMode
 	if config.IsSet("storage.fork_aware") {
 		mlog.Log.Warnf("storage.fork_aware was removed: the working-set suffix engine handles fork switches via unwind+re-execute — delete the key")
 	}
@@ -1917,7 +1962,7 @@ postBootstrap:
 	}
 	replay.TrailingVerifierCfg = vcfg
 
-	if foldBatch := config.GetInt("storage.fold_batch_slots"); foldBatch > 0 {
+	if foldBatch := config.GetInt("storage.fold_batch_slots"); alpenglowMode && foldBatch > 0 {
 		replay.FoldBatchSlots = min(max(foldBatch, 32), 512)
 		if replay.FoldBatchSlots != foldBatch {
 			mlog.Log.Warnf("storage.fold_batch_slots=%d clamped to %d (allowed range 32..512)", foldBatch, replay.FoldBatchSlots)
@@ -1950,7 +1995,7 @@ postBootstrap:
 	// Background compaction is OFF by default until soaked (it holds the store's
 	// fold lock during each cycle); operators opt in via storage.compact.enabled.
 	compactEnabled := false
-	if config.IsSet("storage.compact.enabled") {
+	if alpenglowMode && config.IsSet("storage.compact.enabled") {
 		compactEnabled = config.GetBool("storage.compact.enabled")
 	}
 
@@ -1959,7 +2004,7 @@ postBootstrap:
 	// graceful shutdown and is stale after a hard kill) is reconciled against
 	// the in-memory state watermark. Fresh-build paths fall through to the
 	// recovery call here, which is a no-op on a store with no manifests.
-	if mithrilState != nil {
+	if alpenglowMode && mithrilState != nil {
 		if !foldRecovered {
 			foldRecovery = mustRecoverFoldState(accountsDb)
 			foldRecovered = true
@@ -2003,6 +2048,9 @@ postBootstrap:
 	// the verifier halted at). Runs after fold recovery so the boundary set is
 	// authoritative; replay then re-executes forward from the boundary.
 	if rewindToSlot > 0 {
+		if !alpenglowMode {
+			klog.Fatalf("--rewind-to-slot is available only in Alpenglow rooted-durable mode")
+		}
 		if mithrilState == nil {
 			klog.Fatalf("--rewind-to-slot=%d: no state file to reconcile (fresh bootstrap has nothing to rewind)", rewindToSlot)
 		}
@@ -2021,7 +2069,7 @@ postBootstrap:
 	// Rooted-durable resume needs a context at the last rooted slot. The fold
 	// manifest is the primary source (handled above); the state file is the
 	// fallback for stores from before the first fold.
-	if mithrilState != nil && mithrilState.LastSlot > 0 && mithrilState.LastRootedSlot > 0 {
+	if alpenglowMode && mithrilState != nil && mithrilState.LastRootedSlot > 0 {
 		if mithrilState.LastRootedContext == nil || mithrilState.LastRootedContext.Slot != mithrilState.LastRootedSlot {
 			ctxSlot := uint64(0)
 			if mithrilState.LastRootedContext != nil {
@@ -2029,6 +2077,30 @@ postBootstrap:
 			}
 			klog.Fatalf("rooted-durable resume needs a context-at-R matching LastRootedSlot=%d (have context-slot=%d); re-bootstrap with --bootstrap snapshot",
 				mithrilState.LastRootedSlot, ctxSlot)
+		}
+	}
+
+	// Fold recovery and an operator rewind can move the durable watermark after
+	// the initial state-file decode above. Rebuild the Alpenglow start position
+	// from the reconciled context so replay never starts from a stale watermark.
+	if alpenglowMode {
+		startSlot = int64(manifest.Bank.Slot + 1)
+		resumeState = nil
+		if mithrilState != nil && mithrilState.LastRootedContext != nil {
+			rs, rerr := replay.ResumeStateFromRootedContext(mithrilState.LastRootedContext, mithrilState.ComputedEpochStakes)
+			if rerr != nil {
+				klog.Fatalf("cannot rebuild reconciled Alpenglow resume state at rooted slot %d: %v", mithrilState.LastRootedContext.Slot, rerr)
+			}
+			resumeState = rs
+			startSlot = int64(mithrilState.LastRootedContext.Slot + 1)
+			mlog.Log.Infof("rooted-durable replay start reconciled to R=%d", mithrilState.LastRootedContext.Slot)
+		}
+		if endSlot != -1 {
+			liveEndSlot = uint64(endSlot)
+		} else if numReplaySlots != 0 {
+			liveEndSlot = uint64(startSlot + numReplaySlots)
+		} else {
+			liveEndSlot = uint64(math.MaxUint64)
 		}
 	}
 
@@ -2059,48 +2131,219 @@ postBootstrap:
 		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
 	}
 
+	// The Alpenglow observer is forkchoice authority in both Alpenglow modes.
+	// Classic clusters deliberately run without a certificate engine and keep
+	// their verifying-only replay semantics.
+	var consensusEngine *consensusengine.AlpenglowObserverEngine
+	if alpenglowMode {
+		consensusEngine, err = consensusengine.NewEngine(consensusengine.Config{
+			AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
+			AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
+			AlpenglowBLSDST:           alpenglowBLSDST,
+			AlpenglowShredVersion:     uint16(turbineShredVersion),
+		})
+		if err != nil {
+			klog.Fatalf("unable to create consensus engine: %v", err)
+		}
+		if err := consensusEngine.Start(ctx); err != nil {
+			klog.Fatalf("unable to start consensus engine %q: %v", consensusEngine.Name(), err)
+		}
+		defer func() {
+			if err := consensusEngine.Close(); err != nil {
+				mlog.Log.Warnf("consensus engine close failed: %v", err)
+			}
+		}()
+	}
+
+	localBlocks := make(chan *block.Block, 16)
+	var sharedGossip *gossip.Client
+	var validatorPrewarmBlocks []*block.Block
+	if consensusMode == "validator" {
+		if turbinePrewarm != nil {
+			var dropped int
+			validatorPrewarmBlocks, dropped = turbinePrewarm.Handover()
+			turbinePrewarm = nil
+			if len(validatorPrewarmBlocks) > 0 || dropped > 0 {
+				mlog.Log.Infof("turbine prewarm handover for validator startup: %d blocks (%d dropped)", len(validatorPrewarmBlocks), dropped)
+			}
+		}
+
+		advertisedIP := validatorAdvertisedIP
+		if advertisedIP == "" {
+			advertisedIP = turbineAdvertisedIP
+		}
+		sharedGossip, err = gossip.NewClient(gossip.Config{
+			Entrypoint:    turbineGossipEntrypoint,
+			BindAddr:      turbineGossipBindAddr,
+			TVUAddr:       turbineBindAddr,
+			AlpenglowAddr: alpenglowAddrForGossip(alpenglowObserverBindAddr),
+			AdvertisedIP:  advertisedIP,
+			ShredVersion:  uint16(turbineShredVersion),
+			Identity:      validatorIdentity,
+			Name:          gossip.ClientName,
+		})
+		if err != nil {
+			klog.Fatalf("validator gossip client: %v", err)
+		}
+		go func() {
+			if err := sharedGossip.Run(ctx); err != nil && ctx.Err() == nil {
+				mlog.Log.Errorf("validator gossip client stopped: %v", err)
+			}
+		}()
+
+		epochSchedule := epochScheduleFromState(mithrilState)
+		if epochSchedule == nil {
+			klog.Fatalf("validator production requires an epoch schedule in the snapshot/state seed")
+		}
+		stakesForSlot := func(slot uint64) map[solana.PublicKey]uint64 {
+			epoch := epochSchedule.GetEpoch(slot)
+			voteAccounts := global.EpochStakesVoteAccts(epoch)
+			return turbine.StakedNodes(global.EpochStakes(epoch), func(vote solana.PublicKey) (solana.PublicKey, bool) {
+				voteAccount, ok := voteAccounts[vote]
+				if !ok || voteAccount == nil {
+					return solana.PublicKey{}, false
+				}
+				return voteAccount.NodePubkey, true
+			})
+		}
+		broadcaster, err := turbine.NewTurbineBroadcaster(turbine.TurbineBroadcasterConfig{
+			Self:          solana.PrivateKey(validatorIdentity).PublicKey(),
+			Peers:         sharedGossip,
+			Stakes:        stakesForSlot,
+			EpochForSlot:  epochSchedule.GetEpoch,
+			LeaderForSlot: global.LeaderForSlot,
+			UseChaCha8:    true,
+		})
+		if err != nil {
+			klog.Fatalf("validator turbine broadcaster: %v", err)
+		}
+		defer broadcaster.Close()
+
+		global.SetWallClockSlotDuration(blockprod.AlpenglowSlotDuration)
+		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {
+			global.SeedWallClockSlot(slot)
+		} else {
+			global.SeedWallClockSlot(mithrilState.GetCurrentSlot())
+			mlog.Log.Warnf("validator wall-clock slot seeded from state: %v", err)
+		}
+
+		controller := blockprod.NewController()
+		topicSink := forge.NewSink(controller)
+		tpuCfg := tpu.DefaultConfig()
+		tpuCfg.Identity = validatorIdentity
+		tpuCfg.ListenAddr = validatorTPUQUICBind
+		tpuCfg.AdvertisedIP = advertisedIP
+		tpuCfg.Pipeline.Sink = topicSink
+		if validatorSigverifyWorkers > 0 {
+			tpuCfg.Pipeline.SigverifyWorkers = validatorSigverifyWorkers
+		}
+		tpuService, err := tpu.Start(ctx, tpuCfg)
+		if err != nil {
+			klog.Fatalf("start validator TPU: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := tpuService.Stop(shutdownCtx); err != nil {
+				mlog.Log.Warnf("validator TPU shutdown: %v", err)
+			}
+		}()
+		tpuAdvertise, err := tpuService.AdvertisedQUICAddr()
+		if err != nil {
+			klog.Fatalf("validator TPU advertised address: %v", err)
+		}
+		if err := sharedGossip.SetTPUQUIC(tpuAdvertise); err != nil {
+			mlog.Log.Warnf("validator gossip TPU advertisement: %v", err)
+		}
+
+		rewardBuilder := rewardcerts.NewBuilder(rewardcerts.BuilderConfig{RootSlot: global.Slot})
+		consensusEngine.SetVotorMessageHook(rewardBuilder.ObserveVotorMessage)
+		leaderStop := make(chan struct{})
+		leaderDone := make(chan struct{})
+		leaderLoop := blockprod.NewLeaderLoop(blockprod.LeaderLoopConfig{
+			Controller:     controller,
+			Identity:       solana.PrivateKey(validatorIdentity),
+			AccountsDb:     accountsDb,
+			Broadcaster:    broadcaster,
+			ShredVersion:   uint16(turbineShredVersion),
+			EpochSchedule:  epochSchedule,
+			AlpenglowClock: true,
+			SlotDuration:   blockprod.AlpenglowSlotDuration,
+			ParentContext: func(slot uint64) blockprod.ParentContext {
+				tip := replay.ChainTipParentContext()
+				if slot == 0 || global.ReplayFrontier() < slot-1 || tip.Slot >= slot {
+					return blockprod.ParentContext{}
+				}
+				return blockprod.ParentContext{
+					ParentSlot:          tip.Slot,
+					ParentBankhash:      tip.Bankhash,
+					ParentLastEntryHash: tip.LastEntryHash,
+					EpochRewardsActive:  tip.EpochRewardsActive,
+					PrevNumSigs:         tip.PrevNumSigs,
+					PrevFeeGovernor:     tip.PrevFeeGovernor,
+					AcctsLtHash:         tip.AcctsLtHash,
+					Features:            tip.Features,
+					UnrootedRead:        tip.UnrootedRead,
+				}
+			},
+			CurrentSlot:   global.WallClockSlot,
+			LeaderForSlot: global.LeaderForSlot,
+			ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
+				if parentSlot == 0 {
+					return solana.Hash{}, true
+				}
+				return global.AlpenglowBlockID(parentSlot)
+			},
+			RewardCerts: rewardBuilder,
+			OnBlock: func(produced *block.Block) {
+				select {
+				case localBlocks <- produced:
+				case <-ctx.Done():
+				}
+			},
+		})
+		go func() {
+			defer close(leaderDone)
+			leaderLoop.Run(leaderStop)
+		}()
+		defer func() {
+			close(leaderStop)
+			<-leaderDone
+		}()
+		mlog.Log.Infof("Alpenglow validator production active: TPU=%s advertised=%s", tpuService.ListenAddr(), tpuAdvertise)
+	}
+
 	replayStartTime := time.Now()
 	blockFetchOpts := &replay.BlockFetchOpts{
-		MaxRPS:          blockMaxRPS,
-		MaxInflight:     blockMaxInflight,
-		TipPollMs:       blockTipPollIntervalMs,
-		TipSafetyMargin: uint64(blockTipSafetyMargin),
-
-		// Mode thresholds
-		NearTipThreshold:        blockNearTipThreshold,
-		CatchupThreshold:        blockCatchupThreshold,
-		CatchupTipGateThreshold: blockCatchupTipGateThreshold,
-
-		// Near-tip tuning
-		NearTipPollMs:    blockNearTipPollMs,
-		NearTipLookahead: blockNearTipLookahead,
-
+		MaxRPS:                     blockMaxRPS,
+		MaxInflight:                blockMaxInflight,
+		TipPollMs:                  blockTipPollIntervalMs,
+		TipSafetyMargin:            uint64(blockTipSafetyMargin),
+		NearTipThreshold:           blockNearTipThreshold,
+		CatchupThreshold:           blockCatchupThreshold,
+		CatchupTipGateThreshold:    blockCatchupTipGateThreshold,
+		NearTipPollMs:              blockNearTipPollMs,
+		NearTipLookahead:           blockNearTipLookahead,
 		RepairCatchupMaxGapSlots:   uint64(repairCatchupMaxGapSlots),
 		RepairMaxRequestsPerSecond: repairMaxRequestsPerSecond,
 		DisableRPCBlockFetch:       !blockRPCFallback,
 		TurbinePrewarm:             turbinePrewarm,
+		PrewarmBlocks:              validatorPrewarmBlocks,
 		ShredSpoolDir:              catchupShredSpoolDir(),
+		GossipClient:               sharedGossip,
 	}
-	// Alpenglow-only: the observer engine is the only consensus engine.
-	consensusEngine, err := consensusengine.NewEngine(consensusengine.Config{
-		AlpenglowObserverBindAddr: alpenglowObserverBindAddr,
-		AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
-		AlpenglowBLSDST:           alpenglowBLSDST,
-	})
-	if err != nil {
-		klog.Fatalf("unable to create consensus engine: %v", err)
-	}
-	if err := consensusEngine.Start(ctx); err != nil {
-		klog.Fatalf("unable to start consensus engine %q: %v", consensusEngine.Name(), err)
-	}
-	defer func() {
-		if err := consensusEngine.Close(); err != nil {
-			mlog.Log.Warnf("consensus engine close failed: %v", err)
+	if consensusMode == "validator" {
+		identity := solana.PrivateKey(validatorIdentity).PublicKey()
+		blockFetchOpts.LocalBlocks = localBlocks
+		blockFetchOpts.LocalLeaderForSlot = func(slot uint64) bool {
+			leader, ok := global.LeaderForSlot(slot)
+			return ok && leader == identity
 		}
-	}()
+	}
 
 	consensusOpts := &replay.ConsensusOpts{
-		Engine: consensusEngine,
+		Alpenglow: alpenglowMode,
+		Engine:    consensusEngine,
 	}
 
 	var slotCtxSetter replay.SlotCtxSetter
@@ -2129,7 +2372,10 @@ postBootstrap:
 		}()
 	}
 
-	turbineAlpenglowAddr := alpenglowAddrForGossip(alpenglowObserverBindAddr)
+	turbineAlpenglowAddr := ""
+	if alpenglowMode {
+		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
+	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
 
 	if result.Error != nil {
@@ -2840,6 +3086,20 @@ func queryCurrentSlot(ctx context.Context, rpcEndpoints []string) (uint64, error
 	return slot, nil
 }
 
+// queryWallClockSeedSlot uses confirmed commitment for leader timing; finalized
+// commitment intentionally lags too far behind a live production window.
+func queryWallClockSeedSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
+	if len(rpcEndpoints) == 0 {
+		return 0, fmt.Errorf("no RPC endpoints configured")
+	}
+	client := solrpc.New(rpcEndpoints[0])
+	slot, err := client.GetSlot(ctx, solrpc.CommitmentConfirmed)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get confirmed slot from RPC: %w", err)
+	}
+	return slot, nil
+}
+
 // queryLatestSnapshotSlot queries the latest available snapshot slot from the network.
 func queryLatestSnapshotSlot(ctx context.Context, rpcEndpoints []string) (uint64, error) {
 	if len(rpcEndpoints) == 0 {
@@ -3248,6 +3508,9 @@ func runReplayWithRecovery(
 	}()
 
 	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	if consensusOpts == nil || !consensusOpts.Alpenglow {
+		return result
+	}
 
 	// Fork-aware dump-then-repair: on a confirmed divergence (bankhash vs confirmed
 	// leaf) or an Alpenglow finality mismatch (executed block-id vs certificate), the

@@ -145,6 +145,7 @@ type CertificateVerifier struct {
 	sets          map[uint64]ValidatorSet
 	latestEpoch   uint64
 	maxValidators int
+	shredVersion  uint16
 }
 
 func NewCertificateVerifier() *CertificateVerifier {
@@ -152,6 +153,20 @@ func NewCertificateVerifier() *CertificateVerifier {
 		sets:          make(map[uint64]ValidatorSet),
 		maxValidators: MaximumValidators,
 	}
+}
+
+// SetShredVersion configures the cluster version included in every BLS
+// vote-signing payload.
+func (v *CertificateVerifier) SetShredVersion(version uint16) {
+	v.mu.Lock()
+	v.shredVersion = version
+	v.mu.Unlock()
+}
+
+func (v *CertificateVerifier) ShredVersion() uint16 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.shredVersion
 }
 
 func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAccounts map[solana.PublicKey]*epochstakes.VoteAccount, totalStake uint64) (ValidatorSet, error) {
@@ -281,24 +296,88 @@ func (v *CertificateVerifier) VerifyCertificate(cert Certificate) (Certificate, 
 	return v.VerifyCertificateForEpoch(epoch, cert)
 }
 
+// VerifyRewardCertificateForEpoch verifies a reward certificate's aggregate
+// signature and signer bitmap without imposing a consensus stake threshold.
+func (v *CertificateVerifier) VerifyRewardCertificateForEpoch(epoch uint64, cert Certificate) error {
+	v.mu.RLock()
+	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
+	v.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("alpenglow verifier: no validator set for epoch %d", epoch)
+	}
+	if err := validateChainCertificateForVerifier(cert); err != nil {
+		return err
+	}
+	if len(cert.Signature) != BLSSignatureSize {
+		return fmt.Errorf("alpenglow verifier: %s reward certificate for slot %d has invalid signature length %d", cert.Type, cert.Slot, len(cert.Signature))
+	}
+	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	if err != nil {
+		return err
+	}
+	return verifyRewardCertificateSignatureWithSet(set, cert, bitmap, shredVersion)
+}
+
+func verifyRewardCertificateSignatureWithSet(set ValidatorSet, cert Certificate, bitmap SignerBitmap, shredVersion uint16) error {
+	primaryVote, fallbackVote, hasFallback, err := certificateVotePayloads(cert)
+	if err != nil {
+		return err
+	}
+	primaryPayload, err := EncodeVotePayloadToSign(primaryVote, shredVersion)
+	if err != nil {
+		return err
+	}
+	signature, err := decodeBLSSignature(cert.Signature)
+	if err != nil {
+		return err
+	}
+	terms := make([]blsVerifyTerm, 0, 2)
+	if term, ok, err := aggregateVerificationTerm(set, bitmap.Base, primaryPayload); err != nil {
+		return err
+	} else if ok {
+		terms = append(terms, term)
+	}
+	if bitmap.Encoding == SignerBitmapBase3 {
+		if !hasFallback {
+			return fmt.Errorf("alpenglow verifier: %s reward certificate for slot %d uses fallback signers without a fallback vote", cert.Type, cert.Slot)
+		}
+		if err := bitmap.CheckDisjoint(); err != nil {
+			return err
+		}
+		payload, err := EncodeVotePayloadToSign(fallbackVote, shredVersion)
+		if err != nil {
+			return err
+		}
+		if term, ok, err := aggregateVerificationTerm(set, bitmap.Fallback, payload); err != nil {
+			return err
+		} else if ok {
+			terms = append(terms, term)
+		}
+	}
+	return verifyAggregateSignature(cert, terms, signature)
+}
+
 func (v *CertificateVerifier) VerifyCertificateStakeForEpoch(epoch uint64, cert Certificate) (Certificate, CertificateVerifyResult, error) {
 	v.mu.RLock()
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return cert, CertificateVerifyResult{}, fmt.Errorf("alpenglow verifier: no validator set for epoch %d", epoch)
 	}
-	return verifyCertificateWithSet(set, cert, false)
+	return verifyCertificateWithSetAndShredVersion(set, cert, false, shredVersion)
 }
 
 func (v *CertificateVerifier) VerifyCertificateForEpoch(epoch uint64, cert Certificate) (Certificate, CertificateVerifyResult, error) {
 	v.mu.RLock()
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return cert, CertificateVerifyResult{}, fmt.Errorf("alpenglow verifier: no validator set for epoch %d", epoch)
 	}
-	return verifyCertificateWithSet(set, cert, true)
+	return verifyCertificateWithSetAndShredVersion(set, cert, true, shredVersion)
 }
 
 func (v *CertificateVerifier) VerifyVoteMessage(msg VoteMessage) (VoteVerifyResult, error) {
@@ -312,11 +391,12 @@ func (v *CertificateVerifier) VerifyVoteMessage(msg VoteMessage) (VoteVerifyResu
 	v.mu.RLock()
 	epoch := v.latestEpoch
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: no validator set configured")
 	}
-	return verifyVoteMessageWithSet(set, msg)
+	return verifyVoteMessageWithSetAndShredVersion(set, msg, shredVersion)
 }
 
 func (v *CertificateVerifier) VerifyVoteMessageForEpoch(epoch uint64, msg VoteMessage) (VoteVerifyResult, error) {
@@ -329,11 +409,12 @@ func (v *CertificateVerifier) VerifyVoteMessageForEpoch(epoch uint64, msg VoteMe
 
 	v.mu.RLock()
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: no validator set for epoch %d", epoch)
 	}
-	return verifyVoteMessageWithSet(set, msg)
+	return verifyVoteMessageWithSetAndShredVersion(set, msg, shredVersion)
 }
 
 func (v *CertificateVerifier) DiagnoseCertificate(cert Certificate, maxSamples int) CertificateDiagnostics {
@@ -344,11 +425,12 @@ func (v *CertificateVerifier) DiagnoseCertificate(cert Certificate, maxSamples i
 	v.mu.RLock()
 	epoch := v.latestEpoch
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return CertificateDiagnostics{Epoch: epoch, BitmapError: "no validator set configured"}
 	}
-	return diagnoseCertificateWithSet(set, cert, maxSamples)
+	return diagnoseCertificateWithSet(set, cert, maxSamples, shredVersion)
 }
 
 func (v *CertificateVerifier) DiagnoseCertificateForEpoch(epoch uint64, cert Certificate, maxSamples int) CertificateDiagnostics {
@@ -358,11 +440,12 @@ func (v *CertificateVerifier) DiagnoseCertificateForEpoch(epoch uint64, cert Cer
 
 	v.mu.RLock()
 	set, ok := v.sets[epoch]
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		return CertificateDiagnostics{Epoch: epoch, BitmapError: fmt.Sprintf("no validator set for epoch %d", epoch)}
 	}
-	return diagnoseCertificateWithSet(set, cert, maxSamples)
+	return diagnoseCertificateWithSet(set, cert, maxSamples, shredVersion)
 }
 
 func (v *CertificateVerifier) DiagnoseVoteMessage(msg VoteMessage, maxMatches int) VoteSignatureDiagnostics {
@@ -396,6 +479,7 @@ func (v *CertificateVerifier) diagnoseVoteMessageForEpoch(focusEpoch *uint64, ms
 	for _, epochSet := range v.sets {
 		sets = append(sets, epochSet)
 	}
+	shredVersion := v.shredVersion
 	v.mu.RUnlock()
 	if !ok {
 		diag.Epoch = focusedEpoch
@@ -415,7 +499,7 @@ func (v *CertificateVerifier) diagnoseVoteMessageForEpoch(focusEpoch *uint64, ms
 		diag.AdvertisedRankErr = fmt.Sprintf("rank %d exceeds validator set len %d", msg.Rank, len(set.Validators))
 	}
 
-	payload, err := EncodeVote(msg.Vote)
+	payload, err := EncodeVotePayloadToSign(msg.Vote, shredVersion)
 	if err != nil {
 		diag.DiagnosticError = err.Error()
 		return diag
@@ -485,10 +569,14 @@ func diagnoseVoteMessageWithSet(set ValidatorSet, msg VoteMessage, payload []byt
 }
 
 func verifyCertificateStakeWithSet(set ValidatorSet, cert Certificate) (Certificate, CertificateVerifyResult, error) {
-	return verifyCertificateWithSet(set, cert, false)
+	return verifyCertificateWithSetAndShredVersion(set, cert, false, 0)
 }
 
 func verifyCertificateWithSet(set ValidatorSet, cert Certificate, verifySignature bool) (Certificate, CertificateVerifyResult, error) {
+	return verifyCertificateWithSetAndShredVersion(set, cert, verifySignature, 0)
+}
+
+func verifyCertificateWithSetAndShredVersion(set ValidatorSet, cert Certificate, verifySignature bool, shredVersion uint16) (Certificate, CertificateVerifyResult, error) {
 	if err := validateChainCertificateForVerifier(cert); err != nil {
 		return cert, CertificateVerifyResult{}, err
 	}
@@ -526,7 +614,7 @@ func verifyCertificateWithSet(set ValidatorSet, cert Certificate, verifySignatur
 		}, err
 	}
 	if verifySignature {
-		if err := verifyCertificateSignatureWithSet(set, cert, bitmap); err != nil {
+		if err := verifyCertificateSignatureWithSet(set, cert, bitmap, shredVersion); err != nil {
 			return cert, CertificateVerifyResult{
 				Epoch:         set.Epoch,
 				SignerCount:   countBool(includedRanks),
@@ -549,6 +637,10 @@ func verifyCertificateWithSet(set ValidatorSet, cert Certificate, verifySignatur
 }
 
 func verifyVoteMessageWithSet(set ValidatorSet, msg VoteMessage) (VoteVerifyResult, error) {
+	return verifyVoteMessageWithSetAndShredVersion(set, msg, 0)
+}
+
+func verifyVoteMessageWithSetAndShredVersion(set ValidatorSet, msg VoteMessage, shredVersion uint16) (VoteVerifyResult, error) {
 	if int(msg.Rank) >= len(set.Validators) {
 		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: %s vote for slot %d rank %d exceeds validator set len %d", msg.Vote.Type, msg.Vote.Slot, msg.Rank, len(set.Validators))
 	}
@@ -556,7 +648,7 @@ func verifyVoteMessageWithSet(set ValidatorSet, msg VoteMessage) (VoteVerifyResu
 	if validator.Stake == 0 {
 		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: %s vote for slot %d rank %d has zero stake", msg.Vote.Type, msg.Vote.Slot, msg.Rank)
 	}
-	payload, err := EncodeVote(msg.Vote)
+	payload, err := EncodeVotePayloadToSign(msg.Vote, shredVersion)
 	if err != nil {
 		return VoteVerifyResult{}, err
 	}
@@ -587,12 +679,12 @@ type blsVerifyTerm struct {
 	message bls12381.G2Affine
 }
 
-func verifyCertificateSignatureWithSet(set ValidatorSet, cert Certificate, bitmap SignerBitmap) error {
+func verifyCertificateSignatureWithSet(set ValidatorSet, cert Certificate, bitmap SignerBitmap, shredVersion uint16) error {
 	primaryVote, fallbackVote, hasFallback, err := certificateVotePayloads(cert)
 	if err != nil {
 		return err
 	}
-	primaryPayload, err := EncodeVote(primaryVote)
+	primaryPayload, err := EncodeVotePayloadToSign(primaryVote, shredVersion)
 	if err != nil {
 		return err
 	}
@@ -619,7 +711,7 @@ func verifyCertificateSignatureWithSet(set ValidatorSet, cert Certificate, bitma
 		if err := bitmap.CheckDisjoint(); err != nil {
 			return err
 		}
-		fallbackPayload, err := EncodeVote(fallbackVote)
+		fallbackPayload, err := EncodeVotePayloadToSign(fallbackVote, shredVersion)
 		if err != nil {
 			return err
 		}
@@ -758,7 +850,7 @@ func verifyAggregateSignature(cert Certificate, terms []blsVerifyTerm, signature
 	return nil
 }
 
-func diagnoseCertificateWithSet(set ValidatorSet, cert Certificate, maxSamples int) CertificateDiagnostics {
+func diagnoseCertificateWithSet(set ValidatorSet, cert Certificate, maxSamples int, shredVersion uint16) CertificateDiagnostics {
 	diag := CertificateDiagnostics{
 		Epoch:          set.Epoch,
 		ValidatorCount: len(set.Validators),
@@ -778,11 +870,11 @@ func diagnoseCertificateWithSet(set ValidatorSet, cert Certificate, maxSamples i
 		diag.PrimaryVote = primaryVote
 		diag.FallbackVote = fallbackVote
 		diag.HasFallbackVote = hasFallback
-		if payload, err := EncodeVote(primaryVote); err == nil {
+		if payload, err := EncodeVotePayloadToSign(primaryVote, shredVersion); err == nil {
 			diag.PrimaryPayloadLen = len(payload)
 		}
 		if hasFallback {
-			if payload, err := EncodeVote(fallbackVote); err == nil {
+			if payload, err := EncodeVotePayloadToSign(fallbackVote, shredVersion); err == nil {
 				diag.FallbackPayloadLen = len(payload)
 			}
 		}

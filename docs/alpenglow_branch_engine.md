@@ -1,14 +1,12 @@
 # Alpenglow Branch Engine
 
-This build targets Alpenglow clusters exclusively. It replaces the old
-TowerBFT confirmed-block fork-choice heuristic (which buffered candidate
-blocks and executed only after vote tallies confirmed a path) with an
-**execute-on-receipt** engine where certificates gate *promotion to durable
-state* rather than execution.
+This document describes the engine selected by `network.cluster = "alpenglow"`.
+It uses an **execute-on-receipt** model where certificates gate *promotion to
+durable state* rather than execution.
 
-> The historical TowerBFT heuristic — vote parsing, confirmed-leaf resolution,
-> buffered execution — lives on the `dev` branch. It has been removed here
-> along with `pkg/forkchoice`.
+> `mainnet-beta`, `testnet`, and `devnet` do not enter this path. They retain
+> Mithril's established verifying-only RPC replay and per-slot persistence;
+> validator mode is rejected for those clusters.
 
 ## Model in one paragraph
 

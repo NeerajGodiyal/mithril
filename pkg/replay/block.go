@@ -32,6 +32,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
@@ -81,6 +82,12 @@ type BlockFetchOpts struct {
 	// ShredSpoolDir: on-disk verified-shred spool shared by prewarm and the
 	// block source (empty = disabled).
 	ShredSpoolDir string
+	// LocalBlocks carries fully frozen blocks produced by this validator. They
+	// enter the normal ordered block source and are re-executed by ProcessBlock.
+	LocalBlocks        <-chan *b.Block
+	LocalLeaderForSlot func(slot uint64) bool
+	GossipClient       *gossip.Client
+	PrewarmBlocks      []*b.Block
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -372,6 +379,25 @@ func isNativeProgram(pubkey solana.PublicKey) bool {
 	}
 }
 
+// cacheFeesSysvar loads the legacy Fees sysvar when the cluster still has it.
+// Its absence is expected after DisableFeesSysvar activation.
+func cacheFeesSysvar(acctsDb *accountsdb.AccountsDb) {
+	if acctsDb == nil {
+		return
+	}
+	acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
+	if errors.Is(err, accountsdb.ErrNoAccount) {
+		return
+	}
+	if err != nil {
+		panic("unable to get fees sysvar when caching sysvars")
+	}
+	var fees sealevel.SysvarFees
+	fees.MustUnmarshalWithDecoder(bin.NewBinDecoder(acct.Data))
+	sealevel.SysvarCache.Fees.Sysvar = &fees
+	sealevel.SysvarCache.Fees.Acct = acct
+}
+
 func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochScheduleAddr)
@@ -397,20 +423,7 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 		sealevel.SysvarCache.Rent.Acct = acct
 	}
 
-	{
-		acct, err := acctsDb.GetAccount(0, sealevel.SysvarFeesAddr)
-		if errors.Is(err, accountsdb.ErrNoAccount) {
-			// Alpenglow removes the Fees sysvar; absence is expected there.
-		} else if err != nil {
-			panic("unable to get fees sysvar when caching sysvars")
-		} else {
-			var fees sealevel.SysvarFees
-			decoder := bin.NewBinDecoder(acct.Data)
-			fees.MustUnmarshalWithDecoder(decoder)
-			sealevel.SysvarCache.Fees.Sysvar = &fees
-			sealevel.SysvarCache.Fees.Acct = acct
-		}
-	}
+	cacheFeesSysvar(acctsDb)
 
 	{
 		acct, err := acctsDb.GetAccount(0, sealevel.SysvarEpochRewardsAddr)
@@ -1234,6 +1247,18 @@ func ReplayBlocks(
 	onCancelWriteState OnCancelWriteState, // callback to write state immediately on cancellation (can be nil)
 ) *ReplayResult {
 	result := &ReplayResult{}
+	alpenglowMode := consensusOpts != nil && consensusOpts.Alpenglow
+	replayFrontier := uint64(0)
+	if startSlot > 0 {
+		replayFrontier = startSlot - 1
+	}
+	global.SetReplayFrontier(replayFrontier)
+	ResetChainTip()
+	if alpenglowMode {
+		// These maps are process-local and can otherwise retain a discarded fork
+		// across the node's rooted-checkpoint recovery loop.
+		global.ResetAlpenglowChainMetadata()
+	}
 
 	// Generate unique run ID for log correlation (only if not already set by startup)
 	if CurrentRunID == "" {
@@ -1310,10 +1335,10 @@ func ReplayBlocks(
 		}
 	}
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
-	// Alpenglow-only node: Alpenglow clock/feature/finality semantics apply
-	// unconditionally (this binary targets Alpenglow clusters exclusively).
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, replayCtx, startSlot, isFirstSlotInEpoch)
-	applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
+	if alpenglowMode {
+		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
+	}
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	// Load epoch stakes - persisted stakes on resume, state file on fresh start
@@ -1388,7 +1413,7 @@ func ReplayBlocks(
 	}
 	// Alpenglow consensus engine (certificate-driven finality; nil-safe).
 	var consensusEngine consensusengine.Engine
-	if consensusOpts != nil {
+	if alpenglowMode && consensusOpts != nil {
 		consensusEngine = consensusOpts.Engine
 	}
 
@@ -1446,6 +1471,9 @@ func ReplayBlocks(
 	// executed match after restart — never under delegated trust.
 	alpenglowForced := make(map[uint64]solana.Hash)
 	for _, ev := range mithrilState.AlpenglowEvidence {
+		if !alpenglowMode {
+			break
+		}
 		if ev.Slot <= mithrilState.LastRootedSlot {
 			continue
 		}
@@ -1552,6 +1580,8 @@ func ReplayBlocks(
 		if pruner, ok := consensusEngine.(consensusengine.AlpenglowPruneSink); ok {
 			pruner.PruneAlpenglowBefore(promotedThrough)
 		}
+		global.PruneAlpenglowBlockIDsBefore(promotedThrough)
+		global.PruneAlpenglowChainedRootsBefore(promotedThrough)
 		// Disputed slots that promoted passed the exact-match requirement —
 		// the evidence is satisfied.
 		for slot := range alpenglowForced {
@@ -1783,6 +1813,10 @@ func ReplayBlocks(
 		opts.RepairMaxRequestsPerSecond = blockFetchOpts.RepairMaxRequestsPerSecond
 		opts.DisableRPCBlockFetch = blockFetchOpts.DisableRPCBlockFetch
 		opts.ShredSpoolDir = blockFetchOpts.ShredSpoolDir
+		opts.LocalLeaderForSlot = blockFetchOpts.LocalLeaderForSlot
+		opts.LocalBlocks = blockFetchOpts.LocalBlocks
+		opts.GossipClient = blockFetchOpts.GossipClient
+		opts.PrewarmBlocks = append(opts.PrewarmBlocks, blockFetchOpts.PrewarmBlocks...)
 
 		// Mode thresholds
 		opts.NearTipThreshold = blockFetchOpts.NearTipThreshold
@@ -1798,7 +1832,7 @@ func ReplayBlocks(
 	// prewarm receiver, freeing the turbine bind port for the source.
 	if blockFetchOpts != nil && blockFetchOpts.TurbinePrewarm != nil {
 		prewarmBlocks, prewarmDropped := blockFetchOpts.TurbinePrewarm.Handover()
-		opts.PrewarmBlocks = prewarmBlocks
+		opts.PrewarmBlocks = append(opts.PrewarmBlocks, prewarmBlocks...)
 		if len(prewarmBlocks) > 0 || prewarmDropped > 0 {
 			mlog.Log.Infof("turbine prewarm handover: %d blocks collected during boot (%d dropped over capacity)", len(prewarmBlocks), prewarmDropped)
 		}
@@ -1958,6 +1992,8 @@ func ReplayBlocks(
 							global.SetTransactionCount(*rs.TransactionCount) // drop the discarded fork's txs
 						}
 						blockStream.SetLastExecutedSlot(sw.Slot - 1)
+						global.SetReplayFrontier(sw.Slot - 1)
+						ResetChainTip()
 						windowSwitchInRAM++
 						mlog.Log.Warnf("%v — unwound in RAM to slot %d; re-executing the certified chain (in-RAM switches this window: %d)", sw, sw.Slot-1, windowSwitchInRAM)
 						continue
@@ -1977,7 +2013,7 @@ func ReplayBlocks(
 			// cert-finality; fall back to the RPC-attested finalized slot
 			// (delegated) since an unstaked observer gets no certs. Poll
 			// throttled (the RPC round-trip is slow).
-			{
+			if alpenglowMode {
 				rooted, ok := uint64(0), false
 				if certRooted, certOk := alpenglowRootedSlot(consensusEngine); certOk {
 					rooted, ok = certRooted, true
@@ -2039,6 +2075,7 @@ func ReplayBlocks(
 			// A resolved skip still advances replay progress for near-tip mode and
 			// consensus-managed Lightbringer delivery.
 			blockStream.SetLastExecutedSlot(block.Slot)
+			global.SetReplayFrontier(block.Slot)
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -2092,7 +2129,9 @@ func ReplayBlocks(
 
 			var newlyActivatedFeatures, parentNewlyActivatedFeatures []*accounts.Account
 			replayCtx.CurrentFeatures, newlyActivatedFeatures, parentNewlyActivatedFeatures = scanAndEnableFeatures(acctsDb, replayCtx, currentSlot, true)
-			applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, currentSlot)
+			if alpenglowMode {
+				applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, currentSlot)
+			}
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch, rpcc, dbgOpts)
 			currentEpoch = block.Epoch
@@ -2179,7 +2218,7 @@ func ReplayBlocks(
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
-		alpenglowClock := true // Alpenglow-only node: footer-clock semantics always on
+		alpenglowClock := alpenglowMode
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, alpenglowClock)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
@@ -2187,6 +2226,17 @@ func ReplayBlocks(
 			// Clear any pending stake pubkeys from this failed block
 			global.ClearPendingStakePubkeys()
 			break
+		}
+		if unrootedTailState != nil {
+			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features, unrootedTailState)
+		} else {
+			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features)
+		}
+		if alpenglowMode && block.HasAlpenglowBlockID {
+			global.SetAlpenglowBlockID(block.Slot, solana.Hash(block.AlpenglowBlockID))
+		}
+		if alpenglowMode && block.HasAlpenglowLastChainedRoot {
+			global.SetAlpenglowChainedMerkleRoot(block.Slot, solana.Hash(block.AlpenglowLastChainedRoot))
 		}
 
 		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
@@ -2381,6 +2431,7 @@ func ReplayBlocks(
 
 		// Track last executed slot for accurate tip distance calculation and mode switching
 		blockStream.SetLastExecutedSlot(block.Slot)
+		global.SetReplayFrontier(block.Slot)
 
 		if !justCrossedEpochBoundary {
 			statsCounter++
@@ -3098,7 +3149,7 @@ func ProcessBlock(
 			panic(fmt.Sprintf("unable to clone tx %s for unresolved block copy in slot %d: %v", block.Transactions[i].Signatures[0], block.Slot, cloneErr))
 		}
 		unresolvedBlock.Transactions[i] = clonedTx
-		if unresolvedBlock.TxMetas != nil && !block.FromLiveStream {
+		if !block.FromLiveStream && i < len(block.TxMetas) && block.TxMetas[i] != nil {
 			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
 			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
 		}
@@ -3167,16 +3218,30 @@ func ProcessBlock(
 		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
 			return nil, fmt.Errorf("apply alpenglow footer clock at slot %d: %w", block.Slot, err)
 		}
+		if err := updateAlpenglowNanosecondClockAccount(slotCtx, block); err != nil {
+			return nil, err
+		}
+		if err := ApplyAlpenglowVoteRewards(slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert, block.AlpenglowShredVersion); err != nil {
+			return nil, err
+		}
 	}
 
 	start = time.Now()
 	setReplayStage("compile_accounts")
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
+	if err := ensureParentAccountsForModified(slotCtx); err != nil {
+		return nil, err
+	}
 
 	start = time.Now()
 	setReplayStage("bankhash")
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
+	if alpenglowClock {
+		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
+			return nil, err
+		}
+	}
 
 	// Bankhash consensus enforcement is handled in the replay loop (not here)
 	// because forkchoice is fed after ProcessBlock returns — checking here would

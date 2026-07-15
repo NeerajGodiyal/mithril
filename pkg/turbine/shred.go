@@ -69,6 +69,18 @@ const (
 	ShredTypeCode
 )
 
+// TurbineSeedTypeByte returns the legacy shred-type byte hashed into turbine RNG seeds.
+func (t ShredType) TurbineSeedTypeByte() byte {
+	switch t {
+	case ShredTypeData:
+		return legacyDataVariant
+	case ShredTypeCode:
+		return legacyCodeVariant
+	default:
+		return byte(t)
+	}
+}
+
 type Shred struct {
 	Signature   solana.Signature
 	Variant     byte
@@ -273,6 +285,42 @@ func (s *Shred) erasureShard() ([]byte, error) {
 		return nil, fmt.Errorf("%w: erasure slice %d:%d payload %d", ErrShortShred, start, end, len(s.Payload))
 	}
 	return s.Payload[start:end], nil
+}
+
+// EmbeddedChainedMerkleRoot returns the previous FEC set's merkle root embedded
+// in a chained merkle shred.
+func (s *Shred) EmbeddedChainedMerkleRoot() (solana.Hash, error) {
+	if s == nil || !isMerkleVariant(s.Variant) {
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+	proofSize, chained, resigned, ok := merkleVariantInfo(s.Variant)
+	if !ok || !chained {
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+
+	var headerSize, payloadSize int
+	switch s.Type {
+	case ShredTypeData:
+		headerSize = dataHeaderSize
+		payloadSize = dataPayloadSize
+	case ShredTypeCode:
+		headerSize = codingHeaderSize
+		payloadSize = codingPayloadSize
+	default:
+		return solana.Hash{}, ErrUnsupportedShred
+	}
+
+	capacity, err := merkleCapacity(payloadSize, headerSize, proofSize, chained, resigned)
+	if err != nil {
+		return solana.Hash{}, err
+	}
+	rootOffset := headerSize + capacity
+	if rootOffset+merkleRootSize > len(s.Payload) {
+		return solana.Hash{}, fmt.Errorf("%w: chained merkle root slice %d:%d payload %d", ErrShortShred, rootOffset, rootOffset+merkleRootSize, len(s.Payload))
+	}
+	var root solana.Hash
+	copy(root[:], s.Payload[rootOffset:rootOffset+merkleRootSize])
+	return root, nil
 }
 
 func (s *Shred) MerkleRoot() (solana.Hash, error) {

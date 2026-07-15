@@ -10,8 +10,12 @@ import (
 
 // signTestVote produces one rank's 192-byte uncompressed BLS signature.
 func signTestVote(t *testing.T, vote Vote, key *big.Int) []byte {
+	return signTestVoteWithShredVersion(t, vote, key, 0)
+}
+
+func signTestVoteWithShredVersion(t *testing.T, vote Vote, key *big.Int, shredVersion uint16) []byte {
 	t.Helper()
-	payload, err := EncodeVote(vote)
+	payload, err := EncodeVotePayloadToSign(vote, shredVersion)
 	if err != nil {
 		t.Fatalf("encode vote: %v", err)
 	}

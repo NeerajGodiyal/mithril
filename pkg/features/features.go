@@ -23,6 +23,18 @@ func NewFeaturesDefault() *Features {
 	return &newMap
 }
 
+// Clone returns an independent copy of the feature activation map.
+func (f *Features) Clone() *Features {
+	clone := NewFeaturesDefault()
+	if f == nil {
+		return clone
+	}
+	for gate, info := range *f {
+		(*clone)[gate] = info
+	}
+	return clone
+}
+
 func (f *Features) EnableFeature(gate FeatureGate, activationSlot uint64) {
 	(*f)[gate] = FeatureActivationInfo{Enabled: true, ActivationSlot: activationSlot}
 }

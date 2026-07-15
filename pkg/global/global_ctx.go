@@ -59,6 +59,7 @@ func SetBlockHeight(blockHeight uint64) {
 
 func SetSlot(slot uint64) {
 	instance.SetSlot(slot)
+	notifyWallClockSlot(slot)
 }
 
 func SetEpoch(epoch uint64) {

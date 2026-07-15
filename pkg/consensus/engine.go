@@ -116,16 +116,19 @@ type Config struct {
 	AlpenglowObserverBindAddr string
 	AlpenglowMaxMessageBytes  int64
 	AlpenglowBLSDST           string // BLS hash-to-curve DST; empty keeps the default (must match cluster's solana-bls version)
+	AlpenglowShredVersion     uint16 // included in each Alpenglow BLS vote-signing payload
 }
 
 // NewEngine constructs the Alpenglow observer engine — the only consensus
 // engine in this Alpenglow-only build.
 func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 	alpenglow.SetHashToPointDST(strings.TrimSpace(cfg.AlpenglowBLSDST))
+	verifier := alpenglow.NewCertificateVerifier()
+	verifier.SetShredVersion(cfg.AlpenglowShredVersion)
 	e := &AlpenglowObserverEngine{
 		observer:                alpenglow.NewObserver(),
 		chain:                   newAlpenglowObserverChainTracker(),
-		verifier:                alpenglow.NewCertificateVerifier(),
+		verifier:                verifier,
 		receiverBindAddr:        strings.TrimSpace(cfg.AlpenglowObserverBindAddr),
 		receiverMaxMessageBytes: cfg.AlpenglowMaxMessageBytes,
 		recentBlockIDs:          make(map[uint64]solana.Hash),
@@ -174,6 +177,17 @@ type AlpenglowObserverEngine struct {
 	voteVerifyNoSet         uint64
 	lastVoteVerifyLog       time.Time
 	lastVoteVerifyErr       string
+	votorMessageHookMu      sync.RWMutex
+	votorMessageHook        func(alpenglow.Message)
+}
+
+// SetVotorMessageHook registers an additional consumer for inbound Votor
+// messages. Block production uses it to build footer reward certificates while
+// the observer retains authority over consensus certificate verification.
+func (e *AlpenglowObserverEngine) SetVotorMessageHook(fn func(alpenglow.Message)) {
+	e.votorMessageHookMu.Lock()
+	e.votorMessageHook = fn
+	e.votorMessageHookMu.Unlock()
 }
 
 func (e *AlpenglowObserverEngine) Name() string { return "alpenglow-observer" }
@@ -296,7 +310,18 @@ func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDS
 }
 
 func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
+	e.votorMessageHookMu.RLock()
+	hook := e.votorMessageHook
+	e.votorMessageHookMu.RUnlock()
 	if msg.Vote != nil {
+		// Reward certificates embed partial vote aggregates, so the producer hook
+		// must never see unauthenticated signatures. The consensus cert pool keeps
+		// its own batched verification path below.
+		if hook != nil && (msg.Vote.Vote.Type == alpenglow.VoteTypeSkip || msg.Vote.Vote.Type == alpenglow.VoteTypeNotarize) {
+			if _, err := e.verifyVoteMessage(*msg.Vote); err == nil {
+				hook(msg)
+			}
+		}
 		// The cert pool owns vote verification now (lazy, batched); the old
 		// per-window sampling verifier is redundant with it.
 		e.certPool.AddVote(*msg.Vote)

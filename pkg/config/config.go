@@ -13,14 +13,17 @@ const LightbringerQuietDefault = true
 func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
 	// network.cluster and block.source default in the run command itself
-	// (alpenglow / turbine) — NOT here, because the lightbringer auto-switch
-	// needs to distinguish "operator chose a source" from "defaulted".
+	// (Alpenglow/turbine, classic/RPC) — NOT here, because the lightbringer
+	// auto-switch needs to distinguish "operator chose a source" from "defaulted".
 	v.SetDefault("consensus.mode", "verifying")
 	v.SetDefault("consensus.alpenglow_observer_bind_addr", "")
 	v.SetDefault("consensus.alpenglow_bls_dst", "")
 	v.SetDefault("validator.identity_keypair", "")
 	v.SetDefault("validator.vote_account_keypair", "")
 	v.SetDefault("validator.authorized_withdrawer_keypair", "")
+	v.SetDefault("validator.tpu_quic_bind_addr", "")
+	v.SetDefault("validator.advertised_ip", "")
+	v.SetDefault("validator.tpu_sigverify_workers", 0)
 }
 
 // LedgerConfig holds ledger-related configuration (matches Firedancer [ledger] section)
@@ -216,17 +219,20 @@ type LogConfig struct {
 
 // ConsensusConfig holds Alpenglow consensus configuration.
 type ConsensusConfig struct {
-	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "verifying" (default, non-voting) or "validator" (enforces keypair/socket requirements; voting engine not yet active)
+	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "verifying" or Alpenglow-only "validator" (TPU/block production active; voting not yet active)
 	AlpenglowObserverBindAddr string `toml:"alpenglow_observer_bind_addr" mapstructure:"alpenglow_observer_bind_addr"` // Optional passive Alpenglow Votor QUIC listener
 	AlpenglowMaxMessageBytes  int64  `toml:"alpenglow_max_message_bytes" mapstructure:"alpenglow_max_message_bytes"`   // Max Votor QUIC stream payload size
 	AlpenglowBLSDST           string `toml:"alpenglow_bls_dst" mapstructure:"alpenglow_bls_dst"`                       // BLS hash-to-curve DST; empty = default (must match cluster's solana-bls version)
 }
 
-// ValidatorConfig holds optional validator identity material for gossip and future voting modes.
+// ValidatorConfig holds Alpenglow TPU/block-production identity and listener settings.
 type ValidatorConfig struct {
 	IdentityKeypair             string `toml:"identity_keypair" mapstructure:"identity_keypair"`                           // Validator identity keypair used for native gossip
-	VoteAccountKeypair          string `toml:"vote_account_keypair" mapstructure:"vote_account_keypair"`                   // Vote account keypair path for diagnostics/future voting
+	VoteAccountKeypair          string `toml:"vote_account_keypair" mapstructure:"vote_account_keypair"`                   // Vote account keypair path reserved for voting activation
 	AuthorizedWithdrawerKeypair string `toml:"authorized_withdrawer_keypair" mapstructure:"authorized_withdrawer_keypair"` // Authorized withdrawer keypair path for diagnostics
+	TPUQUICBindAddr             string `toml:"tpu_quic_bind_addr" mapstructure:"tpu_quic_bind_addr"`
+	AdvertisedIP                string `toml:"advertised_ip" mapstructure:"advertised_ip"`
+	TPUSigverifyWorkers         int    `toml:"tpu_sigverify_workers" mapstructure:"tpu_sigverify_workers"`
 }
 
 // Config holds all configuration options for Mithril (Firedancer-style hierarchy)

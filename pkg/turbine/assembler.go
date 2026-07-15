@@ -1,7 +1,6 @@
 package turbine
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -1218,7 +1217,7 @@ func (s *slotState) orderedShreds() []*Shred {
 }
 
 func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
-	entries, parentInfo, err := DecodeEntriesAndAlpenglowParentInfoFromDataShreds(s.orderedShreds())
+	entries, parentInfo, footer, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(s.orderedShreds())
 	if err != nil {
 		return nil, err
 	}
@@ -1235,58 +1234,41 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	}
 
 	blk := BlockFromEntries(s.slot, effectiveParentSlot, entries)
+	blk.AlpenglowShredVersion = s.shredVer
+	if effectiveParentKnown && effectiveParentBlockID != (solana.Hash{}) {
+		blk.AlpenglowParentBlockID = effectiveParentBlockID
+		blk.HasAlpenglowParentBlockID = true
+	}
 	if blockID, ok, err := s.alpenglowBlockID(effectiveParentSlot, effectiveParentBlockID, effectiveParentKnown); err != nil {
 		return nil, err
 	} else if ok {
 		blk.AlpenglowBlockID = blockID
 		blk.HasAlpenglowBlockID = true
+		roots, err := s.fecSetMerkleRoots()
+		if err != nil {
+			return nil, err
+		}
+		if len(roots) > 0 {
+			blk.AlpenglowLastChainedRoot = roots[len(roots)-1]
+			blk.HasAlpenglowLastChainedRoot = true
+		}
 	}
-	if effectiveParentKnown {
-		blk.AlpenglowParentBlockID = effectiveParentBlockID
-		blk.HasAlpenglowParentBlockID = true
-	}
-	// Pull the footer's finalization cert (for an earlier slot) if present; replay
-	// decodes + verifies it to drive Alpenglow finality without needing Votor QUIC.
-	if fc := s.footerFinalCert(); len(fc) > 0 {
-		blk.AlpenglowFinalCert = fc
+	if footer != nil {
+		blk.HasAlpenglowFooter = true
+		blk.SkipRewardCert = append([]byte(nil), footer.SkipRewardCert...)
+		blk.NotarRewardCert = append([]byte(nil), footer.NotarRewardCert...)
+		blk.BlockFinalCert = append([]byte(nil), footer.BlockFinalCert...)
+		blk.AlpenglowFinalCert = append([]byte(nil), footer.BlockFinalCert...)
+		blk.FooterProducerTimeNanos = footer.BlockProducerTimeNanos
+		if footer.BankHash != (solana.Hash{}) {
+			blk.ExpectedBankhash = footer.BankHash
+			blk.HasExpectedBankhash = true
+		}
 	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
 	}
 	return blk, nil
-}
-
-// footerFinalCert returns the raw final_cert bytes from the block footer, or nil.
-// Each batch is classified by its first shred, so entry batches (the common case)
-// are skipped without copying — this stays off the classic hot path.
-func (s *slotState) footerFinalCert() []byte {
-	batchStart := true
-	isMarker := false
-	var batch []byte
-	for _, shred := range s.orderedShreds() {
-		if shred == nil || shred.Type != ShredTypeData {
-			continue
-		}
-		if batchStart {
-			isMarker = InferIsBlockMarker(shred.Data)
-			batchStart = false
-		}
-		if isMarker {
-			batch = append(batch, shred.Data...)
-		}
-		if !shred.DataComplete() {
-			continue
-		}
-		if isMarker {
-			if comp, err := UnmarshalBlockComponent(batch); err == nil && comp.Marker != nil &&
-				comp.Marker.Kind == MarkerBlockFooter && comp.Marker.Footer != nil {
-				return comp.Marker.Footer.BlockFinalCert
-			}
-		}
-		batch = nil
-		batchStart = true
-	}
-	return nil
 }
 
 func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Hash, parentKnown bool) (solana.Hash, bool, error) {
@@ -1301,16 +1283,7 @@ func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Has
 	if len(roots) == 0 {
 		return solana.Hash{}, false, nil
 	}
-	fecSetCount := uint32(s.lastIndex/dataShredsPerFECBlock + 1)
-
-	var parentSlotBytes [8]byte
-	binary.LittleEndian.PutUint64(parentSlotBytes[:], parentSlot)
-	var fecSetCountBytes [4]byte
-	binary.LittleEndian.PutUint32(fecSetCountBytes[:], fecSetCount)
-	parentInfoLeaf := hashv([][]byte{parentSlotBytes[:], parentBlockID[:], fecSetCountBytes[:]})
-	roots = append(roots, parentInfoLeaf)
-
-	return merkleTreeRoot(roots), true, nil
+	return DoubleMerkleBlockID(parentSlot, parentBlockID, roots), true, nil
 }
 
 func (s *slotState) fecSetMerkleRoots() ([]solana.Hash, error) {

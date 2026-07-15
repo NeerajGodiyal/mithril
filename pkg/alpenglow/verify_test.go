@@ -170,6 +170,31 @@ func TestVerifyVoteMessageSignature(t *testing.T) {
 	}
 }
 
+func TestVerifyVoteMessageBindsConfiguredShredVersion(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 100)
+	verifier := NewCertificateVerifier()
+	verifier.SetShredVersion(7)
+	if err := verifier.SetValidatorSet(set); err != nil {
+		t.Fatalf("set validator set: %v", err)
+	}
+
+	vote := NewFinalizationVote(91)
+	valid := VoteMessage{
+		Vote:      vote,
+		Signature: testBLSSignatureWithShredVersion(t, []testBLSVoteSignature{{Vote: vote, Key: keys[0]}}, 7),
+		Rank:      0,
+	}
+	if _, err := verifier.VerifyVoteMessageForEpoch(set.Epoch, valid); err != nil {
+		t.Fatalf("verify vote signed for configured shred version: %v", err)
+	}
+
+	wrongVersion := valid
+	wrongVersion.Signature = testBLSSignatureWithShredVersion(t, []testBLSVoteSignature{{Vote: vote, Key: keys[0]}}, 0)
+	if _, err := verifier.VerifyVoteMessageForEpoch(set.Epoch, wrongVersion); err == nil {
+		t.Fatal("expected vote signed for another shred version to fail")
+	}
+}
+
 // TestVerifyRealClusterBlstSignature pins gnark's hash-to-curve + pairing to real
 // blst crypto. The pubkey + signature were produced by a solana-bls 3.0.0 cluster's
 // blst over the message "mithril-hash-test" — so it pins the matching RO_NUL_ DST
@@ -244,11 +269,15 @@ type testBLSVoteSignature struct {
 }
 
 func testBLSSignature(t *testing.T, signatures []testBLSVoteSignature) []byte {
+	return testBLSSignatureWithShredVersion(t, signatures, 0)
+}
+
+func testBLSSignatureWithShredVersion(t *testing.T, signatures []testBLSVoteSignature, shredVersion uint16) []byte {
 	t.Helper()
 	var aggregate bls12381.G2Affine
 	aggregate.SetInfinity()
 	for _, signature := range signatures {
-		payload, err := EncodeVote(signature.Vote)
+		payload, err := EncodeVotePayloadToSign(signature.Vote, shredVersion)
 		if err != nil {
 			t.Fatalf("encode vote: %v", err)
 		}

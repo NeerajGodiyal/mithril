@@ -19,7 +19,7 @@ Use **alpha** for reliability; use **dev** if you want the newest changes and ca
 
 The `run` command starts Mithril as a live full node - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced.
 
-**This branch builds an Alpenglow-only node.** It boots against Alpenglow clusters (`network.cluster = "alpenglow"`, the default), streams live blocks from native turbine shreds by default, and uses Alpenglow certificates as the source of truth for fork choice and durable state. TowerBFT clusters (`mainnet-beta`/`testnet`/`devnet`) need a build from the `dev` branch until those clusters upgrade to Alpenglow.
+This branch supports two protocol paths. `network.cluster = "alpenglow"` (the default) uses native turbine, certificate-driven fork choice, speculative replay, and rooted-durable storage. `mainnet-beta`, `testnet`, and `devnet` retain Mithril's established verifying-only RPC replay and per-slot AccountsDB persistence. Validator/block-production mode is deliberately available only on Alpenglow; the classic clusters remain verifying nodes.
 
 ### Nix (NixOS / nix-darwin / Home Manager)
 
@@ -127,7 +127,9 @@ This builds the `mithril` binary with version, commit, and branch information em
 Mithril runs as one of two node types, selected by `[consensus].mode`:
 
 - **Verifying node** (`mode = "verifying"`, the default) — non-voting: observes, executes, and verifies the cluster. No keypairs required.
-- **Validator** (`mode = "validator"`) — enforces the full voting-deployment shape at startup: identity + vote-account keypairs, the turbine block source with a gossip entrypoint, and the Votor QUIC listener. The voting engine has not landed yet, so a validator-mode node runs the same verifying pipeline and casts **no votes** — but selecting it now means the deployment is provisioned and the config stays valid when voting activates. Both node types share the same fork choice.
+- **Validator** (`mode = "validator"`, Alpenglow only) — enables TPU ingress and scheduled block production and enforces identity + vote-account keypairs, the turbine block source with a gossip entrypoint, a public advertised IP, and the Votor QUIC listener. The voting engine has not landed yet, so it casts **no votes**.
+
+Alpenglow verifying and validator modes share the same certificate fork choice. Classic clusters do not start the Alpenglow engine and retain their existing verifying flow.
 
 Generate a starter config for your node type:
 
@@ -142,7 +144,7 @@ Generate a starter config for your node type:
 This creates `config.toml`. **We strongly recommend reviewing [`config.example.toml`](config.example.toml)** for all available options and detailed documentation. At minimum, set:
 
 - `[network].rpc` — RPC endpoint(s), used for catchup, tip polling, and execution verification
-- `[turbine].gossip_entrypoint` — a gossip entrypoint of your Alpenglow cluster. **Required for the default turbine block source**: without it the node cannot join the shred tree.
+- Alpenglow only: `[turbine].gossip_entrypoint` — a cluster gossip entrypoint. **Required for the default turbine block source**: without it the node cannot join the shred tree. Classic clusters default to RPC and do not require turbine gossip.
 - Validator profile only: the `[validator]` identity and vote-account keypair paths. Keep the authorized-withdrawer keypair **offline** — it is not needed at runtime.
 
 There is also an interactive wizard (`./mithril setup`) that asks for the node type first and generates the matching config, and `./mithril doctor` validates an existing one.
@@ -224,7 +226,9 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 ### Current Limitations
 
 - **RPC still required**: live near-tip blocks stream from turbine shreds, but RPC `getBlock` is still used for catchup and by the trailing execution verifier (Alpenglow certificates attest block *data*, not execution results, so an external oracle cross-checks execution until peer bankhash cross-checking lands).
-- **Voting engine not yet active**: validator mode provisions and enforces the full voting deployment shape, but the node runs verify-only until the voting engine lands. Block production, repair serving, and Rotor relay duty are also future work.
+- **Voting engine not yet active**: Alpenglow validator mode receives TPU traffic and produces scheduled blocks, but votes remain observer-only until BLS signing, durable own-vote history, and Votor transmission land.
+- **Leader edge cases fail closed**: local production intentionally misses epoch-transition slots and slots with active partitioned epoch rewards until producer-side transition handling is implemented. TPU sanitation currently accepts legacy transactions only; versioned transactions are dropped rather than produced incorrectly.
+- **Remaining validator services**: repair serving and Rotor relay duty are still future work.
 
 ### RPC Sources
 
@@ -284,14 +288,14 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for supported networks and feature gate
 - First formal audit (https://runtimeverification.com/ team is nearing end of audit). Includes development and intensive use of a robust and comprehensive 'conformance suite' for verification of compliance of the VM, interpreter, and runtime as a complete unit. Differential fuzzing will be used to detect differences versus relevant versions of the Labs client, and guided fuzzing will be used generally to uncover security and loss-of-availability issues. Any bugs identified during this phase will be remediated.
 - Thorough optimization work on entire system, including on components such as the Virtual Machine and AccountsDB.
 - Consensus verification implementation (landed on this branch: the Alpenglow certificate engine drives fork choice and durable-state promotion).
-- Direct shred replay support (landed on this branch: native turbine shred streaming is the default block source).
+- Direct shred replay support (landed on this branch: native turbine is the default Alpenglow block source; classic clusters default to RPC).
 - Achieve multi-epoch runs without bugs (e.g. bankhash mismatches with mainnet)
 - Transaction simulation and transaction sending
 - Earlier testing on testnet environments.
 - **Target**: More polished release midway through Q1 2026.
 
 ### Future Directions
-- Complete Alpenglow validator mode: the voting engine (Votor event loop, BLS vote signing, durable vote history) on top of the existing fork choice, plus block production, repair serving, and Rotor relay duty.
+- Complete Alpenglow validator mode: add the voting engine (Votor event loop, BLS vote signing, durable vote history), versioned-transaction TPU handling, epoch-transition/reward production, repair serving, and Rotor relay duty on top of the existing fork choice and block producer.
 - Add Agave ledger-tool type features for Mithril
 - gRPC interface support.
 - Expanded RPC feature set.

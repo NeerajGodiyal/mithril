@@ -767,7 +767,7 @@ func (p *CertPool) verifyBatch(batch []VoteMessage, set *ValidatorSet) []VoteMes
 		return nil
 	}
 	p.snap.BatchesVerified++
-	payload, err := EncodeVote(batch[0].Vote)
+	payload, err := EncodeVotePayloadToSign(batch[0].Vote, p.verifier.ShredVersion())
 	if err != nil {
 		return nil
 	}

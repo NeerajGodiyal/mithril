@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/gagliardetto/solana-go"
 )
 
 const (
@@ -41,12 +42,13 @@ type Config struct {
 type Client struct {
 	cfg Config
 
-	entrypoint *net.UDPAddr
-	bindAddr   *net.UDPAddr
-	tvuAddr    *net.UDPAddr
-	alpenglow  *net.UDPAddr
-	identity   ed25519.PrivateKey
-	pubkey     Pubkey
+	entrypoint     *net.UDPAddr
+	bindAddr       *net.UDPAddr
+	tvuAddr        *net.UDPAddr
+	alpenglow      *net.UDPAddr
+	identity       ed25519.PrivateKey
+	pubkey         Pubkey
+	pendingTPUQUIC *net.UDPAddr
 
 	contactMu sync.RWMutex
 	contact   *ContactInfo
@@ -56,6 +58,9 @@ type Client struct {
 
 	repairPeerMu sync.Mutex
 	repairPeers  map[Pubkey]RepairPeer
+
+	tvuPeerMu sync.Mutex
+	tvuPeers  map[Pubkey]TVUPeer
 
 	rxPackets        atomic.Uint64
 	txPackets        atomic.Uint64
@@ -87,6 +92,13 @@ type udpAddrKey struct {
 type RepairPeer struct {
 	Pubkey   Pubkey
 	Addr     *net.UDPAddr
+	LastSeen time.Time
+}
+
+// TVUPeer is a gossip contact with a TVU UDP socket for turbine broadcast.
+type TVUPeer struct {
+	Pubkey   Pubkey
+	TVUAddr  *net.UDPAddr
 	LastSeen time.Time
 }
 
@@ -173,6 +185,7 @@ func NewClient(cfg Config) (*Client, error) {
 		pubkey:      pubkey,
 		peers:       make(map[udpAddrKey]knownPeer),
 		repairPeers: make(map[Pubkey]RepairPeer),
+		tvuPeers:    make(map[Pubkey]TVUPeer),
 	}, nil
 }
 
@@ -324,6 +337,18 @@ func (c *Client) RepairPeers() []RepairPeer {
 	return peers
 }
 
+// SetTPUQUIC updates the TPU QUIC endpoints published in this client's CRDS contact.
+// It may be called before Run has initialized the contact record.
+func (c *Client) SetTPUQUIC(addr *net.UDPAddr) error {
+	c.contactMu.Lock()
+	defer c.contactMu.Unlock()
+	if c.contact == nil {
+		c.pendingTPUQUIC = cloneUDPAddr(addr)
+		return nil
+	}
+	return c.contact.SetTPUQUIC(addr)
+}
+
 func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 	shredVersion := c.cfg.ShredVersion
 	var advertisedIP net.IP
@@ -386,6 +411,12 @@ func (c *Client) initializeContact(localGossipAddr *net.UDPAddr) error {
 		}
 	}
 	c.contactMu.Lock()
+	if c.pendingTPUQUIC != nil {
+		if err := contact.SetTPUQUIC(c.pendingTPUQUIC); err != nil {
+			c.contactMu.Unlock()
+			return fmt.Errorf("set pending TPU QUIC gossip socket: %w", err)
+		}
+	}
 	c.contact = contact
 	c.contactMu.Unlock()
 	return nil
@@ -566,6 +597,7 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 	}
 	c.recordPeerEndpoint(record.GossipAddr)
 	c.recordRepairPeerRecord(record)
+	c.recordTVUPeerRecord(record)
 	c.acceptedContacts.Add(1)
 }
 
@@ -615,6 +647,60 @@ func (c *Client) recordRepairPeerRecord(record contactRecord) {
 		LastSeen: now,
 	}
 	c.repairPeerMu.Unlock()
+}
+
+// TVUPeers returns non-expired TVU endpoints learned from gossip.
+func (c *Client) TVUPeers() []TVUPeer {
+	now := time.Now()
+	c.tvuPeerMu.Lock()
+	defer c.tvuPeerMu.Unlock()
+	for key, peer := range c.tvuPeers {
+		if now.Sub(peer.LastSeen) > peerExpirationWindow {
+			delete(c.tvuPeers, key)
+		}
+	}
+	out := make([]TVUPeer, 0, len(c.tvuPeers))
+	for _, peer := range c.tvuPeers {
+		peer.TVUAddr = cloneUDPAddr(peer.TVUAddr)
+		out = append(out, peer)
+	}
+	return out
+}
+
+// SelfTVUAddr returns this node's configured TVU endpoint.
+func (c *Client) SelfTVUAddr() *net.UDPAddr {
+	if c == nil {
+		return nil
+	}
+	return cloneUDPAddr(c.tvuAddr)
+}
+
+// LookupTVU resolves a validator identity to its gossip-advertised TVU socket.
+func (c *Client) LookupTVU(pubkey solana.PublicKey) (*net.UDPAddr, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.tvuPeerMu.Lock()
+	defer c.tvuPeerMu.Unlock()
+	peer, ok := c.tvuPeers[Pubkey(pubkey)]
+	if !ok || peer.TVUAddr == nil || time.Since(peer.LastSeen) > peerExpirationWindow {
+		return nil, false
+	}
+	return cloneUDPAddr(peer.TVUAddr), true
+}
+
+func (c *Client) recordTVUPeerRecord(record contactRecord) {
+	addr := record.TVUAddr.UDPAddr()
+	if addr == nil {
+		return
+	}
+	c.tvuPeerMu.Lock()
+	c.tvuPeers[record.Pubkey] = TVUPeer{
+		Pubkey:   record.Pubkey,
+		TVUAddr:  addr,
+		LastSeen: time.Now(),
+	}
+	c.tvuPeerMu.Unlock()
 }
 
 func (c *Client) recordTx() {

@@ -59,6 +59,16 @@ func TestAlpenglowObserverTracksReplayInSnapshot(t *testing.T) {
 	}
 }
 
+func TestNewEngineConfiguresAlpenglowShredVersion(t *testing.T) {
+	engine, err := NewEngine(Config{AlpenglowShredVersion: 0x1234})
+	if err != nil {
+		t.Fatalf("NewEngine returned error: %v", err)
+	}
+	if got := engine.verifier.ShredVersion(); got != 0x1234 {
+		t.Fatalf("verifier shred version = %#x, want %#x", got, uint16(0x1234))
+	}
+}
+
 // A certificate that arrives before its epoch's validator set is installed must be
 // deferred and replayed once the stakes land — otherwise the cert is lost and that
 // slot's decision stalls.
@@ -285,6 +295,34 @@ func TestAlpenglowObserverPublishesCertificateBlockIDsOnly(t *testing.T) {
 	}
 }
 
+func TestVotorMessageHookReceivesOnlyVerifiedRewardVotes(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	set := testAlpenglowValidatorSet()
+	engine.SetAlpenglowEpochLookup(func(uint64) uint64 { return set.Epoch })
+	if err := engine.SetAlpenglowValidatorSet(set); err != nil {
+		t.Fatalf("SetAlpenglowValidatorSet: %v", err)
+	}
+
+	called := 0
+	engine.SetVotorMessageHook(func(alpenglow.Message) { called++ })
+	vote := alpenglow.NewSkipVote(42)
+	validSig := testAlpenglowCertificateSignature(t, alpenglow.Certificate{Type: alpenglow.CertificateSkip, Slot: 42})
+	engine.observeVotorMessage(alpenglow.NewVoteMessage(vote, validSig, 0))
+	if called != 1 {
+		t.Fatalf("verified hook calls = %d, want 1", called)
+	}
+
+	invalidSig := append([]byte(nil), validSig...)
+	invalidSig[0] ^= 0xff
+	engine.observeVotorMessage(alpenglow.NewVoteMessage(vote, invalidSig, 0))
+	if called != 1 {
+		t.Fatalf("invalid vote reached hook; calls = %d", called)
+	}
+}
+
 func testAlpenglowValidatorSet() alpenglow.ValidatorSet {
 	key := testAlpenglowBLSKey()
 	var pubkey bls12381.G1Affine
@@ -316,7 +354,7 @@ func testAlpenglowBLSKey() *big.Int {
 func testAlpenglowCertificateSignature(t *testing.T, cert alpenglow.Certificate) []byte {
 	t.Helper()
 	vote := testAlpenglowCertificateVote(t, cert)
-	payload, err := alpenglow.EncodeVote(vote)
+	payload, err := alpenglow.EncodeVotePayloadToSign(vote, 0)
 	if err != nil {
 		t.Fatalf("encode certificate vote: %v", err)
 	}

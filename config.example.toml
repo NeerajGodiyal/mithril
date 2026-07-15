@@ -26,11 +26,9 @@
 #   [consensus] alpenglow_observer_bind_addr = "0.0.0.0:8010"      (Votor QUIC)
 #   [validator] identity_keypair = "/path/to/validator-keypair.json"
 #
-# NOTE: this build is Alpenglow-only. [consensus].mode selects the node type:
-# "verifying" (default; non-voting) or "validator" (enforces the full voting
-# deployment shape — identity + vote-account keypairs, turbine + gossip
-# entrypoint, Votor QUIC listener — but the voting engine has not landed yet,
-# so it runs verify-only and casts NO votes). Both share the same fork choice.
+# Alpenglow supports "verifying" (default; non-voting) and "validator" modes.
+# Validator mode enables TPU ingress and block production but does not cast
+# votes yet. mainnet-beta/testnet/devnet retain the classic verifying-only flow.
 # Generate a per-type starter config: mithril config init [--validator]
 # ----------------------------------------------------------------------------
 
@@ -153,11 +151,9 @@ name = "mithril"
 # probes the primary and restores to it when healthy.
 
 [network]
-    # Solana cluster. Defaults to "alpenglow" — the only cluster this build
-    # boots: replay applies Alpenglow clock/feature semantics unconditionally.
-    # "mainnet-beta"/"testnet"/"devnet" currently need a mithril build from the
-    # dev branch (TowerBFT) and will be usable here once those clusters upgrade
-    # to Alpenglow.
+    # Solana cluster. Defaults to "alpenglow". Alpenglow uses certificate fork
+    # choice and rooted speculative replay. "mainnet-beta", "testnet", and
+    # "devnet" use the established verifying-only RPC replay path.
     cluster = "alpenglow"
 
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
@@ -176,7 +172,8 @@ name = "mithril"
 # Block source configuration. See also [lightbringer] below for sidecar settings.
 
 [block]
-    # Where to stream new blocks from (default: "turbine"):
+    # Where to stream new blocks from. Empty selects the protocol default:
+    # "turbine" for Alpenglow, "rpc" for classic clusters.
     #   "turbine"      - Native UDP turbine shred receiver (the LIVE mode, and
     #                    the DEFAULT). Uses RPC for catchup, hands off to
     #                    reconstructed shreds near tip. Shreds carry the
@@ -189,7 +186,7 @@ name = "mithril"
     #                    arrive via the Votor QUIC listener ([consensus]).
     #   "lightbringer" - Stream via Lightbringer sidecar (see [lightbringer] section)
     #                    Uses RPC for catchup, hands off to live stream near tip.
-    source = "turbine"
+    source = ""
 
     # Lightbringer endpoint address (only used when source = "lightbringer")
     # lightbringer_endpoint = "localhost:9000"
@@ -309,6 +306,7 @@ name = "mithril"
 # In validator mode ([consensus].mode = "validator") the identity AND
 # vote-account keypairs are REQUIRED — the node refuses to start without them.
 # The authorized withdrawer keypair is NOT needed at runtime: keep it OFFLINE.
+# Validator mode is supported only with network.cluster = "alpenglow".
 
 [validator]
     # identity_keypair = "/path/to/validator-keypair.json"
@@ -318,13 +316,20 @@ name = "mithril"
     # authorized_withdrawer_keypair = "/path/to/authorized-withdrawer-keypair.json"
     authorized_withdrawer_keypair = ""
 
+    # TPU QUIC listener and public address advertised through gossip.
+    tpu_quic_bind_addr = "0.0.0.0:8004"
+    # advertised_ip = "203.0.113.10"
+
+    # Signature-verification workers (0 = GOMAXPROCS).
+    tpu_sigverify_workers = 0
+
 # ============================================================================
 # [consensus] - Alpenglow Consensus
 # ============================================================================
 #
-# This build is Alpenglow-only: blocks execute immediately on receipt, and
-# Alpenglow certificates (block / skip / finalize / conflict) are the source
-# of truth for fork choice and durable-state promotion.
+# On Alpenglow, blocks execute immediately on receipt and certificates are the
+# source of truth for fork choice and durable-state promotion. Classic clusters
+# do not start this engine and retain the established verifying-only flow.
 
 [consensus]
     # Node mode:
@@ -337,9 +342,8 @@ name = "mithril"
     #                 consensus.alpenglow_observer_bind_addr are all REQUIRED.
     #                 The voting engine (Votor event loop, BLS vote signing,
     #                 durable vote history) has NOT landed yet: a validator-mode
-    #                 node runs the same verifying pipeline and casts no votes —
-    #                 select it now so the deployment is provisioned and its
-    #                 config stays valid when voting activates.
+    #                 TPU ingress and block production are active. The voting
+    #                 engine has NOT landed yet, so the node casts no votes.
     mode = "verifying"
 
     # Passive Alpenglow Votor QUIC listener (e.g. "0.0.0.0:8010").

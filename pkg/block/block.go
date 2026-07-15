@@ -31,8 +31,11 @@ type Block struct {
 	HasAlpenglowBlockID                 bool
 	AlpenglowParentBlockID              [32]byte // parent's Merkle-root block id (header/update-parent marker)
 	HasAlpenglowParentBlockID           bool
+	AlpenglowLastChainedRoot            [32]byte // Last data-shred Merkle root, chained into child slots.
+	HasAlpenglowLastChainedRoot         bool
 	AlpenglowFinalCert                  []byte // raw footer final_cert bytes (finalization cert for an earlier slot), decoded in replay
 	ExpectedBankhash                    [32]byte
+	HasExpectedBankhash                 bool
 	TxMetas                             []*rpc.TransactionMeta
 	Leader                              solana.PublicKey
 	BlockReward                         *BlockRewardsInfo
@@ -51,7 +54,14 @@ type Block struct {
 	PrevFeeRateGovernor                 *sealevel.FeeRateGovernor
 	FeeRateGovernor                     *sealevel.FeeRateGovernor
 	FromLiveStream                      bool
+	FromLocalProduction                 bool
 	IsSkipped                           bool // True for slots that were skipped by the leader
+	SkipRewardCert                      []byte
+	NotarRewardCert                     []byte
+	BlockFinalCert                      []byte
+	FooterProducerTimeNanos             uint64
+	HasAlpenglowFooter                  bool
+	AlpenglowShredVersion               uint16
 
 	// Shred-path observability (zero when the block did not come from shreds —
 	// RPC/file blocks must not fabricate these). "Full" follows Agave's

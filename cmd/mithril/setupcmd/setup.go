@@ -78,6 +78,7 @@ const (
 	scrGossip
 	scrIdentityKey       // validator identity keypair path (validator mode)
 	scrVoteKey           // vote account keypair path (validator mode)
+	scrAdvertisedIP      // public TPU QUIC IP (validator mode)
 	scrLightbringerQuiet // log verbosity for managed Lightbringer (only shown when Lightbringer enabled)
 	scrStorage           // accountsPath
 	scrStorageSnap       // snapshotsPath
@@ -118,6 +119,7 @@ type setupModel struct {
 	gossipEntry    string
 	identityKey    string // validator identity keypair path (validator mode)
 	voteKey        string // vote account keypair path (validator mode)
+	advertisedIP   string // public TPU QUIC IP (validator mode)
 	lbQuiet        bool   // suppress Lightbringer info/debug logs
 	accountsPath   string
 	snapshotsPath  string
@@ -180,6 +182,8 @@ func (m *setupModel) inputValueForScreen(scr screen) (string, bool) {
 		return m.identityKey, true
 	case scrVoteKey:
 		return m.voteKey, true
+	case scrAdvertisedIP:
+		return m.advertisedIP, true
 	case scrStorage:
 		return m.accountsPath, true
 	case scrStorageSnap:
@@ -252,16 +256,23 @@ func (m setupModel) currentItems() []menuItem {
 	case scrNodeType:
 		return []menuItem{
 			menuOptionDesc("Verifying node", "verifying", "Non-voting: observe, execute, and verify the cluster"),
-			menuOptionDesc("Validator", "validator", "Requires identity + vote-account keypairs; voting engine not yet active (runs verify-only until it lands)"),
+			menuOptionDesc("Validator", "validator", "Alpenglow TPU + block production; consensus voting is not yet active"),
 			menuSeparator(),
 			menuBack(),
 		}
 	case scrCluster:
+		if m.nodeType == "validator" {
+			return []menuItem{
+				menuOptionDesc("alpenglow", "alpenglow", "Required for validator and block-production mode"),
+				menuSeparator(),
+				menuBack(),
+			}
+		}
 		return []menuItem{
-			menuOptionDesc("alpenglow", "alpenglow", "Alpenglow test cluster (the only cluster this build boots)"),
-			menuOptionDesc("mainnet-beta", "mainnet-beta", "Requires a dev-branch (TowerBFT) build"),
-			menuOptionDesc("testnet", "testnet", "Requires a dev-branch (TowerBFT) build"),
-			menuOptionDesc("devnet", "devnet", "Requires a dev-branch (TowerBFT) build"),
+			menuOptionDesc("alpenglow", "alpenglow", "Certificate fork choice and speculative replay"),
+			menuOptionDesc("mainnet-beta", "mainnet-beta", "Classic verifying-only RPC replay"),
+			menuOptionDesc("testnet", "testnet", "Classic verifying-only RPC replay"),
+			menuOptionDesc("devnet", "devnet", "Classic verifying-only RPC replay"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -423,9 +434,13 @@ func (m setupModel) handleSelect(value string) (tea.Model, tea.Cmd) {
 		if !m.enableLB {
 			m.lbQuiet = config.LightbringerQuietDefault // Reset dependent state so disable→re-enable starts clean.
 		}
-		// Both paths need a gossip entrypoint: lightbringer for its sidecar,
-		// turbine (the default source) to join the shred tree.
-		m.pushInput(scrGossip)
+		if m.enableLB || m.cluster == "alpenglow" {
+			// Lightbringer needs its gossip entrypoint; Alpenglow's default
+			// turbine source needs one to join the shred tree.
+			m.pushInput(scrGossip)
+		} else {
+			m.pushInput(scrStorage)
+		}
 
 	case scrBootstrap:
 		m.bootstrapMode = value
@@ -583,6 +598,16 @@ func (m *setupModel) validateAndApplyInput() bool {
 		}
 		m.voteKey = val
 
+	case scrAdvertisedIP:
+		if !m.requireNonEmpty(val) {
+			return false
+		}
+		if net.ParseIP(val) == nil {
+			m.inputErr = "must be an IPv4 or IPv6 address"
+			return false
+		}
+		m.advertisedIP = val
+
 	case scrStorage:
 		if !m.requireNonEmpty(val) {
 			return false
@@ -639,11 +664,13 @@ func (m *setupModel) validateAndApplyInput() bool {
 func (m *setupModel) advanceFromInput() {
 	switch m.screen {
 	case scrRPC:
-		if m.mode == "quick" || m.nodeType == "validator" {
+		if m.nodeType == "validator" || (m.mode == "quick" && m.cluster == "alpenglow") {
 			// Turbine (the default source, and the only valid one for a
 			// validator) needs a gossip entrypoint; validators never use the
 			// Lightbringer sidecar.
 			m.pushInput(scrGossip)
+		} else if m.mode == "quick" {
+			m.pushMenu(scrReview) // classic quick-start defaults to RPC
 		} else {
 			m.pushMenu(scrLightbringer) // Full Config lets user enable the sidecar
 		}
@@ -660,6 +687,8 @@ func (m *setupModel) advanceFromInput() {
 	case scrIdentityKey:
 		m.pushInput(scrVoteKey)
 	case scrVoteKey:
+		m.pushInput(scrAdvertisedIP)
+	case scrAdvertisedIP:
 		if m.mode == "quick" {
 			m.pushMenu(scrReview)
 		} else {
@@ -722,6 +751,11 @@ func (m setupModel) View() string {
 		return banner + "\n" + renderInput("Vote Account Keypair",
 			"Path to the vote account keypair (Solana keygen JSON)\n"+
 				"The vote account votes are cast for · keep the WITHDRAWER keypair offline",
+			m.inputVal, m.inputErr, m.inputCur)
+
+	case scrAdvertisedIP:
+		return banner + "\n" + renderInput("Validator Advertised IP",
+			"Public IPv4 or IPv6 address peers use for this validator's TPU QUIC listener",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrStorage:
@@ -789,7 +823,7 @@ func (m setupModel) View() string {
 		}
 		nodeTypeLabel := "verifying (non-voting)"
 		if nodeType == "validator" {
-			nodeTypeLabel = "validator (voting engine not yet active)"
+			nodeTypeLabel = "Alpenglow validator (block production active; voting not yet active)"
 		}
 		rows := [][]string{
 			{"Node type", nodeTypeLabel},
@@ -800,6 +834,7 @@ func (m setupModel) View() string {
 			rows = append(rows,
 				[]string{"Identity key", m.identityKey},
 				[]string{"Vote key", m.voteKey},
+				[]string{"Advertised IP", m.advertisedIP},
 			)
 		}
 		if m.enableLB {
@@ -808,8 +843,10 @@ func (m setupModel) View() string {
 				summary += " · quiet logs"
 			}
 			rows = append(rows, []string{"Lightbringer", summary})
-		} else {
+		} else if m.cluster == "alpenglow" {
 			rows = append(rows, []string{"Block source", "turbine (gossip: " + m.gossipEntry + ")"})
+		} else {
+			rows = append(rows, []string{"Block source", "rpc"})
 		}
 		if m.mode == "quick" {
 			rows = append(rows, []string{"AccountsDB", m.accountsPath + " (default)"})
@@ -903,13 +940,15 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	cfg.WriteString("[block]\n")
 	if m.enableLB {
 		cfg.WriteString("source = \"lightbringer\"\n")
-	} else {
+	} else if m.cluster == "alpenglow" {
 		cfg.WriteString("source = \"turbine\"\n")
 		cfg.WriteString("turbine_bind_addr = \"0.0.0.0:8001\"\n")
+	} else {
+		cfg.WriteString("source = \"rpc\"\n")
 	}
 	fmt.Fprintf(&cfg, "max_rps = %s\n", m.blockMaxRPS)
 	fmt.Fprintf(&cfg, "max_inflight = %s\n\n", m.blockInflight)
-	if !m.enableLB {
+	if !m.enableLB && m.cluster == "alpenglow" {
 		cfg.WriteString("[turbine]\n")
 		fmt.Fprintf(&cfg, "gossip_entrypoint = %q\n\n", m.gossipEntry)
 	}
@@ -933,10 +972,13 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		fmt.Fprintf(&cfg, "identity_keypair = %q\n", m.identityKey)
 		fmt.Fprintf(&cfg, "vote_account_keypair = %q\n", m.voteKey)
 		cfg.WriteString("# Keep the authorized withdrawer keypair OFFLINE — not needed at runtime.\n")
-		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n\n")
+		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n")
+		cfg.WriteString("tpu_quic_bind_addr = \"0.0.0.0:8004\"\n")
+		fmt.Fprintf(&cfg, "advertised_ip = %q\n", m.advertisedIP)
+		cfg.WriteString("tpu_sigverify_workers = 0\n\n")
 
 		cfg.WriteString("[consensus]\n")
-		cfg.WriteString("# Validator mode: voting engine not yet active — runs verify-only until it lands.\n")
+		cfg.WriteString("# TPU ingress and block production are active; consensus voting is not yet active.\n")
 		cfg.WriteString("mode = \"validator\"\n")
 		cfg.WriteString("alpenglow_observer_bind_addr = \"0.0.0.0:8010\" # REQUIRED: Votor QUIC vote/cert listener\n")
 		cfg.WriteString("alpenglow_max_message_bytes = 0\n")
@@ -945,7 +987,10 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("[validator]\n")
 		cfg.WriteString("identity_keypair = \"\"\n")
 		cfg.WriteString("vote_account_keypair = \"\"\n")
-		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n\n")
+		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n")
+		cfg.WriteString("tpu_quic_bind_addr = \"0.0.0.0:8004\"\n")
+		cfg.WriteString("advertised_ip = \"\"\n")
+		cfg.WriteString("tpu_sigverify_workers = 0\n\n")
 
 		cfg.WriteString("[consensus]\n")
 		cfg.WriteString("mode = \"verifying\"\n")
@@ -996,7 +1041,7 @@ snapshots = "/mnt/mithril-ledger/snapshots"   # ~100GB for full + incremental
 logs = "/mnt/mithril-logs"                    # Log files (created if missing)
 
 [network]
-cluster = "alpenglow"  # This build boots Alpenglow only (TowerBFT clusters need a dev-branch build)
+cluster = "alpenglow"  # mainnet-beta/testnet/devnet use classic verifying-only RPC replay
 rpc = ["https://rpc.ag.validator1.net"]
 
 [block]
@@ -1031,9 +1076,12 @@ txpar = %d   # Recommended: 2x your CPU core count
 identity_keypair = ""              # Optional validator identity for native turbine gossip
 vote_account_keypair = ""          # Optional vote account keypair path for diagnostics/future voting
 authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
+tpu_quic_bind_addr = "0.0.0.0:8004"
+advertised_ip = ""                  # Required for Alpenglow validator mode
+tpu_sigverify_workers = 0
 
 [consensus]
-mode = "verifying"                # "verifying" (default, non-voting) | "validator" (requires keypairs + Votor listener; voting engine not yet active)
+mode = "verifying"                # "validator" is Alpenglow-only; TPU/block production active, voting not yet active
 alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener (raw-vote cert feed)
 alpenglow_max_message_bytes = 0   # 0 = default
 alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)
