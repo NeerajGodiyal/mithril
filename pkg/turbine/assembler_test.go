@@ -760,6 +760,57 @@ func TestSlotAssemblerRepairRequestsPrioritizeRequestedRange(t *testing.T) {
 	}
 }
 
+func TestSlotAssemblerPriorityRepairBypassesLiveEdgeGrace(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 220
+	assembler.slots[220] = &slotState{
+		slot:    220,
+		shreds:  map[uint32]*Shred{7: {Slot: 220, Type: ShredTypeData, Index: 7}},
+		fecSets: make(map[uint32]*fecState),
+	}
+	assembler.PrioritizeRepairSlot(220)
+
+	priority, edge := assembler.RepairRequestsTiered(32, 8)
+	if len(priority) != 1 || priority[0].Slot != 220 {
+		t.Fatalf("priority = %+v, want newest observed slot 220", priority)
+	}
+	if !priority[0].NeedHighestDataShred || priority[0].HighestDataShredIndex != 8 {
+		t.Fatalf("priority newest-slot request = %+v, want highest probe from index 8", priority[0])
+	}
+	for _, req := range edge {
+		if req.Slot == 220 {
+			t.Fatalf("ordinary freshness tier repaired newest slot despite edge grace: %+v", edge)
+		}
+	}
+}
+
+func TestSlotAssemblerPriorityRepairCanDiscoverAbsentSlotBeyondObservedEdge(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.maxObservedSlot = 220
+	assembler.PrioritizeRepairSlot(221)
+
+	priority, _ := assembler.RepairRequestsTiered(32, 8)
+	if len(priority) != 1 || priority[0].Slot != 221 {
+		t.Fatalf("priority = %+v, want absent pinned slot 221", priority)
+	}
+	if !priority[0].NeedHighestDataShred || priority[0].HighestDataShredIndex != 0 {
+		t.Fatalf("absent priority request = %+v, want highest probe from index 0", priority[0])
+	}
+}
+
+func TestSlotAssemblerPriorityRepairDoesNotNeedObservedEdge(t *testing.T) {
+	assembler := NewSlotAssembler()
+	assembler.PrioritizeRepairSlot(100)
+
+	priority, edge := assembler.RepairRequestsTiered(32, 8)
+	if len(priority) != 1 || priority[0].Slot != 100 || !priority[0].NeedHighestDataShred {
+		t.Fatalf("priority = %+v, want absent pinned slot 100", priority)
+	}
+	if len(edge) != 0 {
+		t.Fatalf("edge = %+v, want no freshness scan without an observed edge", edge)
+	}
+}
+
 func TestUDPReceiverSignalsReadyAfterBind(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

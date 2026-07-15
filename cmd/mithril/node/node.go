@@ -1008,7 +1008,8 @@ func runLive(c *cobra.Command, args []string) {
 	if pprofPort != -1 {
 		startPprofHandlers(int(pprofPort))
 	}
-	ctx := c.Context()
+	ctx, cancelRun := context.WithCancel(c.Context())
+	defer cancelRun()
 
 	// Print the Mithril banner first, before any other output
 	progress.PrintBanner()
@@ -2201,8 +2202,12 @@ postBootstrap:
 		go func() {
 			if err := sharedGossip.Run(ctx); err != nil && ctx.Err() == nil {
 				mlog.Log.Errorf("validator gossip client stopped: %v", err)
+				if errors.Is(err, gossip.ErrIdentityInUse) {
+					cancelRun()
+				}
 			}
 		}()
+		go monitorValidatorIdentityOwnership(ctx, rpcEndpoints, solana.PrivateKey(validatorIdentity).PublicKey(), sharedGossip, cancelRun)
 
 		epochSchedule := epochScheduleFromState(mithrilState)
 		if epochSchedule == nil {
@@ -3134,6 +3139,103 @@ func queryWallClockSeedSlot(ctx context.Context, rpcEndpoints []string) (uint64,
 		return 0, fmt.Errorf("failed to get confirmed slot from RPC: %w", err)
 	}
 	return slot, nil
+}
+
+const (
+	validatorIdentityOwnershipGrace        = 30 * time.Second
+	validatorIdentityOwnershipPollInterval = 5 * time.Second
+	validatorIdentityConflictConfirmations = 2
+)
+
+// monitorValidatorIdentityOwnership checks the cluster-wide CRDS winner for
+// our validator pubkey. Two processes can both sign valid ContactInfo records
+// with the same key, but only the newest record wins; when the other process
+// wins, turbine and Votor ingress move there while our RPC-derived tip remains
+// healthy. Passive gossip cannot always observe the winning record after its
+// own endpoint has been displaced, so use the already-configured RPC view as
+// an independent ownership check and stop cleanly instead of stalling replay.
+func monitorValidatorIdentityOwnership(ctx context.Context, rpcEndpoints []string, identity solana.PublicKey, client *gossip.Client, cancel context.CancelFunc) {
+	if len(rpcEndpoints) == 0 || client == nil || cancel == nil {
+		return
+	}
+	grace := time.NewTimer(validatorIdentityOwnershipGrace)
+	defer grace.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-grace.C:
+	}
+
+	ticker := time.NewTicker(validatorIdentityOwnershipPollInterval)
+	defer ticker.Stop()
+	conflicts := 0
+	for {
+		expected := client.AdvertisedGossipAddr()
+		if expected != nil {
+			lookupCtx, lookupCancel := context.WithTimeout(ctx, 5*time.Second)
+			observed, found, err := queryValidatorIdentityGossip(lookupCtx, rpcEndpoints, identity)
+			lookupCancel()
+			switch {
+			case err != nil:
+				conflicts = 0 // an unavailable observer is not evidence of a collision
+				mlog.Log.FileOnlyf("validator identity ownership check unavailable: %v", err)
+			case !found:
+				conflicts = 0 // CRDS convergence/expiry window
+			case sameUDPAddrString(observed, expected):
+				conflicts = 0
+			default:
+				conflicts++
+				if conflicts >= validatorIdentityConflictConfirmations {
+					mlog.Log.Errorf("validator identity ownership lost: cluster advertises %s at gossip=%s, but this Mithril instance advertises gossip=%s; another live process is using the same identity — stop it before restarting Mithril",
+						identity.String(), observed, expected.String())
+					cancel()
+					return
+				}
+				mlog.Log.Warnf("validator identity ownership check: cluster currently advertises gossip=%s for %s, expected %s (confirmation %d/%d)",
+					observed, identity.String(), expected.String(), conflicts, validatorIdentityConflictConfirmations)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func queryValidatorIdentityGossip(ctx context.Context, rpcEndpoints []string, identity solana.PublicKey) (string, bool, error) {
+	var lastErr error
+	var succeeded bool
+	for _, endpoint := range rpcEndpoints {
+		nodes, err := solrpc.New(endpoint).GetClusterNodes(ctx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		succeeded = true
+		for _, node := range nodes {
+			if node == nil || node.Pubkey != identity || node.Gossip == nil || strings.TrimSpace(*node.Gossip) == "" {
+				continue
+			}
+			return strings.TrimSpace(*node.Gossip), true, nil
+		}
+	}
+	if succeeded {
+		return "", false, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no RPC endpoints configured")
+	}
+	return "", false, lastErr
+}
+
+func sameUDPAddrString(observed string, expected *net.UDPAddr) bool {
+	if expected == nil {
+		return false
+	}
+	addr, err := net.ResolveUDPAddr("udp", observed)
+	return err == nil && addr.Port == expected.Port && addr.IP.Equal(expected.IP)
 }
 
 // queryLatestSnapshotSlot queries the latest available snapshot slot from the network.

@@ -25,6 +25,8 @@ const (
 	peerExpirationWindow = 15 * time.Minute
 )
 
+var ErrIdentityInUse = errors.New("validator identity is already active in gossip")
+
 type Config struct {
 	Entrypoint        string
 	BindAddr          string
@@ -52,6 +54,13 @@ type Client struct {
 
 	contactMu sync.RWMutex
 	contact   *ContactInfo
+
+	identityConflictMu        sync.Mutex
+	identityConflictGossip    contactEndpoint
+	identityConflictTVU       contactEndpoint
+	identityConflictAlpenglow contactEndpoint
+	identityConflictWallclock uint64
+	identityConflictCh        chan error
 
 	peerMu sync.Mutex
 	peers  map[udpAddrKey]knownPeer
@@ -176,16 +185,17 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	return &Client{
-		cfg:         cfg,
-		entrypoint:  entrypoint,
-		bindAddr:    bindAddr,
-		tvuAddr:     tvuAddr,
-		alpenglow:   alpenglowAddr,
-		identity:    identity,
-		pubkey:      pubkey,
-		peers:       make(map[udpAddrKey]knownPeer),
-		repairPeers: make(map[Pubkey]RepairPeer),
-		tvuPeers:    make(map[Pubkey]TVUPeer),
+		cfg:                cfg,
+		entrypoint:         entrypoint,
+		bindAddr:           bindAddr,
+		tvuAddr:            tvuAddr,
+		alpenglow:          alpenglowAddr,
+		identity:           identity,
+		pubkey:             pubkey,
+		identityConflictCh: make(chan error, 1),
+		peers:              make(map[udpAddrKey]knownPeer),
+		repairPeers:        make(map[Pubkey]RepairPeer),
+		tvuPeers:           make(map[Pubkey]TVUPeer),
 	}, nil
 }
 
@@ -204,6 +214,17 @@ func (c *Client) ShredVersion() uint16 {
 		return c.cfg.ShredVersion
 	}
 	return c.contact.ShredVer
+}
+
+// AdvertisedGossipAddr returns the socket in this client's current signed
+// ContactInfo. It is nil until Run has initialized the contact.
+func (c *Client) AdvertisedGossipAddr() *net.UDPAddr {
+	c.contactMu.RLock()
+	defer c.contactMu.RUnlock()
+	if c.contact == nil {
+		return nil
+	}
+	return cloneUDPAddr(c.contact.GossipAddr)
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -272,6 +293,8 @@ func (c *Client) Run(ctx context.Context) error {
 			if err == nil || ctx.Err() != nil {
 				return nil
 			}
+			return err
+		case err := <-c.identityConflictCh:
 			return err
 		case <-pushTicker.C:
 			if err := c.pushContact(conn); err != nil {
@@ -592,6 +615,17 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 	if record.ShredVer != shredVersion || !record.GossipAddr.ok {
 		return
 	}
+	// CRDS is keyed by validator identity. If another process publishes that
+	// same identity with different sockets, its newer ContactInfo replaces ours
+	// cluster-wide: turbine and Votor traffic then move to the other process in
+	// one instant while our gossip-derived tip keeps advancing. Treat echoed
+	// copies of our own contact as harmless, but confirm two increasing foreign
+	// wallclocks before stopping so a stale record from a previous run cannot
+	// trip a fresh process.
+	if record.Pubkey == c.pubkey {
+		c.observeOwnContactRecord(record)
+		return
+	}
 	if sameEndpointUDPAddr(record.GossipAddr, c.entrypoint) {
 		return
 	}
@@ -599,6 +633,71 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 	c.recordRepairPeerRecord(record)
 	c.recordTVUPeerRecord(record)
 	c.acceptedContacts.Add(1)
+}
+
+func (c *Client) observeOwnContactRecord(record contactRecord) {
+	c.contactMu.RLock()
+	var local *ContactInfo
+	if c.contact != nil {
+		local = c.contact.CloneWithWallclock(c.contact.Wallclock)
+	}
+	c.contactMu.RUnlock()
+	if local == nil {
+		return
+	}
+	alpenglow := record.Sockets[socketTagAlpenglow]
+	if sameEndpointUDPAddr(record.GossipAddr, local.GossipAddr) &&
+		sameEndpointUDPAddr(record.TVUAddr, local.TVUAddr) &&
+		sameEndpointUDPAddr(alpenglow, local.AlpenglowAddr) {
+		return
+	}
+	if record.Wallclock <= local.Wallclock {
+		return // stale ContactInfo from before this process initialized
+	}
+
+	c.identityConflictMu.Lock()
+	sameInstance := record.GossipAddr == c.identityConflictGossip &&
+		record.TVUAddr == c.identityConflictTVU &&
+		alpenglow == c.identityConflictAlpenglow
+	previousWallclock := c.identityConflictWallclock
+	if !sameInstance || previousWallclock == 0 {
+		c.identityConflictGossip = record.GossipAddr
+		c.identityConflictTVU = record.TVUAddr
+		c.identityConflictAlpenglow = alpenglow
+		c.identityConflictWallclock = record.Wallclock
+		c.identityConflictMu.Unlock()
+		mlog.Log.Warnf("validator identity %s also appeared in gossip at gossip=%s tvu=%s alpenglow=%s; waiting for a newer record to confirm that the other instance is live",
+			solana.PublicKey(c.pubkey).String(), endpointString(record.GossipAddr), endpointString(record.TVUAddr), endpointString(alpenglow))
+		return
+	}
+	if record.Wallclock <= previousWallclock {
+		c.identityConflictMu.Unlock()
+		return // the same stale CRDS value echoed by another peer
+	}
+	c.identityConflictWallclock = record.Wallclock
+	c.identityConflictMu.Unlock()
+
+	err := fmt.Errorf("%w: %s is publishing conflicting endpoints (ours gossip=%s tvu=%s alpenglow=%s; other gossip=%s tvu=%s alpenglow=%s); stop the other validator before starting Mithril",
+		ErrIdentityInUse, solana.PublicKey(c.pubkey).String(), addrString(local.GossipAddr), addrString(local.TVUAddr), addrString(local.AlpenglowAddr),
+		endpointString(record.GossipAddr), endpointString(record.TVUAddr), endpointString(alpenglow))
+	select {
+	case c.identityConflictCh <- err:
+	default:
+	}
+}
+
+func endpointString(endpoint contactEndpoint) string {
+	if addr := endpoint.UDPAddr(); addr != nil {
+		return addr.String()
+	}
+	return "disabled"
+}
+
+func addrString(addr *net.UDPAddr) string {
+	if addr == nil {
+		return "disabled"
+	}
+	return addr.String()
 }
 
 func (c *Client) recordRepairPeer(contact *ContactInfo) {

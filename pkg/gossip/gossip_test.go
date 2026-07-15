@@ -3,6 +3,7 @@ package gossip
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -138,6 +139,127 @@ func TestClientAdvertisesAlpenglowSocket(t *testing.T) {
 	if got, want := contact.TPUVoteQuicAddr.String(), "203.0.113.10:8002"; got != want {
 		t.Fatalf("tpu vote quic addr = %s, want %s", got, want)
 	}
+}
+
+func TestClientConfirmsLiveDuplicateIdentityBeforeSignaling(t *testing.T) {
+	_, identity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	client, err := NewClient(Config{
+		Entrypoint:    "127.0.0.1:8000",
+		BindAddr:      "0.0.0.0:0",
+		TVUAddr:       "0.0.0.0:8001",
+		AlpenglowAddr: "0.0.0.0:8002",
+		AdvertisedIP:  "203.0.113.10",
+		ShredVersion:  4321,
+		Identity:      identity,
+	})
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	if err := client.initializeContact(&net.UDPAddr{IP: net.IPv4zero, Port: 65400}); err != nil {
+		t.Fatalf("initializeContact returned error: %v", err)
+	}
+
+	client.contactMu.RLock()
+	localWallclock := client.contact.Wallclock
+	client.contactMu.RUnlock()
+	foreign, err := NewContactInfo(
+		client.pubkey,
+		4321,
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9000},
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9001},
+	)
+	if err != nil {
+		t.Fatalf("NewContactInfo foreign returned error: %v", err)
+	}
+	if err := foreign.SetAlpenglowAddr(&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9002}); err != nil {
+		t.Fatalf("SetAlpenglowAddr foreign returned error: %v", err)
+	}
+
+	client.handleContactRecord(contactRecordFromInfo(t, foreign.CloneWithWallclock(localWallclock+1), identity), 4321)
+	select {
+	case err := <-client.identityConflictCh:
+		t.Fatalf("first foreign record must not signal a live conflict: %v", err)
+	default:
+	}
+	// Repeating the same CRDS value through another peer is not proof that its
+	// publisher is still alive.
+	client.handleContactRecord(contactRecordFromInfo(t, foreign.CloneWithWallclock(localWallclock+1), identity), 4321)
+	select {
+	case err := <-client.identityConflictCh:
+		t.Fatalf("echoed foreign record must not signal a live conflict: %v", err)
+	default:
+	}
+
+	client.handleContactRecord(contactRecordFromInfo(t, foreign.CloneWithWallclock(localWallclock+2), identity), 4321)
+	select {
+	case err := <-client.identityConflictCh:
+		if !errors.Is(err, ErrIdentityInUse) {
+			t.Fatalf("identity conflict error = %v, want ErrIdentityInUse", err)
+		}
+	default:
+		t.Fatal("newer foreign ContactInfo did not signal a live identity conflict")
+	}
+}
+
+func TestClientIgnoresEchoedAndStaleOwnContactRecords(t *testing.T) {
+	_, identity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	client, err := NewClient(Config{
+		Entrypoint:    "127.0.0.1:8000",
+		BindAddr:      "0.0.0.0:0",
+		TVUAddr:       "0.0.0.0:8001",
+		AlpenglowAddr: "0.0.0.0:8002",
+		AdvertisedIP:  "203.0.113.10",
+		ShredVersion:  4321,
+		Identity:      identity,
+	})
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	if err := client.initializeContact(&net.UDPAddr{IP: net.IPv4zero, Port: 65400}); err != nil {
+		t.Fatalf("initializeContact returned error: %v", err)
+	}
+	client.contactMu.RLock()
+	local := client.contact.CloneWithWallclock(client.contact.Wallclock + 10)
+	localWallclock := client.contact.Wallclock
+	client.contactMu.RUnlock()
+	client.handleContactRecord(contactRecordFromInfo(t, local, identity), 4321)
+
+	stale, err := NewContactInfo(client.pubkey, 4321,
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9000},
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 9001})
+	if err != nil {
+		t.Fatalf("NewContactInfo stale returned error: %v", err)
+	}
+	client.handleContactRecord(contactRecordFromInfo(t, stale.CloneWithWallclock(localWallclock), identity), 4321)
+	select {
+	case err := <-client.identityConflictCh:
+		t.Fatalf("echoed/current or stale own contact signaled conflict: %v", err)
+	default:
+	}
+	if got := len(client.currentPeers()); got != 0 {
+		t.Fatalf("own contact records entered peer table: %d", got)
+	}
+}
+
+func contactRecordFromInfo(t *testing.T, info *ContactInfo, identity ed25519.PrivateKey) contactRecord {
+	t.Helper()
+	value, err := signCrdsContactInfo(info, identity)
+	if err != nil {
+		t.Fatalf("signCrdsContactInfo returned error: %v", err)
+	}
+	var encoded encoder
+	value.encode(&encoded)
+	record, err := decodeCrdsContactRecord(newDecoder(encoded.bytes()))
+	if err != nil {
+		t.Fatalf("decodeCrdsContactRecord returned error: %v", err)
+	}
+	return record
 }
 
 func TestPingPongRoundTrip(t *testing.T) {

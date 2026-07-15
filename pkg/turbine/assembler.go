@@ -886,10 +886,18 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.maxObservedSlot <= repairObservedSlotLag {
-		return nil, nil
+	// Freshness repair deliberately trails the observed edge: broadcast/FEC
+	// should get the first chance to finish a slot before we spend repair
+	// bandwidth on it. Explicit priority pins are different. They are installed
+	// by replay for a slot that is already gating progress, and may legitimately
+	// name the newest observed slot (or an entirely absent slot ahead of it when
+	// live ingress has gone quiet). Applying the edge grace to those pins makes
+	// the catchup head impossible to repair precisely when repair is most needed.
+	haveRepairThrough := a.maxObservedSlot > repairObservedSlotLag
+	repairThrough := uint64(0)
+	if haveRepairThrough {
+		repairThrough = a.maxObservedSlot - repairObservedSlotLag
 	}
-	repairThrough := a.maxObservedSlot - repairObservedSlotLag
 	scanLag := a.edgeScanLag
 	if scanLag == 0 {
 		scanLag = repairScanSlotWindow
@@ -906,7 +914,7 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 	}
 
 	seen := make(map[uint64]struct{}, maxSlots)
-	appendRequest := func(dst []SlotRepairRequest, slot uint64, maxMissing int) []SlotRepairRequest {
+	appendRequest := func(dst []SlotRepairRequest, slot uint64, maxMissing int, priorityPin bool) []SlotRepairRequest {
 		if len(dst) >= maxSlots {
 			return dst
 		}
@@ -916,7 +924,7 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 		if _, completed := a.completedSlots[slot]; completed {
 			return dst
 		}
-		if a.slotTooOldLocked(slot) || slot > repairThrough {
+		if a.slotTooOldLocked(slot) || (!priorityPin && (!haveRepairThrough || slot > repairThrough)) {
 			return dst
 		}
 		state := a.slots[slot]
@@ -950,13 +958,13 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 		if len(priority) == 0 {
 			maxMissing = repairHeadMaxMissing
 		}
-		priority = appendRequest(priority, slot, maxMissing)
+		priority = appendRequest(priority, slot, maxMissing, true)
 		if len(priority) >= maxSlots {
 			break
 		}
 	}
-	for slot := start; slot <= repairThrough && len(edge) < maxSlots; slot++ {
-		edge = appendRequest(edge, slot, maxMissingPerSlot)
+	for slot := start; haveRepairThrough && slot <= repairThrough && len(edge) < maxSlots; slot++ {
+		edge = appendRequest(edge, slot, maxMissingPerSlot, false)
 	}
 	return priority, edge
 }
