@@ -1193,6 +1193,48 @@ func TestAlpenglowParentLinkedForkRewindsAndEmitsAlternateBranch(t *testing.T) {
 	if _, exists := bs.emittedAlpenglowBlockIDs[344]; exists {
 		t.Fatal("discarded fork identity at slot 344 survived the rewind")
 	}
+	lateWrong := &b.Block{
+		Slot:                      344,
+		FromLiveStream:            true,
+		SourceParentSlot:          343,
+		AlpenglowBlockID:          wrong344,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    parentID,
+		HasAlpenglowParentBlockID: true,
+	}
+	if !bs.isRejectedAlpenglowBlock(lateWrong) {
+		t.Fatal("discarded block identity was not tombstoned")
+	}
+	bs.reorderMu.Lock()
+	queuedReverse := bs.queueAlpenglowParentSwitchLocked(lateWrong)
+	bs.reorderMu.Unlock()
+	if queuedReverse {
+		t.Fatal("delayed discarded block reversed the accepted parent-linked switch")
+	}
+	unseenWrong := *lateWrong
+	unseenWrong.Slot = 347
+	unseenWrong.SourceParentSlot = 343
+	unseenWrong.AlpenglowBlockID = solana.Hash{0x47}
+	if !bs.isRejectedAlpenglowBlock(&unseenWrong) {
+		t.Fatal("previously unseen block inside selected skip range was not rejected")
+	}
+
+	// A later certificate naming the old identity is authoritative and must be
+	// able to override the speculative tombstone.
+	bs.SetKnownAlpenglowBlockID(344, wrong344)
+	if bs.isRejectedAlpenglowBlock(lateWrong) {
+		t.Fatal("certificate-derived block-ID hint did not clear speculative tombstone")
+	}
+	for slot := uint64(10_000); slot < 10_000+maxKnownAlpenglowBlockIDs; slot++ {
+		bs.SetKnownAlpenglowBlockID(slot, solana.Hash{byte(slot), byte(slot >> 8)})
+	}
+	bs.rejectedAlpenglowMu.RLock()
+	_, retainedOldAuthority := bs.authoritativeAlpenglowBlockIDs[344]
+	authorityCount := len(bs.authoritativeAlpenglowBlockIDs)
+	bs.rejectedAlpenglowMu.RUnlock()
+	if retainedOldAuthority || authorityCount > maxKnownAlpenglowBlockIDs {
+		t.Fatalf("authoritative tombstone overrides were not bounded with block-ID hints: retained_old=%t count=%d", retainedOldAuthority, authorityCount)
+	}
 }
 
 func TestAlpenglowParentLinkedForkRequiresExactIDAndAlpenglowMode(t *testing.T) {
@@ -1224,6 +1266,34 @@ func TestAlpenglowParentLinkedForkRequiresExactIDAndAlpenglowMode(t *testing.T) 
 	child.AlpenglowParentBlockID = solana.Hash{1}
 	if bs := newSource(false); bs.queueAlpenglowParentSwitchLocked(child) {
 		t.Fatal("classic turbine mode queued an Alpenglow speculative switch")
+	}
+}
+
+func TestAlpenglowParentLinkedForkOutsideFiniteRangeIsIgnored(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    100,
+		EndSlot:                      120,
+	})
+	parentID := solana.Hash{1}
+	bs.lastEmittedBlockSlot = 150
+	bs.emittedAlpenglowBlockIDs[125] = parentID
+	child := &b.Block{
+		Slot:                      140,
+		FromLiveStream:            true,
+		SourceParentSlot:          125,
+		AlpenglowBlockID:          solana.Hash{2},
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    parentID,
+		HasAlpenglowParentBlockID: true,
+	}
+	bs.reorderMu.Lock()
+	queued := bs.queueAlpenglowParentSwitchLocked(child)
+	bs.reorderMu.Unlock()
+	if queued {
+		t.Fatal("fork outside finite replay range queued a shutdown-racing control event")
 	}
 }
 

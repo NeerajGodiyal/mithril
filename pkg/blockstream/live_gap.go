@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
@@ -18,6 +19,11 @@ const (
 	alpenglowEmittedBlockIDHistory  = 65_536
 	alpenglowMaxParentLinkedSkipRun = 65_536
 )
+
+type alpenglowSlotRange struct {
+	from uint64 // inclusive
+	to   uint64 // exclusive
+}
 
 func (bs *BlockSource) clearLiveGapWatch() {
 	bs.lightbringerGapSlot.Store(0)
@@ -157,6 +163,9 @@ func (bs *BlockSource) liveBlockConnectsLocked(blk *b.Block) bool {
 	if blk.SourceParentSlot != bs.lastEmittedBlockSlot {
 		return false
 	}
+	if bs.isRejectedAlpenglowBlock(blk) {
+		return false
+	}
 	// Classic turbine/lightbringer blocks have only slot ancestry. In
 	// Alpenglow, use the exact parent identity whenever both sides provide it;
 	// accepting a same-slot/different-ID parent would immediately put replay
@@ -187,6 +196,122 @@ func (bs *BlockSource) recordEmittedAlpenglowBlockIDLocked(blk *b.Block) {
 	}
 }
 
+// rejectAlpenglowEmissionSuffixLocked tombstones exact identities from a
+// discarded speculative suffix. Without this, a delayed assembler result can
+// link to the same retained ancestor and reverse replay straight back onto the
+// branch it just unwound. Caller holds reorderMu.
+func (bs *BlockSource) rejectAlpenglowEmissionSuffixLocked(from uint64) {
+	bs.rejectedAlpenglowMu.Lock()
+	defer bs.rejectedAlpenglowMu.Unlock()
+	for slot, id := range bs.emittedAlpenglowBlockIDs {
+		if slot < from || id == (solana.Hash{}) {
+			continue
+		}
+		ids := bs.rejectedAlpenglowBlockIDs[slot]
+		if ids == nil {
+			ids = make(map[solana.Hash]struct{})
+			bs.rejectedAlpenglowBlockIDs[slot] = ids
+		}
+		ids[id] = struct{}{}
+	}
+	// Keep tombstones for the same bounded ancestry window as emitted IDs.
+	// They exist only when a switch occurs, so pruning here avoids per-block
+	// scans on the hot emission path.
+	bs.pruneRejectedAlpenglowLocked(bs.lastEmittedBlockSlot)
+}
+
+// rejectAlpenglowSkipRange records the slots a selected parent-linked child
+// proved absent on that speculative branch. This is stronger than tombstoning
+// only blocks already emitted: an unseen/delayed block in the chosen skip range
+// must not resurrect another branch and make replay oscillate. Certificates can
+// still authorize an exact identity through allowRejectedAlpenglowBlockID.
+func (bs *BlockSource) rejectAlpenglowSkipRange(from, to uint64) {
+	if from == 0 || to <= from {
+		return
+	}
+	bs.rejectedAlpenglowMu.Lock()
+	bs.rejectedAlpenglowSkipRanges = append(bs.rejectedAlpenglowSkipRanges, alpenglowSlotRange{from: from, to: to})
+	sort.Slice(bs.rejectedAlpenglowSkipRanges, func(i, j int) bool {
+		return bs.rejectedAlpenglowSkipRanges[i].from < bs.rejectedAlpenglowSkipRanges[j].from
+	})
+	merged := bs.rejectedAlpenglowSkipRanges[:0]
+	for _, r := range bs.rejectedAlpenglowSkipRanges {
+		if len(merged) == 0 || r.from > merged[len(merged)-1].to {
+			merged = append(merged, r)
+			continue
+		}
+		if r.to > merged[len(merged)-1].to {
+			merged[len(merged)-1].to = r.to
+		}
+	}
+	bs.rejectedAlpenglowSkipRanges = merged
+	bs.pruneRejectedAlpenglowLocked(bs.lastEmittedBlockSlot)
+	bs.rejectedAlpenglowMu.Unlock()
+}
+
+func (bs *BlockSource) pruneRejectedAlpenglowLocked(tip uint64) {
+	if tip <= alpenglowEmittedBlockIDHistory {
+		return
+	}
+	floor := tip - alpenglowEmittedBlockIDHistory
+	for slot := range bs.rejectedAlpenglowBlockIDs {
+		if slot < floor {
+			delete(bs.rejectedAlpenglowBlockIDs, slot)
+		}
+	}
+	for slot := range bs.authoritativeAlpenglowBlockIDs {
+		if slot < floor {
+			delete(bs.authoritativeAlpenglowBlockIDs, slot)
+		}
+	}
+	kept := bs.rejectedAlpenglowSkipRanges[:0]
+	for _, r := range bs.rejectedAlpenglowSkipRanges {
+		if r.to <= floor {
+			continue
+		}
+		if r.from < floor {
+			r.from = floor
+		}
+		kept = append(kept, r)
+	}
+	bs.rejectedAlpenglowSkipRanges = kept
+}
+
+func (bs *BlockSource) isRejectedAlpenglowBlock(blk *b.Block) bool {
+	if blk == nil || !bs.turbineAlpenglowBlockIDHints || !blk.HasAlpenglowBlockID {
+		return false
+	}
+	id := solana.Hash(blk.AlpenglowBlockID)
+	bs.rejectedAlpenglowMu.RLock()
+	if allowed, ok := bs.authoritativeAlpenglowBlockIDs[blk.Slot]; ok && allowed == id {
+		bs.rejectedAlpenglowMu.RUnlock()
+		return false
+	}
+	_, rejected := bs.rejectedAlpenglowBlockIDs[blk.Slot][id]
+	if !rejected {
+		for _, r := range bs.rejectedAlpenglowSkipRanges {
+			if blk.Slot >= r.from && blk.Slot < r.to {
+				rejected = true
+				break
+			}
+		}
+	}
+	bs.rejectedAlpenglowMu.RUnlock()
+	return rejected
+}
+
+func (bs *BlockSource) allowRejectedAlpenglowBlockID(slot uint64, id solana.Hash) {
+	bs.rejectedAlpenglowMu.Lock()
+	bs.authoritativeAlpenglowBlockIDs[slot] = id
+	if ids := bs.rejectedAlpenglowBlockIDs[slot]; ids != nil {
+		delete(ids, id)
+		if len(ids) == 0 {
+			delete(bs.rejectedAlpenglowBlockIDs, slot)
+		}
+	}
+	bs.rejectedAlpenglowMu.Unlock()
+}
+
 // synthesizeAlpenglowParentLinkedSkipsLocked advances over a missing slot run
 // only when a later turbine block carries an exact Alpenglow parent block ID
 // matching the last emitted block. The inference is deliberately provisional:
@@ -205,6 +330,9 @@ func (bs *BlockSource) synthesizeAlpenglowParentLinkedSkipsLocked() bool {
 	var child *b.Block
 	for slot, candidate := range bs.reorderBuffer {
 		if slot <= waitingSlot || candidate == nil || !candidate.HasAlpenglowBlockID || !candidate.HasAlpenglowParentBlockID {
+			continue
+		}
+		if bs.isRejectedAlpenglowBlock(candidate) {
 			continue
 		}
 		if candidate.SourceParentSlot != bs.lastEmittedBlockSlot || solana.Hash(candidate.AlpenglowParentBlockID) != bs.lastEmittedAlpenglowBlockID {
@@ -291,6 +419,16 @@ func (bs *BlockSource) queueAlpenglowParentSwitchLocked(blk *b.Block) bool {
 	if blk.SourceParentSlot == 0 || blk.SourceParentSlot >= bs.lastEmittedBlockSlot || blk.SourceParentSlot >= blk.Slot {
 		return false
 	}
+	// Finite replay uses an exclusive end frontier. A far-ahead live child may
+	// expose a fork wholly outside that requested range while the scheduler is
+	// already shutting down; it is irrelevant to this run and must not race the
+	// source channel closure.
+	if bs.endSlot != 0 && blk.SourceParentSlot+1 >= bs.endSlot {
+		return false
+	}
+	if bs.isRejectedAlpenglowBlock(blk) {
+		return false
+	}
 	parentID, ok := bs.emittedAlpenglowBlockIDs[blk.SourceParentSlot]
 	if !ok || parentID != solana.Hash(blk.AlpenglowParentBlockID) {
 		return false
@@ -348,6 +486,9 @@ func (bs *BlockSource) queueBufferedAlpenglowParentSwitchLocked() bool {
 			!candidate.FromLiveStream || !candidate.HasAlpenglowBlockID || !candidate.HasAlpenglowParentBlockID ||
 			candidate.SourceParentSlot == 0 || candidate.SourceParentSlot >= bs.lastEmittedBlockSlot ||
 			candidate.SourceParentSlot >= candidate.Slot {
+			continue
+		}
+		if bs.isRejectedAlpenglowBlock(candidate) {
 			continue
 		}
 		parentID, ok := bs.emittedAlpenglowBlockIDs[candidate.SourceParentSlot]

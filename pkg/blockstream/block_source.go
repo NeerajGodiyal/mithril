@@ -315,6 +315,10 @@ type BlockSource struct {
 	hasLastEmittedAlpenglowBlockID bool
 	emittedAlpenglowBlockIDs       map[uint64]solana.Hash
 	emittedAlpenglowBlockIDOrder   []uint64
+	rejectedAlpenglowMu            sync.RWMutex
+	rejectedAlpenglowBlockIDs      map[uint64]map[solana.Hash]struct{}
+	rejectedAlpenglowSkipRanges    []alpenglowSlotRange
+	authoritativeAlpenglowBlockIDs map[uint64]solana.Hash
 	alpenglowParentSwitchCh        chan AlpenglowParentSwitch
 	pendingAlpenglowParentSwitch   *AlpenglowParentSwitch // guarded by reorderMu
 	maxPending                     int
@@ -656,56 +660,58 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	bs := &BlockSource{
-		rpcClients:                   rpcClients,
-		streamChan:                   make(chan *b.Block, streamChanBuffer),
-		startSlot:                    opts.StartSlot,
-		endSlot:                      opts.EndSlot,
-		currentSlot:                  opts.StartSlot,
-		blockDir:                     opts.BlockDir,
-		sourceType:                   opts.SourceType,
-		rateLimiter:                  rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
-		maxInflight:                  maxInflight,
-		tipSafetyMargin:              tipSafetyMargin,
-		tipPollInterval:              time.Duration(tipPollMs) * time.Millisecond,
-		reorderBuffer:                make(map[uint64]*b.Block),
-		skippedSlots:                 make(map[uint64]bool),
-		liveSynthesizedSkips:         make(map[uint64]bool),
-		alpenglowCertifiedSkips:      make(map[uint64]bool),
-		emittedAlpenglowBlockIDs:     make(map[uint64]solana.Hash),
-		alpenglowParentSwitchCh:      make(chan AlpenglowParentSwitch, 1),
-		nextSlotToSend:               opts.StartSlot,
-		maxPending:                   defaultMaxPending,
-		slotState:                    make(map[uint64]slotStatus),
-		inflightStart:                make(map[uint64]time.Time),
-		workQueue:                    make(chan uint64, maxInflight*2),
-		resultQueue:                  make(chan fetchResult, maxInflight*2),
-		stopChan:                     make(chan struct{}),
-		stallTimeout:                 defaultStallTimeout,
-		catchupTipSafety:             tipSafetyMargin, // Store original for switching back to catchup
-		lightbringerEndpoint:         opts.LightbringerEndpoint,
-		turbineBindAddr:              opts.TurbineBindAddr,
-		repairCatchupMaxGapSlots:     opts.RepairCatchupMaxGapSlots,
-		repairMaxRequestsPerSecond:   opts.RepairMaxRequestsPerSecond,
-		shredSpoolDir:                opts.ShredSpoolDir,
-		rpcFallbackEnabled:           !opts.DisableRPCBlockFetch,
-		turbineGossipEntrypoint:      opts.TurbineGossipEntrypoint,
-		turbineGossipBindAddr:        opts.TurbineGossipBindAddr,
-		turbineAdvertisedIP:          opts.TurbineAdvertisedIP,
-		turbineShredVersion:          opts.TurbineShredVersion,
-		turbineAlpenglowAddr:         opts.TurbineAlpenglowAddr,
-		turbineAlpenglowBlockIDHints: opts.TurbineAlpenglowBlockIDHints,
-		turbineIdentity:              clonePrivateKey(opts.TurbineIdentity),
-		leaderForSlot:                opts.LeaderForSlot,
-		localLeaderForSlot:           opts.LocalLeaderForSlot,
-		localBlocks:                  opts.LocalBlocks,
-		gossipClient:                 opts.GossipClient,
-		alpenglowDecisionSource:      opts.AlpenglowDecisionSource,
-		alpenglowCandidateBlockSink:  opts.AlpenglowCandidateBlockSink,
-		alpenglowFooterCertSink:      opts.AlpenglowFooterCertSink,
-		alpenglowWantedBlocksFn:      opts.AlpenglowWantedBlocks,
-		alpenglowSkipCertifiedFn:     opts.AlpenglowSkipCertified,
-		liveStagingBuffer:            make(map[uint64]*b.Block),
-		knownAlpenglowBlockIDs:       make(map[uint64]solana.Hash),
+		rpcClients:                     rpcClients,
+		streamChan:                     make(chan *b.Block, streamChanBuffer),
+		startSlot:                      opts.StartSlot,
+		endSlot:                        opts.EndSlot,
+		currentSlot:                    opts.StartSlot,
+		blockDir:                       opts.BlockDir,
+		sourceType:                     opts.SourceType,
+		rateLimiter:                    rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
+		maxInflight:                    maxInflight,
+		tipSafetyMargin:                tipSafetyMargin,
+		tipPollInterval:                time.Duration(tipPollMs) * time.Millisecond,
+		reorderBuffer:                  make(map[uint64]*b.Block),
+		skippedSlots:                   make(map[uint64]bool),
+		liveSynthesizedSkips:           make(map[uint64]bool),
+		alpenglowCertifiedSkips:        make(map[uint64]bool),
+		emittedAlpenglowBlockIDs:       make(map[uint64]solana.Hash),
+		rejectedAlpenglowBlockIDs:      make(map[uint64]map[solana.Hash]struct{}),
+		authoritativeAlpenglowBlockIDs: make(map[uint64]solana.Hash),
+		alpenglowParentSwitchCh:        make(chan AlpenglowParentSwitch, 1),
+		nextSlotToSend:                 opts.StartSlot,
+		maxPending:                     defaultMaxPending,
+		slotState:                      make(map[uint64]slotStatus),
+		inflightStart:                  make(map[uint64]time.Time),
+		workQueue:                      make(chan uint64, maxInflight*2),
+		resultQueue:                    make(chan fetchResult, maxInflight*2),
+		stopChan:                       make(chan struct{}),
+		stallTimeout:                   defaultStallTimeout,
+		catchupTipSafety:               tipSafetyMargin, // Store original for switching back to catchup
+		lightbringerEndpoint:           opts.LightbringerEndpoint,
+		turbineBindAddr:                opts.TurbineBindAddr,
+		repairCatchupMaxGapSlots:       opts.RepairCatchupMaxGapSlots,
+		repairMaxRequestsPerSecond:     opts.RepairMaxRequestsPerSecond,
+		shredSpoolDir:                  opts.ShredSpoolDir,
+		rpcFallbackEnabled:             !opts.DisableRPCBlockFetch,
+		turbineGossipEntrypoint:        opts.TurbineGossipEntrypoint,
+		turbineGossipBindAddr:          opts.TurbineGossipBindAddr,
+		turbineAdvertisedIP:            opts.TurbineAdvertisedIP,
+		turbineShredVersion:            opts.TurbineShredVersion,
+		turbineAlpenglowAddr:           opts.TurbineAlpenglowAddr,
+		turbineAlpenglowBlockIDHints:   opts.TurbineAlpenglowBlockIDHints,
+		turbineIdentity:                clonePrivateKey(opts.TurbineIdentity),
+		leaderForSlot:                  opts.LeaderForSlot,
+		localLeaderForSlot:             opts.LocalLeaderForSlot,
+		localBlocks:                    opts.LocalBlocks,
+		gossipClient:                   opts.GossipClient,
+		alpenglowDecisionSource:        opts.AlpenglowDecisionSource,
+		alpenglowCandidateBlockSink:    opts.AlpenglowCandidateBlockSink,
+		alpenglowFooterCertSink:        opts.AlpenglowFooterCertSink,
+		alpenglowWantedBlocksFn:        opts.AlpenglowWantedBlocks,
+		alpenglowSkipCertifiedFn:       opts.AlpenglowSkipCertified,
+		liveStagingBuffer:              make(map[uint64]*b.Block),
+		knownAlpenglowBlockIDs:         make(map[uint64]solana.Hash),
 
 		// Configurable mode thresholds
 		nearTipThreshold:    uint64(nearTipThreshold),
@@ -784,8 +790,12 @@ func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash
 	if !bs.turbineAlpenglowBlockIDHints || slot == 0 || blockID == (solana.Hash{}) {
 		return
 	}
+	// Certificate-derived block-ID hints are authoritative and may legitimately
+	// revive an identity rejected by an earlier speculative branch selection.
+	bs.allowRejectedAlpenglowBlockID(slot, blockID)
 
 	bs.alpenglowMu.Lock()
+	var evictedKnownSlots []uint64
 	if existing, ok := bs.knownAlpenglowBlockIDs[slot]; !ok {
 		bs.knownAlpenglowBlockIDOrder = append(bs.knownAlpenglowBlockIDOrder, slot)
 	} else if existing == blockID {
@@ -801,9 +811,19 @@ func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash
 		old := bs.knownAlpenglowBlockIDOrder[0]
 		bs.knownAlpenglowBlockIDOrder = bs.knownAlpenglowBlockIDOrder[1:]
 		delete(bs.knownAlpenglowBlockIDs, old)
+		evictedKnownSlots = append(evictedKnownSlots, old)
 	}
 	receiver := bs.activeTurbineReceiver
 	bs.alpenglowMu.Unlock()
+	if len(evictedKnownSlots) > 0 {
+		// Authoritative tombstone overrides need no longer lifetime than the
+		// corresponding bounded block-ID hint cache.
+		bs.rejectedAlpenglowMu.Lock()
+		for _, old := range evictedKnownSlots {
+			delete(bs.authoritativeAlpenglowBlockIDs, old)
+		}
+		bs.rejectedAlpenglowMu.Unlock()
+	}
 
 	if receiver != nil {
 		receiver.SetKnownAlpenglowBlockID(slot, blockID)
@@ -1842,6 +1862,7 @@ func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Ha
 	if bs.nextSlotToSend > slot {
 		bs.nextSlotToSend = slot
 	}
+	bs.rejectAlpenglowEmissionSuffixLocked(slot)
 	bs.rewindAlpenglowEmissionAnchorLocked(slot)
 	for bufferedSlot := range bs.reorderBuffer {
 		if bufferedSlot >= slot {
@@ -1894,7 +1915,7 @@ func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Ha
 // already-buffered descendants are retained; the discarded source suffix is
 // cleared and ordered emission is kicked from the restored parent anchor.
 func (bs *BlockSource) RewindForAlpenglowParentSwitch(event AlpenglowParentSwitch) bool {
-	if event.SwitchSlot == 0 || event.ParentSlot+1 != event.SwitchSlot || event.ChildSlot < event.SwitchSlot {
+	if bs.stopped.Load() || event.SwitchSlot == 0 || event.ParentSlot+1 != event.SwitchSlot || event.ChildSlot < event.SwitchSlot {
 		return false
 	}
 
@@ -1916,6 +1937,8 @@ func (bs *BlockSource) RewindForAlpenglowParentSwitch(event AlpenglowParentSwitc
 
 	discardedTip := bs.lastEmittedBlockSlot
 	bs.nextSlotToSend = event.SwitchSlot
+	bs.rejectAlpenglowEmissionSuffixLocked(event.SwitchSlot)
+	bs.rejectAlpenglowSkipRange(event.SwitchSlot, event.ChildSlot)
 	bs.rewindAlpenglowEmissionAnchorLocked(event.SwitchSlot)
 	for slot := range bs.reorderBuffer {
 		if slot >= event.SwitchSlot && slot < event.ChildSlot {
@@ -2624,15 +2647,30 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 
 			if waitingSlot, observedParentSlot, expectedParentSlot, mismatch := bs.waitingLiveParentMismatchLocked(); mismatch {
+				candidate := bs.reorderBuffer[waitingSlot]
+				if bs.isRejectedAlpenglowBlock(candidate) {
+					// A delayed assembly from a branch replay already discarded must
+					// not reverse that switch. Remove only the source candidate; a
+					// later parent-linked child or certificate decides whether this
+					// slot is skipped or has another block identity.
+					delete(bs.reorderBuffer, waitingSlot)
+					bs.slotStateMu.Lock()
+					delete(bs.slotState, waitingSlot)
+					delete(bs.inflightStart, waitingSlot)
+					bs.slotStateMu.Unlock()
+					bs.clearSlotErrors(waitingSlot)
+					mlog.Log.Warnf("ALPENGLOW rejected branch: dropping delayed block %s at slot %d so it cannot reverse an accepted speculative switch",
+						solana.Hash(candidate.AlpenglowBlockID), waitingSlot)
+					continue
+				}
 				// A complete Alpenglow child can expose a fork only after we have
 				// emitted its competing suffix. Exact block-ID ancestry is enough
 				// to choose that coherent branch speculatively, but replay owns the
 				// account-state unwind. Hold child and wake replay through the
 				// control channel; certificates can still override this branch.
-				if bs.queueAlpenglowParentSwitchLocked(bs.reorderBuffer[waitingSlot]) {
+				if bs.queueAlpenglowParentSwitchLocked(candidate) {
 					break
 				}
-				candidate := bs.reorderBuffer[waitingSlot]
 				if bs.turbineAlpenglowBlockIDHints && observedParentSlot == expectedParentSlot &&
 					candidate != nil && candidate.HasAlpenglowParentBlockID && bs.hasLastEmittedAlpenglowBlockID {
 					// Same parent SLOT but a different parent ID is a stale sibling
