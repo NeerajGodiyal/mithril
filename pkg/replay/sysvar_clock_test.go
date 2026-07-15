@@ -134,6 +134,35 @@ func TestUpdateClockSysvarFromAlpenglowFooterAppliesFooterTimestamp(t *testing.T
 	require.Equal(t, blk.UnixTimestamp, clock.UnixTimestamp)
 }
 
+func TestUpdateClockSysvarFromAlpenglowFooterDerivesTimestampFromFooterNanos(t *testing.T) {
+	bankEpochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch:            54000,
+		LeaderScheduleSlotOffset: 54000,
+	}
+	clock := &sealevel.SysvarClock{
+		Slot:                2751721,
+		Epoch:               50,
+		LeaderScheduleEpoch: 51,
+		EpochStartTimestamp: 1779232800,
+		UnixTimestamp:       1779232849,
+	}
+	blk := &block.Block{
+		Slot:                    2751722,
+		ParentSlot:              2751721,
+		Epoch:                   50,
+		FooterProducerTimeNanos: 1779232900_987654321,
+	}
+
+	err := updateClockSysvarFromAlpenglowFooter(clock, blk, bankEpochSchedule)
+	require.NoError(t, err)
+
+	require.Equal(t, blk.Slot, clock.Slot)
+	require.Equal(t, blk.Epoch, clock.Epoch)
+	require.Equal(t, uint64(51), clock.LeaderScheduleEpoch)
+	require.Equal(t, int64(1779232800), clock.EpochStartTimestamp)
+	require.Equal(t, int64(1779232900), clock.UnixTimestamp)
+}
+
 func TestUpdateClockSysvarRejectsMismatchedEpochFrame(t *testing.T) {
 	clock := &sealevel.SysvarClock{Slot: 463624424, Epoch: 1073}
 	blk := &block.Block{Slot: 463624425, Epoch: 56592}
@@ -190,7 +219,7 @@ func TestUpdateClockSysvarForModeUsesStakeWeightedEstimate(t *testing.T) {
 	require.Equal(t, int64(1000), clock.EpochStartTimestamp)
 }
 
-// UnixTimestamp==0 marks "no footer time", so the footer update must be a no-op.
+// Both footer timestamp fields being zero marks "no footer time", so the update must be a no-op.
 func TestUpdateClockSysvarFromAlpenglowFooterNoOpWhenNoFooterTimestamp(t *testing.T) {
 	bankEpochSchedule := &sealevel.SysvarEpochSchedule{
 		SlotsPerEpoch:            54000,

@@ -112,7 +112,9 @@ func cloneBLSCompressed(src *[48]byte) *[48]byte {
 // applyAlpenglowFooterClock rewrites the Clock sysvar from the block footer's
 // timestamp (Alpenglow uses the footer time, not the estimated PoH time).
 func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
-	if block.UnixTimestamp == 0 {
+	if _, ok, err := alpenglowFooterUnixTimestamp(block); err != nil {
+		return err
+	} else if !ok {
 		return nil
 	}
 

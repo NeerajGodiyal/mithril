@@ -82,3 +82,29 @@ func TestApplyAlpenglowFooterClockRewritesClockFromFooter(t *testing.T) {
 	require.Equal(t, blk.UnixTimestamp, decoded.UnixTimestamp)
 	require.Equal(t, blk.Slot, decoded.Slot)
 }
+
+func TestApplyAlpenglowFooterClockPersistsFooterNanosTimestamp(t *testing.T) {
+	snapshotClockCache(t)
+
+	clock := sealevel.SysvarClock{Slot: 100, Epoch: 5, LeaderScheduleEpoch: 6, EpochStartTimestamp: 1000, UnixTimestamp: 1050}
+	slotCtx := newClockSlotCtx(t, clock)
+	blk := &block.Block{
+		Slot:                    2160010,
+		ParentSlot:              2160009,
+		Epoch:                   5,
+		FooterProducerTimeNanos: 1779999999_987654321,
+	}
+	sched := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 432000, LeaderScheduleSlotOffset: 432000}
+
+	require.NoError(t, applyAlpenglowFooterClock(slotCtx, blk, sched))
+
+	require.NotNil(t, sealevel.SysvarCache.Clock.Sysvar)
+	require.Equal(t, int64(1779999999), sealevel.SysvarCache.Clock.Sysvar.UnixTimestamp)
+
+	stored, err := slotCtx.GetAccount(sealevel.SysvarClockAddr)
+	require.NoError(t, err)
+	var decoded sealevel.SysvarClock
+	require.NoError(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(stored.Data)))
+	require.Equal(t, int64(1779999999), decoded.UnixTimestamp)
+	require.Equal(t, blk.Slot, decoded.Slot)
+}

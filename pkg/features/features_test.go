@@ -55,6 +55,12 @@ func TestEnableSbpfV3DeploymentAndExecutionFeatureGates(t *testing.T) {
 	assert.True(t, f.IsSbpfV3DeploymentAndExecutionActive())
 }
 
+func TestAlpenglowFeatureGate(t *testing.T) {
+	assert.Equal(t, "Alpenglow", Alpenglow.Name)
+	assert.Equal(t, base58.MustDecodeFromString("a1penGLz8Vm2QHYB3JPefBiU4BY3Z6JkW2k3Scw5GWP"), Alpenglow.Address)
+	assert.Contains(t, AllFeatureGates, Alpenglow)
+}
+
 func TestSyscallParameterAddressRestrictionsFeatureGate(t *testing.T) {
 	assert.Equal(t, "SyscallParameterAddressRestrictions", SyscallParameterAddressRestrictions.Name)
 	assert.Equal(t, base58.MustDecodeFromString("EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF"), SyscallParameterAddressRestrictions.Address)
