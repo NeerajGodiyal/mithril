@@ -12,10 +12,10 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// The trailing verifier is the execution-correctness oracle of the fold
-// pipeline. Alpenglow certificates attest a block's DATA (block_id), never
-// the results of executing it — so after TowerBFT's voted-bankhash check was
-// removed, nothing in consensus can catch a mithril-side execution bug. The
+// The trailing verifier is the verifying mode's external execution oracle.
+// Full validator mode does not use RPC block data: it executes blocks locally
+// and checks the bank hash in the certified block footer before voting/folding.
+// For a non-voting verifying node, the
 // verifier re-derives each executed slot's per-transaction results from RPC
 // getBlock metadata (finalized commitment) a configurable lag behind the tip
 // and compares against the slot digests replay recorded. The fold watermark
@@ -32,10 +32,11 @@ import (
 
 // VerifierConfig configures the trailing verifier ([verifier] section).
 type VerifierConfig struct {
-	Enabled  bool
-	LagSlots uint64 // don't attempt verification until executedTip - LagSlots
-	MaxRPS   int    // verifier's own RPC budget (never shares block fetch)
-	Required bool   // gate folds on the verified watermark
+	Enabled             bool
+	LagSlots            uint64 // don't attempt verification until executedTip - LagSlots
+	MaxRPS              int    // verifier's own RPC budget (never shares block fetch)
+	Required            bool   // gate folds on the verified watermark
+	ValidatorFooterHash bool   // validator mode uses certified footer/local bank-hash parity, never RPC blocks
 }
 
 // TrailingVerifierDefaults returns the default configuration: enabled,

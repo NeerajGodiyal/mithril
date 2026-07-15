@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
@@ -17,6 +18,34 @@ import (
 const (
 	maxRecentAlpenglowBlockIDs          = 8192
 	alpenglowVoteVerifySamplesPerWindow = 16
+	maxVerifiedVotorCertificates        = 8192
+	maxVerifiedVotorVotes               = 16384
+)
+
+type certificateAttemptKey struct {
+	key       alpenglow.CertificateKey
+	signature [sha256.Size]byte
+	bitmap    [sha256.Size]byte
+}
+
+type certificateVerification struct {
+	done     chan struct{}
+	verified alpenglow.Certificate
+	result   alpenglow.CertificateVerifyResult
+	err      error
+}
+
+type voteAttemptKey struct {
+	key       alpenglow.VoteMessageKey
+	signature [sha256.Size]byte
+}
+
+type verificationDisposition uint8
+
+const (
+	verificationFresh verificationDisposition = iota
+	verificationCached
+	verificationInFlight
 )
 
 type BlockObservation struct {
@@ -179,8 +208,23 @@ type AlpenglowObserverEngine struct {
 	voteVerifyNoSet         uint64
 	lastVoteVerifyLog       time.Time
 	lastVoteVerifyErr       string
-	votorMessageHookMu      sync.RWMutex
-	votorMessageHook        func(alpenglow.Message)
+	// Votor messages are redundantly broadcast by many QUIC peers. Collapse
+	// identical in-flight work and retain only successful logical
+	// verifications: invalid material can never poison a later valid
+	// certificate/vote for the same slot and hash.
+	verificationMu           sync.Mutex
+	verifiedCertificates     map[alpenglow.CertificateKey]alpenglow.Certificate
+	verifiedCertificateOrder []alpenglow.CertificateKey
+	certificateInFlight      map[certificateAttemptKey]*certificateVerification
+	verifiedVotes            map[alpenglow.VoteMessageKey]alpenglow.VoteVerifyResult
+	verifiedVoteOrder        []alpenglow.VoteMessageKey
+	voteInFlight             map[voteAttemptKey]struct{}
+	certificateCacheHits     atomic.Uint64
+	certificateInflightDrops atomic.Uint64
+	voteCacheHits            atomic.Uint64
+	voteInflightDrops        atomic.Uint64
+	votorMessageHookMu       sync.RWMutex
+	votorMessageHook         func(alpenglow.Message)
 }
 
 // SetVotorMessageHook registers an additional consumer for inbound Votor
@@ -209,7 +253,7 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 		BindAddr:        e.receiverBindAddr,
 		MaxMessageBytes: e.receiverMaxMessageBytes,
 		ShredVersion:    e.shredVersion,
-		OnMessage:       e.observeVotorMessage,
+		AdmitMessage:    e.admitVotorMessage,
 	}, observer)
 	if err != nil {
 		return err
@@ -313,6 +357,19 @@ func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDS
 }
 
 func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
+	msg, admitted := e.admitVotorMessage(msg)
+	if admitted {
+		_, _ = e.ensureObserver().ObserveMessage(msg)
+	}
+}
+
+// admitVotorMessage is the trust boundary between wire decoding and observer
+// state. The Votor overlay sends the same certificate/vote over many peer
+// connections; expensive BLS work is single-flighted and successful results
+// are cached by their logical key. The attempt key also hashes the untrusted
+// signature/bitmap, so an invalid packet cannot suppress different, valid
+// material for the same certificate.
+func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpenglow.Message, bool) {
 	e.votorMessageHookMu.RLock()
 	hook := e.votorMessageHook
 	e.votorMessageHookMu.RUnlock()
@@ -321,27 +378,34 @@ func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 		// must never see unauthenticated signatures. The consensus cert pool keeps
 		// its own batched verification path below.
 		if hook != nil && (msg.Vote.Vote.Type == alpenglow.VoteTypeSkip || msg.Vote.Vote.Type == alpenglow.VoteTypeNotarize) {
-			if _, err := e.verifyVoteMessage(*msg.Vote); err == nil {
+			_, disposition, err := e.verifyVoteMessageCollapsed(*msg.Vote)
+			if err == nil && disposition == verificationFresh {
 				hook(msg)
 			}
 		}
 		// The cert pool owns vote verification now (lazy, batched); the old
 		// per-window sampling verifier is redundant with it.
-		e.certPool.AddVote(*msg.Vote)
+		if e.certPool != nil {
+			e.certPool.AddVote(*msg.Vote)
+		}
 	}
 	if msg.Certificate != nil {
-		verified, result, err := e.verifyCertificate(*msg.Certificate)
+		verified, result, disposition, err := e.verifyCertificateCollapsed(*msg.Certificate, false)
+		if disposition != verificationFresh {
+			return alpenglow.Message{}, false
+		}
 		if err != nil {
 			e.logCertificateVerifyDrop(*msg.Certificate, result, err)
 			e.deferCertIfStakesMissing(*msg.Certificate, err)
-			return
+			return alpenglow.Message{}, false
 		} else if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
 			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid certificate: %v", err)
-			return
+			return alpenglow.Message{}, false
 		}
 		msg.Certificate = &verified
 	}
 	e.observeVotorBlockID(msg)
+	return msg, true
 }
 
 // ObserveFooterCertificates verifies and ingests certificates decoded from a block
@@ -355,7 +419,11 @@ func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Ce
 	notarized := make(map[uint64]alpenglow.BlockID)
 	finalizeSlots := make(map[uint64]struct{})
 	for _, cert := range certs {
-		verified, result, err := e.verifyCertificate(cert)
+		// A footer may race the same certificate arriving over Votor QUIC.
+		// Wait for that exact in-flight verification instead of duplicating the
+		// pairing work; cached certificates still participate in this footer's
+		// finalized-block result below.
+		verified, result, _, err := e.verifyCertificateCollapsed(cert, true)
 		if err != nil {
 			e.logCertificateVerifyDrop(cert, result, err)
 			e.deferCertIfStakesMissing(cert, err)
@@ -601,11 +669,117 @@ func (e *AlpenglowObserverEngine) verifyCertificate(cert alpenglow.Certificate) 
 	return e.ensureVerifier().VerifyCertificate(cert)
 }
 
+func (e *AlpenglowObserverEngine) verifyCertificateCollapsed(cert alpenglow.Certificate, wait bool) (alpenglow.Certificate, alpenglow.CertificateVerifyResult, verificationDisposition, error) {
+	logical := cert.Key()
+	attempt := certificateAttemptKey{
+		key:       logical,
+		signature: sha256.Sum256(cert.Signature),
+		bitmap:    sha256.Sum256(cert.Bitmap),
+	}
+
+	e.verificationMu.Lock()
+	if verified, ok := e.verifiedCertificates[logical]; ok {
+		e.certificateCacheHits.Add(1)
+		e.verificationMu.Unlock()
+		return verified, certificateResultFromVerified(verified), verificationCached, nil
+	}
+	if pending := e.certificateInFlight[attempt]; pending != nil {
+		e.certificateInflightDrops.Add(1)
+		e.verificationMu.Unlock()
+		if !wait {
+			return alpenglow.Certificate{}, alpenglow.CertificateVerifyResult{}, verificationInFlight, nil
+		}
+		<-pending.done
+		return pending.verified, pending.result, verificationCached, pending.err
+	}
+	if e.certificateInFlight == nil {
+		e.certificateInFlight = make(map[certificateAttemptKey]*certificateVerification)
+	}
+	pending := &certificateVerification{done: make(chan struct{})}
+	e.certificateInFlight[attempt] = pending
+	e.verificationMu.Unlock()
+
+	verified, result, err := e.verifyCertificate(cert)
+
+	e.verificationMu.Lock()
+	pending.verified, pending.result, pending.err = verified, result, err
+	delete(e.certificateInFlight, attempt)
+	if err == nil {
+		if e.verifiedCertificates == nil {
+			e.verifiedCertificates = make(map[alpenglow.CertificateKey]alpenglow.Certificate)
+		}
+		if _, exists := e.verifiedCertificates[logical]; !exists {
+			e.verifiedCertificateOrder = append(e.verifiedCertificateOrder, logical)
+		}
+		e.verifiedCertificates[logical] = verified
+		for len(e.verifiedCertificates) > maxVerifiedVotorCertificates {
+			old := e.verifiedCertificateOrder[0]
+			e.verifiedCertificateOrder = e.verifiedCertificateOrder[1:]
+			delete(e.verifiedCertificates, old)
+		}
+	}
+	close(pending.done)
+	e.verificationMu.Unlock()
+	return verified, result, verificationFresh, err
+}
+
+func certificateResultFromVerified(cert alpenglow.Certificate) alpenglow.CertificateVerifyResult {
+	return alpenglow.CertificateVerifyResult{
+		IncludedStake:     cert.IncludedStake,
+		TotalStake:        cert.TotalStake,
+		StakeVerified:     cert.StakeVerified,
+		SignatureVerified: cert.SignatureVerified,
+	}
+}
+
 func (e *AlpenglowObserverEngine) verifyVoteMessage(msg alpenglow.VoteMessage) (alpenglow.VoteVerifyResult, error) {
 	if epoch, ok := e.alpenglowEpochForSlot(msg.Vote.Slot); ok {
 		return e.ensureVerifier().VerifyVoteMessageForEpoch(epoch, msg)
 	}
 	return e.ensureVerifier().VerifyVoteMessage(msg)
+}
+
+func (e *AlpenglowObserverEngine) verifyVoteMessageCollapsed(msg alpenglow.VoteMessage) (alpenglow.VoteVerifyResult, verificationDisposition, error) {
+	logical := msg.Key()
+	attempt := voteAttemptKey{key: logical, signature: sha256.Sum256(msg.Signature)}
+
+	e.verificationMu.Lock()
+	if result, ok := e.verifiedVotes[logical]; ok {
+		e.voteCacheHits.Add(1)
+		e.verificationMu.Unlock()
+		return result, verificationCached, nil
+	}
+	if _, ok := e.voteInFlight[attempt]; ok {
+		e.voteInflightDrops.Add(1)
+		e.verificationMu.Unlock()
+		return alpenglow.VoteVerifyResult{}, verificationInFlight, nil
+	}
+	if e.voteInFlight == nil {
+		e.voteInFlight = make(map[voteAttemptKey]struct{})
+	}
+	e.voteInFlight[attempt] = struct{}{}
+	e.verificationMu.Unlock()
+
+	result, err := e.verifyVoteMessage(msg)
+
+	e.verificationMu.Lock()
+	delete(e.voteInFlight, attempt)
+	if err == nil {
+		if e.verifiedVotes == nil {
+			e.verifiedVotes = make(map[alpenglow.VoteMessageKey]alpenglow.VoteVerifyResult)
+		}
+		if _, exists := e.verifiedVotes[logical]; !exists {
+			e.verifiedVoteOrder = append(e.verifiedVoteOrder, logical)
+		}
+		e.verifiedVotes[logical] = result
+		for len(e.verifiedVotes) > maxVerifiedVotorVotes {
+			old := e.verifiedVoteOrder[0]
+			e.verifiedVoteOrder = e.verifiedVoteOrder[1:]
+			delete(e.verifiedVotes, old)
+		}
+	}
+	e.verificationMu.Unlock()
+	return result, verificationFresh, err
 }
 
 func (e *AlpenglowObserverEngine) alpenglowEpochForSlot(slot uint64) (uint64, bool) {

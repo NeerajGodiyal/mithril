@@ -32,7 +32,12 @@ type ReceiverConfig struct {
 	ShredVersion    uint16
 	Decode          DecodeOptions
 	LogInterval     time.Duration
-	OnMessage       func(Message)
+	// AdmitMessage runs after wire decoding/version checks but before the
+	// observer. It may authenticate/normalize a message or reject a duplicate.
+	// This boundary keeps unauthenticated certificates out of trusted observer
+	// state and prevents rebroadcast duplicates from reaching expensive users.
+	AdmitMessage func(Message) (Message, bool)
+	OnMessage    func(Message)
 }
 
 func DefaultReceiverConfig() ReceiverConfig {
@@ -216,6 +221,17 @@ func (r *Receiver) handleStream(stream *quic.ReceiveStream) {
 		r.recordShredVersionMismatch()
 		return
 	}
+	// Count decoded traffic independently of admission. In particular, a
+	// duplicate storm must remain visible even though admission collapses it to
+	// one cryptographic verification and one observer update.
+	r.recordMessage(msg)
+	if r.cfg.AdmitMessage != nil {
+		var admitted bool
+		msg, admitted = r.cfg.AdmitMessage(msg)
+		if !admitted {
+			return
+		}
+	}
 	if _, err := r.observer.ObserveMessage(msg); err != nil {
 		r.recordDecodeError()
 		return
@@ -223,7 +239,6 @@ func (r *Receiver) handleStream(stream *quic.ReceiveStream) {
 	if r.cfg.OnMessage != nil {
 		r.cfg.OnMessage(msg)
 	}
-	r.recordMessage(msg)
 }
 
 func (r *Receiver) logStatsLoop(ctx context.Context) {

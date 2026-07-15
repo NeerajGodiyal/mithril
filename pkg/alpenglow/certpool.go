@@ -743,8 +743,8 @@ func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *Va
 			}
 		}
 
-		var pub bls12381.G1Affine
-		if _, err := pub.SetBytes(set.Validators[msg.Rank].BlsPubkeyCompressed[:]); err != nil {
+		pub, err := validatorBLSPubkey(*set, int(msg.Rank))
+		if err != nil {
 			continue
 		}
 		var sig bls12381.G2Affine
@@ -782,9 +782,11 @@ func (p *CertPool) verifyBatch(batch []VoteMessage, set *ValidatorSet) []VoteMes
 		ok  bool
 	}, len(batch))
 	for i, msg := range batch {
-		if _, err := parsed[i].pub.SetBytes(set.Validators[msg.Rank].BlsPubkeyCompressed[:]); err != nil || parsed[i].pub.IsInfinity() {
+		pub, err := validatorBLSPubkey(*set, int(msg.Rank))
+		if err != nil {
 			continue
 		}
+		parsed[i].pub = pub
 		if _, err := parsed[i].sig.SetBytes(msg.Signature); err != nil || parsed[i].sig.IsInfinity() {
 			continue
 		}

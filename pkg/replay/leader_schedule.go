@@ -1206,8 +1206,8 @@ func PrepareLeaderScheduleLocal(
 			epoch, stats.SkippedZeroStake, stats.SkippedMissingNodePk, stats.SkippedMissingVoteAcct)
 	}
 
-	// Set as source of truth
-	global.SetLeaderSchedule(schedule)
+	// Keep this epoch alongside any older repair/future live schedules.
+	global.SetLeaderScheduleForEpoch(epoch, schedule)
 
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)
@@ -1315,8 +1315,8 @@ func PrepareLeaderScheduleLocalFromVoteCache(
 			epoch, missingPercent, stats.SkippedMissingVoteAcct, missingStake)
 	}
 
-	// Set as source of truth
-	global.SetLeaderSchedule(schedule)
+	// Keep this epoch alongside any older repair/future live schedules.
+	global.SetLeaderScheduleForEpoch(epoch, schedule)
 
 	// Compute hash for logging
 	fullHash := scheduleFullHash(schedule, firstSlot, numSlots)

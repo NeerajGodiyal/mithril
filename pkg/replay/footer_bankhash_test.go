@@ -57,6 +57,16 @@ func TestVerifyAlpenglowBlockFooterMissing(t *testing.T) {
 	require.Contains(t, err.Error(), "missing block footer")
 }
 
+func TestVerifyAlpenglowBlockFooterRequiresBankHash(t *testing.T) {
+	ft := features.NewFeaturesDefault()
+	ft.EnableFeature(features.Alpenglow, 1)
+	slotCtx := &sealevel.SlotCtx{Slot: 99, Features: ft, FinalBankhash: []byte{1}}
+	block := &b.Block{Slot: 99, FromLiveStream: true, HasAlpenglowFooter: true}
+
+	err := verifyAlpenglowBlockFooter(slotCtx, block, true)
+	require.ErrorContains(t, err, "block footer is missing its bank hash")
+}
+
 func TestVerifyAlpenglowBlockFooterAllowsLeaderBlocks(t *testing.T) {
 	ft := features.NewFeaturesDefault()
 	ft.EnableFeature(features.Alpenglow, 1)

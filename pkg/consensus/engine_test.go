@@ -317,12 +317,61 @@ func TestVotorMessageHookReceivesOnlyVerifiedRewardVotes(t *testing.T) {
 	if called != 1 {
 		t.Fatalf("verified hook calls = %d, want 1", called)
 	}
+	engine.observeVotorMessage(alpenglow.NewVoteMessage(vote, validSig, 0))
+	if called != 1 {
+		t.Fatalf("duplicate verified vote reached hook; calls = %d, want 1", called)
+	}
+	if engine.voteCacheHits.Load() != 1 {
+		t.Fatalf("vote cache hits = %d, want 1", engine.voteCacheHits.Load())
+	}
 
 	invalidSig := append([]byte(nil), validSig...)
 	invalidSig[0] ^= 0xff
 	engine.observeVotorMessage(alpenglow.NewVoteMessage(vote, invalidSig, 0))
 	if called != 1 {
 		t.Fatalf("invalid vote reached hook; calls = %d", called)
+	}
+}
+
+func TestVotorCertificateVerificationDeduplicatesWithoutInvalidPoisoning(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	set := testAlpenglowValidatorSet()
+	engine.SetAlpenglowEpochLookup(func(uint64) uint64 { return set.Epoch })
+	if err := engine.SetAlpenglowValidatorSet(set); err != nil {
+		t.Fatalf("SetAlpenglowValidatorSet: %v", err)
+	}
+
+	cert := alpenglow.Certificate{
+		Type:   alpenglow.CertificateSkip,
+		Slot:   77,
+		Bitmap: testAlpenglowSignerBitmap(),
+	}
+	cert.Signature = testAlpenglowCertificateSignature(t, cert)
+	invalid := cert
+	invalid.Signature = append([]byte(nil), cert.Signature...)
+	invalid.Signature[0] ^= 0xff
+
+	// A rejected attempt has the same logical certificate key, but different
+	// authentication material. It must not reserve/poison that logical key.
+	engine.observeVotorMessage(alpenglow.NewCertificateMessage(invalid))
+	engine.observeVotorMessage(alpenglow.NewCertificateMessage(cert))
+	engine.observeVotorMessage(alpenglow.NewCertificateMessage(cert))
+
+	decision, ok := engine.NextAlpenglowDecision(76)
+	if !ok || decision.Kind != alpenglow.ChainDecisionKindSkip || decision.Slot != 77 {
+		t.Fatalf("valid cert after invalid attempt was not admitted: decision=%+v ok=%v", decision, ok)
+	}
+	if got := engine.ensureChain().Snapshot().CertificatesAccepted; got != 1 {
+		t.Fatalf("certificates accepted = %d, want exactly 1", got)
+	}
+	if engine.certificateCacheHits.Load() != 1 {
+		t.Fatalf("certificate cache hits = %d, want 1", engine.certificateCacheHits.Load())
+	}
+	if got := engine.ensureObserver().Snapshot().CertificatesObserved; got != 1 {
+		t.Fatalf("trusted observer certificates = %d, want exactly 1 verified cert", got)
 	}
 }
 

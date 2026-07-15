@@ -62,11 +62,11 @@ and makes the common (no-fork) path cheap while the rare fork case pays.
 - `EvictFrom(slot)` unwinds a suffix by replaying its undo journal
   newest-layer-first, restoring the exact pre-suffix values.
 
-### 4. Dual-watermark promotion (the safety keystone)
+### 4. Promotion safety
 
-Because certificates do not attest execution, promotion to disk is clamped to
+In verifying mode, promotion to disk is clamped to
 `min(certificate finality, trailing-verification watermark)`
-(`pkg/replay/promotion.go`). The trailing verifier
+(`pkg/replay/promotion.go`). Its trailing verifier
 (`pkg/replay/trailing_verifier.go`) re-derives a compact per-transaction digest
 (`pkg/replay/txdigest.go` — fee, success/failure, balances; compute units
 deliberately excluded) from finalized RPC block metadata some slots behind the
@@ -74,6 +74,13 @@ tip and compares it against what replay produced. A mismatch is an execution
 divergence: record evidence and halt. With the verifier required and its RPC
 feed cut, folds stall and the in-RAM tail eventually hits its cap and halts —
 fail-closed by design.
+
+Full validator mode does not fetch RPC blocks. Every received Alpenglow block
+must contain a footer, the double-Merkle block id commits to that footer, and
+local replay must reproduce its bank hash before the block is accepted. Durable
+promotion then gates on certificate finality. This is the validator path that
+will eventually vote on its own execution result; the RPC oracle remains a
+verifying-mode diagnostic and the classic non-Alpenglow flow is unchanged.
 
 ### 5. Fork switch: sweep + unwind
 
@@ -149,9 +156,10 @@ mixed (heterogeneous-client) or Mithril-only cluster identically:
 
 ## What this proves — and does not
 
-The certificate layer proves which block *data* the cluster settled on. The
-trailing verifier proves execution *correctness* against the cluster's
-finalized results. Neither replaces Mithril's own transaction execution,
+The certificate layer proves which block *data* the cluster settled on. In
+validator mode that certified data includes the footer bank hash checked
+against local execution; in verifying mode the trailing verifier additionally
+compares transaction results with finalized RPC metadata. Neither replaces Mithril's own transaction execution,
 account loading, bankhash calculation, reward/rent handling, or bankhash
 verification — those still run in full. The engine's job is to pick the right
 block to execute, promote durable state only when it is safe, and halt (never

@@ -465,10 +465,12 @@ func (bs *BlockSource) enqueueLiveBlocks(blocks []*b.Block) {
 		if blk == nil {
 			continue
 		}
+		bs.trackLiveDelivery(blk.Slot)
 
 		select {
 		case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: generation}:
 		case <-bs.stopChan:
+			bs.finishLiveDelivery(blk.Slot)
 			return
 		}
 	}

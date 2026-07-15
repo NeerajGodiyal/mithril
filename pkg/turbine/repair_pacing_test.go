@@ -404,9 +404,10 @@ func TestRetryModelEndgameEscalation(t *testing.T) {
 	}
 }
 
-// A timely answer to the ORIGINAL attempt (after a retry went out) credits
-// that peer as timely — not late — and releases exactly one inflight slot.
-func TestRetryKeepsOriginalMatchableAsTimely(t *testing.T) {
+// A timely answer to the ORIGINAL endgame attempt (after another fanout went
+// out) credits that peer as timely, then retires all sibling attempts because
+// the shred is already satisfied.
+func TestRepairAnswerCancelsSiblingAttempts(t *testing.T) {
 	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("sink: %v", err)
@@ -424,38 +425,36 @@ func TestRetryKeepsOriginalMatchableAsTimely(t *testing.T) {
 	c.peerCache = peers
 	c.peerCacheAt = time.Now()
 
-	pol := bulkPolicy()
+	pol := headPolicy(1)
 	const acct = time.Second
 	sk := shredKey{kind: repairRequestWindowIndex, slot: 60, index: 3}
 
 	if !c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 60, 3, pol, acct) {
 		t.Fatal("first attempt must send")
 	}
-	// Capture attempt 0's nonce/addr, then age and retry (bulk max 2).
+	// Endgame sends two attempts immediately; capture attempt 0's nonce.
 	c.mu.Lock()
 	o0 := c.outstanding[repairRequestKey{kind: repairRequestWindowIndex, slot: 60, index: 3, attempt: 0}]
-	c.inflight[sk].lastSentAt = time.Now().Add(-2 * repairRetryBulk)
 	c.mu.Unlock()
 	if !c.sendShredAttempt(conn, peers, repairRequestWindowIndex, 60, 3, pol, acct) {
-		t.Fatal("stale bulk attempt must retry to a new peer")
+		t.Fatal("second endgame fanout attempt must send")
 	}
 	c.mu.Lock()
 	concurrent := c.inflight[sk].concurrent
 	c.mu.Unlock()
 	if concurrent != 2 {
-		t.Fatalf("concurrent = %d, want 2 after a bulk retry", concurrent)
+		t.Fatalf("concurrent = %d, want 2 after endgame fanout", concurrent)
 	}
 
-	// The ORIGINAL peer answers: timely (its attempt was never expired),
-	// inflight drops to 1, and the retry attempt is still outstanding.
+	// The ORIGINAL peer answers timely; the sibling is neutral-cancelled.
 	from := &net.UDPAddr{IP: sinkAddr.IP, Port: sinkAddr.Port}
 	if !c.observeShredResponse(conn, nonceTrailer(o0.nonce), from, &Shred{Slot: 60, Index: 3, Type: ShredTypeData}) {
 		t.Fatal("original attempt's answer must match")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.inflight[sk] == nil || c.inflight[sk].concurrent != 1 {
-		t.Fatalf("inflight after timely match = %v, want concurrent 1", c.inflight[sk])
+	if c.inflight[sk] != nil || len(c.outstanding) != 0 || len(c.byResponse) != 0 {
+		t.Fatalf("satisfied shred retained work: inflight=%v outstanding=%d responses=%d", c.inflight[sk], len(c.outstanding), len(c.byResponse))
 	}
 	addrKey, _ := repairAddressKeyFromUDP(from)
 	if rec := c.perPeer[addrKey]; rec == nil || rec.timely != 1 || rec.late != 0 || rec.timeouts != 0 {
@@ -463,7 +462,55 @@ func TestRetryKeepsOriginalMatchableAsTimely(t *testing.T) {
 	}
 }
 
-// Admission cap: outstanding never exceeds ~1s of service rate no matter
+func TestVerifiedBroadcastCancelsOutstandingRepair(t *testing.T) {
+	c := newPacingTestClient(t)
+	addr := repairAddressKey{port: 8008}
+	sk := shredKey{kind: repairRequestWindowIndex, slot: 70, index: 9}
+	key := repairRequestKey{kind: sk.kind, slot: sk.slot, index: sk.index}
+	req := outstandingRepairRequest{key: key, nonce: 44, addr: addr}
+	c.outstanding[key] = req
+	c.byResponse[repairResponseKey{addr: addr, nonce: req.nonce}] = key
+	c.inflight[sk] = &shredInflight{concurrent: 1, nextAttempt: 1}
+	c.perPeer[addr] = &peerRecord{sent: 1, inflight: 1}
+
+	c.satisfyDataShred(&Shred{Slot: sk.slot, Index: sk.index, Type: ShredTypeData})
+
+	if len(c.outstanding) != 0 || len(c.byResponse) != 0 || c.inflight[sk] != nil {
+		t.Fatalf("broadcast-satisfied repair was not cancelled")
+	}
+	if got := c.perPeer[addr].inflight; got != 0 {
+		t.Fatalf("peer inflight = %d, want 0 after neutral cancellation", got)
+	}
+	if c.responses.Load() != 0 || c.timeouts.Load() != 0 {
+		t.Fatalf("broadcast cancellation must not score a peer outcome")
+	}
+}
+
+func TestCompletedSlotCancelsAllRepairWork(t *testing.T) {
+	c := newPacingTestClient(t)
+	addr := repairAddressKey{port: 8009}
+	for index := uint32(0); index < 3; index++ {
+		sk := shredKey{kind: repairRequestWindowIndex, slot: 80, index: index}
+		key := repairRequestKey{kind: sk.kind, slot: sk.slot, index: sk.index}
+		req := outstandingRepairRequest{key: key, nonce: 100 + index, addr: addr}
+		c.outstanding[key] = req
+		c.byResponse[repairResponseKey{addr: addr, nonce: req.nonce}] = key
+		c.inflight[sk] = &shredInflight{concurrent: 1, nextAttempt: 1}
+	}
+	c.perPeer[addr] = &peerRecord{sent: 3, inflight: 3}
+
+	c.cancelSlotRequests(80)
+
+	if len(c.outstanding) != 0 || len(c.byResponse) != 0 || len(c.inflight) != 0 {
+		t.Fatalf("completed slot retained repair state")
+	}
+	if got := c.perPeer[addr].inflight; got != 0 {
+		t.Fatalf("peer inflight = %d, want 0 after slot cancellation", got)
+	}
+}
+
+// Admission cap: outstanding never exceeds the configured fraction of one
+// second of service rate no matter
 // what the token bucket would allow — queue DEPTH, not the timeout, bounds
 // peer-side queueing (the bufferbloat spiral observed live: outstanding
 // ~3000 at 500/s pushed avg latency to 4.4s with zero throughput gain).
@@ -529,6 +576,10 @@ func TestFollowupsAreMeteredByTokenBucket(t *testing.T) {
 	}
 
 	c, from, packet, shred = prime()
+	c.mu.Lock()
+	c.rateRefillAt = time.Now()
+	c.rateTokens = repairMaxRequestsPerSecond
+	c.mu.Unlock()
 	if !c.observeShredResponse(conn, packet, from, shred) {
 		t.Fatal("response itself must match")
 	}

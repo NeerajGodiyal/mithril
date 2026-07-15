@@ -72,8 +72,8 @@ type BlockSourceOpts struct {
 	// most this many slots, fill the gap via turbine repair instead of RPC
 	// getBlock (0 disables). Repaired shreds carry block ids + footer certs, so
 	// catchup finality is cryptographic rather than delegated to the RPC's
-	// "finalized" commitment — and the whole RPC budget stays with the
-	// trailing verifier.
+	// "finalized" commitment. In verifying mode this also leaves the RPC budget
+	// to the trailing verifier; validator mode never fetches RPC blocks.
 	RepairCatchupMaxGapSlots uint64
 	// RepairMaxRequestsPerSecond overrides the repair request-rate ceiling
 	// (0 = built-in default). Peer-side serve-repair QoS bans heavy unstaked
@@ -96,8 +96,8 @@ type BlockSourceOpts struct {
 	// source NEVER fetches blocks over RPC — shreds via turbine + repair are
 	// the only block path, no matter how far behind replay is, and every
 	// force-RPC recovery path routes to turbine repair or holds for
-	// certificate adjudication instead. RPC still serves tip polling and the
-	// trailing verifier. Ignored for non-shred sources (source = "rpc",
+	// certificate adjudication instead. RPC still serves control-plane queries
+	// and, in verifying mode, the trailing verifier. Ignored for non-shred sources (source = "rpc",
 	// "file"), which are their own block path.
 	DisableRPCBlockFetch bool
 	StartSlot            uint64
@@ -399,6 +399,8 @@ type BlockSource struct {
 	liveStagingMu                sync.Mutex
 	liveStagingBuffer            map[uint64]*b.Block
 	liveStagingOrder             []uint64
+	liveDeliveryMu               sync.Mutex
+	liveDeliveryPending          map[uint64]int // assembled blocks queued between stream intake and ordered emitter
 	alpenglowMu                  sync.Mutex
 	knownAlpenglowBlockIDs       map[uint64]solana.Hash
 	knownAlpenglowBlockIDOrder   []uint64
@@ -529,11 +531,16 @@ const (
 	// ceiling. Raised to an aggressive posture matching cavey's kv-block-
 	// production, which runs repair with no rate limiter; the peer set is meant
 	// to be the binder, not our throttle. Dial back via config if serve-repair
-	// freezes. (Note: the AIMD step only fires on large peer sets — see the
-	// RespondingPeers gate in repair_catchup.go — so on small testnets the base
-	// block.repair_max_requests_per_second is the effective ceiling.)
+	// freezes. The controller can also step up when a healthy peer set is
+	// answering promptly but replay is still losing ground: the configured rate
+	// sizes both the token bucket and the in-flight admission window, so send-rate
+	// utilization alone is not a sufficient saturation signal.
+	repairAutoRateMin  = 2500
 	repairAutoRateStep = 5000
 	repairAutoRateMax  = 50000
+	// Ignore a few slots of heartbeat-to-heartbeat jitter. Sustained growth
+	// beyond this means the cluster edge is outrunning shred-only replay.
+	repairAutoGapGrowthSlots = uint64(4)
 
 	// QoS-throttle detector thresholds (evaluated per heartbeat interval). The
 	// serve-repair rate-ban signature is "responses freeze while requests keep
@@ -560,6 +567,16 @@ func qosThrottleSuspected(sendRate, prevAnswerRate, answerRate float64) bool {
 	return sendRate >= repairQoSMinSendRate &&
 		prevAnswerRate >= repairQoSHealthyRespRate &&
 		answerRate < prevAnswerRate*repairQoSCollapseFraction
+}
+
+// shouldIncreaseRepairRate recognizes both ways the repair client can be
+// locally constrained. A full token bucket is the obvious one. The subtler
+// case is a growing replay gap with healthy service: rate also sizes the
+// admission window, so that window can bind while actual sends remain below
+// the nominal ceiling. Requiring healthy/timely peers keeps a remote serving
+// shortage from being mistaken for a reason to send harder.
+func shouldIncreaseRepairRate(timelyPct uint64, healthyPeers, utilized, gapGrowing, repairStarved bool) bool {
+	return timelyPct >= 75 && healthyPeers && repairStarved && (utilized || gapGrowing)
 }
 
 const (
@@ -679,6 +696,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		skippedSlots:                   make(map[uint64]bool),
 		liveSynthesizedSkips:           make(map[uint64]bool),
 		alpenglowCertifiedSkips:        make(map[uint64]bool),
+		liveDeliveryPending:            make(map[uint64]int),
 		emittedAlpenglowBlockIDs:       make(map[uint64]solana.Hash),
 		rejectedAlpenglowBlockIDs:      make(map[uint64]map[solana.Hash]struct{}),
 		authoritativeAlpenglowBlockIDs: make(map[uint64]solana.Hash),
@@ -1093,8 +1111,8 @@ func (bs *BlockSource) forceRPCForCatchupWithReason(gap uint64, reason string) {
 // rpcBlockFetchAllowed reports whether RPC may fetch BLOCKS at all. With
 // block.rpc_fallback=false (the shipped default) a NATIVE TURBINE source
 // never fetches blocks over RPC — turbine + repair are the only block path,
-// no matter how far behind replay is; RPC serves only tip polling and the
-// trailing verifier. Scoped to turbine because only turbine has the repair
+// no matter how far behind replay is; RPC serves control-plane queries and the
+// verifying mode's trailing verifier. Scoped to turbine because only turbine has the repair
 // machinery to fill gaps itself: the Lightbringer sidecar streams near-tip
 // only and NEEDS RPC for old/evicted shreds, and non-shred sources are their
 // own block path.
@@ -1341,6 +1359,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	if blk == nil {
 		return true
 	}
+	bs.trackLiveDelivery(blk.Slot)
 
 	bs.liveLastStreamSlot.Store(blk.Slot)
 	bs.liveLastRecvUnix.Store(time.Now().Unix())
@@ -1358,6 +1377,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	}
 
 	if !bs.shouldDecodeLiveSlot(blk.Slot) {
+		bs.finishLiveDelivery(blk.Slot)
 		return true
 	}
 
@@ -1371,6 +1391,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 			case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
 				return true
 			case <-bs.stopChan:
+				bs.finishLiveDelivery(blk.Slot)
 				return false
 			}
 		}
@@ -1378,10 +1399,12 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		// to build its whole connected run while replay is already at tip.
 		bs.bufferLiveStreamBlock(blk)
 		bs.maybePrepareLiveHandoff()
+		bs.finishLiveDelivery(blk.Slot)
 		return true
 	}
 
 	if (!bs.isNearTip.Load() && !bs.repairCatchupActive()) || blk.Slot < bs.liveHandoffSlot.Load() {
+		bs.finishLiveDelivery(blk.Slot)
 		return true
 	}
 
@@ -1396,6 +1419,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		bs.reorderMu.Unlock()
 		if waiting != 0 && blk.Slot > waiting+repairCatchupLiveDeliverWindow {
 			bs.bufferLiveStreamBlock(blk)
+			bs.finishLiveDelivery(blk.Slot)
 			return true
 		}
 	}
@@ -1404,8 +1428,38 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
 		return true
 	case <-bs.stopChan:
+		bs.finishLiveDelivery(blk.Slot)
 		return false
 	}
+}
+
+func (bs *BlockSource) trackLiveDelivery(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	bs.liveDeliveryMu.Lock()
+	if bs.liveDeliveryPending == nil {
+		bs.liveDeliveryPending = make(map[uint64]int)
+	}
+	bs.liveDeliveryPending[slot]++
+	bs.liveDeliveryMu.Unlock()
+}
+
+func (bs *BlockSource) finishLiveDelivery(slot uint64) {
+	bs.liveDeliveryMu.Lock()
+	if count := bs.liveDeliveryPending[slot]; count <= 1 {
+		delete(bs.liveDeliveryPending, slot)
+	} else {
+		bs.liveDeliveryPending[slot] = count - 1
+	}
+	bs.liveDeliveryMu.Unlock()
+}
+
+func (bs *BlockSource) liveDeliveryInFlight(slot uint64) bool {
+	bs.liveDeliveryMu.Lock()
+	pending := bs.liveDeliveryPending[slot] > 0
+	bs.liveDeliveryMu.Unlock()
+	return pending
 }
 
 func (bs *BlockSource) handleLiveShredStreamClosed(reason string) int {
@@ -2402,6 +2456,9 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 // emitOrderedBlocks receives results and emits blocks in order
 func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
+		if result.block != nil && result.block.FromLiveStream {
+			bs.finishLiveDelivery(result.slot)
+		}
 		var gapWaitingSlot uint64
 		var gapFirstBufferedSlot uint64
 		var gapFirstBufferedParentSlot uint64

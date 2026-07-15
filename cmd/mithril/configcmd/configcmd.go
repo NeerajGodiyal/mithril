@@ -207,7 +207,7 @@ rewind_horizon_batches = 64 # Fold batches of undo pointers kept actionable (~55
 # ── Network ──────────────────────────────────────────────────────────────
 [network]
 cluster = "alpenglow"     # Also supports mainnet-beta/testnet/devnet in verifying-only RPC mode
-rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Used for catchup, tip polling, and the trailing verifier.
+rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Validator mode uses it for control-plane data (tip/stakes/snapshots), never blocks; verifying mode may use block RPC.
 
 # ── Block source ─────────────────────────────────────────────────────────
 [block]
@@ -215,9 +215,9 @@ rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Us
 # "rpc" is catch-up/debug only. "lightbringer" uses the sidecar.
 source = "turbine"
 turbine_bind_addr = "0.0.0.0:8001"    # REQUIRED for turbine: the shred receive port (open inbound UDP)
-rpc_fallback = false                  # false (default): with source="turbine", shreds via turbine + repair are the ONLY block path; RPC never fetches blocks (it still serves tip polling + the trailing verifier). true: RPC may catch up when replay is more than repair_catchup_max_gap_slots behind. Ignored for source="rpc"/"lightbringer" (they need RPC catchup).
+rpc_fallback = false                  # false (default): with source="turbine", shreds via turbine + repair are the ONLY block path. Validator mode also disables the RPC trailing verifier and validates local execution against the certified footer bank hash. true: RPC may catch up when replay is more than repair_catchup_max_gap_slots behind. Ignored for source="rpc"/"lightbringer" (they need RPC catchup).
 repair_catchup_max_gap_slots = 8192   # Gaps within this fill via turbine repair, which then OWNS catchup (no timer fallback to RPC). Only meaningful with rpc_fallback = true; ignored in shreds-only mode.
-# repair_max_requests_per_second = 0 # Repair request-rate. 0/unset = AUTO: starts at 10000/s and an AIMD controller ramps toward 50000/s while peers keep up, backing off automatically on a serve-repair throttle signal. Set a positive value to PIN a fixed rate (turns the controller off — an explicit choice). Peer QoS deprioritizes/drops heavy unstaked requesters, so watch "qos: throttle-suspect intervals" and the timeout/late counts in the repair heartbeat.
+# repair_max_requests_per_second = 0 # Repair request-rate. 0/unset = AUTO: starts at 15000/s and an AIMD controller ramps toward 50000/s while peers keep up, backing off as low as 2500/s on a serve-repair throttle signal. Set a positive value to PIN a fixed rate (turns the controller off — an explicit choice). Peer QoS deprioritizes/drops heavy unstaked requesters, so watch "qos: throttle-suspect intervals" and the timeout/late counts in the repair heartbeat.
 # lightbringer_endpoint = "localhost:9000"
 # --- Fetch tuning (RPC catchup) ---
 max_rps = 8               # Max block-fetch requests/sec (match your RPC's limit)
@@ -251,14 +251,14 @@ verbose = false                # Verbose source-probe reporting
 
 # ── Execution verification ───────────────────────────────────────────────
 [verifier]
-enabled = true            # Trailing verifier: re-derives per-tx digests from finalized RPC blocks
-required = true           # Gate folds on the verified watermark (false = advisory only; an execution divergence could reach disk)
+enabled = true            # Verifying mode only: re-derive per-tx digests from finalized RPC blocks. Validator mode ignores this and never fetches RPC blocks.
+required = true           # Verifying mode: gate folds on the RPC-verified watermark. Validator folds gate on certificates after local footer bank-hash parity.
 lag_slots = 32            # Verify slots this far behind the executed tip
 max_rps = 8               # Verifier's own RPC budget (never shares the block-fetch budget)
 
 # ── Replay tuning ────────────────────────────────────────────────────────
 [tuning]
-txpar = 24                # Transaction parallelism (recommended: ~2x CPU cores)
+txpar = 24                # Validator auto-defaults to 2x CPU cores only when unset; explicit 0 = sequential
 
 # ── Mithril's RPC server ─────────────────────────────────────────────────
 [rpc]

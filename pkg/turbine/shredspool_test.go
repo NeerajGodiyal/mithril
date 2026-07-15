@@ -62,6 +62,39 @@ func TestShredSpoolCapDropsHighest(t *testing.T) {
 	}
 }
 
+func TestShredSpoolDeduplicatesAndRejectsOverCapFutureWithoutChurn(t *testing.T) {
+	spool, err := OpenShredSpool(t.TempDir(), 80)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer spool.Close()
+
+	payload := make([]byte, 20)
+	low := &Shred{Slot: 10, Type: ShredTypeData, Index: 0}
+	if !spool.AppendShred(low, payload) {
+		t.Fatal("first distinct shred was not stored")
+	}
+	if spool.AppendShred(low, payload) {
+		t.Fatal("duplicate shred was stored twice")
+	}
+	spool.Append(11, payload) // fill to 72/80 bytes
+	_, before := spool.Stats()
+
+	future := &Shred{Slot: 12, Type: ShredTypeData, Index: 0}
+	for i := 0; i < 100; i++ {
+		if spool.AppendShred(future, payload) {
+			t.Fatal("over-cap future shred should be rejected")
+		}
+	}
+	_, after := spool.Stats()
+	if after != before {
+		t.Fatalf("over-cap future traffic churned spool bytes: before=%d after=%d", before, after)
+	}
+	if !spool.HasSlot(10) || !spool.HasSlot(11) || spool.HasSlot(12) {
+		t.Fatalf("cap retention changed: low10=%v low11=%v future12=%v", spool.HasSlot(10), spool.HasSlot(11), spool.HasSlot(12))
+	}
+}
+
 // A restart adopts leftover slot files: they hydrate instead of re-repairing.
 func TestShredSpoolAdoptsExistingFiles(t *testing.T) {
 	dir := t.TempDir()

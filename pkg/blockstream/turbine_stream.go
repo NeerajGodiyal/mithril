@@ -420,7 +420,9 @@ func (bs *BlockSource) runTurbineStream() {
 					streamDoneConsumed = true
 					break streamLoop
 				}
-				if !bs.ingestLiveShredBlock(blk) {
+				keepRunning := bs.ingestLiveShredBlock(blk)
+				receiver.AcknowledgeBlockDelivery(blk.Slot)
+				if !keepRunning {
 					statsTicker.Stop()
 					cancelStream()
 					<-streamDone

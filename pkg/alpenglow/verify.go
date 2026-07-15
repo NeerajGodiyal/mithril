@@ -52,6 +52,11 @@ type ValidatorSet struct {
 	Epoch      uint64
 	Validators []ValidatorStake
 	TotalStake uint64
+	// parsedPubkeys is populated when the set is installed in a verifier.
+	// Validator BLS keys are immutable for an epoch, so parsing and subgroup
+	// checking them for every vote/certificate is pure duplicate work. Keep the
+	// points private so callers cannot mutate the verifier's trusted cache.
+	parsedPubkeys []bls12381.G1Affine
 }
 
 type SignerBitmapEncoding string
@@ -269,9 +274,10 @@ func (v *CertificateVerifier) SetValidatorSet(set ValidatorSet) error {
 	}
 
 	copied := ValidatorSet{
-		Epoch:      set.Epoch,
-		Validators: append([]ValidatorStake(nil), set.Validators...),
-		TotalStake: set.TotalStake,
+		Epoch:         set.Epoch,
+		Validators:    append([]ValidatorStake(nil), set.Validators...),
+		TotalStake:    set.TotalStake,
+		parsedPubkeys: make([]bls12381.G1Affine, len(set.Validators)),
 	}
 	for rank, validator := range copied.Validators {
 		if validator.Rank != uint16(rank) {
@@ -279,6 +285,12 @@ func (v *CertificateVerifier) SetValidatorSet(set ValidatorSet) error {
 		}
 		if validator.Stake == 0 {
 			return fmt.Errorf("alpenglow verifier: validator set epoch %d has zero stake at rank %d", set.Epoch, rank)
+		}
+		if _, err := copied.parsedPubkeys[rank].SetBytes(validator.BlsPubkeyCompressed[:]); err != nil {
+			return fmt.Errorf("alpenglow verifier: validator set epoch %d has invalid BLS pubkey at rank %d: %w", set.Epoch, rank, err)
+		}
+		if copied.parsedPubkeys[rank].IsInfinity() {
+			return fmt.Errorf("alpenglow verifier: validator set epoch %d has BLS pubkey infinity at rank %d", set.Epoch, rank)
 		}
 	}
 
@@ -549,6 +561,27 @@ func sortedValidatorSets(sets []ValidatorSet) []ValidatorSet {
 	return sets
 }
 
+// validatorBLSPubkey returns the epoch-immutable, install-time validated BLS
+// public key when available. Direct unit callers may pass a ValidatorSet that
+// has not gone through CertificateVerifier.SetValidatorSet; retain the parsing
+// fallback for that API without making the live path pay for it repeatedly.
+func validatorBLSPubkey(set ValidatorSet, rank int) (bls12381.G1Affine, error) {
+	if rank < 0 || rank >= len(set.Validators) {
+		return bls12381.G1Affine{}, fmt.Errorf("signer rank %d exceeds validator set len %d", rank, len(set.Validators))
+	}
+	if len(set.parsedPubkeys) == len(set.Validators) {
+		return set.parsedPubkeys[rank], nil
+	}
+	var pubkey bls12381.G1Affine
+	if _, err := pubkey.SetBytes(set.Validators[rank].BlsPubkeyCompressed[:]); err != nil {
+		return bls12381.G1Affine{}, err
+	}
+	if pubkey.IsInfinity() {
+		return bls12381.G1Affine{}, fmt.Errorf("infinity point")
+	}
+	return pubkey, nil
+}
+
 func diagnoseVoteMessageWithSet(set ValidatorSet, msg VoteMessage, payload []byte, signature bls12381.G2Affine, maxMatches int) EpochVoteSignatureDiagnostics {
 	diag := EpochVoteSignatureDiagnostics{
 		Epoch:          set.Epoch,
@@ -565,11 +598,8 @@ func diagnoseVoteMessageWithSet(set ValidatorSet, msg VoteMessage, payload []byt
 		if validator.Stake == 0 {
 			continue
 		}
-		var pubkey bls12381.G1Affine
-		if _, err := pubkey.SetBytes(validator.BlsPubkeyCompressed[:]); err != nil {
-			continue
-		}
-		if pubkey.IsInfinity() {
+		pubkey, err := validatorBLSPubkey(set, rank)
+		if err != nil {
 			continue
 		}
 		if err := verifyBLSSignature(pubkey, payload, signature); err != nil {
@@ -669,12 +699,9 @@ func verifyVoteMessageWithSetAndShredVersion(set ValidatorSet, msg VoteMessage, 
 	if err != nil {
 		return VoteVerifyResult{}, err
 	}
-	var pubkey bls12381.G1Affine
-	if _, err := pubkey.SetBytes(validator.BlsPubkeyCompressed[:]); err != nil {
+	pubkey, err := validatorBLSPubkey(set, int(msg.Rank))
+	if err != nil {
 		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: invalid BLS pubkey at rank %d: %w", msg.Rank, err)
-	}
-	if pubkey.IsInfinity() {
-		return VoteVerifyResult{}, fmt.Errorf("alpenglow verifier: invalid BLS pubkey infinity point at rank %d", msg.Rank)
 	}
 	signature, err := decodeBLSSignature(msg.Signature)
 	if err != nil {
@@ -815,12 +842,9 @@ func aggregateVerificationTerm(set ValidatorSet, ranks []bool, payload []byte) (
 		if rank >= len(set.Validators) {
 			return blsVerifyTerm{}, false, fmt.Errorf("alpenglow verifier: signer rank %d exceeds validator set len %d", rank, len(set.Validators))
 		}
-		var pubkey bls12381.G1Affine
-		if _, err := pubkey.SetBytes(set.Validators[rank].BlsPubkeyCompressed[:]); err != nil {
+		pubkey, err := validatorBLSPubkey(set, rank)
+		if err != nil {
 			return blsVerifyTerm{}, false, fmt.Errorf("alpenglow verifier: invalid BLS pubkey at rank %d: %w", rank, err)
-		}
-		if pubkey.IsInfinity() {
-			return blsVerifyTerm{}, false, fmt.Errorf("alpenglow verifier: invalid BLS pubkey infinity point at rank %d", rank)
 		}
 		aggregate.Add(&aggregate, &pubkey)
 		signerCount++

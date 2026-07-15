@@ -38,12 +38,14 @@ type GlobalCtx struct {
 	epochVoteStateSnapshots    map[uint64]map[solana.PublicKey]*sealevel.VoteStateVersions
 	epochStakes                *epochstakes.EpochStakesCache
 	slotsConfirmed             map[uint64]struct{}
-	leaderSchedule             *leaderschedule.LeaderSchedule
+	leaderSchedule             *leaderschedule.LeaderSchedule // compatibility schedule installed by SetLeaderSchedule
+	leaderSchedules            map[uint64]*leaderschedule.LeaderSchedule
 	calcUnixTimeForClockSysvar bool
 	manageLeaderSchedule       bool
 	pendingStakeMutex          sync.Mutex // Protects pendingNewStakePubkeys
 	voteCacheMutex             sync.RWMutex
 	slotsConfirmedMutex        sync.Mutex
+	leaderScheduleMutex        sync.RWMutex
 	mu                         sync.Mutex
 }
 
@@ -323,14 +325,46 @@ func ManageLeaderSchedule() bool {
 }
 
 func SetLeaderSchedule(ls *leaderschedule.LeaderSchedule) {
+	instance.leaderScheduleMutex.Lock()
+	defer instance.leaderScheduleMutex.Unlock()
+
 	instance.leaderSchedule = ls
+	instance.leaderSchedules = nil
+}
+
+// SetLeaderScheduleForEpoch installs one epoch's schedule without discarding
+// schedules for other epochs. Turbine can receive current live shreds while
+// replay repair is still consuming an older epoch, so both must remain
+// verifiable concurrently.
+func SetLeaderScheduleForEpoch(epoch uint64, ls *leaderschedule.LeaderSchedule) {
+	instance.leaderScheduleMutex.Lock()
+	defer instance.leaderScheduleMutex.Unlock()
+
+	// Epoch-aware production callers supersede the legacy single-schedule API.
+	instance.leaderSchedule = nil
+	if ls == nil {
+		delete(instance.leaderSchedules, epoch)
+		return
+	}
+	if instance.leaderSchedules == nil {
+		instance.leaderSchedules = make(map[uint64]*leaderschedule.LeaderSchedule)
+	}
+	instance.leaderSchedules[epoch] = ls
 }
 
 func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
-	if instance.leaderSchedule == nil {
-		return solana.PublicKey{}, false
+	instance.leaderScheduleMutex.RLock()
+	defer instance.leaderScheduleMutex.RUnlock()
+
+	if instance.leaderSchedule != nil {
+		return instance.leaderSchedule.LeaderForSlot(slot)
 	}
-	return instance.leaderSchedule.LeaderForSlot(slot)
+	for _, schedule := range instance.leaderSchedules {
+		if leader, ok := schedule.LeaderForSlot(slot); ok {
+			return leader, true
+		}
+	}
+	return solana.PublicKey{}, false
 }
 
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {

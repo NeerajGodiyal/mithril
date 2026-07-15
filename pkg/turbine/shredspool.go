@@ -32,17 +32,20 @@ import (
 // re-fetch near the tip, the low end borders replay and is what repair would
 // otherwise pay for dearly.
 type ShredSpool struct {
-	mu        sync.Mutex
-	dir       string
-	open      map[uint64]*spoolFile
-	sizes     map[uint64]int64 // per-slot bytes on disk (open writers included)
-	validated map[uint64]bool  // adopted files whose record tail was checked this run
-	complete  map[uint64]SpoolSlotMeta
-	journal   *os.File // append-only completeness journal (complete.idx)
-	bytes     int64
-	maxBytes  int64
-	floor     uint64
-	closed    bool
+	mu          sync.Mutex
+	dir         string
+	open        map[uint64]*spoolFile
+	sizes       map[uint64]int64                      // per-slot bytes on disk (open writers included)
+	seen        map[uint64]map[spoolShredKey]struct{} // distinct shreds appended this run
+	validated   map[uint64]bool                       // adopted files whose record tail was checked this run
+	complete    map[uint64]SpoolSlotMeta
+	journal     *os.File // append-only completeness journal (complete.idx)
+	bytes       int64
+	maxBytes    int64
+	highestSlot uint64
+	haveHighest bool
+	floor       uint64
+	closed      bool
 }
 
 // SpoolSlotMeta records a slot proven FULLY assembled: every data shred
@@ -67,6 +70,13 @@ type spoolFile struct {
 	w *bufio.Writer
 }
 
+type spoolShredKey struct {
+	type_       ShredType
+	index       uint32
+	fecSetIndex uint32
+	position    uint16
+}
+
 const (
 	spoolOpenFilesCap = 32
 	// Slots this close to the shred edge always assemble in RAM — broadcast
@@ -88,6 +98,7 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 		dir:       dir,
 		open:      make(map[uint64]*spoolFile),
 		sizes:     make(map[uint64]int64),
+		seen:      make(map[uint64]map[spoolShredKey]struct{}),
 		validated: make(map[uint64]bool),
 		complete:  make(map[uint64]SpoolSlotMeta),
 		maxBytes:  maxBytes,
@@ -121,6 +132,9 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 		}
 		s.sizes[slot] = info.Size()
 		s.bytes += info.Size()
+		if !s.haveHighest || slot > s.highestSlot {
+			s.highestSlot, s.haveHighest = slot, true
+		}
 	}
 	s.loadJournal()
 	return s, nil
@@ -224,14 +238,56 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.appendLocked(slot, packet)
+}
+
+// AppendShred stores a verified shred only once per process run. Network
+// Turbine and serve-repair commonly deliver the same packet many times; those
+// duplicates must not consume disk bandwidth or repeatedly exercise cap
+// eviction before the assembler gets a chance to classify them.
+func (s *ShredSpool) AppendShred(shred *Shred, packet []byte) bool {
+	if shred == nil || len(packet) == 0 {
+		return false
+	}
+	key := spoolShredKey{
+		type_:       shred.Type,
+		index:       shred.Index,
+		fecSetIndex: shred.FECSetIndex,
+		position:    shred.Position,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if slotSeen := s.seen[shred.Slot]; slotSeen != nil {
+		if _, duplicate := slotSeen[key]; duplicate {
+			return false
+		}
+	}
+	if !s.appendLocked(shred.Slot, packet) {
+		return false
+	}
+	if s.seen[shred.Slot] == nil {
+		s.seen[shred.Slot] = make(map[spoolShredKey]struct{})
+	}
+	s.seen[shred.Slot][key] = struct{}{}
+	return true
+}
+
+func (s *ShredSpool) appendLocked(slot uint64, packet []byte) bool {
 	if s.closed || slot < s.floor {
-		return
+		return false
+	}
+	additional := int64(spoolRecordHeaderSize + len(packet))
+	if s.sizes[slot] == 0 {
+		additional += int64(len(spoolFileMagic))
+	}
+	if !s.ensureRoomLocked(slot, additional) {
+		return false
 	}
 	sf := s.open[slot]
 	if sf == nil {
 		if s.sizes[slot] > 0 && !s.validated[slot] {
 			if _, err := s.readSlotLocked(slot); err != nil {
-				return
+				return false
 			}
 		}
 		if len(s.open) >= spoolOpenFilesCap {
@@ -239,7 +295,7 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 		}
 		f, err := os.OpenFile(s.pathFor(slot), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
-			return // disposable cache: failures degrade to repair
+			return false // disposable cache: failures degrade to repair
 		}
 		sf = &spoolFile{f: f, w: bufio.NewWriterSize(f, 64<<10)}
 		s.open[slot] = sf
@@ -247,26 +303,29 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 			if _, err := sf.w.Write(spoolFileMagic[:]); err != nil {
 				s.closeSlotLocked(slot)
 				_ = os.Remove(s.pathFor(slot))
-				return
+				return false
 			}
 			s.sizes[slot] = int64(len(spoolFileMagic))
 			s.bytes += int64(len(spoolFileMagic))
 			s.validated[slot] = true
+			if !s.haveHighest || slot > s.highestSlot {
+				s.highestSlot, s.haveHighest = slot, true
+			}
 		}
 	}
 	var hdr [spoolRecordHeaderSize]byte
 	binary.LittleEndian.PutUint32(hdr[:], uint32(len(packet)))
 	binary.LittleEndian.PutUint32(hdr[4:], crc32.ChecksumIEEE(packet))
 	if _, err := sf.w.Write(hdr[:]); err != nil {
-		return
+		return false
 	}
 	if _, err := sf.w.Write(packet); err != nil {
-		return
+		return false
 	}
 	written := int64(spoolRecordHeaderSize + len(packet))
 	s.sizes[slot] += written
 	s.bytes += written
-	s.enforceCapLocked()
+	return true
 }
 
 // closeOldestLocked flushes and closes one open handle (lowest slot: it is
@@ -293,30 +352,33 @@ func (s *ShredSpool) closeSlotLocked(slot uint64) {
 	}
 }
 
-func (s *ShredSpool) enforceCapLocked() {
-	if s.maxBytes <= 0 {
-		return
+// ensureRoomLocked applies the retention policy before writing. Once the
+// spool is full, a new slot at/above the highest retained slot is rejected in
+// O(1): writing and immediately deleting it was both useless and, formerly,
+// performed an O(number-of-slots) highest-slot scan for every packet. A lower
+// catch-up slot may evict whole future slots; recomputing the maximum once per
+// evicted slot is rare and preserves the low-end-first retention contract.
+func (s *ShredSpool) ensureRoomLocked(slot uint64, additional int64) bool {
+	if s.maxBytes <= 0 || s.bytes+additional <= s.maxBytes {
+		return true
 	}
-	for s.bytes > s.maxBytes {
-		var victim uint64
-		found := false
-		for slot := range s.sizes {
-			if !found || slot > victim {
-				victim = slot
-				found = true
-			}
+	for s.bytes+additional > s.maxBytes {
+		if !s.haveHighest {
+			return additional <= s.maxBytes
 		}
-		if !found {
-			return
+		if slot >= s.highestSlot {
+			return false
 		}
-		s.dropSlotLocked(victim)
+		s.dropSlotLocked(s.highestSlot)
 	}
+	return true
 }
 
 func (s *ShredSpool) dropSlotLocked(slot uint64) {
 	s.closeSlotLocked(slot)
 	s.bytes -= s.sizes[slot]
 	delete(s.sizes, slot)
+	delete(s.seen, slot)
 	delete(s.validated, slot)
 	delete(s.complete, slot)
 	_ = os.Remove(s.pathFor(slot))
@@ -324,6 +386,19 @@ func (s *ShredSpool) dropSlotLocked(slot uint64) {
 		// Supersede any older completion record if this slot number is later
 		// re-created before the journal is compacted on restart.
 		s.journal.Write(spoolJournalRecord(slot, SpoolSlotMeta{}))
+	}
+	if s.haveHighest && slot == s.highestSlot {
+		s.recomputeHighestLocked()
+	}
+}
+
+func (s *ShredSpool) recomputeHighestLocked() {
+	s.haveHighest = false
+	s.highestSlot = 0
+	for slot := range s.sizes {
+		if !s.haveHighest || slot > s.highestSlot {
+			s.highestSlot, s.haveHighest = slot, true
+		}
 	}
 }
 

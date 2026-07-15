@@ -341,6 +341,8 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 	// spot that collapse; qosThrottleIntervals counts trips.
 	prevAnswerRate := 0.0
 	qosThrottleIntervals := 0
+	previousRepairGap := uint64(0)
+	havePreviousRepairGap := false
 	// AIMD rate controller: active only when the operator has NOT pinned
 	// block.repair_max_requests_per_second — an explicit knob is a decision,
 	// the default is a starting point. Steps the ceiling up while the peer
@@ -511,11 +513,17 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				headCompletedAt = time.Now()
 			} else if time.Since(headCompletedAt) >= time.Second {
 				staged := bs.stagedLiveBlock(waiting)
+				pendingDelivery := receiver.BlockPendingDelivery(waiting) || bs.liveDeliveryInFlight(waiting)
 				bs.reorderMu.Lock()
 				buffered := bs.reorderBuffer[waiting] != nil
 				emittedAnchor := bs.lastEmittedBlockSlot
 				bs.reorderMu.Unlock()
 				switch {
+				case pendingDelivery:
+					// The receiver/ordered-emitter pipeline owns it. Under a
+					// repair burst these bounded queues can legitimately hold a
+					// completed block for several seconds; resetting here creates
+					// a duplicate re-repair and turns queueing into a false stall.
 				case staged != nil:
 					if time.Since(lastStagedWarn) >= 30*time.Second {
 						lastStagedWarn = time.Now()
@@ -556,7 +564,11 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				}
 				hint := ""
 				if stalled > 10*time.Minute {
-					hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or set block.rpc_fallback=true"
+					if bs.rpcFallbackEnabled {
+						hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot or allow the configured RPC fallback"
+					} else {
+						hint = " | HINT: if peers no longer retain shreds this old (responding count near zero), restart with --bootstrap new-snapshot"
+					}
 				}
 				mlog.Log.Warnf("repair catchup: no progress at slot %d for %s — staying on turbine repair (%s) | head shreds held %d (assembly errors %d, latest: %s) | %s | window blocks %d | repair since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | receiver drops since arming: ignored_old +%d, missing_leader +%d, sig_err +%d, parse_err +%d, non_canonical +%d (last: slot %d) | evicted_slots +%d, active_slots %d | repair pings +%d, pongs +%d, send_errors +%d%s",
 					waiting, stalled.Round(time.Second), rpcNote,
@@ -634,8 +646,19 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			if d, ok := receiver.HeadShredDetail(waiting); ok && d.HaveLast {
 				headMissing = int64(d.LastIndex) + 1 - int64(d.DataShreds)
 			}
-			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, USEFUL %.0f shreds/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d | qos: throttle-suspect intervals %d",
-				waiting, receiver.RepairOutstandingForSlot(waiting), headMissing, edge, windowBlocks,
+			liveEdge := bs.repairCatchupEdge(receiver)
+			currentRepairGap := uint64(0)
+			if liveEdge > waiting {
+				currentRepairGap = liveEdge - waiting
+			}
+			gapGrowing := havePreviousRepairGap && currentRepairGap > previousRepairGap+repairAutoGapGrowthSlots
+			// A growing gap is a repair-pressure signal only when replay is
+			// actually running out of assembled runway. If the head is complete
+			// and blocks are buffered ahead, execution is the limiter and a larger
+			// repair window would only grow UDP/spool pressure.
+			repairStarved := headMissing > 0 || windowBlocks == 0
+			mlog.NamedFilef("catchup", "repair catchup status: head %d (in-flight %d, missing %d), edge %d, gap %d, window blocks %d | interval: send %.0f/s, resp %.0f/s, USEFUL %.0f shreds/s, timely %d%% | since arming: requests +%d, responses +%d (late +%d), timeouts +%d, timeout %dms (avg resp %dms), peers %d (responding %d) | hydration: slots +%d (complete from disk +%d) | sigverify: ed25519 +%d, cached +%d | qos: throttle-suspect intervals %d",
+				waiting, receiver.RepairOutstandingForSlot(waiting), headMissing, liveEdge, currentRepairGap, windowBlocks,
 				sendRate, respRate, float64(dUseful)/interval, timelyPct,
 				repair.Requests-statsAtArm.Repair.Requests, repair.Responses-statsAtArm.Repair.Responses,
 				repair.LateResponses-statsAtArm.Repair.LateResponses,
@@ -656,21 +679,21 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			// rate). Additive increase toward repairAutoRateMax while the peer set
 			// cleanly absorbs the current rate; MULTIPLICATIVE decrease on a
 			// throttle signal (the QoS detector firing, or timely collapsing) so
-			// it actually recovers instead of only warning. base < max, so it can
-			// both climb and retreat.
+			// it actually recovers instead of only warning. The backoff floor is
+			// intentionally below the starting rate: otherwise a throttle at the
+			// default ceiling can only log and never reduce load.
 			if autoRate > 0 {
-				base := turbine.DefaultRepairRequestsPerSecond
-				utilized := float64(dReq)/interval >= 0.7*float64(autoRate)
+				utilized := float64(dReq)/interval >= 0.6*float64(autoRate)
 				// A FRACTION of the live peers answering — works on a small
 				// validator set, unlike the old fixed >=80 gate that never fired
 				// on a ~62-peer cluster (so the rate never moved).
 				healthyPeers := repair.Peers > 0 && repair.RespondingPeers*10 >= repair.Peers*8
 				switch {
 				case qosSuspect || timelyPct < 60:
-					if autoRate > base {
+					if autoRate > repairAutoRateMin {
 						next := autoRate / 2
-						if next < base {
-							next = base
+						if next < repairAutoRateMin {
+							next = repairAutoRateMin
 						}
 						if qosSuspect {
 							mlog.NamedFilef("catchup", "repair rate: throttle-suspect — backing off %d/s -> %d/s", autoRate, next)
@@ -680,15 +703,21 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 						autoRate = next
 						receiver.SetRepairRequestRate(autoRate)
 					}
-				case timelyPct >= 75 && healthyPeers && utilized && autoRate < repairAutoRateMax:
+				case shouldIncreaseRepairRate(timelyPct, healthyPeers, utilized, gapGrowing, repairStarved) && autoRate < repairAutoRateMax:
 					autoRate += repairAutoRateStep
 					if autoRate > repairAutoRateMax {
 						autoRate = repairAutoRateMax
 					}
 					receiver.SetRepairRequestRate(autoRate)
-					mlog.NamedFilef("catchup", "repair rate: stepping up to %d/s (timely %d%%, responding %d/%d) — backs off automatically on a throttle signal", autoRate, timelyPct, repair.RespondingPeers, repair.Peers)
+					reason := "request ceiling utilized"
+					if gapGrowing && !utilized {
+						reason = fmt.Sprintf("replay gap grew %d -> %d slots while admission was below the send ceiling", previousRepairGap, currentRepairGap)
+					}
+					mlog.NamedFilef("catchup", "repair rate: stepping up to %d/s (%s; timely %d%%, responding %d/%d) — backs off automatically on a throttle signal", autoRate, reason, timelyPct, repair.RespondingPeers, repair.Peers)
 				}
 			}
+			previousRepairGap = currentRepairGap
+			havePreviousRepairGap = true
 			prevAnswerRate = answerRate
 			hbPrev = hb
 			hbPrevAt = time.Now()

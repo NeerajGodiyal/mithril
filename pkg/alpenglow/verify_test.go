@@ -177,6 +177,10 @@ func TestVerifyVoteMessageBindsConfiguredShredVersion(t *testing.T) {
 	if err := verifier.SetValidatorSet(set); err != nil {
 		t.Fatalf("set validator set: %v", err)
 	}
+	installed, ok := verifier.ValidatorSetForEpoch(set.Epoch)
+	if !ok || len(installed.parsedPubkeys) != len(set.Validators) {
+		t.Fatalf("installed validator keys were not prevalidated: found=%v parsed=%d validators=%d", ok, len(installed.parsedPubkeys), len(set.Validators))
+	}
 
 	vote := NewFinalizationVote(91)
 	valid := VoteMessage{

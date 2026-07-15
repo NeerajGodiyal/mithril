@@ -81,7 +81,7 @@ var (
 	blockSource                 string // "turbine", "rpc", or "lightbringer"
 	lightbringerEndpoint        string
 	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
-	repairMaxRequestsPerSecond  int    // Repair request-rate ceiling override (0 = default 500)
+	repairMaxRequestsPerSecond  int    // Repair request-rate ceiling override (0 = adaptive default)
 	blockRPCFallback            bool   // Allow RPC block fetch when > repairCatchupMaxGapSlots behind (default false: shreds only)
 	blockMaxRPS                 int    // Rate limit for block fetching
 	blockMaxInflight            int    // Max concurrent block fetch workers
@@ -207,6 +207,32 @@ func defaultBlockSourceForMode(alpenglow bool) string {
 	return "rpc"
 }
 
+// txParallelismForMode gives full-validator replay a usable default without
+// changing the classic verifying flow. Zero remains a meaningful, supported
+// operator choice when it was explicitly supplied through CLI or config.
+func txParallelismForMode(mode string, configured int64, explicitlySet bool, cpuCount int) int64 {
+	if mode != "validator" || explicitlySet || configured != 0 {
+		return configured
+	}
+	if cpuCount < 1 {
+		cpuCount = 1
+	}
+	return int64(cpuCount * 2)
+}
+
+// A full validator validates the block it will vote on by executing it and
+// comparing the resulting bank hash with the footer committed by the
+// certificate's double-Merkle block id. Fetching finalized getBlock metadata
+// afterwards is a verifying-node oracle, not part of validator operation.
+func verifierConfigForConsensusMode(mode string, cfg replay.VerifierConfig) replay.VerifierConfig {
+	if mode == "validator" {
+		cfg.Enabled = false
+		cfg.Required = false
+		cfg.ValidatorFooterHash = true
+	}
+	return cfg
+}
+
 // alpenglowAddrForGossip returns the Votor QUIC address to advertise in gossip,
 // or "" when the bind address is empty or has no fixed port.
 func alpenglowAddrForGossip(bindAddr string) string {
@@ -327,7 +353,7 @@ func init() {
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
-	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Set to 0 to use sequential execution, or >0 to execute a topsort tx plan with the given number of workers")
+	Run.Flags().Int64Var(&txParallelism, "txpar", 0, "Transaction execution workers (>0 enables topsort parallelism; explicit 0 is sequential; unset validator mode defaults to 2x CPU cores)")
 	Run.Flags().Int64Var(&numReplaySlots, "num-slots", 0, "Number of slots to replay (0 = run continuously)")
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
 
@@ -548,6 +574,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	// [replay] section (txpar moved to [tuning], with backwards-compatible fallback)
 	numReplaySlots = getInt64("num-slots", "replay.num_slots")
 	endSlot = getInt64("end-slot", "replay.end_slot")
+	txParallelismExplicit := flagChanged("txpar") || config.IsSet("tuning.txpar") || config.IsSet("replay.txpar")
 	if config.IsSet("tuning.txpar") {
 		txParallelism = getInt64("txpar", "tuning.txpar")
 	} else if config.IsSet("replay.txpar") {
@@ -631,6 +658,11 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		// pipeline and casts no votes (warned loudly at startup).
 	default:
 		return fmt.Errorf("unknown consensus.mode %q (valid: \"verifying\", \"validator\")", consensusMode)
+	}
+	resolvedTxParallelism := txParallelismForMode(consensusMode, txParallelism, txParallelismExplicit, runtime.NumCPU())
+	if resolvedTxParallelism != txParallelism {
+		txParallelism = resolvedTxParallelism
+		mlog.Log.Infof("consensus.mode=validator: tuning.txpar was not set; enabling %d transaction execution workers (set --txpar 0 explicitly to retain sequential execution)", txParallelism)
 	}
 	alpenglowObserverBindAddr = getString("alpenglow-observer-bind-addr", "consensus.alpenglow_observer_bind_addr")
 	alpenglowMaxMessageBytes = getInt64("alpenglow-max-message-bytes", "consensus.alpenglow_max_message_bytes")
@@ -1974,6 +2006,7 @@ postBootstrap:
 	if v := config.GetInt("verifier.max_rps"); v > 0 {
 		vcfg.MaxRPS = v
 	}
+	vcfg = verifierConfigForConsensusMode(consensusMode, vcfg)
 	replay.TrailingVerifierCfg = vcfg
 
 	if foldBatch := config.GetInt("storage.fold_batch_slots"); alpenglowMode && foldBatch > 0 {

@@ -379,11 +379,12 @@ func (a *SlotAssembler) SetEdgeRepairLag(lag uint64) {
 }
 
 // SetRetentionFloor pins the assembler's age cutoff: while floor is non-zero,
-// slots >= floor are accepted and retained even when they trail the live edge
-// by more than the normal lag window. Repair catchup uses this so shreds for a
-// gap far behind the edge are not discarded as "too old". Advance the floor as
-// replay progresses (releasing state behind it) and clear it (0) when caught
-// up. The absolute incomplete-slot cap still applies as the memory backstop.
+// slots >= floor are accepted even when they trail the live edge by more than
+// the normal lag window. Repair catchup uses this so shreds for a gap far
+// behind the edge are not discarded as "too old". Advance the floor as replay
+// progresses (releasing state behind it) and clear it (0) when caught up. The
+// absolute incomplete-slot cap still applies as the memory backstop, but its
+// eviction policy hard-protects the floor itself and repair-priority slots.
 func (a *SlotAssembler) SetRetentionFloor(slot uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -441,21 +442,52 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 		return
 	}
 	for len(a.slots) > maxRetainedIncompleteSlotCap {
-		var oldest uint64
-		first := true
-		for slot := range a.slots {
-			if first || slot < oldest {
-				oldest = slot
-				first = false
-			}
-		}
-		if first {
+		victim, ok := a.capEvictionCandidateLocked()
+		if !ok {
 			return
 		}
-		a.recordPartialObsLocked(a.slots[oldest])
-		delete(a.slots, oldest)
+		a.recordPartialObsLocked(a.slots[victim])
+		delete(a.slots, victim)
 		a.evictedSlots++
 	}
+}
+
+// capEvictionCandidateLocked chooses state furthest ahead of replay, rather
+// than the numerically oldest state. During a large repair catchup the oldest
+// slot is the emission-gating head; evicting it on every repair response makes
+// completion impossible once live ingress fills the cap. Prefer non-priority
+// future state, preserve every explicit repair pin, and never evict the exact
+// retention floor. The priority set is bounded below the assembler cap, so the
+// fallback should only be needed if an invariant changes in the future.
+func (a *SlotAssembler) capEvictionCandidateLocked() (uint64, bool) {
+	var highest uint64
+	found := false
+	for slot := range a.slots {
+		if a.retentionFloor > 0 && slot == a.retentionFloor {
+			continue
+		}
+		if _, priority := a.priorityRepairSlots[slot]; priority {
+			continue
+		}
+		if !found || slot > highest {
+			highest = slot
+			found = true
+		}
+	}
+	if found {
+		return highest, true
+	}
+
+	for slot := range a.slots {
+		if a.retentionFloor > 0 && slot == a.retentionFloor {
+			continue
+		}
+		if !found || slot > highest {
+			highest = slot
+			found = true
+		}
+	}
+	return highest, found
 }
 
 func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {

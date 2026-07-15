@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/trace"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1286,7 +1287,8 @@ func ReplayBlocks(
 	// Track last successfully persisted slot for checkpoint/resume
 	persistedHashes := &persistedTracker{}
 
-	// RPC client - for all cluster access (blocks, leader schedule, tip polling)
+	// RPC client for cluster data. Verifying/RPC-source flows may fetch blocks;
+	// validator mode restricts it to control-plane queries.
 	// First endpoint is primary, rest are backups for failover
 	rpcc := rpcclient.NewRpcClient(rpcEndpoints[0])
 	var rpcBackups []string
@@ -1392,23 +1394,33 @@ func ReplayBlocks(
 		}
 	}
 
-	// Shreds before blocks: turbine shred signature verification needs the
-	// leader schedule, and on a shreds-only node (block.rpc_fallback=false)
-	// the first block can only arrive AS verified shreds. Build the current
-	// epoch's schedule from the just-loaded epoch stakes NOW — deferring it
-	// to first-block configuration (the historical order) deadlocks:
-	// schedule ← first block ← verified shreds ← schedule. The guard is
-	// "can the installed schedule answer for the resume slot", not merely
-	// "does one exist" — same-process re-entry (recovery loop) can leave a
-	// prior epoch's schedule installed, which would reject every shred just
-	// as thoroughly as none at all.
+	// Shreds before blocks: turbine shred signature verification needs every
+	// available schedule from the repair epoch through the live epoch. On a
+	// shreds-only node the first block can only arrive AS verified shreds, so
+	// deferring this to first-block configuration deadlocks:
+	// schedule <- first block <- verified shreds <- schedule. Keeping only the
+	// resume epoch is also insufficient during a large catchup: current live
+	// shreds would all be rejected before they can be spooled for later replay.
 	if global.ManageLeaderSchedule() {
-		if _, ok := global.LeaderForSlot(startSlot); !ok {
-			if _, err := PrepareLeaderScheduleLocal(currentEpoch, epochSchedule, ""); err != nil {
-				result.Error = fmt.Errorf("building leader schedule for epoch %d before block-source start: %w", currentEpoch, err)
+		epochs := global.GetAllCachedEpochs()
+		slices.Sort(epochs)
+		for _, epoch := range epochs {
+			if epoch < currentEpoch {
+				continue
+			}
+			firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
+			if _, ok := global.LeaderForSlot(firstSlot); ok {
+				continue
+			}
+			if _, err := PrepareLeaderScheduleLocal(epoch, epochSchedule, ""); err != nil {
+				result.Error = fmt.Errorf("building leader schedule for cached epoch %d before block-source start: %w", epoch, err)
 				return result
 			}
-			mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", currentEpoch)
+			mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", epoch)
+		}
+		if _, ok := global.LeaderForSlot(startSlot); !ok {
+			result.Error = fmt.Errorf("leader schedule does not cover replay start slot %d (epoch %d)", startSlot, currentEpoch)
+			return result
 		}
 	}
 
@@ -1557,6 +1569,8 @@ func ReplayBlocks(
 			mlog.Log.Warnf("trailing verifier running in ADVISORY mode (verifier.required=false): folds are NOT gated on execution verification")
 		}
 		mlog.Log.FileOnlyf("trailing verifier active: lag=%d slots, budget=%d rps — folds gate on min(finality, verified)", TrailingVerifierCfg.LagSlots, TrailingVerifierCfg.MaxRPS)
+	} else if unrootedTailState != nil && TrailingVerifierCfg.ValidatorFooterHash {
+		mlog.Log.Infof("validator execution verification: RPC block metadata is disabled; received Alpenglow blocks must match their certified footer bank hash before certificate-finalized state can fold")
 	} else if unrootedTailState != nil {
 		mlog.Log.Warnf("trailing verifier DISABLED: folds gate on certificate finality only — certificates attest block data, not execution; a mithril-side execution divergence would fold to disk undetected")
 	}
@@ -1638,8 +1652,10 @@ func ReplayBlocks(
 		if lastRootedWatermark == 0 {
 			return false
 		}
-		// The trailing verifier is the only execution-correctness oracle; a
-		// divergence halts regardless of finality progress.
+		// In verifying mode the trailing verifier is the external execution
+		// oracle; a divergence halts regardless of finality progress. Validator
+		// mode has already enforced certified-footer/local bank-hash parity in
+		// ProcessBlock and therefore has no trailing verifier here.
 		if trailingVerifier != nil {
 			if div := trailingVerifier.Failure(); div != nil {
 				recordReplayDivergenceEvidence(mithrilState, div)
@@ -1650,9 +1666,10 @@ func ReplayBlocks(
 				return true
 			}
 		}
-		// Dual watermark: nothing folds unless BOTH certificate finality AND the
-		// trailing verifier cover it (certificates attest block data, not
-		// execution), and never at or past a persisted-divergence floor.
+		// Verifying mode uses the dual watermark: certificate finality AND the
+		// trailing verifier. Validator mode needs certificate finality only here
+		// because every received block already passed certified-footer/local
+		// bank-hash parity. Neither mode folds at/past a divergence floor.
 		verifierRequired := trailingVerifier != nil && TrailingVerifierCfg.Required
 		verifiedWM := uint64(0)
 		if verifierRequired {

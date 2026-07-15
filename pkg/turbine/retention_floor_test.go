@@ -71,3 +71,43 @@ func TestRetentionFloorProtectsStateFromPruning(t *testing.T) {
 		t.Fatalf("clearing the floor must let priority pruning reclaim the window")
 	}
 }
+
+func TestRetentionFloorProtectsRepairHeadAtIncompleteSlotCap(t *testing.T) {
+	a := NewSlotAssembler()
+	floor := uint64(1_000)
+	a.SetRetentionFloor(floor)
+
+	// Fill beyond the absolute cap with future live states. The old eviction
+	// policy selected the numerically oldest state here, deleting the repair
+	// head every time another response arrived.
+	for slot := floor; slot < floor+maxRetainedIncompleteSlotCap+64; slot++ {
+		a.slots[slot] = &slotState{
+			slot:    slot,
+			shreds:  map[uint32]*Shred{0: {}},
+			fecSets: make(map[uint32]*fecState),
+		}
+	}
+	priorityFuture := floor + maxRetainedIncompleteSlotCap + 63
+	a.priorityRepairSlots[floor] = struct{}{}
+	a.priorityRepairSlots[priorityFuture] = struct{}{}
+	a.priorityRepairOrder = append(a.priorityRepairOrder, floor, priorityFuture)
+	a.maxObservedSlot = floor + maxRetainedIncompleteSlotCap + 63
+
+	a.pruneOldSlotsLocked()
+
+	if got := len(a.slots); got != maxRetainedIncompleteSlotCap {
+		t.Fatalf("retained %d incomplete slots, want cap %d", got, maxRetainedIncompleteSlotCap)
+	}
+	if a.slots[floor] == nil {
+		t.Fatalf("repair head at retention floor was evicted at the cap")
+	}
+	if a.slots[priorityFuture] == nil {
+		t.Fatalf("priority-pinned future slot was evicted at the cap")
+	}
+	if a.slots[priorityFuture-1] != nil {
+		t.Fatalf("highest non-priority future slot survived cap eviction")
+	}
+	if got := a.evictedSlots; got != 64 {
+		t.Fatalf("evicted %d slots, want 64", got)
+	}
+}

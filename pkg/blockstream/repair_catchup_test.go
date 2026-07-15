@@ -353,6 +353,13 @@ func TestCatchupStallRescueGates(t *testing.T) {
 		if res.slot != 1_006 || res.rpcIdx != -1 || res.block != blk {
 			t.Fatalf("rescued block must be delivered as a live result, got %+v", res)
 		}
+		if !bs.liveDeliveryInFlight(res.slot) {
+			t.Fatalf("queued live result must remain explicitly owned before emitter intake")
+		}
+		bs.finishLiveDelivery(res.slot) // simulate emitOrderedBlocks intake
+		if bs.liveDeliveryInFlight(res.slot) {
+			t.Fatalf("emitter intake must release queued-delivery ownership")
+		}
 	default:
 		t.Fatalf("rescued block must be in the result queue, not the staging buffer")
 	}

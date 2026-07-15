@@ -141,7 +141,8 @@ name = "mithril"
 # [network] - RPC Endpoints
 # ============================================================================
 #
-# Solana RPC endpoints for all cluster access (blocks, leader schedule, etc.)
+# Solana RPC endpoints for cluster data. Validator mode uses control-plane data
+# only and never fetches blocks; verifying/RPC-source modes may fetch blocks.
 # Endpoints are listed in PRIORITY ORDER:
 #   - First endpoint is PRIMARY (used for all calls when healthy)
 #   - Remaining endpoints are FALLBACKS (used when primary fails)
@@ -225,12 +226,12 @@ name = "mithril"
     # (the incremental is fetched AFTER the full snapshot builds, so the resume
     # point is usually only minutes behind tip) and typical restart gaps.
     repair_catchup_max_gap_slots = 8192
-    # Repair request-rate ceiling, requests/second (0 or unset = default 500).
-    # Peer serve-repair QoS bans heavy unstaked requesters (observed: ~2000/s
-    # sustained froze all responses after ~90s). Raise in steps — try 750,
-    # then 1000 — and watch the timeout share and "late" counts in the repair
-    # catchup heartbeat; back off if timeouts climb.
-    # repair_max_requests_per_second = 500
+    # Repair request-rate ceiling, requests/second (0/unset = adaptive, starts
+    # at 15000). The controller increases the admission/rate budget only while
+    # replay is shred-starved and healthy peers keep up, and backs off on late
+    # service or a QoS-throttle signature. Positive values pin the rate and
+    # disable auto-tuning; watch timeout, late, and throttle counters.
+    # repair_max_requests_per_second = 0
     # Cluster-join / gossip settings for native turbine live under [turbine];
     # [turbine].gossip_entrypoint is also required to discover the shred version
     # and advertise this node into the turbine tree.
@@ -476,9 +477,9 @@ name = "mithril"
 # The defaults work well for most deployments.
 
 [tuning]
-    # Transaction parallelism for block execution.
-    # Set to 0 for sequential execution, or >0 for parallel workers.
-    # Recommended: 2x your CPU core count (e.g., 192 for a 96-core machine)
+    # Transaction parallelism for block execution. Validator mode defaults to
+    # 2x CPU cores when this key and --txpar are both unset. Verifying mode
+    # stays sequential by default; explicit 0 always requests sequential mode.
     txpar = 24
 
     # Zstd decoder concurrency (defaults to NumCPU)
@@ -754,15 +755,17 @@ name = "mithril"
 # [verifier] - Trailing Execution Verifier
 # ============================================================================
 #
-# Alpenglow certificates attest a block's DATA (block id), never the results
-# of executing it. The trailing verifier is the execution-correctness oracle:
+# In verifying mode, the trailing verifier is an external execution oracle:
 # it re-derives each executed slot's per-transaction results (fee, status,
 # pre/post balances) from RPC getBlock metadata at finalized commitment and
-# compares them against what replay produced. Durable folds gate on
+# compares them against what replay produced. Durable folds then gate on
 # min(certificate finality, verified watermark) — nothing reaches disk
 # unverified. On a confirmed mismatch the node halts and records evidence;
 # restarts refuse to fold past the disputed slot until the evidence is
-# cleared after triage.
+# cleared after triage. Full validator mode never fetches RPC blocks: it
+# executes received blocks locally, requires the resulting bank hash to match
+# the footer committed by the certified block id, and folds on certificate
+# finality. The settings below therefore apply to verifying mode only.
 
 [verifier]
     enabled = true

@@ -30,10 +30,16 @@ type UDPReceiver struct {
 	repairClient  *repairClient
 	sigCache      shredSigCache
 	blocks        chan *block.Block
-	errs          chan error
-	ready         chan error
-	once          sync.Once
-	readyOnce     sync.Once
+	// Count queued deliveries rather than storing a boolean. A rejected
+	// Alpenglow variant can reset a slot and assemble its replacement while
+	// the first delivery is still crossing Blocks(); acknowledging the first
+	// must not make the replacement look lost to the catchup watchdog.
+	pendingBlocksMu sync.Mutex
+	pendingBlocks   map[uint64]int // slot -> deliveries waiting in Blocks()
+	errs            chan error
+	ready           chan error
+	once            sync.Once
+	readyOnce       sync.Once
 
 	spool       *ShredSpool
 	hydrLo      atomic.Uint64
@@ -101,14 +107,23 @@ type ReceiverStats struct {
 	SigVerifyCached uint64
 }
 
+// Repair catchup is packet-processing heavy (wire decode, Merkle proof,
+// occasional Ed25519, spool classification, FEC/block assembly). Multiple
+// readers on the dedicated repair socket keep the kernel queue draining while
+// one reader finishes a large block. net.UDPConn supports concurrent methods;
+// assembler, signature cache, repair client, and spool provide their own
+// synchronization.
+const turbineRepairReadWorkers = 4
+
 func NewUDPReceiver(addr string) *UDPReceiver {
 	return &UDPReceiver{
-		Addr:        addr,
-		assembler:   NewSlotAssembler(),
-		blocks:      make(chan *block.Block, 1024),
-		errs:        make(chan error, 16),
-		ready:       make(chan error, 1),
-		hydrateKick: make(chan struct{}, 1),
+		Addr:          addr,
+		assembler:     NewSlotAssembler(),
+		blocks:        make(chan *block.Block, 1024),
+		pendingBlocks: make(map[uint64]int),
+		errs:          make(chan error, 16),
+		ready:         make(chan error, 1),
+		hydrateKick:   make(chan struct{}, 1),
 	}
 }
 
@@ -173,6 +188,9 @@ func (r *UDPReceiver) ResetSlot(slot uint64) {
 	}
 	r.slotResetMu.Lock()
 	defer r.slotResetMu.Unlock()
+	if r.repairClient != nil {
+		r.repairClient.cancelSlotRequests(slot)
+	}
 	r.assembler.ResetSlot(slot)
 }
 
@@ -187,6 +205,9 @@ func (r *UDPReceiver) ResetSlotAndDiscardSpool(slot uint64) {
 	}
 	r.slotResetMu.Lock()
 	defer r.slotResetMu.Unlock()
+	if r.repairClient != nil {
+		r.repairClient.cancelSlotRequests(slot)
+	}
 	r.assembler.ResetSlot(slot)
 	if r.spool != nil {
 		r.spool.DiscardSlot(slot)
@@ -282,6 +303,37 @@ func (r *UDPReceiver) Blocks() <-chan *block.Block {
 	return r.blocks
 }
 
+// BlockPendingDelivery reports whether an assembled block is still queued
+// between the receiver and its consumer. A completed assembler marker is not
+// "lost" while this is true.
+func (r *UDPReceiver) BlockPendingDelivery(slot uint64) bool {
+	r.pendingBlocksMu.Lock()
+	defer r.pendingBlocksMu.Unlock()
+	return r.pendingBlocks[slot] > 0
+}
+
+// AcknowledgeBlockDelivery transfers ownership of a block received from
+// Blocks() to the consumer.
+func (r *UDPReceiver) AcknowledgeBlockDelivery(slot uint64) {
+	r.finishPendingBlock(slot)
+}
+
+func (r *UDPReceiver) startPendingBlock(slot uint64) {
+	r.pendingBlocksMu.Lock()
+	r.pendingBlocks[slot]++
+	r.pendingBlocksMu.Unlock()
+}
+
+func (r *UDPReceiver) finishPendingBlock(slot uint64) {
+	r.pendingBlocksMu.Lock()
+	if r.pendingBlocks[slot] <= 1 {
+		delete(r.pendingBlocks, slot)
+	} else {
+		r.pendingBlocks[slot]--
+	}
+	r.pendingBlocksMu.Unlock()
+}
+
 func (r *UDPReceiver) Errors() <-chan error {
 	return r.errs
 }
@@ -357,23 +409,40 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		r.signalReady(err)
 		return err
 	}
-	conn, err := net.ListenUDP("udp", udpAddr)
+	liveConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		r.signalReady(err)
 		return err
 	}
-	defer conn.Close()
-	// Shreds AND repair responses land on this one socket in multi-megabyte
-	// bursts; the kernel buffer is the only slack while the read loop drains.
-	gossip.BoostUDPReceiveBuffer(conn, gossip.TurbineUDPReceiveBufferBytes, "turbine receiver")
+	defer liveConn.Close()
+	gossip.BoostUDPReceiveBuffer(liveConn, gossip.TurbineUDPReceiveBufferBytes, "turbine receiver")
+
+	// Serve-repair replies to the request's UDP source port. Give repair its
+	// own socket so the one or two shreds gating replay never sit behind a
+	// multi-megabyte FIFO of unrelated live-edge broadcast. The advertised TVU
+	// socket remains unchanged; this ephemeral socket is outbound repair only.
+	var repairConn *net.UDPConn
+	if r.repairClient != nil {
+		repairBind := &net.UDPAddr{IP: udpAddr.IP, Port: 0, Zone: udpAddr.Zone}
+		repairConn, err = net.ListenUDP("udp", repairBind)
+		if err != nil {
+			r.signalReady(fmt.Errorf("listen for turbine repair responses: %w", err))
+			return fmt.Errorf("listen for turbine repair responses: %w", err)
+		}
+		defer repairConn.Close()
+		gossip.BoostUDPReceiveBuffer(repairConn, gossip.TurbineUDPReceiveBufferBytes, "turbine repair receiver")
+	}
 	r.signalReady(nil)
 
 	go func() {
 		<-runCtx.Done()
-		_ = conn.Close()
+		_ = liveConn.Close()
+		if repairConn != nil {
+			_ = repairConn.Close()
+		}
 	}()
-	if r.repairClient != nil {
-		go r.repairClient.run(runCtx, conn, r.assembler)
+	if repairConn != nil {
+		go r.repairClient.run(runCtx, repairConn, r.assembler)
 	}
 	if r.spool != nil {
 		// Flush buffered slot-file tails and close the completeness journal
@@ -396,114 +465,146 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		}()
 	}
 
+	readers := 1
+	readErr := make(chan error, 1+turbineRepairReadWorkers)
+	go func() { readErr <- r.readPackets(runCtx, liveConn) }()
+	if repairConn != nil {
+		readers += turbineRepairReadWorkers
+		for i := 0; i < turbineRepairReadWorkers; i++ {
+			go func() { readErr <- r.readPackets(runCtx, repairConn) }()
+		}
+	}
+	firstErr := <-readErr
+	runCancel()
+	_ = liveConn.Close()
+	if repairConn != nil {
+		_ = repairConn.Close()
+	}
+	for i := 1; i < readers; i++ {
+		<-readErr
+	}
+	if firstErr != nil && ctx.Err() == nil {
+		return firstErr
+	}
+	return nil
+}
+
+func (r *UDPReceiver) readPackets(ctx context.Context, conn *net.UDPConn) error {
 	buf := make([]byte, packetDataSize)
 	for {
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if runCtx.Err() != nil {
+			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
-		r.packets.Add(1)
-		r.lastPacketUnix.Store(time.Now().Unix())
-		packet := buf[:n]
-		if r.repairClient != nil && r.repairClient.handleRepairPing(conn, packet, addr) {
-			continue
-		}
-		shred, err := ParseShred(packet)
-		if err != nil {
-			if errors.Is(err, ErrCodingShredIgnored) {
-				r.codingShreds.Add(1)
-				continue
-			}
-			r.parseErrors.Add(1)
-			select {
-			case r.errs <- err:
-			default:
-			}
-			continue
-		}
-		switch shred.Type {
-		case ShredTypeData:
-			r.dataShreds.Add(1)
-			// Monotonic max: out-of-order packets must not move the reported
-			// latest-shred edge backward.
-			for {
-				cur := r.lastDataSlot.Load()
-				if shred.Slot <= cur || r.lastDataSlot.CompareAndSwap(cur, shred.Slot) {
-					break
-				}
-			}
-		case ShredTypeCode:
-			r.codingShreds.Add(1)
-		}
-		if r.leaderForSlot != nil {
-			leader, ok := r.leaderForSlot(shred.Slot)
-			if !ok {
-				r.missingLeaders.Add(1)
-				select {
-				case r.errs <- fmt.Errorf("missing leader for turbine shred slot %d", shred.Slot):
-				default:
-				}
-				continue
-			}
-			if err := r.sigCache.verifyShred(shred, leader); err != nil {
-				r.signatureErrors.Add(1)
-				select {
-				case r.errs <- err:
-				default:
-				}
-				continue
-			}
-		}
-		fromRepair := false
-		if r.repairClient != nil {
-			fromRepair = r.repairClient.observeShredResponse(conn, packet, addr, shred)
-		}
-		r.slotResetMu.RLock()
-		if r.spool != nil {
-			// Write-through of every VERIFIED shred (copy: the read buffer
-			// is reused). Repaired shreds included — a later slot reset
-			// re-hydrates from disk instead of re-fetching over the wire.
-			pkt := make([]byte, len(packet))
-			copy(pkt, packet)
-			r.spool.Append(shred.Slot, pkt)
-			if r.skipAssemblyForSpool(shred.Slot) {
-				r.slotResetMu.RUnlock()
-				// Far-future slot during catchup: on disk is enough. The
-				// hydrator streams it into RAM when replay approaches. A repair
-				// delivery lands on disk and bypasses the assembler's useful
-				// counter, so count it as useful repair throughput here — else
-				// disk-bound catchup, where most repair goes straight to the
-				// spool, would read as ~zero useful/s while repair is in fact
-				// carrying the whole catchup.
-				if fromRepair {
-					r.spooledRepairShreds.Add(1)
-				}
-				continue
-			}
-		}
-		blk, err := r.assembler.AddShredFrom(shred, fromRepair)
-		r.slotResetMu.RUnlock()
-		if err != nil {
-			if errors.Is(err, ErrDuplicateShred) {
-				continue
-			}
-			r.assemblyErrors.Add(1)
-			select {
-			case r.errs <- err:
-			default:
-			}
-			continue
-		}
-		if blk == nil {
-			continue
-		}
-		if !r.emitAssembled(runCtx, blk) {
+		if !r.processPacket(ctx, conn, buf[:n], addr) {
 			return nil
 		}
 	}
+}
+
+func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, packet []byte, addr *net.UDPAddr) bool {
+	r.packets.Add(1)
+	r.lastPacketUnix.Store(time.Now().Unix())
+	if r.repairClient != nil && r.repairClient.handleRepairPing(conn, packet, addr) {
+		return true
+	}
+	shred, err := ParseShred(packet)
+	if err != nil {
+		if errors.Is(err, ErrCodingShredIgnored) {
+			r.codingShreds.Add(1)
+			return true
+		}
+		r.parseErrors.Add(1)
+		select {
+		case r.errs <- err:
+		default:
+		}
+		return true
+	}
+	switch shred.Type {
+	case ShredTypeData:
+		r.dataShreds.Add(1)
+		// Monotonic max: out-of-order packets must not move the reported
+		// latest-shred edge backward.
+		for {
+			cur := r.lastDataSlot.Load()
+			if shred.Slot <= cur || r.lastDataSlot.CompareAndSwap(cur, shred.Slot) {
+				break
+			}
+		}
+	case ShredTypeCode:
+		r.codingShreds.Add(1)
+	}
+	if r.leaderForSlot != nil {
+		leader, ok := r.leaderForSlot(shred.Slot)
+		if !ok {
+			r.missingLeaders.Add(1)
+			select {
+			case r.errs <- fmt.Errorf("missing leader for turbine shred slot %d", shred.Slot):
+			default:
+			}
+			return true
+		}
+		if err := r.sigCache.verifyShred(shred, leader); err != nil {
+			r.signatureErrors.Add(1)
+			select {
+			case r.errs <- err:
+			default:
+			}
+			return true
+		}
+	}
+	fromRepair := false
+	if r.repairClient != nil {
+		fromRepair = r.repairClient.observeShredResponse(conn, packet, addr, shred)
+		r.repairClient.satisfyDataShred(shred)
+	}
+	r.slotResetMu.RLock()
+	if r.spool != nil {
+		// Write-through of every VERIFIED shred (copy: the read buffer
+		// is reused). Repaired shreds included — a later slot reset
+		// re-hydrates from disk instead of re-fetching over the wire.
+		pkt := make([]byte, len(packet))
+		copy(pkt, packet)
+		spooled := r.spool.AppendShred(shred, pkt)
+		if r.skipAssemblyForSpool(shred.Slot) {
+			r.slotResetMu.RUnlock()
+			// Far-future slot during catchup: on disk is enough. The
+			// hydrator streams it into RAM when replay approaches. A repair
+			// delivery lands on disk and bypasses the assembler's useful
+			// counter, so count it as useful repair throughput here — else
+			// disk-bound catchup, where most repair goes straight to the
+			// spool, would read as ~zero useful/s while repair is in fact
+			// carrying the whole catchup.
+			if fromRepair && spooled {
+				r.spooledRepairShreds.Add(1)
+			}
+			return true
+		}
+	}
+	blk, err := r.assembler.AddShredFrom(shred, fromRepair)
+	r.slotResetMu.RUnlock()
+	if err != nil {
+		if errors.Is(err, ErrDuplicateShred) {
+			return true
+		}
+		r.assemblyErrors.Add(1)
+		select {
+		case r.errs <- err:
+		default:
+		}
+		return true
+	}
+	if blk == nil {
+		return true
+	}
+	if r.repairClient != nil {
+		r.repairClient.cancelSlotRequests(blk.Slot)
+	}
+	return r.emitAssembled(ctx, blk)
 }
 
 // skipAssemblyForSpool implements the catchup RAM policy: with a hydration
@@ -523,10 +624,12 @@ func (r *UDPReceiver) skipAssemblyForSpool(slot uint64) bool {
 func (r *UDPReceiver) emitAssembled(ctx context.Context, blk *block.Block) bool {
 	r.blocksEmitted.Add(1)
 	r.lastBlockSlot.Store(blk.Slot)
+	r.startPendingBlock(blk.Slot)
 	select {
 	case r.blocks <- blk:
 		return true
 	case <-ctx.Done():
+		r.finishPendingBlock(blk.Slot)
 		return false
 	}
 }
@@ -579,6 +682,9 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 				if perr != nil {
 					continue
 				}
+				if r.repairClient != nil {
+					r.repairClient.satisfyDataShred(shred)
+				}
 				blk, aerr := r.assembler.AddShredFrom(shred, false)
 				if aerr != nil || blk == nil {
 					continue
@@ -588,6 +694,9 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 			}
 			complete := r.assembler.SlotCompleted(slot)
 			r.slotResetMu.RUnlock()
+			if complete && r.repairClient != nil {
+				r.repairClient.cancelSlotRequests(slot)
+			}
 			if assembled != nil && !r.emitAssembled(ctx, assembled) {
 				return
 			}

@@ -90,15 +90,14 @@ type BlockConfig struct {
 	// Repair-first catchup: resume gaps up to this many slots fill via turbine
 	// repair instead of RPC getBlock (0 disables; default 1024).
 	RepairCatchupMaxGapSlots int `toml:"repair_catchup_max_gap_slots" mapstructure:"repair_catchup_max_gap_slots"`
-	// Repair request-rate ceiling, requests/second (0 = default 500). Peer
-	// serve-repair QoS bans heavy unstaked requesters — observed: ~2000/s
-	// sustained froze all responses. Raise in steps and watch the timeout
-	// ratio in the repair catchup heartbeat.
+	// Repair request-rate ceiling, requests/second (0 = adaptive default). Peer
+	// service health and replay starvation tune the default automatically. A
+	// positive value pins the ceiling and disables auto-tuning.
 	RepairMaxRequestsPerSecond int `toml:"repair_max_requests_per_second" mapstructure:"repair_max_requests_per_second"`
 	// RPCFallback: allow RPC to fetch blocks at all on a shred source. False
 	// (the default) is shreds-only: turbine + repair are the only block
-	// path regardless of how far behind replay is; RPC serves only tip
-	// polling and the trailing verifier. True enables RPC catchup when
+	// path regardless of how far behind replay is; RPC serves control-plane
+	// queries and, in verifying mode only, the trailing verifier. True enables RPC catchup when
 	// replay is more than repair_catchup_max_gap_slots behind.
 	RPCFallback bool `toml:"rpc_fallback" mapstructure:"rpc_fallback"`
 

@@ -85,6 +85,51 @@ func TestReceiverRejectsMismatchedShredVersionBeforeObservation(t *testing.T) {
 	require.NoError(t, <-runErr)
 }
 
+func TestReceiverAdmissionRejectsBeforeTrustedObservation(t *testing.T) {
+	observer := NewObserver()
+	admissions := make(chan Message, 1)
+	receiver, err := NewReceiver(ReceiverConfig{
+		BindAddr:    "127.0.0.1:0",
+		LogInterval: -1,
+		AdmitMessage: func(msg Message) (Message, bool) {
+			admissions <- msg
+			return Message{}, false
+		},
+	}, observer)
+	require.NoError(t, err)
+	defer receiver.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- receiver.Run(ctx) }()
+
+	msg := NewCertificateMessage(Certificate{
+		Type:      CertificateSkip,
+		Slot:      42,
+		Signature: testSignatureSeq(0x42),
+		Bitmap:    []byte{0, 0, 0},
+	})
+	payload, err := EncodeMessage(msg)
+	require.NoError(t, err)
+	conn := sendVotorQUICPayload(t, receiver.Addr().String(), payload)
+	defer conn.CloseWithError(0, "test done")
+
+	select {
+	case <-admissions:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admission callback was not invoked")
+	}
+	require.Eventually(t, func() bool {
+		return receiver.Stats().MessagesDecoded == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Zero(t, observer.Snapshot().CertificatesObserved)
+
+	cancel()
+	require.NoError(t, receiver.Close())
+	require.NoError(t, <-runErr)
+}
+
 func TestReceiverCountsMalformedVotorPayload(t *testing.T) {
 	observer := NewObserver()
 	receiver, err := NewReceiver(ReceiverConfig{

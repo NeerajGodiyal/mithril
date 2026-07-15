@@ -19,7 +19,10 @@ import (
 const (
 	repairScanInterval        = 100 * time.Millisecond
 	repairPeerRefreshInterval = 2 * time.Second
-	repairMaxSlotsPerScan     = 32
+	// Match blockstream's 64-slot catchup priority window. At high healthy
+	// repair rates, scanning only 32 slots left the admission window half empty
+	// and replay repeatedly reached the end of its prefetched runway.
+	repairMaxSlotsPerScan = 64
 	// Max NEW requests one scan may put on the wire, independent of how many
 	// tokens the bucket has accumulated. Each send does a random-nonce Ed25519
 	// signature (~13us measured, BenchmarkRepairRequestSign); without this cap a
@@ -64,19 +67,21 @@ const (
 	repairTimeoutLatencyFactor = 3
 	repairLatencyEWMAAlpha     = 0.1
 	// Retry intervals by tier and, for the head, by how close it is to
-	// completion. Firedancer/Agave re-ask missing shreds far faster than a
-	// multi-second timeout; these are the practical pieces.
+	// completion. Only the endgame permits concurrent attempts: duplicating
+	// the whole bulk/prefetch window when the receive queue is seconds deep
+	// halves distinct-shred throughput. Bulk attempts retry after their
+	// accounting timeout releases the in-flight entry.
 	repairRetryHeadEndgame     = 150 * time.Millisecond // head within the fanout window
 	repairRetryHeadNear        = 250 * time.Millisecond // head within repairRetryHeadNearMissing
 	repairRetryHeadFar         = 500 * time.Millisecond // large head — don't over-duplicate
 	repairRetryBulk            = 800 * time.Millisecond // window/edge slots
 	repairRetryHeadNearMissing = 128
 	// Concurrent in-flight attempts allowed per missing shred, by tier: the
-	// head endgame fans a shred across a few distinct peers (fastest wins);
-	// bulk allows one retry (a second peer) if the first goes silent.
+	// head endgame fans a shred across a few distinct peers (fastest wins),
+	// while near/far head and bulk work stay one-request-per-distinct-shred.
 	repairMaxAttemptsHeadEndgame = 3
-	repairMaxAttemptsHead        = 2
-	repairMaxAttemptsBulk        = 2
+	repairMaxAttemptsHead        = 1
+	repairMaxAttemptsBulk        = 1
 	// Expired-request memory: (responder, nonce) keys of timed-out requests,
 	// two rotating generations. A response landing after expiry is matched
 	// here instead of vanishing into ignored_old — it counts as a LATE
@@ -91,12 +96,12 @@ const (
 	repairExpiredRetentionSeconds = 4.0
 	repairExpiredGenMin           = 8192
 	repairExpiredGenMax           = 131072
-	// Global request-rate BASE (the starting point; the AIMD controller ramps
+	// Global request-rate START (the starting point; the AIMD controller ramps
 	// it up toward repairAutoRateMax when the peer set absorbs it cleanly and
 	// multiplicatively backs it off on a QoS-throttle signal — see
 	// repair_catchup.go). It is deliberately NOT the experimental ceiling:
 	// pinning default==max would disable the controller (can't ramp, can't back
-	// off). This base is already aggressive — 20x the old 500 and well past the
+	// off). This base is already aggressive — 30x the old 500 and well past the
 	// ~2000/s that once froze serve-repair — so catchup moves immediately, then
 	// the controller finds the peer set's real ceiling and retreats if it trips
 	// a ban. Fully overridable via block.repair_max_requests_per_second, which
@@ -104,7 +109,13 @@ const (
 	// decision). HISTORY: cavey's kv-block-production runs repair unthrottled and
 	// does not stall on these clusters; low caps left monster-block catchup
 	// crawling at ~80 useful shreds/s, hence the aggressive posture.
-	repairMaxRequestsPerSecond = 10000
+	// Live shred-only catchup on the Alpenglow community testnet plateaued at
+	// roughly the cluster slot rate from a 10k ceiling: the admission window
+	// could only sustain 4-6k useful shreds/s through monster-block stretches.
+	// The dedicated repair socket remains healthy at 15k (100/103 peers
+	// responding, >90% timely); when its admission window binds below the token
+	// ceiling, the controller raises it until replay closes the gap.
+	repairMaxRequestsPerSecond = 15000
 	// Success-weighted peer selection: a peer that answered within this
 	// window counts as a responder, and 3 of 4 requests go to responders.
 	// Blind round-robin across a cluster where only a few peers still
@@ -146,7 +157,7 @@ const (
 	// admission never binds in the good regime, but bounds queue depth the
 	// moment service degrades; the per-peer inflight cap keeps the slow
 	// population from absorbing the extra room this allows.
-	repairAdmissionQueueSeconds = 1.5
+	repairAdmissionQueueSeconds = 0.75
 	// The head's share of the admission window. 1.0 was tried live and
 	// LOWERED emission throughput (6.5s/slot vs 3.8s on easier content):
 	// total fill rate is peer-service-bound either way, so a total head
@@ -621,6 +632,12 @@ func (c *repairClient) observeShredResponse(conn *net.UDPConn, packet []byte, fr
 	} else {
 		c.notePeerTimelyLocked(addrKey, latency)
 	}
+	// The first conforming answer satisfies the shred. Retire every sibling
+	// attempt immediately instead of leaving redundant requests to occupy the
+	// admission window (and later deliver duplicate packets) until timeout.
+	// This is especially important in catchup: with a 2-6s receive backlog,
+	// bulk fast-retries otherwise keep the entire window full of obsolete work.
+	c.cancelShredRequestsLocked(outstanding.key.shred())
 	c.observeLatencyLocked(latency)
 	c.mu.Unlock()
 
@@ -738,6 +755,75 @@ func headPolicy(missing int) retryPolicy {
 
 func bulkPolicy() retryPolicy {
 	return retryPolicy{repairRetryBulk, 1, repairMaxAttemptsBulk}
+}
+
+// satisfyDataShred retires WindowIndex requests satisfied by a verified data
+// shred arriving through any path: a matched repair response, Turbine
+// broadcast, FEC/spool hydration, or a duplicate response. Request nonce
+// matching still happens first in observeShredResponse so the answering peer
+// receives its proper timely/late credit.
+func (c *repairClient) satisfyDataShred(shred *Shred) {
+	if c == nil || shred == nil || shred.Type != ShredTypeData {
+		return
+	}
+	c.mu.Lock()
+	c.cancelShredRequestsLocked(shredKey{
+		kind:  repairRequestWindowIndex,
+		slot:  shred.Slot,
+		index: shred.Index,
+	})
+	c.mu.Unlock()
+}
+
+// cancelSlotRequests retires all repair work for a slot that has assembled or
+// is being reset. These requests can no longer contribute useful data; keeping
+// them until their accounting deadlines steals admission room from the next
+// replay head.
+func (c *repairClient) cancelSlotRequests(slot uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	for key, req := range c.outstanding {
+		if key.slot != slot {
+			continue
+		}
+		delete(c.outstanding, key)
+		delete(c.byResponse, repairResponseKey{addr: req.addr, nonce: req.nonce})
+		c.notePeerInflightDoneLocked(req.addr)
+	}
+	for key := range c.inflight {
+		if key.slot == slot {
+			delete(c.inflight, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
+// cancelShredRequestsLocked retires the handful of concurrent attempts for a
+// single shred in O(attempts), not O(all outstanding). It must be called with
+// c.mu held.
+func (c *repairClient) cancelShredRequestsLocked(sk shredKey) {
+	inf := c.inflight[sk]
+	if inf == nil {
+		return
+	}
+	for attempt := 0; attempt < int(inf.nextAttempt); attempt++ {
+		key := repairRequestKey{
+			kind:    sk.kind,
+			slot:    sk.slot,
+			index:   sk.index,
+			attempt: uint8(attempt),
+		}
+		req, ok := c.outstanding[key]
+		if !ok {
+			continue
+		}
+		delete(c.outstanding, key)
+		delete(c.byResponse, repairResponseKey{addr: req.addr, nonce: req.nonce})
+		c.notePeerInflightDoneLocked(req.addr)
+	}
+	delete(c.inflight, sk)
 }
 
 // accountingTimeout is how long an attempt stays matchable-as-timely (and,
@@ -897,8 +983,8 @@ func (c *repairClient) rateLimitLocked() float64 {
 }
 
 // setRateLimit overrides the request-rate ceiling (0 restores the default).
-// Callers should stay well below the peer-side QoS ban threshold — observed
-// live: ~2000 req/s sustained froze all responses after ~90s.
+// The automatic caller watches timely/late service and backs off when the
+// current cluster/identity begins to see a QoS-throttle signature.
 func (c *repairClient) setRateLimit(perSecond int) {
 	c.mu.Lock()
 	c.ratePerSecond = float64(perSecond)
@@ -924,7 +1010,11 @@ func (c *repairClient) takeRateTokens(want int) int {
 	}
 	if c.rateRefillAt.IsZero() {
 		c.rateRefillAt = now
-		c.rateTokens = limit
+		// Start with one scan interval, not a full second's burst. A cold
+		// catchup previously signed and sent ~10k requests in its first two
+		// scans, filling the local UDP receive queue before latency feedback
+		// existed. Steady-state refill is unchanged.
+		c.rateTokens = limit * repairScanInterval.Seconds()
 	}
 	elapsed := now.Sub(c.rateRefillAt).Seconds()
 	c.rateRefillAt = now

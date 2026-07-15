@@ -31,3 +31,28 @@ func TestQoSThrottleSuspected(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldIncreaseRepairRate(t *testing.T) {
+	cases := []struct {
+		name                                               string
+		timely                                             uint64
+		healthy, utilized, gapGrowing, repairStarved, want bool
+	}{
+		{"utilized ceiling while repair-starved", 90, true, true, false, true, true},
+		{"utilized ceiling with an assembled runway", 90, true, true, false, false, false},
+		{"admission-bound, starved, and losing ground", 90, true, false, true, true, true},
+		{"execution-bound with runway", 90, true, false, true, false, false},
+		{"admission-bound but gap stable", 90, true, false, false, true, false},
+		{"unhealthy peer set", 90, false, true, true, true, false},
+		{"responses no longer timely", 59, true, true, true, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldIncreaseRepairRate(tc.timely, tc.healthy, tc.utilized, tc.gapGrowing, tc.repairStarved)
+			if got != tc.want {
+				t.Fatalf("shouldIncreaseRepairRate(%d, %v, %v, %v, %v) = %v, want %v",
+					tc.timely, tc.healthy, tc.utilized, tc.gapGrowing, tc.repairStarved, got, tc.want)
+			}
+		})
+	}
+}

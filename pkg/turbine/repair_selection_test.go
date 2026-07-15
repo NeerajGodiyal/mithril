@@ -239,11 +239,15 @@ func TestHeadPolicy(t *testing.T) {
 		t.Fatalf("endgame retry = %v, want %v", endgame.retryInterval, repairRetryHeadEndgame)
 	}
 	near := headPolicy(repairRetryHeadNearMissing)
-	if near.initialConcurrent != 1 || near.retryInterval != repairRetryHeadNear {
-		t.Fatalf("near policy = %+v, want initial 1 / retry %v", near, repairRetryHeadNear)
+	if near.initialConcurrent != 1 || near.maxConcurrent != 1 || near.retryInterval != repairRetryHeadNear {
+		t.Fatalf("near policy = %+v, want single attempt / retry %v", near, repairRetryHeadNear)
 	}
 	far := headPolicy(repairRetryHeadNearMissing + 1)
-	if far.retryInterval != repairRetryHeadFar {
-		t.Fatalf("far policy retry = %v, want %v", far.retryInterval, repairRetryHeadFar)
+	if far.maxConcurrent != 1 || far.retryInterval != repairRetryHeadFar {
+		t.Fatalf("far policy = %+v, want single attempt / retry %v", far, repairRetryHeadFar)
+	}
+	bulk := bulkPolicy()
+	if bulk.maxConcurrent != 1 {
+		t.Fatalf("bulk policy = %+v, want no concurrent duplicate attempts", bulk)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
+	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,4 +61,22 @@ func TestResolveTurbineShredVersionReportsDiscoveryErrors(t *testing.T) {
 func TestDefaultBlockSourceForProtocolMode(t *testing.T) {
 	require.Equal(t, "turbine", defaultBlockSourceForMode(true))
 	require.Equal(t, "rpc", defaultBlockSourceForMode(false))
+}
+
+func TestValidatorModeUsesLocalFooterBankHashInsteadOfRPCVerifier(t *testing.T) {
+	cfg := replay.TrailingVerifierDefaults()
+	got := verifierConfigForConsensusMode("validator", cfg)
+	require.False(t, got.Enabled)
+	require.False(t, got.Required)
+	require.True(t, got.ValidatorFooterHash)
+
+	require.Equal(t, cfg, verifierConfigForConsensusMode("verifying", cfg), "verifying mode must remain unchanged")
+}
+
+func TestTxParallelismForMode(t *testing.T) {
+	require.Equal(t, int64(32), txParallelismForMode("validator", 0, false, 16))
+	require.Equal(t, int64(0), txParallelismForMode("validator", 0, true, 16), "explicit sequential validator mode must be preserved")
+	require.Equal(t, int64(7), txParallelismForMode("validator", 7, true, 16))
+	require.Equal(t, int64(0), txParallelismForMode("verifying", 0, false, 16), "non-Alpenglow verifying flow must remain unchanged")
+	require.Equal(t, int64(2), txParallelismForMode("validator", 0, false, 0), "invalid CPU discovery gets a safe minimum")
 }

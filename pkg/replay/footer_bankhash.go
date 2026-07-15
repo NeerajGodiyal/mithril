@@ -26,8 +26,16 @@ func requireAlpenglowBlockFooter(block *b.Block, slotCtx *sealevel.SlotCtx, alpe
 // verifyAlpenglowBlockFooter enforces footer presence on Alpenglow turbine blocks and
 // compares the footer bank hash to the locally computed hash when present.
 func verifyAlpenglowBlockFooter(slotCtx *sealevel.SlotCtx, block *b.Block, alpenglowClock bool) error {
-	if requireAlpenglowBlockFooter(block, slotCtx, alpenglowClock) && !block.HasAlpenglowFooter {
-		return fmt.Errorf("slot %d missing block footer", block.Slot)
+	if requireAlpenglowBlockFooter(block, slotCtx, alpenglowClock) {
+		if !block.HasAlpenglowFooter {
+			return fmt.Errorf("slot %d missing block footer", block.Slot)
+		}
+		// Validator mode relies on local execution matching the bank hash in
+		// the footer committed by the certified double-Merkle block id. A
+		// present-but-zero footer must not silently bypass that check.
+		if !block.HasExpectedBankhash {
+			return fmt.Errorf("slot %d block footer is missing its bank hash", block.Slot)
+		}
 	}
 	return verifyFooterBankHash(slotCtx, block)
 }
