@@ -185,11 +185,7 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		// only catchup there is, whatever the distance.
 		gapOK := !bs.rpcFallbackEnabled ||
 			(bs.repairCatchupMaxGapSlots > 0 && gap <= bs.repairCatchupMaxGapSlots)
-		eligible := gapOK &&
-			bs.liveHandoffSlot.Load() == 0 &&
-			!bs.isNearTip.Load() &&
-			bs.liveForceRPCUntil.Load() == 0 &&
-			time.Now().Unix() >= bs.repairCatchupCooldownUntil.Load()
+		eligible := bs.repairCatchupEligible(gapOK)
 
 		// Repair can only fill the gap if turbine is demonstrably alive: shreds
 		// actually received (proves the socket/gossip path) and repair peers
@@ -270,6 +266,29 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		// Stalled and fell back to RPC: loop back to monitoring (cooldown
 		// gates the next arming).
 	}
+}
+
+func (bs *BlockSource) clearSlotStateForLiveRefetch(slot uint64) {
+	bs.slotStateMu.Lock()
+	delete(bs.slotState, slot)
+	delete(bs.inflightStart, slot)
+	bs.slotStateMu.Unlock()
+	bs.clearSlotErrors(slot)
+}
+
+// repairCatchupEligible reports whether the resident repair monitor may own
+// the current gap. An RPC-enabled source waits for an existing handoff to be
+// torn down before changing catchup owners. A shreds-only source has no such
+// owner change: its near-tip handoff is the live delivery path that repair
+// must keep using while it fills a replay regression. Treating that handoff
+// as an exclusion deadlocks the transition — updateMode re-arms repair, but
+// the monitor idles forever even when the waiting slot is complete on disk.
+func (bs *BlockSource) repairCatchupEligible(gapOK bool) bool {
+	return gapOK &&
+		(!bs.rpcFallbackEnabled || bs.liveHandoffSlot.Load() == 0) &&
+		!bs.isNearTip.Load() &&
+		bs.liveForceRPCUntil.Load() == 0 &&
+		time.Now().Unix() >= bs.repairCatchupCooldownUntil.Load()
 }
 
 // repairCatchupEdge returns the best live-tip signal available: turbine's
@@ -541,6 +560,11 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 				case buffered:
 					// Emit loop owns it.
 				default:
+					// Reset BOTH halves of delivery state. Resetting only the
+					// receiver clears its completed marker, but slotDone in the
+					// ordered emitter then classifies every reassembled block as
+					// a duplicate and drops it, recreating the marker forever.
+					bs.clearSlotStateForLiveRefetch(waiting)
 					receiver.ResetSlot(waiting)
 					mlog.Log.Warnf("repair catchup: head slot %d carried a completed-slot marker but the block is in neither staging nor the buffer (lost after assembly) — cleared; repair re-fetches the slot", waiting)
 				}

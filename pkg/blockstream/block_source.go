@@ -2092,6 +2092,46 @@ switchChannelDrained:
 	return true
 }
 
+// RejectAlpenglowParentSwitch resolves a pending parent-linked fork observation
+// in favor of the branch already emitted by this source. Replay calls this only
+// when the proposed divergence is at/below its rooted-durable watermark: the
+// alternate child is merely a late speculative sibling and cannot replace
+// finalized state. Tombstoning its exact identity prevents spool hydration or
+// another delayed assembler result from proposing the same reverse switch.
+// Certificates remain authoritative: SetKnownAlpenglowBlockID can explicitly
+// clear this tombstone if consensus later reports a safety conflict.
+func (bs *BlockSource) RejectAlpenglowParentSwitch(event AlpenglowParentSwitch) bool {
+	if event.SwitchSlot == 0 || event.ParentSlot+1 != event.SwitchSlot || event.ChildSlot < event.SwitchSlot || event.ChildID == (solana.Hash{}) {
+		return false
+	}
+
+	bs.reorderMu.Lock()
+	pending := bs.pendingAlpenglowParentSwitch
+	if pending == nil || *pending != event {
+		bs.reorderMu.Unlock()
+		return false
+	}
+	child := bs.reorderBuffer[event.ChildSlot]
+	if child == nil || !child.HasAlpenglowBlockID || solana.Hash(child.AlpenglowBlockID) != event.ChildID {
+		bs.pendingAlpenglowParentSwitch = nil
+		bs.reorderMu.Unlock()
+		return false
+	}
+	delete(bs.reorderBuffer, event.ChildSlot)
+	bs.pendingAlpenglowParentSwitch = nil
+	bs.rejectAlpenglowBlockID(event.ChildSlot, event.ChildID)
+	bs.reorderMu.Unlock()
+
+	bs.slotStateMu.Lock()
+	delete(bs.slotState, event.ChildSlot)
+	delete(bs.inflightStart, event.ChildSlot)
+	bs.slotStateMu.Unlock()
+	bs.clearSlotErrors(event.ChildSlot)
+	bs.discardTurbineSlotState(event.ChildSlot)
+	bs.lastProgress.Store(time.Now().Unix())
+	return true
+}
+
 // SetLastExecutedSlot is called by the replay loop after each block is fully executed.
 // This allows accurate tip distance calculation without blocking on replay progress.
 // Also triggers mode switching based on replay progress (not just tip polling).

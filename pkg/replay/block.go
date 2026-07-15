@@ -1897,22 +1897,24 @@ func ReplayBlocks(
 			mlog.Log.Warnf("%v — no speculative account-state tail is available for unwind", sw)
 			return false
 		}
-		if !rewindSource() {
-			windowSwitchFallback++
-			switchFallbackReasons["source-rewind"]++
-			result.Error = fmt.Errorf("%w: block source rejected fork rewind", sw)
-			mlog.Log.Warnf("%v — block source rejected the fork rewind", sw)
-			return false
-		}
 		// Settle the in-flight fold before touching the overlay: the worker
-		// reads chunk layers the unwind would evict. If the applied fold moved
-		// the durable frontier past the switch slot, use node-level recovery.
+		// reads chunk layers the unwind would evict. This MUST also happen
+		// before rewinding the block source: if the applied fold moved the
+		// durable frontier past the switch slot, mutating source ancestry first
+		// would leave the source on a branch AccountsDB can no longer adopt.
 		applyFoldOutcome(promoter.drain())
 		if sw.Slot <= mithrilState.LastRootedSlot {
 			windowSwitchFallback++
 			switchFallbackReasons["durable-overlap"]++
 			result.Error = sw
 			mlog.Log.Warnf("%v — switch slot is at/below the durable watermark %d after settling the in-flight fold; deferring to the recovery loop", sw, mithrilState.LastRootedSlot)
+			return false
+		}
+		if !rewindSource() {
+			windowSwitchFallback++
+			switchFallbackReasons["source-rewind"]++
+			result.Error = fmt.Errorf("%w: block source rejected fork rewind", sw)
+			mlog.Log.Warnf("%v — block source rejected the fork rewind", sw)
 			return false
 		}
 		rs, fallbackReason := tryInLoopUnwind(sw, unrootedTailState, mithrilState, epochSchedule, currentEpoch, partitionedRewardsInfo)
@@ -2018,6 +2020,27 @@ func ReplayBlocks(
 					}
 					mlog.Log.Warnf("ALPENGLOW speculative fork selected before execution: replaced queued suffix from slot %d with child %s at slot %d (replay currently at slot %d; no account-state unwind needed)",
 						parentSwitch.SwitchSlot, parentSwitch.ChildID, parentSwitch.ChildSlot, currentExecutedAnchorSlot())
+					continue
+				}
+				// A parent-linked child is speculative evidence, not a certificate.
+				// Once the competing suffix is rooted, that suffix is the finalized
+				// branch and a late sibling must be discarded. Settle an in-flight
+				// fold first so the comparison uses the true durable frontier. The
+				// old ordering rewound the source first, discovered the overlap only
+				// afterwards, and halted with no retained rewind boundary.
+				if promoter != nil {
+					applyFoldOutcome(promoter.drain())
+				}
+				if parentSwitch.SwitchSlot <= mithrilState.LastRootedSlot {
+					windowSwitches++
+					if !blockStream.RejectAlpenglowParentSwitch(*parentSwitch) {
+						windowSwitchFallback++
+						switchFallbackReasons["source-reject"]++
+						result.Error = fmt.Errorf("alpenglow speculative switch at slot %d: block source rejected rooted-branch retention", parentSwitch.SwitchSlot)
+						break
+					}
+					mlog.Log.Warnf("ALPENGLOW rooted branch retained: discarded late speculative child %s at slot %d linking to ancestor %s at slot %d; switch slot %d is already durable through %d",
+						parentSwitch.ChildID, parentSwitch.ChildSlot, parentSwitch.ParentID, parentSwitch.ParentSlot, parentSwitch.SwitchSlot, mithrilState.LastRootedSlot)
 					continue
 				}
 				sw := &CertifiedSwitch{

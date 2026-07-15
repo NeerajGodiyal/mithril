@@ -1237,6 +1237,64 @@ func TestAlpenglowParentLinkedForkRewindsAndEmitsAlternateBranch(t *testing.T) {
 	}
 }
 
+func TestRejectAlpenglowParentSwitchRetainsRootedBranch(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    344,
+		EndSlot:                      400,
+	})
+	parentID := solana.Hash{0x43}
+	rootedChildID := solana.Hash{0x48}
+	lateSibling := &b.Block{
+		Slot:                      344,
+		FromLiveStream:            true,
+		SourceParentSlot:          343,
+		AlpenglowBlockID:          rootedChildID,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    parentID,
+		HasAlpenglowParentBlockID: true,
+	}
+	bs.emittedAlpenglowBlockIDs[343] = parentID
+	bs.emittedAlpenglowBlockIDs[348] = solana.Hash{0x99}
+	bs.lastEmittedBlockSlot = 348
+	bs.lastEmittedAlpenglowBlockID = solana.Hash{0x99}
+	bs.hasLastEmittedAlpenglowBlockID = true
+	bs.nextSlotToSend = 349
+	bs.reorderBuffer[344] = lateSibling
+
+	bs.reorderMu.Lock()
+	if !bs.queueAlpenglowParentSwitchLocked(lateSibling) {
+		bs.reorderMu.Unlock()
+		t.Fatal("test premise: late sibling did not queue a parent switch")
+	}
+	event := *bs.pendingAlpenglowParentSwitch
+	bs.reorderMu.Unlock()
+
+	if !bs.RejectAlpenglowParentSwitch(event) {
+		t.Fatal("rooted branch retention rejected the pending event")
+	}
+	if bs.pendingAlpenglowParentSwitch != nil {
+		t.Fatal("rooted branch retention left the switch pending")
+	}
+	if bs.reorderBuffer[event.ChildSlot] != nil {
+		t.Fatal("late sibling remained buffered after rejection")
+	}
+	if bs.nextSlotToSend != 349 || bs.lastEmittedBlockSlot != 348 {
+		t.Fatalf("rooted branch frontier changed: next=%d emitted=%d", bs.nextSlotToSend, bs.lastEmittedBlockSlot)
+	}
+	if !bs.isRejectedAlpenglowBlock(lateSibling) {
+		t.Fatal("late sibling identity was not tombstoned")
+	}
+	bs.reorderMu.Lock()
+	reversed := bs.queueAlpenglowParentSwitchLocked(lateSibling)
+	bs.reorderMu.Unlock()
+	if reversed {
+		t.Fatal("tombstoned late sibling queued the same reverse switch again")
+	}
+}
+
 func TestAlpenglowParentLinkedForkRequiresExactIDAndAlpenglowMode(t *testing.T) {
 	newSource := func(alpenglowMode bool) *BlockSource {
 		bs := NewBlockSource(&BlockSourceOpts{
@@ -1266,6 +1324,48 @@ func TestAlpenglowParentLinkedForkRequiresExactIDAndAlpenglowMode(t *testing.T) 
 	child.AlpenglowParentBlockID = solana.Hash{1}
 	if bs := newSource(false); bs.queueAlpenglowParentSwitchLocked(child) {
 		t.Fatal("classic turbine mode queued an Alpenglow speculative switch")
+	}
+}
+
+func TestAlpenglowParentLinkedForkCannotOverrideCertifiedSkip(t *testing.T) {
+	parentID := solana.Hash{0x43}
+	childID := solana.Hash{0x44}
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:                   BlockSourceTurbine,
+		TurbineBindAddr:              "127.0.0.1:0",
+		TurbineAlpenglowBlockIDHints: true,
+		StartSlot:                    344,
+		EndSlot:                      400,
+		AlpenglowDecisionSource: func(anchor uint64) (alpenglow.ChainDecision, bool) {
+			if anchor == 343 {
+				return alpenglow.ChainDecision{Slot: 344, Kind: alpenglow.ChainDecisionKindSkip}, true
+			}
+			return alpenglow.ChainDecision{}, false
+		},
+	})
+	bs.emittedAlpenglowBlockIDs[343] = parentID
+	bs.emittedAlpenglowBlockIDs[348] = solana.Hash{0x48}
+	bs.lastEmittedBlockSlot = 348
+	bs.lastEmittedAlpenglowBlockID = solana.Hash{0x48}
+	bs.hasLastEmittedAlpenglowBlockID = true
+	child := &b.Block{
+		Slot:                      344,
+		FromLiveStream:            true,
+		SourceParentSlot:          343,
+		AlpenglowBlockID:          childID,
+		HasAlpenglowBlockID:       true,
+		AlpenglowParentBlockID:    parentID,
+		HasAlpenglowParentBlockID: true,
+	}
+
+	bs.reorderMu.Lock()
+	queued := bs.queueAlpenglowParentSwitchLocked(child)
+	bs.reorderMu.Unlock()
+	if queued || bs.pendingAlpenglowParentSwitch != nil {
+		t.Fatal("a child at a certified-skipped slot queued a speculative switch")
+	}
+	if !bs.isRejectedAlpenglowBlock(child) {
+		t.Fatal("the consensus-rejected child identity was not tombstoned")
 	}
 }
 

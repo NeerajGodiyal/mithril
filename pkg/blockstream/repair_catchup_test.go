@@ -2,6 +2,7 @@ package blockstream
 
 import (
 	"testing"
+	"time"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 )
@@ -148,6 +149,69 @@ func TestShredsOnlyModeGatesAllRPCBlockFetch(t *testing.T) {
 	})
 	if !noThreshold.repairCatchupPending.Load() {
 		t.Fatalf("shreds-only must arm the repair monitor even with threshold 0")
+	}
+}
+
+// A shreds-only node keeps its Turbine handoff active at the live edge. If
+// replay later slips across the catchup hysteresis, that SAME handoff must
+// coexist with the repair drive: there is no RPC owner to hand the gap to.
+// The observed failure had slot 3228975 complete in the disk spool, but the
+// old handoff marker made the resident monitor idle forever after re-arming.
+func TestShredsOnlyRepairRearmsAcrossActiveHandoff(t *testing.T) {
+	const (
+		lastExecuted = uint64(3_228_974)
+		confirmedTip = uint64(3_229_039) // gap 65: crosses the 64-slot threshold
+		handoffSlot  = uint64(3_228_738)
+	)
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:           BlockSourceTurbine,
+		TurbineBindAddr:      "127.0.0.1:0",
+		StartSlot:            lastExecuted + 1,
+		DisableRPCBlockFetch: true,
+	})
+	bs.repairCatchupPending.Store(false)
+	bs.isNearTip.Store(true)
+	bs.lastExecutedSlot.Store(lastExecuted)
+	bs.confirmedTip.Store(confirmedTip)
+	bs.liveHandoffSlot.Store(handoffSlot)
+	bs.liveStreamActive.Store(true)
+
+	bs.updateMode()
+
+	if bs.isNearTip.Load() {
+		t.Fatalf("gap regression must leave near-tip mode")
+	}
+	if !bs.repairCatchupPending.Load() {
+		t.Fatalf("gap regression must re-arm repair catchup")
+	}
+	if !bs.repairCatchupEligible(true) {
+		t.Fatalf("shreds-only repair must activate while its Turbine handoff remains active")
+	}
+	if got := bs.liveHandoffSlot.Load(); got != handoffSlot {
+		t.Fatalf("re-arm must preserve the live delivery handoff: got %d, want %d", got, handoffSlot)
+	}
+
+	// RPC fallback retains the old ownership barrier: forceRPCForCatchup is
+	// responsible for dismantling the handoff before repair may take over.
+	bs.rpcFallbackEnabled = true
+	if bs.repairCatchupEligible(true) {
+		t.Fatalf("RPC-enabled repair must still wait for an active handoff to be dismantled")
+	}
+}
+
+func TestLostLiveBlockRefetchClearsEmitterDoneState(t *testing.T) {
+	bs := newRepairCatchupTestSource(1024)
+	const slot = uint64(2_001)
+	bs.slotState[slot] = slotDone
+	bs.inflightStart[slot] = time.Now()
+
+	bs.clearSlotStateForLiveRefetch(slot)
+
+	if _, ok := bs.slotState[slot]; ok {
+		t.Fatal("slotDone survived live-block refetch reset and would drop the replacement as a duplicate")
+	}
+	if _, ok := bs.inflightStart[slot]; ok {
+		t.Fatal("inflight timestamp survived live-block refetch reset")
 	}
 }
 

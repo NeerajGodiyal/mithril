@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
@@ -312,6 +313,21 @@ func (bs *BlockSource) allowRejectedAlpenglowBlockID(slot uint64, id solana.Hash
 	bs.rejectedAlpenglowMu.Unlock()
 }
 
+func (bs *BlockSource) rejectAlpenglowBlockID(slot uint64, id solana.Hash) {
+	if slot == 0 || id == (solana.Hash{}) {
+		return
+	}
+	bs.rejectedAlpenglowMu.Lock()
+	ids := bs.rejectedAlpenglowBlockIDs[slot]
+	if ids == nil {
+		ids = make(map[solana.Hash]struct{})
+		bs.rejectedAlpenglowBlockIDs[slot] = ids
+	}
+	ids[id] = struct{}{}
+	bs.pruneRejectedAlpenglowLocked(bs.lastEmittedBlockSlot)
+	bs.rejectedAlpenglowMu.Unlock()
+}
+
 // synthesizeAlpenglowParentLinkedSkipsLocked advances over a missing slot run
 // only when a later turbine block carries an exact Alpenglow parent block ID
 // matching the last emitted block. The inference is deliberately provisional:
@@ -446,6 +462,17 @@ func (bs *BlockSource) queueAlpenglowParentSwitchLocked(blk *b.Block) bool {
 		ChildSlot:  blk.Slot,
 		ChildID:    childID,
 	}
+	if conflicts, reason := bs.alpenglowParentSwitchConflictsWithDecision(event); conflicts {
+		// Exact parent links are speculative evidence only. Never let a late
+		// assembled sibling override an already-decisive block/skip path; doing
+		// so invalidates queued live results and can strand the next certified
+		// block behind a stale completed-slot marker. The exact tombstone keeps
+		// spool hydration from proposing the same losing identity repeatedly.
+		bs.rejectAlpenglowBlockID(event.ChildSlot, event.ChildID)
+		mlog.Log.Warnf("ALPENGLOW certified branch retained: dropping speculative child %s at slot %d linking to ancestor %s at slot %d (%s)",
+			event.ChildID, event.ChildSlot, event.ParentID, event.ParentSlot, reason)
+		return false
+	}
 	if pending := bs.pendingAlpenglowParentSwitch; pending != nil {
 		return *pending == event
 	}
@@ -459,6 +486,43 @@ func (bs *BlockSource) queueAlpenglowParentSwitchLocked(blk *b.Block) bool {
 		// is set. Do not replace it and risk reordering two replay rewinds.
 	}
 	return true
+}
+
+// alpenglowParentSwitchConflictsWithDecision checks the entire direct-link
+// span against decisions already known to consensus. Slots omitted by the
+// proposed child may be certified skips; a decisive block inside that range,
+// a skip at the child slot, a different decisive child, or any conflict makes
+// the speculative transition ineligible. Unknown slots remain speculative and
+// may still use the ordinary rewind path.
+func (bs *BlockSource) alpenglowParentSwitchConflictsWithDecision(event AlpenglowParentSwitch) (bool, string) {
+	if bs.alpenglowDecisionSource == nil {
+		return false, ""
+	}
+	for slot := event.SwitchSlot; slot <= event.ChildSlot; slot++ {
+		decision, ok := bs.alpenglowDecisionSource(slot - 1)
+		if !ok || decision.Slot != slot {
+			continue
+		}
+		switch decision.Kind {
+		case alpenglow.ChainDecisionKindConflict:
+			return true, fmt.Sprintf("consensus conflict at slot %d", slot)
+		case alpenglow.ChainDecisionKindSkip:
+			if slot == event.ChildSlot {
+				return true, fmt.Sprintf("slot %d is certified-skipped", slot)
+			}
+		case alpenglow.ChainDecisionKindBlock:
+			if slot < event.ChildSlot {
+				return true, fmt.Sprintf("direct link omits decisive block %s at slot %d", decision.Block.Hash, slot)
+			}
+			if decision.Block.Hash != event.ChildID {
+				return true, fmt.Sprintf("decisive child at slot %d is %s", slot, decision.Block.Hash)
+			}
+		}
+		if slot == ^uint64(0) {
+			break
+		}
+	}
+	return false, ""
 }
 
 // queueBufferedAlpenglowParentSwitchLocked finds an alternate child even when
