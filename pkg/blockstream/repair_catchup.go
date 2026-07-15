@@ -466,17 +466,28 @@ func (bs *BlockSource) driveRepairCatchup(ctx context.Context, receiver *turbine
 			// owns it), and a head whose shred count is still GROWING is
 			// never reset (it is rate-limited, not poisoned; the reset would
 			// discard progress the repair budget already paid for).
-			if headResets < repairCatchupMaxHeadResets && stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter &&
-				headStalled >= repairCatchupHeadGrowthGrace && !receiver.SlotCompleted(waiting) {
-				errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
+			errCount, lastErr := receiver.SlotAssemblyErrors(waiting)
+			headDetail, haveHeadDetail := receiver.HeadShredDetail(waiting)
+			completeDecodeFailure := errCount > 0 && haveHeadDetail && headDetail.HaveLast &&
+				headDetail.ContiguousThrough == int64(headDetail.LastIndex) &&
+				headDetail.DataShreds == int(headDetail.LastIndex)+1
+			genericPoisonTimeout := stalled > time.Duration(headResets+1)*repairCatchupHeadResetAfter &&
+				headStalled >= repairCatchupHeadGrowthGrace
+			fastDecodeTimeout := completeDecodeFailure && stalled >= repairCatchupDecodeErrorResetAfter
+			if headResets < repairCatchupMaxHeadResets && (genericPoisonTimeout || fastDecodeTimeout) &&
+				!receiver.SlotCompleted(waiting) {
 				if lastErr == "" {
 					lastErr = "none"
 				}
 				headResets++
 				detail := headShredDetailString(receiver, waiting)
-				receiver.ResetSlot(waiting)
-				mlog.Log.Warnf("repair catchup: resetting shred state for stuck head slot %d (attempt %d/%d) — %d shreds held, no growth for %s, and the slot cannot complete (assembly errors: %d, latest: %s) | %s; re-repairing from scratch",
-					waiting, headResets, repairCatchupMaxHeadResets, max(headShreds, 0), headStalled.Round(time.Second), errCount, lastErr, detail)
+				receiver.ResetSlotAndDiscardSpool(waiting)
+				reason := fmt.Sprintf("%d shreds held with no growth for %s", max(headShreds, 0), headStalled.Round(time.Second))
+				if completeDecodeFailure {
+					reason = "the complete contiguous shred set failed deterministic block decoding"
+				}
+				mlog.Log.Warnf("repair catchup: purging shred state and spool for stuck head slot %d (attempt %d/%d) — %s (assembly errors: %d, latest: %s) | %s; re-repairing from scratch",
+					waiting, headResets, repairCatchupMaxHeadResets, reason, errCount, lastErr, detail)
 			}
 
 			// A stalled head stays on repair — loudly. The counters make the

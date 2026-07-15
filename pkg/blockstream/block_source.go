@@ -586,9 +586,13 @@ const (
 	// accumulating shreds is rate-limited, not poisoned, and resetting it
 	// throws away paid-for progress (observed live: a 7392-shred slot wiped
 	// at 6434 held, mid-climb).
-	repairCatchupHeadResetAfter  = 90 * time.Second
-	repairCatchupMaxHeadResets   = 2
-	repairCatchupHeadGrowthGrace = 30 * time.Second
+	repairCatchupHeadResetAfter = 90 * time.Second
+	// A full contiguous shred set with a recorded decode failure cannot gain
+	// anything from more repair responses. Purge its persisted packets quickly
+	// rather than waiting for the generic no-growth timeout.
+	repairCatchupDecodeErrorResetAfter = 2 * time.Second
+	repairCatchupMaxHeadResets         = 2
+	repairCatchupHeadGrowthGrace       = 30 * time.Second
 
 	liveEdgeHandoffMaxLag = 4
 	liveGapFallbackWait   = 8 * time.Second
@@ -1986,7 +1990,7 @@ func (bs *BlockSource) RewindForAlpenglowParentSwitch(event AlpenglowParentSwitc
 		bs.alpenglowMu.Unlock()
 		if receiver != nil {
 			for slot := event.ChildSlot + 1; slot <= discardedTip; slot++ {
-				receiver.ResetSlot(slot)
+				receiver.ResetSlotAndDiscardSpool(slot)
 			}
 		}
 	}
@@ -2684,7 +2688,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 						delete(bs.slotState, waitingSlot)
 						delete(bs.inflightStart, waitingSlot)
 						bs.slotStateMu.Unlock()
-						bs.resetTurbineSlotState(waitingSlot)
+						bs.discardTurbineSlotState(waitingSlot)
 						bs.prioritizeTurbineRepairRange(waitingSlot, waitingSlot)
 						mlog.Log.Warnf("ALPENGLOW stale sibling: dropping block %s at slot %d because parent id %s does not match selected parent %s at slot %d; re-repairing",
 							solana.Hash(candidate.AlpenglowBlockID), waitingSlot, observedParentID, bs.lastEmittedAlpenglowBlockID, expectedParentSlot)

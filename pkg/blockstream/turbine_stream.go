@@ -22,7 +22,9 @@ func (bs *BlockSource) resetTurbineSlotForAlpenglowBlock(slot uint64, blockID so
 	receiver := bs.activeTurbineReceiver
 	bs.alpenglowMu.Unlock()
 	if receiver != nil {
-		receiver.ResetSlot(slot)
+		// A certificate supplies an exact block identity. Any already-held or
+		// spooled variant for this slot is unsafe to rehydrate after the reset.
+		receiver.ResetSlotAndDiscardSpool(slot)
 		receiver.PrioritizeRepairSlot(slot)
 	}
 }
@@ -243,6 +245,19 @@ func (bs *BlockSource) resetTurbineSlotState(slot uint64) {
 	bs.alpenglowMu.Unlock()
 	if receiver != nil {
 		receiver.ResetSlot(slot)
+	}
+}
+
+// discardTurbineSlotState is the destructive counterpart used only when the
+// held packets are known to be poisoned or to belong to a rejected branch.
+// Staging evictions use resetTurbineSlotState instead so good spool data stays
+// available for cheap rehydration.
+func (bs *BlockSource) discardTurbineSlotState(slot uint64) {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver != nil {
+		receiver.ResetSlotAndDiscardSpool(slot)
 	}
 }
 

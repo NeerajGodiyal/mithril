@@ -1,6 +1,8 @@
 package turbine
 
 import (
+	"encoding/binary"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,16 +44,16 @@ func TestShredSpoolRoundTrip(t *testing.T) {
 }
 
 func TestShredSpoolCapDropsHighest(t *testing.T) {
-	spool, err := OpenShredSpool(t.TempDir(), 64)
+	spool, err := OpenShredSpool(t.TempDir(), 80)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer spool.Close()
 
 	payload := make([]byte, 20)
-	spool.Append(10, payload) // 24 bytes
-	spool.Append(11, payload) // 48
-	spool.Append(12, payload) // 72 > 64 -> drop highest (12)
+	spool.Append(10, payload) // 36 bytes (file + record headers included)
+	spool.Append(11, payload) // 72
+	spool.Append(12, payload) // 108 > 80 -> drop highest (12)
 	if spool.HasSlot(12) {
 		t.Fatalf("cap must drop the highest slot")
 	}
@@ -81,6 +83,102 @@ func TestShredSpoolAdoptsExistingFiles(t *testing.T) {
 	got, err := second.ReadSlot(500)
 	if err != nil || len(got) != 1 || string(got[0]) != "persisted" {
 		t.Fatalf("ReadSlot after reopen = %v, %v", got, err)
+	}
+}
+
+// A crash can leave a record header plus only part of its payload. If a new
+// process appends repairs behind that fragment, a length-only format can
+// accidentally consume bytes from the new record as the old packet and feed
+// poisoned shred data to replay. The checksum makes the boundary detectable,
+// and validation before the first post-restart append preserves later data.
+func TestShredSpoolRepairsTornTailBeforeAppending(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first.Append(500, []byte("intact"))
+	first.Close()
+
+	path := filepath.Join(dir, "s500.shreds")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open torn tail: %v", err)
+	}
+	intended := []byte("interrupted-packet")
+	var hdr [spoolRecordHeaderSize]byte
+	binary.LittleEndian.PutUint32(hdr[:4], uint32(len(intended)))
+	binary.LittleEndian.PutUint32(hdr[4:], crc32.ChecksumIEEE(intended))
+	if _, err := f.Write(append(hdr[:], intended[:3]...)); err != nil {
+		t.Fatalf("write torn tail: %v", err)
+	}
+	_ = f.Close()
+
+	second, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer second.Close()
+	// Append is intentionally before ReadSlot: restart-time repair traffic
+	// must not be hidden behind the torn record.
+	second.Append(500, []byte("after-restart"))
+	got, err := second.ReadSlot(500)
+	if err != nil {
+		t.Fatalf("read repaired file: %v", err)
+	}
+	if len(got) != 2 || string(got[0]) != "intact" || string(got[1]) != "after-restart" {
+		t.Fatalf("ReadSlot after torn tail repair = %q, want intact + after-restart", got)
+	}
+	wantSize := len(spoolFileMagic) +
+		spoolRecordHeaderSize + len("intact") +
+		spoolRecordHeaderSize + len("after-restart")
+	if info, err := os.Stat(path); err != nil || info.Size() != int64(wantSize) {
+		t.Fatalf("repaired size = %v, %v; want %d", info, err, wantSize)
+	}
+}
+
+func TestShredSpoolDiscardTombstonesOldCompletion(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first.Append(800, []byte("old-complete-block"))
+	first.MarkComplete(800, 9, 10)
+	first.DiscardSlot(800)
+	first.Append(800, []byte("new-partial-block"))
+	first.Close()
+
+	second, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer second.Close()
+	if meta, ok := second.IsComplete(800); ok {
+		t.Fatalf("discarded completion resurrected for replacement file: %+v", meta)
+	}
+	got, err := second.ReadSlot(800)
+	if err != nil || len(got) != 1 || string(got[0]) != "new-partial-block" {
+		t.Fatalf("replacement partial file = %q, %v", got, err)
+	}
+}
+
+func TestShredSpoolDropsLegacyUncheckedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s900.shreds")
+	if err := os.WriteFile(path, []byte("legacy-unchecked-cache"), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+	spool, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer spool.Close()
+	if spool.HasSlot(900) {
+		t.Fatalf("legacy unchecked slot was adopted")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy file was not removed: %v", err)
 	}
 }
 

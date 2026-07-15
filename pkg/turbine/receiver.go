@@ -20,7 +20,12 @@ type LeaderForSlotFunc func(slot uint64) (solana.PublicKey, bool)
 type UDPReceiver struct {
 	Addr string
 
-	assembler     *SlotAssembler
+	assembler *SlotAssembler
+	// A reset must be atomic with respect to both network ingestion and spool
+	// hydration. Otherwise a hydrator can read a soon-to-be-discarded file,
+	// lose the race with ResetSlot, and feed its stale packets straight back
+	// into the newly-cleared assembler state.
+	slotResetMu   sync.RWMutex
 	leaderForSlot LeaderForSlotFunc
 	repairClient  *repairClient
 	sigCache      shredSigCache
@@ -166,7 +171,26 @@ func (r *UDPReceiver) ResetSlot(slot uint64) {
 	if r == nil || r.assembler == nil {
 		return
 	}
+	r.slotResetMu.Lock()
+	defer r.slotResetMu.Unlock()
 	r.assembler.ResetSlot(slot)
+}
+
+// ResetSlotAndDiscardSpool clears the in-memory assembly state and the
+// persisted packets as one operation relative to ingestion/hydration. Use it
+// when the slot is known to be poisoned or belongs to a rejected Alpenglow
+// branch; ordinary eviction resets deliberately keep the spool for cheap
+// rehydration.
+func (r *UDPReceiver) ResetSlotAndDiscardSpool(slot uint64) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.slotResetMu.Lock()
+	defer r.slotResetMu.Unlock()
+	r.assembler.ResetSlot(slot)
+	if r.spool != nil {
+		r.spool.DiscardSlot(slot)
+	}
 }
 
 // ShredEdges reports the monotonic shred frontier from the assembler: highest
@@ -437,6 +461,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		if r.repairClient != nil {
 			fromRepair = r.repairClient.observeShredResponse(conn, packet, addr, shred)
 		}
+		r.slotResetMu.RLock()
 		if r.spool != nil {
 			// Write-through of every VERIFIED shred (copy: the read buffer
 			// is reused). Repaired shreds included — a later slot reset
@@ -445,6 +470,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 			copy(pkt, packet)
 			r.spool.Append(shred.Slot, pkt)
 			if r.skipAssemblyForSpool(shred.Slot) {
+				r.slotResetMu.RUnlock()
 				// Far-future slot during catchup: on disk is enough. The
 				// hydrator streams it into RAM when replay approaches. A repair
 				// delivery lands on disk and bypasses the assembler's useful
@@ -459,6 +485,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 			}
 		}
 		blk, err := r.assembler.AddShredFrom(shred, fromRepair)
+		r.slotResetMu.RUnlock()
 		if err != nil {
 			if errors.Is(err, ErrDuplicateShred) {
 				continue
@@ -539,11 +566,14 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 					continue
 				}
 			}
+			r.slotResetMu.RLock()
 			packets, err := r.spool.ReadSlot(slot)
 			if err != nil {
+				r.slotResetMu.RUnlock()
 				continue
 			}
 			hydrated[slot] = true
+			var assembled *block.Block
 			for _, pkt := range packets {
 				shred, perr := ParseShred(pkt)
 				if perr != nil {
@@ -553,12 +583,16 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 				if aerr != nil || blk == nil {
 					continue
 				}
-				if !r.emitAssembled(ctx, blk) {
-					return
-				}
+				assembled = blk
+				break
+			}
+			complete := r.assembler.SlotCompleted(slot)
+			r.slotResetMu.RUnlock()
+			if assembled != nil && !r.emitAssembled(ctx, assembled) {
+				return
 			}
 			r.hydratedSlots.Add(1)
-			if r.assembler.SlotCompleted(slot) {
+			if complete {
 				r.hydratedFromDisk.Add(1)
 			}
 			select {

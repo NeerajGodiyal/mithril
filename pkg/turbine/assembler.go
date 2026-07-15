@@ -255,6 +255,11 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
 	blk, err := state.block(parentBlockID, parentKnown)
 	if err != nil {
+		// The slot can hold every shred yet still fail to decode (for example,
+		// after hydrating a crash-torn cache record). Keep that deterministic
+		// failure on the live state so catchup diagnostics and self-healing see
+		// the actual cause instead of reporting "assembly errors: 0" forever.
+		state.noteError(err)
 		return nil, err
 	}
 	if !a.acceptAlpenglowBlockIDLocked(blk) {
@@ -700,6 +705,7 @@ func (a *SlotAssembler) CompleteSlot(slot uint64) (*block.Block, error) {
 	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
 	blk, err := state.block(parentBlockID, parentKnown)
 	if err != nil {
+		state.noteError(err)
 		return nil, err
 	}
 	if !a.acceptAlpenglowBlockIDLocked(blk) {

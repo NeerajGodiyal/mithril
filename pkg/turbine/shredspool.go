@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,23 +22,27 @@ import (
 // are written too, so a slot reset re-hydrates from disk instead of
 // re-fetching one shred per round trip.
 //
-// Durability is explicitly NOT a goal: no fsync, and a truncated tail record
-// after a crash is skipped on read (the missing shreds re-repair). Files
-// below the floor are deleted as replay advances; when the byte cap is
+// Durability is explicitly NOT a goal: no fsync. Each record is checksummed,
+// though, and an interrupted tail is truncated before either hydration or a
+// later append. That distinction matters: appending after a torn record and
+// merely stopping at it on read would make all later repairs unreachable and
+// could feed a packet assembled across the crash boundary back into replay.
+// Files below the floor are deleted as replay advances; when the byte cap is
 // exceeded the HIGHEST slots are dropped first — the live edge is cheap to
-// re-fetch near the tip, the low end borders replay and is what repair
-// would otherwise pay for dearly.
+// re-fetch near the tip, the low end borders replay and is what repair would
+// otherwise pay for dearly.
 type ShredSpool struct {
-	mu       sync.Mutex
-	dir      string
-	open     map[uint64]*spoolFile
-	sizes    map[uint64]int64 // per-slot bytes on disk (open writers included)
-	complete map[uint64]SpoolSlotMeta
-	journal  *os.File // append-only completeness journal (complete.idx)
-	bytes    int64
-	maxBytes int64
-	floor    uint64
-	closed   bool
+	mu        sync.Mutex
+	dir       string
+	open      map[uint64]*spoolFile
+	sizes     map[uint64]int64 // per-slot bytes on disk (open writers included)
+	validated map[uint64]bool  // adopted files whose record tail was checked this run
+	complete  map[uint64]SpoolSlotMeta
+	journal   *os.File // append-only completeness journal (complete.idx)
+	bytes     int64
+	maxBytes  int64
+	floor     uint64
+	closed    bool
 }
 
 // SpoolSlotMeta records a slot proven FULLY assembled: every data shred
@@ -51,6 +57,10 @@ type SpoolSlotMeta struct {
 
 const spoolJournalName = "complete.idx"
 const spoolJournalRecordSize = 8 + 4 + 4
+
+var spoolFileMagic = [8]byte{'M', 'I', 'T', 'H', 'S', 'P', 2, 0}
+
+const spoolRecordHeaderSize = 4 + 4 // packet length + CRC32
 
 type spoolFile struct {
 	f *os.File
@@ -75,11 +85,12 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 		return nil, err
 	}
 	s := &ShredSpool{
-		dir:      dir,
-		open:     make(map[uint64]*spoolFile),
-		sizes:    make(map[uint64]int64),
-		complete: make(map[uint64]SpoolSlotMeta),
-		maxBytes: maxBytes,
+		dir:       dir,
+		open:      make(map[uint64]*spoolFile),
+		sizes:     make(map[uint64]int64),
+		validated: make(map[uint64]bool),
+		complete:  make(map[uint64]SpoolSlotMeta),
+		maxBytes:  maxBytes,
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -90,10 +101,26 @@ func OpenShredSpool(dir string, maxBytes int64) (*ShredSpool, error) {
 		if !ok {
 			continue
 		}
-		if info, err := e.Info(); err == nil {
-			s.sizes[slot] = info.Size()
-			s.bytes += info.Size()
+		info, err := e.Info()
+		if err != nil {
+			continue
 		}
+		// The pre-v2 format had no integrity check. It cannot distinguish a
+		// valid packet from one completed with bytes belonging to the next
+		// post-crash append, so a disposable legacy cache must be re-repaired.
+		f, err := os.Open(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var magic [len(spoolFileMagic)]byte
+		_, readErr := io.ReadFull(f, magic[:])
+		_ = f.Close()
+		if readErr != nil || magic != spoolFileMagic {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+			continue
+		}
+		s.sizes[slot] = info.Size()
+		s.bytes += info.Size()
 	}
 	s.loadJournal()
 	return s, nil
@@ -108,13 +135,21 @@ func (s *ShredSpool) loadJournal() {
 	if err == nil {
 		for off := 0; off+spoolJournalRecordSize <= len(data); off += spoolJournalRecordSize {
 			slot := binary.LittleEndian.Uint64(data[off:])
-			if _, exists := s.sizes[slot]; !exists {
-				continue // slot file gone: stale entry
-			}
-			s.complete[slot] = SpoolSlotMeta{
+			meta := SpoolSlotMeta{
 				LastIndex: binary.LittleEndian.Uint32(data[off+8:]),
 				Shreds:    binary.LittleEndian.Uint32(data[off+12:]),
 			}
+			// A zero-shred record is a tombstone. Process it even when a
+			// newly-created partial file for this slot already exists: it
+			// supersedes an older completion record for the discarded file.
+			if meta.Shreds == 0 {
+				delete(s.complete, slot)
+				continue
+			}
+			if _, exists := s.sizes[slot]; !exists {
+				continue // slot file gone: stale entry
+			}
+			s.complete[slot] = meta
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
@@ -141,7 +176,7 @@ func spoolJournalRecord(slot uint64, meta SpoolSlotMeta) []byte {
 func (s *ShredSpool) MarkComplete(slot uint64, lastIndex uint32, shreds uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if slot < s.floor {
+	if slot < s.floor || shreds == 0 {
 		return
 	}
 	if _, done := s.complete[slot]; done {
@@ -194,6 +229,11 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 	}
 	sf := s.open[slot]
 	if sf == nil {
+		if s.sizes[slot] > 0 && !s.validated[slot] {
+			if _, err := s.readSlotLocked(slot); err != nil {
+				return
+			}
+		}
 		if len(s.open) >= spoolOpenFilesCap {
 			s.closeOldestLocked()
 		}
@@ -203,16 +243,27 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 		}
 		sf = &spoolFile{f: f, w: bufio.NewWriterSize(f, 64<<10)}
 		s.open[slot] = sf
+		if s.sizes[slot] == 0 {
+			if _, err := sf.w.Write(spoolFileMagic[:]); err != nil {
+				s.closeSlotLocked(slot)
+				_ = os.Remove(s.pathFor(slot))
+				return
+			}
+			s.sizes[slot] = int64(len(spoolFileMagic))
+			s.bytes += int64(len(spoolFileMagic))
+			s.validated[slot] = true
+		}
 	}
-	var hdr [4]byte
+	var hdr [spoolRecordHeaderSize]byte
 	binary.LittleEndian.PutUint32(hdr[:], uint32(len(packet)))
+	binary.LittleEndian.PutUint32(hdr[4:], crc32.ChecksumIEEE(packet))
 	if _, err := sf.w.Write(hdr[:]); err != nil {
 		return
 	}
 	if _, err := sf.w.Write(packet); err != nil {
 		return
 	}
-	written := int64(4 + len(packet))
+	written := int64(spoolRecordHeaderSize + len(packet))
 	s.sizes[slot] += written
 	s.bytes += written
 	s.enforceCapLocked()
@@ -266,15 +317,37 @@ func (s *ShredSpool) dropSlotLocked(slot uint64) {
 	s.closeSlotLocked(slot)
 	s.bytes -= s.sizes[slot]
 	delete(s.sizes, slot)
+	delete(s.validated, slot)
 	delete(s.complete, slot)
 	_ = os.Remove(s.pathFor(slot))
+	if s.journal != nil {
+		// Supersede any older completion record if this slot number is later
+		// re-created before the journal is compacted on restart.
+		s.journal.Write(spoolJournalRecord(slot, SpoolSlotMeta{}))
+	}
+}
+
+// DiscardSlot removes both persisted packets and the completeness marker for
+// a poisoned or rejected slot. The journal tombstone prevents an older
+// completion record from being resurrected if repair immediately recreates a
+// partial file with the same slot number.
+func (s *ShredSpool) DiscardSlot(slot uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.dropSlotLocked(slot)
 }
 
 // HasSlot reports whether any shreds are spooled for slot.
 func (s *ShredSpool) HasSlot(slot uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sizes[slot] > 0
+	return s.sizes[slot] > int64(len(spoolFileMagic))
 }
 
 // SlotsInRange returns spooled slots within [lo, hi], ascending.
@@ -282,8 +355,8 @@ func (s *ShredSpool) SlotsInRange(lo, hi uint64) []uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []uint64
-	for slot := range s.sizes {
-		if slot >= lo && slot <= hi {
+	for slot, size := range s.sizes {
+		if size > int64(len(spoolFileMagic)) && slot >= lo && slot <= hi {
 			out = append(out, slot)
 		}
 	}
@@ -291,28 +364,60 @@ func (s *ShredSpool) SlotsInRange(lo, hi uint64) []uint64 {
 	return out
 }
 
-// ReadSlot returns every spooled shred packet for slot. A truncated tail
-// record (crash mid-append) is skipped silently.
+// ReadSlot returns every intact spooled shred packet for slot. A truncated or
+// corrupt tail is removed atomically under the spool lock, so later repairs
+// append at the last valid record rather than behind unreachable garbage.
 func (s *ShredSpool) ReadSlot(slot uint64) ([][]byte, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readSlotLocked(slot)
+}
+
+func (s *ShredSpool) readSlotLocked(slot uint64) ([][]byte, error) {
 	s.closeSlotLocked(slot) // flush any buffered tail
 	path := s.pathFor(slot)
-	s.mu.Unlock()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	if len(data) < len(spoolFileMagic) || string(data[:len(spoolFileMagic)]) != string(spoolFileMagic[:]) {
+		s.dropSlotLocked(slot)
+		return nil, fmt.Errorf("invalid shred spool header for slot %d", slot)
+	}
 	var packets [][]byte
-	for off := 0; off+4 <= len(data); {
-		n := int(binary.LittleEndian.Uint32(data[off : off+4]))
-		off += 4
-		if n <= 0 || off+n > len(data) {
+	validEnd := len(spoolFileMagic)
+	for off := validEnd; off < len(data); {
+		if off+spoolRecordHeaderSize > len(data) {
 			break
 		}
-		packets = append(packets, data[off:off+n])
-		off += n
+		n := int(binary.LittleEndian.Uint32(data[off : off+4]))
+		wantCRC := binary.LittleEndian.Uint32(data[off+4 : off+spoolRecordHeaderSize])
+		packetStart := off + spoolRecordHeaderSize
+		packetEnd := packetStart + n
+		if n <= 0 || packetEnd < packetStart || packetEnd > len(data) {
+			break
+		}
+		packet := data[packetStart:packetEnd]
+		if crc32.ChecksumIEEE(packet) != wantCRC {
+			break
+		}
+		packets = append(packets, packet)
+		off = packetEnd
+		validEnd = packetEnd
 	}
+	if validEnd != len(data) {
+		if err := os.Truncate(path, int64(validEnd)); err != nil {
+			return nil, fmt.Errorf("truncate corrupt shred spool tail for slot %d: %w", slot, err)
+		}
+		oldSize := s.sizes[slot]
+		s.sizes[slot] = int64(validEnd)
+		s.bytes += int64(validEnd) - oldSize
+		delete(s.complete, slot)
+		if s.journal != nil {
+			s.journal.Write(spoolJournalRecord(slot, SpoolSlotMeta{}))
+		}
+	}
+	s.validated[slot] = true
 	return packets, nil
 }
 
@@ -336,7 +441,12 @@ func (s *ShredSpool) SetFloor(slot uint64) {
 func (s *ShredSpool) Stats() (slots int, bytes int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.sizes), s.bytes
+	for _, size := range s.sizes {
+		if size > int64(len(spoolFileMagic)) {
+			slots++
+		}
+	}
+	return slots, s.bytes
 }
 
 // Close flushes and closes all open handles (files remain for the next

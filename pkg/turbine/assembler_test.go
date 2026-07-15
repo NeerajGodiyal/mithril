@@ -248,6 +248,37 @@ func TestSlotAssemblerResetSlotClearsCompletedSlotForRepair(t *testing.T) {
 	}
 }
 
+func TestSlotAssemblerRecordsCompleteSlotDecodeFailure(t *testing.T) {
+	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
+	if len(rawShreds) == 0 {
+		t.Fatal("fixture has no shreds")
+	}
+	// Keep the shred structurally complete but make its transaction bytes
+	// invalid. The receiver has already authenticated live packets before the
+	// assembler sees them; this test exercises the post-completion decode path.
+	corrupt := make([][]byte, len(rawShreds))
+	for i, raw := range rawShreds {
+		corrupt[i] = append([]byte(nil), raw...)
+	}
+	corrupt[len(corrupt)/2][dataHeaderSize+8] ^= 0xff
+
+	assembler := NewSlotAssembler()
+	var decodeErr error
+	for _, raw := range corrupt {
+		_, err := assembler.AddPacket(raw)
+		if err != nil {
+			decodeErr = err
+		}
+	}
+	if decodeErr == nil {
+		t.Fatal("corrupt complete slot unexpectedly decoded")
+	}
+	count, latest := assembler.SlotAssemblyErrors(102815960)
+	if count == 0 || latest == "" {
+		t.Fatalf("complete-slot decode failure was not retained: count=%d latest=%q", count, latest)
+	}
+}
+
 func TestValidateBlockTransactionsRejectsInvalidSignature(t *testing.T) {
 	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
 	assembler := NewSlotAssembler()
