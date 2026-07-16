@@ -62,6 +62,48 @@ func TestConsensusPoolSlowFinalizationNeedsNotarizeAndFinalize(t *testing.T) {
 	}
 }
 
+func TestConsensusPoolFastFinalizationUpgradesSlowFinalization(t *testing.T) {
+	pool := NewConsensusPool(DefaultConsensusPoolConfig())
+	hash := parentReadyHash(15)
+	for _, cert := range []Certificate{
+		{Type: CertificateFinalize, Slot: 20, StakeVerified: true, SignatureVerified: true},
+		{Type: CertificateNotarize, Slot: 20, BlockHash: hash, StakeVerified: true, SignatureVerified: true},
+	} {
+		if _, err := pool.AddVerifiedCertificate(cert); err != nil {
+			t.Fatal(err)
+		}
+	}
+	update, err := pool.AddVerifiedCertificate(Certificate{
+		Type: CertificateFinalizeFast, Slot: 20, BlockHash: hash,
+		StakeVerified: true, SignatureVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(update.Events) == 0 || !update.Events[len(update.Events)-1].Fast {
+		t.Fatalf("fast certificate did not upgrade slow finalization: %+v", update.Events)
+	}
+}
+
+func TestConsensusPoolCertificateAssemblyOrderMatchesAgave(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 100)
+	pool := NewConsensusPool(DefaultConsensusPoolConfig())
+	pool.NoteLiveSlot(10)
+	update, err := pool.AddVerifiedVote(poolVote(t, set, keys, 0, NewNotarizationVote(11, parentReadyHash(7)), false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CertificateType{CertificateNotarize, CertificateNotarizeFallback, CertificateFinalizeFast}
+	if len(update.Certificates) != len(want) {
+		t.Fatalf("certificates = %v, want %v", update.Certificates, want)
+	}
+	for i, cert := range update.Certificates {
+		if cert.Type != want[i] {
+			t.Fatalf("certificate %d = %s, want %s", i, cert.Type, want[i])
+		}
+	}
+}
+
 func TestConsensusPoolSlowFinalizationFailsClosedOnTwinNotarizeCertificates(t *testing.T) {
 	pool := NewConsensusPool(DefaultConsensusPoolConfig())
 	for _, hash := range []solana.Hash{parentReadyHash(5), parentReadyHash(6)} {

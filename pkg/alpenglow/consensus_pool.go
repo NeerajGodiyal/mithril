@@ -1,7 +1,9 @@
 package alpenglow
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 
 	bls12381 "github.com/Overclock-Validator/gnark-crypto/ecc/bls12-381"
@@ -116,12 +118,14 @@ type slotConsensusState struct {
 type ConsensusPool struct {
 	mu sync.Mutex
 
-	cfg         ConsensusPoolConfig
-	root        BlockID
-	liveSlot    uint64
-	slots       map[uint64]*slotConsensusState
-	completed   map[CertificateKey]Certificate
-	finalized   map[BlockID]bool
+	cfg       ConsensusPoolConfig
+	root      BlockID
+	liveSlot  uint64
+	slots     map[uint64]*slotConsensusState
+	completed map[CertificateKey]Certificate
+	// finalized records the strongest certificate observed for each block.
+	// A bool loses the slow->fast upgrade Agave emits to downstream consumers.
+	finalized   map[BlockID]CertificateType
 	parentReady *ParentReadyTracker
 	evidence    []VoteEvidence
 	conflicts   map[uint64]string
@@ -159,7 +163,7 @@ func NewConsensusPool(cfg ConsensusPoolConfig) *ConsensusPool {
 		root:        cfg.RootBlock,
 		slots:       make(map[uint64]*slotConsensusState),
 		completed:   make(map[CertificateKey]Certificate),
-		finalized:   make(map[BlockID]bool),
+		finalized:   make(map[BlockID]CertificateType),
 		parentReady: NewParentReadyTracker(cfg.RootBlock),
 		conflicts:   make(map[uint64]string),
 	}
@@ -583,9 +587,22 @@ func (p *ConsensusPool) assembleCertificatesLocked(slot uint64, state *slotConse
 		}
 	}
 
+	orderedKeys := make([]CertificateKey, 0, len(targets))
+	for key := range targets {
+		orderedKeys = append(orderedKeys, key)
+	}
+	sort.Slice(orderedKeys, func(i, j int) bool {
+		pi, pj := certificateAssemblyPriority(orderedKeys[i].Type), certificateAssemblyPriority(orderedKeys[j].Type)
+		if pi != pj {
+			return pi < pj
+		}
+		return bytes.Compare(orderedKeys[i].BlockHash[:], orderedKeys[j].BlockHash[:]) < 0
+	})
+
 	var certificates []Certificate
 	var events []ConsensusEvent
-	for key, target := range targets {
+	for _, key := range orderedKeys {
+		target := targets[key]
 		if _, exists := p.completed[key]; exists {
 			continue
 		}
@@ -669,8 +686,8 @@ func (p *ConsensusPool) insertCertificateLocked(cert Certificate) ([]ConsensusEv
 			return nil, false, err
 		}
 		events = append(events, parentEvents...)
-		if _, done := p.finalized[block]; !done {
-			p.finalized[block] = true
+		if _, conflicted := p.conflicts[cert.Slot]; !conflicted && p.finalized[block] != CertificateFinalizeFast {
+			p.finalized[block] = CertificateFinalizeFast
 			events = append(events, ConsensusEvent{Kind: ConsensusEventFinalized, Slot: cert.Slot, Block: block, Fast: true, CertificateType: cert.Type})
 		}
 	case CertificateSkip:
@@ -718,11 +735,32 @@ func (p *ConsensusPool) maybeSlowFinalizeLocked(slot uint64) ([]ConsensusEvent, 
 		return nil, nil
 	}
 	block := notarized[0]
-	if p.finalized[block] {
+	if _, finalized := p.finalized[block]; finalized {
 		return nil, nil
 	}
-	p.finalized[block] = true
+	p.finalized[block] = CertificateFinalize
 	return []ConsensusEvent{{Kind: ConsensusEventFinalized, Slot: slot, Block: block, CertificateType: CertificateFinalize}}, nil
+}
+
+func certificateAssemblyPriority(certType CertificateType) int {
+	// This follows Agave's certificate_types_from_vote order. Stable output is
+	// important because finality and parent-ready events are consumed in order.
+	switch certType {
+	case CertificateNotarize:
+		return 0
+	case CertificateNotarizeFallback:
+		return 1
+	case CertificateFinalizeFast:
+		return 2
+	case CertificateFinalize:
+		return 3
+	case CertificateSkip:
+		return 4
+	case CertificateGenesis:
+		return 5
+	default:
+		return 6
+	}
 }
 
 func filterBlocksAtOrAbove(blocks []BlockID, root uint64) []BlockID {
