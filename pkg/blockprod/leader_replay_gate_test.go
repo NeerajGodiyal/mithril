@@ -3,12 +3,48 @@ package blockprod
 import (
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLeaderWindowRequiresVerifiedParentReady(t *testing.T) {
+	const leaderSlot = uint64(212)
+	global.SetReplayFrontier(leaderSlot - 1)
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+		},
+	})
+
+	ready, err := loop.leaderSlotReplayReady(leaderSlot)
+	assert.False(t, ready)
+	require.ErrorIs(t, err, errParentNotReady)
+}
+
+func TestLeaderWindowRejectsParentReadyForkMismatch(t *testing.T) {
+	const leaderSlot = uint64(216)
+	selected := alpenglow.BlockID{Slot: 212, Hash: solana.Hash{3}}
+	global.SetReplayFrontier(leaderSlot - 1)
+	global.SetAlpenglowBlockID(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentReady, Parent: selected}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return ParentContext{ParentSlot: selected.Slot, ParentBankhash: solana.Hash{5}}
+		},
+		ParentBlockID: global.AlpenglowBlockID,
+	})
+
+	err := loop.startSlotLocked(leaderSlot)
+	require.ErrorIs(t, err, errParentNotReady)
+	assert.Nil(t, loop.activeBank)
+}
 
 func TestLeaderSlotReplayReadyOtherLeaderParent(t *testing.T) {
 	self := txfixture.PayerPubkey()

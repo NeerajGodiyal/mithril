@@ -14,6 +14,9 @@ const rewardVoteFutureWindow = 512
 type BuilderConfig struct {
 	MaxValidators int
 	RootSlot      func() uint64
+	// BeforeBuild publishes any lazily verified votes for rewardSlot. It runs
+	// before Builder takes its lock, so the callback may synchronously AddVote.
+	BeforeBuild func(rewardSlot uint64)
 }
 
 func DefaultBuilderConfig() BuilderConfig {
@@ -25,6 +28,7 @@ type Builder struct {
 	mu            sync.Mutex
 	maxValidators int
 	rootSlotFn    func() uint64
+	beforeBuild   func(uint64)
 	rootSlot      uint64
 	votes         map[uint64]slotEntry
 }
@@ -37,6 +41,7 @@ func NewBuilder(cfg BuilderConfig) *Builder {
 	return &Builder{
 		maxValidators: maxValidators,
 		rootSlotFn:    cfg.RootSlot,
+		beforeBuild:   cfg.BeforeBuild,
 		votes:         make(map[uint64]slotEntry),
 	}
 }
@@ -93,13 +98,16 @@ func (b *Builder) AddVote(msg alpenglow.VoteMessage) {
 // BuildForLeaderSlot returns wincode-encoded footer certs for the slot reward
 // window ending at leaderSlot.
 func (b *Builder) BuildForLeaderSlot(leaderSlot uint64) RewardCertificates {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	rewardSlot, ok := rewardSlotForLeader(leaderSlot)
 	if !ok {
 		return RewardCertificates{}
 	}
+	if b.beforeBuild != nil {
+		b.beforeBuild(rewardSlot)
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.dropBefore(rewardSlot)
 
 	entry, ok := b.votes[rewardSlot]

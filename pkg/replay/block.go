@@ -1646,6 +1646,15 @@ func ReplayBlocks(
 		if unrootedTailState == nil {
 			return false
 		}
+		if safety, ok := consensusEngine.(consensusengine.AlpenglowSafetyStatus); ok {
+			if err := safety.AlpenglowSafetyError(); err != nil {
+				if result.Error == nil {
+					result.Error = fmt.Errorf("ALPENGLOW SAFETY: %w; durable state remains at slot %d", err, mithrilState.LastRootedSlot)
+				}
+				mlog.Log.Errorf("ALPENGLOW SAFETY: refusing durable promotion after consensus fault: %v", err)
+				return true
+			}
+		}
 		// Apply any completed async fold first so the gates below see the
 		// current durable frontier.
 		applyFoldOutcome(promoter.poll())
@@ -2078,15 +2087,18 @@ func ReplayBlocks(
 				continue
 			}
 
-			// Alpenglow: feed the observed block to the consensus engine. Observer
-			// telemetry must never break replay, so log-and-continue on error.
+			// Alpenglow: feed the observed block to the consensus engine. This is a
+			// consensus boundary, not telemetry: a latched pool/tracker fault stops
+			// replay before execution or durable promotion can continue.
 			if consensusEngine != nil {
 				if err := consensusEngine.ObserveBlock(ctx, consensusengine.BlockObservation{
 					Block:  block,
 					Source: blockStream.GetFetchStats().CurrentSource,
 					At:     time.Now(),
 				}); err != nil {
-					mlog.Log.Warnf("consensus engine observe block %d: %v", block.Slot, err)
+					result.Error = fmt.Errorf("consensus engine rejected block %d: %w", block.Slot, err)
+					mlog.Log.Errorf("%v", result.Error)
+					break
 				}
 				if len(block.AlpenglowFinalCert) > 0 {
 					finalized := ingestAlpenglowFooterCertificate(consensusEngine, block.AlpenglowFinalCert)
@@ -2384,7 +2396,8 @@ func ReplayBlocks(
 		}
 
 		// Alpenglow: report the replayed slot's bankhash to the engine (drives cert
-		// replay reconciliation). Log-and-continue — never break replay on telemetry.
+		// replay reconciliation). A consensus safety error halts; this callback is
+		// no longer a telemetry-only observer.
 		if consensusEngine != nil && lastSlotCtx != nil {
 			// Record the executed identity here — execution is proven (a block
 			// captured at observe time can still be discarded before it runs).
@@ -2397,7 +2410,9 @@ func ReplayBlocks(
 				Source:   blockStream.GetFetchStats().CurrentSource,
 				At:       time.Now(),
 			}); err != nil {
-				mlog.Log.Warnf("consensus engine replay result %d: %v", block.Slot, err)
+				result.Error = fmt.Errorf("consensus engine rejected replay result %d: %w", block.Slot, err)
+				mlog.Log.Errorf("%v", result.Error)
+				break
 			}
 		}
 

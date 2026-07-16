@@ -16,10 +16,8 @@ import (
 )
 
 const (
-	maxRecentAlpenglowBlockIDs          = 8192
-	alpenglowVoteVerifySamplesPerWindow = 16
-	maxVerifiedVotorCertificates        = 8192
-	maxVerifiedVotorVotes               = 16384
+	maxRecentAlpenglowBlockIDs   = 8192
+	maxVerifiedVotorCertificates = 8192
 )
 
 type certificateAttemptKey struct {
@@ -33,11 +31,6 @@ type certificateVerification struct {
 	verified alpenglow.Certificate
 	result   alpenglow.CertificateVerifyResult
 	err      error
-}
-
-type voteAttemptKey struct {
-	key       alpenglow.VoteMessageKey
-	signature [sha256.Size]byte
 }
 
 type verificationDisposition uint8
@@ -103,6 +96,16 @@ type AlpenglowPruneSink interface {
 	PruneAlpenglowBefore(slot uint64)
 }
 
+// AlpenglowSafetyStatus exposes a latched consensus fault to replay. Once set,
+// replay may not advance the durable watermark or continue producing blocks.
+type AlpenglowSafetyStatus interface {
+	AlpenglowSafetyError() error
+}
+
+type AlpenglowBlockProductionParentSource interface {
+	AlpenglowBlockProductionParent(slot uint64) alpenglow.BlockProductionParent
+}
+
 // AlpenglowChainQuery answers the switch sweep's decisive-certificate
 // questions (unique-strength or finalized block per slot; certified skips).
 type AlpenglowChainQuery interface {
@@ -124,12 +127,13 @@ type AlpenglowWantedBlocksSource interface {
 }
 
 type Snapshot struct {
-	Mode           string                   `json:"mode"`
-	ObservedBlocks uint64                   `json:"observed_blocks"`
-	ReplayedSlots  uint64                   `json:"replayed_slots"`
-	Alpenglow      *alpenglow.Snapshot      `json:"alpenglow,omitempty"`
-	AlpenglowChain *alpenglow.ChainSnapshot `json:"alpenglow_chain,omitempty"`
-	Receiver       *alpenglow.ReceiverStats `json:"receiver,omitempty"`
+	Mode           string                           `json:"mode"`
+	ObservedBlocks uint64                           `json:"observed_blocks"`
+	ReplayedSlots  uint64                           `json:"replayed_slots"`
+	Alpenglow      *alpenglow.Snapshot              `json:"alpenglow,omitempty"`
+	AlpenglowPool  *alpenglow.ConsensusPoolSnapshot `json:"alpenglow_pool,omitempty"`
+	AlpenglowChain *alpenglow.ChainSnapshot         `json:"alpenglow_chain,omitempty"`
+	Receiver       *alpenglow.ReceiverStats         `json:"receiver,omitempty"`
 }
 
 type Engine interface {
@@ -157,22 +161,18 @@ func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 	e := &AlpenglowObserverEngine{
 		observer:                alpenglow.NewObserver(),
 		chain:                   newAlpenglowObserverChainTracker(),
+		pool:                    alpenglow.NewConsensusPool(alpenglow.DefaultConsensusPoolConfig()),
 		verifier:                verifier,
 		receiverBindAddr:        strings.TrimSpace(cfg.AlpenglowObserverBindAddr),
 		receiverMaxMessageBytes: cfg.AlpenglowMaxMessageBytes,
 		shredVersion:            cfg.AlpenglowShredVersion,
 		recentBlockIDs:          make(map[uint64]solana.Hash),
 	}
-	// The cert pool assembles certificates locally from raw Votor votes;
-	// pool-assembled certs are fully stake+signature verified and enter the
-	// chain tracker exactly like verified wire certs.
-	e.certPool = alpenglow.NewCertPool(alpenglow.DefaultCertPoolConfig(), e.verifier, func(cert alpenglow.Certificate) {
-		if _, err := e.ensureChain().ObserveCertificate(cert); err != nil {
-			mlog.Log.FileOnlyf("ALPENGLOW observer: pool-assembled certificate rejected by tracker: %v", err)
-			return
-		}
-		e.observeVotorBlockID(alpenglow.Message{Certificate: &cert})
-	})
+	// CertPool remains the bounded, lazy BLS batch-verification front end. Its
+	// verified votes feed ConsensusPool, which is the sole certificate/finality
+	// authority; CertPool's parallel certificate output is deliberately disabled.
+	e.certPool = alpenglow.NewCertPool(alpenglow.DefaultCertPoolConfig(), e.verifier, nil)
+	e.certPool.SetVerifiedVoteSink(e.acceptVerifiedVote)
 	return e, nil
 }
 
@@ -181,6 +181,7 @@ type AlpenglowObserverEngine struct {
 	replayedSlots           atomic.Uint64
 	observer                *alpenglow.Observer
 	certPool                *alpenglow.CertPool
+	pool                    *alpenglow.ConsensusPool
 	chain                   *alpenglow.ChainTracker
 	verifier                *alpenglow.CertificateVerifier
 	receiverBindAddr        string
@@ -199,32 +200,21 @@ type AlpenglowObserverEngine struct {
 	certVerifyDropCount     uint64
 	certVerifyDetailCount   uint64
 	lastCertVerifyLog       time.Time
-	voteVerifyLogMu         sync.Mutex
-	voteVerifyWindowStart   time.Time
-	voteVerifySamples       int
-	voteVerifyChecked       uint64
-	voteVerifyOK            uint64
-	voteVerifyFailed        uint64
-	voteVerifyNoSet         uint64
-	lastVoteVerifyLog       time.Time
-	lastVoteVerifyErr       string
 	// Votor messages are redundantly broadcast by many QUIC peers. Collapse
-	// identical in-flight work and retain only successful logical
-	// verifications: invalid material can never poison a later valid
-	// certificate/vote for the same slot and hash.
+	// identical in-flight certificate work and retain only successful logical
+	// verifications. Vote verification is owned by CertPool's bounded batch path.
 	verificationMu           sync.Mutex
 	verifiedCertificates     map[alpenglow.CertificateKey]alpenglow.Certificate
 	verifiedCertificateOrder []alpenglow.CertificateKey
 	certificateInFlight      map[certificateAttemptKey]*certificateVerification
-	verifiedVotes            map[alpenglow.VoteMessageKey]alpenglow.VoteVerifyResult
-	verifiedVoteOrder        []alpenglow.VoteMessageKey
-	voteInFlight             map[voteAttemptKey]struct{}
 	certificateCacheHits     atomic.Uint64
 	certificateInflightDrops atomic.Uint64
-	voteCacheHits            atomic.Uint64
-	voteInflightDrops        atomic.Uint64
 	votorMessageHookMu       sync.RWMutex
 	votorMessageHook         func(alpenglow.Message)
+	// Pool transitions and downstream chain delivery are one ordered stream.
+	poolOutputMu sync.Mutex
+	safetyMu     sync.RWMutex
+	safetyErr    error
 }
 
 // SetVotorMessageHook registers an additional consumer for inbound Votor
@@ -268,6 +258,9 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 }
 
 func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObservation) error {
+	if err := e.safetyError(); err != nil {
+		return err
+	}
 	if obs.Block != nil {
 		if e.observedBlocks.Add(1) == 1 {
 			mlog.Log.Infof("ALPENGLOW observer: first replay block observed at slot %d (source=%s, alpenglow_block_id=%t)", obs.Block.Slot, obs.Source, obs.Block.HasAlpenglowBlockID)
@@ -287,13 +280,16 @@ func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObser
 		}
 		e.ensureObserver().ObserveReplayBlock(replayObs)
 		if blockID.HasHash() {
-			e.ensureChain().ObserveReplayBlock(replayObs)
+			e.observeChainReplayBlock(replayObs)
 		}
 	}
-	return nil
+	return e.safetyError()
 }
 
 func (e *AlpenglowObserverEngine) OnReplayResult(_ context.Context, result SlotReplayResult) error {
+	if err := e.safetyError(); err != nil {
+		return err
+	}
 	if result.Slot != 0 {
 		if e.replayedSlots.Add(1) == 1 {
 			mlog.Log.Infof("ALPENGLOW observer: first replay result at slot %d", result.Slot)
@@ -309,6 +305,7 @@ func (e *AlpenglowObserverEngine) OnReplayResult(_ context.Context, result SlotR
 		if e.certPool != nil {
 			e.certPool.NoteLiveSlot(result.Slot)
 		}
+		e.ensurePool().NoteLiveSlot(result.Slot)
 	}
 	return nil
 }
@@ -330,6 +327,10 @@ func (e *AlpenglowObserverEngine) Snapshot() Snapshot {
 	if e.chain != nil {
 		chainSnapshot := e.chain.Snapshot()
 		snapshot.AlpenglowChain = &chainSnapshot
+	}
+	if e.pool != nil {
+		poolSnapshot := e.pool.Snapshot()
+		snapshot.AlpenglowPool = &poolSnapshot
 	}
 	return snapshot
 }
@@ -357,10 +358,7 @@ func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDS
 }
 
 func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
-	msg, admitted := e.admitVotorMessage(msg)
-	if admitted {
-		_, _ = e.ensureObserver().ObserveMessage(msg)
-	}
+	_, _ = e.admitVotorMessage(msg)
 }
 
 // admitVotorMessage is the trust boundary between wire decoding and observer
@@ -370,24 +368,14 @@ func (e *AlpenglowObserverEngine) observeVotorMessage(msg alpenglow.Message) {
 // signature/bitmap, so an invalid packet cannot suppress different, valid
 // material for the same certificate.
 func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpenglow.Message, bool) {
-	e.votorMessageHookMu.RLock()
-	hook := e.votorMessageHook
-	e.votorMessageHookMu.RUnlock()
 	if msg.Vote != nil {
-		// Reward certificates embed partial vote aggregates, so the producer hook
-		// must never see unauthenticated signatures. The consensus cert pool keeps
-		// its own batched verification path below.
-		if hook != nil && (msg.Vote.Vote.Type == alpenglow.VoteTypeSkip || msg.Vote.Vote.Type == alpenglow.VoteTypeNotarize) {
-			_, disposition, err := e.verifyVoteMessageCollapsed(*msg.Vote)
-			if err == nil && disposition == verificationFresh {
-				hook(msg)
-			}
-		}
-		// The cert pool owns vote verification now (lazy, batched); the old
-		// per-window sampling verifier is redundant with it.
+		// Raw votes stop here. CertPool verifies them lazily in bounded BLS
+		// batches, then invokes acceptVerifiedVote. Neither the observer nor block
+		// production sees unauthenticated or merely sampled input.
 		if e.certPool != nil {
 			e.certPool.AddVote(*msg.Vote)
 		}
+		return alpenglow.Message{}, false
 	}
 	if msg.Certificate != nil {
 		verified, result, disposition, err := e.verifyCertificateCollapsed(*msg.Certificate, false)
@@ -398,14 +386,125 @@ func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpe
 			e.logCertificateVerifyDrop(*msg.Certificate, result, err)
 			e.deferCertIfStakesMissing(*msg.Certificate, err)
 			return alpenglow.Message{}, false
-		} else if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
-			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid certificate: %v", err)
-			return alpenglow.Message{}, false
 		}
-		msg.Certificate = &verified
+		e.acceptVerifiedCertificate(verified)
 	}
-	e.observeVotorBlockID(msg)
-	return msg, true
+	// Admission is fully consumed above. Accepted verified messages are
+	// delivered exactly once by the ConsensusPool output path.
+	return alpenglow.Message{}, false
+}
+
+func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote) {
+	if e.safetyError() != nil {
+		return
+	}
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+	if e.safetyError() != nil {
+		return
+	}
+	update, err := e.ensurePool().AddVerifiedVote(vote)
+	if err != nil {
+		fault := fmt.Errorf("consensus pool rejected verified %s vote at slot %d rank %d: %w", vote.Message.Vote.Type, vote.Message.Vote.Slot, vote.Message.Rank, err)
+		e.latchSafetyError(fault)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
+		return
+	}
+	if err := e.handleConsensusUpdate(update); err != nil {
+		e.latchSafetyError(err)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: consensus-pool vote output rejected downstream: %v", err)
+		return
+	}
+	if !update.VoteAccepted {
+		return
+	}
+	if _, err := e.ensureObserver().ObserveVote(vote.Message); err != nil {
+		fault := fmt.Errorf("observer rejected pool-accepted %s vote at slot %d: %w", vote.Message.Vote.Type, vote.Message.Vote.Slot, err)
+		e.latchSafetyError(fault)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
+		return
+	}
+	e.deliverVerifiedVotorMessage(alpenglow.Message{Vote: &vote.Message})
+}
+
+func (e *AlpenglowObserverEngine) acceptVerifiedCertificate(verified alpenglow.Certificate) (alpenglow.ConsensusUpdate, bool) {
+	if e.safetyError() != nil {
+		return alpenglow.ConsensusUpdate{}, false
+	}
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+	if e.safetyError() != nil {
+		return alpenglow.ConsensusUpdate{}, false
+	}
+	update, err := e.ensurePool().AddVerifiedCertificate(verified)
+	if err != nil {
+		fault := fmt.Errorf("consensus pool rejected verified %s certificate at slot %d: %w", verified.Type, verified.Slot, err)
+		e.latchSafetyError(fault)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
+		return alpenglow.ConsensusUpdate{}, false
+	}
+	if len(update.Certificates) == 0 {
+		return update, false
+	}
+	if err := e.handleConsensusUpdate(update); err != nil {
+		e.latchSafetyError(err)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: consensus-pool certificate rejected downstream: %v", err)
+		return alpenglow.ConsensusUpdate{}, false
+	}
+	e.deliverVerifiedVotorMessage(alpenglow.NewCertificateMessage(verified))
+	return update, true
+}
+
+func (e *AlpenglowObserverEngine) handleConsensusUpdate(update alpenglow.ConsensusUpdate) error {
+	for _, cert := range update.Certificates {
+		if _, err := e.ensureObserver().ObserveCertificate(cert); err != nil {
+			return fmt.Errorf("observer rejected accepted %s certificate at slot %d: %w", cert.Type, cert.Slot, err)
+		}
+		chain := e.ensureChain()
+		chainUpdate, err := chain.ObserveCertificate(cert)
+		if err != nil {
+			return fmt.Errorf("chain tracker rejected accepted %s certificate at slot %d: %w", cert.Type, cert.Slot, err)
+		}
+		if chainUpdate.Trusted {
+			if reason, conflicted := chain.FinalityConflictReasonAt(cert.Slot); conflicted {
+				return fmt.Errorf("chain tracker detected accepted-certificate conflict at slot %d: %s", cert.Slot, reason)
+			}
+		}
+		if cert.Type == alpenglow.CertificateGenesis {
+			block, ok := cert.Block()
+			if !ok {
+				return fmt.Errorf("accepted genesis certificate at slot %d has no block identity", cert.Slot)
+			}
+			if err := chain.ObserveFinalized(block, cert.Type); err != nil {
+				return fmt.Errorf("chain tracker rejected genesis finalization at slot %d: %w", cert.Slot, err)
+			}
+			e.ensurePool().PruneBehindFinality(block.Slot)
+		}
+		e.observeVotorBlockID(alpenglow.NewCertificateMessage(cert))
+	}
+	for _, event := range update.Events {
+		switch event.Kind {
+		case alpenglow.ConsensusEventFinalized:
+			if err := e.ensureChain().ObserveFinalized(event.Block, event.CertificateType); err != nil {
+				return fmt.Errorf("chain tracker rejected pool finalization at slot %d: %w", event.Slot, err)
+			}
+			e.ensurePool().PruneBehindFinality(event.Slot)
+		case alpenglow.ConsensusEventConflict:
+			fault := fmt.Errorf("consensus pool conflict at slot %d: %s", event.Slot, event.Reason)
+			e.latchSafetyError(fault)
+			mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
+		}
+	}
+	return e.safetyError()
+}
+
+func (e *AlpenglowObserverEngine) deliverVerifiedVotorMessage(msg alpenglow.Message) {
+	e.votorMessageHookMu.RLock()
+	hook := e.votorMessageHook
+	e.votorMessageHookMu.RUnlock()
+	if hook != nil {
+		hook(msg)
+	}
 }
 
 // ObserveFooterCertificates verifies and ingests certificates decoded from a block
@@ -415,8 +514,6 @@ func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpe
 // Finalize cert), derived from the verified certs themselves so the result cannot
 // be raced away by tracker pruning.
 func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Certificate) []alpenglow.BlockID {
-	var finalized []alpenglow.BlockID
-	notarized := make(map[uint64]alpenglow.BlockID)
 	finalizeSlots := make(map[uint64]struct{})
 	for _, cert := range certs {
 		// A footer may race the same certificate arriving over Votor QUIC.
@@ -429,25 +526,15 @@ func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Ce
 			e.deferCertIfStakesMissing(cert, err)
 			continue
 		}
-		if _, err := e.ensureChain().ObserveCertificate(verified); err != nil {
-			mlog.Log.FileOnlyf("ALPENGLOW observer: ignored invalid footer certificate: %v", err)
-			continue
-		}
 		switch verified.Type {
-		case alpenglow.CertificateFinalizeFast:
-			if block, ok := verified.Block(); ok {
-				finalized = append(finalized, block)
-			}
-		case alpenglow.CertificateNotarize:
-			if block, ok := verified.Block(); ok {
-				notarized[verified.Slot] = block
-			}
-		case alpenglow.CertificateFinalize:
+		case alpenglow.CertificateFinalizeFast, alpenglow.CertificateFinalize, alpenglow.CertificateGenesis:
 			finalizeSlots[verified.Slot] = struct{}{}
 		}
+		e.acceptVerifiedCertificate(verified)
 	}
+	var finalized []alpenglow.BlockID
 	for slot := range finalizeSlots {
-		if block, ok := notarized[slot]; ok {
+		if block, ok := e.ensureChain().FinalizedBlockAt(slot); ok {
 			finalized = append(finalized, block)
 		}
 	}
@@ -518,7 +605,7 @@ func (e *AlpenglowObserverEngine) replayPendingCertsForEpoch(epoch uint64) {
 		if err != nil {
 			continue
 		}
-		_, _ = e.ensureChain().ObserveCertificate(verified)
+		e.acceptVerifiedCertificate(verified)
 	}
 }
 
@@ -528,6 +615,12 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 	}
 	blockID, ok := msg.Certificate.Block()
 	if !ok || !blockID.HasHash() {
+		return
+	}
+	decisive, _, ok := e.ensureChain().CertifiedBlockAt(blockID.Slot)
+	if !ok || decisive != blockID {
+		// Fallback-certified siblings are repair leads, not a safe hard filter for
+		// the shred assembler. Publish only a decisive block identity.
 		return
 	}
 
@@ -559,6 +652,13 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 }
 
 func (e *AlpenglowObserverEngine) NextAlpenglowDecision(anchorSlot uint64) (alpenglow.ChainDecision, bool) {
+	if err := e.safetyError(); err != nil {
+		return alpenglow.ChainDecision{
+			Slot:   anchorSlot + 1,
+			Kind:   alpenglow.ChainDecisionKindConflict,
+			Reason: err.Error(),
+		}, true
+	}
 	return e.ensureChain().NextDecision(anchorSlot)
 }
 
@@ -574,7 +674,17 @@ func (e *AlpenglowObserverEngine) ObserveAlpenglowCandidateBlock(obs alpenglow.R
 	if !obs.Block.HasHash() {
 		return
 	}
-	e.ensureChain().ObserveReplayBlock(obs)
+	e.observeChainReplayBlock(obs)
+}
+
+func (e *AlpenglowObserverEngine) observeChainReplayBlock(obs alpenglow.ReplayBlockObservation) {
+	update := e.ensureChain().ObserveReplayBlock(obs)
+	if !update.Conflict {
+		return
+	}
+	fault := fmt.Errorf("chain tracker detected replay-link conflict at slot %d: %s", update.ConflictSlot, update.ConflictReason)
+	e.latchSafetyError(fault)
+	mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
 }
 
 func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.ValidatorSet) error {
@@ -587,6 +697,41 @@ func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.Validat
 		e.certPool.OnValidatorSetInstalled(set.Epoch)
 	}
 	return nil
+}
+
+func (e *AlpenglowObserverEngine) SetAlpenglowRoot(block alpenglow.BlockID) {
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+
+	pool := e.ensurePool()
+	if snapshot := pool.Snapshot(); snapshot.RootSlot == 0 && block.Slot > 0 && block.HasHash() {
+		pool.RestoreParentReady(block.Slot+1, block)
+	} else {
+		pool.SetRoot(block)
+	}
+	// A restart root is also the lower bound for every downstream structure.
+	// Otherwise old certificates received immediately after startup could regrow
+	// historical chain state or consume the raw-vote pool before replay advances.
+	e.ensureChain().PruneBeforeSlot(block.Slot)
+	if e.certPool != nil {
+		e.certPool.ObserveFloor(block.Slot)
+	}
+}
+
+func (e *AlpenglowObserverEngine) AlpenglowBlockProductionParent(slot uint64) alpenglow.BlockProductionParent {
+	if e.safetyError() != nil {
+		return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+	}
+	return e.ensurePool().BlockProductionParent(slot)
+}
+
+// FlushAlpenglowRewardVotes makes the lazy verifier publish all valid plain
+// skip/notarize votes needed by the slot+8 reward footer.
+func (e *AlpenglowObserverEngine) FlushAlpenglowRewardVotes(slot uint64) {
+	if e.safetyError() != nil || e.certPool == nil {
+		return
+	}
+	e.certPool.FlushRewardVotes(slot)
 }
 
 // CertifiedBlockAt exposes the tracker's decisive block for the switch sweep.
@@ -621,17 +766,49 @@ func (e *AlpenglowObserverEngine) SetAlpenglowEpochLookup(fn func(slot uint64) u
 	}
 }
 
-// PruneAlpenglowBefore drops consensus bookkeeping for slots at or below the
-// durably-folded watermark: chain-tracker state and cert-pool tallies.
+// PruneAlpenglowBefore advances the durable consensus root. ChainTracker keeps
+// the exact root and drops older ancestry; the pool/tally front ends no longer
+// need votes through the rooted slot.
 // Equivocation and conflict evidence survive pruning by design.
 func (e *AlpenglowObserverEngine) PruneAlpenglowBefore(slot uint64) {
 	if slot == 0 {
 		return
 	}
-	e.ensureChain().PruneBeforeSlot(slot)
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+
+	chain := e.ensureChain()
+	root := alpenglow.BlockID{Slot: slot}
+	if finalized, ok := chain.FinalizedBlockAt(slot); ok {
+		root = finalized
+	}
+	e.ensurePool().SetRoot(root)
+	chain.PruneBeforeSlot(slot)
 	if e.certPool != nil {
 		e.certPool.ObserveFloor(slot)
 	}
+}
+
+func (e *AlpenglowObserverEngine) latchSafetyError(err error) {
+	if err == nil {
+		return
+	}
+	e.safetyMu.Lock()
+	if e.safetyErr == nil {
+		e.safetyErr = fmt.Errorf("alpenglow safety fault: %w", err)
+	}
+	e.safetyMu.Unlock()
+}
+
+func (e *AlpenglowObserverEngine) safetyError() error {
+	e.safetyMu.RLock()
+	err := e.safetyErr
+	e.safetyMu.RUnlock()
+	return err
+}
+
+func (e *AlpenglowObserverEngine) AlpenglowSafetyError() error {
+	return e.safetyError()
 }
 
 func (e *AlpenglowObserverEngine) Close() error {
@@ -653,6 +830,13 @@ func (e *AlpenglowObserverEngine) ensureChain() *alpenglow.ChainTracker {
 		e.chain = newAlpenglowObserverChainTracker()
 	}
 	return e.chain
+}
+
+func (e *AlpenglowObserverEngine) ensurePool() *alpenglow.ConsensusPool {
+	if e.pool == nil {
+		e.pool = alpenglow.NewConsensusPool(alpenglow.DefaultConsensusPoolConfig())
+	}
+	return e.pool
 }
 
 func (e *AlpenglowObserverEngine) ensureVerifier() *alpenglow.CertificateVerifier {
@@ -732,56 +916,6 @@ func certificateResultFromVerified(cert alpenglow.Certificate) alpenglow.Certifi
 	}
 }
 
-func (e *AlpenglowObserverEngine) verifyVoteMessage(msg alpenglow.VoteMessage) (alpenglow.VoteVerifyResult, error) {
-	if epoch, ok := e.alpenglowEpochForSlot(msg.Vote.Slot); ok {
-		return e.ensureVerifier().VerifyVoteMessageForEpoch(epoch, msg)
-	}
-	return e.ensureVerifier().VerifyVoteMessage(msg)
-}
-
-func (e *AlpenglowObserverEngine) verifyVoteMessageCollapsed(msg alpenglow.VoteMessage) (alpenglow.VoteVerifyResult, verificationDisposition, error) {
-	logical := msg.Key()
-	attempt := voteAttemptKey{key: logical, signature: sha256.Sum256(msg.Signature)}
-
-	e.verificationMu.Lock()
-	if result, ok := e.verifiedVotes[logical]; ok {
-		e.voteCacheHits.Add(1)
-		e.verificationMu.Unlock()
-		return result, verificationCached, nil
-	}
-	if _, ok := e.voteInFlight[attempt]; ok {
-		e.voteInflightDrops.Add(1)
-		e.verificationMu.Unlock()
-		return alpenglow.VoteVerifyResult{}, verificationInFlight, nil
-	}
-	if e.voteInFlight == nil {
-		e.voteInFlight = make(map[voteAttemptKey]struct{})
-	}
-	e.voteInFlight[attempt] = struct{}{}
-	e.verificationMu.Unlock()
-
-	result, err := e.verifyVoteMessage(msg)
-
-	e.verificationMu.Lock()
-	delete(e.voteInFlight, attempt)
-	if err == nil {
-		if e.verifiedVotes == nil {
-			e.verifiedVotes = make(map[alpenglow.VoteMessageKey]alpenglow.VoteVerifyResult)
-		}
-		if _, exists := e.verifiedVotes[logical]; !exists {
-			e.verifiedVoteOrder = append(e.verifiedVoteOrder, logical)
-		}
-		e.verifiedVotes[logical] = result
-		for len(e.verifiedVotes) > maxVerifiedVotorVotes {
-			old := e.verifiedVoteOrder[0]
-			e.verifiedVoteOrder = e.verifiedVoteOrder[1:]
-			delete(e.verifiedVotes, old)
-		}
-	}
-	e.verificationMu.Unlock()
-	return result, verificationFresh, err
-}
-
 func (e *AlpenglowObserverEngine) alpenglowEpochForSlot(slot uint64) (uint64, bool) {
 	e.epochLookupMu.RLock()
 	fn := e.epochForSlot
@@ -846,100 +980,6 @@ func (e *AlpenglowObserverEngine) logCertificateVerifyDrop(cert alpenglow.Certif
 	)
 }
 
-func (e *AlpenglowObserverEngine) sampleVoteVerification(msg alpenglow.VoteMessage) {
-	now := time.Now()
-	e.voteVerifyLogMu.Lock()
-	if e.voteVerifyWindowStart.IsZero() || now.Sub(e.voteVerifyWindowStart) >= 10*time.Second {
-		e.voteVerifyWindowStart = now
-		e.voteVerifySamples = 0
-	}
-	if e.voteVerifySamples >= alpenglowVoteVerifySamplesPerWindow {
-		e.voteVerifyLogMu.Unlock()
-		return
-	}
-	e.voteVerifySamples++
-	e.voteVerifyLogMu.Unlock()
-
-	result, err := e.verifyVoteMessage(msg)
-
-	e.voteVerifyLogMu.Lock()
-	e.voteVerifyChecked++
-	switch {
-	case err == nil:
-		e.voteVerifyOK++
-	case strings.Contains(err.Error(), "no validator set"):
-		e.voteVerifyNoSet++
-		e.lastVoteVerifyErr = err.Error()
-	default:
-		e.voteVerifyFailed++
-		e.lastVoteVerifyErr = err.Error()
-	}
-	shouldLog := e.lastVoteVerifyLog.IsZero() || now.Sub(e.lastVoteVerifyLog) >= 10*time.Second || err != nil
-	if shouldLog {
-		e.lastVoteVerifyLog = now
-	}
-	checked := e.voteVerifyChecked
-	ok := e.voteVerifyOK
-	failed := e.voteVerifyFailed
-	noSet := e.voteVerifyNoSet
-	lastErr := e.lastVoteVerifyErr
-	e.voteVerifyLogMu.Unlock()
-
-	if !shouldLog {
-		return
-	}
-	if err != nil {
-		mlog.Log.FileOnlyf("ALPENGLOW observer: sampled vote BLS verification failed: checked=%d ok=%d failed=%d no_set=%d vote=%s slot=%d rank=%d err=%v",
-			checked, ok, failed, noSet, msg.Vote.Type, msg.Vote.Slot, msg.Rank, err)
-		if !strings.Contains(err.Error(), "no validator set") {
-			var diag alpenglow.VoteSignatureDiagnostics
-			if epoch, ok := e.alpenglowEpochForSlot(msg.Vote.Slot); ok {
-				diag = e.ensureVerifier().DiagnoseVoteMessageForEpoch(epoch, msg, 4)
-			} else {
-				diag = e.ensureVerifier().DiagnoseVoteMessage(msg, 4)
-			}
-			mlog.Log.FileOnlyf("ALPENGLOW observer: sampled vote BLS debug: vote=%s slot=%d advertised_rank=%d epoch=%d validators=%d payload_len=%d payload_hex=%s sig_len=%d sig_hex=%s advertised=%s advertised_rank_err=%q matches=%d match_samples=%s epoch_matches=%s diag_error=%q",
-				msg.Vote.Type,
-				msg.Vote.Slot,
-				msg.Rank,
-				diag.Epoch,
-				diag.ValidatorCount,
-				diag.PayloadLen,
-				diag.PayloadHex,
-				diag.SignatureLen,
-				diag.SignatureHex,
-				formatSignerSample(diag.AdvertisedSigner),
-				diag.AdvertisedRankErr,
-				diag.MatchCount,
-				formatSignerSamples(diag.MatchSamples),
-				formatEpochVoteDiagnostics(diag.Epochs),
-				diag.DiagnosticError,
-			)
-		}
-		return
-	}
-	mlog.Log.FileOnlyf("ALPENGLOW observer: sampled vote BLS verification ok: checked=%d ok=%d failed=%d no_set=%d latest_vote=%s slot=%d rank=%d epoch=%d stake=%d/%d last_err=%q",
-		checked, ok, failed, noSet, msg.Vote.Type, msg.Vote.Slot, msg.Rank, result.Epoch, result.Stake, result.TotalStake, lastErr)
-}
-
-func formatEpochVoteDiagnostics(diags []alpenglow.EpochVoteSignatureDiagnostics) string {
-	if len(diags) == 0 {
-		return "[]"
-	}
-	parts := make([]string, 0, len(diags))
-	for _, diag := range diags {
-		parts = append(parts, fmt.Sprintf("{epoch:%d validators:%d advertised:%s advertised_rank_err:%q matches:%d samples:%s}",
-			diag.Epoch,
-			diag.ValidatorCount,
-			formatSignerSample(diag.AdvertisedSigner),
-			diag.AdvertisedRankErr,
-			diag.MatchCount,
-			formatSignerSamples(diag.MatchSamples),
-		))
-	}
-	return "[" + strings.Join(parts, " ") + "]"
-}
-
 func formatSignerSamples(samples []alpenglow.SignerSample) string {
 	if len(samples) == 0 {
 		return "[]"
@@ -959,13 +999,6 @@ func formatSignerSamples(samples []alpenglow.SignerSample) string {
 		))
 	}
 	return "[" + strings.Join(parts, " ") + "]"
-}
-
-func formatSignerSample(sample *alpenglow.SignerSample) string {
-	if sample == nil {
-		return "none"
-	}
-	return formatSignerSamples([]alpenglow.SignerSample{*sample})
 }
 
 func newAlpenglowObserverChainTracker() *alpenglow.ChainTracker {

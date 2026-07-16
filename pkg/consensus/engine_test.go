@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -288,11 +289,17 @@ func TestAlpenglowObserverPublishesCertificateBlockIDsOnly(t *testing.T) {
 
 	var certBlockID solana.Hash
 	certBlockID[0] = 2
-	observer.observeVotorBlockID(alpenglow.NewCertificateMessage(alpenglow.Certificate{
-		Type:      alpenglow.CertificateNotarize,
-		Slot:      10,
-		BlockHash: certBlockID,
-	}))
+	cert := alpenglow.Certificate{
+		Type:              alpenglow.CertificateNotarize,
+		Slot:              10,
+		BlockHash:         certBlockID,
+		SignatureVerified: true,
+		StakeVerified:     true,
+	}
+	if _, err := observer.ensureChain().ObserveCertificate(cert); err != nil {
+		t.Fatal(err)
+	}
+	observer.observeVotorBlockID(alpenglow.NewCertificateMessage(cert))
 	if len(published) != 1 || published[0] != (alpenglow.BlockID{Slot: 10, Hash: certBlockID}) {
 		t.Fatalf("published block IDs = %+v, want certified block ID", published)
 	}
@@ -321,8 +328,8 @@ func TestVotorMessageHookReceivesOnlyVerifiedRewardVotes(t *testing.T) {
 	if called != 1 {
 		t.Fatalf("duplicate verified vote reached hook; calls = %d, want 1", called)
 	}
-	if engine.voteCacheHits.Load() != 1 {
-		t.Fatalf("vote cache hits = %d, want 1", engine.voteCacheHits.Load())
+	if got := engine.pool.Snapshot().VerifiedVotes; got != 1 {
+		t.Fatalf("verified pool votes = %d, want 1", got)
 	}
 
 	invalidSig := append([]byte(nil), validSig...)
@@ -372,6 +379,65 @@ func TestVotorCertificateVerificationDeduplicatesWithoutInvalidPoisoning(t *test
 	}
 	if got := engine.ensureObserver().Snapshot().CertificatesObserved; got != 1 {
 		t.Fatalf("trusted observer certificates = %d, want exactly 1 verified cert", got)
+	}
+}
+
+func TestPoolRejectedCertificateDoesNotReachChainOrConsumers(t *testing.T) {
+	observer := &AlpenglowObserverEngine{
+		pool: alpenglow.NewConsensusPool(alpenglow.ConsensusPoolConfig{
+			RootBlock: alpenglow.BlockID{Slot: 10, Hash: solana.Hash{1}},
+		}),
+	}
+	var delivered int
+	observer.SetVotorMessageHook(func(alpenglow.Message) { delivered++ })
+	observer.acceptVerifiedCertificate(alpenglow.Certificate{
+		Type:              alpenglow.CertificateSkip,
+		Slot:              9,
+		SignatureVerified: true,
+		StakeVerified:     true,
+	})
+	if snapshot := observer.ensureChain().Snapshot(); snapshot.CertificatesObserved != 0 {
+		t.Fatalf("pool-rejected certificate reached chain tracker: %+v", snapshot)
+	}
+	if delivered != 0 {
+		t.Fatal("pool-rejected certificate reached verified consumer hook")
+	}
+}
+
+func TestAlpenglowObserverSafetyFaultFailsClosed(t *testing.T) {
+	observer := &AlpenglowObserverEngine{}
+	observer.latchSafetyError(errors.New("injected downstream rejection"))
+	decision, ok := observer.NextAlpenglowDecision(41)
+	if !ok || decision.Kind != alpenglow.ChainDecisionKindConflict || decision.Slot != 42 {
+		t.Fatalf("safety decision = %+v (ok=%v)", decision, ok)
+	}
+	if err := observer.OnReplayResult(context.Background(), SlotReplayResult{Slot: 41}); err == nil {
+		t.Fatal("replay continued after consensus safety fault")
+	}
+	if parent := observer.AlpenglowBlockProductionParent(44); parent.Kind != alpenglow.BlockProductionParentNotReady {
+		t.Fatalf("block production parent after safety fault = %+v", parent)
+	}
+}
+
+func TestSetAlpenglowRootRestoresStartupParentReady(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := alpenglow.BlockID{Slot: 208, Hash: solana.Hash{7}}
+	engine.SetAlpenglowRoot(root)
+	parent := engine.AlpenglowBlockProductionParent(209)
+	if parent.Kind != alpenglow.BlockProductionParentReady || parent.Parent != root {
+		t.Fatalf("startup ParentReady = %+v, want root %+v", parent, root)
+	}
+	if snapshot := engine.certPool.Snapshot(); snapshot.Floor != root.Slot {
+		t.Fatalf("startup raw-vote floor = %d, want %d", snapshot.Floor, root.Slot)
+	}
+	engine.ensureChain().ObserveReplayBlock(alpenglow.ReplayBlockObservation{
+		Block: alpenglow.BlockID{Slot: root.Slot - 1, Hash: solana.Hash{8}},
+	})
+	if got := engine.ensureChain().Snapshot().CertifiedBlocks; got != 0 {
+		t.Fatalf("startup durable floor allowed historical chain regrowth: %d blocks", got)
 	}
 }
 

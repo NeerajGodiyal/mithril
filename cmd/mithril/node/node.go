@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockprod"
@@ -2192,6 +2193,17 @@ postBootstrap:
 		if err != nil {
 			klog.Fatalf("unable to create consensus engine: %v", err)
 		}
+		root := alpenglow.BlockID{}
+		if startSlot > 0 {
+			root.Slot = uint64(startSlot - 1)
+		}
+		if resumeState != nil {
+			root.Slot = resumeState.ParentSlot
+			if resumeState.HasParentAlpenglowBlockID {
+				root.Hash = resumeState.ParentAlpenglowBlockID
+			}
+		}
+		consensusEngine.SetAlpenglowRoot(root)
 		if err := consensusEngine.Start(ctx); err != nil {
 			klog.Fatalf("unable to start consensus engine %q: %v", consensusEngine.Name(), err)
 		}
@@ -2307,7 +2319,10 @@ postBootstrap:
 			mlog.Log.Warnf("validator gossip TPU advertisement: %v", err)
 		}
 
-		rewardBuilder := rewardcerts.NewBuilder(rewardcerts.BuilderConfig{RootSlot: global.Slot})
+		rewardBuilder := rewardcerts.NewBuilder(rewardcerts.BuilderConfig{
+			RootSlot:    global.Slot,
+			BeforeBuild: consensusEngine.FlushAlpenglowRewardVotes,
+		})
 		consensusEngine.SetVotorMessageHook(rewardBuilder.ObserveVotorMessage)
 		leaderStop := make(chan struct{})
 		leaderDone := make(chan struct{})
@@ -2337,8 +2352,9 @@ postBootstrap:
 					UnrootedRead:        tip.UnrootedRead,
 				}
 			},
-			CurrentSlot:   global.WallClockSlot,
-			LeaderForSlot: global.LeaderForSlot,
+			ProductionParent: consensusEngine.AlpenglowBlockProductionParent,
+			CurrentSlot:      global.WallClockSlot,
+			LeaderForSlot:    global.LeaderForSlot,
 			ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 				if parentSlot == 0 {
 					return solana.Hash{}, true

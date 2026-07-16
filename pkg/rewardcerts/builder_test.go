@@ -122,6 +122,21 @@ func TestBuilderUsesSlotsForRewardOffset(t *testing.T) {
 	require.NotEmpty(t, builder.BuildForLeaderSlot(18).Skip)
 }
 
+func TestBuilderFlushesLazyVotesBeforeBuilding(t *testing.T) {
+	keys := testBLSKeys(t, 1)
+	const rewardSlot = uint64(25)
+	var builder *Builder
+	var flushed uint64
+	builder = NewBuilder(BuilderConfig{BeforeBuild: func(slot uint64) {
+		flushed = slot
+		builder.AddVote(testSignedVote(t, alpenglow.NewSkipVote(slot), 0, keys[0]))
+	}})
+
+	certs := builder.BuildForLeaderSlot(rewardSlot + SlotsForReward)
+	assert.Equal(t, rewardSlot, flushed)
+	require.NotEmpty(t, certs.Skip)
+}
+
 func TestBuilderDeduplicatesVotes(t *testing.T) {
 	keys := testBLSKeys(t, 2)
 	builder := NewBuilder(DefaultBuilderConfig())
