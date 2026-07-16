@@ -83,6 +83,30 @@ func TestCertPoolAssemblesNotarizeCert(t *testing.T) {
 	}
 }
 
+func TestCertPoolPublishesOnlyBatchVerifiedVotes(t *testing.T) {
+	pool, set, keys, _ := newTestPool(t)
+	var verified []VerifiedVote
+	pool.SetVerifiedVoteSink(func(vote VerifiedVote) {
+		verified = append(verified, vote)
+	})
+
+	vote := NewSkipVote(501)
+	addVote(t, pool, vote, 0, keys[0])
+	if len(verified) != 1 {
+		t.Fatalf("verified vote callbacks = %d, want 1", len(verified))
+	}
+	if got := verified[0]; got.Message.Rank != 0 || got.Result.Rank != 0 || got.Result.Epoch != set.Epoch || got.Result.Stake != 40 || got.Result.TotalStake != set.TotalStake {
+		t.Fatalf("verified vote metadata = %+v", got)
+	}
+
+	bad := VoteMessage{Vote: NewSkipVote(502), Rank: 0, Signature: append([]byte(nil), verified[0].Message.Signature...)}
+	bad.Signature[0] ^= 0xff
+	pool.AddVote(bad)
+	if len(verified) != 1 {
+		t.Fatalf("bad signature reached verified sink: %+v", verified)
+	}
+}
+
 // 80% of notarize stake additionally assembles a finalize-fast certificate.
 func TestCertPoolAssemblesFinalizeFastAtEightyPercent(t *testing.T) {
 	pool, set, keys, emitted := newTestPool(t)
@@ -323,6 +347,57 @@ func TestCertPoolBogusVoteDoesNotPoisonRealVote(t *testing.T) {
 	}
 	if !bitmap.Base[0] {
 		t.Fatal("honest rank 0's real vote must be counted")
+	}
+}
+
+// Same logical vote, same advertised rank: an invalid first packet must not
+// occupy the pending-rank entry and suppress the validator's later real
+// signature. The collision forces a small batch verification immediately.
+func TestCertPoolBogusSameTallyCandidateDoesNotSuppressRealVote(t *testing.T) {
+	pool, set, keys, _ := newTestPool(t)
+	var verified []VerifiedVote
+	pool.SetVerifiedVoteSink(func(vote VerifiedVote) { verified = append(verified, vote) })
+
+	var blockHash solana.Hash
+	blockHash[0] = 0xC0
+	vote := NewNotarizationVote(951, blockHash)
+	// Rank 4 owns 5%: one candidate remains below every normal fold trigger.
+	pool.AddVote(VoteMessage{Vote: vote, Rank: 4, Signature: signTestVote(t, vote, keys[3])})
+	if len(verified) != 0 {
+		t.Fatal("forged first candidate reached verified sink")
+	}
+	pool.AddVote(VoteMessage{Vote: vote, Rank: 4, Signature: signTestVote(t, vote, keys[4])})
+
+	if len(verified) != 1 {
+		t.Fatalf("verified callbacks = %d, want only the real vote", len(verified))
+	}
+	if verified[0].Message.Rank != 4 || verified[0].Result.Epoch != set.Epoch {
+		t.Fatalf("wrong verified vote: %+v", verified[0])
+	}
+	if pool.Snapshot().PendingTotal != 0 || pool.Snapshot().BadSignatures == 0 {
+		t.Fatalf("collision was not resolved cleanly: %+v", pool.Snapshot())
+	}
+}
+
+func TestCertPoolFlushRewardVotesPublishesBelowThresholdVotes(t *testing.T) {
+	pool, _, keys, _ := newTestPool(t)
+	var verified []VerifiedVote
+	pool.SetVerifiedVoteSink(func(vote VerifiedVote) { verified = append(verified, vote) })
+
+	var blockHash solana.Hash
+	blockHash[0] = 0xD0
+	addVote(t, pool, NewNotarizationVote(952, blockHash), 4, keys[4]) // 5%
+	addVote(t, pool, NewSkipVote(952), 3, keys[3])                    // 10%
+	if len(verified) != 0 {
+		t.Fatalf("below-threshold votes verified before reward flush: %+v", verified)
+	}
+
+	pool.FlushRewardVotes(952)
+	if len(verified) != 2 {
+		t.Fatalf("reward flush published %d votes, want 2", len(verified))
+	}
+	if pool.Snapshot().PendingTotal != 0 {
+		t.Fatalf("reward votes remain pending: %+v", pool.Snapshot())
 	}
 }
 

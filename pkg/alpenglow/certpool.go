@@ -1,6 +1,7 @@
 package alpenglow
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sync"
 
@@ -8,6 +9,12 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 )
+
+// Keep two signatures for one logical rank/tally before forcing verification.
+// A forged first arrival therefore cannot occupy the rank until the real vote
+// has passed: the second distinct candidate resolves both immediately. The
+// global/per-slot pending caps still bound pre-verification memory and work.
+const maxUnverifiedCandidatesPerRank = 2
 
 // The certificate pool assembles Alpenglow certificates LOCALLY from raw
 // votor votes, the way Agave's votor certificate pool does. Waiting for a
@@ -92,15 +99,15 @@ type CertPoolSnapshot struct {
 
 // tally accumulates one (vote type, block hash) target within a slot.
 type tally struct {
-	pending  map[uint16]VoteMessage // unverified, by rank
-	verified map[uint16]struct{}    // ranks folded into the aggregate
-	aggSig   bls12381.G2Affine      // sum of verified signatures
-	aggPub   bls12381.G1Affine      // sum of verified pubkeys
-	stake    uint64                 // verified stake
+	pending  map[uint16]map[[sha256.Size]byte]VoteMessage // unverified candidates, by rank and signature
+	verified map[uint16]struct{}                          // ranks folded into the aggregate
+	aggSig   bls12381.G2Affine                            // sum of verified signatures
+	aggPub   bls12381.G1Affine                            // sum of verified pubkeys
+	stake    uint64                                       // verified stake
 }
 
 func newTally() *tally {
-	t := &tally{pending: make(map[uint16]VoteMessage), verified: make(map[uint16]struct{})}
+	t := &tally{pending: make(map[uint16]map[[sha256.Size]byte]VoteMessage), verified: make(map[uint16]struct{})}
 	t.aggSig.SetInfinity()
 	t.aggPub.SetInfinity()
 	return t
@@ -108,8 +115,8 @@ func newTally() *tally {
 
 func (t *tally) candidateStake(set *ValidatorSet) uint64 {
 	total := t.stake
-	for rank := range t.pending {
-		if int(rank) < len(set.Validators) {
+	for rank, candidates := range t.pending {
+		if len(candidates) > 0 && int(rank) < len(set.Validators) {
 			total += set.Validators[rank].Stake
 		}
 	}
@@ -145,6 +152,11 @@ type CertPool struct {
 	cfg      CertPoolConfig
 	verifier *CertificateVerifier
 	emit     func(Certificate)
+	// verifiedVoteSink receives each vote only after its BLS signature has
+	// verified against the rank-owned key. ConsensusPool is the sole consumer
+	// in the node; CertPool remains only the bounded batch-verification front
+	// end and must not make downstream consensus decisions itself.
+	verifiedVoteSink func(VerifiedVote)
 
 	mu           sync.Mutex
 	epochForSlot func(slot uint64) uint64
@@ -183,6 +195,14 @@ func NewCertPool(cfg CertPoolConfig, verifier *CertificateVerifier, emit func(Ce
 		slots:    make(map[uint64]*poolSlot),
 		emitted:  make(map[CertificateKey]struct{}),
 	}
+}
+
+// SetVerifiedVoteSink installs the downstream verified-message authority.
+// The sink runs after the pool lock is released.
+func (p *CertPool) SetVerifiedVoteSink(sink func(VerifiedVote)) {
+	p.mu.Lock()
+	p.verifiedVoteSink = sink
+	p.mu.Unlock()
 }
 
 // SetEpochLookup wires slot→epoch resolution (validator set selection).
@@ -240,6 +260,7 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 	slot := msg.Vote.Slot
 
 	var emits []Certificate
+	var verified []VerifiedVote
 	p.mu.Lock()
 	if slot <= p.floor {
 		p.snap.VotesRejected++
@@ -267,42 +288,68 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 		p.slots[slot] = ps
 	}
 
-	// Memory bounds only — no trust-sensitive state is touched here.
-	if ps.pendingCount >= p.cfg.MaxPendingVotesPerSlot || p.totalPending >= p.cfg.MaxPendingVotesTotal {
-		p.snap.VotesRejected++
-		p.mu.Unlock()
-		return
-	}
-
 	tk := tallyKey{Type: msg.Vote.Type, Hash: msg.Vote.BlockHash}
 	tl := ps.tallies[tk]
 	if tl == nil {
 		tl = newTally()
 		ps.tallies[tk] = tl
 	}
-	// One pending vote per rank per tally; a rank already verified in this tally
-	// needs no re-buffer. (Different block hashes are DIFFERENT tallies, so a
-	// bogus hash cannot displace the real one — no cross-tally poisoning.)
-	if _, dup := tl.pending[msg.Rank]; !dup {
-		if _, done := tl.verified[msg.Rank]; !done {
-			tl.pending[msg.Rank] = msg
+	// Distinct signatures for the same logical vote are retained briefly rather
+	// than first-arrival-deduped. On the second candidate we verify immediately,
+	// so an attacker cannot park a forged signature ahead of the validator's real
+	// one. Different block hashes remain separate tallies.
+	forceFold := false
+	if _, done := tl.verified[msg.Rank]; !done {
+		sigKey := sha256.Sum256(msg.Signature)
+		candidates := tl.pending[msg.Rank]
+		if candidates == nil {
+			candidates = make(map[[sha256.Size]byte]VoteMessage)
+			tl.pending[msg.Rank] = candidates
+		}
+		if _, dup := candidates[sigKey]; !dup {
+			atCap := ps.pendingCount >= p.cfg.MaxPendingVotesPerSlot || p.totalPending >= p.cfg.MaxPendingVotesTotal
+			// A second candidate is immediately resolved and removed below, so let
+			// it exceed the cap by one while holding the lock when the validator set
+			// is available. Otherwise the cap itself would recreate first-packet
+			// poisoning exactly when the pool is full.
+			canResolveCollision := len(candidates) > 0 && p.setForSlotLocked(slot) != nil
+			if atCap && !canResolveCollision {
+				p.snap.VotesRejected++
+				p.mu.Unlock()
+				return
+			}
+			candidates[sigKey] = msg
 			ps.pendingCount++
 			p.totalPending++
 			p.snap.VotesAccepted++
+			forceFold = len(candidates) >= maxUnverifiedCandidatesPerRank
 		}
 	}
 	if slot > p.highestSlot {
 		p.highestSlot = slot
 	}
 
+	if forceFold {
+		if set := p.setForSlotLocked(slot); set != nil {
+			verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
+		}
+	}
 	// Keep verified stake fresh for the Votor fallback triggers. Only plain
 	// notarize/skip arrivals can change the trigger predicates.
 	if msg.Vote.Type == VoteTypeNotarize || msg.Vote.Type == VoteTypeSkip {
-		p.maybeFoldTriggersLocked(slot, ps)
+		verified = append(verified, p.maybeFoldTriggersLocked(slot, ps)...)
 	}
-	emits = p.maybeAssembleLocked(slot, ps)
+	var assembledVerified []VerifiedVote
+	emits, assembledVerified = p.maybeAssembleLocked(slot, ps)
+	verified = append(verified, assembledVerified...)
+	sink := p.verifiedVoteSink
 	p.mu.Unlock()
 
+	for _, vote := range verified {
+		if sink != nil {
+			sink(vote)
+		}
+	}
 	for _, cert := range emits {
 		p.emitCert(cert)
 	}
@@ -313,17 +360,59 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 // slot can be safely attributed to the epoch, so nothing is retried.
 func (p *CertPool) OnValidatorSetInstalled(epoch uint64) {
 	var emits []Certificate
+	var verified []VerifiedVote
 	p.mu.Lock()
 	if p.epochForSlot != nil {
 		for slot, ps := range p.slots {
 			if p.epochForSlot(slot) != epoch {
 				continue
 			}
-			p.maybeFoldTriggersLocked(slot, ps)
-			emits = append(emits, p.maybeAssembleLocked(slot, ps)...)
+			verified = append(verified, p.maybeFoldTriggersLocked(slot, ps)...)
+			certs, newlyVerified := p.maybeAssembleLocked(slot, ps)
+			emits = append(emits, certs...)
+			verified = append(verified, newlyVerified...)
 		}
 	}
+	sink := p.verifiedVoteSink
 	p.mu.Unlock()
+	for _, vote := range verified {
+		if sink != nil {
+			sink(vote)
+		}
+	}
+	for _, cert := range emits {
+		p.emitCert(cert)
+	}
+}
+
+// FlushRewardVotes batch-verifies every pending plain skip/notarize vote for a
+// reward slot. Normal consensus verification stays lazy, but block production
+// calls this just before building the slot+8 footer so valid below-threshold
+// votes are not omitted from reward certificates.
+func (p *CertPool) FlushRewardVotes(slot uint64) {
+	var emits []Certificate
+	var verified []VerifiedVote
+	p.mu.Lock()
+	ps := p.slots[slot]
+	set := p.setForSlotLocked(slot)
+	if ps != nil && set != nil {
+		for key, tl := range ps.tallies {
+			if key.Type == VoteTypeSkip || key.Type == VoteTypeNotarize {
+				verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
+			}
+		}
+		var assembled []VerifiedVote
+		emits, assembled = p.maybeAssembleLocked(slot, ps)
+		verified = append(verified, assembled...)
+	}
+	sink := p.verifiedVoteSink
+	p.mu.Unlock()
+
+	for _, vote := range verified {
+		if sink != nil {
+			sink(vote)
+		}
+	}
 	for _, cert := range emits {
 		p.emitCert(cert)
 	}
@@ -455,10 +544,10 @@ func meets(f Fraction, stake, total uint64) bool {
 // implementation (Agave) would. This is the ONLY fold policy: one fork-choice
 // behavior for observer and voting nodes alike; sub-trigger tallies still
 // cost nothing.
-func (p *CertPool) maybeFoldTriggersLocked(slot uint64, ps *poolSlot) {
+func (p *CertPool) maybeFoldTriggersLocked(slot uint64, ps *poolSlot) []VerifiedVote {
 	set := p.setForSlotLocked(slot)
 	if set == nil {
-		return // votes stay buffered; retried on OnValidatorSetInstalled
+		return nil // votes stay buffered; retried on OnValidatorSetInstalled
 	}
 	total := set.TotalStake
 	v := buildTriggerViewLocked(ps, set)
@@ -493,20 +582,22 @@ func (p *CertPool) maybeFoldTriggersLocked(slot uint64, ps *poolSlot) {
 	}
 
 	if !foldSkip && !foldAllNotar && len(foldNotar) == 0 {
-		return
+		return nil
 	}
+	var verified []VerifiedVote
 	for tk, tl := range ps.tallies {
 		switch tk.Type {
 		case VoteTypeNotarize:
 			if foldAllNotar || foldNotar[tk.Hash] {
-				p.foldTallyLocked(slot, ps, tl, set)
+				verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
 			}
 		case VoteTypeSkip:
 			if foldSkip {
-				p.foldTallyLocked(slot, ps, tl, set)
+				verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
 			}
 		}
 	}
+	return verified
 }
 
 // VotorStakes is the verified-stake observation Votor's fallback-trigger
@@ -609,13 +700,14 @@ func targetsForSlot(ps *poolSlot) []certTarget {
 // maybeAssembleLocked checks every assemblable target for the slot: folds
 // pending votes (batch verification) once candidate stake crosses the
 // threshold, and returns any newly assembled certificates for emission.
-func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) []Certificate {
+func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) ([]Certificate, []VerifiedVote) {
 	set := p.setForSlotLocked(slot)
 	if set == nil {
-		return nil // validator set / epoch not resolvable yet; votes stay buffered
+		return nil, nil // validator set / epoch not resolvable yet; votes stay buffered
 	}
 
 	var emits []Certificate
+	var verified []VerifiedVote
 	for _, target := range targetsForSlot(ps) {
 		key := CertificateKey{Type: target.certType, Slot: slot}
 		if target.certType.HasBlock() {
@@ -650,8 +742,8 @@ func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) []Certificate 
 		}
 
 		// Candidate stake crossed: fold pending votes (one pairing per tally).
-		p.foldTallyLocked(slot, ps, base, set)
-		p.foldTallyLocked(slot, ps, fb, set)
+		verified = append(verified, p.foldTallyLocked(slot, ps, base, set)...)
+		verified = append(verified, p.foldTallyLocked(slot, ps, fb, set)...)
 
 		verifiedStake := uint64(0)
 		if base != nil {
@@ -673,7 +765,7 @@ func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) []Certificate 
 		p.snap.CertsEmitted++
 		emits = append(emits, cert)
 	}
-	return emits
+	return emits, verified
 }
 
 // foldTallyLocked batch-verifies a tally's pending votes: all sign the same
@@ -682,29 +774,37 @@ func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) []Certificate 
 // verifies does it update the durable per-slot state — the vote-budget /
 // equivocation ledger (verifiedHash) and base↔fallback disjointness — so raw
 // votes can never poison those.
-func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *ValidatorSet) {
+func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *ValidatorSet) []VerifiedVote {
 	if tl == nil || len(tl.pending) == 0 {
-		return
+		return nil
 	}
-	batch := make([]VoteMessage, 0, len(tl.pending))
-	for rank, msg := range tl.pending {
-		if int(rank) >= len(set.Validators) {
-			delete(tl.pending, rank)
-			ps.pendingCount--
-			p.totalPending--
-			p.snap.VotesRejected++
-			continue
+	batch := make([]VoteMessage, 0, pendingCandidateCount(tl))
+	for rank, candidates := range tl.pending {
+		count := len(candidates)
+		if int(rank) < len(set.Validators) {
+			for _, msg := range candidates {
+				batch = append(batch, msg)
+			}
+		} else {
+			p.snap.VotesRejected += uint64(count)
 		}
-		batch = append(batch, msg)
+		delete(tl.pending, rank)
+		ps.pendingCount -= count
+		p.totalPending -= count
 	}
 	good := p.verifyBatch(batch, set)
-	for _, msg := range batch {
-		delete(tl.pending, msg.Rank)
-		ps.pendingCount--
-		p.totalPending--
-	}
 
+	verified := make([]VerifiedVote, 0, len(good))
 	for _, msg := range good {
+		verified = append(verified, VerifiedVote{
+			Message: msg,
+			Result: VoteVerifyResult{
+				Epoch:      set.Epoch,
+				Rank:       msg.Rank,
+				Stake:      set.Validators[msg.Rank].Stake,
+				TotalStake: set.TotalStake,
+			},
+		})
 		// Vote budget + equivocation, on VERIFIED votes only. A rank may cast a
 		// notarize-fallback for up to 3 distinct hashes; every other type is
 		// single-shot. A conflicting VERIFIED vote beyond budget is cryptographic
@@ -758,6 +858,15 @@ func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *Va
 		ps.verifiedHash[dk] = append(seen, msg.Vote.BlockHash)
 	}
 	p.snap.BadSignatures += uint64(len(batch) - len(good))
+	return verified
+}
+
+func pendingCandidateCount(tl *tally) int {
+	count := 0
+	for _, candidates := range tl.pending {
+		count += len(candidates)
+	}
+	return count
 }
 
 // verifyBatch verifies same-payload votes with one aggregate pairing check,
