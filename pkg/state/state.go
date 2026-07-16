@@ -16,7 +16,9 @@ const HistoryFileName = "mithril_state.history.jsonl"
 
 // CurrentStateSchemaVersion is the current version of the state file format.
 // Increment this when making breaking changes to the state file structure.
-const CurrentStateSchemaVersion uint32 = 2
+// Version 3 requires computed epoch-stake metadata to retain vote-account
+// balances; older checkpoints cannot prove SIMD-0357 VAT admission on resume.
+const CurrentStateSchemaVersion uint32 = 3
 
 // MithrilState tracks the current state of the mithril node.
 // The state file serves as an atomic marker of validity - AccountsDB is valid

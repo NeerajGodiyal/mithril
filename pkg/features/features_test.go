@@ -61,6 +61,18 @@ func TestAlpenglowFeatureGate(t *testing.T) {
 	assert.Contains(t, AllFeatureGates, Alpenglow)
 }
 
+func TestAlpenglowVATAndSlotTimeFeatureGates(t *testing.T) {
+	for _, gate := range []FeatureGate{
+		ValidatorAdmissionTicket,
+		ReduceSlotTimeTo350ms,
+		ReduceSlotTimeTo300ms,
+		ReduceSlotTimeTo250ms,
+		ReduceSlotTimeTo200ms,
+	} {
+		assert.Contains(t, AllFeatureGates, gate)
+	}
+}
+
 func TestVoteAccountInitializeV2FeatureGates(t *testing.T) {
 	for _, gate := range []FeatureGate{
 		BlsPubkeyManagementInVoteAccount,

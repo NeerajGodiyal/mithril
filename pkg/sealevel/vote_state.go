@@ -26,6 +26,8 @@ const (
 const (
 	VoteStateV2Size = 3731
 	VoteStateV3Size = 3762
+	// VoteStateV4 keeps the same serialized account allocation as V3.
+	VoteStateV4Size = VoteStateV3Size
 )
 
 func sizeOfVersionedVoteState(f features.Features) uint64 {

@@ -64,6 +64,11 @@ var ReenableSbpfV0Execution = FeatureGate{Name: "ReenableSbpfV0Execution", Addre
 var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTransactionDataSize", Address: base58.MustDecodeFromString("DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8")}
 var Alpenglow = FeatureGate{Name: "Alpenglow", Address: base58.MustDecodeFromString("a1penGLz8Vm2QHYB3JPefBiU4BY3Z6JkW2k3Scw5GWP")}
 var AlpenglowDevContext = FeatureGate{Name: "AlpenglowDevContext", Address: base58.MustDecodeFromString("8KpruRFrT59jQ9NfFX9DU6j8a1hW7y6xchvZNQ5rxD4P")}
+var ValidatorAdmissionTicket = FeatureGate{Name: "ValidatorAdmissionTicket", Address: base58.MustDecodeFromString("VAT9huvhPjRN9cyrPytq9rwvEJ3J4ADtjdncgZRyANJ")}
+var ReduceSlotTimeTo350ms = FeatureGate{Name: "ReduceSlotTimeTo350ms", Address: base58.MustDecodeFromString("iBRL5RuWhw4yqaAZu96RUULHckHTZAoe2b77qaV38JZ")}
+var ReduceSlotTimeTo300ms = FeatureGate{Name: "ReduceSlotTimeTo300ms", Address: base58.MustDecodeFromString("iBRLL3k18HST852F1Mf3Lv83waTNQmmqvKDxvYGwQFL")}
+var ReduceSlotTimeTo250ms = FeatureGate{Name: "ReduceSlotTimeTo250ms", Address: base58.MustDecodeFromString("iBRLMc81UjRa8fn8A6eE8bJTnRbgQoPTynM51akENCV")}
+var ReduceSlotTimeTo200ms = FeatureGate{Name: "ReduceSlotTimeTo200ms", Address: base58.MustDecodeFromString("iBRLjhJnkmDZgNoZRDMW11d8ZV7HvsL3vAyRjZB5npW")}
 var IncreaseCpiAccountInfoLimit = FeatureGate{Name: "IncreaseCpiAccountInfoLimit", Address: base58.MustDecodeFromString("H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5")}
 var StaticInstructionLimit = FeatureGate{Name: "StaticInstructionLimit", Address: base58.MustDecodeFromString("64ixypL1HPu8WtJhNSMb9mSgfFaJvsANuRkTbHyuLfnx")}
 var PoseidonEnforcePadding = FeatureGate{Name: "PoseidonEnforcePadding", Address: base58.MustDecodeFromString("poUdAqRXXsNmfqAZ6UqpjbeYgwBygbfQLEvWSqVhSnb")}
@@ -106,7 +111,8 @@ var AllFeatureGates = []FeatureGate{StopTruncatingStringsInSyscalls, EnableParti
 	FullInflationVote, FullInflationEnable, FullInflationDevnetAndTestnet, PicoInflation, DisableAccountLoaderSpecialCase, EnableGetEpochStakeSyscall,
 	ReserveMinimalCUsForBuiltinInstructions, RelaxIntraBatchAccountLocks, MaskOutRentEpochInVmSerialization, RemoveAccountsExecutableFlagChecks,
 	AccountsLtHash, RemoveAccountsDeltaHash, EnableLoaderV4, EnableSbpfV1DeploymentAndExecution, EnableSbpfV2DeploymentAndExecution,
-	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, Alpenglow, AlpenglowDevContext, IncreaseCpiAccountInfoLimit,
+	EnableSbpfV3DeploymentAndExecution, DisableSbpfV0Execution, ReenableSbpfV0Execution, FormalizeLoadedTransactionDataSize, Alpenglow, AlpenglowDevContext,
+	ValidatorAdmissionTicket, ReduceSlotTimeTo350ms, ReduceSlotTimeTo300ms, ReduceSlotTimeTo250ms, ReduceSlotTimeTo200ms, IncreaseCpiAccountInfoLimit,
 	StaticInstructionLimit, PoseidonEnforcePadding, FixAltBn128PairingLengthCheck, DeprecateRentExemptionThreshold,
 	ProvideInstructionDataOffsetInVmR2, SyscallParameterAddressRestrictions, VirtualAddressSpaceAdjustments, AccountDataDirectMapping,
 	VoteStateV4, BlsPubkeyManagementInVoteAccount, CommissionRateInBasisPoints, CustomCommissionCollector, BlockRevenueSharing, VoteAccountInitializeV2,

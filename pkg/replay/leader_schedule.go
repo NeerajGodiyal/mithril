@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
@@ -153,6 +154,44 @@ func RebuildVoteCacheFromAccountsDB(
 	voteAcctStakes map[solana.PublicKey]uint64,
 	maxConcurrency int,
 ) error {
+	return rebuildVoteCacheFromAccountsDB(acctsDb, slot, voteAcctStakes, maxConcurrency, nil)
+}
+
+type rebuiltVoteAccountMeta struct {
+	Lamports   uint64
+	Owner      solana.PublicKey
+	Executable bool
+	RentEpoch  uint64
+}
+
+func rebuildVoteCacheFromAccountsDBWithMetadata(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	maxConcurrency int,
+) (map[solana.PublicKey]rebuiltVoteAccountMeta, error) {
+	metadata := make(map[solana.PublicKey]rebuiltVoteAccountMeta, len(voteAcctStakes))
+	var metadataMu sync.Mutex
+	err := rebuildVoteCacheFromAccountsDB(acctsDb, slot, voteAcctStakes, maxConcurrency, func(pk solana.PublicKey, acct *accounts.Account) {
+		metadataMu.Lock()
+		metadata[pk] = rebuiltVoteAccountMeta{
+			Lamports:   acct.Lamports,
+			Owner:      solana.PublicKey(acct.Owner),
+			Executable: acct.Executable,
+			RentEpoch:  acct.RentEpoch,
+		}
+		metadataMu.Unlock()
+	})
+	return metadata, err
+}
+
+func rebuildVoteCacheFromAccountsDB(
+	acctsDb *accountsdb.AccountsDb,
+	slot uint64,
+	voteAcctStakes map[solana.PublicKey]uint64,
+	maxConcurrency int,
+	onLoaded func(solana.PublicKey, *accounts.Account),
+) error {
 	if maxConcurrency <= 0 {
 		maxConcurrency = DefaultVoteCacheRebuildConcurrency
 	}
@@ -268,6 +307,9 @@ func RebuildVoteCacheFromAccountsDB(
 
 		// Update VoteCache
 		global.PutVoteCacheItem(item.pk, versionedVoteState)
+		if onLoaded != nil {
+			onLoaded(item.pk, voteAcct)
+		}
 		successCount.Add(1)
 	})
 	if err != nil {

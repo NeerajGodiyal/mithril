@@ -213,7 +213,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	scanResult := scanStakesForEpochBoundary(acctsDb, prevSlotCtx.Slot, epoch, leaderScheduleEpoch, &stakeHistory, epochSchedule, f)
 	t1 := time.Now()
 
-	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult)
+	updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch, block, acctsDb, prevSlotCtx.Slot, scanResult, f, epochSchedule)
 	global.PutEpochVoteStateSnapshot(newEpoch, global.VoteCacheSnapshot())
 	t2 := time.Now()
 
@@ -263,14 +263,15 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 
 // updateEpochStakesAndRefreshVoteCache applies pre-computed vote/effective stake data
 // from the boundary scan to refresh the vote cache and store epoch stakes.
-func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult) {
+func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.Block, acctsDb *accountsdb.AccountsDb, slot uint64, scanResult *BoundaryStakeScanResult, f *features.Features, epochSchedule *sealevel.SysvarEpochSchedule) {
 	// Check if we need to compute epoch stakes (skip on resume)
 	hasEpochStakes := global.HasEpochStakes(leaderScheduleEpoch)
 
 	// ALWAYS refresh vote cache from AccountsDB, even if HasEpochStakes is true
 	// This ensures the vote cache has fresh NodePubkey for leader schedule
-	if err := RebuildVoteCacheFromAccountsDB(acctsDb, slot, scanResult.VoteAcctStakes, 0); err != nil {
-		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", err)
+	voteMetadata, rebuildErr := rebuildVoteCacheFromAccountsDBWithMetadata(acctsDb, slot, scanResult.VoteAcctStakes, 0)
+	if rebuildErr != nil {
+		mlog.Log.Errorf("failed to rebuild vote cache at epoch boundary: %v", rebuildErr)
 	}
 
 	// Skip epoch stakes storage if already cached (resume)
@@ -279,19 +280,49 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 		return
 	}
 
-	// Store epoch stakes computed during scanning
+	// Store epoch stakes computed during scanning. VAT admission changes both the
+	// leader schedule and the Alpenglow BLS rank map, so filter once at the shared
+	// epoch-stakes boundary rather than only in certificate verification.
 	voteCache := global.VoteCache()
-	for votePk, stake := range scanResult.EffectiveStakes {
+	effectiveStakes := scanResult.EffectiveStakes
+	totalEffectiveStake := scanResult.TotalEffectiveStake
+	if f != nil && f.IsActive(features.ValidatorAdmissionTicket) {
+		minimumBalance, err := minimumVoteAccountBalanceForVAT(f, epochSchedule, slot)
+		if err != nil {
+			panic(err)
+		}
+		effectiveStakes, totalEffectiveStake = filterEpochStakesForVAT(effectiveStakes, voteCache, voteMetadata, minimumBalance)
+		mlog.Log.FileOnlyf("VAT epoch stakes: admitted=%d/%d minimum_vote_balance=%d", len(effectiveStakes), len(scanResult.EffectiveStakes), minimumBalance)
+	}
+	for votePk, stake := range effectiveStakes {
 		voteAcct, exists := voteCache[votePk]
-		if exists {
+		meta, hasMeta := voteMetadata[votePk]
+		if exists && hasMeta {
+			lastTimestamp := voteAcct.LastTimestamp()
+			var lastTimestampTs int64
+			var lastTimestampSlot uint64
+			if lastTimestamp != nil {
+				lastTimestampTs = lastTimestamp.Timestamp
+				lastTimestampSlot = lastTimestamp.Slot
+			}
+			var executable byte
+			if meta.Executable {
+				executable = 1
+			}
 			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{
+				Lamports:            meta.Lamports,
 				NodePubkey:          voteAcct.NodePubkey(),
 				BlsPubkeyCompressed: voteAcct.BlsPubkeyCompressed(),
+				LastTimestampTs:     lastTimestampTs,
+				LastTimestampSlot:   lastTimestampSlot,
+				Owner:               meta.Owner,
+				Executable:          executable,
+				RentEpoch:           meta.RentEpoch,
 			})
 		}
 	}
-	global.PutEpochTotalStake(leaderScheduleEpoch, scanResult.TotalEffectiveStake)
+	global.PutEpochTotalStake(leaderScheduleEpoch, totalEffectiveStake)
 
 	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
-	b.TotalEpochStake = scanResult.TotalEffectiveStake
+	b.TotalEpochStake = totalEffectiveStake
 }
