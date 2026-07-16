@@ -88,8 +88,11 @@ type ChainCertificateUpdate struct {
 }
 
 type ChainReplayBlockUpdate struct {
-	New      bool          `json:"new"`
-	Snapshot ChainSnapshot `json:"snapshot"`
+	New            bool          `json:"new"`
+	Conflict       bool          `json:"conflict,omitempty"`
+	ConflictSlot   uint64        `json:"conflict_slot,omitempty"`
+	ConflictReason string        `json:"conflict_reason,omitempty"`
+	Snapshot       ChainSnapshot `json:"snapshot"`
 }
 
 type ChainTracker struct {
@@ -115,6 +118,9 @@ type ChainTracker struct {
 	finalizedBySlot map[uint64]BlockID
 	indirectSkips   map[uint64]chainIndirectSkip
 	conflicts       map[uint64]chainConflict
+	// prunedBeforeSlot is the durable AccountsDB boundary. Consensus input
+	// below it is historical and must not regrow decision state after pruning.
+	prunedBeforeSlot uint64
 
 	certificatesObserved         uint64
 	certificatesAccepted         uint64
@@ -190,6 +196,9 @@ func (t *ChainTracker) ObserveCertificate(cert Certificate) (ChainCertificateUpd
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if cert.Slot < t.prunedBeforeSlot {
+		return ChainCertificateUpdate{Snapshot: t.snapshotLocked()}, nil
+	}
 
 	key := cert.Key()
 	if _, exists := t.certificates[key]; exists {
@@ -225,9 +234,60 @@ func (t *ChainTracker) ObserveCertificate(cert Certificate) (ChainCertificateUpd
 	return ChainCertificateUpdate{New: true, Trusted: true, Snapshot: t.snapshotLocked()}, nil
 }
 
+// ObserveFinalized applies the sole finalization decision emitted by
+// ConsensusPool. Certificates populate the chain graph, but ChainTracker does
+// not independently pair them into a second finality authority.
+func (t *ChainTracker) ObserveFinalized(block BlockID, certType CertificateType) error {
+	if block.IsZero() || !block.HasHash() {
+		return fmt.Errorf("finalization decision has no block identity")
+	}
+	if certType != CertificateFinalize && certType != CertificateFinalizeFast && certType != CertificateGenesis {
+		return fmt.Errorf("certificate %s cannot finalize block %s", certType, block)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if block.Slot < t.prunedBeforeSlot {
+		return nil
+	}
+	state := t.blocks[block]
+	switch certType {
+	case CertificateFinalize:
+		if _, ok := t.finalizeCerts[block.Slot]; !ok {
+			return fmt.Errorf("slow finalization for block %s has no accepted finalize certificate", block)
+		}
+		if state == nil {
+			return fmt.Errorf("slow finalization for block %s has no accepted notarize certificate", block)
+		}
+		if _, ok := state.certificates[CertificateNotarize]; !ok {
+			return fmt.Errorf("slow finalization for block %s has no accepted notarize certificate", block)
+		}
+	case CertificateFinalizeFast, CertificateGenesis:
+		if state == nil {
+			return fmt.Errorf("finalization for block %s has no accepted %s certificate", block, certType)
+		}
+		if _, ok := state.certificates[certType]; !ok {
+			return fmt.Errorf("finalization for block %s has no accepted %s certificate", block, certType)
+		}
+	}
+
+	conflictsBefore := len(t.conflicts)
+	t.markDirectFinalizedLocked(block, certType)
+	if conflict, ok := t.conflicts[block.Slot]; ok {
+		return fmt.Errorf("finalization conflict at slot %d: %s", block.Slot, conflict.reason)
+	}
+	if len(t.conflicts) > conflictsBefore {
+		return fmt.Errorf("finalization of block %s exposed conflicting finalized ancestry", block)
+	}
+	return nil
+}
+
 func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainReplayBlockUpdate {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if obs.Block.Slot < t.prunedBeforeSlot {
+		return ChainReplayBlockUpdate{Snapshot: t.snapshotLocked()}
+	}
 
 	if obs.At.IsZero() {
 		obs.At = time.Now()
@@ -242,16 +302,20 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 
 	state := t.ensureBlockStateLocked(obs.Block)
 	wasObserved := state.observed
+	conflictsBefore := len(t.conflicts)
 	state.observed = true
 	prevParentSlot, prevParentHash := state.parentSlot, state.parentHash
-	// Parent slot 0 means unknown — never clobber a known parent link with it, and
-	// never replace a known parent hash with zero (indirect-skip and ancestry
-	// derivation depend on the link surviving).
 	if obs.ParentSlot != 0 {
-		if obs.ParentSlot != state.parentSlot && obs.ParentHash.IsZero() {
-			// New parent slot without a hash: drop the stale hash rather than pair
-			// it with the wrong slot.
-			state.parentHash = solana.Hash{}
+		switch {
+		case obs.ParentSlot >= obs.Block.Slot:
+			t.recordConflictLocked(obs.Block.Slot, "replayed block has a non-ancestor parent slot")
+			return t.replayBlockUpdateLocked(wasObserved, conflictsBefore, obs.Block.Slot)
+		case state.parentSlot != 0 && state.parentSlot != obs.ParentSlot:
+			t.recordConflictLocked(obs.Block.Slot, "replayed block identity has conflicting parent slots")
+			return t.replayBlockUpdateLocked(wasObserved, conflictsBefore, obs.Block.Slot)
+		case !state.parentHash.IsZero() && !obs.ParentHash.IsZero() && state.parentHash != obs.ParentHash:
+			t.recordConflictLocked(obs.Block.Slot, "replayed block identity has conflicting parent block IDs")
+			return t.replayBlockUpdateLocked(wasObserved, conflictsBefore, obs.Block.Slot)
 		}
 		state.parentSlot = obs.ParentSlot
 		if !obs.ParentHash.IsZero() {
@@ -281,7 +345,28 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 		t.bumpDecisionLocked()
 	}
 
-	return ChainReplayBlockUpdate{New: !wasObserved, Snapshot: t.snapshotLocked()}
+	return t.replayBlockUpdateLocked(wasObserved, conflictsBefore, obs.Block.Slot)
+}
+
+func (t *ChainTracker) replayBlockUpdateLocked(wasObserved bool, conflictsBefore int, preferredSlot uint64) ChainReplayBlockUpdate {
+	update := ChainReplayBlockUpdate{New: !wasObserved, Snapshot: t.snapshotLocked()}
+	if conflict, ok := t.conflicts[preferredSlot]; ok {
+		update.Conflict = true
+		update.ConflictSlot = preferredSlot
+		update.ConflictReason = conflict.reason
+		return update
+	}
+	if len(t.conflicts) <= conflictsBefore {
+		return update
+	}
+	for slot, conflict := range t.conflicts {
+		if !update.Conflict || slot < update.ConflictSlot {
+			update.Conflict = true
+			update.ConflictSlot = slot
+			update.ConflictReason = conflict.reason
+		}
+	}
+	return update
 }
 
 func (t *ChainTracker) NextDecision(anchorSlot uint64) (ChainDecision, bool) {
@@ -347,8 +432,6 @@ func (t *ChainTracker) applyTrustedCertificateLocked(cert Certificate) {
 		t.applyTrustedBlockCertificateLocked(cert)
 	case CertificateFinalize:
 		t.finalizeCerts[cert.Slot] = cert
-		t.tryMarkSlowFinalizedLocked(cert.Slot)
-		t.refreshConflictLocked(cert.Slot) // finalization creates exclusivity (Lemma 26)
 	case CertificateSkip:
 		t.skipCerts[cert.Slot] = cert
 		t.refreshConflictLocked(cert.Slot)
@@ -371,12 +454,6 @@ func (t *ChainTracker) applyTrustedBlockCertificateLocked(cert Certificate) {
 	}
 	t.blockSlots[block.Slot][block.Hash] = block
 
-	switch cert.Type {
-	case CertificateFinalizeFast, CertificateGenesis:
-		t.markDirectFinalizedLocked(block, cert.Type)
-	case CertificateNotarize:
-		t.tryMarkSlowFinalizedLocked(block.Slot)
-	}
 	t.refreshConflictLocked(block.Slot)
 }
 
@@ -392,21 +469,6 @@ func (t *ChainTracker) ensureBlockStateLocked(block BlockID) *chainBlockState {
 	return state
 }
 
-func (t *ChainTracker) tryMarkSlowFinalizedLocked(slot uint64) {
-	if _, ok := t.finalizeCerts[slot]; !ok {
-		return
-	}
-	for _, block := range t.blockSlots[slot] {
-		state := t.blocks[block]
-		if state == nil {
-			continue
-		}
-		if _, notarized := state.certificates[CertificateNotarize]; notarized {
-			t.markDirectFinalizedLocked(block, CertificateFinalize)
-		}
-	}
-}
-
 func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType CertificateType) {
 	if block.IsZero() || !block.HasHash() {
 		return
@@ -414,17 +476,24 @@ func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType Certifi
 	if existing, ok := t.directFinalized[block]; ok && existing == certType {
 		return
 	}
+	if existing, ok := t.finalizedBySlot[block.Slot]; ok && existing != block {
+		t.recordConflictLocked(block.Slot, "multiple finalized block IDs for slot")
+		return
+	}
+	for existing := range t.directFinalized {
+		if existing.Slot == block.Slot && existing != block {
+			t.recordConflictLocked(block.Slot, "multiple finalized block IDs for slot")
+			return
+		}
+	}
 	t.directFinalized[block] = certType
-	if _, taken := t.finalizedBySlot[block.Slot]; !taken {
-		t.finalizedBySlot[block.Slot] = block
+	t.finalizedBySlot[block.Slot] = block
+	t.refreshConflictLocked(block.Slot)
+	if _, conflicted := t.conflicts[block.Slot]; conflicted {
+		return
 	}
 	if block.Slot >= t.latestDirectFinalizedBlock.Slot {
 		t.latestDirectFinalizedBlock = block
-		// Bound memory on long runs: finalized slots well behind the watermark are
-		// settled and no longer needed for decisions or indirect-skip derivation.
-		if block.Slot > chainTrackerRetentionSlots {
-			t.pruneBeforeSlotLocked(block.Slot - chainTrackerRetentionSlots)
-		}
 	}
 	t.deriveIndirectSkipsLocked(block, certType)
 	t.markChainFinalizedAncestorsLocked(block)
@@ -436,8 +505,15 @@ func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType Certifi
 // ambiguity (several certified blocks at the parent slot with no exact match).
 func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 	for {
+		if t.prunedBeforeSlot != 0 && block.Slot <= t.prunedBeforeSlot {
+			return
+		}
 		state := t.blocks[block]
 		if state == nil || !state.observed || state.parentSlot == 0 || state.parentSlot >= block.Slot {
+			return
+		}
+		if t.prunedBeforeSlot != 0 && state.parentSlot < t.prunedBeforeSlot {
+			t.recordConflictLocked(t.prunedBeforeSlot, "finalized ancestry crosses the durable root")
 			return
 		}
 		parent := BlockID{Slot: state.parentSlot, Hash: state.parentHash}
@@ -475,10 +551,12 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 		if _, done := t.chainFinalized[parent]; done {
 			return
 		}
-		t.chainFinalized[parent] = struct{}{}
-		if _, taken := t.finalizedBySlot[parent.Slot]; !taken {
-			t.finalizedBySlot[parent.Slot] = parent
+		if existing, ok := t.finalizedBySlot[parent.Slot]; ok && existing != parent {
+			t.recordConflictLocked(parent.Slot, "multiple finalized block IDs for slot")
+			return
 		}
+		t.chainFinalized[parent] = struct{}{}
+		t.finalizedBySlot[parent.Slot] = parent
 		// Ancestry finalization creates the same exclusivity as direct finalization.
 		t.refreshConflictLocked(parent.Slot)
 		block = parent
@@ -491,12 +569,6 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 // with 60% required per cert, at most 4/0.6 ≈ 6.7 → 7 distinct blocks can ever be
 // certified). More is protocol-impossible — cryptographic evidence of an attack.
 const maxCertifiedBlocksPerSlot = 7
-
-// chainTrackerRetentionSlots is how many slots of state the tracker keeps behind the
-// finalized watermark. Live decisions are only made near the tip (the block source
-// gates on isNearTip, ~32-64 slots), so a window this far behind finality can never
-// remove state a live decision or indirect-skip derivation still needs.
-const chainTrackerRetentionSlots = 512
 
 // FinalizedBlockAt returns the finalized block for slot when it is unambiguous.
 // ok is false when nothing finalized is known (including pruned history), the slot
@@ -540,9 +612,13 @@ func (t *ChainTracker) FinalityConflictAt(slot uint64) bool {
 	return ok
 }
 
-// PruneBeforeSlot drops all tracker state for slots strictly below slot, bounding
-// memory on a long-running node. Pruning runs automatically behind finality; this
-// exported form lets a caller prune explicitly (e.g. behind the rooted watermark).
+func (t *ChainTracker) FinalityConflictReasonAt(slot uint64) (string, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	conflict, ok := t.conflicts[slot]
+	return conflict.reason, ok
+}
+
 // CertifiedBlockAt returns the slot's DECISIVELY certified block: one backed
 // by a unique-strength certificate (notarize / finalize-fast / genesis — at
 // most one per slot by protocol, Lemma 21(i)/24) or finalized directly or by
@@ -552,6 +628,9 @@ func (t *ChainTracker) FinalityConflictAt(slot uint64) bool {
 func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	if _, conflicted := t.conflicts[slot]; conflicted {
+		return BlockID{}, "", false
+	}
 	var winner BlockID
 	var winnerType CertificateType
 	found := false
@@ -604,6 +683,9 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 func (t *ChainTracker) SkipCertifiedAt(slot uint64) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	if _, conflicted := t.conflicts[slot]; conflicted {
+		return false
+	}
 	if _, ok := t.skipCerts[slot]; ok {
 		return true
 	}
@@ -678,6 +760,9 @@ func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 		if len(out) >= max {
 			break
 		}
+		if _, conflicted := t.conflicts[slot]; conflicted {
+			continue
+		}
 		_, skipped := t.skipCerts[slot]
 		if !skipped {
 			_, skipped = t.indirectSkips[slot]
@@ -718,9 +803,17 @@ func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 	return out
 }
 
+// PruneBeforeSlot drops tracker state strictly below slot. The durable
+// AccountsDB promotion path is the normal caller: consensus finality alone must
+// not discard speculative ancestry that has not actually been folded. Startup
+// also uses it to restore the already-durable lower bound.
 func (t *ChainTracker) PruneBeforeSlot(slot uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if slot <= t.prunedBeforeSlot {
+		return
+	}
+	t.prunedBeforeSlot = slot
 	t.pruneBeforeSlotLocked(slot)
 }
 
@@ -790,6 +883,9 @@ func (t *ChainTracker) deriveIndirectSkipsLocked(block BlockID, certType Certifi
 		return
 	}
 	for slot := state.parentSlot + 1; slot < block.Slot; slot++ {
+		if slot < t.prunedBeforeSlot {
+			continue
+		}
 		t.indirectSkips[slot] = chainIndirectSkip{
 			slot:            slot,
 			viaFinalized:    block,
@@ -958,42 +1054,34 @@ func (t *ChainTracker) refreshConflictLocked(slot uint64) {
 	case len(candidates) > maxCertifiedBlocksPerSlot:
 		// See maxCertifiedBlocksPerSlot: beyond the vote-budget bound is
 		// protocol-impossible — cryptographic evidence of an attack.
-		t.conflicts[slot] = chainConflict{
-			slot:       slot,
-			reason:     "certified blocks exceed the per-slot protocol bound",
-			candidates: candidates,
-		}
+		t.recordConflictLocked(slot, "certified blocks exceed the per-slot protocol bound")
 	case unique > 1: // two notarized (or fast-finalized) blocks in one slot
-		t.conflicts[slot] = chainConflict{
-			slot:       slot,
-			reason:     "multiple notarized blocks for slot",
-			candidates: candidates,
-		}
+		t.recordConflictLocked(slot, "multiple notarized blocks for slot")
 	case finalized > 0 && hasSkip: // finalized block contradicted by a skip (Lemmas 21(iii)/26(iii))
-		t.conflicts[slot] = chainConflict{
-			slot:       slot,
-			reason:     "finalized block contradicted by skip",
-			candidates: candidates,
-		}
+		t.recordConflictLocked(slot, "finalized block contradicted by skip")
 	case finalized > 0 && len(candidates) > 1: // finalized block plus another certified block (Lemmas 21(i,ii)/26(i,ii))
-		t.conflicts[slot] = chainConflict{
-			slot:       slot,
-			reason:     "finalized block plus competing certified block",
-			candidates: candidates,
-		}
+		t.recordConflictLocked(slot, "finalized block plus competing certified block")
 	case certlessFinalized && (hasSkip || len(candidates) > 0):
 		// Same violations as above with the finalized block invisible to the
 		// candidate scan (cert-less, ancestry-finalized).
-		t.conflicts[slot] = chainConflict{
-			slot:       slot,
-			reason:     "cert-less finalized block contradicted by certificate or skip",
-			candidates: candidates,
-		}
+		t.recordConflictLocked(slot, "cert-less finalized block contradicted by certificate or skip")
 	}
 	// No delete arm: recorded violations are write-once Byzantine evidence. The
 	// conditions are monotone while a slot's state is retained, and after pruning a
 	// single re-observed cert would otherwise rebuild the slot as conflict-free and
 	// erase the flag right before the promotion gate consults it.
+}
+
+func (t *ChainTracker) recordConflictLocked(slot uint64, reason string) {
+	if _, exists := t.conflicts[slot]; exists {
+		return
+	}
+	t.conflicts[slot] = chainConflict{
+		slot:       slot,
+		reason:     reason,
+		candidates: t.blockCandidatesLocked(slot),
+	}
+	t.bumpDecisionLocked()
 }
 
 func (t *ChainTracker) snapshotLocked() ChainSnapshot {

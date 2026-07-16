@@ -129,6 +129,15 @@ func TestFooterFinalizeFastReachesFinality(t *testing.T) {
 		if _, err := tracker.ObserveCertificate(verified); err != nil {
 			t.Fatalf("observe %s: %v", c.Type, err)
 		}
+		if verified.Type == CertificateFinalizeFast {
+			block, ok := verified.Block()
+			if !ok {
+				t.Fatal("verified finalize-fast certificate has no block")
+			}
+			if err := tracker.ObserveFinalized(block, verified.Type); err != nil {
+				t.Fatalf("apply pool finalization: %v", err)
+			}
+		}
 	}
 
 	snap := tracker.Snapshot()

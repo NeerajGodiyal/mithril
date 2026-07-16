@@ -16,10 +16,19 @@ func specObserve(t *testing.T, tracker *ChainTracker, cert Certificate) {
 	}
 }
 
+func specFinalize(t *testing.T, tracker *ChainTracker, block BlockID, certType CertificateType) {
+	t.Helper()
+	if err := tracker.ObserveFinalized(block, certType); err != nil {
+		t.Fatalf("finalize %s with %s: %v", block, certType, err)
+	}
+}
+
 // Lemma 21(iii): a fast-finalized block plus a skip cert is a safety violation.
 func TestSpecFastFinalizedPlusSkipConflicts(t *testing.T) {
 	tracker := NewChainTracker()
-	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 21, BlockHash: chainTestHash(1)})
+	block := BlockID{Slot: 21, Hash: chainTestHash(1)}
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: block.Slot, BlockHash: block.Hash})
+	specFinalize(t, tracker, block, CertificateFinalizeFast)
 	specObserve(t, tracker, Certificate{Type: CertificateSkip, Slot: 21})
 
 	decision, ok := tracker.NextDecision(20)
@@ -33,6 +42,7 @@ func TestSpecSlowFinalizedPlusSkipConflicts(t *testing.T) {
 	tracker := NewChainTracker()
 	specObserve(t, tracker, Certificate{Type: CertificateNotarize, Slot: 31, BlockHash: chainTestHash(1)})
 	specObserve(t, tracker, Certificate{Type: CertificateFinalize, Slot: 31})
+	specFinalize(t, tracker, BlockID{Slot: 31, Hash: chainTestHash(1)}, CertificateFinalize)
 	specObserve(t, tracker, Certificate{Type: CertificateSkip, Slot: 31})
 
 	decision, ok := tracker.NextDecision(30)
@@ -45,7 +55,9 @@ func TestSpecSlowFinalizedPlusSkipConflicts(t *testing.T) {
 // block conflicts.
 func TestSpecFinalizedPlusCompetingFallbackConflicts(t *testing.T) {
 	tracker := NewChainTracker()
-	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 41, BlockHash: chainTestHash(1)})
+	block := BlockID{Slot: 41, Hash: chainTestHash(1)}
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: block.Slot, BlockHash: block.Hash})
+	specFinalize(t, tracker, block, CertificateFinalizeFast)
 	specObserve(t, tracker, Certificate{Type: CertificateNotarizeFallback, Slot: 41, BlockHash: chainTestHash(2)})
 
 	decision, ok := tracker.NextDecision(40)
@@ -122,6 +134,7 @@ func TestSpecFinalizedAncestryMakesFallbackDecisive(t *testing.T) {
 		ParentHash: parent.Hash,
 	})
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: child.Slot, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
 
 	decision, ok := tracker.NextDecision(parent.Slot - 1)
 	if !ok || decision.Kind != ChainDecisionKindBlock || decision.Block != parent {

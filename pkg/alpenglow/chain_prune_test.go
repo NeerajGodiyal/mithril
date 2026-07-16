@@ -6,23 +6,33 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// A long run must not grow the tracker's maps without bound: finalizing a high slot
-// prunes settled state well behind the watermark, while recent state is retained.
-func TestChainTrackerPrunesBehindFinality(t *testing.T) {
+// A long run must not grow the tracker's maps without bound. Pruning follows the
+// durable AccountsDB watermark, not consensus finality, so speculative/replay
+// state remains available until it has actually been promoted.
+func TestChainTrackerPrunesBehindDurableRoot(t *testing.T) {
 	tracker := NewChainTracker()
 
-	// Finalize an old slot, then finalize a slot far ahead — the old one is settled
-	// and should be pruned (> chainTrackerRetentionSlots behind).
+	// Finalize an old slot, then finalize a slot far ahead. Nothing prunes until
+	// the durable store explicitly advances its root.
 	oldSlot := uint64(10)
-	newSlot := uint64(oldSlot + chainTrackerRetentionSlots + 100)
+	newSlot := uint64(622)
 	feed := func(c Certificate) {
 		c.SignatureVerified, c.StakeVerified = true, true
 		if _, err := tracker.ObserveCertificate(c); err != nil {
 			t.Fatalf("observe %s slot %d: %v", c.Type, c.Slot, err)
 		}
 	}
-	feed(Certificate{Type: CertificateFinalizeFast, Slot: oldSlot, BlockHash: solana.Hash{0xA}})
-	feed(Certificate{Type: CertificateFinalizeFast, Slot: newSlot, BlockHash: solana.Hash{0xB}})
+	oldBlock := BlockID{Slot: oldSlot, Hash: solana.Hash{0xA}}
+	newBlock := BlockID{Slot: newSlot, Hash: solana.Hash{0xB}}
+	feed(Certificate{Type: CertificateFinalizeFast, Slot: oldSlot, BlockHash: oldBlock.Hash})
+	feed(Certificate{Type: CertificateFinalizeFast, Slot: newSlot, BlockHash: newBlock.Hash})
+	if err := tracker.ObserveFinalized(oldBlock, CertificateFinalizeFast); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.ObserveFinalized(newBlock, CertificateFinalizeFast); err != nil {
+		t.Fatal(err)
+	}
+	tracker.PruneBeforeSlot(110)
 
 	tracker.mu.RLock()
 	defer tracker.mu.RUnlock()
@@ -32,10 +42,10 @@ func TestChainTrackerPrunesBehindFinality(t *testing.T) {
 			t.Fatalf("old slot %d block was not pruned behind finality", oldSlot)
 		}
 	}
-	if _, ok := tracker.directFinalized[BlockID{Slot: oldSlot, Hash: solana.Hash{0xA}}]; ok {
+	if _, ok := tracker.directFinalized[oldBlock]; ok {
 		t.Fatalf("old finalized slot %d not pruned", oldSlot)
 	}
-	if _, ok := tracker.directFinalized[BlockID{Slot: newSlot, Hash: solana.Hash{0xB}}]; !ok {
+	if _, ok := tracker.directFinalized[newBlock]; !ok {
 		t.Fatalf("recent finalized slot %d was pruned (retention window too small)", newSlot)
 	}
 }
@@ -55,8 +65,7 @@ func TestChainTrackerConflictsSurvivePruning(t *testing.T) {
 	if !tracker.FinalityConflictAt(5) {
 		t.Fatal("conflict at slot 5 not recorded")
 	}
-	// Watermark races far ahead -> auto-prune fires well past slot 5.
-	feed(Certificate{Type: CertificateFinalizeFast, Slot: 5 + chainTrackerRetentionSlots + 100, BlockHash: solana.Hash{0xC}})
+	tracker.PruneBeforeSlot(617)
 
 	if !tracker.FinalityConflictAt(5) {
 		t.Fatal("pruning erased Byzantine conflict evidence at slot 5")
@@ -74,7 +83,7 @@ func TestChainTrackerConflictSurvivesCertReobservation(t *testing.T) {
 	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xA}})
 	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xB}})
 	// Prune wipes slot 5's certs/blocks but keeps the conflict...
-	feed(Certificate{Type: CertificateFinalizeFast, Slot: 5 + chainTrackerRetentionSlots + 100, BlockHash: solana.Hash{0xC}})
+	tracker.PruneBeforeSlot(617)
 	// ...then ONE of the original certs is re-observed (dedup key was pruned).
 	feed(Certificate{Type: CertificateNotarize, Slot: 5, BlockHash: solana.Hash{0xA}})
 

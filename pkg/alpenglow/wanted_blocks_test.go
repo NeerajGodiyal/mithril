@@ -36,6 +36,7 @@ func TestWantedBlocksSelection(t *testing.T) {
 	wbCert(t, tr, CertificateNotarizeFallback, 103, wbHash(3))
 	// 104: fast-finalized, unobserved -> wanted with Finalized set.
 	wbCert(t, tr, CertificateFinalizeFast, 104, wbHash(4))
+	specFinalize(t, tr, BlockID{Slot: 104, Hash: wbHash(4)}, CertificateFinalizeFast)
 
 	wanted := tr.WantedBlocks(100, 10)
 	require.Len(t, wanted, 2)
@@ -80,13 +81,15 @@ func TestWantedBlocksPrefersDecisiveOverLowerHashFallback(t *testing.T) {
 	assert.Equal(t, notarizeHi, wanted[0].Block.Hash, "must target the decisive notarized block, not the lower-hash fallback")
 	assert.Equal(t, CertificateNotarize, wanted[0].Strongest)
 
-	// A finalized block outranks a unique-strength cert on another sibling.
+	// A finalized block plus a unique-strength cert on another sibling is a
+	// safety conflict. Repair must not pick either side while the halt path owns
+	// the slot.
 	wbCert(t, tr, CertificateFinalizeFast, 201, wbHash(0xF0))
+	specFinalize(t, tr, BlockID{Slot: 201, Hash: wbHash(0xF0)}, CertificateFinalizeFast)
 	wbCert(t, tr, CertificateNotarize, 201, wbHash(0x02))
 	wanted = tr.WantedBlocks(200, 10)
-	require.Len(t, wanted, 1)
-	assert.Equal(t, wbHash(0xF0), wanted[0].Block.Hash, "finalized block wins")
-	assert.True(t, wanted[0].Finalized)
+	assert.Empty(t, wanted, "conflicted slot must not expose a repair target")
+	assert.True(t, tr.FinalityConflictAt(201))
 
 	// A fallback-only slot still yields the fallback (no decisive candidate).
 	tr2 := NewChainTracker()

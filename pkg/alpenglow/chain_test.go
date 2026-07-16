@@ -190,6 +190,9 @@ func TestChainTrackerFastFinalizationDerivesOmittedSkips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observe fast finalization certificate: %v", err)
 	}
+	if err := tracker.ObserveFinalized(blockID, CertificateFinalizeFast); err != nil {
+		t.Fatalf("observe pool finalization: %v", err)
+	}
 	tracker.ObserveReplayBlock(ReplayBlockObservation{
 		Block:      blockID,
 		ParentSlot: 12,
@@ -229,6 +232,9 @@ func TestChainTrackerDecisionVersionAdvancesOnReplayDerivation(t *testing.T) {
 	v1 := tracker.DecisionVersion()
 	if v1 <= v0 {
 		t.Fatalf("cert acceptance must advance the decision version (%d -> %d)", v0, v1)
+	}
+	if err := tracker.ObserveFinalized(blockID, CertificateFinalizeFast); err != nil {
+		t.Fatalf("observe pool finalization: %v", err)
 	}
 
 	// The replay observation supplies the parent link that derives the omitted
@@ -271,6 +277,12 @@ func TestChainTrackerSlowFinalizationRequiresNotarizationCertificate(t *testing.
 	if err != nil {
 		t.Fatalf("observe notarization certificate: %v", err)
 	}
+	if snap := tracker.Snapshot(); snap.DirectFinalizedBlocks != 0 {
+		t.Fatalf("certificate pair bypassed consensus-pool finalization: %+v", snap)
+	}
+	if err := tracker.ObserveFinalized(blockID, CertificateFinalize); err != nil {
+		t.Fatalf("observe pool finalization: %v", err)
+	}
 
 	path := tracker.ResolvePath(12, 4)
 	if len(path.Decisions) != 3 {
@@ -293,6 +305,73 @@ func TestChainTrackerRejectsBlockCertificateWithEmptyHash(t *testing.T) {
 		SignatureVerified: true,
 	}); err == nil {
 		t.Fatalf("expected empty block hash to be rejected")
+	}
+}
+
+func TestChainTrackerRejectsConflictingParentLinkForBlockIdentity(t *testing.T) {
+	tracker := NewChainTracker()
+	block := BlockID{Slot: 12, Hash: chainTestHash(12)}
+	if _, err := tracker.ObserveCertificate(Certificate{
+		Type: CertificateNotarize, Slot: block.Slot, BlockHash: block.Hash, SignatureVerified: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstParent := chainTestHash(11)
+	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: block, ParentSlot: 11, ParentHash: firstParent})
+
+	update := tracker.ObserveReplayBlock(ReplayBlockObservation{
+		Block: block, ParentSlot: 11, ParentHash: chainTestHash(10),
+	})
+	if !update.Conflict || update.ConflictSlot != block.Slot {
+		t.Fatalf("conflicting parent update = %+v", update)
+	}
+	state := tracker.blocks[block]
+	if state == nil || state.parentSlot != 11 || state.parentHash != firstParent {
+		t.Fatalf("conflicting observation rewrote parent linkage: %+v", state)
+	}
+	decision, ok := tracker.NextDecision(11)
+	if !ok || decision.Kind != ChainDecisionKindConflict {
+		t.Fatalf("parent-link conflict did not fail closed: %+v (ok=%v)", decision, ok)
+	}
+}
+
+func TestChainTrackerDoesNotRegrowPrunedHistory(t *testing.T) {
+	tracker := NewChainTracker()
+	tracker.PruneBeforeSlot(20)
+	update, err := tracker.ObserveCertificate(Certificate{
+		Type: CertificateSkip, Slot: 10, SignatureVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.New || update.Trusted {
+		t.Fatalf("old certificate update = %+v", update)
+	}
+	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: BlockID{Slot: 10, Hash: chainTestHash(10)}})
+	if snapshot := tracker.Snapshot(); snapshot.CertificatesObserved != 0 || snapshot.ReplayBlocksObserved != 0 || snapshot.CertifiedSkips != 0 {
+		t.Fatalf("pruned history regrew: %+v", snapshot)
+	}
+}
+
+func TestChainTrackerCertificatePairCannotBypassPoolFinalization(t *testing.T) {
+	tracker := NewChainTracker()
+	block := BlockID{Slot: 15, Hash: chainTestHash(15)}
+	for _, cert := range []Certificate{
+		{Type: CertificateFinalize, Slot: block.Slot, SignatureVerified: true},
+		{Type: CertificateNotarize, Slot: block.Slot, BlockHash: block.Hash, SignatureVerified: true},
+	} {
+		if _, err := tracker.ObserveCertificate(cert); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if snapshot := tracker.Snapshot(); snapshot.DirectFinalizedBlocks != 0 {
+		t.Fatalf("certificate pair bypassed ConsensusPool: %+v", snapshot)
+	}
+	if err := tracker.ObserveFinalized(block, CertificateFinalize); err != nil {
+		t.Fatal(err)
+	}
+	if finalized, ok := tracker.FinalizedBlockAt(block.Slot); !ok || finalized != block {
+		t.Fatalf("pool-directed finalization missing: %+v (ok=%v)", finalized, ok)
 	}
 }
 

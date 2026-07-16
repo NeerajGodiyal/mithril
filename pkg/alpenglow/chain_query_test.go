@@ -60,6 +60,7 @@ func TestSkipCertifiedAtIndirect(t *testing.T) {
 	finalized := BlockID{Slot: 15, Hash: chainTestHash(15)}
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: finalized.Hash})
 	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: finalized, ParentSlot: 12, ParentHash: chainTestHash(12)})
+	specFinalize(t, tracker, finalized, CertificateFinalizeFast)
 
 	for _, slot := range []uint64{13, 14} {
 		if !tracker.SkipCertifiedAt(slot) {
@@ -94,6 +95,7 @@ func TestCertifiedBlockAtFinalizedByAncestry(t *testing.T) {
 	}
 
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
 
 	got, _, ok := tracker.CertifiedBlockAt(12)
 	if !ok || got != parent {
@@ -122,6 +124,24 @@ func TestCertifiedBlockAtTwoDecisiveIsNoDecision(t *testing.T) {
 	}
 }
 
+func TestChainQueriesFailClosedOnFinalizedSkipConflict(t *testing.T) {
+	tracker := NewChainTracker()
+	block := BlockID{Slot: 45, Hash: chainTestHash(1)}
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: block.Slot, BlockHash: block.Hash})
+	specFinalize(t, tracker, block, CertificateFinalizeFast)
+	specObserve(t, tracker, Certificate{Type: CertificateSkip, Slot: block.Slot})
+
+	if _, _, ok := tracker.CertifiedBlockAt(block.Slot); ok {
+		t.Fatal("conflicted slot exposed a certified block decision")
+	}
+	if tracker.SkipCertifiedAt(block.Slot) {
+		t.Fatal("conflicted slot exposed a skip decision")
+	}
+	if wanted := tracker.WantedBlocks(block.Slot-1, 1); len(wanted) != 0 {
+		t.Fatalf("conflicted slot exposed a repair target: %+v", wanted)
+	}
+}
+
 // The cert-less variant: an ancestry-finalized parent that never received ANY
 // certificate is still decisive — surfaced via the per-slot finalized index,
 // since the cert-only blockSlots scan cannot see it. This is the adversarial
@@ -142,6 +162,7 @@ func TestCertifiedBlockAtCertlessAncestryFinalized(t *testing.T) {
 	}
 
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
 
 	got, _, ok := tracker.CertifiedBlockAt(12)
 	if !ok || got != parent {
@@ -173,6 +194,7 @@ func TestFinalizedBlockAtCertlessAncestryFinalized(t *testing.T) {
 	}
 
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
 
 	got, ok := tracker.FinalizedBlockAt(12)
 	if !ok || got != parent {
@@ -203,6 +225,7 @@ func TestWantedBlocksIncludesCertlessFinalized(t *testing.T) {
 	// the child's parent link + ancestry finalization.
 	tracker.ObserveReplayBlock(ReplayBlockObservation{Block: child, ParentSlot: parent.Slot, ParentHash: parent.Hash})
 	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: 15, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
 
 	wanted := tracker.WantedBlocks(0, 16)
 	for _, w := range wanted {
