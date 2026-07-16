@@ -1,11 +1,14 @@
 package alpenglow
 
 import (
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"sync"
 
 	bls12381 "github.com/Overclock-Validator/gnark-crypto/ecc/bls12-381"
+	blsfr "github.com/Overclock-Validator/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 )
@@ -34,11 +37,11 @@ const maxUnverifiedCandidatesPerRank = 2
 //
 // Verification is lazy and batched: votes buffer unverified (attacker-cheap),
 // and only when a tally's CANDIDATE stake first crosses its threshold does
-// the pool fold the pending set — all votes in a tally sign the identical
-// payload, so folding is sum(pubkeys) + sum(signatures) + ONE pairing check.
-// A failed batch bisects to isolate and evidence-log the bad votes. This
-// keeps steady-state pairing cost at a handful per slot instead of one per
-// vote, and spends nothing at all on tallies that never approach quorum.
+// the pool fold the pending set. Every member receives an unpredictable scalar
+// before its pubkey and signature are aggregated, so a successful pairing proves
+// every member except with negligible probability. A failed batch bisects to
+// isolate bad votes. This keeps steady-state pairing cost at a handful per slot
+// without treating an unweighted aggregate as proof of its individual shares.
 
 // CertPoolConfig bounds the pool's attacker-controlled surfaces. All bounds
 // are enforced on ingest (slots and ranks arrive pre-authentication).
@@ -49,6 +52,9 @@ type CertPoolConfig struct {
 	// MaxPendingVotesPerSlot caps buffered unverified votes per slot across all
 	// tallies.
 	MaxPendingVotesPerSlot int
+	// MaxPendingVotesPerRankSlot bounds the hashes/signatures one unauthenticated
+	// rank can park in a slot before the pool forces verification.
+	MaxPendingVotesPerRankSlot int
 	// MaxLiveSlots caps how many distinct slots the pool retains buffers for; a
 	// hard bound on pool memory independent of the slot window.
 	MaxLiveSlots int
@@ -62,11 +68,12 @@ type CertPoolConfig struct {
 // DefaultCertPoolConfig mirrors the deferred-cert bounds used elsewhere.
 func DefaultCertPoolConfig() CertPoolConfig {
 	return CertPoolConfig{
-		MaxSlotsAhead:          512,
-		MaxPendingVotesPerSlot: 8192,
-		MaxLiveSlots:           1024,
-		MaxPendingVotesTotal:   262144,
-		EquivocationCap:        4096,
+		MaxSlotsAhead:              512,
+		MaxPendingVotesPerSlot:     8192,
+		MaxPendingVotesPerRankSlot: 16,
+		MaxLiveSlots:               1024,
+		MaxPendingVotesTotal:       262144,
+		EquivocationCap:            4096,
 	}
 }
 
@@ -136,8 +143,9 @@ type poolSlot struct {
 	// neither poison dedupe nor forge equivocation. Notarize-fallback legally
 	// allows up to 3 distinct hashes per rank (Def. 12 vote budget); every other
 	// type is single-shot.
-	verifiedHash map[voteDedupKey][]solana.Hash
-	pendingCount int
+	verifiedHash  map[voteDedupKey][]solana.Hash
+	pendingCount  int
+	pendingByRank map[uint16]int
 }
 
 type voteDedupKey struct {
@@ -168,6 +176,12 @@ type CertPool struct {
 	totalPending int
 	equivocation []EquivocationEvidence
 	snap         CertPoolSnapshot
+
+	publicationMu        sync.Mutex
+	publicationCond      *sync.Cond
+	publicationNext      uint64
+	publicationDone      uint64
+	publicationCompleted map[uint64]struct{}
 }
 
 // NewCertPool constructs a pool over the shared certificate verifier's
@@ -179,6 +193,9 @@ func NewCertPool(cfg CertPoolConfig, verifier *CertificateVerifier, emit func(Ce
 	if cfg.MaxPendingVotesPerSlot <= 0 {
 		cfg.MaxPendingVotesPerSlot = 8192
 	}
+	if cfg.MaxPendingVotesPerRankSlot <= 0 {
+		cfg.MaxPendingVotesPerRankSlot = 16
+	}
 	if cfg.MaxLiveSlots <= 0 {
 		cfg.MaxLiveSlots = 1024
 	}
@@ -188,13 +205,16 @@ func NewCertPool(cfg CertPoolConfig, verifier *CertificateVerifier, emit func(Ce
 	if cfg.EquivocationCap <= 0 {
 		cfg.EquivocationCap = 4096
 	}
-	return &CertPool{
-		cfg:      cfg,
-		verifier: verifier,
-		emit:     emit,
-		slots:    make(map[uint64]*poolSlot),
-		emitted:  make(map[CertificateKey]struct{}),
+	p := &CertPool{
+		cfg:                  cfg,
+		verifier:             verifier,
+		emit:                 emit,
+		slots:                make(map[uint64]*poolSlot),
+		emitted:              make(map[CertificateKey]struct{}),
+		publicationCompleted: make(map[uint64]struct{}),
 	}
+	p.publicationCond = sync.NewCond(&p.publicationMu)
+	return p
 }
 
 // SetVerifiedVoteSink installs the downstream verified-message authority.
@@ -279,12 +299,16 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 	ps := p.slots[slot]
 	if ps == nil {
 		// Hard global bound on retained slots (independent of the window).
-		if len(p.slots) >= p.cfg.MaxLiveSlots {
+		if len(p.slots) >= p.cfg.MaxLiveSlots && !p.evictFartherFutureSlotLocked(slot) {
 			p.snap.VotesRejected++
 			p.mu.Unlock()
 			return
 		}
-		ps = &poolSlot{tallies: make(map[tallyKey]*tally), verifiedHash: make(map[voteDedupKey][]solana.Hash)}
+		ps = &poolSlot{
+			tallies:       make(map[tallyKey]*tally),
+			verifiedHash:  make(map[voteDedupKey][]solana.Hash),
+			pendingByRank: make(map[uint16]int),
+		}
 		p.slots[slot] = ps
 	}
 
@@ -302,27 +326,57 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 	if _, done := tl.verified[msg.Rank]; !done {
 		sigKey := sha256.Sum256(msg.Signature)
 		candidates := tl.pending[msg.Rank]
-		if candidates == nil {
-			candidates = make(map[[sha256.Size]byte]VoteMessage)
-			tl.pending[msg.Rank] = candidates
-		}
-		if _, dup := candidates[sigKey]; !dup {
-			atCap := ps.pendingCount >= p.cfg.MaxPendingVotesPerSlot || p.totalPending >= p.cfg.MaxPendingVotesTotal
-			// A second candidate is immediately resolved and removed below, so let
-			// it exceed the cap by one while holding the lock when the validator set
-			// is available. Otherwise the cap itself would recreate first-packet
-			// poisoning exactly when the pool is full.
-			canResolveCollision := len(candidates) > 0 && p.setForSlotLocked(slot) != nil
-			if atCap && !canResolveCollision {
-				p.snap.VotesRejected++
-				p.mu.Unlock()
-				return
+		_, duplicate := candidates[sigKey]
+		if !duplicate && ps.pendingByRank[msg.Rank] >= p.cfg.MaxPendingVotesPerRankSlot {
+			// Do not let forged hashes reserve a validator rank indefinitely. At
+			// the rank quota, authenticate that rank's parked candidates and free
+			// the invalid ones before deciding whether the real vote has room.
+			if set := p.setForSlotLocked(slot); set != nil {
+				verified = append(verified, p.foldPendingRankLocked(slot, ps, msg.Rank, set)...)
 			}
-			candidates[sigKey] = msg
-			ps.pendingCount++
-			p.totalPending++
-			p.snap.VotesAccepted++
-			forceFold = len(candidates) >= maxUnverifiedCandidatesPerRank
+			candidates = tl.pending[msg.Rank]
+		}
+		_, nowDone := tl.verified[msg.Rank]
+		if !duplicate && !nowDone {
+			rejectIncoming := ps.pendingByRank[msg.Rank] >= p.cfg.MaxPendingVotesPerRankSlot
+			atCap := ps.pendingCount >= p.cfg.MaxPendingVotesPerSlot || p.totalPending >= p.cfg.MaxPendingVotesTotal
+			if !rejectIncoming && atCap {
+				if set := p.setForSlotLocked(slot); set != nil {
+					verified = append(verified, p.foldAllPendingLocked(slot, ps, set)...)
+				}
+				if p.totalPending >= p.cfg.MaxPendingVotesTotal {
+					p.evictFartherFutureSlotLocked(slot)
+				}
+				candidates = tl.pending[msg.Rank]
+				_, nowDone = tl.verified[msg.Rank]
+				atCap = ps.pendingCount >= p.cfg.MaxPendingVotesPerSlot || p.totalPending >= p.cfg.MaxPendingVotesTotal
+			}
+			if nowDone {
+				atCap = false
+			} else {
+				if candidates == nil {
+					candidates = make(map[[sha256.Size]byte]VoteMessage)
+					tl.pending[msg.Rank] = candidates
+				}
+				// A second candidate is immediately resolved and removed below, so let
+				// it exceed the cap by one while holding the lock when the validator set
+				// is available. Otherwise the cap itself would recreate first-packet
+				// poisoning exactly when the pool is full.
+				canResolveCollision := len(candidates) > 0 && p.setForSlotLocked(slot) != nil
+				if atCap && !canResolveCollision {
+					rejectIncoming = true
+				}
+			}
+			if rejectIncoming {
+				p.snap.VotesRejected++
+			} else if !nowDone {
+				candidates[sigKey] = msg
+				ps.pendingCount++
+				ps.pendingByRank[msg.Rank]++
+				p.totalPending++
+				p.snap.VotesAccepted++
+				forceFold = len(candidates) >= maxUnverifiedCandidatesPerRank
+			}
 		}
 	}
 	if slot > p.highestSlot {
@@ -343,13 +397,10 @@ func (p *CertPool) AddVote(msg VoteMessage) {
 	emits, assembledVerified = p.maybeAssembleLocked(slot, ps)
 	verified = append(verified, assembledVerified...)
 	sink := p.verifiedVoteSink
+	publication := p.reservePublicationLocked(verified)
 	p.mu.Unlock()
 
-	for _, vote := range verified {
-		if sink != nil {
-			sink(vote)
-		}
-	}
+	p.publishVerifiedVotes(sink, verified, publication)
 	for _, cert := range emits {
 		p.emitCert(cert)
 	}
@@ -374,12 +425,9 @@ func (p *CertPool) OnValidatorSetInstalled(epoch uint64) {
 		}
 	}
 	sink := p.verifiedVoteSink
+	publication := p.reservePublicationLocked(verified)
 	p.mu.Unlock()
-	for _, vote := range verified {
-		if sink != nil {
-			sink(vote)
-		}
-	}
+	p.publishVerifiedVotes(sink, verified, publication)
 	for _, cert := range emits {
 		p.emitCert(cert)
 	}
@@ -406,16 +454,72 @@ func (p *CertPool) FlushRewardVotes(slot uint64) {
 		verified = append(verified, assembled...)
 	}
 	sink := p.verifiedVoteSink
+	publication := p.reservePublicationLocked(verified)
+	targetPublication := p.publicationTargetLocked()
 	p.mu.Unlock()
 
+	p.publishVerifiedVotes(sink, verified, publication)
+	for _, cert := range emits {
+		p.emitCert(cert)
+	}
+	// A vote can finish BLS verification in AddVote just before this flush takes
+	// the pool lock, then still be in flight to the reward builder. Wait through
+	// that publication sequence so a footer cannot omit an already-verified vote.
+	p.waitForPublication(targetPublication)
+}
+
+// reservePublicationLocked assigns ordering while p.mu is held. Flush can then
+// take a precise barrier over all verified batches produced before it.
+func (p *CertPool) reservePublicationLocked(verified []VerifiedVote) uint64 {
+	if len(verified) == 0 {
+		return 0
+	}
+	p.publicationMu.Lock()
+	p.publicationNext++
+	sequence := p.publicationNext
+	p.publicationMu.Unlock()
+	return sequence
+}
+
+func (p *CertPool) publicationTargetLocked() uint64 {
+	p.publicationMu.Lock()
+	target := p.publicationNext
+	p.publicationMu.Unlock()
+	return target
+}
+
+func (p *CertPool) publishVerifiedVotes(sink func(VerifiedVote), verified []VerifiedVote, sequence uint64) {
 	for _, vote := range verified {
 		if sink != nil {
 			sink(vote)
 		}
 	}
-	for _, cert := range emits {
-		p.emitCert(cert)
+	if sequence == 0 {
+		return
 	}
+	p.publicationMu.Lock()
+	p.publicationCompleted[sequence] = struct{}{}
+	for {
+		next := p.publicationDone + 1
+		if _, complete := p.publicationCompleted[next]; !complete {
+			break
+		}
+		delete(p.publicationCompleted, next)
+		p.publicationDone = next
+	}
+	p.publicationCond.Broadcast()
+	p.publicationMu.Unlock()
+}
+
+func (p *CertPool) waitForPublication(target uint64) {
+	if target == 0 {
+		return
+	}
+	p.publicationMu.Lock()
+	for p.publicationDone < target {
+		p.publicationCond.Wait()
+	}
+	p.publicationMu.Unlock()
 }
 
 // ObserveFloor prunes slots <= finalizedSlot (equivocation evidence is exempt).
@@ -768,10 +872,10 @@ func (p *CertPool) maybeAssembleLocked(slot uint64, ps *poolSlot) ([]Certificate
 	return emits, verified
 }
 
-// foldTallyLocked batch-verifies a tally's pending votes: all sign the same
-// payload, so verification is sum(pubkeys)+sum(sigs)+one pairing; failures
-// bisect to isolate the bad votes (dropped + counted). Only AFTER a vote
-// verifies does it update the durable per-slot state — the vote-budget /
+// foldTallyLocked batch-verifies a tally's pending votes. All sign the same
+// payload, so randomized weighted pubkey/signature sums need one pairing;
+// failures bisect to isolate the bad votes (dropped + counted). Only AFTER a
+// vote verifies does it update the durable per-slot state — the vote-budget /
 // equivocation ledger (verifiedHash) and base↔fallback disjointness — so raw
 // votes can never poison those.
 func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *ValidatorSet) []VerifiedVote {
@@ -790,6 +894,10 @@ func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *Va
 		}
 		delete(tl.pending, rank)
 		ps.pendingCount -= count
+		ps.pendingByRank[rank] -= count
+		if ps.pendingByRank[rank] <= 0 {
+			delete(ps.pendingByRank, rank)
+		}
 		p.totalPending -= count
 	}
 	good := p.verifyBatch(batch, set)
@@ -861,6 +969,64 @@ func (p *CertPool) foldTallyLocked(slot uint64, ps *poolSlot, tl *tally, set *Va
 	return verified
 }
 
+func (p *CertPool) foldPendingRankLocked(slot uint64, ps *poolSlot, rank uint16, set *ValidatorSet) []VerifiedVote {
+	var verified []VerifiedVote
+	for _, tl := range ps.tallies {
+		if len(tl.pending[rank]) != 0 {
+			verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
+		}
+	}
+	return verified
+}
+
+func (p *CertPool) foldAllPendingLocked(slot uint64, ps *poolSlot, set *ValidatorSet) []VerifiedVote {
+	var verified []VerifiedVote
+	for _, tl := range ps.tallies {
+		verified = append(verified, p.foldTallyLocked(slot, ps, tl, set)...)
+	}
+	return verified
+}
+
+func (p *CertPool) evictFartherFutureSlotLocked(incoming uint64) bool {
+	anchor := p.windowAnchorLocked()
+	var victim uint64
+	found := false
+	for slot := range p.slots {
+		if slot == incoming || slot <= anchor {
+			continue
+		}
+		// Only unverified buffering is expendable. Once a slot contains an
+		// authenticated vote, eviction would discard consensus information and
+		// let later unauthenticated traffic reverse the trust ordering.
+		if slotHasVerifiedVotes(p.slots[slot]) {
+			continue
+		}
+		if incoming > anchor && slot <= incoming {
+			continue
+		}
+		if !found || slot > victim {
+			victim, found = slot, true
+		}
+	}
+	if !found {
+		return false
+	}
+	ps := p.slots[victim]
+	p.totalPending -= ps.pendingCount
+	if p.totalPending < 0 {
+		p.totalPending = 0
+	}
+	delete(p.slots, victim)
+	return true
+}
+
+func slotHasVerifiedVotes(ps *poolSlot) bool {
+	if ps == nil || len(ps.verifiedHash) == 0 {
+		return false
+	}
+	return true
+}
+
 func pendingCandidateCount(tl *tally) int {
 	count := 0
 	for _, candidates := range tl.pending {
@@ -869,8 +1035,16 @@ func pendingCandidateCount(tl *tally) int {
 	return count
 }
 
-// verifyBatch verifies same-payload votes with one aggregate pairing check,
-// bisecting on failure. Returns the subset that verified.
+type parsedBatchVote struct {
+	message VoteMessage
+	pubkey  bls12381.G1Affine
+	sig     bls12381.G2Affine
+}
+
+// verifyBatch verifies same-payload votes with a randomized aggregate pairing
+// check, bisecting on failure. Unweighted aggregation is insufficient here:
+// invalid shares can cancel while the downstream pool later keeps only a subset.
+// Independent random coefficients bind success to every individual member.
 func (p *CertPool) verifyBatch(batch []VoteMessage, set *ValidatorSet) []VoteMessage {
 	if len(batch) == 0 {
 		return nil
@@ -881,66 +1055,91 @@ func (p *CertPool) verifyBatch(batch []VoteMessage, set *ValidatorSet) []VoteMes
 		return nil
 	}
 
-	var aggPub bls12381.G1Affine
-	var aggSig bls12381.G2Affine
-	aggPub.SetInfinity()
-	aggSig.SetInfinity()
-	parsed := make([]struct {
-		pub bls12381.G1Affine
-		sig bls12381.G2Affine
-		ok  bool
-	}, len(batch))
-	for i, msg := range batch {
+	members := make([]parsedBatchVote, 0, len(batch))
+	for _, msg := range batch {
 		pub, err := validatorBLSPubkey(*set, int(msg.Rank))
 		if err != nil {
 			continue
 		}
-		parsed[i].pub = pub
-		if _, err := parsed[i].sig.SetBytes(msg.Signature); err != nil || parsed[i].sig.IsInfinity() {
+		var sig bls12381.G2Affine
+		if _, err := sig.SetBytes(msg.Signature); err != nil || sig.IsInfinity() {
 			continue
 		}
-		parsed[i].ok = true
-		aggPub.Add(&aggPub, &parsed[i].pub)
-		aggSig.Add(&aggSig, &parsed[i].sig)
+		members = append(members, parsedBatchVote{message: msg, pubkey: pub, sig: sig})
 	}
 
-	valid := make([]VoteMessage, 0, len(batch))
-	structurallyOK := make([]VoteMessage, 0, len(batch))
-	for i := range batch {
-		if parsed[i].ok {
-			structurallyOK = append(structurallyOK, batch[i])
-		}
-	}
-	if len(structurallyOK) == 0 {
+	if len(members) == 0 {
 		return nil
 	}
-	if len(structurallyOK) == len(batch) {
-		if aggregatePairingOK(aggPub, payload, aggSig) {
-			return batch
+	if len(members) == 1 {
+		if aggregatePairingOK(members[0].pubkey, payload, members[0].sig) {
+			return []VoteMessage{members[0].message}
 		}
-	} else {
-		// Rebuild aggregates over the structurally-valid subset only.
-		aggPub.SetInfinity()
-		aggSig.SetInfinity()
-		for i := range batch {
-			if parsed[i].ok {
-				aggPub.Add(&aggPub, &parsed[i].pub)
-				aggSig.Add(&aggSig, &parsed[i].sig)
-			}
-		}
-		if aggregatePairingOK(aggPub, payload, aggSig) {
-			return structurallyOK
-		}
+		return nil
+	}
+	if ok, err := randomizedAggregatePairingOK(members, payload); err == nil && ok {
+		return batchMessages(members)
+	} else if err != nil {
+		// Entropy failure must reduce performance, never verification strength.
+		return individuallyVerifiedBatch(members, payload)
 	}
 
 	// Aggregate failed: bisect the structurally-valid subset.
-	if len(structurallyOK) == 1 {
-		return valid
-	}
-	mid := len(structurallyOK) / 2
-	valid = append(valid, p.verifyBatch(structurallyOK[:mid], set)...)
-	valid = append(valid, p.verifyBatch(structurallyOK[mid:], set)...)
+	messages := batchMessages(members)
+	mid := len(messages) / 2
+	valid := p.verifyBatch(messages[:mid], set)
+	valid = append(valid, p.verifyBatch(messages[mid:], set)...)
 	return valid
+}
+
+func randomizedAggregatePairingOK(members []parsedBatchVote, payload []byte) (bool, error) {
+	var aggPub bls12381.G1Affine
+	var aggSig bls12381.G2Affine
+	aggPub.SetInfinity()
+	aggSig.SetInfinity()
+	for i := range members {
+		coefficient, err := randomNonzeroBatchCoefficient()
+		if err != nil {
+			return false, err
+		}
+		var weightedPub bls12381.G1Affine
+		var weightedSig bls12381.G2Affine
+		weightedPub.ScalarMultiplication(&members[i].pubkey, coefficient)
+		weightedSig.ScalarMultiplication(&members[i].sig, coefficient)
+		aggPub.Add(&aggPub, &weightedPub)
+		aggSig.Add(&aggSig, &weightedSig)
+	}
+	return aggregatePairingOK(aggPub, payload, aggSig), nil
+}
+
+func randomNonzeroBatchCoefficient() (*big.Int, error) {
+	for {
+		coefficient, err := cryptorand.Int(cryptorand.Reader, blsfr.Modulus())
+		if err != nil {
+			return nil, err
+		}
+		if coefficient.Sign() != 0 {
+			return coefficient, nil
+		}
+	}
+}
+
+func individuallyVerifiedBatch(members []parsedBatchVote, payload []byte) []VoteMessage {
+	valid := make([]VoteMessage, 0, len(members))
+	for i := range members {
+		if aggregatePairingOK(members[i].pubkey, payload, members[i].sig) {
+			valid = append(valid, members[i].message)
+		}
+	}
+	return valid
+}
+
+func batchMessages(members []parsedBatchVote) []VoteMessage {
+	messages := make([]VoteMessage, len(members))
+	for i := range members {
+		messages[i] = members[i].message
+	}
+	return messages
 }
 
 func aggregatePairingOK(aggPub bls12381.G1Affine, payload []byte, aggSig bls12381.G2Affine) bool {

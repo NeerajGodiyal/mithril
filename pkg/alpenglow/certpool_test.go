@@ -3,6 +3,7 @@ package alpenglow
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	bls12381 "github.com/Overclock-Validator/gnark-crypto/ecc/bls12-381"
 	"github.com/gagliardetto/solana-go"
@@ -379,6 +380,85 @@ func TestCertPoolBogusSameTallyCandidateDoesNotSuppressRealVote(t *testing.T) {
 	}
 }
 
+// An unweighted same-message batch accepts cancelling invalid shares: (S+T) +
+// (S-T) equals two valid signatures even though neither share is valid alone.
+// The pool publishes individual votes, so its batch check must bind every share.
+func TestCertPoolRandomizedBatchRejectsCancellingInvalidShares(t *testing.T) {
+	pool, set, keys, _ := newTestPool(t)
+	var verified []VerifiedVote
+	pool.SetVerifiedVoteSink(func(vote VerifiedVote) { verified = append(verified, vote) })
+
+	var blockHash solana.Hash
+	blockHash[0] = 0xC1
+	vote := NewNotarizationVote(951, blockHash)
+	var valid, tweak, plus, minus bls12381.G2Affine
+	if _, err := valid.SetBytes(signTestVote(t, vote, keys[4])); err != nil {
+		t.Fatal(err)
+	}
+	tweak.ScalarMultiplicationBase(big.NewInt(1_234_567))
+	plus.Add(&valid, &tweak)
+	minus.Sub(&valid, &tweak)
+	plusRaw := plus.RawBytes()
+	minusRaw := minus.RawBytes()
+	plusMsg := VoteMessage{Vote: vote, Rank: 4, Signature: append([]byte(nil), plusRaw[:]...)}
+	minusMsg := VoteMessage{Vote: vote, Rank: 4, Signature: append([]byte(nil), minusRaw[:]...)}
+	if _, err := verifyVoteMessageWithSet(set, plusMsg); err == nil {
+		t.Fatal("S+T unexpectedly verified as an individual signature")
+	}
+	if _, err := verifyVoteMessageWithSet(set, minusMsg); err == nil {
+		t.Fatal("S-T unexpectedly verified as an individual signature")
+	}
+
+	pool.AddVote(plusMsg)
+	pool.AddVote(minusMsg) // second candidate forces the two-member batch
+	if len(verified) != 0 {
+		t.Fatalf("cancelling invalid shares reached verified sink: %+v", verified)
+	}
+	if snapshot := pool.Snapshot(); snapshot.PendingTotal != 0 || snapshot.BadSignatures != 2 {
+		t.Fatalf("cancelling shares were not rejected cleanly: %+v", snapshot)
+	}
+}
+
+func TestCertPoolRewardFlushWaitsForPriorVerifiedVotePublication(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 100)
+	verifier := NewCertificateVerifier()
+	verifier.SetValidatorSet(set)
+	pool := NewCertPool(DefaultCertPoolConfig(), verifier, nil)
+	pool.SetEpochLookup(func(uint64) uint64 { return set.Epoch })
+	pool.NoteLiveSlot(100)
+
+	sinkEntered := make(chan struct{})
+	releaseSink := make(chan struct{})
+	pool.SetVerifiedVoteSink(func(VerifiedVote) {
+		close(sinkEntered)
+		<-releaseSink
+	})
+	vote := NewNotarizationVote(101, parentReadyHash(11))
+	msg := VoteMessage{Vote: vote, Rank: 0, Signature: testBLSSignature(t, []testBLSVoteSignature{{Vote: vote, Key: keys[0]}})}
+
+	addDone := make(chan struct{})
+	go func() {
+		pool.AddVote(msg)
+		close(addDone)
+	}()
+	<-sinkEntered
+
+	flushDone := make(chan struct{})
+	go func() {
+		pool.FlushRewardVotes(vote.Slot)
+		close(flushDone)
+	}()
+	select {
+	case <-flushDone:
+		t.Fatal("reward flush returned before the prior verified vote reached its sink")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseSink)
+	<-addDone
+	<-flushDone
+}
+
 func TestCertPoolFlushRewardVotesPublishesBelowThresholdVotes(t *testing.T) {
 	pool, _, keys, _ := newTestPool(t)
 	var verified []VerifiedVote
@@ -420,17 +500,17 @@ func TestCertPoolIngestBounds(t *testing.T) {
 		t.Fatal("far-future vote must reject")
 	}
 
-	// Pending cap: third distinct pending vote on the slot rejects.
+	// With a validator set available, reaching the pending cap authenticates and
+	// drains the parked candidates rather than letting them starve later votes.
 	addVote(t, pool, NewSkipVote(100), 3, keys[3])
-	before := pool.Snapshot().VotesRejected
 	pool.AddVote(VoteMessage{Vote: NewSkipFallbackVote(100), Rank: 4, Signature: signTestVote(t, NewSkipFallbackVote(100), keys[4])})
-	if pool.Snapshot().VotesRejected != before+1 {
-		t.Fatal("pending cap must reject the overflow vote")
+	if pool.Snapshot().PendingTotal > 2 {
+		t.Fatal("pending cap must remain bounded after capacity-triggered verification")
 	}
 
 	// Floor: pruned slots reject.
 	pool.ObserveFloor(150)
-	before = pool.Snapshot().VotesRejected
+	before := pool.Snapshot().VotesRejected
 	addVote(t, pool, NewSkipVote(120), 0, keys[0])
 	if pool.Snapshot().VotesRejected != before+1 {
 		t.Fatal("vote at or below the floor must reject")
@@ -531,6 +611,56 @@ func TestCertPoolGlobalMemoryBounds(t *testing.T) {
 	}
 	if snap.VotesRejected == 0 {
 		t.Fatal("spam beyond the bounds must be rejected")
+	}
+}
+
+func TestCertPoolRankQuotaAuthenticatesParkedCandidates(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 5, 95)
+	verifier := NewCertificateVerifier()
+	if err := verifier.SetValidatorSet(set); err != nil {
+		t.Fatal(err)
+	}
+	pool := NewCertPool(CertPoolConfig{
+		MaxSlotsAhead: 10, MaxPendingVotesPerSlot: 10, MaxPendingVotesPerRankSlot: 2,
+	}, verifier, nil)
+	pool.SetEpochLookup(func(uint64) uint64 { return set.Epoch })
+	pool.NoteLiveSlot(100)
+
+	for i := byte(1); i <= 2; i++ {
+		hash := parentReadyHash(i)
+		vote := NewNotarizationVote(101, hash)
+		// A valid BLS point over the wrong payload is ideal attack input: it
+		// passes wire parsing but must not reserve this rank indefinitely.
+		pool.AddVote(VoteMessage{Vote: vote, Rank: 0, Signature: signTestVote(t, NewSkipVote(101), keys[0])})
+	}
+	realVote := NewNotarizationVote(101, parentReadyHash(3))
+	pool.AddVote(VoteMessage{Vote: realVote, Rank: 0, Signature: signTestVote(t, realVote, keys[0])})
+
+	snapshot := pool.Snapshot()
+	if snapshot.BadSignatures != 2 || snapshot.PendingTotal != 1 {
+		t.Fatalf("rank quota did not clear forged candidates for the real vote: %+v", snapshot)
+	}
+}
+
+func TestCertPoolNearTipVoteDisplacesFarFutureSpam(t *testing.T) {
+	set, keys := testBLSValidatorSet(100, 5, 95)
+	verifier := NewCertificateVerifier() // no set: keep all candidates pending
+	pool := NewCertPool(CertPoolConfig{
+		MaxSlotsAhead: 20, MaxPendingVotesPerSlot: 4, MaxLiveSlots: 2, MaxPendingVotesTotal: 2,
+	}, verifier, nil)
+	pool.SetEpochLookup(func(uint64) uint64 { return set.Epoch })
+	pool.NoteLiveSlot(100)
+	for _, slot := range []uint64{110, 111, 101} {
+		vote := NewSkipVote(slot)
+		pool.AddVote(VoteMessage{Vote: vote, Rank: 0, Signature: signTestVote(t, vote, keys[0])})
+	}
+
+	pool.mu.Lock()
+	_, hasNear := pool.slots[101]
+	_, hasFarther := pool.slots[111]
+	pool.mu.Unlock()
+	if !hasNear || hasFarther {
+		t.Fatalf("near-tip slot was starved by far-future spam: near=%t farthest=%t", hasNear, hasFarther)
 	}
 }
 

@@ -24,14 +24,20 @@ const (
 	DefaultReceiverBindAddr       = "0.0.0.0:0"
 	DefaultReceiverMaxMessageSize = int64(DefaultMaxBitmapSize + 4096)
 	DefaultReceiverLogInterval    = 10 * time.Second
+	DefaultReceiverMaxConnections = 512
+	DefaultReceiverMaxConnsPerIP  = 32
+	DefaultReceiverStreamsPerSec  = 4096
 )
 
 type ReceiverConfig struct {
-	BindAddr        string
-	MaxMessageBytes int64
-	ShredVersion    uint16
-	Decode          DecodeOptions
-	LogInterval     time.Duration
+	BindAddr            string
+	MaxMessageBytes     int64
+	ShredVersion        uint16
+	Decode              DecodeOptions
+	LogInterval         time.Duration
+	MaxConnections      int
+	MaxConnsPerIP       int
+	MaxStreamsPerSecond int
 	// AdmitMessage runs after wire decoding/version checks but before the
 	// observer. It may authenticate/normalize a message or reject a duplicate.
 	// This boundary keeps unauthenticated certificates out of trusted observer
@@ -42,10 +48,13 @@ type ReceiverConfig struct {
 
 func DefaultReceiverConfig() ReceiverConfig {
 	return ReceiverConfig{
-		BindAddr:        DefaultReceiverBindAddr,
-		MaxMessageBytes: DefaultReceiverMaxMessageSize,
-		Decode:          DefaultDecodeOptions(),
-		LogInterval:     DefaultReceiverLogInterval,
+		BindAddr:            DefaultReceiverBindAddr,
+		MaxMessageBytes:     DefaultReceiverMaxMessageSize,
+		Decode:              DefaultDecodeOptions(),
+		LogInterval:         DefaultReceiverLogInterval,
+		MaxConnections:      DefaultReceiverMaxConnections,
+		MaxConnsPerIP:       DefaultReceiverMaxConnsPerIP,
+		MaxStreamsPerSecond: DefaultReceiverStreamsPerSec,
 	}
 }
 
@@ -60,6 +69,8 @@ type ReceiverStats struct {
 	ReadErrors             uint64    `json:"read_errors"`
 	AcceptErrors           uint64    `json:"accept_errors"`
 	OversizeMessages       uint64    `json:"oversize_messages"`
+	ConnectionsRejected    uint64    `json:"connections_rejected"`
+	RateLimitedStreams     uint64    `json:"rate_limited_streams"`
 	LastMessageAt          time.Time `json:"last_message_at,omitempty"`
 	LatestVoteSlot         uint64    `json:"latest_vote_slot,omitempty"`
 	LatestCertSlot         uint64    `json:"latest_certificate_slot,omitempty"`
@@ -70,10 +81,11 @@ type Receiver struct {
 	observer *Observer
 	listener *quic.Listener
 
-	mu     sync.Mutex
-	closed bool
-	conns  map[*quic.Conn]struct{}
-	stats  ReceiverStats
+	mu        sync.Mutex
+	closed    bool
+	conns     map[*quic.Conn]string
+	connsByIP map[string]int
+	stats     ReceiverStats
 }
 
 func NewReceiver(cfg ReceiverConfig, observer *Observer) (*Receiver, error) {
@@ -102,10 +114,11 @@ func NewReceiver(cfg ReceiverConfig, observer *Observer) (*Receiver, error) {
 	}
 
 	return &Receiver{
-		cfg:      cfg,
-		observer: observer,
-		listener: listener,
-		conns:    make(map[*quic.Conn]struct{}),
+		cfg:       cfg,
+		observer:  observer,
+		listener:  listener,
+		conns:     make(map[*quic.Conn]string),
+		connsByIP: make(map[string]int),
 	}, nil
 }
 
@@ -139,7 +152,9 @@ func (r *Receiver) Run(ctx context.Context) error {
 			return fmt.Errorf("accept Alpenglow Votor QUIC connection: %w", err)
 		}
 
-		r.addConn(conn)
+		if !r.addConn(conn) {
+			continue
+		}
 		r.recordConnection()
 		go r.handleConn(runCtx, conn)
 	}
@@ -186,6 +201,8 @@ func (r *Receiver) handleConn(ctx context.Context, conn *quic.Conn) {
 	defer r.removeConn(conn)
 	defer conn.CloseWithError(0, "alpenglow receiver done")
 
+	windowStart := time.Now()
+	streamsThisWindow := 0
 	for {
 		stream, err := conn.AcceptUniStream(ctx)
 		if err != nil {
@@ -195,6 +212,20 @@ func (r *Receiver) handleConn(ctx context.Context, conn *quic.Conn) {
 			r.recordReadError()
 			return
 		}
+		now := time.Now()
+		if now.Sub(windowStart) >= time.Second {
+			windowStart = now
+			streamsThisWindow = 0
+		}
+		if streamsThisWindow >= r.cfg.MaxStreamsPerSecond {
+			// Client certificates are not yet bound to staked identities. A per-
+			// connection ceiling prevents one unauthenticated peer from monopolizing
+			// decode and pending-vote capacity before cryptographic admission.
+			stream.CancelRead(0)
+			r.recordRateLimitedStream()
+			continue
+		}
+		streamsThisWindow++
 		r.handleStream(stream)
 	}
 }
@@ -255,9 +286,9 @@ func (r *Receiver) logStatsLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			stats := r.Stats()
-			mlog.Log.FileOnlyf("alpenglow Votor receiver stats: connections=%d streams=%d messages=%d votes=%d certificates=%d decode_errors=%d shred_version_mismatches=%d read_errors=%d accept_errors=%d oversize=%d latest_vote_slot=%d latest_certificate_slot=%d last_message=%s",
+			mlog.Log.FileOnlyf("alpenglow Votor receiver stats: connections=%d streams=%d messages=%d votes=%d certificates=%d decode_errors=%d shred_version_mismatches=%d read_errors=%d accept_errors=%d oversize=%d rejected_connections=%d rate_limited_streams=%d latest_vote_slot=%d latest_certificate_slot=%d last_message=%s",
 				stats.ConnectionsAccepted, stats.StreamsReceived, stats.MessagesDecoded, stats.VotesDecoded, stats.CertificatesDecoded,
-				stats.DecodeErrors, stats.ShredVersionMismatches, stats.ReadErrors, stats.AcceptErrors, stats.OversizeMessages, stats.LatestVoteSlot, stats.LatestCertSlot,
+				stats.DecodeErrors, stats.ShredVersionMismatches, stats.ReadErrors, stats.AcceptErrors, stats.OversizeMessages, stats.ConnectionsRejected, stats.RateLimitedStreams, stats.LatestVoteSlot, stats.LatestCertSlot,
 				formatStatsTime(stats.LastMessageAt))
 		}
 	}
@@ -331,20 +362,54 @@ func (r *Receiver) recordOversizeMessage() {
 	r.mu.Unlock()
 }
 
-func (r *Receiver) addConn(conn *quic.Conn) {
+func (r *Receiver) recordRateLimitedStream() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.stats.RateLimitedStreams++
+	r.mu.Unlock()
+}
+
+func (r *Receiver) addConn(conn *quic.Conn) bool {
+	remoteIP := receiverRemoteIP(conn.RemoteAddr())
+	r.mu.Lock()
 	if r.closed {
+		r.mu.Unlock()
 		_ = conn.CloseWithError(0, "alpenglow receiver closed")
-		return
+		return false
 	}
-	r.conns[conn] = struct{}{}
+	if len(r.conns) >= r.cfg.MaxConnections || r.connsByIP[remoteIP] >= r.cfg.MaxConnsPerIP {
+		r.stats.ConnectionsRejected++
+		r.mu.Unlock()
+		_ = conn.CloseWithError(0, "alpenglow receiver connection limit")
+		return false
+	}
+	r.conns[conn] = remoteIP
+	r.connsByIP[remoteIP]++
+	r.mu.Unlock()
+	return true
 }
 
 func (r *Receiver) removeConn(conn *quic.Conn) {
 	r.mu.Lock()
+	remoteIP, exists := r.conns[conn]
 	delete(r.conns, conn)
+	if exists {
+		r.connsByIP[remoteIP]--
+		if r.connsByIP[remoteIP] <= 0 {
+			delete(r.connsByIP, remoteIP)
+		}
+	}
 	r.mu.Unlock()
+}
+
+func receiverRemoteIP(addr net.Addr) string {
+	if udp, ok := addr.(*net.UDPAddr); ok {
+		return udp.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err == nil {
+		return host
+	}
+	return addr.String()
 }
 
 func (r *Receiver) isClosed() bool {
@@ -366,6 +431,15 @@ func normalizeReceiverConfig(cfg ReceiverConfig) ReceiverConfig {
 	}
 	if cfg.LogInterval == 0 {
 		cfg.LogInterval = defaults.LogInterval
+	}
+	if cfg.MaxConnections <= 0 {
+		cfg.MaxConnections = defaults.MaxConnections
+	}
+	if cfg.MaxConnsPerIP <= 0 {
+		cfg.MaxConnsPerIP = defaults.MaxConnsPerIP
+	}
+	if cfg.MaxStreamsPerSecond <= 0 {
+		cfg.MaxStreamsPerSecond = defaults.MaxStreamsPerSecond
 	}
 	return cfg
 }
