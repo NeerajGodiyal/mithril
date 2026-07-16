@@ -64,9 +64,9 @@ func parentSwitchNeedsStateUnwind(switchSlot, executedAnchor uint64) bool {
 // unwind/replay operation.
 type CertifiedSwitch struct {
 	Slot         uint64
-	Executed     solana.Hash // zero when Skip
-	Certified    solana.Hash // zero when Skip
-	Skip         bool        // a skip cert contradicts an executed block
+	Executed     solana.Hash // zero when the local slot was treated as skipped
+	Certified    solana.Hash // zero only for legacy skip-switch callers
+	Skip         bool        // retained for recovery/API compatibility; the sweeper no longer sets it
 	ParentLinked bool        // speculative child links to an older emitted ancestor
 	ParentSlot   uint64
 	ParentID     solana.Hash
@@ -124,9 +124,10 @@ func (s *alpenglowSwitchSweeper) sweep(executed map[uint64]solana.Hash, lastRoot
 			continue
 		}
 		if s.query.SkipCertifiedAt(slot) {
-			if !executedID.IsZero() {
-				return &CertifiedSwitch{Slot: slot, Executed: executedID, Skip: true}
-			}
+			// A skip certificate permits a future child to omit this slot, but it
+			// does not invalidate an already replayed block as that child's parent.
+			// Agave retains the bank in BankForks and lets exact ancestry/finality
+			// select the branch. Mithril's parent-link switch performs that selection.
 			continue
 		}
 		if certified, _, ok := s.query.CertifiedBlockAt(slot); ok {

@@ -561,8 +561,11 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID, certType
 		}
 		t.chainFinalized[parent] = certType
 		t.finalizedBySlot[parent.Slot] = parent
-		// Ancestry finalization creates the same exclusivity as direct finalization.
-		t.refreshConflictLocked(parent.Slot)
+		// The exact parent link selects this ancestor, but it does not turn the
+		// ancestor into a directly-finalized slot. Agave can retain a block as
+		// finalized ancestry even when that slot also has a skip certificate (or
+		// other pre-finality certificates); only a direct finalization certificate
+		// carries the per-slot exclusivity checked by refreshConflictLocked.
 		block = parent
 	}
 }
@@ -635,18 +638,22 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 	if _, conflicted := t.conflicts[slot]; conflicted {
 		return BlockID{}, "", false
 	}
+	// A finalized block (direct or by ancestry) is decisive even when it never
+	// received a certificate of its own — the cert-less ancestry-finalized
+	// parent case, which the cert-only blockSlots scan below cannot see. Exact
+	// finalized ancestry also outranks other non-finalizing certificates at this
+	// slot; Agave roots the finalized bank and its exact BankForks ancestors. A
+	// different directly-finalized block would already have recorded a conflict.
+	if fin, ok := t.finalizedBySlot[slot]; ok {
+		var certType CertificateType
+		if state := t.blocks[fin]; state != nil {
+			certType = strongestBlockCertificateType(state.certificates)
+		}
+		return fin, certType, true
+	}
 	var winner BlockID
 	var winnerType CertificateType
 	found := false
-	// A finalized block (direct or by ancestry) is decisive even when it never
-	// received a certificate of its own — the cert-less ancestry-finalized
-	// parent case, which the cert-only blockSlots scan below cannot see.
-	if fin, ok := t.finalizedBySlot[slot]; ok {
-		winner, found = fin, true
-		if state := t.blocks[fin]; state != nil {
-			winnerType = strongestBlockCertificateType(state.certificates)
-		}
-	}
 	// Iterate the slot's blocks directly (no candidate-slice allocation): the
 	// switch sweep calls this for every executed-unfolded slot whenever the
 	// tracker's decision version advances — which on a healthy cluster is
@@ -682,12 +689,17 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 	return winner, winnerType, found
 }
 
-// SkipCertifiedAt reports whether the slot is certified skipped, explicitly
-// (skip cert) or indirectly (omitted between finalized ancestors).
+// SkipCertifiedAt reports whether replay should treat the slot as skipped,
+// explicitly (skip cert) or indirectly (omitted between finalized ancestors).
+// A block selected as exact finalized ancestry overrides a same-slot skip: the
+// skip made omission legal, but did not invalidate the block as a future parent.
 func (t *ChainTracker) SkipCertifiedAt(slot uint64) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	if _, conflicted := t.conflicts[slot]; conflicted {
+		return false
+	}
+	if _, selected := t.finalizedBySlot[slot]; selected {
 		return false
 	}
 	if _, ok := t.skipCerts[slot]; ok {
@@ -730,8 +742,9 @@ func wantedPriority(ct CertificateType, finalized bool) int {
 // most decisive candidate is chosen (finalized > unique-strength > fallback),
 // tie-broken by lowest hash for determinism — so a fallback is targeted only
 // when no decisive candidate exists. Skip-certified slots are excluded unless
-// the block is finalized (finality outranks a skip; the illegal coexistence is
-// the conflict machinery's to flag). The scan is bounded by the tracker's
+// the block is selected by finality; ancestry-selected blocks can legally
+// coexist with a skip because the skip does not invalidate them as parents.
+// The scan is bounded by the tracker's
 // retention window and the <= 7 certified candidates per slot protocol bound.
 func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 	if max <= 0 {
@@ -909,6 +922,25 @@ func (t *ChainTracker) nextDecisionLocked(anchorSlot uint64) (ChainDecision, boo
 			Candidates: conflict.candidates,
 		}, true
 	}
+	// Direct finality or exact finalized ancestry decides the block even if an
+	// explicit skip also exists at an ancestor slot. Agave roots the finalized
+	// bank's exact BankForks ancestry; its parent-ready tracker permits that
+	// ancestry block and a skip certificate to coexist.
+	if block, ok := t.finalizedBySlot[slot]; ok {
+		decision := ChainDecision{
+			Slot:   slot,
+			Kind:   ChainDecisionKindBlock,
+			Block:  block,
+			Reason: "selected by finality",
+		}
+		if state := t.blocks[block]; state != nil {
+			decision.Observed = state.observed
+			decision.ParentSlot = state.parentSlot
+			decision.ParentHash = state.parentHash
+			decision.CertificateType = strongestBlockCertificateType(state.certificates)
+		}
+		return decision, true
+	}
 	if cert, ok := t.skipCerts[slot]; ok {
 		return ChainDecision{
 			Slot:            slot,
@@ -1017,41 +1049,27 @@ func strongestBlockCertificateType(certs map[CertificateType]Certificate) Certif
 
 // refreshConflictLocked flags only true Alpenglow safety violations (whitepaper
 // Lemmas 21/24/26). Notarize/notar-fallback certs legally coexist with skips and
-// with each other pre-finality — only finalized blocks carry exclusivity.
+// with each other pre-finality. Only DIRECT finalization carries certificate
+// exclusivity at its slot; a block selected indirectly as finalized ancestry can
+// legally coexist with a same-slot skip and other pre-finality certificates.
 func (t *ChainTracker) refreshConflictLocked(slot uint64) {
 	candidates := t.blockCandidatesLocked(slot)
 	_, hasExplicitSkip := t.skipCerts[slot]
 	_, hasIndirectSkip := t.indirectSkips[slot]
 	hasSkip := hasExplicitSkip || hasIndirectSkip
 
-	// Unique-strength certs (at most one per slot: Lemmas 21(i)/24) and finalized
-	// blocks (direct or by ancestry — both carry exclusivity).
-	var unique, finalized int
+	// Unique-strength certs are bounded to one per slot (Lemmas 21(i)/24).
+	// Directly-finalized blocks carry the exclusivity used below; exact ancestors
+	// selected by a later finalized block do not.
+	var unique, directFinalizedCount int
 	for _, c := range candidates {
 		switch c.CertificateType {
 		case CertificateFinalizeFast, CertificateNotarize, CertificateGenesis:
 			unique++
 		}
-		if t.finalizedLocked(c.Block) {
-			finalized++
+		if _, directlyFinalized := t.directFinalized[c.Block]; directlyFinalized {
+			directFinalizedCount++
 		}
-	}
-
-	// A cert-less ancestry-finalized block never enters blockSlots (only its
-	// stub in the blocks map), yet carries the same exclusivity. Without
-	// counting it here, a competing certified sibling — or a skip cert — at
-	// its slot would pass silently, and the FinalizedBlockAt Byzantine
-	// defense (which trusts this flag) would keep answering.
-	certlessFinalized := false
-	if fin, ok := t.finalizedBySlot[slot]; ok {
-		present := false
-		for _, c := range candidates {
-			if c.Block == fin {
-				present = true
-				break
-			}
-		}
-		certlessFinalized = !present
 	}
 
 	switch {
@@ -1061,14 +1079,10 @@ func (t *ChainTracker) refreshConflictLocked(slot uint64) {
 		t.recordConflictLocked(slot, "certified blocks exceed the per-slot protocol bound")
 	case unique > 1: // two notarized (or fast-finalized) blocks in one slot
 		t.recordConflictLocked(slot, "multiple notarized blocks for slot")
-	case finalized > 0 && hasSkip: // finalized block contradicted by a skip (Lemmas 21(iii)/26(iii))
+	case directFinalizedCount > 0 && hasSkip: // directly finalized block contradicted by a skip (Lemmas 21(iii)/26(iii))
 		t.recordConflictLocked(slot, "finalized block contradicted by skip")
-	case finalized > 0 && len(candidates) > 1: // finalized block plus another certified block (Lemmas 21(i,ii)/26(i,ii))
+	case directFinalizedCount > 0 && len(candidates) > 1: // directly finalized block plus another certified block (Lemmas 21(i,ii)/26(i,ii))
 		t.recordConflictLocked(slot, "finalized block plus competing certified block")
-	case certlessFinalized && (hasSkip || len(candidates) > 0):
-		// Same violations as above with the finalized block invisible to the
-		// candidate scan (cert-less, ancestry-finalized).
-		t.recordConflictLocked(slot, "cert-less finalized block contradicted by certificate or skip")
 	}
 	// No delete arm: recorded violations are write-once Byzantine evidence. The
 	// conditions are monotone while a slot's state is retained, and after pruning a

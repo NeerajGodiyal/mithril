@@ -16,6 +16,10 @@ type fakeChainQuery struct {
 	version   uint64
 }
 
+type trackerChainQuery struct{ *alpenglow.ChainTracker }
+
+func (q *trackerChainQuery) ChainDecisionVersion() uint64 { return q.DecisionVersion() }
+
 func (f *fakeChainQuery) CertifiedBlockAt(slot uint64) (alpenglow.BlockID, alpenglow.CertificateType, bool) {
 	if b, ok := f.certified[slot]; ok {
 		return b, alpenglow.CertificateNotarize, true
@@ -60,15 +64,52 @@ func TestSweepSiblingMismatch(t *testing.T) {
 	assert.False(t, sw.Skip)
 }
 
-// A skip cert over an executed slot switches with Skip=true.
-func TestSweepSkipOverExecuted(t *testing.T) {
+// Like Agave's BankForks, execute-on-receipt must retain an already replayed
+// block when a skip certificate arrives. A skip makes it legal for a future
+// child to omit the block, but does not prove that the block cannot be that
+// child's parent. An exact parent link or finalized ancestry selects the fork.
+func TestSweepSkipDoesNotInvalidateExecutedPotentialParent(t *testing.T) {
 	q := &fakeChainQuery{certified: map[uint64]alpenglow.BlockID{}, skipped: map[uint64]bool{101: true}, version: 1}
 	s := newTestSweeper(q)
 	executed := map[uint64]solana.Hash{101: swHash(1)}
-	sw := s.sweep(executed, 100, 101)
+	assert.Nil(t, s.sweep(executed, 100, 101))
+}
+
+func TestSweepRetainsSkipCertifiedParentSelectedByFinalizedChild(t *testing.T) {
+	tracker := alpenglow.NewChainTracker()
+	parent := alpenglow.BlockID{Slot: 12, Hash: swHash(12)}
+	child := alpenglow.BlockID{Slot: 16, Hash: swHash(16)}
+	tracker.ObserveReplayBlock(alpenglow.ReplayBlockObservation{Block: parent, ParentSlot: 7, ParentHash: swHash(7)})
+	for _, cert := range []alpenglow.Certificate{
+		{Type: alpenglow.CertificateNotarizeFallback, Slot: parent.Slot, BlockHash: parent.Hash, SignatureVerified: true},
+		{Type: alpenglow.CertificateSkip, Slot: parent.Slot, SignatureVerified: true},
+	} {
+		_, err := tracker.ObserveCertificate(cert)
+		require.NoError(t, err)
+	}
+
+	s := &alpenglowSwitchSweeper{query: &trackerChainQuery{ChainTracker: tracker}}
+	executed := map[uint64]solana.Hash{parent.Slot: parent.Hash}
+	assert.Nil(t, s.sweep(executed, 7, parent.Slot), "skip alone must retain the possible parent")
+
+	tracker.ObserveReplayBlock(alpenglow.ReplayBlockObservation{Block: child, ParentSlot: parent.Slot, ParentHash: parent.Hash})
+	_, err := tracker.ObserveCertificate(alpenglow.Certificate{
+		Type:              alpenglow.CertificateFinalizeFast,
+		Slot:              child.Slot,
+		BlockHash:         child.Hash,
+		SignatureVerified: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, tracker.ObserveFinalized(child, alpenglow.CertificateFinalizeFast))
+
+	assert.Nil(t, s.sweep(executed, 7, parent.Slot), "finalized child must retain its matching exact parent")
+	executed[parent.Slot] = swHash(99)
+	s = &alpenglowSwitchSweeper{query: &trackerChainQuery{ChainTracker: tracker}}
+	sw := s.sweep(executed, 7, parent.Slot)
 	require.NotNil(t, sw)
-	assert.True(t, sw.Skip)
-	assert.Equal(t, uint64(101), sw.Slot)
+	assert.Equal(t, parent.Slot, sw.Slot)
+	assert.Equal(t, parent.Hash, sw.Certified)
+	assert.False(t, sw.Skip)
 }
 
 func TestSweepCertifiedSkipMatchesLocalSkip(t *testing.T) {

@@ -1905,11 +1905,11 @@ func (bs *BlockSource) rewindAlpenglowEmissionAnchorLocked(slot uint64) {
 }
 
 // RewindForAlpenglowSwitch rewinds the emission frontier to re-serve `slot`
-// after certificates named a different outcome than the executed one (wrong
-// sibling or certificate-skipped). Buffered and in-flight state at or above
-// the slot is dropped, live-stream results are invalidated, and the certified
-// block id (zero for a skip) narrows the turbine assembler + prioritizes
-// repair so the certified version arrives fast.
+// after finality or a decisive block certificate names a different block than
+// the one executed. Buffered and in-flight state at or above the slot is
+// dropped, live-stream results are invalidated, and the certified block id
+// narrows the turbine assembler + prioritizes repair so that version arrives
+// quickly.
 func (bs *BlockSource) RewindForAlpenglowSwitch(slot uint64, certified solana.Hash) {
 	if slot == 0 {
 		return

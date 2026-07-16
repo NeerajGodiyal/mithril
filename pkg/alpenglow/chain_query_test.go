@@ -197,11 +197,23 @@ func TestCertifiedBlockAtCertlessAncestryFinalized(t *testing.T) {
 		t.Fatalf("cert-less ancestry-finalized parent must be decisive: %+v ok=%v", got, ok)
 	}
 
-	// Two-decisive still fails closed: a decisive cert for a DIFFERENT sibling
-	// at the finalized slot is Byzantine — no switch decision, conflict owns it.
+	// A non-finalizing certificate for a sibling may coexist at an indirectly
+	// finalized ancestor slot. Exact finalized ancestry remains authoritative;
+	// only a different direct finalization would be a safety conflict.
 	specObserve(t, tracker, Certificate{Type: CertificateNotarize, Slot: 12, BlockHash: chainTestHash(99)})
-	if _, _, ok := tracker.CertifiedBlockAt(12); ok {
-		t.Fatalf("finalized block + different decisive cert must yield NO switch decision")
+	if got, _, ok := tracker.CertifiedBlockAt(12); !ok || got != parent {
+		t.Fatalf("exact finalized ancestry lost to non-finalizing sibling: %+v ok=%v", got, ok)
+	}
+
+	// Directly finalizing that sibling is different: it would create two
+	// finalized chains and must still fail closed.
+	sibling := BlockID{Slot: 12, Hash: chainTestHash(99)}
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: sibling.Slot, BlockHash: sibling.Hash})
+	if err := tracker.ObserveFinalized(sibling, CertificateFinalizeFast); err == nil {
+		t.Fatal("different directly-finalized sibling did not report a conflict")
+	}
+	if !tracker.FinalityConflictAt(parent.Slot) {
+		t.Fatal("different directly-finalized sibling did not latch the safety conflict")
 	}
 }
 
@@ -232,11 +244,11 @@ func TestFinalizedBlockAtCertlessAncestryFinalized(t *testing.T) {
 		t.Fatalf("directly finalized child must be visible: %+v ok=%v", fin, ok)
 	}
 
-	// Byzantine defense: a decisive certificate for a DIFFERENT sibling at
-	// the finalized slot is a safety violation — no unambiguous answer.
+	// A non-finalizing sibling certificate does not replace exact finalized
+	// ancestry and is not, by itself, a conflicting finalization.
 	specObserve(t, tracker, Certificate{Type: CertificateNotarize, Slot: 12, BlockHash: chainTestHash(99)})
-	if _, ok := tracker.FinalizedBlockAt(12); ok {
-		t.Fatalf("finalized block + conflicting decisive cert must yield NO finalized answer")
+	if got, ok := tracker.FinalizedBlockAt(12); !ok || got != parent {
+		t.Fatalf("exact finalized ancestry lost after sibling certificate: %+v ok=%v", got, ok)
 	}
 }
 

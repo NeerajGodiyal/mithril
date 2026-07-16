@@ -141,3 +141,49 @@ func TestSpecFinalizedAncestryMakesFallbackDecisive(t *testing.T) {
 		t.Fatalf("ancestor of finalized block must resolve to block %v, got %+v (ok=%v)", parent, decision, ok)
 	}
 }
+
+// Agave's parent-ready state machine permits a notar-fallback block and a skip
+// certificate at the same slot: that block remains a valid parent for a later
+// skip-connected child. If the child finalizes, its exact parent link selects
+// the block; the same-slot skip is not conflicting finality and must not erase
+// the selected ancestor. This is the live fork shape observed at 3425812->3425816.
+func TestSpecFinalizedDescendantSelectsFallbackParentDespiteSkip(t *testing.T) {
+	tracker := NewChainTracker()
+	parent := BlockID{Slot: 3_425_812, Hash: chainTestHash(12)}
+	child := BlockID{Slot: 3_425_816, Hash: chainTestHash(16)}
+
+	tracker.ObserveReplayBlock(ReplayBlockObservation{
+		Block:      parent,
+		ParentSlot: parent.Slot - 5,
+		ParentHash: chainTestHash(7),
+	})
+	specObserve(t, tracker, Certificate{Type: CertificateNotarizeFallback, Slot: parent.Slot, BlockHash: parent.Hash})
+	specObserve(t, tracker, Certificate{Type: CertificateSkip, Slot: parent.Slot})
+	for slot := parent.Slot + 1; slot < child.Slot; slot++ {
+		specObserve(t, tracker, Certificate{Type: CertificateSkip, Slot: slot})
+	}
+	tracker.ObserveReplayBlock(ReplayBlockObservation{
+		Block:      child,
+		ParentSlot: parent.Slot,
+		ParentHash: parent.Hash,
+	})
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: child.Slot, BlockHash: child.Hash})
+	specFinalize(t, tracker, child, CertificateFinalizeFast)
+
+	if tracker.FinalityConflictAt(parent.Slot) {
+		reason, _ := tracker.FinalityConflictReasonAt(parent.Slot)
+		t.Fatalf("selected fallback parent plus skip is legal, got conflict: %s", reason)
+	}
+	if tracker.SkipCertifiedAt(parent.Slot) {
+		t.Fatal("selected exact parent must override its same-slot skip for replay")
+	}
+	decision, ok := tracker.NextDecision(parent.Slot - 1)
+	if !ok || decision.Kind != ChainDecisionKindBlock || decision.Block != parent {
+		t.Fatalf("selected parent decision = %+v (ok=%v), want block %v", decision, ok, parent)
+	}
+	for slot := parent.Slot + 1; slot < child.Slot; slot++ {
+		if !tracker.SkipCertifiedAt(slot) {
+			t.Fatalf("omitted slot %d must remain skipped", slot)
+		}
+	}
+}
