@@ -105,3 +105,18 @@ func TestBuildValidatorSetExcludesDuplicateBLSAndNodeKeys(t *testing.T) {
 		t.Fatalf("ranked total stake = %d, want 500", set.TotalStake)
 	}
 }
+
+func TestVATCapDropsEveryValidatorTiedAtBoundary(t *testing.T) {
+	entries := []ValidatorStake{
+		{Stake: 50, BlsPubkeyCompressed: [48]byte{1}},
+		{Stake: 40, BlsPubkeyCompressed: [48]byte{2}},
+		{Stake: 30, BlsPubkeyCompressed: [48]byte{3}},
+		{Stake: 30, BlsPubkeyCompressed: [48]byte{4}},
+		{Stake: 20, BlsPubkeyCompressed: [48]byte{5}},
+	}
+
+	capped := capValidatorStakeEntries(entries, 3)
+	if len(capped) != 2 || capped[0].Stake != 50 || capped[1].Stake != 40 {
+		t.Fatalf("VAT cap retained a cutoff-stake tie: %+v", capped)
+	}
+}

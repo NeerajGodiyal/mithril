@@ -230,6 +230,38 @@ func TestDecodeSignerStoreBitmapRejectsCorruptPayload(t *testing.T) {
 	}
 }
 
+func TestCertificateBitmapCapacityIsSeparateFromVATCap(t *testing.T) {
+	if MaximumVATValidators != 2000 || CertificateBitmapCapacity != 4096 {
+		t.Fatalf("unexpected validator limits: VAT=%d bitmap=%d", MaximumVATValidators, CertificateBitmapCapacity)
+	}
+	base := make([]bool, CertificateBitmapCapacity)
+	base[0] = true
+	encoded, err := EncodeSignerStoreBitmap(SignerBitmap{
+		Encoding: SignerBitmapBase2,
+		Length:   CertificateBitmapCapacity,
+		Base:     base,
+	})
+	if err != nil {
+		t.Fatalf("encode capacity bitmap: %v", err)
+	}
+	if _, err := DecodeSignerStoreBitmap(encoded, CertificateBitmapCapacity); err != nil {
+		t.Fatalf("decode legal capacity bitmap: %v", err)
+	}
+	if _, err := DecodeSignerStoreBitmap(encoded, MaximumVATValidators); err == nil {
+		t.Fatal("VAT cap unexpectedly accepted as the certificate wire capacity")
+	}
+
+	set := testValidatorSet(100, 100)
+	cert := Certificate{Type: CertificateSkip, Slot: 77, Bitmap: encoded}
+	verified, _, err := verifyCertificateStakeWithSet(set, cert)
+	if err != nil {
+		t.Fatalf("zero bitmap tail should verify against a smaller active set: %v", err)
+	}
+	if !verified.StakeVerified || verified.IncludedStake != 100 {
+		t.Fatalf("unexpected verified certificate: %+v", verified)
+	}
+}
+
 func testValidatorSet(totalStake uint64, stakes ...uint64) ValidatorSet {
 	validators := make([]ValidatorStake, len(stakes))
 	for i, stake := range stakes {

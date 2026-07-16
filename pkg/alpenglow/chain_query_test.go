@@ -76,6 +76,34 @@ func TestSkipCertifiedAtIndirect(t *testing.T) {
 	}
 }
 
+func TestSkipCertifiedAtAcrossMultiHopFinalizedAncestry(t *testing.T) {
+	tracker := NewChainTracker()
+	ancestor := BlockID{Slot: 10, Hash: chainTestHash(10)}
+	finalized := BlockID{Slot: 15, Hash: chainTestHash(15)}
+
+	tracker.ObserveReplayBlock(ReplayBlockObservation{
+		Block:      ancestor,
+		ParentSlot: 7,
+		ParentHash: chainTestHash(7),
+	})
+	tracker.ObserveReplayBlock(ReplayBlockObservation{
+		Block:      finalized,
+		ParentSlot: ancestor.Slot,
+		ParentHash: ancestor.Hash,
+	})
+	specObserve(t, tracker, Certificate{Type: CertificateFinalizeFast, Slot: finalized.Slot, BlockHash: finalized.Hash})
+	specFinalize(t, tracker, finalized, CertificateFinalizeFast)
+
+	for _, slot := range []uint64{8, 9, 11, 12, 13, 14} {
+		if !tracker.SkipCertifiedAt(slot) {
+			t.Fatalf("slot %d omitted on a finalized ancestry edge was not skip-certified", slot)
+		}
+	}
+	if got, _, ok := tracker.CertifiedBlockAt(ancestor.Slot); !ok || got != ancestor {
+		t.Fatalf("intermediate finalized ancestor must be decisive: %+v ok=%v", got, ok)
+	}
+}
+
 // Finalization by ancestry upgrades a FALLBACK-cert'd parent to decisive: a
 // notar-fallback cert alone is ambiguous (never a switch signal), but once a
 // finalized descendant chains to it the ambiguity is resolved and the sweep

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
@@ -53,6 +54,45 @@ func TestBlockComponentMarkerRoundTrip(t *testing.T) {
 	require.Equal(t, turbine.MarkerBlockHeader, decoded.Marker.Kind)
 	require.Equal(t, uint64(99), decoded.Marker.Header.ParentSlot)
 	require.Equal(t, parentID, decoded.Marker.Header.ParentBlockID)
+}
+
+func TestBlockComponentRejectsImpossibleEntryCount(t *testing.T) {
+	raw := make([]byte, 8)
+	binary.LittleEndian.PutUint64(raw, ^uint64(0))
+
+	_, err := turbine.UnmarshalBlockComponent(raw)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, turbine.ErrInvalidBlockComponent))
+}
+
+func TestBlockComponentRejectsTrailingBytes(t *testing.T) {
+	entryComponent, err := turbine.NewEntryBatch([]turbine.Entry{{NumHashes: 1, Hash: solana.Hash{9}}})
+	require.NoError(t, err)
+	entryRaw, err := turbine.MarshalBlockComponent(entryComponent)
+	require.NoError(t, err)
+	_, err = turbine.UnmarshalBlockComponent(append(entryRaw, 0))
+	require.Error(t, err)
+	require.True(t, errors.Is(err, turbine.ErrInvalidBlockComponent))
+
+	markerRaw, err := turbine.MarshalBlockComponent(turbine.NewBlockHeader(99, solana.Hash{7}))
+	require.NoError(t, err)
+	_, err = turbine.UnmarshalBlockComponent(append(markerRaw, 0))
+	require.Error(t, err)
+	require.True(t, errors.Is(err, turbine.ErrInvalidBlockComponent))
+}
+
+func TestBlockComponentRejectsOversizedGenesisBitmap(t *testing.T) {
+	inner := make([]byte, 240)
+	binary.LittleEndian.PutUint64(inner[232:240], ^uint64(0))
+	raw := make([]byte, 0, 8+2+3+len(inner))
+	raw = append(raw, make([]byte, 8)...)
+	raw = append(raw, 1, 0) // versioned marker v1
+	raw = append(raw, byte(turbine.MarkerGenesisCertificate), byte(len(inner)), byte(len(inner)>>8))
+	raw = append(raw, inner...)
+
+	_, err := turbine.UnmarshalBlockComponent(raw)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, turbine.ErrInvalidBlockComponent))
 }
 
 func TestShredEntryBatchRoundTrip(t *testing.T) {

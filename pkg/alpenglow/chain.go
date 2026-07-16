@@ -107,7 +107,10 @@ type ChainTracker struct {
 	skipCerts       map[uint64]Certificate
 	finalizeCerts   map[uint64]Certificate
 	directFinalized map[BlockID]CertificateType
-	chainFinalized  map[BlockID]struct{} // finalized by ancestry of a finalized block
+	// chainFinalized records the certificate type of the finalized descendant
+	// that rooted each ancestor. Retaining it lets later parent observations
+	// derive every skipped gap in the finalized chain.
+	chainFinalized map[BlockID]CertificateType
 	// finalizedBySlot indexes the finalized block PER SLOT (direct or by
 	// ancestry) so slot-keyed decision queries (CertifiedBlockAt, WantedBlocks)
 	// can surface a finalized block even when it never received a certificate
@@ -182,7 +185,7 @@ func NewChainTrackerWithConfig(cfg ChainConfig) *ChainTracker {
 		skipCerts:       make(map[uint64]Certificate),
 		finalizeCerts:   make(map[uint64]Certificate),
 		directFinalized: make(map[BlockID]CertificateType),
-		chainFinalized:  make(map[BlockID]struct{}),
+		chainFinalized:  make(map[BlockID]CertificateType),
 		indirectSkips:   make(map[uint64]chainIndirectSkip),
 		finalizedBySlot: make(map[uint64]BlockID),
 		conflicts:       make(map[uint64]chainConflict),
@@ -326,13 +329,12 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 
 	derived := false
 	if certType, finalized := t.directFinalized[obs.Block]; finalized {
-		t.deriveIndirectSkipsLocked(obs.Block, certType)
 		// The cert may have arrived before this observation supplied the parent
-		// link — ancestry marking needs the link, so re-run it now.
-		t.markChainFinalizedAncestorsLocked(obs.Block)
+		// link — ancestry and skipped-gap derivation need the link, so re-run now.
+		t.markChainFinalizedAncestorsLocked(obs.Block, certType)
 		derived = true
-	} else if _, chainFin := t.chainFinalized[obs.Block]; chainFin {
-		t.markChainFinalizedAncestorsLocked(obs.Block)
+	} else if certType, chainFin := t.chainFinalized[obs.Block]; chainFin {
+		t.markChainFinalizedAncestorsLocked(obs.Block, certType)
 		derived = true
 	}
 
@@ -495,15 +497,14 @@ func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType Certifi
 	if block.Slot >= t.latestDirectFinalizedBlock.Slot {
 		t.latestDirectFinalizedBlock = block
 	}
-	t.deriveIndirectSkipsLocked(block, certType)
-	t.markChainFinalizedAncestorsLocked(block)
+	t.markChainFinalizedAncestorsLocked(block, certType)
 }
 
 // markChainFinalizedAncestorsLocked walks parent links from a finalized block,
 // marking ancestors finalized-by-ancestry so their slots resolve to block decisions
 // even when they only carry fallback certs. The walk stops at unobserved parents or
 // ambiguity (several certified blocks at the parent slot with no exact match).
-func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
+func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID, certType CertificateType) {
 	for {
 		if t.prunedBeforeSlot != 0 && block.Slot <= t.prunedBeforeSlot {
 			return
@@ -512,6 +513,9 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 		if state == nil || !state.observed || state.parentSlot == 0 || state.parentSlot >= block.Slot {
 			return
 		}
+		// Every omitted slot on every parent edge of a finalized chain is
+		// resolved as skipped, not only the gap directly below the tip.
+		t.deriveIndirectSkipsLocked(block, certType)
 		if t.prunedBeforeSlot != 0 && state.parentSlot < t.prunedBeforeSlot {
 			t.recordConflictLocked(t.prunedBeforeSlot, "finalized ancestry crosses the durable root")
 			return
@@ -555,7 +559,7 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID) {
 			t.recordConflictLocked(parent.Slot, "multiple finalized block IDs for slot")
 			return
 		}
-		t.chainFinalized[parent] = struct{}{}
+		t.chainFinalized[parent] = certType
 		t.finalizedBySlot[parent.Slot] = parent
 		// Ancestry finalization creates the same exclusivity as direct finalization.
 		t.refreshConflictLocked(parent.Slot)

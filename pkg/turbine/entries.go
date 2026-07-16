@@ -19,6 +19,9 @@ const (
 	blockMarkerVariantHeader       = 1
 	blockMarkerVariantUpdateParent = 2
 	versionedParentInfoV1          = 1
+	// A minimally encoded transaction still has compact counts, the message
+	// header, and a recent blockhash.
+	minimumTransactionWireSize = 1 + 3 + 1 + 32 + 1
 )
 
 type Entry struct {
@@ -46,7 +49,7 @@ func (e *Entry) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("read transaction count: %w", err)
 	}
-	if numTxns > uint64(decoder.Remaining()) {
+	if numTxns > uint64(decoder.Remaining()/minimumTransactionWireSize) {
 		return fmt.Errorf("transaction count %d exceeds remaining bytes %d", numTxns, decoder.Remaining())
 	}
 	e.Txns = make([]solana.Transaction, numTxns)
@@ -67,7 +70,7 @@ func (b *entryBatch) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("read entry count: %w", err)
 	}
-	if numEntries > uint64(decoder.Remaining()) {
+	if numEntries > uint64(decoder.Remaining()/minimumEntryWireSize) {
 		return fmt.Errorf("entry count %d exceeds remaining bytes %d", numEntries, decoder.Remaining())
 	}
 	b.Entries = make([]Entry, numEntries)
@@ -156,6 +159,9 @@ func decodeEntryBatch(data []byte) ([]Entry, error) {
 	var batch entryBatch
 	if err := batch.UnmarshalWithDecoder(&decoder); err != nil {
 		return nil, err
+	}
+	if decoder.Remaining() != 0 {
+		return nil, fmt.Errorf("entry batch has %d trailing bytes", decoder.Remaining())
 	}
 	return batch.Entries, nil
 }

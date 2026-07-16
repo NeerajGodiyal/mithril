@@ -20,7 +20,7 @@ type BuilderConfig struct {
 }
 
 func DefaultBuilderConfig() BuilderConfig {
-	return BuilderConfig{MaxValidators: alpenglow.MaximumValidators}
+	return BuilderConfig{MaxValidators: alpenglow.MaximumVATValidators}
 }
 
 // Builder accumulates skip/notar votes and produces footer reward certificates.
@@ -36,7 +36,7 @@ type Builder struct {
 func NewBuilder(cfg BuilderConfig) *Builder {
 	maxValidators := cfg.MaxValidators
 	if maxValidators <= 0 {
-		maxValidators = alpenglow.MaximumValidators
+		maxValidators = alpenglow.MaximumVATValidators
 	}
 	return &Builder{
 		maxValidators: maxValidators,

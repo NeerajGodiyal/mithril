@@ -14,7 +14,12 @@ import (
 )
 
 const (
-	MaximumValidators       = 4096
+	// CertificateBitmapCapacity is Agave's signer-bitmap wire bound. It is
+	// intentionally larger than the validator-admission cap so a legal zero
+	// tail remains decodable.
+	CertificateBitmapCapacity = 4096
+	// MaximumVATValidators is SIMD-0357's active validator-set cap.
+	MaximumVATValidators    = 2000
 	signerStoreVersionBase2 = byte(0)
 	signerStoreVersionBase3 = byte(1)
 	signerStoreHeaderLen    = 3
@@ -156,7 +161,7 @@ type CertificateVerifier struct {
 func NewCertificateVerifier() *CertificateVerifier {
 	return &CertificateVerifier{
 		sets:          make(map[uint64]ValidatorSet),
-		maxValidators: MaximumValidators,
+		maxValidators: MaximumVATValidators,
 	}
 }
 
@@ -180,8 +185,6 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 	}
 
 	candidates := make([]ValidatorStake, 0, len(stakes))
-	blsPubkeyCounts := make(map[[48]byte]uint32)
-	nodePubkeyCounts := make(map[solana.PublicKey]uint32)
 	for voteAcct, stake := range stakes {
 		if stake == 0 {
 			continue
@@ -202,6 +205,16 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 			Stake:                 stake,
 		}
 		candidates = append(candidates, candidate)
+	}
+	// Agave applies SIMD-0357 admission before constructing the BLS rank map.
+	// If the cutoff is tied, every validator at the cutoff stake is excluded.
+	candidates = capValidatorStakeEntries(candidates, MaximumVATValidators)
+	if len(candidates) == 0 {
+		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no validators remain after VAT stake cap for epoch %d", epoch)
+	}
+	blsPubkeyCounts := make(map[[48]byte]uint32, len(candidates))
+	nodePubkeyCounts := make(map[solana.PublicKey]uint32, len(candidates))
+	for _, candidate := range candidates {
 		blsPubkeyCounts[candidate.BlsPubkeyCompressed]++
 		nodePubkeyCounts[candidate.NodePubkey]++
 	}
@@ -225,9 +238,6 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 	if len(entries) == 0 {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: no BLS-ranked validators for epoch %d", epoch)
 	}
-	if len(entries) > MaximumValidators {
-		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: %d validators exceeds max %d", len(entries), MaximumValidators)
-	}
 	if totalStake == 0 {
 		return ValidatorSet{}, fmt.Errorf("alpenglow verifier: total BLS-ranked stake is zero for epoch %d", epoch)
 	}
@@ -244,6 +254,26 @@ func BuildValidatorSet(epoch uint64, stakes map[solana.PublicKey]uint64, voteAcc
 		entries[i].Rank = uint16(i)
 	}
 	return ValidatorSet{Epoch: epoch, Validators: entries, TotalStake: totalStake}, nil
+}
+
+func capValidatorStakeEntries(entries []ValidatorStake, maxValidators int) []ValidatorStake {
+	if len(entries) <= maxValidators {
+		return entries
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Stake != entries[j].Stake {
+			return entries[i].Stake > entries[j].Stake
+		}
+		return bytes.Compare(entries[i].BlsPubkeyCompressed[:], entries[j].BlsPubkeyCompressed[:]) < 0
+	})
+	cutoffStake := entries[maxValidators].Stake
+	capped := make([]ValidatorStake, 0, maxValidators)
+	for _, entry := range entries {
+		if entry.Stake > cutoffStake {
+			capped = append(capped, entry)
+		}
+	}
+	return capped
 }
 
 // ValidatorSetForEpoch returns the installed validator set for epoch (copy of
@@ -341,7 +371,7 @@ func (v *CertificateVerifier) VerifyRewardCertificateForEpoch(epoch uint64, cert
 	if len(cert.Signature) != BLSSignatureSize {
 		return fmt.Errorf("alpenglow verifier: %s reward certificate for slot %d has invalid signature length %d", cert.Type, cert.Slot, len(cert.Signature))
 	}
-	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, CertificateBitmapCapacity)
 	if err != nil {
 		return err
 	}
@@ -630,7 +660,7 @@ func verifyCertificateWithSetAndShredVersion(set ValidatorSet, cert Certificate,
 	if verifySignature && len(cert.Signature) != BLSSignatureSize {
 		return cert, CertificateVerifyResult{}, fmt.Errorf("alpenglow verifier: %s certificate for slot %d has invalid signature length %d", cert.Type, cert.Slot, len(cert.Signature))
 	}
-	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, CertificateBitmapCapacity)
 	if err != nil {
 		return cert, CertificateVerifyResult{}, err
 	}
@@ -898,7 +928,7 @@ func diagnoseCertificateWithSet(set ValidatorSet, cert Certificate, maxSamples i
 		BitmapBytes:    len(cert.Bitmap),
 		TotalStake:     set.TotalStake,
 	}
-	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	bitmap, err := DecodeSignerStoreBitmap(cert.Bitmap, CertificateBitmapCapacity)
 	if err != nil {
 		diag.BitmapError = err.Error()
 		return diag
@@ -993,7 +1023,7 @@ func DecodeSignerStoreBitmap(data []byte, maxLen int) (SignerBitmap, error) {
 	if len(data) < signerStoreHeaderLen {
 		return SignerBitmap{}, fmt.Errorf("alpenglow verifier: signer bitmap too short")
 	}
-	if maxLen < 0 || maxLen > MaximumValidators {
+	if maxLen < 0 || maxLen > CertificateBitmapCapacity {
 		return SignerBitmap{}, fmt.Errorf("alpenglow verifier: invalid max bitmap len %d", maxLen)
 	}
 	totalBits := int(binary.LittleEndian.Uint16(data[1:3]))
@@ -1016,7 +1046,7 @@ func DecodeSignerStoreBitmap(data []byte, maxLen int) (SignerBitmap, error) {
 // base3 symbols (0/1/2 = none/base/fallback, 5 per byte). Base3 requires
 // disjoint base/fallback sets.
 func EncodeSignerStoreBitmap(b SignerBitmap) ([]byte, error) {
-	if b.Length < 0 || b.Length > MaximumValidators {
+	if b.Length < 0 || b.Length > CertificateBitmapCapacity {
 		return nil, fmt.Errorf("alpenglow verifier: invalid bitmap length %d", b.Length)
 	}
 	out := []byte{0, byte(b.Length), byte(b.Length >> 8)}

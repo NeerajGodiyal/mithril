@@ -12,6 +12,9 @@ import (
 const (
 	versionedMarkerTagV1 = uint16(1)
 	versionedInnerTagV1  = uint8(1)
+	// Every entry has num_hashes, a 32-byte hash, and a transaction count
+	// before any transaction bytes.
+	minimumEntryWireSize = 8 + 32 + 8
 )
 
 // MarshalBlockComponent serializes a component using the Alpenglow wincode layout.
@@ -73,11 +76,17 @@ func unmarshalEntryBatch(data []byte) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if numEntries > uint64(dec.Remaining()/minimumEntryWireSize) {
+		return nil, fmt.Errorf("%w: entry count %d exceeds remaining bytes %d", ErrInvalidBlockComponent, numEntries, dec.Remaining())
+	}
 	entries := make([]Entry, numEntries)
 	for i := uint64(0); i < numEntries; i++ {
 		if err := entries[i].UnmarshalWithDecoder(&dec); err != nil {
 			return nil, fmt.Errorf("read entry %d: %w", i, err)
 		}
+	}
+	if dec.Remaining() != 0 {
+		return nil, fmt.Errorf("%w: entry batch has %d trailing bytes", ErrInvalidBlockComponent, dec.Remaining())
 	}
 	return entries, nil
 }
@@ -164,8 +173,8 @@ func unmarshalBlockMarkerV1(data []byte) (*BlockMarker, error) {
 	}
 	kind := BlockMarkerKind(data[0])
 	innerLen := binary.LittleEndian.Uint16(data[1:3])
-	if int(innerLen)+3 > len(data) {
-		return nil, fmt.Errorf("%w: marker length overflow", ErrInvalidBlockComponent)
+	if int(innerLen)+3 != len(data) {
+		return nil, fmt.Errorf("%w: marker payload length %d does not match remaining %d", ErrInvalidBlockComponent, innerLen, len(data)-3)
 	}
 	inner := data[3 : 3+innerLen]
 	switch kind {
@@ -207,8 +216,8 @@ func marshalVersionedBlockHeader(header BlockHeader) ([]byte, error) {
 }
 
 func unmarshalVersionedBlockHeader(data []byte) (*BlockHeader, error) {
-	if len(data) < 1+8+32 {
-		return nil, fmt.Errorf("%w: short block header", ErrInvalidBlockComponent)
+	if len(data) != 1+8+32 {
+		return nil, fmt.Errorf("%w: block header length %d, want %d", ErrInvalidBlockComponent, len(data), 1+8+32)
 	}
 	if data[0] != versionedInnerTagV1 {
 		return nil, fmt.Errorf("%w: unsupported header version", ErrInvalidBlockComponent)
@@ -228,8 +237,8 @@ func marshalVersionedUpdateParent(update UpdateParent) ([]byte, error) {
 }
 
 func unmarshalVersionedUpdateParent(data []byte) (*UpdateParent, error) {
-	if len(data) < 1+8+32 {
-		return nil, fmt.Errorf("%w: short update parent", ErrInvalidBlockComponent)
+	if len(data) != 1+8+32 {
+		return nil, fmt.Errorf("%w: update parent length %d, want %d", ErrInvalidBlockComponent, len(data), 1+8+32)
 	}
 	if data[0] != versionedInnerTagV1 {
 		return nil, fmt.Errorf("%w: unsupported update parent version", ErrInvalidBlockComponent)
@@ -289,6 +298,9 @@ func unmarshalVersionedBlockFooter(data []byte) (*BlockFooter, error) {
 	if err != nil {
 		return nil, err
 	}
+	if pos != len(data) {
+		return nil, fmt.Errorf("%w: block footer has %d trailing bytes", ErrInvalidBlockComponent, len(data)-pos)
+	}
 	return &footer, nil
 }
 
@@ -311,8 +323,11 @@ func unmarshalGenesisCert(data []byte) (*GenesisCertMarker, error) {
 	copy(cert.BlockID[:], data[8:40])
 	copy(cert.BLSSignature[:], data[40:232])
 	bitmapLen := binary.LittleEndian.Uint64(data[232:240])
-	if 240+int(bitmapLen) > len(data) {
-		return nil, fmt.Errorf("%w: genesis cert bitmap overflow", ErrInvalidBlockComponent)
+	if bitmapLen > 512 {
+		return nil, fmt.Errorf("%w: genesis cert bitmap length %d exceeds 512", ErrInvalidBlockComponent, bitmapLen)
+	}
+	if bitmapLen > uint64(len(data)-240) || 240+int(bitmapLen) != len(data) {
+		return nil, fmt.Errorf("%w: genesis cert bitmap length %d does not match remaining %d", ErrInvalidBlockComponent, bitmapLen, len(data)-240)
 	}
 	cert.Bitmap = append([]byte(nil), data[240:240+bitmapLen]...)
 	return &cert, nil

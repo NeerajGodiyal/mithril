@@ -164,7 +164,7 @@ func ValidateBlockFinalCertificate(
 }
 
 func collectFinalCertSigners(set alpenglow.ValidatorSet, cert alpenglow.Certificate, signers map[solana.PublicKey]struct{}) error {
-	bitmap, err := alpenglow.DecodeSignerStoreBitmap(cert.Bitmap, len(set.Validators))
+	bitmap, err := alpenglow.DecodeSignerStoreBitmap(cert.Bitmap, alpenglow.CertificateBitmapCapacity)
 	if err != nil {
 		return err
 	}
