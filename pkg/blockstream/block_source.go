@@ -53,6 +53,7 @@ type BlockSourceOpts struct {
 	GossipClient                 *gossip.Client
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
+	AlpenglowFirstShredSink      func(slot uint64)
 	// Cert-driven repair feed: certified-but-unobserved blocks the repair loop
 	// steers turbine toward, and the skip oracle that cancels shred state for
 	// certificate-skipped slots.
@@ -333,10 +334,12 @@ type BlockSource struct {
 	retrySlots []uint64
 
 	// Worker coordination
-	workQueue   chan uint64
-	resultQueue chan fetchResult
-	stopChan    chan struct{}
-	stopped     atomic.Bool
+	workQueue    chan uint64
+	resultQueue  chan fetchResult
+	stopChan     chan struct{}
+	stopOnce     sync.Once
+	stopped      atomic.Bool
+	backgroundWg sync.WaitGroup
 
 	// Stall detection
 	lastProgress atomic.Int64 // Unix timestamp of last successful block emit
@@ -438,6 +441,7 @@ type BlockSource struct {
 	lastReorderGapSlot          atomic.Uint64 // backoff: repeated warns for the same waiting slot slow down
 	alpenglowDecisionSource     func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	alpenglowCandidateBlockSink func(alpenglow.ReplayBlockObservation)
+	alpenglowFirstShredSink     func(slot uint64)
 	alpenglowWantedBlocksFn     func(afterSlot uint64, max int) []alpenglow.WantedBlock
 	alpenglowSkipCertifiedFn    func(slot uint64) bool
 	alpenglowFooterCertSink     func(raw []byte)
@@ -727,6 +731,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		gossipClient:                   opts.GossipClient,
 		alpenglowDecisionSource:        opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:    opts.AlpenglowCandidateBlockSink,
+		alpenglowFirstShredSink:        opts.AlpenglowFirstShredSink,
 		alpenglowFooterCertSink:        opts.AlpenglowFooterCertSink,
 		alpenglowWantedBlocksFn:        opts.AlpenglowWantedBlocks,
 		alpenglowSkipCertifiedFn:       opts.AlpenglowSkipCertified,
@@ -1401,7 +1406,8 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		return true
 	}
 
-	if (!bs.isNearTip.Load() && !bs.repairCatchupActive()) || blk.Slot < bs.liveHandoffSlot.Load() {
+	catchupAccepting := bs.repairCatchupAcceptingLiveBlocks()
+	if (!bs.isNearTip.Load() && !catchupAccepting) || blk.Slot < bs.liveHandoffSlot.Load() {
 		bs.finishLiveDelivery(blk.Slot)
 		return true
 	}
@@ -1411,7 +1417,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	// eviction keeps the low end). The drive drains staging into the queue
 	// as replay advances — bounding reorder-buffer memory without ever
 	// discarding a block outright.
-	if bs.repairCatchupActive() && !bs.isNearTip.Load() {
+	if catchupAccepting && !bs.isNearTip.Load() {
 		bs.reorderMu.Lock()
 		waiting := bs.nextSlotToSend
 		bs.reorderMu.Unlock()
@@ -2456,7 +2462,11 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 				// Beyond tip - send back for retry
 				if maxSlot > 0 && slot > maxSlot {
 					bs.stats.ErrBeyondTip.Add(1)
-					bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}
+					select {
+					case bs.resultQueue <- fetchResult{slot: slot, err: errBeyondTip, rpcIdx: -1}:
+					case <-bs.stopChan:
+						return
+					}
 					continue
 				}
 			}
@@ -2480,14 +2490,27 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 		}
 
 		skipped := err == rpcclient.SlotSkipped
-		bs.resultQueue <- fetchResult{
+		select {
+		case bs.resultQueue <- fetchResult{
 			slot:      slot,
 			block:     blk,
 			err:       err,
 			skipped:   skipped,
 			rpcIdx:    rpcIdx,
 			latencyMs: fetchLatency.Milliseconds(),
+		}:
+		case <-bs.stopChan:
+			return
 		}
+	}
+}
+
+func (bs *BlockSource) emitReplayBlock(blk *b.Block) bool {
+	select {
+	case bs.streamChan <- blk:
+		return true
+	case <-bs.stopChan:
+		return false
 	}
 }
 
@@ -2848,7 +2871,9 @@ func (bs *BlockSource) emitOrderedBlocks() {
 					}
 				}
 
-				bs.streamChan <- blk
+				if !bs.emitReplayBlock(blk) {
+					return
+				}
 				// Update progress timestamp for stall detection
 				bs.lastProgress.Store(time.Now().Unix())
 
@@ -2895,7 +2920,9 @@ func (bs *BlockSource) emitOrderedBlocks() {
 						mlog.Log.Infof("BLOCK SOURCE STATUS: missing streamed slot %d was confirmed skipped via RPC; staying on %s stream", skippedSlot, bs.liveShredStreamName())
 					}
 				}
-				bs.streamChan <- skipBlock
+				if !bs.emitReplayBlock(skipBlock) {
+					return
+				}
 
 				// Update progress - skipped slots count as progress
 				bs.lastProgress.Store(time.Now().Unix())
@@ -3364,12 +3391,20 @@ func (bs *BlockSource) Start() {
 		bs.maybeStartLightbringerStream()
 	}
 
-	// Start tip poller
-	go bs.pollTip()
+	// Start tip poller.
+	bs.backgroundWg.Add(1)
+	go func() {
+		defer bs.backgroundWg.Done()
+		bs.pollTip()
+	}()
 
 	// Cert-driven repair: steer turbine toward certified-but-unobserved blocks.
 	if bs.sourceType == BlockSourceTurbine && bs.turbineAlpenglowBlockIDHints && bs.alpenglowWantedBlocksFn != nil {
-		go bs.alpenglowRepairLoop()
+		bs.backgroundWg.Add(1)
+		go func() {
+			defer bs.backgroundWg.Done()
+			bs.alpenglowRepairLoop()
+		}()
 	}
 
 	// Wait for initial tip
@@ -3410,23 +3445,42 @@ func (bs *BlockSource) Start() {
 	// Start scheduler (runs until all slots done)
 	bs.scheduler()
 
-	if bs.stopReasonEnum() == blockSourceStopReasonNone {
+	if bs.stopReasonEnum() == blockSourceStopReasonNone && !bs.stopped.Load() {
 		bs.reorderMu.Lock()
 		waitingSlot := bs.nextSlotToSend
 		bs.reorderMu.Unlock()
 		bs.setStopReason(blockSourceStopReasonUnexpectedLiveEnd, waitingSlot)
 	}
 
-	// Shutdown
-	bs.stopped.Store(true)
-	close(bs.stopChan)
+	// Shutdown. Stop is also called by replay when it abandons this source for
+	// a rooted fork recovery. Keeping the close idempotent lets that external
+	// teardown race safely with an ordinary scheduler completion.
+	bs.Stop()
 	close(bs.workQueue)
 	wg.Wait()
 	bs.liveStreamWg.Wait()
+	bs.backgroundWg.Wait()
 	localBlocksWg.Wait()
 	close(bs.resultQueue)
 	<-emitterDone
 	close(bs.streamChan)
+}
+
+// Stop asks every component owned by this block source to exit. Callers that
+// need ownership to be fully released (notably an in-process fork-replay that
+// will bind the same Turbine socket and reopen the same shred spool) must also
+// join the goroutine running Start.
+//
+// Stop is intentionally idempotent: the scheduler may finish at the same time
+// as replay decides to abandon an attempt.
+func (bs *BlockSource) Stop() {
+	if bs == nil {
+		return
+	}
+	bs.stopped.Store(true)
+	bs.stopOnce.Do(func() {
+		close(bs.stopChan)
+	})
 }
 
 // startSequential is the old sequential approach for non-RPC sources
@@ -3434,7 +3488,9 @@ func (bs *BlockSource) startSequential() {
 	for ; bs.currentSlot < bs.endSlot; bs.currentSlot++ {
 		newBlock, _ := bs.fetchAndParseBlockSequential(bs.currentSlot)
 		if newBlock != nil {
-			bs.streamChan <- newBlock
+			if !bs.emitReplayBlock(newBlock) {
+				break
+			}
 		}
 	}
 	close(bs.streamChan)

@@ -86,6 +86,7 @@ var (
 	TxsPerBlock                    = Metric{"txs_per_block"}
 	SnapshotTarBytesRead           = Metric{"snapshot_tar_bytes_read"}
 	SlotReplays                    = Metric{"slot_replays"}
+	BlockProductionLeaderSlots     = Metric{"block_production_leader_slots_total"}
 
 	SnapshotWorkerPoolUtilization = Metric{"snapshot_worker_pool_utilization"}
 	TasksSetIfSlotHigherQueueSize = Metric{"tasks_set_if_slot_higher_queue_size"}
@@ -159,8 +160,9 @@ var MetricToType = map[Metric]metricType{
 	SlotReplayDurationMs: TimingT,
 	TxsPerBlock:          TimingT,
 
-	SnapshotTarBytesRead: CountT,
-	SlotReplays:          CountT,
+	SnapshotTarBytesRead:       CountT,
+	SlotReplays:                CountT,
+	BlockProductionLeaderSlots: CountT,
 
 	TestCount: CountT,
 
@@ -224,10 +226,11 @@ var MetricToLabels = map[Metric][]string{
 	TasksIndexEntryBuilderLatency:  {},
 	TasksAppendVecCopyingLatency:   {},
 
-	SlotReplayDurationMs: {},
-	TxsPerBlock:          {},
-	SnapshotTarBytesRead: {},
-	SlotReplays:          {},
+	SlotReplayDurationMs:       {},
+	TxsPerBlock:                {},
+	SnapshotTarBytesRead:       {},
+	SlotReplays:                {},
+	BlockProductionLeaderSlots: {"outcome", "reason"},
 
 	SnapshotWorkerPoolUtilization: {"task"},
 	TasksSetIfSlotHigherQueueSize: {},

@@ -367,7 +367,7 @@ func runDoctorChecks(configFile string, cfg *configData) []checkResult {
 	case "", "verifying":
 		results = append(results, checkResult{"Node mode", "pass", "verifying (non-voting)"})
 	case "validator":
-		results = append(results, checkResult{"Node mode", "pass", "validator (voting engine not yet active)"})
+		results = append(results, checkResult{"Node mode", "pass", "validator (voting and block production active)"})
 	default:
 		results = append(results, checkResult{"Node mode", "fail", "invalid consensus.mode: " + cfg.consensusMode})
 	}

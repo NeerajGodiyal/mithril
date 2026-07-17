@@ -51,8 +51,9 @@ type unrootedState interface {
 	Add(slot uint64, delta []*accounts.Account, bankhash []byte)
 	SetContext(slot uint64, ctx *state.ResumeContext)
 	promote(through uint64) (uint64, *state.ResumeContext, error)
-	// flush force-folds the trailing partial chunk <= through (graceful
-	// shutdown), so restart re-execution is bounded by the fold batch size.
+	// flush force-folds the trailing partial chunk <= through. Epoch-boundary
+	// scans use it to settle the durable AccountsDB view; graceful shutdown uses
+	// it so restart re-execution is bounded by the fold batch size.
 	flush(through uint64) (uint64, *state.ResumeContext, error)
 	OverCap() bool
 }
@@ -92,12 +93,20 @@ func newUnrootedTail(durable blockAccountSource, committer batchCommitter, haltC
 // (rooted) value read at slot.
 func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
-		// Match AccountsDB's ownership semantics: callers receive a mutable
-		// account, never the WorkingSet's retained historical value. Fee and
-		// reward paths legitimately mutate values returned by this method.
+		// Callers receive a mutable account, never the WorkingSet's retained
+		// historical value. Fee and reward paths legitimately mutate values
+		// returned by this method.
 		return a.Clone(), nil
 	}
-	return t.durable.GetAccount(slot, pubkey)
+	a, err := t.durable.GetAccount(slot, pubkey)
+	if err != nil || a == nil {
+		return a, err
+	}
+	// AccountsDb may satisfy this read from one of its shared read caches.
+	// Do not let a speculative caller (notably leader fee distribution) mutate
+	// that cached parent in place: ordered replay must observe the same parent
+	// value when it reconstructs the locally produced block.
+	return a.Clone(), nil
 }
 
 // GetAccountsBatch returns one entry per requested key, in order, preferring the
@@ -142,6 +151,12 @@ func batchOverDurable(ctx context.Context, slot uint64, pks []solana.PublicKey, 
 			return nil, fmt.Errorf("durable GetAccountsBatch returned %d accounts for %d keys at slot %d", len(loaded), len(misses), slot)
 		}
 		for j, a := range loaded {
+			if a != nil {
+				// Durable batch results may likewise be cache-backed. The block
+				// loader owns and mutates its returned parent snapshot, so detach it
+				// from the durable read cache at this boundary.
+				a = a.Clone()
+			}
 			out[missIdx[j]] = a
 		}
 	}
@@ -173,7 +188,7 @@ func (t *unrootedTail) promote(through uint64) (uint64, *state.ResumeContext, er
 }
 
 // flush force-folds everything <= through including the partial trailing
-// chunk — the graceful-shutdown path, bounding restart re-execution.
+// chunk for epoch-boundary settlement and graceful shutdown.
 func (t *unrootedTail) flush(through uint64) (uint64, *state.ResumeContext, error) {
 	return t.promoteChunked(through, true)
 }

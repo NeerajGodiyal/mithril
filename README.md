@@ -127,7 +127,7 @@ This builds the `mithril` binary with version, commit, and branch information em
 Mithril runs as one of two node types, selected by `[consensus].mode`:
 
 - **Verifying node** (`mode = "verifying"`, the default) — non-voting: observes, executes, and verifies the cluster. No keypairs required.
-- **Validator** (`mode = "validator"`, Alpenglow only) — enables TPU ingress and scheduled block production and enforces identity + vote-account keypairs, the turbine block source with a gossip entrypoint, a public advertised IP, and the Votor QUIC listener. The voting engine has not landed yet, so it casts **no votes**.
+- **Validator** (`mode = "validator"`, Alpenglow only) — enables Votor voting, TPU ingress, and scheduled block production. It enforces an identity plus vote-account address, the turbine block source with a gossip entrypoint, a public advertised IP, and the Votor QUIC listener. Like Agave, the authorized voter defaults to the identity; configure a separate authorized-voter keypair when applicable.
 
 Alpenglow verifying and validator modes share the same certificate fork choice. Classic clusters do not start the Alpenglow engine and retain their existing verifying flow.
 
@@ -226,7 +226,7 @@ We're actively expanding RPC method coverage. Upcoming methods include transacti
 ### Current Limitations
 
 - **RPC still required**: live near-tip blocks stream from turbine shreds, but RPC `getBlock` is still used for catchup and by the trailing execution verifier (Alpenglow certificates attest block *data*, not execution results, so an external oracle cross-checks execution until peer bankhash cross-checking lands).
-- **Voting engine not yet active**: Alpenglow validator mode receives TPU traffic and produces scheduled blocks, but votes remain observer-only until BLS signing, durable own-vote history, and Votor transmission land.
+- **Alpenglow voting is experimental**: validator mode now signs, persists, self-verifies, and broadcasts Votor votes, but should be exercised on the community cluster before production use. Vote history is identity-bound and startup fails closed if it is corrupt. A `vote landed source=votor-quic proof=verified-aggregate` log is emitted only when an exact network-received, BLS-verified certificate includes the validator's rank for a vote present in its durable history; periodic `alpenglow voting stats` lines expose the cumulative confirmation and broadcast counters.
 - **Leader edge cases fail closed**: local production intentionally misses epoch-transition slots and slots with active partitioned epoch rewards until producer-side transition handling is implemented. TPU sanitation currently accepts legacy transactions only; versioned transactions are dropped rather than produced incorrectly.
 - **Remaining validator services**: repair serving and Rotor relay duty are still future work.
 

@@ -326,6 +326,25 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 	return update, nil
 }
 
+// HasVerifiedVote reports whether the exact logical vote is present in the
+// verified pool. The local voter uses this after self-injection so a bounded-
+// pool rejection can never be mistaken for successful admission and followed
+// by persistence or network broadcast.
+func (p *ConsensusPool) HasVerifiedVote(message VoteMessage) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.slots[message.Vote.Slot]
+	if state == nil {
+		return false
+	}
+	for _, hash := range state.byRank[message.Rank][message.Vote.Type] {
+		if hash == message.Vote.BlockHash {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *ConsensusPool) AddVerifiedCertificate(cert Certificate) (ConsensusUpdate, error) {
 	if !cert.SignatureVerified || !cert.StakeVerified {
 		return ConsensusUpdate{}, fmt.Errorf("consensus pool requires signature and stake verified certificate")
@@ -355,6 +374,43 @@ func (p *ConsensusPool) BlockProductionParent(slot uint64) BlockProductionParent
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.parentReady.BlockProductionParent(slot)
+}
+
+// HighestParentReady returns the highest slot and Agave-compatible preferred
+// parent currently known to the pool.
+func (p *ConsensusPool) HighestParentReady() (uint64, BlockID, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	slot := p.parentReady.highestWithParentReady
+	parents := p.parentReady.Parents(slot)
+	if len(parents) == 0 {
+		return 0, BlockID{}, false
+	}
+	return slot, parents[0], true
+}
+
+// CertificatesAtOrAfter snapshots accepted certificates for standstill
+// refresh. Returned signatures/bitmaps are deep-copied so broadcast never
+// aliases pool state.
+func (p *ConsensusPool) CertificatesAtOrAfter(slot uint64) []Certificate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	certs := make([]Certificate, 0, len(p.completed))
+	for _, cert := range p.completed {
+		if cert.Slot < slot {
+			continue
+		}
+		cert.Signature = append([]byte(nil), cert.Signature...)
+		cert.Bitmap = append([]byte(nil), cert.Bitmap...)
+		certs = append(certs, cert)
+	}
+	sort.Slice(certs, func(i, j int) bool {
+		if certs[i].Slot != certs[j].Slot {
+			return certs[i].Slot < certs[j].Slot
+		}
+		return certificateAssemblyPriority(certs[i].Type) < certificateAssemblyPriority(certs[j].Type)
+	})
+	return certs
 }
 
 func (p *ConsensusPool) HasNotarFallbackOrStronger(block BlockID) bool {

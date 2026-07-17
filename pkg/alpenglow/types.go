@@ -294,6 +294,16 @@ type Message struct {
 	ShredVersion uint16       `json:"shred_version,omitempty"`
 }
 
+func (m Message) Slot() uint64 {
+	if m.Vote != nil {
+		return m.Vote.Vote.Slot
+	}
+	if m.Certificate != nil {
+		return m.Certificate.Slot
+	}
+	return 0
+}
+
 func NewVoteMessage(vote Vote, signature []byte, rank uint16) Message {
 	msg := VoteMessage{Vote: vote, Signature: signature, Rank: rank}
 	return Message{Vote: &msg}

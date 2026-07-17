@@ -163,7 +163,7 @@ func TestReceiverCountsMalformedVotorPayload(t *testing.T) {
 func sendVotorQUICPayload(t *testing.T, addr string, payload []byte) *quic.Conn {
 	t.Helper()
 
-	cert, err := newVotorQUICCertificate()
+	cert, err := newVotorQUICCertificate(nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

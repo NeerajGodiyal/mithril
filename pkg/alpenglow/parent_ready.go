@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"time"
 )
 
 const (
@@ -26,12 +27,17 @@ const (
 type BlockProductionParent struct {
 	Kind   BlockProductionParentKind
 	Parent BlockID
+	// ReadyAt is the local monotonic instant at which Votor most recently made
+	// this window producible. Agave starts every per-slot block deadline from
+	// the ParentReady event, not from a separately extrapolated wall slot.
+	ReadyAt time.Time
 }
 
 type parentReadyStatus struct {
 	skip           bool
 	notarFallbacks []BlockID
 	parentsReady   []BlockID
+	readyAt        time.Time
 }
 
 // ParentReadyTracker mirrors Agave's parent-ready state machine. A block is a
@@ -113,6 +119,7 @@ func (t *ParentReadyTracker) addNotarFallbackOrStronger(block BlockID) ([]Consen
 		if !containsBlock(status.parentsReady, block) {
 			status.parentsReady = append(status.parentsReady, block)
 			if isLeaderWindowStart(slot) {
+				status.readyAt = time.Now()
 				events = append(events, ConsensusEvent{Kind: ConsensusEventParentReady, Slot: slot, Block: block})
 			}
 			if slot > t.highestWithParentReady {
@@ -165,6 +172,7 @@ func (t *ParentReadyTracker) AddSkip(slot uint64) []ConsensusEvent {
 			}
 			status.parentsReady = append(status.parentsReady, parent)
 			if isLeaderWindowStart(next) {
+				status.readyAt = time.Now()
 				events = append(events, ConsensusEvent{Kind: ConsensusEventParentReady, Slot: next, Block: parent})
 			}
 		}
@@ -198,7 +206,7 @@ func (t *ParentReadyTracker) BlockProductionParent(slot uint64) BlockProductionP
 	if len(parents) == 0 {
 		return BlockProductionParent{Kind: BlockProductionParentNotReady}
 	}
-	return BlockProductionParent{Kind: BlockProductionParentReady, Parent: parents[0]}
+	return BlockProductionParent{Kind: BlockProductionParentReady, Parent: parents[0], ReadyAt: t.status(slot).readyAt}
 }
 
 func (t *ParentReadyTracker) status(slot uint64) *parentReadyStatus {

@@ -108,3 +108,36 @@ func TestApplyAlpenglowFooterClockPersistsFooterNanosTimestamp(t *testing.T) {
 	require.Equal(t, int64(1779999999), decoded.UnixTimestamp)
 	require.Equal(t, blk.Slot, decoded.Slot)
 }
+
+func TestApplyAlpenglowFooterClockLocalDoesNotPublishSpeculativeClock(t *testing.T) {
+	snapshotClockCache(t)
+
+	parent := sealevel.SysvarClock{Slot: 100, Epoch: 5, LeaderScheduleEpoch: 6, EpochStartTimestamp: 1000, UnixTimestamp: 1050}
+	parentAcct := &accounts.Account{
+		Key:      sealevel.SysvarClockAddr,
+		Lamports: 1,
+		Data:     parent.MustMarshal(),
+	}
+	sealevel.SysvarCache.Clock.Sysvar = &parent
+	sealevel.SysvarCache.Clock.Acct = parentAcct
+
+	slotCtx := newClockSlotCtx(t, parent)
+	blk := &block.Block{Slot: 2160010, ParentSlot: 2160009, Epoch: 5, FooterProducerTimeNanos: 1779999999_987654321}
+	sched := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 432000, LeaderScheduleSlotOffset: 432000}
+
+	require.NoError(t, applyAlpenglowFooterClockLocal(slotCtx, blk, sched))
+
+	// The candidate bank has the footer Clock.
+	stored, err := slotCtx.GetAccount(sealevel.SysvarClockAddr)
+	require.NoError(t, err)
+	var candidate sealevel.SysvarClock
+	require.NoError(t, candidate.UnmarshalWithDecoder(bin.NewBinDecoder(stored.Data)))
+	require.Equal(t, blk.Slot, candidate.Slot)
+	require.Equal(t, int64(1779999999), candidate.UnixTimestamp)
+
+	// Ordered replay still sees the genuine parent Clock until it accepts the
+	// produced block itself.
+	require.Same(t, &parent, sealevel.SysvarCache.Clock.Sysvar)
+	require.Same(t, parentAcct, sealevel.SysvarCache.Clock.Acct)
+	require.Equal(t, uint64(100), sealevel.SysvarCache.Clock.Sysvar.Slot)
+}

@@ -304,16 +304,20 @@ name = "mithril"
 # observer sockets into the cluster (set it so a staked node joins the turbine
 # tree and receives shreds plus Votor traffic).
 #
-# In validator mode ([consensus].mode = "validator") the identity AND
-# vote-account keypairs are REQUIRED — the node refuses to start without them.
+# In validator mode ([consensus].mode = "validator") the identity keypair AND
+# vote-account address are REQUIRED — the node refuses to start without them.
 # The authorized withdrawer keypair is NOT needed at runtime: keep it OFFLINE.
 # Validator mode is supported only with network.cluster = "alpenglow".
 
 [validator]
     # identity_keypair = "/path/to/validator-keypair.json"
     identity_keypair = ""
+    # Public key or keypair path; the private key is not required for voting.
     # vote_account_keypair = "/path/to/vote-account-keypair.json"
     vote_account_keypair = ""
+    # Authorized voter used to derive the registered Alpenglow BLS key.
+    # Empty defaults to identity_keypair, matching Agave.
+    authorized_voter_keypair = ""
     # authorized_withdrawer_keypair = "/path/to/authorized-withdrawer-keypair.json"
     authorized_withdrawer_keypair = ""
 
@@ -341,13 +345,12 @@ name = "mithril"
     #                 validator.identity_keypair, validator.vote_account_keypair,
     #                 block.source = "turbine", turbine.gossip_entrypoint, and
     #                 consensus.alpenglow_observer_bind_addr are all REQUIRED.
-    #                 The voting engine (Votor event loop, BLS vote signing,
-    #                 durable vote history) has NOT landed yet: a validator-mode
-    #                 TPU ingress and block production are active. The voting
-    #                 engine has NOT landed yet, so the node casts no votes.
+    #                 Enables the Votor event loop, BLS vote signing, signed
+    #                 durable vote history, staked-peer QUIC broadcast, TPU
+    #                 ingress, and block production.
     mode = "verifying"
 
-    # Passive Alpenglow Votor QUIC listener (e.g. "0.0.0.0:8010").
+    # Alpenglow Votor QUIC listener (e.g. "0.0.0.0:8010").
     # Agave advertises this as the gossip "alpenglow" socket and sends
     # wincode ConsensusMessage payloads over Solana QUIC ("solana-tpu" ALPN).
     # When native turbine gossip is enabled, Mithril advertises this socket

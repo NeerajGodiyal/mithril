@@ -22,6 +22,25 @@ type fakeDurable struct {
 	batchCalls int
 }
 
+// sharedAccountDurable deliberately returns the same pointer on every read,
+// matching an AccountsDb read-cache hit. unrootedTail must detach callers from
+// that shared value before handing it out for mutation.
+type sharedAccountDurable struct {
+	acct *accounts.Account
+}
+
+func (d *sharedAccountDurable) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	return d.acct, nil
+}
+
+func (d *sharedAccountDurable) GetAccountsBatch(_ context.Context, _ uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+	out := make([]*accounts.Account, len(pks))
+	for i := range out {
+		out[i] = d.acct
+	}
+	return out, nil
+}
+
 func (d *fakeDurable) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	if l, ok := d.known[pubkey]; ok {
 		return &accounts.Account{Key: pubkey, Lamports: l}, nil
@@ -260,6 +279,31 @@ func TestUnrootedTailReadsDoNotMutateHeldState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(51), again.Lamports)
 	assert.Equal(t, []byte{1, 2, 3}, again.Data)
+}
+
+func TestUnrootedTailReadsDoNotMutateDurableCache(t *testing.T) {
+	key := testKey(1)
+	durable := &sharedAccountDurable{acct: &accounts.Account{
+		Key:      key,
+		Lamports: 51,
+		Data:     []byte{1, 2, 3},
+	}}
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
+
+	single, err := tail.GetAccount(6, key)
+	require.NoError(t, err)
+	single.Lamports = 99
+	single.Data[0] = 9
+	assert.Equal(t, uint64(51), durable.acct.Lamports)
+	assert.Equal(t, []byte{1, 2, 3}, durable.acct.Data)
+
+	batch, err := tail.GetAccountsBatch(context.Background(), 6, []solana.PublicKey{key})
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	batch[0].Lamports = 100
+	batch[0].Data[1] = 8
+	assert.Equal(t, uint64(51), durable.acct.Lamports)
+	assert.Equal(t, []byte{1, 2, 3}, durable.acct.Data)
 }
 
 // OverCap trips only when held slots exceed the cap (backpressure on stalled rooting).

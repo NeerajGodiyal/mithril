@@ -30,9 +30,13 @@ const (
 )
 
 type ReceiverConfig struct {
-	BindAddr            string
-	MaxMessageBytes     int64
-	ShredVersion        uint16
+	BindAddr        string
+	MaxMessageBytes int64
+	ShredVersion    uint16
+	// Identity binds the QUIC certificate's Ed25519 public key to the validator
+	// identity, allowing Agave's staked A2A admission to recognize this node.
+	// Empty retains an ephemeral certificate for passive observer mode.
+	Identity            ed25519.PrivateKey
 	Decode              DecodeOptions
 	LogInterval         time.Duration
 	MaxConnections      int
@@ -94,7 +98,7 @@ func NewReceiver(cfg ReceiverConfig, observer *Observer) (*Receiver, error) {
 		observer = NewObserver()
 	}
 
-	cert, err := newVotorQUICCertificate()
+	cert, err := newVotorQUICCertificate(cfg.Identity)
 	if err != nil {
 		return nil, fmt.Errorf("create Alpenglow Votor QUIC certificate: %w", err)
 	}
@@ -444,10 +448,20 @@ func normalizeReceiverConfig(cfg ReceiverConfig) ReceiverConfig {
 	return cfg
 }
 
-func newVotorQUICCertificate() (tls.Certificate, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
+func newVotorQUICCertificate(identity ed25519.PrivateKey) (tls.Certificate, error) {
+	priv := identity
+	var pub ed25519.PublicKey
+	if len(priv) == 0 {
+		var err error
+		pub, priv, err = ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return tls.Certificate{}, err
+		}
+	} else {
+		if len(priv) != ed25519.PrivateKeySize {
+			return tls.Certificate{}, fmt.Errorf("invalid Votor QUIC identity size %d", len(priv))
+		}
+		pub = priv.Public().(ed25519.PublicKey)
 	}
 
 	template := &x509.Certificate{

@@ -29,6 +29,9 @@ func TestParentReadyConnectsNotarizedBlockAcrossSkips(t *testing.T) {
 	if parent.Kind != BlockProductionParentReady || parent.Parent != block {
 		t.Fatalf("block production parent = %+v", parent)
 	}
+	if parent.ReadyAt.IsZero() {
+		t.Fatal("block production parent did not retain its ParentReady timer origin")
+	}
 }
 
 func TestParentReadyChoosesLowestBlockLikeAgave(t *testing.T) {

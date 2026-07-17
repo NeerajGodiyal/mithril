@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"strings"
@@ -18,6 +20,11 @@ import (
 const (
 	maxRecentAlpenglowBlockIDs   = 8192
 	maxVerifiedVotorCertificates = 8192
+	// Network events continuously re-anchor this short extrapolation. Capping
+	// it to one leader window prevents a quiet or disconnected receiver from
+	// recreating the unbounded startup-wall-clock drift that can skip our own
+	// leader slots.
+	alpenglowLiveClockSlotDuration = 200 * time.Millisecond
 )
 
 type certificateAttemptKey struct {
@@ -72,6 +79,16 @@ type AlpenglowFinalityIndex interface {
 
 type AlpenglowCandidateBlockObserver interface {
 	ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation)
+}
+
+type AlpenglowFirstShredObserver interface {
+	ObserveAlpenglowFirstShred(slot uint64)
+}
+
+// AlpenglowLiveSlotSource exposes the short, verified-network-anchored clock
+// used by block production and the voting live-window gate.
+type AlpenglowLiveSlotSource interface {
+	AlpenglowLiveSlot() (uint64, bool)
 }
 
 // AlpenglowFooterCertificateSink ingests finalization certs decoded from block
@@ -134,6 +151,7 @@ type Snapshot struct {
 	AlpenglowPool  *alpenglow.ConsensusPoolSnapshot `json:"alpenglow_pool,omitempty"`
 	AlpenglowChain *alpenglow.ChainSnapshot         `json:"alpenglow_chain,omitempty"`
 	Receiver       *alpenglow.ReceiverStats         `json:"receiver,omitempty"`
+	Voting         *VotingStats                     `json:"voting,omitempty"`
 }
 
 type Engine interface {
@@ -148,8 +166,9 @@ type Engine interface {
 type Config struct {
 	AlpenglowObserverBindAddr string
 	AlpenglowMaxMessageBytes  int64
-	AlpenglowBLSDST           string // BLS hash-to-curve DST; empty keeps the default (must match cluster's solana-bls version)
-	AlpenglowShredVersion     uint16 // included in each Alpenglow BLS vote-signing payload
+	AlpenglowBLSDST           string             // BLS hash-to-curve DST; empty keeps the default (must match cluster's solana-bls version)
+	AlpenglowShredVersion     uint16             // included in each Alpenglow BLS vote-signing payload
+	AlpenglowIdentity         ed25519.PrivateKey // validator identity for staked Votor QUIC; empty is passive observer mode
 }
 
 // NewEngine constructs the Alpenglow observer engine — the only consensus
@@ -166,7 +185,10 @@ func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 		receiverBindAddr:        strings.TrimSpace(cfg.AlpenglowObserverBindAddr),
 		receiverMaxMessageBytes: cfg.AlpenglowMaxMessageBytes,
 		shredVersion:            cfg.AlpenglowShredVersion,
+		identity:                append(ed25519.PrivateKey(nil), cfg.AlpenglowIdentity...),
 		recentBlockIDs:          make(map[uint64]solana.Hash),
+		observedReplayBlocks:    make(map[uint64]alpenglow.ReplayBlockObservation),
+		validatorSets:           make(map[uint64]alpenglow.ValidatorSet),
 	}
 	// CertPool remains the bounded, lazy BLS batch-verification front end. Its
 	// verified votes feed ConsensusPool, which is the sole certificate/finality
@@ -187,7 +209,14 @@ type AlpenglowObserverEngine struct {
 	receiverBindAddr        string
 	receiverMaxMessageBytes int64
 	shredVersion            uint16
+	identity                ed25519.PrivateKey
 	receiver                *alpenglow.Receiver
+	voterMu                 sync.RWMutex
+	voter                   *alpenglowVoter
+	observedReplayMu        sync.Mutex
+	observedReplayBlocks    map[uint64]alpenglow.ReplayBlockObservation
+	validatorSetsMu         sync.RWMutex
+	validatorSets           map[uint64]alpenglow.ValidatorSet
 	blockIDSinkMu           sync.RWMutex
 	blockIDSink             AlpenglowBlockIDSink
 	recentBlockIDs          map[uint64]solana.Hash
@@ -195,7 +224,7 @@ type AlpenglowObserverEngine struct {
 	epochLookupMu           sync.RWMutex
 	epochForSlot            func(slot uint64) uint64
 	pendingCertsMu          sync.Mutex
-	pendingCerts            map[uint64][]alpenglow.Certificate // deferred until their epoch's stakes install
+	pendingCerts            map[uint64][]pendingCertificate // deferred until their epoch's stakes install
 	certVerifyLogMu         sync.Mutex
 	certVerifyDropCount     uint64
 	certVerifyDetailCount   uint64
@@ -209,8 +238,14 @@ type AlpenglowObserverEngine struct {
 	certificateInFlight      map[certificateAttemptKey]*certificateVerification
 	certificateCacheHits     atomic.Uint64
 	certificateInflightDrops atomic.Uint64
+	networkProofsMu          sync.Mutex
+	networkProofs            map[certificateAttemptKey]struct{}
+	networkProofOrder        []certificateAttemptKey
 	votorMessageHookMu       sync.RWMutex
 	votorMessageHook         func(alpenglow.Message)
+	liveClockMu              sync.Mutex
+	liveClockSlot            uint64
+	liveClockAt              time.Time
 	// Pool transitions and downstream chain delivery are one ordered stream.
 	poolOutputMu sync.Mutex
 	safetyMu     sync.RWMutex
@@ -232,7 +267,7 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 	observer := e.ensureObserver()
 	e.ensureChain()
 	e.ensureVerifier()
-	mlog.Log.FileOnlyf("Consensus engine started: %s (passive; no votes will be signed)", e.Name())
+	mlog.Log.FileOnlyf("Consensus engine started: %s (voting activates only after validator key/rank/history checks)", e.Name())
 	mlog.Log.FileOnlyf("ALPENGLOW observer: certified path resolver requires stake and aggregate BLS signature verified certificates")
 	if e.receiverBindAddr == "" {
 		mlog.Log.FileOnlyf("ALPENGLOW observer: Votor receiver disabled; set consensus.alpenglow_observer_bind_addr to listen for Votor QUIC messages")
@@ -243,6 +278,7 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 		BindAddr:        e.receiverBindAddr,
 		MaxMessageBytes: e.receiverMaxMessageBytes,
 		ShredVersion:    e.shredVersion,
+		Identity:        e.identity,
 		AdmitMessage:    e.admitVotorMessage,
 	}, observer)
 	if err != nil {
@@ -255,6 +291,131 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+// EnableVoting turns the verified observer into an active Votor participant.
+// It fails closed on missing/corrupt history and does not emit anything until
+// the on-chain epoch rank proves the identity, vote account, and derived BLS
+// key are one validator.
+func (e *AlpenglowObserverEngine) EnableVoting(cfg VotingConfig) error {
+	if err := e.safetyError(); err != nil {
+		return err
+	}
+	e.voterMu.Lock()
+	if e.voter != nil {
+		e.voterMu.Unlock()
+		return fmt.Errorf("Alpenglow voting is already enabled")
+	}
+	root := alpenglow.BlockID{Slot: e.ensurePool().Snapshot().RootSlot}
+	if block, ok := e.ensureChain().FinalizedBlockAt(root.Slot); ok {
+		root = block
+	}
+	voter, err := newAlpenglowVoter(e, cfg, root)
+	if err != nil {
+		e.voterMu.Unlock()
+		return err
+	}
+	// Resume the furthest persisted ParentReady boundary before accepting new
+	// events, matching Agave's initial_parent_ready selection.
+	if slot, parent, ok := voter.history.HighestParentReady(); ok && slot > root.Slot {
+		e.ensurePool().RestoreParentReady(slot, parent)
+	}
+	e.voter = voter
+	e.voterMu.Unlock()
+
+	e.validatorSetsMu.RLock()
+	sets := make([]alpenglow.ValidatorSet, 0, len(e.validatorSets))
+	for _, set := range e.validatorSets {
+		sets = append(sets, cloneValidatorSet(set))
+	}
+	e.validatorSetsMu.RUnlock()
+	for _, set := range sets {
+		if err := voter.enqueue(voterEvent{kind: voterEventValidatorSet, set: set}); err != nil {
+			e.removeAndCloseVoter(voter)
+			return err
+		}
+	}
+	if slot, parent, ok := e.ensurePool().HighestParentReady(); ok {
+		if err := voter.enqueue(voterEvent{kind: voterEventConsensus, consensus: alpenglow.ConsensusEvent{
+			Kind:  alpenglow.ConsensusEventParentReady,
+			Slot:  slot,
+			Block: parent,
+		}}); err != nil {
+			e.removeAndCloseVoter(voter)
+			return err
+		}
+	}
+	mlog.Log.Infof("ALPENGLOW voting engine enabled for identity %s vote account %s (history=%s)", voter.node, voter.voteAccount, cfg.HistoryDir)
+	return nil
+}
+
+func (e *AlpenglowObserverEngine) removeAndCloseVoter(voter *alpenglowVoter) {
+	e.voterMu.Lock()
+	if e.voter == voter {
+		e.voter = nil
+	}
+	e.voterMu.Unlock()
+	_ = voter.close()
+}
+
+func (e *AlpenglowObserverEngine) enqueueVoter(event voterEvent) error {
+	e.voterMu.RLock()
+	voter := e.voter
+	e.voterMu.RUnlock()
+	if voter == nil {
+		return nil
+	}
+	return voter.enqueue(event)
+}
+
+func (e *AlpenglowObserverEngine) ObserveAlpenglowFirstShred(slot uint64) {
+	if slot == 0 || e.safetyError() != nil {
+		return
+	}
+	e.noteAlpenglowLiveSlot(slot)
+	if err := e.enqueueVoter(voterEvent{kind: voterEventFirstShred, slot: slot}); err != nil {
+		e.latchSafetyError(err)
+	}
+}
+
+// noteAlpenglowLiveSlot re-anchors the production clock on authenticated live
+// traffic. Comparing with the anchor (rather than its extrapolated value) lets
+// each later network event correct accumulated 200ms slot-duration drift.
+func (e *AlpenglowObserverEngine) noteAlpenglowLiveSlot(slot uint64) {
+	if slot == 0 {
+		return
+	}
+	e.liveClockMu.Lock()
+	if slot > e.liveClockSlot {
+		e.liveClockSlot = slot
+		e.liveClockAt = time.Now()
+	}
+	e.liveClockMu.Unlock()
+}
+
+// AlpenglowLiveSlot returns a bounded extrapolation from the latest verified
+// first shred or Votor proof. It deliberately becomes only four slots fresher
+// than its anchor: enough to cover our own leader window after the preceding
+// leader's traffic, but not enough to run hundreds of slots ahead in silence.
+func (e *AlpenglowObserverEngine) AlpenglowLiveSlot() (uint64, bool) {
+	e.liveClockMu.Lock()
+	slot, at := e.liveClockSlot, e.liveClockAt
+	e.liveClockMu.Unlock()
+	if slot == 0 || at.IsZero() {
+		return 0, false
+	}
+	elapsed := time.Since(at)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	elapsedSlots := uint64(elapsed / alpenglowLiveClockSlotDuration)
+	if elapsedSlots > alpenglow.LeaderWindowSlots {
+		elapsedSlots = alpenglow.LeaderWindowSlots
+	}
+	if slot > ^uint64(0)-elapsedSlots {
+		return ^uint64(0), true
+	}
+	return slot + elapsedSlots, true
 }
 
 func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObservation) error {
@@ -279,6 +440,15 @@ func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObser
 			At:         obs.At,
 		}
 		e.ensureObserver().ObserveReplayBlock(replayObs)
+		e.observedReplayMu.Lock()
+		e.observedReplayBlocks[blockID.Slot] = replayObs
+		// Replay is sequential and only needs the current speculative horizon.
+		for slot := range e.observedReplayBlocks {
+			if slot+maxRecentAlpenglowBlockIDs < blockID.Slot {
+				delete(e.observedReplayBlocks, slot)
+			}
+		}
+		e.observedReplayMu.Unlock()
 		if blockID.HasHash() {
 			e.observeChainReplayBlock(replayObs)
 		}
@@ -306,6 +476,16 @@ func (e *AlpenglowObserverEngine) OnReplayResult(_ context.Context, result SlotR
 			e.certPool.NoteLiveSlot(result.Slot)
 		}
 		e.ensurePool().NoteLiveSlot(result.Slot)
+		e.observedReplayMu.Lock()
+		obs, observed := e.observedReplayBlocks[result.Slot]
+		delete(e.observedReplayBlocks, result.Slot)
+		e.observedReplayMu.Unlock()
+		if observed {
+			if err := e.enqueueVoter(voterEvent{kind: voterEventBlock, block: obs}); err != nil {
+				e.latchSafetyError(err)
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -331,6 +511,13 @@ func (e *AlpenglowObserverEngine) Snapshot() Snapshot {
 	if e.pool != nil {
 		poolSnapshot := e.pool.Snapshot()
 		snapshot.AlpenglowPool = &poolSnapshot
+	}
+	e.voterMu.RLock()
+	voter := e.voter
+	e.voterMu.RUnlock()
+	if voter != nil {
+		votingSnapshot := voter.snapshot()
+		snapshot.Voting = &votingSnapshot
 	}
 	return snapshot
 }
@@ -379,12 +566,27 @@ func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpe
 	}
 	if msg.Certificate != nil {
 		verified, result, disposition, err := e.verifyCertificateCollapsed(*msg.Certificate, false)
-		if disposition != verificationFresh {
+		if disposition == verificationInFlight {
 			return alpenglow.Message{}, false
 		}
 		if err != nil {
 			e.logCertificateVerifyDrop(*msg.Certificate, result, err)
-			e.deferCertIfStakesMissing(*msg.Certificate, err)
+			e.deferCertIfStakesMissing(*msg.Certificate, err, true)
+			return alpenglow.Message{}, false
+		}
+		// This exact wire proof arrived over Votor QUIC and passed aggregate
+		// BLS/stake verification, so it is a safe live-clock anchor even when
+		// the logical certificate was already cached from another source.
+		e.noteAlpenglowLiveSlot(verified.Slot)
+		// A logical certificate can be cached before this particular wire proof
+		// arrives (for example from a block footer). Only attribute network
+		// confirmation when the exact signature+bitmap received over Votor QUIC
+		// is the proof that was cryptographically verified. Substituting a cached
+		// aggregate with a different signer set could falsely claim our rank.
+		if disposition == verificationFresh || sameCertificateProof(*msg.Certificate, verified) {
+			e.noteNetworkCertificate(verified)
+		}
+		if disposition != verificationFresh {
 			return alpenglow.Message{}, false
 		}
 		e.acceptVerifiedCertificate(verified)
@@ -392,6 +594,63 @@ func (e *AlpenglowObserverEngine) admitVotorMessage(msg alpenglow.Message) (alpe
 	// Admission is fully consumed above. Accepted verified messages are
 	// delivered exactly once by the ConsensusPool output path.
 	return alpenglow.Message{}, false
+}
+
+func sameCertificateProof(wire, verified alpenglow.Certificate) bool {
+	return wire.Key() == verified.Key() &&
+		bytes.Equal(wire.Signature, verified.Signature) &&
+		bytes.Equal(wire.Bitmap, verified.Bitmap)
+}
+
+// noteNetworkCertificate is called only for a certificate proof received over
+// Votor QUIC whose exact signature and bitmap have passed BLS verification.
+// Footer certificates and locally assembled certificates never enter here.
+func (e *AlpenglowObserverEngine) noteNetworkCertificate(cert alpenglow.Certificate) {
+	e.voterMu.RLock()
+	voter := e.voter
+	e.voterMu.RUnlock()
+	if voter == nil {
+		return
+	}
+
+	proof := certificateAttemptKey{
+		key:       cert.Key(),
+		signature: sha256.Sum256(cert.Signature),
+		bitmap:    sha256.Sum256(cert.Bitmap),
+	}
+	e.networkProofsMu.Lock()
+	if _, seen := e.networkProofs[proof]; seen {
+		e.networkProofsMu.Unlock()
+		return
+	}
+	if e.networkProofs == nil {
+		e.networkProofs = make(map[certificateAttemptKey]struct{})
+	}
+	e.networkProofs[proof] = struct{}{}
+	e.networkProofOrder = append(e.networkProofOrder, proof)
+	for len(e.networkProofs) > maxVerifiedVotorCertificates {
+		old := e.networkProofOrder[0]
+		e.networkProofOrder = e.networkProofOrder[1:]
+		delete(e.networkProofs, old)
+	}
+	e.networkProofsMu.Unlock()
+
+	if err := voter.enqueue(voterEvent{kind: voterEventNetworkCertificate, certificate: cert}); err != nil {
+		// Landing telemetry must never trip consensus safety. Permit a later
+		// duplicate proof to retry after transient queue pressure.
+		e.networkProofsMu.Lock()
+		delete(e.networkProofs, proof)
+		for i := len(e.networkProofOrder) - 1; i >= 0; i-- {
+			if e.networkProofOrder[i] != proof {
+				continue
+			}
+			copy(e.networkProofOrder[i:], e.networkProofOrder[i+1:])
+			e.networkProofOrder = e.networkProofOrder[:len(e.networkProofOrder)-1]
+			break
+		}
+		e.networkProofsMu.Unlock()
+		mlog.Log.FileOnlyf("ALPENGLOW voting: dropped network certificate landing observation at slot %d: %v", cert.Slot, err)
+	}
 }
 
 func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote) {
@@ -415,8 +674,22 @@ func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote
 		mlog.Log.Errorf("ALPENGLOW SAFETY: consensus-pool vote output rejected downstream: %v", err)
 		return
 	}
+	if len(update.Certificates) > 0 {
+		e.voterMu.RLock()
+		voter := e.voter
+		e.voterMu.RUnlock()
+		if voter != nil {
+			if err := voter.broadcastCertificates(update.Certificates); err != nil {
+				e.latchSafetyError(fmt.Errorf("broadcast locally assembled certificates: %w", err))
+				return
+			}
+		}
+	}
 	if !update.VoteAccepted {
 		return
+	}
+	if !vote.Local {
+		e.noteAlpenglowLiveSlot(vote.Message.Vote.Slot)
 	}
 	if _, err := e.ensureObserver().ObserveVote(vote.Message); err != nil {
 		fault := fmt.Errorf("observer rejected pool-accepted %s vote at slot %d: %w", vote.Message.Vote.Type, vote.Message.Vote.Slot, err)
@@ -425,6 +698,35 @@ func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote
 		return
 	}
 	e.deliverVerifiedVotorMessage(alpenglow.Message{Vote: &vote.Message})
+}
+
+func (e *AlpenglowObserverEngine) injectLocalVote(message alpenglow.VoteMessage, result alpenglow.VoteVerifyResult) error {
+	if err := e.safetyError(); err != nil {
+		return err
+	}
+	if epoch, ok := e.alpenglowEpochForSlot(message.Vote.Slot); ok && epoch != result.Epoch {
+		return fmt.Errorf("local vote epoch mismatch at slot %d: slot lookup=%d signer=%d", message.Vote.Slot, epoch, result.Epoch)
+	}
+	// Verify locally even though this process just signed it. This protects the
+	// pool from rank/DST/encoding integration mistakes and makes local and
+	// network admission share the same cryptographic boundary. Validator sets
+	// for the next epoch are normally preloaded, so verification must use the
+	// vote slot's selected epoch rather than the verifier's latest installed set.
+	verifiedResult, err := e.ensureVerifier().VerifyVoteMessageForEpoch(result.Epoch, message)
+	if err != nil {
+		return fmt.Errorf("self-verify signed vote: %w", err)
+	}
+	if verifiedResult != result {
+		return fmt.Errorf("self-verified vote metadata mismatch: got %+v want %+v", verifiedResult, result)
+	}
+	e.acceptVerifiedVote(alpenglow.VerifiedVote{Message: message, Result: verifiedResult, Local: true})
+	if err := e.safetyError(); err != nil {
+		return err
+	}
+	if !e.ensurePool().HasVerifiedVote(message) {
+		return fmt.Errorf("verified consensus pool did not accept local %s vote at slot %d rank %d", message.Vote.Type, message.Vote.Slot, message.Rank)
+	}
+	return nil
 }
 
 func (e *AlpenglowObserverEngine) acceptVerifiedCertificate(verified alpenglow.Certificate) (alpenglow.ConsensusUpdate, bool) {
@@ -494,6 +796,9 @@ func (e *AlpenglowObserverEngine) handleConsensusUpdate(update alpenglow.Consens
 			e.latchSafetyError(fault)
 			mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
 		}
+		if err := e.enqueueVoter(voterEvent{kind: voterEventConsensus, consensus: event}); err != nil {
+			return fmt.Errorf("deliver %s event to voting engine: %w", event.Kind, err)
+		}
 	}
 	return e.safetyError()
 }
@@ -523,7 +828,7 @@ func (e *AlpenglowObserverEngine) ObserveFooterCertificates(certs []alpenglow.Ce
 		verified, result, _, err := e.verifyCertificateCollapsed(cert, true)
 		if err != nil {
 			e.logCertificateVerifyDrop(cert, result, err)
-			e.deferCertIfStakesMissing(cert, err)
+			e.deferCertIfStakesMissing(cert, err, false)
 			continue
 		}
 		switch verified.Type {
@@ -550,11 +855,16 @@ const (
 	alpenglowPendingEpochCap = 4
 )
 
+type pendingCertificate struct {
+	certificate alpenglow.Certificate
+	fromNetwork bool
+}
+
 // deferCertIfStakesMissing buffers a certificate that failed verification only
 // because its epoch's validator set isn't installed yet, so it can be replayed once
 // the stakes arrive (otherwise a QUIC cert that races ahead of its epoch is lost and
 // that slot's decision stalls). Certs that fail for any other reason are not buffered.
-func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certificate, err error) {
+func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certificate, err error, fromNetwork bool) {
 	if err == nil || !strings.Contains(err.Error(), "no validator set") {
 		return
 	}
@@ -572,7 +882,7 @@ func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certif
 	e.pendingCertsMu.Lock()
 	defer e.pendingCertsMu.Unlock()
 	if e.pendingCerts == nil {
-		e.pendingCerts = make(map[uint64][]alpenglow.Certificate)
+		e.pendingCerts = make(map[uint64][]pendingCertificate)
 	}
 	// Bound distinct epoch buckets: evict the HIGHEST epoch when a new one would
 	// exceed the cap — garbage slots are typically far-future, genuine pending
@@ -590,7 +900,7 @@ func (e *AlpenglowObserverEngine) deferCertIfStakesMissing(cert alpenglow.Certif
 	if len(q) >= alpenglowPendingCertCap {
 		q = q[1:] // drop oldest
 	}
-	e.pendingCerts[epoch] = append(q, cert)
+	e.pendingCerts[epoch] = append(q, pendingCertificate{certificate: cert, fromNetwork: fromNetwork})
 }
 
 // replayPendingCertsForEpoch re-verifies and ingests certs deferred until this
@@ -600,10 +910,13 @@ func (e *AlpenglowObserverEngine) replayPendingCertsForEpoch(epoch uint64) {
 	certs := e.pendingCerts[epoch]
 	delete(e.pendingCerts, epoch)
 	e.pendingCertsMu.Unlock()
-	for _, cert := range certs {
-		verified, _, err := e.verifyCertificate(cert)
+	for _, pending := range certs {
+		verified, _, err := e.verifyCertificate(pending.certificate)
 		if err != nil {
 			continue
+		}
+		if pending.fromNetwork {
+			e.noteNetworkCertificate(verified)
 		}
 		e.acceptVerifiedCertificate(verified)
 	}
@@ -691,11 +1004,21 @@ func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.Validat
 	if err := e.ensureVerifier().SetValidatorSet(set); err != nil {
 		return err
 	}
+	e.validatorSetsMu.Lock()
+	e.validatorSets[set.Epoch] = cloneValidatorSet(set)
+	e.validatorSetsMu.Unlock()
 	mlog.Log.FileOnlyf("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)", set.Epoch, len(set.Validators), set.TotalStake)
-	e.replayPendingCertsForEpoch(set.Epoch)
 	if e.certPool != nil {
 		e.certPool.OnValidatorSetInstalled(set.Epoch)
 	}
+	// Install the set in the voter before replaying deferred network material.
+	// That keeps both consensus events and landing-proof events ordered behind
+	// the rank map they need.
+	if err := e.enqueueVoter(voterEvent{kind: voterEventValidatorSet, set: cloneValidatorSet(set)}); err != nil {
+		e.latchSafetyError(err)
+		return err
+	}
+	e.replayPendingCertsForEpoch(set.Epoch)
 	return nil
 }
 
@@ -715,6 +1038,9 @@ func (e *AlpenglowObserverEngine) SetAlpenglowRoot(block alpenglow.BlockID) {
 	e.ensureChain().PruneBeforeSlot(block.Slot)
 	if e.certPool != nil {
 		e.certPool.ObserveFloor(block.Slot)
+	}
+	if err := e.enqueueVoter(voterEvent{kind: voterEventRoot, root: block}); err != nil {
+		e.latchSafetyError(err)
 	}
 }
 
@@ -787,6 +1113,9 @@ func (e *AlpenglowObserverEngine) PruneAlpenglowBefore(slot uint64) {
 	if e.certPool != nil {
 		e.certPool.ObserveFloor(slot)
 	}
+	if err := e.enqueueVoter(voterEvent{kind: voterEventRoot, root: root}); err != nil {
+		e.latchSafetyError(err)
+	}
 }
 
 func (e *AlpenglowObserverEngine) latchSafetyError(err error) {
@@ -812,6 +1141,15 @@ func (e *AlpenglowObserverEngine) AlpenglowSafetyError() error {
 }
 
 func (e *AlpenglowObserverEngine) Close() error {
+	e.voterMu.Lock()
+	voter := e.voter
+	e.voter = nil
+	e.voterMu.Unlock()
+	if voter != nil {
+		if err := voter.close(); err != nil {
+			return err
+		}
+	}
 	if e.receiver != nil {
 		return e.receiver.Close()
 	}

@@ -34,6 +34,18 @@ type ReplayCtx struct {
 	HasEpochAcctsHash bool
 }
 
+// requireDurableEpochBoundaryParent protects the AccountsDB-wide epoch scans
+// from observing a stale durable view while newer rooted writes still live only
+// in the replay tail. Equality is the common case; a later durable slot is also
+// safe when resuming across skipped slots.
+func requireDurableEpochBoundaryParent(boundarySlot, parentSlot, durableSlot uint64) error {
+	if durableSlot >= parentSlot {
+		return nil
+	}
+	return fmt.Errorf("epoch boundary at slot %d requires durable parent %d before AccountsDB-wide scans; durable state is only at slot %d",
+		boundarySlot, parentSlot, durableSlot)
+}
+
 // newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
 // This ensures resume uses fresh values instead of potentially stale manifest data.
 func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*ReplayCtx, error) {
@@ -90,9 +102,13 @@ type BoundaryStakeScanResult struct {
 	StakeHistoryActivating   uint64
 	StakeHistoryDeactivating uint64
 	// For epoch stakes + vote cache
-	VoteAcctStakes      map[solana.PublicKey]uint64
-	EffectiveStakes     map[solana.PublicKey]uint64
-	TotalEffectiveStake uint64
+	VoteAcctStakes  map[solana.PublicKey]uint64
+	EffectiveStakes map[solana.PublicKey]uint64
+	// RewardEpochEffectiveStakes is the per-vote-account effective stake in
+	// targetEpoch. Alpenglow reward credits are divided by this denominator;
+	// EffectiveStakes above is for the next leader-schedule epoch instead.
+	RewardEpochEffectiveStakes map[solana.PublicKey]uint64
+	TotalEffectiveStake        uint64
 }
 
 // scanStakesForEpochBoundary performs a single streaming pass over all stake accounts,
@@ -110,6 +126,8 @@ func scanStakesForEpochBoundary(acctsDb *accountsdb.AccountsDb, slot uint64, tar
 	var voteAcctStakesMu sync.Mutex
 	effectiveStakes := make(map[solana.PublicKey]uint64)
 	var effectiveStakesMu sync.Mutex
+	rewardEpochEffectiveStakes := make(map[solana.PublicKey]uint64)
+	var rewardEpochEffectiveStakesMu sync.Mutex
 	var totalEffectiveStake atomic.Uint64
 
 	_, err := global.StreamStakeAccounts(acctsDb, slot,
@@ -120,6 +138,11 @@ func scanStakesForEpochBoundary(acctsDb *accountsdb.AccountsDb, slot uint64, tar
 				shEffective.Add(entry.Effective)
 				shActivating.Add(entry.Activating)
 				shDeactivating.Add(entry.Deactivating)
+				if entry.Effective > 0 {
+					rewardEpochEffectiveStakesMu.Lock()
+					rewardEpochEffectiveStakes[delegation.VoterPubkey] += entry.Effective
+					rewardEpochEffectiveStakesMu.Unlock()
+				}
 			}
 
 			// --- Epoch stakes accumulation ---
@@ -140,12 +163,13 @@ func scanStakesForEpochBoundary(acctsDb *accountsdb.AccountsDb, slot uint64, tar
 	}
 
 	return &BoundaryStakeScanResult{
-		StakeHistoryEffective:    shEffective.Load(),
-		StakeHistoryActivating:   shActivating.Load(),
-		StakeHistoryDeactivating: shDeactivating.Load(),
-		VoteAcctStakes:           voteAcctStakes,
-		EffectiveStakes:          effectiveStakes,
-		TotalEffectiveStake:      totalEffectiveStake.Load(),
+		StakeHistoryEffective:      shEffective.Load(),
+		StakeHistoryActivating:     shActivating.Load(),
+		StakeHistoryDeactivating:   shDeactivating.Load(),
+		VoteAcctStakes:             voteAcctStakes,
+		EffectiveStakes:            effectiveStakes,
+		RewardEpochEffectiveStakes: rewardEpochEffectiveStakes,
+		TotalEffectiveStake:        totalEffectiveStake.Load(),
 	}
 }
 
@@ -205,7 +229,6 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
 	newEpoch := epoch + 1
-	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(newEpoch)
 	leaderScheduleEpoch := epochSchedule.LeaderScheduleEpoch(block.Slot)
 
 	// Single streaming pass for both stake history and epoch stakes
@@ -237,7 +260,51 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t3 := time.Now()
 
 	if partitionedEpochRewards {
-		partitionedRewardsInfo, block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = beginPartitionedEpochRewardsDistribution(acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule, block, f, newEpoch, firstSlotInEpoch, rpcc, dbgOpts)
+		migrationSlot, alpenglowActive := f.ActivationSlot(features.Alpenglow)
+		migrationEpoch := epochSchedule.GetEpoch(migrationSlot)
+		rewardedEpoch := newEpoch - 1
+		admitted := global.EpochStakes(leaderScheduleEpoch)
+
+		mode := rewards.RewardCalculationMode{}
+		if alpenglowActive && rewardedEpoch > migrationEpoch {
+			mode.FullAlpenglow = true
+			mode.RewardEpochDelegatedStakes = scanResult.RewardEpochEffectiveStakes
+		}
+
+		// Agave persists these denominators for both the migration epoch and
+		// every full Alpenglow epoch so reward partitions can be reconstructed
+		// after a snapshot restore.
+		if alpenglowActive && rewardedEpoch >= migrationEpoch {
+			updated, parent, err := stageRewardEpochDelegatedStakes(
+				acctsDb, prevSlotCtx.Slot, block.Slot, rewardedEpoch,
+				admitted, scanResult.RewardEpochEffectiveStakes, replayCtx,
+			)
+			if err != nil {
+				panic(err)
+			}
+			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated)
+			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parent)
+		}
+
+		if alpenglowActive && f.IsActive(features.ValidatorAdmissionTicket) {
+			updated, parents, err := applyAlpenglowBoundaryVAT(
+				acctsDb, prevSlotCtx.Slot, block.Slot,
+				alpenglowVATBurnPerEpoch(f, epochSchedule, block.Slot), admitted,
+			)
+			if err != nil {
+				panic(err)
+			}
+			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated...)
+			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parents...)
+		}
+
+		var updated, parents []*accounts.Account
+		partitionedRewardsInfo, updated, parents = beginPartitionedEpochRewardsDistribution(
+			acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule,
+			block, f, newEpoch, block.Slot, rpcc, dbgOpts, mode,
+		)
+		block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated...)
+		block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parents...)
 	} else {
 		panic("only partitioned rewards supported")
 	}

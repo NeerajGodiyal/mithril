@@ -8,9 +8,10 @@ import "github.com/gagliardetto/solana-go"
 const AlpenglowFeatureGatePubkey = "a1penGLz8Vm2QHYB3JPefBiU4BY3Z6JkW2k3Scw5GWP"
 
 var (
-	alpenglowFeatureGatePubkey = solana.MustPublicKeyFromBase58(AlpenglowFeatureGatePubkey)
-	voteRewardAccountPubkey, _, _ = solana.FindProgramAddress([][]byte{[]byte("vote_reward_account")}, alpenglowFeatureGatePubkey)
-	nanosecondClockAccountPubkey, _, _ = solana.FindProgramAddress([][]byte{[]byte("alpenclock")}, alpenglowFeatureGatePubkey)
+	alpenglowFeatureGatePubkey                    = solana.MustPublicKeyFromBase58(AlpenglowFeatureGatePubkey)
+	voteRewardAccountPubkey, _, _                 = solana.FindProgramAddress([][]byte{[]byte("vote_reward_account")}, alpenglowFeatureGatePubkey)
+	nanosecondClockAccountPubkey, _, _            = solana.FindProgramAddress([][]byte{[]byte("alpenclock")}, alpenglowFeatureGatePubkey)
+	rewardEpochDelegatedStakesAccountPubkey, _, _ = solana.FindProgramAddress([][]byte{[]byte("reward_epoch_delegated_stakes")}, alpenglowFeatureGatePubkey)
 )
 
 // VoteRewardAccountAddr returns the vote-reward metadata PDA (Agave epoch inflation state).
@@ -21,4 +22,11 @@ func VoteRewardAccountAddr() solana.PublicKey {
 // NanosecondClockAccountAddr returns the Alpenglow nanosecond clock PDA (Agave alpenclock).
 func NanosecondClockAccountAddr() solana.PublicKey {
 	return nanosecondClockAccountPubkey
+}
+
+// RewardEpochDelegatedStakesAccountAddr returns Agave's bounded PDA containing
+// the effective-stake denominators used to recalculate Alpenglow epoch rewards
+// after restoring a snapshot during partitioned reward distribution.
+func RewardEpochDelegatedStakesAccountAddr() solana.PublicKey {
+	return rewardEpochDelegatedStakesAccountPubkey
 }

@@ -34,10 +34,10 @@ Two profiles:
   mithril config init              Verifying node (non-voting) — the default.
   mithril config init --validator  Validator — consensus.mode=validator with the
 	                                   required keypair/socket fields laid out
-	                                   (identity + vote-account keypairs, turbine
+	                                   (identity keypair + vote-account address, turbine
 	                                   gossip entrypoint, advertised IP, TPU and
 	                                   Votor QUIC listeners). Block production is
-	                                   active; consensus voting is not yet active.
+	                                   active and the node casts Alpenglow votes.
 
 If config.toml already exists, this command will not overwrite it.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -149,11 +149,12 @@ func generateStarterConfig(validator bool) string {
 
 	// The [validator] + [consensus] sections are the profile split: a
 	// verifying node needs neither keypairs nor the Votor listener; validator
-	// mode REQUIRES identity + vote-account keypairs, a turbine gossip
+	// mode REQUIRES an identity keypair + vote-account address, a turbine gossip
 	// entrypoint, and the Votor QUIC listener (enforced at startup).
 	nodeSections := `[validator]
 identity_keypair = ""              # Validator identity — advertises this node into turbine gossip; set for a staked Alpenglow node
-vote_account_keypair = ""          # Vote account keypair path (used once voting activates)
+vote_account_keypair = ""          # Vote account public key or keypair path
+authorized_voter_keypair = ""      # BLS derivation signer (empty defaults to identity_keypair, like Agave)
 authorized_withdrawer_keypair = "" # Authorized withdrawer keypair path (diagnostics only)
 tpu_quic_bind_addr = "0.0.0.0:8004"
 advertised_ip = ""                 # Required only in validator mode; public IP advertised for TPU QUIC
@@ -166,9 +167,10 @@ alpenglow_max_message_bytes = 0   # 0 = default
 alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)`
 	if validator {
 		nodeSections = `[validator]
-# REQUIRED in validator mode — the node refuses to start without these two.
-identity_keypair = "/path/to/validator-keypair.json"        # Signs gossip/turbine identity and, once voting activates, votes
+# REQUIRED in validator mode — the node refuses to start without these values.
+identity_keypair = "/path/to/validator-keypair.json"        # Signs gossip/turbine and authenticates Votor QUIC
 vote_account_keypair = "/path/to/vote-account-keypair.json" # The vote account votes are cast for
+authorized_voter_keypair = ""                               # Empty defaults to identity_keypair, matching Agave
 # NOT required at runtime — keep the withdrawer keypair OFFLINE.
 authorized_withdrawer_keypair = ""
 tpu_quic_bind_addr = "0.0.0.0:8004"
@@ -176,8 +178,7 @@ advertised_ip = "" # REQUIRED: public IP advertised for TPU QUIC
 tpu_sigverify_workers = 0
 
 [consensus]
-# Validator mode enables TPU ingress and block production. Consensus votes
-# remain observer-only until BLS signing and durable own-vote history land.
+# Validator mode enables TPU ingress, block production, and Votor voting.
 mode = "validator"
 alpenglow_observer_bind_addr = "0.0.0.0:8010" # REQUIRED: Votor QUIC vote/cert listener
 alpenglow_max_message_bytes = 0               # 0 = default

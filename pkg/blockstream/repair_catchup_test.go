@@ -200,6 +200,58 @@ func TestShredsOnlyRepairRearmsAcrossActiveHandoff(t *testing.T) {
 	}
 }
 
+// A near-tip regression is a two-phase transition: updateMode publishes the
+// pending bit immediately, then the resident repair monitor publishes the
+// active range.  The old intake gates recognized only the second phase.  A
+// block assembled during the pending interval was therefore dropped while
+// the assembler retained its completed-slot marker, producing the live
+// "lost after assembly" loop and forcing a full re-repair of the head slot.
+func TestPendingRepairCatchupKeepsActiveHandoffBlocks(t *testing.T) {
+	const (
+		handoff = uint64(1_900)
+		waiting = uint64(2_001)
+	)
+	bs := newRepairCatchupTestSource(1024)
+	bs.isNearTip.Store(false)
+	bs.repairCatchupPending.Store(true)
+	bs.repairCatchupFrom.Store(0)
+	bs.liveHandoffSlot.Store(handoff)
+	bs.liveStreamActive.Store(true)
+	bs.nextSlotToSend = waiting
+
+	if !bs.shouldDecodeLiveSlot(waiting) {
+		t.Fatalf("pending catchup must keep post-handoff decode admission open")
+	}
+
+	head := &b.Block{Slot: waiting, FromLiveStream: true, SourceParentSlot: waiting - 1}
+	if !bs.ingestLiveShredBlock(head) {
+		t.Fatalf("pending catchup must accept the assembled head block")
+	}
+	select {
+	case res := <-bs.resultQueue:
+		if res.slot != waiting || res.block != head {
+			t.Fatalf("pending catchup delivered %+v, want head slot %d", res, waiting)
+		}
+		bs.finishLiveDelivery(res.slot) // simulate emitOrderedBlocks intake
+	default:
+		t.Fatalf("pending catchup dropped the assembled head block")
+	}
+
+	farSlot := waiting + repairCatchupLiveDeliverWindow + 1
+	far := &b.Block{Slot: farSlot, FromLiveStream: true, SourceParentSlot: farSlot - 1}
+	if !bs.ingestLiveShredBlock(far) {
+		t.Fatalf("pending catchup must accept a far-edge block")
+	}
+	if got := bs.stagedLiveBlock(farSlot); got != far {
+		t.Fatalf("pending catchup far-edge block was not staged: got %p, want %p", got, far)
+	}
+	select {
+	case res := <-bs.resultQueue:
+		t.Fatalf("far-edge block bypassed bounded staging during pending catchup: slot %d", res.slot)
+	default:
+	}
+}
+
 func TestLostLiveBlockRefetchClearsEmitterDoneState(t *testing.T) {
 	bs := newRepairCatchupTestSource(1024)
 	const slot = uint64(2_001)

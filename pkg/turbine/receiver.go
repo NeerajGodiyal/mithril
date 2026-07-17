@@ -71,7 +71,14 @@ type UDPReceiver struct {
 	lastPacketUnix  atomic.Int64
 	lastDataSlot    atomic.Uint64
 	lastBlockSlot   atomic.Uint64
+
+	firstShredMu    sync.Mutex
+	firstShredSink  func(slot uint64)
+	firstShredSeen  map[uint64]struct{}
+	firstShredOrder []uint64
 }
+
+const maxFirstShredNotifications = 8192
 
 type ReceiverStats struct {
 	Packets              uint64
@@ -117,18 +124,48 @@ const turbineRepairReadWorkers = 4
 
 func NewUDPReceiver(addr string) *UDPReceiver {
 	return &UDPReceiver{
-		Addr:          addr,
-		assembler:     NewSlotAssembler(),
-		blocks:        make(chan *block.Block, 1024),
-		pendingBlocks: make(map[uint64]int),
-		errs:          make(chan error, 16),
-		ready:         make(chan error, 1),
-		hydrateKick:   make(chan struct{}, 1),
+		Addr:           addr,
+		assembler:      NewSlotAssembler(),
+		blocks:         make(chan *block.Block, 1024),
+		pendingBlocks:  make(map[uint64]int),
+		errs:           make(chan error, 16),
+		ready:          make(chan error, 1),
+		hydrateKick:    make(chan struct{}, 1),
+		firstShredSeen: make(map[uint64]struct{}),
 	}
 }
 
 func (r *UDPReceiver) SetLeaderForSlot(fn LeaderForSlotFunc) {
 	r.leaderForSlot = fn
+}
+
+// SetFirstShredSink registers the Votor early-crashed-leader signal. The sink
+// is called once per slot, after leader-signature verification and before full
+// block assembly.
+func (r *UDPReceiver) SetFirstShredSink(fn func(slot uint64)) {
+	r.firstShredMu.Lock()
+	r.firstShredSink = fn
+	r.firstShredMu.Unlock()
+}
+
+func (r *UDPReceiver) noteFirstShred(slot uint64) {
+	r.firstShredMu.Lock()
+	if _, exists := r.firstShredSeen[slot]; exists {
+		r.firstShredMu.Unlock()
+		return
+	}
+	r.firstShredSeen[slot] = struct{}{}
+	r.firstShredOrder = append(r.firstShredOrder, slot)
+	for len(r.firstShredOrder) > maxFirstShredNotifications {
+		old := r.firstShredOrder[0]
+		r.firstShredOrder = r.firstShredOrder[1:]
+		delete(r.firstShredSeen, old)
+	}
+	sink := r.firstShredSink
+	r.firstShredMu.Unlock()
+	if sink != nil {
+		sink(slot)
+	}
 }
 
 func (r *UDPReceiver) SetRepairPeerSource(identity ed25519.PrivateKey, source func() []gossip.RepairPeer) error {
@@ -557,6 +594,7 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 			return true
 		}
 	}
+	r.noteFirstShred(shred.Slot)
 	fromRepair := false
 	if r.repairClient != nil {
 		fromRepair = r.repairClient.observeShredResponse(conn, packet, addr, shred)

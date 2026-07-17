@@ -45,9 +45,137 @@ type CalculatedStakePoints struct {
 	ForceCreditsUpdateWithSkippedReward bool
 }
 
+const legacyInflationSlotsPerYear = 78_892_314.984
+
+type inflationSlotTimeTransition struct {
+	gate         features.FeatureGate
+	slotsPerYear float64
+}
+
+var inflationSlotTimeTransitions = [...]inflationSlotTimeTransition{
+	{gate: features.ReduceSlotTimeTo350ms, slotsPerYear: 90_162_645.696},
+	{gate: features.ReduceSlotTimeTo300ms, slotsPerYear: 105_189_753.312},
+	{gate: features.ReduceSlotTimeTo250ms, slotsPerYear: 126_227_703.974},
+	{gate: features.ReduceSlotTimeTo200ms, slotsPerYear: 157_784_629.968},
+}
+
+type effectiveInflationSlotTime struct {
+	slot         uint64
+	slotsPerYear float64
+}
+
+// inflationSlotTimeArchive mirrors Agave's SlotParamsArchive for the values
+// that affect inflation. Slot-time gates activate at the following epoch
+// boundary, and out-of-order longer-slot transitions are discarded.
+func inflationSlotTimeArchive(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	restoredSlotsPerYear float64,
+	bankEpoch uint64,
+	f *features.Features,
+) (float64, []effectiveInflationSlotTime) {
+	baseline := restoredSlotsPerYear
+	if baseline == 0 {
+		baseline = legacyInflationSlotsPerYear
+	}
+	if f == nil {
+		return baseline, nil
+	}
+
+	type candidate struct {
+		effectiveSlot uint64
+		slotsPerYear  float64
+	}
+	candidates := make([]candidate, len(inflationSlotTimeTransitions))
+	for i, transition := range inflationSlotTimeTransitions {
+		activationSlot, active := f.ActivationSlot(transition.gate)
+		if !active {
+			continue
+		}
+		activationEpoch := epochSchedule.GetEpoch(activationSlot)
+		candidates[i] = candidate{
+			effectiveSlot: epochSchedule.FirstSlotInEpoch(safemath.SaturatingAddU64(activationEpoch, 1)),
+			slotsPerYear:  transition.slotsPerYear,
+		}
+	}
+
+	// Once a reduction is effective, Agave reconstructs the historical archive
+	// from the genesis (400 ms) baseline rather than the current snapshot value.
+	bankFirstSlot := epochSchedule.FirstSlotInEpoch(bankEpoch)
+	for _, candidate := range candidates {
+		if candidate.slotsPerYear != 0 && candidate.effectiveSlot <= bankFirstSlot {
+			baseline = legacyInflationSlotsPerYear
+			break
+		}
+	}
+
+	archive := make([]effectiveInflationSlotTime, 0, len(candidates))
+	earliestSameOrShorter := uint64(math.MaxUint64)
+	for i := len(candidates) - 1; i >= 0; i-- {
+		candidate := candidates[i]
+		if candidate.slotsPerYear == 0 || candidate.effectiveSlot >= earliestSameOrShorter {
+			continue
+		}
+		archive = append(archive, effectiveInflationSlotTime{
+			slot: candidate.effectiveSlot, slotsPerYear: candidate.slotsPerYear,
+		})
+		earliestSameOrShorter = candidate.effectiveSlot
+	}
+	sort.Slice(archive, func(i, j int) bool { return archive[i].slot < archive[j].slot })
+	return baseline, archive
+}
+
+func inflationSlotRangeDurationInYears(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	restoredSlotsPerYear float64,
+	bankEpoch, startSlot, endSlot uint64,
+	f *features.Features,
+) float64 {
+	if startSlot >= endSlot {
+		return 0
+	}
+	baseline, archive := inflationSlotTimeArchive(epochSchedule, restoredSlotsPerYear, bankEpoch, f)
+	cursor := startSlot
+	currentSlotsPerYear := baseline
+	var duration float64
+	for _, transition := range archive {
+		if transition.slot <= startSlot {
+			currentSlotsPerYear = transition.slotsPerYear
+			continue
+		}
+		if transition.slot >= endSlot {
+			break
+		}
+		duration += float64(transition.slot-cursor) / currentSlotsPerYear
+		cursor = transition.slot
+		currentSlotsPerYear = transition.slotsPerYear
+	}
+	return duration + float64(endSlot-cursor)/currentSlotsPerYear
+}
+
+func inflationSlotsPerYearAtSlot(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	restoredSlotsPerYear float64,
+	bankEpoch, slot uint64,
+	f *features.Features,
+) float64 {
+	baseline, archive := inflationSlotTimeArchive(epochSchedule, restoredSlotsPerYear, bankEpoch, f)
+	slotsPerYear := baseline
+	for _, transition := range archive {
+		if transition.slot > slot {
+			break
+		}
+		slotsPerYear = transition.slotsPerYear
+	}
+	return slotsPerYear
+}
+
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
-	numSlots := GetInflationNumSlots(epochSchedule, epoch, f)
-	return float64(numSlots) / slotsPerYear
+	inflationActivationSlot := GetInflationStartSlot(f)
+	inflationStartSlot := epochSchedule.FirstSlotInEpoch(safemath.SaturatingSubU64(epochSchedule.GetEpoch(inflationActivationSlot), 1))
+	return inflationSlotRangeDurationInYears(
+		epochSchedule, slotsPerYear, epoch, inflationStartSlot,
+		epochSchedule.FirstSlotInEpoch(epoch), f,
+	)
 }
 
 func GetInflationNumSlots(epochSchedule *sealevel.SysvarEpochSchedule, epoch uint64, f *features.Features) uint64 {
@@ -84,7 +212,11 @@ func GetInflationStartSlot(f *features.Features) uint64 {
 func CalculatePreviousEpochInflationRewards(epochSchedule *sealevel.SysvarEpochSchedule, inflation *Inflation, prevEpochCapitalization, epoch, prevEpoch uint64, slotsPerYear float64, f *features.Features) uint64 {
 	slotInYear := SlotInYearForInflation(epochSchedule, slotsPerYear, epoch, f)
 	validatorRate := inflation.Validator(slotInYear)
-	prevEpochDurationInYears := float64(epochSchedule.SlotsInEpoch(prevEpoch)) / slotsPerYear
+	prevEpochSlotsPerYear := inflationSlotsPerYearAtSlot(
+		epochSchedule, slotsPerYear, epoch,
+		epochSchedule.FirstSlotInEpoch(prevEpoch), f,
+	)
+	prevEpochDurationInYears := float64(epochSchedule.SlotsInEpoch(prevEpoch)) / prevEpochSlotsPerYear
 
 	validatorRewards := validatorRate * float64(prevEpochCapitalization) * prevEpochDurationInYears
 	return uint64(validatorRewards)
@@ -369,6 +501,16 @@ type CalculatedStakeRewards struct {
 	NewCreditsObserved uint64
 }
 
+// RewardCalculationMode selects the credit semantics used for an epoch reward
+// calculation.  Tower credits are vote counts and are stake-weighted before
+// being scaled by PointValue.  Once Alpenglow is fully active, vote-account
+// credits are already lamport-denominated validator rewards; a delegation is
+// entitled to its effective-stake fraction of those credits directly.
+type RewardCalculationMode struct {
+	FullAlpenglow              bool
+	RewardEpochDelegatedStakes map[solana.PublicKey]uint64
+}
+
 func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *CalculatedStakePoints, delegation *sealevel.Delegation, voteState *sealevel.VoteStateVersions, rewardedEpoch uint64, pointValue PointValue, newRateActivationEpoch *uint64) *CalculatedStakeRewards {
 	if pointValue.Rewards == 0 || delegation.ActivationEpoch == rewardedEpoch {
 		stakePointsResult.ForceCreditsUpdateWithSkippedReward = true
@@ -397,7 +539,7 @@ func CalculateStakeRewardsForAcct(pubkey solana.PublicKey, stakePointsResult *Ca
 		return nil
 	}
 
-	splitResult := voteCommissionSplit(voteState, rewards)
+	splitResult := voteCommissionSplit(voteState, rewards, false, false)
 	if splitResult.IsSplit && (splitResult.VoterPortion == 0 || splitResult.StakerPortion == 0) {
 		//mlog.Log.Debugf("CalculateStakeRewardsForAcct: returning nil for %s. IsSplit = %t, splitResult.VoterPortion = %d, splitResult.StakerPortion = %d", stakePubkey, splitResult.VoterPortion, splitResult.StakerPortion)
 		return nil
@@ -418,47 +560,67 @@ type CommissionSplit struct {
 	IsSplit       bool
 }
 
-func mulDivPercent(on uint64, pct uint64) uint64 {
-	// pct must be 0..100
-	q := on / 100
-	r := on % 100
-	return q*pct + (r*pct)/100
+func mulDivBPS(on uint64, bps uint64) uint64 {
+	// bps must be 0..10_000. Splitting the quotient and remainder avoids a
+	// u64 overflow while retaining the exact floor(on*bps/10_000).
+	q := on / 10_000
+	r := on % 10_000
+	return q*bps + (r*bps)/10_000
 }
 
-func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64) CommissionSplit {
-	var commission byte
+func voteInflationCommissionBPS(voteState *sealevel.VoteStateVersions, useBasisPoints bool) uint16 {
+	var commissionBPS uint16
 
 	switch voteState.Type {
 	case sealevel.VoteStateVersionCurrent:
-		commission = voteState.Current.Commission
+		commissionBPS = uint16(voteState.Current.Commission) * 100
 	case sealevel.VoteStateVersionV0_23_5:
-		commission = voteState.V0_23_5.Commission
+		commissionBPS = uint16(voteState.V0_23_5.Commission) * 100
 	case sealevel.VoteStateVersionV1_14_11:
-		commission = voteState.V1_14_11.Commission
+		commissionBPS = uint16(voteState.V1_14_11.Commission) * 100
 	case sealevel.VoteStateVersionV4:
-		commission = byte(voteState.V4.InflationRewardsCommissionBps / 100)
+		commissionBPS = voteState.V4.InflationRewardsCommissionBps
 	}
+	if !useBasisPoints {
+		commissionBPS = (commissionBPS / 100) * 100
+	}
+	return min(commissionBPS, uint16(10_000))
+}
 
-	commissionRate := uint64(min(commission, 100))
+func voteCommissionSplit(voteState *sealevel.VoteStateVersions, rewards uint64, preserveLamports, useBasisPoints bool) CommissionSplit {
+	commissionBPS := uint64(voteInflationCommissionBPS(voteState, useBasisPoints))
+
 	result := CommissionSplit{}
 
-	switch commissionRate {
+	switch commissionBPS {
 	case 0:
 		// no commission, all rewards go to staker
 		result.StakerPortion = rewards
-	case 100:
+	case 10_000:
 		// 100% commission, all rewards go to validator
 		result.VoterPortion = rewards
 	default:
-		mine := mulDivPercent(rewards, commissionRate)
-		theirs := mulDivPercent(rewards, 100-commissionRate)
-
-		result.VoterPortion = mine
-		result.StakerPortion = theirs
+		// Alpenglow assigns the fractional-lamport remainder to the voter so
+		// every earned lamport is preserved. Tower retains the historical
+		// symmetric truncation behavior.
+		if preserveLamports {
+			result.StakerPortion = mulDivBPS(rewards, 10_000-commissionBPS)
+			result.VoterPortion = rewards - result.StakerPortion
+		} else {
+			result.VoterPortion = mulDivBPS(rewards, commissionBPS)
+			result.StakerPortion = mulDivBPS(rewards, 10_000-commissionBPS)
+		}
 		result.IsSplit = true
 	}
 
 	return result
+}
+
+func voteInflationRewardsCollector(votePubkey solana.PublicKey, voteState *sealevel.VoteStateVersions, customCollector bool) solana.PublicKey {
+	if customCollector && voteState != nil && voteState.Type == sealevel.VoteStateVersionV4 {
+		return voteState.V4.InflationRewardsCollector
+	}
+	return votePubkey
 }
 
 func calculateStakePointsAndCredits(
@@ -467,6 +629,8 @@ func calculateStakePointsAndCredits(
 	delegation *sealevel.Delegation,
 	voteState *sealevel.VoteStateVersions,
 	newRateActivationEpoch *uint64,
+	rewardedEpoch uint64,
+	mode RewardCalculationMode,
 ) CalculatedStakePoints {
 	creditsInStake := delegation.CreditsObserved
 
@@ -498,6 +662,40 @@ func calculateStakePointsAndCredits(
 
 	if creditsInVote == creditsInStake || len(epochCredits) == 0 {
 		return CalculatedStakePoints{NewCreditsObserved: creditsInVote}
+	}
+
+	if mode.FullAlpenglow {
+		latest := epochCredits[len(epochCredits)-1]
+		if latest.Epoch != rewardedEpoch {
+			return CalculatedStakePoints{NewCreditsObserved: creditsInStake}
+		}
+
+		newObserved := creditsInStake
+		var earnedCredits uint64
+		if creditsInStake < latest.PrevCredits {
+			earnedCredits = latest.Credits - latest.PrevCredits
+		} else if creditsInStake < latest.Credits {
+			earnedCredits = latest.Credits - newObserved
+		}
+		newObserved = max(newObserved, latest.Credits)
+
+		effectiveStake := delegation.StakeActivatingAndDeactivating(
+			rewardedEpoch, stakeHistory, newRateActivationEpoch,
+		).Effective
+		if earnedCredits == 0 || effectiveStake == 0 {
+			return CalculatedStakePoints{NewCreditsObserved: newObserved}
+		}
+		totalStake := mode.RewardEpochDelegatedStakes[delegation.VoterPubkey]
+		if totalStake == 0 {
+			return CalculatedStakePoints{
+				NewCreditsObserved:                  newObserved,
+				ForceCreditsUpdateWithSkippedReward: true,
+			}
+		}
+		points := wide.Uint128FromUint64(earnedCredits).
+			Mul(wide.Uint128FromUint64(effectiveStake)).
+			Div(wide.Uint128FromUint64(totalStake))
+		return CalculatedStakePoints{Points: points, NewCreditsObserved: newObserved}
 	}
 
 	/*start := sort.Search(len(epochCredits), func(i int) bool {
@@ -563,6 +761,17 @@ type spoolWriteRequest struct {
 	record *SpoolRecord
 }
 
+func shouldForceCreditsOnly(
+	pcs CalculatedStakePoints,
+	pointValueRewards, activationEpoch, rewardedEpoch, creditsObserved uint64,
+	mode RewardCalculationMode,
+) bool {
+	return pcs.ForceCreditsUpdateWithSkippedReward ||
+		pointValueRewards == 0 ||
+		activationEpoch == rewardedEpoch ||
+		(mode.FullAlpenglow && pcs.Points.Eq(wide.Uint128{}) && pcs.NewCreditsObserved != creditsObserved)
+}
+
 // CalculateRewardsStreaming performs a streaming calculation of stake rewards.
 // Phase 1: Stream stakes to calculate total points + write points spool (single AccountsDB scan)
 // Phase 2: Replay points spool to compute rewards + write temp spool (sequential file I/O only)
@@ -578,6 +787,7 @@ func CalculateRewardsStreaming(
 	blockhash [32]byte,
 	slotCtx *sealevel.SlotCtx,
 	f *features.Features,
+	mode RewardCalculationMode,
 ) (*StreamingRewardsResult, error) {
 	minimum := minimumStakeDelegation(slotCtx)
 	spoolDir := filepath.Join(acctsDb.AcctsDir, "..")
@@ -598,9 +808,6 @@ func CalculateRewardsStreaming(
 	var phase1NoVoteState atomic.Int64
 	var phase1ZeroPoints atomic.Int64
 	var phase1TotalStakeLamports atomic.Uint64
-
-	// Collect ALL vote pubkeys from delegations (matching in-memory path's pre-population)
-	var allVotePubkeys sync.Map
 
 	// Channel + single-writer goroutine for points spool writes
 	type pointsWriteRequest struct {
@@ -625,9 +832,6 @@ func CalculateRewardsStreaming(
 
 	_, err = global.StreamStakeAccounts(acctsDb, slot,
 		func(pk solana.PublicKey, delegation *sealevel.Delegation, creditsObs uint64) {
-			// Always record the vote pubkey, even for below-minimum delegations
-			allVotePubkeys.Store(delegation.VoterPubkey, struct{}{})
-
 			if delegation.StakeLamports < minimum {
 				phase1BelowMinimum.Add(1)
 				return
@@ -642,7 +846,7 @@ func CalculateRewardsStreaming(
 
 			delegWithCredits := *delegation
 			delegWithCredits.CreditsObserved = creditsObs
-			pcs := calculateStakePointsAndCredits(pk, stakeHistory, &delegWithCredits, voteState, newWarmupCooldownRateEpoch)
+			pcs := calculateStakePointsAndCredits(pk, stakeHistory, &delegWithCredits, voteState, newWarmupCooldownRateEpoch, rewardedEpoch, mode)
 
 			zero128 := wide.Uint128FromUint64(0)
 			if pcs.Points.Eq(zero128) {
@@ -657,9 +861,10 @@ func CalculateRewardsStreaming(
 
 			// Precompute the full forceCreditsUpdate flag using the same three
 			// triggers as CalculateStakeRewardsForAcct:
-			forceCredits := pcs.ForceCreditsUpdateWithSkippedReward ||
-				pointValue.Rewards == 0 ||
-				delegation.ActivationEpoch == rewardedEpoch
+			forceCredits := shouldForceCreditsOnly(
+				pcs, pointValue.Rewards, delegation.ActivationEpoch,
+				rewardedEpoch, creditsObs, mode,
+			)
 
 			// Only write points records that Phase 2 will actually use:
 			// - forceCredits records produce spool records with 0 rewards
@@ -717,13 +922,7 @@ func CalculateRewardsStreaming(
 	}
 	tempPath := tempWriter.Path()
 
-	// Pre-populate validatorRewards with ALL vote pubkeys from delegations
 	validatorRewards := make(map[solana.PublicKey]*atomic.Uint64)
-	allVotePubkeys.Range(func(key, _ interface{}) bool {
-		voterPk := key.(solana.PublicKey)
-		validatorRewards[voterPk] = &atomic.Uint64{}
-		return true
-	})
 
 	pointsReader, err := NewPointsSpoolReader(pointsPath)
 	if err != nil {
@@ -776,8 +975,12 @@ func CalculateRewardsStreaming(
 			continue
 		}
 
-		// 3. Compute reward: (points * totalRewards) / totalPoints
-		rewards128 := rec.Points.Mul(wide.Uint128FromUint64(pv.Rewards)).Div(pv.Points)
+		// 3. Tower points are scaled across the inflation pool. Full
+		// Alpenglow points are already the delegation's lamport reward.
+		rewards128 := rec.Points
+		if !mode.FullAlpenglow {
+			rewards128 = rec.Points.Mul(wide.Uint128FromUint64(pv.Rewards)).Div(pv.Points)
+		}
 		if !rewards128.IsUint64() {
 			phase2SkippedNilReward++
 			continue
@@ -800,8 +1003,9 @@ func CalculateRewardsStreaming(
 				commissionVoteState = historicalVoteState
 			}
 		}
-		splitResult := voteCommissionSplit(commissionVoteState, rewards)
-		if splitResult.IsSplit && (splitResult.VoterPortion == 0 || splitResult.StakerPortion == 0) {
+		useBasisPoints := f.IsActive(features.CommissionRateInBasisPoints)
+		splitResult := voteCommissionSplit(commissionVoteState, rewards, mode.FullAlpenglow, useBasisPoints)
+		if !mode.FullAlpenglow && splitResult.IsSplit && (splitResult.VoterPortion == 0 || splitResult.StakerPortion == 0) {
 			phase2SkippedNilReward++
 			continue
 		}
@@ -823,7 +1027,15 @@ func CalculateRewardsStreaming(
 		}
 
 		if splitResult.VoterPortion > 0 {
-			validatorRewards[rec.VotePubkey].Add(splitResult.VoterPortion)
+			collector := voteInflationRewardsCollector(
+				rec.VotePubkey, voteState, f.IsActive(features.CustomCommissionCollector),
+			)
+			accumulator := validatorRewards[collector]
+			if accumulator == nil {
+				accumulator = &atomic.Uint64{}
+				validatorRewards[collector] = accumulator
+			}
+			accumulator.Add(splitResult.VoterPortion)
 		}
 	}
 
@@ -888,10 +1100,17 @@ func CalculateRewardsStreaming(
 		return nil, fmt.Errorf("partition spool close failed: %w", err)
 	}
 
+	reportedPoints := totalPoints
+	if mode.FullAlpenglow {
+		// Agave records zero total_points for a full Alpenglow epoch. The
+		// per-delegation values above are already final lamport rewards.
+		reportedPoints = wide.Uint128{}
+	}
+
 	return &StreamingRewardsResult{
 		SpoolDir:         spoolDir,
 		SpoolSlot:        slot,
-		TotalPoints:      totalPoints,
+		TotalPoints:      reportedPoints,
 		ValidatorRewards: validatorRewards,
 		NumStakeRewards:  actualRewardCount,
 		NumPartitions:    numPartitions,

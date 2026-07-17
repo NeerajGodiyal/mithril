@@ -71,6 +71,9 @@ type Client struct {
 	tvuPeerMu sync.Mutex
 	tvuPeers  map[Pubkey]TVUPeer
 
+	alpenglowPeerMu sync.Mutex
+	alpenglowPeers  map[Pubkey]AlpenglowPeer
+
 	rxPackets        atomic.Uint64
 	txPackets        atomic.Uint64
 	rxDecodeErrors   atomic.Uint64
@@ -111,6 +114,14 @@ type TVUPeer struct {
 	LastSeen time.Time
 }
 
+// AlpenglowPeer is a gossip contact's Votor QUIC endpoint. Voting code applies
+// the epoch validator-set filter before using these contacts.
+type AlpenglowPeer struct {
+	Pubkey        Pubkey
+	AlpenglowAddr *net.UDPAddr
+	LastSeen      time.Time
+}
+
 type Stats struct {
 	RxPackets        uint64
 	TxPackets        uint64
@@ -129,6 +140,7 @@ type Stats struct {
 	LastTxUnix       int64
 	Peers            int
 	RepairPeers      int
+	AlpenglowPeers   int
 }
 
 func NewClient(cfg Config) (*Client, error) {
@@ -196,6 +208,7 @@ func NewClient(cfg Config) (*Client, error) {
 		peers:              make(map[udpAddrKey]knownPeer),
 		repairPeers:        make(map[Pubkey]RepairPeer),
 		tvuPeers:           make(map[Pubkey]TVUPeer),
+		alpenglowPeers:     make(map[Pubkey]AlpenglowPeer),
 	}, nil
 }
 
@@ -323,6 +336,9 @@ func (c *Client) Stats() Stats {
 	c.repairPeerMu.Lock()
 	repairPeers := len(c.repairPeers)
 	c.repairPeerMu.Unlock()
+	c.alpenglowPeerMu.Lock()
+	alpenglowPeers := len(c.alpenglowPeers)
+	c.alpenglowPeerMu.Unlock()
 	return Stats{
 		RxPackets:        c.rxPackets.Load(),
 		TxPackets:        c.txPackets.Load(),
@@ -341,6 +357,7 @@ func (c *Client) Stats() Stats {
 		LastTxUnix:       c.lastTxUnix.Load(),
 		Peers:            peers,
 		RepairPeers:      repairPeers,
+		AlpenglowPeers:   alpenglowPeers,
 	}
 }
 
@@ -632,6 +649,7 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 	c.recordPeerEndpoint(record.GossipAddr)
 	c.recordRepairPeerRecord(record)
 	c.recordTVUPeerRecord(record)
+	c.recordAlpenglowPeerRecord(record)
 	c.acceptedContacts.Add(1)
 }
 
@@ -788,6 +806,43 @@ func (c *Client) LookupTVU(pubkey solana.PublicKey) (*net.UDPAddr, bool) {
 	return cloneUDPAddr(peer.TVUAddr), true
 }
 
+// AlpenglowPeers returns non-expired Votor QUIC endpoints learned from signed
+// ContactInfo records.
+func (c *Client) AlpenglowPeers() []AlpenglowPeer {
+	if c == nil {
+		return nil
+	}
+	now := time.Now()
+	c.alpenglowPeerMu.Lock()
+	defer c.alpenglowPeerMu.Unlock()
+	for key, peer := range c.alpenglowPeers {
+		if now.Sub(peer.LastSeen) > peerExpirationWindow {
+			delete(c.alpenglowPeers, key)
+		}
+	}
+	out := make([]AlpenglowPeer, 0, len(c.alpenglowPeers))
+	for _, peer := range c.alpenglowPeers {
+		peer.AlpenglowAddr = cloneUDPAddr(peer.AlpenglowAddr)
+		out = append(out, peer)
+	}
+	return out
+}
+
+// LookupAlpenglow resolves a validator identity to its gossip-advertised
+// Votor QUIC socket.
+func (c *Client) LookupAlpenglow(pubkey solana.PublicKey) (*net.UDPAddr, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.alpenglowPeerMu.Lock()
+	defer c.alpenglowPeerMu.Unlock()
+	peer, ok := c.alpenglowPeers[Pubkey(pubkey)]
+	if !ok || peer.AlpenglowAddr == nil || time.Since(peer.LastSeen) > peerExpirationWindow {
+		return nil, false
+	}
+	return cloneUDPAddr(peer.AlpenglowAddr), true
+}
+
 func (c *Client) recordTVUPeerRecord(record contactRecord) {
 	addr := record.TVUAddr.UDPAddr()
 	if addr == nil {
@@ -800,6 +855,20 @@ func (c *Client) recordTVUPeerRecord(record contactRecord) {
 		LastSeen: time.Now(),
 	}
 	c.tvuPeerMu.Unlock()
+}
+
+func (c *Client) recordAlpenglowPeerRecord(record contactRecord) {
+	addr := record.Sockets[socketTagAlpenglow].UDPAddr()
+	if addr == nil {
+		return
+	}
+	c.alpenglowPeerMu.Lock()
+	c.alpenglowPeers[record.Pubkey] = AlpenglowPeer{
+		Pubkey:        record.Pubkey,
+		AlpenglowAddr: addr,
+		LastSeen:      time.Now(),
+	}
+	c.alpenglowPeerMu.Unlock()
 }
 
 func (c *Client) recordTx() {

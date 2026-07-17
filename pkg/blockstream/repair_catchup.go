@@ -16,6 +16,16 @@ func (bs *BlockSource) repairCatchupActive() bool {
 	return bs.repairCatchupFrom.Load() != 0
 }
 
+// repairCatchupAcceptingLiveBlocks covers both sides of the short handoff
+// between updateMode and the resident repair monitor.  updateMode first
+// clears near-tip and marks catchup pending; the monitor publishes the active
+// range a few ticks later.  Live blocks assembled in that interval must stay
+// admitted, otherwise the assembler keeps a completed-slot marker for a block
+// the block source discarded and replay has to repair it all over again.
+func (bs *BlockSource) repairCatchupAcceptingLiveBlocks() bool {
+	return bs.repairCatchupPending.Load() || bs.repairCatchupActive()
+}
+
 // repairCatchupResumeFrontier is the slot replay resumes at: the durable /
 // snapshot frontier seeded into the block source at construction (startSlot =
 // manifest.Bank.Slot+1 on a fresh bootstrap, i.e. the incremental snapshot

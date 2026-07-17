@@ -92,7 +92,7 @@ func runDoctor() {
 			missing = append(missing, "block.source=turbine")
 		}
 		if len(missing) == 0 {
-			fmt.Printf("  %s Node mode: Alpenglow validator (block production active; voting not yet active)\n", successStyle.Render("✓"))
+			fmt.Printf("  %s Node mode: Alpenglow validator (voting and block production active)\n", successStyle.Render("✓"))
 			passed++
 		} else {
 			fmt.Printf("  %s validator mode is missing: %s\n", errorStyle.Render("✗"), strings.Join(missing, ", "))

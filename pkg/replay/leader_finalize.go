@@ -119,7 +119,11 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 		}
 	}
 	if in.AlpenglowClock {
-		if err := applyAlpenglowFooterClock(slotCtx, block, in.EpochSchedule); err != nil {
+		// This is a speculative producer bank until the forged block passes
+		// through ordered replay. Keep its Clock slot-local: publishing it to the
+		// global replay cache here would replace the true parent Clock before
+		// ProcessBlock loads the block and would produce a different LtHash.
+		if err := applyAlpenglowFooterClockLocal(slotCtx, block, in.EpochSchedule); err != nil {
 			return nil, err
 		}
 		if err := updateAlpenglowNanosecondClockAccount(slotCtx, block); err != nil {

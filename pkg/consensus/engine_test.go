@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
 	bls12381 "github.com/Overclock-Validator/gnark-crypto/ecc/bls12-381"
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
@@ -57,6 +58,34 @@ func TestAlpenglowObserverTracksReplayInSnapshot(t *testing.T) {
 	}
 	if [32]byte(snapshot.Alpenglow.LatestReplayBlock.Hash) != alpenglowBlockID {
 		t.Fatalf("latest replay block hash = %s, want %x", snapshot.Alpenglow.LatestReplayBlock.Hash, alpenglowBlockID)
+	}
+}
+
+func TestAlpenglowLiveSlotUsesBoundedNetworkAnchors(t *testing.T) {
+	engine := &AlpenglowObserverEngine{}
+	if slot, ok := engine.AlpenglowLiveSlot(); ok || slot != 0 {
+		t.Fatalf("unanchored live slot = %d, ok=%v", slot, ok)
+	}
+
+	engine.ObserveAlpenglowFirstShred(100)
+	if slot, ok := engine.AlpenglowLiveSlot(); !ok || slot != 100 {
+		t.Fatalf("first-shred live slot = %d, ok=%v; want 100, true", slot, ok)
+	}
+	engine.noteAlpenglowLiveSlot(99)
+	if slot, ok := engine.AlpenglowLiveSlot(); !ok || slot != 100 {
+		t.Fatalf("older event rewound live slot to %d, ok=%v", slot, ok)
+	}
+
+	engine.liveClockMu.Lock()
+	engine.liveClockAt = time.Now().Add(-10 * time.Second)
+	engine.liveClockMu.Unlock()
+	if slot, ok := engine.AlpenglowLiveSlot(); !ok || slot != 100+alpenglow.LeaderWindowSlots {
+		t.Fatalf("quiet live slot = %d, ok=%v; want capped slot %d", slot, ok, 100+alpenglow.LeaderWindowSlots)
+	}
+
+	engine.noteAlpenglowLiveSlot(101)
+	if slot, ok := engine.AlpenglowLiveSlot(); !ok || slot != 101 {
+		t.Fatalf("newer event did not re-anchor live slot: %d, ok=%v", slot, ok)
 	}
 }
 
@@ -120,7 +149,7 @@ func TestAlpenglowPendingCertEpochCap(t *testing.T) {
 
 	noSet := fmt.Errorf("alpenglow verifier: no validator set for epoch")
 	for epoch := uint64(1); epoch <= uint64(alpenglowPendingEpochCap)+2; epoch++ {
-		observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: epoch}, noSet)
+		observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: epoch}, noSet, true)
 	}
 
 	observer.pendingCertsMu.Lock()
@@ -191,8 +220,8 @@ func TestAlpenglowDeferRejectsFarOffEpochs(t *testing.T) {
 	observer.SetAlpenglowEpochLookup(func(slot uint64) uint64 { return slot }) // slot == epoch
 
 	noSet := fmt.Errorf("alpenglow verifier: no validator set for epoch")
-	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 500}, noSet) // far future
-	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 2}, noSet)   // latest+1: in window
+	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 500}, noSet, true) // far future
+	observer.deferCertIfStakesMissing(alpenglow.Certificate{Slot: 2}, noSet, true)   // latest+1: in window
 
 	observer.pendingCertsMu.Lock()
 	defer observer.pendingCertsMu.Unlock()

@@ -29,6 +29,23 @@ func resolveInitialTransactionCount(rs *ResumeState, manifestCount uint64) (coun
 	return manifestCount, false
 }
 
+// initialReplayEpoch is the epoch of the state being extended. On resume this
+// is the rooted parent's epoch, which can differ from startSlot's epoch when an
+// epoch opens with skipped slots before the first executable block.
+func initialReplayEpoch(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	startSlot, manifestParentSlot uint64,
+	rs *ResumeState,
+) uint64 {
+	if rs != nil {
+		return epochSchedule.GetEpoch(rs.ParentSlot)
+	}
+	if manifestParentSlot != 0 {
+		return epochSchedule.GetEpoch(manifestParentSlot)
+	}
+	return epochSchedule.GetEpoch(startSlot)
+}
+
 func DecodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
 	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
 	dropped := 0

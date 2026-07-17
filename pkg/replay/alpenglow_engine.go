@@ -110,8 +110,22 @@ func cloneBLSCompressed(src *[48]byte) *[48]byte {
 }
 
 // applyAlpenglowFooterClock rewrites the Clock sysvar from the block footer's
-// timestamp (Alpenglow uses the footer time, not the estimated PoH time).
+// timestamp (Alpenglow uses the footer time, not the estimated PoH time) and
+// publishes the accepted value to replay's process-global sysvar cache.
 func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	return applyAlpenglowFooterClockWithCache(slotCtx, block, epochSchedule, true)
+}
+
+// applyAlpenglowFooterClockLocal performs the same deterministic slot-state
+// update without publishing it globally. Block production freezes a candidate
+// before that candidate re-enters ordered replay; updating SysvarCache there
+// would make replay mistake the candidate's Clock for its parent Clock and omit
+// the Clock delta from AccountsLtHash.
+func applyAlpenglowFooterClockLocal(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) error {
+	return applyAlpenglowFooterClockWithCache(slotCtx, block, epochSchedule, false)
+}
+
+func applyAlpenglowFooterClockWithCache(slotCtx *sealevel.SlotCtx, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, updateCache bool) error {
 	if _, ok, err := alpenglowFooterUnixTimestamp(block); err != nil {
 		return err
 	} else if !ok {
@@ -139,8 +153,10 @@ func applyAlpenglowFooterClock(slotCtx *sealevel.SlotCtx, block *b.Block, epochS
 	if err := slotCtx.SetAccount(sealevel.SysvarClockAddr, clockAcct); err != nil {
 		return fmt.Errorf("unable to write Alpenglow footer clock back to slot state: %w", err)
 	}
-	sealevel.SysvarCache.Clock.Sysvar = &clock
-	sealevel.SysvarCache.Clock.Acct = clockAcct
+	if updateCache {
+		sealevel.SysvarCache.Clock.Sysvar = &clock
+		sealevel.SysvarCache.Clock.Acct = clockAcct
+	}
 	return nil
 }
 

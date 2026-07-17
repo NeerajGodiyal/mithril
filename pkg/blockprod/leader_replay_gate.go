@@ -10,24 +10,35 @@ import (
 // leaderSlotReplayReady reports whether replay has advanced far enough to start
 // forging leaderSlot.
 //
-// Block production stays aligned with replay: every leader slot waits until its
-// immediate parent has passed authoritative replay, including consecutive local
-// leader slots. A locally frozen bank is not itself a committed chain tip.
+// Block production stays aligned with replay. Intrawindow slots wait until their
+// immediate parent has passed authoritative replay. The first slot of a four-slot
+// window is different: Votor's verified ParentReady selects the parent, which may
+// be older than leaderSlot-1 when the preceding window was skipped. This mirrors
+// Agave's ProduceWindow gate instead of waiting for those skipped slot numbers to
+// pass through ordered replay before opening the new window.
 func (l *LeaderLoop) leaderSlotReplayReady(leaderSlot uint64) (bool, error) {
 	if leaderSlot == 0 {
 		return true, nil
 	}
 
-	requiredFrontier := leaderSlot - 1
 	replaySlot := global.ReplayFrontier()
 	if replaySlot >= leaderSlot {
 		return false, fmt.Errorf("%w: ordered replay already resolved leader slot %d", errParentNotReady, leaderSlot)
 	}
-	if replaySlot == requiredFrontier {
-		_, _, err := l.resolveProductionParent(leaderSlot)
-		if err != nil {
-			return false, err
+
+	selectedParent, parentReadyRequired, err := l.resolveProductionParent(leaderSlot)
+	if err != nil {
+		return false, err
+	}
+	if parentReadyRequired {
+		if replaySlot < selectedParent.Slot {
+			return false, fmt.Errorf("%w: ordered replay at %d needs selected ParentReady parent %d", errParentNotReady, replaySlot, selectedParent.Slot)
 		}
+		return true, nil
+	}
+
+	requiredFrontier := leaderSlot - 1
+	if replaySlot == requiredFrontier {
 		return true, nil
 	}
 	return false, fmt.Errorf("%w: ordered replay at %d needs outcome through slot %d", errParentNotReady, replaySlot, requiredFrontier)

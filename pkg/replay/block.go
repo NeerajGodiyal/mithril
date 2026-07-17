@@ -1129,6 +1129,27 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	return nil
 }
 
+// epochBoundaryParentCtx reconstructs the small portion of the parent bank
+// context consumed by epoch-transition code when the first executable block
+// after startup crosses an epoch. This occurs when the epoch opens with one or
+// more skipped slots, so lastSlotCtx has not yet been created in this process.
+func epochBoundaryParentCtx(
+	acctsDb *accountsdb.AccountsDb,
+	block *b.Block,
+	parentEpoch uint64,
+	f *features.Features,
+) *sealevel.SlotCtx {
+	return &sealevel.SlotCtx{
+		Accounts:      accounts.NewMemAccounts(),
+		AccountsDb:    acctsDb,
+		Slot:          block.ParentSlot,
+		Epoch:         parentEpoch,
+		Features:      f,
+		Blockhash:     block.LastBlockhash,
+		LastBlockhash: block.LastBlockhash,
+	}
+}
+
 func configureGlobalCtx(block *b.Block) {
 	global.SetSlot(block.Slot)
 	global.SetEpoch(block.Epoch)
@@ -1313,7 +1334,8 @@ func ReplayBlocks(
 	global.SetManageLeaderSchedule(true)
 
 	var currentSlot uint64
-	currentEpoch := epochSchedule.GetEpoch(startSlot)
+	startEpoch := epochSchedule.GetEpoch(startSlot)
+	currentEpoch := initialReplayEpoch(epochSchedule, startSlot, mithrilState.ManifestParentSlot, resumeState)
 	var lastSlotCtx *sealevel.SlotCtx
 	var partitionedEpochRewardsEnabled bool
 	var partitionedRewardsInfo *rewards.PartitionedRewardDistributionInfo
@@ -1341,7 +1363,7 @@ func ReplayBlocks(
 				mithrilState.LastRootedSlot, mithrilState.SnapshotSlot)
 		}
 	}
-	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(currentEpoch) == startSlot
+	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(startEpoch) == startSlot
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, replayCtx, startSlot, isFirstSlotInEpoch)
 	if alpenglowMode {
 		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
@@ -1352,11 +1374,11 @@ func ReplayBlocks(
 	snapshotEpoch := epochSchedule.GetEpoch(mithrilState.ManifestParentSlot)
 	if resumeState != nil {
 		// Resume case - check if we've crossed epoch boundaries since snapshot
-		epochsCrossed := currentEpoch > snapshotEpoch
+		epochsCrossed := startEpoch > snapshotEpoch
 		if epochsCrossed && len(resumeState.ComputedEpochStakes) == 0 {
 			// Crossed epoch boundary but no persisted stakes - data loss (crash before persist)
-			mlog.Log.Errorf("Resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", currentEpoch, snapshotEpoch)
-			result.Error = fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", currentEpoch, snapshotEpoch)
+			mlog.Log.Errorf("Resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
+			result.Error = fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
 			return result
 		}
 		if len(resumeState.ComputedEpochStakes) > 0 {
@@ -1374,21 +1396,21 @@ func ReplayBlocks(
 			// Validate current epoch stakes exist (we build schedules for block.Epoch)
 			// Note: Don't validate leaderScheduleEpoch here - it can point to E+1 in second
 			// half of epoch E with non-standard slot offsets, causing false failures
-			if !global.HasEpochStakes(currentEpoch) {
-				mlog.Log.Errorf("Missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", currentEpoch)
-				result.Error = fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", currentEpoch)
+			if !global.HasEpochStakes(startEpoch) {
+				mlog.Log.Errorf("Missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
+				result.Error = fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
 				return result
 			}
 		} else {
 			// Resume in same epoch as snapshot, no boundaries crossed - state file epoch stakes still valid
-			if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
+			if err := buildInitialEpochStakesCache(mithrilState, startEpoch, snapshotEpoch); err != nil {
 				result.Error = err
 				return result
 			}
 		}
 	} else {
 		// Fresh start: load all epochs from state file
-		if err := buildInitialEpochStakesCache(mithrilState, currentEpoch, snapshotEpoch); err != nil {
+		if err := buildInitialEpochStakesCache(mithrilState, startEpoch, snapshotEpoch); err != nil {
 			result.Error = err
 			return result
 		}
@@ -1405,7 +1427,7 @@ func ReplayBlocks(
 		epochs := global.GetAllCachedEpochs()
 		slices.Sort(epochs)
 		for _, epoch := range epochs {
-			if epoch < currentEpoch {
+			if epoch < startEpoch {
 				continue
 			}
 			firstSlot := epochSchedule.FirstSlotInEpoch(epoch)
@@ -1419,7 +1441,7 @@ func ReplayBlocks(
 			mlog.Log.Infof("leader schedule ready for epoch %d (shred verification live)", epoch)
 		}
 		if _, ok := global.LeaderForSlot(startSlot); !ok {
-			result.Error = fmt.Errorf("leader schedule does not cover replay start slot %d (epoch %d)", startSlot, currentEpoch)
+			result.Error = fmt.Errorf("leader schedule does not cover replay start slot %d (epoch %d)", startSlot, startEpoch)
 			return result
 		}
 	}
@@ -1441,7 +1463,7 @@ func ReplayBlocks(
 		if lookupSink, ok := consensusEngine.(consensusengine.AlpenglowEpochLookupSink); ok {
 			lookupSink.SetAlpenglowEpochLookup(epochSchedule.GetEpoch)
 		}
-		installCachedAlpenglowValidatorSets(consensusEngine, currentEpoch)
+		installCachedAlpenglowValidatorSets(consensusEngine, startEpoch)
 	}
 
 	// 100-slot summary window collectors ("full" = reconstructable-from-shreds,
@@ -1640,8 +1662,8 @@ func ReplayBlocks(
 	// alone can advance the watermark, and it checks the verifier for a divergence
 	// unconditionally so a failure halts even while finality is flat. Returns true
 	// when the caller must halt (result.Error is already set). force=true
-	// force-folds the trailing partial chunk (shutdown); force=false folds full
-	// chunks only.
+	// force-folds the trailing partial chunk (epoch-boundary settlement and
+	// shutdown); force=false folds full chunks only.
 	foldRootedPrefix := func(force bool) (halt bool) {
 		if unrootedTailState == nil {
 			return false
@@ -1728,16 +1750,17 @@ func ReplayBlocks(
 		}
 
 		if force {
-			// Shutdown flush: settle the worker first, then fold everything
+			// Forced settlement: settle the worker first, then fold everything
 			// (including the trailing partial chunk) synchronously through the
-			// SAME gate-derived target — shutdown can never fold a slot the
+			// SAME gate-derived target. This is used before AccountsDB-wide epoch
+			// scans as well as at shutdown, and can never fold a slot the normal
 			// loop would refuse.
 			if res := promoter.drain(); res != nil {
 				applyFoldOutcome(res)
 			}
 			promotedThrough, rootedCtx, perr := unrootedTailState.flush(promoteThrough)
 			if perr != nil {
-				mlog.Log.Errorf("rooted-durable: shutdown flush stopped at slot %d: %v", promotedThrough, perr)
+				mlog.Log.Errorf("rooted-durable: forced fold stopped at slot %d: %v", promotedThrough, perr)
 			}
 			if promotedThrough > mithrilState.LastRootedSlot && rootedCtx != nil {
 				applyPromotionBookkeeping(promotedThrough, rootedCtx)
@@ -1816,6 +1839,9 @@ func ReplayBlocks(
 		if co, ok := consensusEngine.(consensusengine.AlpenglowCandidateBlockObserver); ok {
 			opts.AlpenglowCandidateBlockSink = co.ObserveAlpenglowCandidateBlock
 		}
+		if firstShred, ok := consensusEngine.(consensusengine.AlpenglowFirstShredObserver); ok {
+			opts.AlpenglowFirstShredSink = firstShred.ObserveAlpenglowFirstShred
+		}
 		// Cert-driven repair: the source's repair loop steers turbine toward
 		// certified-but-unobserved blocks and cancels shred state for
 		// certificate-skipped slots.
@@ -1878,7 +1904,20 @@ func ReplayBlocks(
 	if !isLive {
 		blockStream.DownloadInitialBlocks()
 	}
-	go blockStream.Start()
+	blockStreamDone := make(chan struct{})
+	go func() {
+		defer close(blockStreamDone)
+		blockStream.Start()
+	}()
+	// A typed fork-switch error returns to runReplayWithRecovery, which starts a
+	// new ReplayBlocks attempt in this process using the SAME Turbine address
+	// and shred spool. The abandoned source must release both before that retry
+	// is constructed; otherwise its receiver keeps the UDP port bound and the
+	// replacement source can only back off until the stall watchdog fires.
+	defer func() {
+		blockStream.Stop()
+		<-blockStreamDone
+	}()
 
 	var skippedSlotsCount int // Track skipped slots for 100-slot summary
 	replayStartLogged := false
@@ -2250,6 +2289,29 @@ func ReplayBlocks(
 
 		// epoch boundary
 		if block.Epoch != currentEpoch {
+			// Epoch transition code performs full AccountsDB scans for stake and
+			// vote accounts. The normal promotion path deliberately retains a
+			// rooted tail shorter than FoldBatchSlots in RAM, so without settling
+			// that tail these scans can miss the last slots' vote credits and
+			// compute the wrong rewards/bank hash. Force-fold only through the
+			// already gated rooted parent, then fail closed if finality has not yet
+			// made that exact parent durable.
+			if unrootedTailState != nil {
+				boundaryParentSlot := block.ParentSlot
+				if lastSlotCtx != nil {
+					boundaryParentSlot = lastSlotCtx.Slot
+				}
+				if foldRootedPrefix(true) {
+					break
+				}
+				if err := requireDurableEpochBoundaryParent(block.Slot, boundaryParentSlot, mithrilState.LastRootedSlot); err != nil {
+					result.Error = err
+					mlog.Log.Errorf("%v", err)
+					break
+				}
+				mlog.Log.FileOnlyf("epoch boundary: settled rooted parent %d into AccountsDB before epoch-wide scans", boundaryParentSlot)
+			}
+
 			mlog.Log.Infof("")
 			mlog.Log.Infof("=== Epoch Boundary ===")
 			mlog.Log.Infof("%d -> %d", currentEpoch, currentEpoch+1)
@@ -2260,7 +2322,11 @@ func ReplayBlocks(
 				applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, currentSlot)
 			}
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
-			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, lastSlotCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch, rpcc, dbgOpts)
+			boundaryParentCtx := lastSlotCtx
+			if boundaryParentCtx == nil {
+				boundaryParentCtx = epochBoundaryParentCtx(acctsDb, block, currentEpoch, replayCtx.CurrentFeatures)
+			}
+			partitionedRewardsInfo = handleEpochTransition(acctsDb, partitionedEpochRewardsEnabled, boundaryParentCtx, replayCtx, epochSchedule, replayCtx.CurrentFeatures, block, currentEpoch, rpcc, dbgOpts)
 			currentEpoch = block.Epoch
 			justCrossedEpochBoundary = true
 			// While partitioned rewards are distributing, hold durable promotion
@@ -2342,6 +2408,10 @@ func ReplayBlocks(
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
+
+		block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts = coalesceEpochAccountUpdates(
+			block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts,
+		)
 
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 

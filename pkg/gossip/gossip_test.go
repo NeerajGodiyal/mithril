@@ -7,6 +7,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/gagliardetto/solana-go"
 )
 
 func TestVarintAndShortLenEncoding(t *testing.T) {
@@ -201,6 +203,45 @@ func TestClientConfirmsLiveDuplicateIdentityBeforeSignaling(t *testing.T) {
 		}
 	default:
 		t.Fatal("newer foreign ContactInfo did not signal a live identity conflict")
+	}
+}
+
+func TestClientLearnsAlpenglowEndpointFromSignedContact(t *testing.T) {
+	_, localIdentity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey local: %v", err)
+	}
+	client, err := NewClient(Config{
+		Entrypoint:   "127.0.0.1:8000",
+		BindAddr:     "0.0.0.0:0",
+		ShredVersion: 4321,
+		Identity:     localIdentity,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, foreignIdentity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey foreign: %v", err)
+	}
+	foreignPubkey := Pubkey(foreignIdentity.Public().(ed25519.PublicKey))
+	foreign, err := NewContactInfo(
+		foreignPubkey,
+		4321,
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9000},
+		&net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9001},
+	)
+	if err != nil {
+		t.Fatalf("NewContactInfo: %v", err)
+	}
+	want := &net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9002}
+	if err := foreign.SetAlpenglowAddr(want); err != nil {
+		t.Fatalf("SetAlpenglowAddr: %v", err)
+	}
+	client.handleContactRecord(contactRecordFromInfo(t, foreign, foreignIdentity), 4321)
+	got, ok := client.LookupAlpenglow(solana.PublicKey(foreignPubkey))
+	if !ok || got.String() != want.String() {
+		t.Fatalf("LookupAlpenglow = %v, %t; want %v", got, ok, want)
 	}
 }
 

@@ -590,7 +590,7 @@ func (bs *BlockSource) shouldDecodeLiveSlot(slot uint64) bool {
 		// and edge blocks assembled meanwhile must not be dropped (a dropped
 		// block's slot is marked completed in the assembler and would need a
 		// cert-driven reset to re-fetch).
-		if (bs.repairCatchupPending.Load() || bs.repairCatchupActive()) && slot >= bs.repairCatchupGateSlot() {
+		if bs.repairCatchupAcceptingLiveBlocks() && slot >= bs.repairCatchupGateSlot() {
 			return true
 		}
 		if bs.catchupRescueCovers(slot) {
@@ -598,7 +598,7 @@ func (bs *BlockSource) shouldDecodeLiveSlot(slot uint64) bool {
 		}
 		return bs.isNearTip.Load() || bs.shouldStageLiveSlot(slot)
 	}
-	return (bs.isNearTip.Load() || bs.repairCatchupActive()) && slot >= handoffSlot
+	return (bs.isNearTip.Load() || bs.repairCatchupAcceptingLiveBlocks()) && slot >= handoffSlot
 }
 
 // inspectLaterLiveBlocksLocked summarizes later buffered live shred

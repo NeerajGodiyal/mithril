@@ -411,17 +411,25 @@ func ptrToVotingRewardSummary(summary votingRewardComparisonSummary) *votingRewa
 	return &summary
 }
 
-func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account) {
+func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions, mode rewards.RewardCalculationMode) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account) {
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
 	totalRewards := partitionedRewardsInfo.TotalStakingRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	voteCacheSnapshot := global.VoteCacheSnapshot()
+	if f.IsActive(features.ValidatorAdmissionTicket) {
+		admitted := global.EpochStakes(epochSchedule.LeaderScheduleEpoch(block.Slot))
+		for votePubkey := range voteCacheSnapshot {
+			if _, ok := admitted[votePubkey]; !ok {
+				delete(voteCacheSnapshot, votePubkey)
+			}
+		}
+	}
 
 	pointValue := rewards.PointValue{Rewards: totalRewards, Points: wide.Uint128{}}
 	streamResult, streamErr := rewards.CalculateRewardsStreaming(
 		acctsDb, slot, stakeHistory, newWarmupCooldownRateEpoch,
-		voteCacheSnapshot, pointValue, epoch-1, slotCtx.Blockhash, slotCtx, f)
+		voteCacheSnapshot, pointValue, epoch-1, slotCtx.Blockhash, slotCtx, f, mode)
 	if streamErr != nil {
 		panic(fmt.Sprintf("streaming rewards calculation failed: %s", streamErr))
 	}

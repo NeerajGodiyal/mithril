@@ -20,6 +20,7 @@ func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("consensus.alpenglow_bls_dst", "")
 	v.SetDefault("validator.identity_keypair", "")
 	v.SetDefault("validator.vote_account_keypair", "")
+	v.SetDefault("validator.authorized_voter_keypair", "")
 	v.SetDefault("validator.authorized_withdrawer_keypair", "")
 	v.SetDefault("validator.tpu_quic_bind_addr", "")
 	v.SetDefault("validator.advertised_ip", "")
@@ -218,7 +219,7 @@ type LogConfig struct {
 
 // ConsensusConfig holds Alpenglow consensus configuration.
 type ConsensusConfig struct {
-	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "verifying" or Alpenglow-only "validator" (TPU/block production active; voting not yet active)
+	Mode                      string `toml:"mode" mapstructure:"mode"`                                                 // "verifying" or Alpenglow-only active "validator"
 	AlpenglowObserverBindAddr string `toml:"alpenglow_observer_bind_addr" mapstructure:"alpenglow_observer_bind_addr"` // Optional passive Alpenglow Votor QUIC listener
 	AlpenglowMaxMessageBytes  int64  `toml:"alpenglow_max_message_bytes" mapstructure:"alpenglow_max_message_bytes"`   // Max Votor QUIC stream payload size
 	AlpenglowBLSDST           string `toml:"alpenglow_bls_dst" mapstructure:"alpenglow_bls_dst"`                       // BLS hash-to-curve DST; empty = default (must match cluster's solana-bls version)
@@ -227,7 +228,8 @@ type ConsensusConfig struct {
 // ValidatorConfig holds Alpenglow TPU/block-production identity and listener settings.
 type ValidatorConfig struct {
 	IdentityKeypair             string `toml:"identity_keypair" mapstructure:"identity_keypair"`                           // Validator identity keypair used for native gossip
-	VoteAccountKeypair          string `toml:"vote_account_keypair" mapstructure:"vote_account_keypair"`                   // Vote account keypair path reserved for voting activation
+	VoteAccountKeypair          string `toml:"vote_account_keypair" mapstructure:"vote_account_keypair"`                   // On-chain vote account public key or keypair path
+	AuthorizedVoterKeypair      string `toml:"authorized_voter_keypair" mapstructure:"authorized_voter_keypair"`           // Authorized voter used to derive the registered Alpenglow BLS key
 	AuthorizedWithdrawerKeypair string `toml:"authorized_withdrawer_keypair" mapstructure:"authorized_withdrawer_keypair"` // Authorized withdrawer keypair path for diagnostics
 	TPUQUICBindAddr             string `toml:"tpu_quic_bind_addr" mapstructure:"tpu_quic_bind_addr"`
 	AdvertisedIP                string `toml:"advertised_ip" mapstructure:"advertised_ip"`

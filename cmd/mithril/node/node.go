@@ -72,33 +72,34 @@ var (
 		},
 	}
 
-	bootstrapMode               string // "auto", "snapshot", "new-snapshot", "new-incremental", or "accountsdb"
-	snapshotArchivePath         string
-	incrementalSnapshotFilename string
-	accountsPath                string
-	scratchDirectory            string
-	rpcEndpoints                []string
-	cluster                     string // "alpenglow", "mainnet-beta", "testnet", or "devnet"
-	blockSource                 string // "turbine", "rpc", or "lightbringer"
-	lightbringerEndpoint        string
-	repairCatchupMaxGapSlots    int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
-	repairMaxRequestsPerSecond  int    // Repair request-rate ceiling override (0 = adaptive default)
-	blockRPCFallback            bool   // Allow RPC block fetch when > repairCatchupMaxGapSlots behind (default false: shreds only)
-	blockMaxRPS                 int    // Rate limit for block fetching
-	blockMaxInflight            int    // Max concurrent block fetch workers
-	blockTipPollIntervalMs      int    // Tip poll interval in milliseconds
-	blockTipSafetyMargin        int    // Don't fetch within N slots of tip
-	consensusModeFlag           string // raw --consensus-mode value (cobra binding)
-	consensusMode               string // resolved: "verifying" (default) or "validator"
-	alpenglowObserverBindAddr   string
-	alpenglowMaxMessageBytes    int64
-	alpenglowBLSDST             string
-	validatorIdentityKeypair    string
-	validatorVoteAccountKeypair string
-	validatorWithdrawerKeypair  string
-	validatorTPUQUICBind        string
-	validatorAdvertisedIP       string
-	validatorSigverifyWorkers   int
+	bootstrapMode                   string // "auto", "snapshot", "new-snapshot", "new-incremental", or "accountsdb"
+	snapshotArchivePath             string
+	incrementalSnapshotFilename     string
+	accountsPath                    string
+	scratchDirectory                string
+	rpcEndpoints                    []string
+	cluster                         string // "alpenglow", "mainnet-beta", "testnet", or "devnet"
+	blockSource                     string // "turbine", "rpc", or "lightbringer"
+	lightbringerEndpoint            string
+	repairCatchupMaxGapSlots        int    // Resume gaps up to this fill via turbine repair instead of RPC (0 = off)
+	repairMaxRequestsPerSecond      int    // Repair request-rate ceiling override (0 = adaptive default)
+	blockRPCFallback                bool   // Allow RPC block fetch when > repairCatchupMaxGapSlots behind (default false: shreds only)
+	blockMaxRPS                     int    // Rate limit for block fetching
+	blockMaxInflight                int    // Max concurrent block fetch workers
+	blockTipPollIntervalMs          int    // Tip poll interval in milliseconds
+	blockTipSafetyMargin            int    // Don't fetch within N slots of tip
+	consensusModeFlag               string // raw --consensus-mode value (cobra binding)
+	consensusMode                   string // resolved: "verifying" (default) or "validator"
+	alpenglowObserverBindAddr       string
+	alpenglowMaxMessageBytes        int64
+	alpenglowBLSDST                 string
+	validatorIdentityKeypair        string
+	validatorVoteAccountKeypair     string
+	validatorAuthorizedVoterKeypair string
+	validatorWithdrawerKeypair      string
+	validatorTPUQUICBind            string
+	validatorAdvertisedIP           string
+	validatorSigverifyWorkers       int
 
 	// Mode thresholds
 	blockNearTipThreshold        int // Enter near-tip when gap <= this
@@ -290,6 +291,36 @@ func loadValidatorKeypairPubkey(label, path string) (string, error) {
 	return key.PublicKey().String(), nil
 }
 
+func loadValidatorPrivateKey(label, path string) (ed25519.PrivateKey, solana.PublicKey, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, solana.PublicKey{}, fmt.Errorf("%s keypair path is empty", label)
+	}
+	key, err := solana.PrivateKeyFromSolanaKeygenFile(path)
+	if err != nil {
+		return nil, solana.PublicKey{}, fmt.Errorf("load %s keypair %s: %w", label, path, err)
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, solana.PublicKey{}, fmt.Errorf("%s keypair %s has invalid private key size %d", label, path, len(key))
+	}
+	return ed25519.PrivateKey(append([]byte(nil), key...)), key.PublicKey(), nil
+}
+
+func loadValidatorPubkey(label, value string) (solana.PublicKey, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return solana.PublicKey{}, fmt.Errorf("%s is empty", label)
+	}
+	if pubkey, err := solana.PublicKeyFromBase58(value); err == nil {
+		return pubkey, nil
+	}
+	key, err := solana.PrivateKeyFromSolanaKeygenFile(value)
+	if err != nil {
+		return solana.PublicKey{}, fmt.Errorf("load %s %s as a public key or keypair file: %w", label, value, err)
+	}
+	return key.PublicKey(), nil
+}
+
 func manifestEpochScheduleSeedMatches(s *state.MithrilState, manifest *snapshot.SnapshotManifest) bool {
 	if s == nil || s.ManifestEpochSchedule == nil || manifest == nil || manifest.Bank == nil {
 		return false
@@ -359,12 +390,13 @@ func init() {
 	Run.Flags().Int64VarP(&endSlot, "end-slot", "e", -1, "Block at which to stop replaying, inclusive (-1 = run continuously)")
 
 	// [consensus] section flags
-	Run.Flags().StringVar(&consensusModeFlag, "consensus-mode", "verifying", "Node mode: 'verifying' (default; non-voting) or Alpenglow-only 'validator' (TPU/block production active; voting not yet active; requires keypairs, advertised IP, turbine/gossip, and Votor listener)")
-	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Passive Alpenglow Votor QUIC listener address")
+	Run.Flags().StringVar(&consensusModeFlag, "consensus-mode", "verifying", "Node mode: 'verifying' (default; non-voting) or Alpenglow-only 'validator' (TPU, block production, and Votor voting active)")
+	Run.Flags().StringVar(&alpenglowObserverBindAddr, "alpenglow-observer-bind-addr", "", "Alpenglow Votor QUIC listener address")
 	Run.Flags().StringVar(&alpenglowBLSDST, "alpenglow-bls-dst", "", "BLS hash-to-curve DST override (must match cluster's solana-bls version; empty = default)")
 	Run.Flags().Int64Var(&alpenglowMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Alpenglow Votor QUIC stream payload size (0 = default)")
 	Run.Flags().StringVar(&validatorIdentityKeypair, "identity-keypair", "", "Validator identity keypair for native turbine gossip (Solana keygen JSON)")
-	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "Vote account keypair path for validator diagnostics (Solana keygen JSON)")
+	Run.Flags().StringVar(&validatorVoteAccountKeypair, "vote-account-keypair", "", "On-chain vote account public key or keypair path")
+	Run.Flags().StringVar(&validatorAuthorizedVoterKeypair, "authorized-voter-keypair", "", "Authorized voter keypair used to derive the Alpenglow BLS signer (defaults to identity-keypair, matching Agave)")
 	Run.Flags().StringVar(&validatorWithdrawerKeypair, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair path for validator diagnostics (Solana keygen JSON)")
 	Run.Flags().StringVar(&validatorTPUQUICBind, "tpu-quic-bind-addr", "", "Validator TPU QUIC listen address (default 0.0.0.0:8004)")
 	Run.Flags().StringVar(&validatorAdvertisedIP, "validator-advertised-ip", "", "Public IP advertised for validator TPU QUIC")
@@ -652,11 +684,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	case "", "verifying":
 		consensusMode = "verifying"
 	case "validator":
-		// Selectable now so validator deployments (keypairs, sockets, gossip)
-		// are provisioned and validated ahead of the voting engine landing.
 		// Requirements are enforced below once the block/turbine settings are
-		// resolved; until the engine ships the node runs the same verifying
-		// pipeline and casts no votes (warned loudly at startup).
+		// resolved. Validator mode activates Votor voting, TPU ingress, and
+		// scheduled block production on the shared verified consensus pipeline.
 	default:
 		return fmt.Errorf("unknown consensus.mode %q (valid: \"verifying\", \"validator\")", consensusMode)
 	}
@@ -670,6 +700,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	alpenglowBLSDST = getString("alpenglow-bls-dst", "consensus.alpenglow_bls_dst")
 	validatorIdentityKeypair = getString("identity-keypair", "validator.identity_keypair")
 	validatorVoteAccountKeypair = getString("vote-account-keypair", "validator.vote_account_keypair")
+	validatorAuthorizedVoterKeypair = getString("authorized-voter-keypair", "validator.authorized_voter_keypair")
 	validatorWithdrawerKeypair = getString("authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair")
 	validatorTPUQUICBind = getString("tpu-quic-bind-addr", "validator.tpu_quic_bind_addr")
 	if validatorTPUQUICBind == "" {
@@ -796,19 +827,17 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		return fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", blockSource)
 	}
 
-	// Validator mode: enforce the deployment shape a voting node needs, even
-	// though the voting engine has not landed yet — operators provision once
-	// and the config stays valid when voting activates.
+	// Validator mode: enforce the complete block-production and voting shape.
 	if consensusMode == "validator" {
 		var missing []string
 		if !alpenglowMode {
 			missing = append(missing, "network.cluster=alpenglow (classic clusters remain verifying-only)")
 		}
 		if validatorIdentityKeypair == "" {
-			missing = append(missing, "validator.identity_keypair (signs gossip/turbine identity and, later, votes)")
+			missing = append(missing, "validator.identity_keypair (signs gossip/turbine and authenticates Votor QUIC)")
 		}
 		if validatorVoteAccountKeypair == "" {
-			missing = append(missing, "validator.vote_account_keypair (the vote account votes are cast for)")
+			missing = append(missing, "validator.vote_account_keypair (the on-chain vote account address)")
 		}
 		if blockSource != "turbine" {
 			missing = append(missing, fmt.Sprintf("block.source=turbine (a validator cannot run off %q)", blockSource))
@@ -827,7 +856,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		}
 		// The authorized withdrawer is deliberately NOT required at runtime —
 		// best practice keeps it offline.
-		mlog.Log.Infof("consensus.mode=validator: Alpenglow block production and TPU ingress enabled; consensus votes remain observer-only until the signing engine is enabled")
+		mlog.Log.Infof("consensus.mode=validator: Alpenglow TPU ingress, block production, and fail-closed Votor voting enabled")
 	}
 
 	blockMaxRPS = getInt("block-max-rps", "block.max_rps")
@@ -1255,12 +1284,27 @@ func runLive(c *cobra.Command, args []string) {
 			startPrewarm(m, "from the incremental manifest")
 		}
 	}
+	var validatorVoteAccount solana.PublicKey
+	var validatorAuthorizedVoter ed25519.PrivateKey
 	if validatorVoteAccountKeypair != "" {
-		votePubkey, err := loadValidatorKeypairPubkey("vote account", validatorVoteAccountKeypair)
+		votePubkey, err := loadValidatorPubkey("vote account", validatorVoteAccountKeypair)
 		if err != nil {
 			klog.Fatalf("%v", err)
 		}
-		mlog.Log.Infof("validator vote account configured: %s", votePubkey)
+		validatorVoteAccount = votePubkey
+		if validatorAuthorizedVoterKeypair == "" {
+			if len(validatorIdentity) == ed25519.PrivateKeySize {
+				validatorAuthorizedVoter = append(ed25519.PrivateKey(nil), validatorIdentity...)
+				mlog.Log.Infof("validator vote account configured: %s (authorized voter defaults to identity %s, matching Agave)", votePubkey, validatorIdentityPubkey)
+			}
+		} else {
+			authorizedVoter, authorizedVoterPubkey, err := loadValidatorPrivateKey("authorized voter", validatorAuthorizedVoterKeypair)
+			if err != nil {
+				klog.Fatalf("%v", err)
+			}
+			validatorAuthorizedVoter = authorizedVoter
+			mlog.Log.Infof("validator vote account configured: %s (authorized voter %s)", votePubkey, authorizedVoterPubkey)
+		}
 	}
 	if validatorWithdrawerKeypair != "" {
 		withdrawerPubkey, err := loadValidatorKeypairPubkey("authorized withdrawer", validatorWithdrawerKeypair)
@@ -2189,6 +2233,7 @@ postBootstrap:
 			AlpenglowMaxMessageBytes:  alpenglowMaxMessageBytes,
 			AlpenglowBLSDST:           alpenglowBLSDST,
 			AlpenglowShredVersion:     uint16(turbineShredVersion),
+			AlpenglowIdentity:         validatorIdentity,
 		})
 		if err != nil {
 			klog.Fatalf("unable to create consensus engine: %v", err)
@@ -2258,6 +2303,64 @@ postBootstrap:
 		if epochSchedule == nil {
 			klog.Fatalf("validator production requires an epoch schedule in the snapshot/state seed")
 		}
+		global.SetWallClockSlotDuration(blockprod.AlpenglowSlotDuration)
+		wallClockSeed, err := queryWallClockSeedSlot(ctx, rpcEndpoints)
+		if err != nil {
+			klog.Fatalf("validator voting requires a confirmed network wall-clock slot; refusing unsafe snapshot-slot fallback: %v", err)
+		}
+		global.SeedWallClockSlot(wallClockSeed)
+		startupWallSlot := global.WallClockSlot()
+		waitToVoteSlot := startupWallSlot - startupWallSlot%alpenglow.LeaderWindowSlots
+		if waitToVoteSlot <= math.MaxUint64-2*alpenglow.LeaderWindowSlots {
+			waitToVoteSlot += 2 * alpenglow.LeaderWindowSlots
+		} else {
+			waitToVoteSlot = math.MaxUint64
+		}
+		mlog.Log.Infof("ALPENGLOW voting startup watermark: wall_clock=%d wait_to_vote=%d", startupWallSlot, waitToVoteSlot)
+
+		identityPubkey := solana.PrivateKey(validatorIdentity).PublicKey()
+		if err := consensusEngine.EnableVoting(consensusengine.VotingConfig{
+			Identity:        validatorIdentity,
+			AuthorizedVoter: validatorAuthorizedVoter,
+			VoteAccount:     validatorVoteAccount,
+			HistoryDir:      blockstorePath,
+			EpochForSlot:    epochSchedule.GetEpoch,
+			SlotDuration:    blockprod.AlpenglowSlotDuration,
+			WaitToVoteSlot:  waitToVoteSlot,
+			ReadyToVote: func(slot uint64) bool {
+				wallSlot := global.WallClockSlot()
+				if liveSlot, ok := consensusEngine.AlpenglowLiveSlot(); ok {
+					wallSlot = liveSlot
+				}
+				return slot >= wallSlot || wallSlot-slot <= alpenglow.LeaderWindowSlots
+			},
+			Peers: func(slot uint64, _ []alpenglow.ValidatorStake) []*net.UDPAddr {
+				epoch := epochSchedule.GetEpoch(slot)
+				stakes := global.EpochStakes(epoch)
+				voteAccounts := global.EpochStakesVoteAccts(epoch)
+				peers := make([]*net.UDPAddr, 0, len(stakes))
+				seen := make(map[string]struct{}, len(stakes))
+				for voteAccount, stake := range stakes {
+					account := voteAccounts[voteAccount]
+					if stake == 0 || account == nil || account.NodePubkey == identityPubkey {
+						continue
+					}
+					addr, ok := sharedGossip.LookupAlpenglow(account.NodePubkey)
+					if !ok {
+						continue
+					}
+					key := addr.String()
+					if _, duplicate := seen[key]; duplicate {
+						continue
+					}
+					seen[key] = struct{}{}
+					peers = append(peers, addr)
+				}
+				return peers
+			},
+		}); err != nil {
+			klog.Fatalf("enable Alpenglow voting: %v", err)
+		}
 		stakesForSlot := func(slot uint64) map[solana.PublicKey]uint64 {
 			epoch := epochSchedule.GetEpoch(slot)
 			voteAccounts := global.EpochStakesVoteAccts(epoch)
@@ -2281,14 +2384,6 @@ postBootstrap:
 			klog.Fatalf("validator turbine broadcaster: %v", err)
 		}
 		defer broadcaster.Close()
-
-		global.SetWallClockSlotDuration(blockprod.AlpenglowSlotDuration)
-		if slot, err := queryWallClockSeedSlot(ctx, rpcEndpoints); err == nil {
-			global.SeedWallClockSlot(slot)
-		} else {
-			global.SeedWallClockSlot(mithrilState.GetCurrentSlot())
-			mlog.Log.Warnf("validator wall-clock slot seeded from state: %v", err)
-		}
 
 		controller := blockprod.NewController()
 		topicSink := forge.NewSink(controller)
@@ -2337,7 +2432,11 @@ postBootstrap:
 			SlotDuration:   blockprod.AlpenglowSlotDuration,
 			ParentContext: func(slot uint64) blockprod.ParentContext {
 				tip := replay.ChainTipParentContext()
-				if slot == 0 || global.ReplayFrontier() < slot-1 || tip.Slot >= slot {
+				// Blockprod owns the replay-readiness rule. In particular, the first
+				// slot of an Alpenglow leader window may legitimately build on an
+				// older ParentReady ancestor when the preceding window was skipped;
+				// requiring frontier==slot-1 here would silently defeat that gate.
+				if slot == 0 || tip.Slot >= slot {
 					return blockprod.ParentContext{}
 				}
 				return blockprod.ParentContext{
@@ -2353,8 +2452,13 @@ postBootstrap:
 				}
 			},
 			ProductionParent: consensusEngine.AlpenglowBlockProductionParent,
-			CurrentSlot:      global.WallClockSlot,
-			LeaderForSlot:    global.LeaderForSlot,
+			CurrentSlot: func() uint64 {
+				if slot, ok := consensusEngine.AlpenglowLiveSlot(); ok {
+					return slot
+				}
+				return global.WallClockSlot()
+			},
+			LeaderForSlot: global.LeaderForSlot,
 			ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 				if parentSlot == 0 {
 					return solana.Hash{}, true
@@ -2710,7 +2814,7 @@ func printStartupInfo(commandName string) {
 	// Node mode, right at the top where an operator looks first
 	modeLabel := "verifying node (non-voting)"
 	if consensusMode == "validator" {
-		modeLabel = "validator (voting engine not yet active)"
+		modeLabel = "validator (voting and block production active)"
 	}
 	fmt.Printf("  Mode:         %s%s%s\n", gold, modeLabel, reset)
 
@@ -3182,12 +3286,27 @@ func queryWallClockSeedSlot(ctx context.Context, rpcEndpoints []string) (uint64,
 	if len(rpcEndpoints) == 0 {
 		return 0, fmt.Errorf("no RPC endpoints configured")
 	}
-	client := solrpc.New(rpcEndpoints[0])
-	slot, err := client.GetSlot(ctx, solrpc.CommitmentConfirmed)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get confirmed slot from RPC: %w", err)
+	var best uint64
+	found := false
+	failures := make([]string, 0, len(rpcEndpoints))
+	for _, endpoint := range rpcEndpoints {
+		client := solrpc.New(endpoint)
+		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		slot, err := client.GetSlot(requestCtx, solrpc.CommitmentConfirmed)
+		cancel()
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", endpoint, err))
+			continue
+		}
+		if !found || slot > best {
+			best = slot
+			found = true
+		}
 	}
-	return slot, nil
+	if !found {
+		return 0, fmt.Errorf("failed to get confirmed slot from configured RPC endpoints: %s", strings.Join(failures, "; "))
+	}
+	return best, nil
 }
 
 const (

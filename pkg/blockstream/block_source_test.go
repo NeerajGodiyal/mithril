@@ -2,6 +2,7 @@ package blockstream
 
 import (
 	"math"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,95 @@ func waitForBlockSourceCondition(t *testing.T, condition func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for block source condition")
+}
+
+// A rooted Alpenglow fork recovery starts a replacement BlockSource in the
+// same process and reuses the configured TVU address. The abandoned source
+// must synchronously release that socket first; otherwise every replacement
+// receiver fails with "bind: address already in use" and replay stalls without
+// ever attempting its first slot.
+func TestStopReleasesTurbineSocketForForkReplay(t *testing.T) {
+	seed, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("reserve turbine address: %v", err)
+	}
+	addr := seed.LocalAddr().String()
+	if err := seed.Close(); err != nil {
+		t.Fatalf("release reserved turbine address: %v", err)
+	}
+
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType:      BlockSourceTurbine,
+		TurbineBindAddr: addr,
+		StartSlot:       100,
+		EndSlot:         200,
+	})
+	bs.liveStreamWg.Add(1)
+	go bs.runTurbineStream()
+	waitForBlockSourceCondition(t, bs.liveStreamConnected.Load)
+
+	// Model Stop racing with the scheduler's ordinary Start shutdown.
+	bs.Stop()
+	bs.Stop()
+	done := make(chan struct{})
+	go func() {
+		bs.liveStreamWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turbine stream did not stop and release ownership")
+	}
+
+	replacement, err := net.ListenUDP("udp", mustResolveUDPAddr(t, addr))
+	if err != nil {
+		t.Fatalf("replacement fork-replay receiver could not bind %s: %v", addr, err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatalf("close replacement turbine socket: %v", err)
+	}
+}
+
+func TestStopUnblocksEmitterWhenForkReplayStopsConsuming(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  100,
+		EndSlot:    200,
+	})
+	for i := 0; i < cap(bs.streamChan); i++ {
+		bs.streamChan <- &b.Block{Slot: uint64(i + 1)}
+	}
+
+	emitterDone := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(emitterDone)
+	}()
+	bs.resultQueue <- fetchResult{slot: 100, block: &b.Block{Slot: 100}}
+	waitForBlockSourceCondition(t, func() bool {
+		bs.reorderMu.Lock()
+		defer bs.reorderMu.Unlock()
+		return bs.lastEmittedBlockSlot == 100
+	})
+
+	// Replay has stopped reading streamChan while the emitter is trying to
+	// publish one more block. Shutdown must still join instead of deadlocking.
+	bs.Stop()
+	select {
+	case <-emitterDone:
+	case <-time.After(time.Second):
+		t.Fatal("ordered emitter stayed blocked after fork-replay shutdown")
+	}
+}
+
+func mustResolveUDPAddr(t *testing.T, addr string) *net.UDPAddr {
+	t.Helper()
+	resolved, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatalf("resolve UDP address %q: %v", addr, err)
+	}
+	return resolved
 }
 
 func TestInjectLocalBlockReplacesBufferedNetworkBlock(t *testing.T) {

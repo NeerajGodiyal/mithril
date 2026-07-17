@@ -77,7 +77,7 @@ const (
 	scrLightbringer
 	scrGossip
 	scrIdentityKey       // validator identity keypair path (validator mode)
-	scrVoteKey           // vote account keypair path (validator mode)
+	scrVoteKey           // vote account public key or keypair path (validator mode)
 	scrAdvertisedIP      // public TPU QUIC IP (validator mode)
 	scrLightbringerQuiet // log verbosity for managed Lightbringer (only shown when Lightbringer enabled)
 	scrStorage           // accountsPath
@@ -118,7 +118,7 @@ type setupModel struct {
 	enableLB       bool
 	gossipEntry    string
 	identityKey    string // validator identity keypair path (validator mode)
-	voteKey        string // vote account keypair path (validator mode)
+	voteKey        string // vote account public key or keypair path (validator mode)
 	advertisedIP   string // public TPU QUIC IP (validator mode)
 	lbQuiet        bool   // suppress Lightbringer info/debug logs
 	accountsPath   string
@@ -256,7 +256,7 @@ func (m setupModel) currentItems() []menuItem {
 	case scrNodeType:
 		return []menuItem{
 			menuOptionDesc("Verifying node", "verifying", "Non-voting: observe, execute, and verify the cluster"),
-			menuOptionDesc("Validator", "validator", "Alpenglow TPU + block production; consensus voting is not yet active"),
+			menuOptionDesc("Validator", "validator", "Alpenglow voting, TPU ingress, and block production"),
 			menuSeparator(),
 			menuBack(),
 		}
@@ -744,12 +744,12 @@ func (m setupModel) View() string {
 	case scrIdentityKey:
 		return banner + "\n" + renderInput("Validator Identity Keypair",
 			"Path to the validator identity keypair (Solana keygen JSON)\n"+
-				"Signs gossip/turbine identity and, once voting activates, votes",
+				"Signs gossip/turbine, authenticates Votor QUIC, and is Agave's default authorized voter",
 			m.inputVal, m.inputErr, m.inputCur)
 
 	case scrVoteKey:
-		return banner + "\n" + renderInput("Vote Account Keypair",
-			"Path to the vote account keypair (Solana keygen JSON)\n"+
+		return banner + "\n" + renderInput("Vote Account",
+			"Vote-account public key or path to its Solana keygen JSON\n"+
 				"The vote account votes are cast for · keep the WITHDRAWER keypair offline",
 			m.inputVal, m.inputErr, m.inputCur)
 
@@ -823,7 +823,7 @@ func (m setupModel) View() string {
 		}
 		nodeTypeLabel := "verifying (non-voting)"
 		if nodeType == "validator" {
-			nodeTypeLabel = "Alpenglow validator (block production active; voting not yet active)"
+			nodeTypeLabel = "Alpenglow validator (voting and block production active)"
 		}
 		rows := [][]string{
 			{"Node type", nodeTypeLabel},
@@ -971,6 +971,8 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("[validator]\n")
 		fmt.Fprintf(&cfg, "identity_keypair = %q\n", m.identityKey)
 		fmt.Fprintf(&cfg, "vote_account_keypair = %q\n", m.voteKey)
+		cfg.WriteString("# Empty defaults to identity_keypair, matching Agave; set this when the authorized voter is separate.\n")
+		cfg.WriteString("authorized_voter_keypair = \"\"\n")
 		cfg.WriteString("# Keep the authorized withdrawer keypair OFFLINE — not needed at runtime.\n")
 		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n")
 		cfg.WriteString("tpu_quic_bind_addr = \"0.0.0.0:8004\"\n")
@@ -978,7 +980,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("tpu_sigverify_workers = 0\n\n")
 
 		cfg.WriteString("[consensus]\n")
-		cfg.WriteString("# TPU ingress and block production are active; consensus voting is not yet active.\n")
+		cfg.WriteString("# Alpenglow voting, TPU ingress, and block production are active.\n")
 		cfg.WriteString("mode = \"validator\"\n")
 		cfg.WriteString("alpenglow_observer_bind_addr = \"0.0.0.0:8010\" # REQUIRED: Votor QUIC vote/cert listener\n")
 		cfg.WriteString("alpenglow_max_message_bytes = 0\n")
@@ -987,6 +989,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 		cfg.WriteString("[validator]\n")
 		cfg.WriteString("identity_keypair = \"\"\n")
 		cfg.WriteString("vote_account_keypair = \"\"\n")
+		cfg.WriteString("authorized_voter_keypair = \"\"\n")
 		cfg.WriteString("authorized_withdrawer_keypair = \"\"\n")
 		cfg.WriteString("tpu_quic_bind_addr = \"0.0.0.0:8004\"\n")
 		cfg.WriteString("advertised_ip = \"\"\n")
@@ -1074,14 +1077,15 @@ txpar = %d   # Recommended: 2x your CPU core count
 
 [validator]
 identity_keypair = ""              # Optional validator identity for native turbine gossip
-vote_account_keypair = ""          # Optional vote account keypair path for diagnostics/future voting
+vote_account_keypair = ""          # Vote account public key or keypair path
+authorized_voter_keypair = ""      # BLS derivation signer (empty defaults to identity_keypair, like Agave)
 authorized_withdrawer_keypair = "" # Optional authorized withdrawer keypair path for diagnostics
 tpu_quic_bind_addr = "0.0.0.0:8004"
 advertised_ip = ""                  # Required for Alpenglow validator mode
 tpu_sigverify_workers = 0
 
 [consensus]
-mode = "verifying"                # "validator" is Alpenglow-only; TPU/block production active, voting not yet active
+mode = "verifying"                # "validator" is Alpenglow-only; voting, TPU, and block production active
 alpenglow_observer_bind_addr = "" # Optional Votor QUIC listener (raw-vote cert feed)
 alpenglow_max_message_bytes = 0   # 0 = default
 alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-bls version)

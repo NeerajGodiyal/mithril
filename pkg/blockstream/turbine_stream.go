@@ -310,6 +310,7 @@ func (bs *BlockSource) runTurbineStream() {
 		receiver := turbine.NewUDPReceiver(bs.turbineBindAddr)
 		bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
 		receiver.SetLeaderForSlot(bs.leaderForSlot)
+		receiver.SetFirstShredSink(bs.alpenglowFirstShredSink)
 		if bs.shredSpoolDir != "" {
 			if spool, serr := turbine.OpenShredSpool(bs.shredSpoolDir, shredSpoolMaxBytes); serr != nil {
 				mlog.Log.Warnf("shred spool disabled (%s): %v", bs.shredSpoolDir, serr)
