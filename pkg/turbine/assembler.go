@@ -1040,7 +1040,10 @@ func (a *SlotAssembler) recoverFEC(state *slotState, fecSetIndex uint32) ([]*Shr
 		if err != nil {
 			return nil, err
 		}
-		shards[int(idx)] = append([]byte(nil), shard...)
+		// ReconstructSome treats present shards as read-only and only fills the
+		// requested missing entries, so the owned shred payload can be passed
+		// directly without another full-shard copy.
+		shards[int(idx)] = shard
 	}
 	for pos, shred := range fec.coding {
 		if pos >= layout.codingShreds {
@@ -1050,7 +1053,7 @@ func (a *SlotAssembler) recoverFEC(state *slotState, fecSetIndex uint32) ([]*Shr
 		if err != nil {
 			return nil, err
 		}
-		shards[int(layout.dataShreds)+int(pos)] = append([]byte(nil), shard...)
+		shards[int(layout.dataShreds)+int(pos)] = shard
 	}
 	encoder, err := a.fecEncoder(layout)
 	if err != nil {
@@ -1314,6 +1317,11 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
 	}
+	// Replay consumes this exact in-memory block and can trust the assembler's
+	// completed verification instead of marshaling and verifying every signed
+	// message a second time. The marker is private/non-serialized, so blocks
+	// crossing any file or JSON boundary safely fall back to replay verification.
+	blk.MarkTransactionSignaturesVerified()
 	return blk, nil
 }
 

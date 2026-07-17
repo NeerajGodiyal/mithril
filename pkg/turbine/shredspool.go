@@ -231,7 +231,8 @@ func (s *ShredSpool) pathFor(slot uint64) string {
 	return filepath.Join(s.dir, fmt.Sprintf("s%d.shreds", slot))
 }
 
-// Append stores one verified shred packet (copied) under its slot.
+// Append stores one verified shred packet under its slot. It consumes packet
+// synchronously and does not retain the slice after returning.
 func (s *ShredSpool) Append(slot uint64, packet []byte) {
 	if len(packet) == 0 {
 		return
@@ -244,7 +245,8 @@ func (s *ShredSpool) Append(slot uint64, packet []byte) {
 // AppendShred stores a verified shred only once per process run. Network
 // Turbine and serve-repair commonly deliver the same packet many times; those
 // duplicates must not consume disk bandwidth or repeatedly exercise cap
-// eviction before the assembler gets a chance to classify them.
+// eviction before the assembler gets a chance to classify them. The packet is
+// consumed synchronously and is not retained after this method returns.
 func (s *ShredSpool) AppendShred(shred *Shred, packet []byte) bool {
 	if shred == nil || len(packet) == 0 {
 		return false

@@ -602,12 +602,12 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 	}
 	r.slotResetMu.RLock()
 	if r.spool != nil {
-		// Write-through of every VERIFIED shred (copy: the read buffer
-		// is reused). Repaired shreds included — a later slot reset
-		// re-hydrates from disk instead of re-fetching over the wire.
-		pkt := make([]byte, len(packet))
-		copy(pkt, packet)
-		spooled := r.spool.AppendShred(shred, pkt)
+		// Write-through of every VERIFIED shred. AppendShred consumes packet
+		// synchronously and retains no reference, so the receive buffer can be
+		// reused immediately without an intermediate copy. Repaired shreds are
+		// included — a later slot reset re-hydrates from disk instead of
+		// re-fetching over the wire.
+		spooled := r.spool.AppendShred(shred, packet)
 		if r.skipAssemblyForSpool(shred.Slot) {
 			r.slotResetMu.RUnlock()
 			// Far-future slot during catchup: on disk is enough. The

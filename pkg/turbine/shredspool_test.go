@@ -43,6 +43,26 @@ func TestShredSpoolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestShredSpoolDoesNotRetainAppendBuffer(t *testing.T) {
+	spool, err := OpenShredSpool(t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer spool.Close()
+
+	packet := []byte("original")
+	spool.Append(100, packet)
+	copy(packet, "modified")
+
+	got, err := spool.ReadSlot(100)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != "original" {
+		t.Fatalf("spool retained append buffer: %q", got)
+	}
+}
+
 func TestShredSpoolCapDropsHighest(t *testing.T) {
 	spool, err := OpenShredSpool(t.TempDir(), 80)
 	if err != nil {

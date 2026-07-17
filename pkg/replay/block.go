@@ -3024,7 +3024,7 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, uint64) {
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
 	// process & execute each transaction in turn
@@ -3033,7 +3033,7 @@ func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bl
 		if block.TxMetas != nil {
 			txMeta = block.TxMetas[idx]
 		}
-		txFeeInfo, txComputeUnitsConsumed, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil)
+		txFeeInfo, txComputeUnitsConsumed, txErr := ProcessTransaction(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, nil, shouldVerifySignatures)
 		totalComputeUnitsConsumed += txComputeUnitsConsumed
 
 		if txMeta == nil {
@@ -3144,12 +3144,11 @@ func lightbringerEntryExecutionBatches(transactions []*solana.Transaction, entry
 	return batches
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions) (fees.TxFeeInfoAccumulator, uint64) {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	txComputeUnitsConsumed := make([]uint64, len(block.Transactions))
 	errs := make([]error, len(block.Transactions))
-	txDurations := make([]time.Duration, txParallelism)
 
 	plannerBlock := block
 	if rblock.FromLiveStream {
@@ -3167,13 +3166,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			go func() {
 				defer wg.Done()
 				for idx := range do {
-					txStart := time.Now()
 					tx := block.Transactions[idx]
 					var txMeta *rpc.TransactionMeta
 					if idx < len(rblock.TxMetas) {
 						txMeta = rblock.TxMetas[idx]
 					}
-					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[i])
+					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[i], shouldVerifySignatures)
 					txErr := errs[idx]
 					// check for success-failure return value divergences
 					if txMeta != nil && txErr == nil && txMeta.Err != nil {
@@ -3185,7 +3183,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 					}
-					txDurations[i] += time.Since(txStart)
 					done <- idx
 				}
 
@@ -3203,13 +3200,12 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			go func(workerIdx int) {
 				defer workersWg.Done()
 				for idx := range do {
-					txStart := time.Now()
 					tx := block.Transactions[idx]
 					var txMeta *rpc.TransactionMeta
 					if int(idx) < len(rblock.TxMetas) {
 						txMeta = rblock.TxMetas[idx]
 					}
-					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[workerIdx])
+					txFeeInfos[idx], txComputeUnitsConsumed[idx], errs[idx] = ProcessTransaction(slotCtx, sigverifyWg, rblock.Transactions[idx], txMeta, dbgOpts, sealevel.BorrowedAccountArenas[workerIdx], shouldVerifySignatures)
 					txErr := errs[idx]
 					if txMeta != nil && txErr == nil && txMeta.Err != nil {
 						mlog.Log.Errorf("[run:%s] DIVERGENCE in slot %d: tx %s succeeded locally but failed onchain: %+v",
@@ -3220,7 +3216,6 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 							CurrentRunID, block.Slot, tx.Signatures[0], txErr)
 						panic(fmt.Sprintf("tx %s return value divergence: txErr was %+v (%s), but onchain err was nil", tx.Signatures[0], txErr, txErr))
 					}
-					txDurations[workerIdx] += time.Since(txStart)
 					batchWg.Done()
 				}
 			}(i)
@@ -3266,6 +3261,39 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	}
 
 	return txFeeAccumulator, totalComputeUnitsConsumed
+}
+
+// prepareDependencyPlannerBlock preserves unresolved transaction account keys
+// only when the dependency planner needs them. Live replay explicitly plans
+// from the execution block after address-table resolution, and sequential
+// replay has no planner, so cloning either kind would be pure overhead.
+func prepareDependencyPlannerBlock(block *b.Block, txParallelism int) (*b.Block, error) {
+	if block == nil {
+		return nil, errors.New("nil block")
+	}
+	if txParallelism <= 0 || block.FromLiveStream {
+		return block, nil
+	}
+
+	unresolvedBlock := &b.Block{
+		Transactions: make([]*solana.Transaction, len(block.Transactions)),
+		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
+		Slot:         block.Slot,
+		ParentSlot:   block.ParentSlot,
+	}
+	for i := range block.Transactions {
+		clonedTx, err := cloneTransaction(block.Transactions[i])
+		if err != nil {
+			return nil, fmt.Errorf("clone transaction %d in slot %d: %w", i, block.Slot, err)
+		}
+		unresolvedBlock.Transactions[i] = clonedTx
+		if i < len(block.TxMetas) && block.TxMetas[i] != nil {
+			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
+			*unresolvedBlock.TxMetas[i] = *block.TxMetas[i]
+		}
+	}
+
+	return unresolvedBlock, nil
 }
 
 func ProcessBlock(
@@ -3339,26 +3367,12 @@ func ProcessBlock(
 
 	var sigverifyWg sync.WaitGroup
 	defer sigverifyWg.Wait()
-	start := time.Now()
-	unresolvedBlock := &b.Block{
-		Transactions: make([]*solana.Transaction, len(block.Transactions)),
-		TxMetas:      make([]*rpc.TransactionMeta, len(block.TxMetas)),
-		Slot:         block.Slot,
-		ParentSlot:   block.ParentSlot,
-	}
-	for i := range block.Transactions {
-		clonedTx, cloneErr := cloneTransaction(block.Transactions[i])
-		if cloneErr != nil {
-			panic(fmt.Sprintf("unable to clone tx %s for unresolved block copy in slot %d: %v", block.Transactions[i].Signatures[0], block.Slot, cloneErr))
-		}
-		unresolvedBlock.Transactions[i] = clonedTx
-		if !block.FromLiveStream && i < len(block.TxMetas) && block.TxMetas[i] != nil {
-			unresolvedBlock.TxMetas[i] = &rpc.TransactionMeta{}
-			*(unresolvedBlock.TxMetas[i]) = *block.TxMetas[i]
-		}
+	plannerBlock, err := prepareDependencyPlannerBlock(block, txParallelism)
+	if err != nil {
+		panic(fmt.Sprintf("unable to prepare dependency planner block for slot %d: %v", block.Slot, err))
 	}
 
-	start = time.Now()
+	start := time.Now()
 	setReplayStage("load_accounts")
 	loadAcctsRegion := trace.StartRegion(ctx, "LoadBlockAccounts")
 	// In rooted-durable mode, block accounts/sysvars load through the unrooted
@@ -3382,10 +3396,11 @@ func ProcessBlock(
 
 	setReplayStage("tx_loop")
 	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
+	shouldVerifySignatures := !block.TransactionSignaturesVerified()
 	if txParallelism > 0 {
-		txFeeAccumulator, totalComputeUnitsConsumed = parallelTxLoop(slotCtx, &sigverifyWg, unresolvedBlock, block, txParallelism, dbgOpts)
+		txFeeAccumulator, totalComputeUnitsConsumed = parallelTxLoop(slotCtx, &sigverifyWg, plannerBlock, block, txParallelism, dbgOpts, shouldVerifySignatures)
 	} else {
-		txFeeAccumulator, totalComputeUnitsConsumed = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts)
+		txFeeAccumulator, totalComputeUnitsConsumed = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts, shouldVerifySignatures)
 	}
 	slotCtx.TotalComputeUnitsConsumed = totalComputeUnitsConsumed
 	txLoopRegion.End()

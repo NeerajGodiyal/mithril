@@ -56,12 +56,16 @@ type Block struct {
 	FromLiveStream                      bool
 	FromLocalProduction                 bool
 	IsSkipped                           bool // True for slots that were skipped by the leader
-	SkipRewardCert                      []byte
-	NotarRewardCert                     []byte
-	BlockFinalCert                      []byte
-	FooterProducerTimeNanos             uint64
-	HasAlpenglowFooter                  bool
-	AlpenglowShredVersion               uint16
+	// transactionSignaturesVerified is deliberately private: it is a trust
+	// marker set only by an in-process source after it has verified every
+	// transaction signature. It must not be accepted from JSON/file input.
+	transactionSignaturesVerified bool
+	SkipRewardCert                []byte
+	NotarRewardCert               []byte
+	BlockFinalCert                []byte
+	FooterProducerTimeNanos       uint64
+	HasAlpenglowFooter            bool
+	AlpenglowShredVersion         uint16
 
 	// Shred-path observability (zero when the block did not come from shreds —
 	// RPC/file blocks must not fabricate these). "Full" follows Agave's
@@ -70,6 +74,24 @@ type Block struct {
 	ShredFirstNanos int64 // wall clock (unix nanos) of the first accepted shred for the slot
 	ShredFullNanos  int64 // wall clock (unix nanos) when the slot became full
 	RepairedShreds  int   // data shreds obtained via repair rather than turbine
+}
+
+// MarkTransactionSignaturesVerified records that every transaction signature
+// in this exact in-memory block has already been verified. Callers must set it
+// only after successful verification and must not subsequently mutate signed
+// transaction data. Signature-preserving transformations such as resolving
+// address-table lookups remain safe.
+func (b *Block) MarkTransactionSignaturesVerified() {
+	if b != nil {
+		b.transactionSignaturesVerified = true
+	}
+}
+
+// TransactionSignaturesVerified reports whether this exact in-memory block
+// crossed a trusted transaction-signature verification boundary. The marker is
+// intentionally not serialized; replay re-verifies after any serialization.
+func (b *Block) TransactionSignaturesVerified() bool {
+	return b != nil && b.transactionSignaturesVerified
 }
 
 func (b *Block) FixupTxVersions() {

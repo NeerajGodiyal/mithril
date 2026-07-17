@@ -426,7 +426,7 @@ func processTransactionComputeUnits(execCtx *sealevel.ExecutionCtx) uint64 {
 	return execCtx.ComputeMeter.Used()
 }
 
-func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount]) (*fees.TxFeeInfo, uint64, error) {
+func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount], shouldVerifySignatures bool) (*fees.TxFeeInfo, uint64, error) {
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
 		regionType := "ProcessTransaction"
 		if tx.IsVote() {
@@ -452,13 +452,14 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		}
 	}
 
-	start := time.Now()
-	sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
-	if err != nil {
-		return nil, 0, err
+	if shouldVerifySignatures {
+		sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
+		if err != nil {
+			return nil, 0, err
+		}
+		sigverifyWg.Add(1)
+		enqueueSigverify(sigverifySnapshot, sigverifyWg)
 	}
-	sigverifyWg.Add(1)
-	enqueueSigverify(sigverifySnapshot, sigverifyWg)
 
 	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
@@ -480,7 +481,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	computeBudgetLimits := output.ComputeBudgetLimits
 
 	// Pre-balance divergence check (uses pre-fee-deduction lamports from pure function output)
-	start = time.Now()
+	start := time.Now()
 	if txMeta != nil && output.PreBalances != nil && execCtx != nil {
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct := execCtx.TransactionContext.Accounts.Accounts[count]

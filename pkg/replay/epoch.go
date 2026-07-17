@@ -260,6 +260,10 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t3 := time.Now()
 
 	if partitionedEpochRewards {
+		// Agave calculates the new epoch's validator reward ceiling from the
+		// parent bank capitalization, before any boundary accounts or voting
+		// rewards are added to this bank.
+		epochStartCapitalization := replayCtx.Capitalization
 		migrationSlot, alpenglowActive := f.ActivationSlot(features.Alpenglow)
 		migrationEpoch := epochSchedule.GetEpoch(migrationSlot)
 		rewardedEpoch := newEpoch - 1
@@ -299,12 +303,25 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 		}
 
 		var updated, parents []*accounts.Account
-		partitionedRewardsInfo, updated, parents = beginPartitionedEpochRewardsDistribution(
+		var voteRewardsDistributed uint64
+		partitionedRewardsInfo, updated, parents, voteRewardsDistributed = beginPartitionedEpochRewardsDistribution(
 			acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule,
 			block, f, newEpoch, block.Slot, rpcc, dbgOpts, mode,
 		)
 		block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated...)
 		block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parents...)
+
+		if alpenglowClockFeatureActive(f) {
+			updated, parent, err := stageEpochInflationAccount(
+				acctsDb, prevSlotCtx.Slot, block.Slot, replayCtx, epochSchedule, f,
+				newEpoch, epochStartCapitalization, voteRewardsDistributed,
+			)
+			if err != nil {
+				panic(err)
+			}
+			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated)
+			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parent)
+		}
 	} else {
 		panic("only partitioned rewards supported")
 	}

@@ -122,6 +122,21 @@ func parseDataShred(packet []byte, variant byte) (*Shred, error) {
 	if size < dataHeaderSize || size > len(packet) || size > packetDataSize {
 		return nil, fmt.Errorf("%w: data size %d packet size %d", ErrInvalidDataShred, size, len(packet))
 	}
+	payloadSize := len(packet)
+	if isMerkleVariant(variant) && payloadSize >= dataPayloadSize {
+		payloadSize = dataPayloadSize
+	}
+	payload := make([]byte, payloadSize)
+	copy(payload, packet[:payloadSize])
+	var data []byte
+	if size <= payloadSize {
+		data = payload[dataHeaderSize:size]
+	} else {
+		// Preserve parsing of non-canonical packets whose declared data extends
+		// into a Merkle packet trailer. Valid Merkle shreds take the zero-copy
+		// view above; this cold fallback retains the prior parser behavior.
+		data = append([]byte(nil), packet[dataHeaderSize:size]...)
+	}
 
 	shred := &Shred{
 		Variant:      variant,
@@ -132,16 +147,10 @@ func parseDataShred(packet []byte, variant byte) (*Shred, error) {
 		FECSetIndex:  binary.LittleEndian.Uint32(packet[shredFECSetIndexOffset : shredFECSetIndexOffset+4]),
 		ParentOffset: binary.LittleEndian.Uint16(packet[dataParentOffsetOffset : dataParentOffsetOffset+2]),
 		Flags:        packet[dataFlagsOffset],
-		Data:         make([]byte, size-dataHeaderSize),
+		Data:         data,
+		Payload:      payload,
 	}
-	copy(shred.Signature[:], packet[shredSignatureOffset:shredSignatureSize])
-	copy(shred.Data, packet[dataHeaderSize:size])
-	payloadSize := len(packet)
-	if isMerkleVariant(variant) && payloadSize >= dataPayloadSize {
-		payloadSize = dataPayloadSize
-	}
-	shred.Payload = make([]byte, payloadSize)
-	copy(shred.Payload, packet[:payloadSize])
+	copy(shred.Signature[:], payload[shredSignatureOffset:shredSignatureSize])
 	return shred, nil
 }
 
@@ -153,6 +162,8 @@ func parseCodingShred(packet []byte, variant byte) (*Shred, error) {
 		return nil, fmt.Errorf("%w: coding payload size %d", ErrShortShred, len(packet))
 	}
 
+	payload := make([]byte, codingPayloadSize)
+	copy(payload, packet[:codingPayloadSize])
 	shred := &Shred{
 		Variant:         variant,
 		Type:            ShredTypeCode,
@@ -163,10 +174,9 @@ func parseCodingShred(packet []byte, variant byte) (*Shred, error) {
 		NumDataShreds:   binary.LittleEndian.Uint16(packet[codingNumDataOffset : codingNumDataOffset+2]),
 		NumCodingShreds: binary.LittleEndian.Uint16(packet[codingNumCodingOffset : codingNumCodingOffset+2]),
 		Position:        binary.LittleEndian.Uint16(packet[codingPositionOffset : codingPositionOffset+2]),
-		Payload:         make([]byte, codingPayloadSize),
+		Payload:         payload,
 	}
-	copy(shred.Signature[:], packet[shredSignatureOffset:shredSignatureSize])
-	copy(shred.Payload, packet[:codingPayloadSize])
+	copy(shred.Signature[:], payload[shredSignatureOffset:shredSignatureSize])
 	return shred, nil
 }
 

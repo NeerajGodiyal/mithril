@@ -39,6 +39,14 @@ func TestParseMerkleDataShred(t *testing.T) {
 	if len(shred.Data) == 0 {
 		t.Fatalf("expected parsed data payload")
 	}
+	if &shred.Data[0] != &shred.Payload[dataHeaderSize] {
+		t.Fatalf("data and payload should share one owned packet copy")
+	}
+	originalDataByte := shred.Data[0]
+	raw[dataHeaderSize] ^= 0xff
+	if shred.Data[0] != originalDataByte {
+		t.Fatalf("parsed shred retained the caller's reusable packet buffer")
+	}
 }
 
 func TestClassifyCurrentMerkleVariants(t *testing.T) {
@@ -150,6 +158,9 @@ func TestSlotAssemblerBuildsBlockFromCompleteDataShreds(t *testing.T) {
 		}
 		if !blk.FromLiveStream {
 			t.Fatalf("expected block to be marked as live shred-stream sourced")
+		}
+		if !blk.TransactionSignaturesVerified() {
+			t.Fatalf("expected assembler-verified block to carry the in-memory verification marker")
 		}
 		if len(fecRoots) == 0 && blk.HasAlpenglowBlockID {
 			t.Fatalf("legacy fixture unexpectedly carried an Alpenglow block id")
