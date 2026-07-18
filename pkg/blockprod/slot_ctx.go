@@ -18,7 +18,7 @@ type ParentContext struct {
 	ParentBankhash      solana.Hash
 	ParentLastEntryHash solana.Hash
 	EpochRewardsActive  bool
-	PrevNumSigs         uint64
+	PrevNumSigs         uint64 // signatures processed in the parent bank; fee-governor input only
 	PrevFeeGovernor     *sealevel.FeeRateGovernor
 	AcctsLtHash         *lthash.LtHash
 	Features            *features.Features
@@ -58,7 +58,9 @@ func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, p
 		AcctMapsMu:      &sync.Mutex{},
 		ModifiedAccts:   make(map[solana.PublicKey]bool),
 		WritableAccts:   make(map[solana.PublicKey]bool),
-		NumSignatures:   parent.PrevNumSigs,
+		// Signature count is bank-local. Parent.PrevNumSigs feeds the fee
+		// governor above, while the new child bank starts at zero.
+		NumSignatures: 0,
 	}
 	if parent.AcctsLtHash != nil {
 		slotCtx.AcctsLtHash = parent.AcctsLtHash.Clone()

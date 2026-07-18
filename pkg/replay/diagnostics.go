@@ -316,6 +316,7 @@ func writeFooterBankhashMismatchArtifact(
 	artifact["computed_accts_lthash_checksum"] = consensusLtHashChecksum(slotCtx.AcctsLtHash)
 	artifact["total_compute_units_consumed"] = slotCtx.TotalComputeUnitsConsumed
 	artifact["lamports_burnt"] = slotCtx.LamportsBurnt
+	artifact["processed_num_signatures"] = slotCtx.NumSignatures
 	artifact["footer_producer_time_nanos"] = block.FooterProducerTimeNanos
 	artifact["has_alpenglow_footer"] = block.HasAlpenglowFooter
 	artifact["has_expected_bankhash"] = block.HasExpectedBankhash

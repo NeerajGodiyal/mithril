@@ -334,6 +334,22 @@ func TestUnrootedTailSharedBatchBorrowsImmutableParents(t *testing.T) {
 	assert.NotSame(t, durable.acct, owned[1], "public mutable read must still clone")
 }
 
+func TestUnrootedTailSharedBatchReportsWorkingSetAndDurableKeys(t *testing.T) {
+	durable := &fakeDurable{known: map[solana.PublicKey]uint64{testKey(2): 200}}
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
+	held := testAccount(1, 100)
+	tail.Add(5, []*accounts.Account{held}, testHashBytes(5))
+
+	out, stats, err := tail.GetAccountsBatchSharedWithStats(context.Background(), 6, []solana.PublicKey{held.Key, testKey(2)})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, uint64(2), stats.RequestedKeys)
+	assert.Equal(t, uint64(1), stats.WorkingSetHits)
+	assert.Equal(t, uint64(1), stats.DurableKeys)
+	assert.Positive(t, stats.WorkingSetLookupNanoseconds)
+	assert.Equal(t, 1, durable.batchCalls)
+}
+
 func BenchmarkUnrootedTailBlockParentBatch(b *testing.B) {
 	const accountCount = 30_000
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")

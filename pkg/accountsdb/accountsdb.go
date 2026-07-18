@@ -93,6 +93,7 @@ var (
 const (
 	indexPebbleMemTableSize                = 64 << 20
 	indexPebbleMemTableStopWritesThreshold = 4
+	commonAccountCacheCapacity             = 5000
 	DefaultProgramCacheMaxMB               = 1024
 	programCacheCostUnitBytes              = 1 << 20
 )
@@ -213,7 +214,7 @@ func (accountsDb *AccountsDb) InitCaches() {
 		panic(err)
 	}
 
-	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](5000).
+	accountsDb.CommonAcctsCache, err = otter.MustBuilder[solana.PublicKey, *accounts.Account](commonAccountCacheCapacity).
 		Cost(func(key solana.PublicKey, acct *accounts.Account) uint32 {
 			return 1
 		}).
@@ -329,6 +330,22 @@ func (accountsDb *AccountsDb) cacheReadAccount(pubkey solana.PublicKey, acct *ac
 	}
 }
 
+// cacheBatchReadAccount keeps small batch reads useful to the read-through
+// cache without allowing a large block scan to flood a 5k-entry cache with
+// tens of thousands of one-shot accounts. Vote accounts retain their dedicated
+// cache regardless of batch size.
+func (accountsDb *AccountsDb) cacheBatchReadAccount(pubkey solana.PublicKey, acct *accounts.Account, admitCommon bool) (voteAdmitted, commonAdmitted bool) {
+	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+		accountsDb.VoteAcctCache.Set(pubkey, acct)
+		return true, false
+	}
+	if admitCommon {
+		accountsDb.CommonAcctsCache.Set(pubkey, acct)
+		return false, true
+	}
+	return false, false
+}
+
 // readIndexedAccount performs one index-fetch + file-read attempt.
 func (accountsDb *AccountsDb) readIndexedAccount(pubkey solana.PublicKey) (*accounts.Account, error) {
 	acctIdxEntryBytes, c, err := accountsDb.Index.Get(pubkey[:])
@@ -441,25 +458,27 @@ func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot 
 	accountsDb.refreshReadCaches(accts)
 }
 
-// refreshReadCaches updates the vote/common read caches for a just-stored batch:
-// a deleted (zero-lamport) account is evicted so stale state isn't served (crucial
-// for vote accounts that lose the vote-program owner on withdraw); otherwise the
-// account is cached under the vote or common cache by owner.
+// refreshReadCaches keeps already-hot common entries coherent after a store,
+// but does not admit every account in a large fold: doing so turns the 5k-entry
+// cache into an expensive write-only churn loop. Vote accounts retain their
+// dedicated cache. Deleted and owner-transitioned entries are evicted from the
+// cache that can no longer serve them.
 func (accountsDb *AccountsDb) refreshReadCaches(accts []*accounts.Account) {
 	for _, acct := range accts {
 		if acct == nil {
 			continue
 		}
 		if acct.Lamports == 0 {
-			if accountsDb.CommonAcctsCache.Has(acct.Key) {
-				accountsDb.CommonAcctsCache.Delete(acct.Key)
-			} else if accountsDb.VoteAcctCache.Has(acct.Key) {
-				accountsDb.VoteAcctCache.Delete(acct.Key)
-			}
+			accountsDb.CommonAcctsCache.Delete(acct.Key)
+			accountsDb.VoteAcctCache.Delete(acct.Key)
 		} else if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
+			accountsDb.CommonAcctsCache.Delete(acct.Key)
 			accountsDb.VoteAcctCache.Set(acct.Key, acct)
 		} else {
-			accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			accountsDb.VoteAcctCache.Delete(acct.Key)
+			if accountsDb.CommonAcctsCache.Has(acct.Key) {
+				accountsDb.CommonAcctsCache.Set(acct.Key, acct)
+			}
 		}
 	}
 }

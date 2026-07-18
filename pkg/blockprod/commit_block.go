@@ -24,13 +24,16 @@ func BuildLeaderBlock(in LeaderBlockInput) *b.Block {
 	bank := in.Bank
 	slot := bank.Slot()
 	block := &b.Block{
-		Slot:                slot,
-		ParentSlot:          in.ParentSlot,
-		Leader:              bank.Leader(),
-		Transactions:        bank.ForgedTransactions(),
-		Epoch:               in.EpochSchedule.GetEpoch(slot),
-		Features:            bank.SlotCtx().Features,
-		NumSignatures:       in.PrevNumSigs + bank.NumSignatures(),
+		Slot:         slot,
+		ParentSlot:   in.ParentSlot,
+		Leader:       bank.Leader(),
+		Transactions: bank.ForgedTransactions(),
+		Epoch:        in.EpochSchedule.GetEpoch(slot),
+		Features:     bank.SlotCtx().Features,
+		// Agave resets Bank.signature_count for every child bank.  The parent
+		// count is used only to derive this slot's fee governor; it is not part
+		// of this slot's bank-hash signature count.
+		NumSignatures:       bank.NumSignatures(),
 		PrevNumSignatures:   in.PrevNumSigs,
 		PrevFeeRateGovernor: in.PrevFeeGovernor,
 		LastBlockhash:       global.LatestBlockHash(),

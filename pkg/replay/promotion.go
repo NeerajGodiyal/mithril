@@ -49,11 +49,25 @@ type sharedBlockAccountSource interface {
 	GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error)
 }
 
+type measuredSharedBlockAccountSource interface {
+	GetAccountsBatchSharedWithStats(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, accountsdb.BatchReadStats, error)
+}
+
 func getAccountsBatchShared(ctx context.Context, source blockAccountSource, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
-	if shared, ok := source.(sharedBlockAccountSource); ok {
-		return shared.GetAccountsBatchShared(ctx, slot, pks)
+	out, _, err := getAccountsBatchSharedWithStats(ctx, source, slot, pks)
+	return out, err
+}
+
+func getAccountsBatchSharedWithStats(ctx context.Context, source blockAccountSource, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, accountsdb.BatchReadStats, error) {
+	if measured, ok := source.(measuredSharedBlockAccountSource); ok {
+		return measured.GetAccountsBatchSharedWithStats(ctx, slot, pks)
 	}
-	return source.GetAccountsBatch(ctx, slot, pks)
+	if shared, ok := source.(sharedBlockAccountSource); ok {
+		out, err := shared.GetAccountsBatchShared(ctx, slot, pks)
+		return out, accountsdb.BatchReadStats{RequestedKeys: uint64(len(pks)), DurableKeys: uint64(len(pks))}, err
+	}
+	out, err := source.GetAccountsBatch(ctx, slot, pks)
+	return out, accountsdb.BatchReadStats{RequestedKeys: uint64(len(pks)), DurableKeys: uint64(len(pks))}, err
 }
 
 // unrootedState is the in-RAM speculative-state engine the replay loop drives in
@@ -143,17 +157,27 @@ func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []
 // immutable values for the block parent snapshot; execution copy-on-writes on
 // first mutation.
 func (t *unrootedTail) GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+	out, _, err := t.GetAccountsBatchSharedWithStats(ctx, slot, pks)
+	return out, err
+}
+
+func (t *unrootedTail) GetAccountsBatchSharedWithStats(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, accountsdb.BatchReadStats, error) {
+	stats := accountsdb.BatchReadStats{RequestedKeys: uint64(len(pks))}
 	if len(pks) == 0 {
-		return nil, nil
+		return nil, stats, nil
 	}
 	out := make([]*accounts.Account, len(pks))
+	lookupStart := time.Now()
 	t.overlay.LookupBatch(pks, out)
+	stats.WorkingSetLookupNanoseconds = uint64(time.Since(lookupStart).Nanoseconds())
 	missCount := 0
 	for _, acct := range out {
 		if acct == nil {
 			missCount++
 		}
 	}
+	stats.WorkingSetHits = uint64(len(pks) - missCount)
+	stats.DurableKeys = uint64(missCount)
 	if missCount > 0 {
 		misses := make([]solana.PublicKey, 0, missCount)
 		missIdx := make([]int, 0, missCount)
@@ -163,20 +187,25 @@ func (t *unrootedTail) GetAccountsBatchShared(ctx context.Context, slot uint64, 
 				missIdx = append(missIdx, i)
 			}
 		}
-		loaded, err := getAccountsBatchShared(ctx, t.durable, slot, misses)
+		loaded, durableStats, err := getAccountsBatchSharedWithStats(ctx, t.durable, slot, misses)
 		if err != nil {
-			return nil, err
+			return nil, stats, err
 		}
+		durableStats.RequestedKeys = stats.RequestedKeys
+		durableStats.DurableKeys = stats.DurableKeys
+		durableStats.WorkingSetHits += stats.WorkingSetHits
+		durableStats.WorkingSetLookupNanoseconds += stats.WorkingSetLookupNanoseconds
+		stats = durableStats
 		// Durable returns one entry per requested key; guard so a contract
 		// violation surfaces as an error, not an index panic.
 		if len(loaded) != len(misses) {
-			return nil, fmt.Errorf("durable GetAccountsBatch returned %d accounts for %d keys at slot %d", len(loaded), len(misses), slot)
+			return nil, stats, fmt.Errorf("durable GetAccountsBatch returned %d accounts for %d keys at slot %d", len(loaded), len(misses), slot)
 		}
 		for j, a := range loaded {
 			out[missIdx[j]] = a
 		}
 	}
-	return out, nil
+	return out, stats, nil
 }
 
 // Add buffers a replayed slot's writes + bankhash in the overlay; it becomes

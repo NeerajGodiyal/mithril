@@ -339,7 +339,12 @@ func refreshManifestSeedFromManifest(accountsPath string, s *state.MithrilState,
 	}
 
 	snapshotEpoch := snapshotEpochForState(manifest)
-	if manifestEpochScheduleSeedMatches(s, manifest) && s.SnapshotEpoch == snapshotEpoch {
+	// ManifestEpochStakes is deliberately cleared after replay starts to release
+	// the large JSON seed.  A later graceful state save persists that cleared
+	// value, so schedule metadata alone does not mean the manifest seed is
+	// complete on restart.  Rehydrate when the stakes payload is absent.
+	if manifestEpochScheduleSeedMatches(s, manifest) &&
+		s.SnapshotEpoch == snapshotEpoch && len(s.ManifestEpochStakes) > 0 {
 		return
 	}
 

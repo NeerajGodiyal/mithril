@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/cockroachdb/pebble"
@@ -41,8 +42,57 @@ type appendVecReadChunk struct {
 	locations []batchAccountLocation
 }
 
+// BatchReadStats is one durable batch read's wall-time and work breakdown.
+// Allocation counters describe logical objects created directly by this path;
+// they deliberately exclude Pebble/OS/runtime internals.
+type BatchReadStats struct {
+	RequestedKeys uint64
+	DurableKeys   uint64
+
+	WorkingSetHits    uint64
+	InProgressHits    uint64
+	CacheHits         uint64
+	IndexHits         uint64
+	IndexMisses       uint64
+	UniqueAppendVecs  uint64
+	AppendVecChunks   uint64
+	AppendVecAccounts uint64
+	OpenFailures      uint64
+	ReadFailures      uint64
+	RetryAccounts     uint64
+
+	CommonCacheAdmissions        uint64
+	CommonCacheAdmissionsSkipped uint64
+	VoteCacheAdmissions          uint64
+
+	DecodedAccountObjects uint64
+	DecodedAccountBytes   uint64
+	PlaceholderObjects    uint64
+
+	WorkingSetLookupNanoseconds uint64
+	InProgressNanoseconds       uint64
+	CacheLookupNanoseconds      uint64
+	IndexLookupNanoseconds      uint64
+	ReadPlanningNanoseconds     uint64
+	AppendVecReadNanoseconds    uint64
+}
+
+type batchChunkReadStats struct {
+	appendVecAccounts            uint64
+	openFailures                 uint64
+	readFailures                 uint64
+	retryAccounts                uint64
+	commonCacheAdmissions        uint64
+	commonCacheAdmissionsSkipped uint64
+	voteCacheAdmissions          uint64
+	decodedAccountObjects        uint64
+	decodedAccountBytes          uint64
+	placeholderObjects           uint64
+}
+
 func (db *AccountsDb) GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
-	return db.getAccountsBatch(ctx, slot, pks)
+	out, _, err := db.getAccountsBatchWithStats(ctx, slot, pks)
+	return out, err
 }
 
 // GetAccountsBatchShared is the immutable-parent fast path consumed by replay.
@@ -50,34 +100,53 @@ func (db *AccountsDb) GetAccountsBatch(ctx context.Context, slot uint64, pks []s
 // makes that ownership explicit and lets an unrooted overlay avoid cloning
 // those values before transaction execution copy-on-writes them.
 func (db *AccountsDb) GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
-	return db.getAccountsBatch(ctx, slot, pks)
+	out, _, err := db.getAccountsBatchWithStats(ctx, slot, pks)
+	return out, err
 }
 
-func (db *AccountsDb) getAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+// GetAccountsBatchSharedWithStats is replay's instrumented immutable-parent
+// path. The non-instrumented APIs above share the same implementation.
+func (db *AccountsDb) GetAccountsBatchSharedWithStats(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, BatchReadStats, error) {
+	return db.getAccountsBatchWithStats(ctx, slot, pks)
+}
+
+func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, BatchReadStats, error) {
+	stats := BatchReadStats{RequestedKeys: uint64(len(pks)), DurableKeys: uint64(len(pks))}
 	if len(pks) == 0 {
-		return nil, nil
+		return nil, stats, nil
 	}
 
+	phaseStart := time.Now()
 	out := db.getStoreInProgressAccounts(pks)
+	stats.InProgressNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	phaseStart = time.Now()
 	cold := make([]int, 0, len(pks))
 	for i, pk := range pks {
 		if out[i] != nil {
+			stats.InProgressHits++
 			continue
 		}
 		if acct, ok := db.getCachedAccount(pk); ok {
+			stats.CacheHits++
+			if acct == nil || acct.Lamports == 0 {
+				stats.PlaceholderObjects++
+			}
 			out[i] = batchAccountOrPlaceholder(pk, acct)
 			continue
 		}
 		cold = append(cold, i)
 	}
+	stats.CacheLookupNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 	if len(cold) == 0 {
-		return out, nil
+		return out, stats, nil
 	}
 	if db.Index == nil {
 		for _, idx := range cold {
 			out[idx] = missingAccount(pks[idx])
 		}
-		return out, nil
+		stats.IndexMisses = uint64(len(cold))
+		stats.PlaceholderObjects += uint64(len(cold))
+		return out, stats, nil
 	}
 
 	// Resolve every cold key's index location with a fixed-size worker pool.
@@ -86,6 +155,7 @@ func (db *AccountsDb) getAccountsBatch(ctx context.Context, slot uint64, pks []s
 	// scheduler operations on a busy block.
 	locations := make([]batchAccountLocation, len(cold))
 	found := make([]bool, len(cold))
+	phaseStart = time.Now()
 	err := runBatchWorkers(ctx, len(cold), func(job int) error {
 		idx := cold[job]
 		pk := pks[idx]
@@ -106,18 +176,24 @@ func (db *AccountsDb) getAccountsBatch(ctx context.Context, slot uint64, pks []s
 		found[job] = true
 		return nil
 	})
+	stats.IndexLookupNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
+	phaseStart = time.Now()
 	groups := make(map[appendVecID][]batchAccountLocation)
 	for i, location := range locations {
 		if !found[i] {
+			stats.IndexMisses++
+			stats.PlaceholderObjects++
 			continue
 		}
+		stats.IndexHits++
 		id := appendVecID{slot: location.entry.Slot, fileID: location.entry.FileId}
 		groups[id] = append(groups[id], location)
 	}
+	stats.UniqueAppendVecs = uint64(len(groups))
 
 	chunks := make([]appendVecReadChunk, 0, len(groups))
 	for id, group := range groups {
@@ -129,16 +205,24 @@ func (db *AccountsDb) getAccountsBatch(ctx context.Context, slot uint64, pks []s
 			chunks = append(chunks, appendVecReadChunk{id: id, locations: group[start:end]})
 		}
 	}
+	stats.AppendVecChunks = uint64(len(chunks))
+	stats.ReadPlanningNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	admitCommon := len(cold) <= commonAccountCacheCapacity
+	chunkStats := make([]batchChunkReadStats, len(chunks))
 
 	// Each worker opens an appendvec once per small chunk, instead of once per
 	// account. A stale/unlinked compaction location falls back to the existing
 	// one-account read, which re-fetches the index and retries once.
+	phaseStart = time.Now()
 	err = runBatchWorkers(ctx, len(chunks), func(job int) error {
 		chunk := chunks[job]
+		jobStats := &chunkStats[job]
 		path := filepath.Join(db.AcctsDir, fmt.Sprintf("%d.%d", chunk.id.slot, chunk.id.fileID))
 		file, openErr := os.Open(path)
 		if openErr != nil {
-			return db.retryBatchLocations(ctx, slot, out, chunk.locations)
+			jobStats.openFailures++
+			jobStats.retryAccounts += uint64(len(chunk.locations))
+			return db.retryBatchLocations(ctx, slot, out, chunk.locations, jobStats)
 		}
 		defer file.Close()
 
@@ -148,20 +232,53 @@ func (db *AccountsDb) getAccountsBatch(ctx context.Context, slot uint64, pks []s
 			}
 			acct, readErr := readBatchAccountAt(file, path, location)
 			if readErr != nil {
-				if err := db.retryBatchLocation(slot, out, location); err != nil {
+				jobStats.readFailures++
+				jobStats.retryAccounts++
+				placeholder, err := db.retryBatchLocation(slot, out, location)
+				if err != nil {
 					return err
+				}
+				if placeholder {
+					jobStats.placeholderObjects++
 				}
 				continue
 			}
-			db.cacheReadAccount(location.pubkey, acct)
+			jobStats.appendVecAccounts++
+			jobStats.decodedAccountObjects++
+			jobStats.decodedAccountBytes += uint64(len(acct.Data))
+			voteAdmitted, commonAdmitted := db.cacheBatchReadAccount(location.pubkey, acct, admitCommon)
+			switch {
+			case voteAdmitted:
+				jobStats.voteCacheAdmissions++
+			case commonAdmitted:
+				jobStats.commonCacheAdmissions++
+			default:
+				jobStats.commonCacheAdmissionsSkipped++
+			}
+			if acct.Lamports == 0 {
+				jobStats.placeholderObjects++
+			}
 			out[location.outputIdx] = batchAccountOrPlaceholder(location.pubkey, acct)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	stats.AppendVecReadNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	for _, chunkStat := range chunkStats {
+		stats.AppendVecAccounts += chunkStat.appendVecAccounts
+		stats.OpenFailures += chunkStat.openFailures
+		stats.ReadFailures += chunkStat.readFailures
+		stats.RetryAccounts += chunkStat.retryAccounts
+		stats.CommonCacheAdmissions += chunkStat.commonCacheAdmissions
+		stats.CommonCacheAdmissionsSkipped += chunkStat.commonCacheAdmissionsSkipped
+		stats.VoteCacheAdmissions += chunkStat.voteCacheAdmissions
+		stats.DecodedAccountObjects += chunkStat.decodedAccountObjects
+		stats.DecodedAccountBytes += chunkStat.decodedAccountBytes
+		stats.PlaceholderObjects += chunkStat.placeholderObjects
 	}
-	return out, nil
+	if err != nil {
+		return nil, stats, err
+	}
+	return out, stats, nil
 }
 
 func readBatchAccountAt(file *os.File, path string, location batchAccountLocation) (*accounts.Account, error) {
@@ -180,25 +297,30 @@ func readBatchAccountAt(file *os.File, path string, location batchAccountLocatio
 	return acct, nil
 }
 
-func (db *AccountsDb) retryBatchLocations(ctx context.Context, slot uint64, out []*accounts.Account, locations []batchAccountLocation) error {
+func (db *AccountsDb) retryBatchLocations(ctx context.Context, slot uint64, out []*accounts.Account, locations []batchAccountLocation, stats *batchChunkReadStats) error {
 	for _, location := range locations {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := db.retryBatchLocation(slot, out, location); err != nil {
+		placeholder, err := db.retryBatchLocation(slot, out, location)
+		if err != nil {
 			return err
+		}
+		if placeholder {
+			stats.placeholderObjects++
 		}
 	}
 	return nil
 }
 
-func (db *AccountsDb) retryBatchLocation(slot uint64, out []*accounts.Account, location batchAccountLocation) error {
+func (db *AccountsDb) retryBatchLocation(slot uint64, out []*accounts.Account, location batchAccountLocation) (bool, error) {
 	acct, err := db.getStoredAccount(slot, location.pubkey)
 	if err != nil && err != ErrNoAccount {
-		return err
+		return false, err
 	}
+	placeholder := acct == nil || acct.Lamports == 0
 	out[location.outputIdx] = batchAccountOrPlaceholder(location.pubkey, acct)
-	return nil
+	return placeholder, nil
 }
 
 func batchAccountOrPlaceholder(pubkey solana.PublicKey, acct *accounts.Account) *accounts.Account {

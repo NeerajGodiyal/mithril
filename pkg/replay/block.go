@@ -47,6 +47,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
+	"github.com/zeebo/blake3"
 )
 
 // SlotCtxSetter is implemented by types that accept a SlotCtx update (e.g. RpcServer).
@@ -148,7 +149,7 @@ type ReplayResult struct {
 	LastAcctsLtHash          *lthash.LtHash // LtHash at end of last persisted slot
 	LastLamportsPerSignature uint64         // FeeRateGovernor.LamportsPerSignature
 	LastPrevLamportsPerSig   uint64         // FeeRateGovernor.PrevLamportsPerSignature
-	LastNumSignatures        uint64         // SlotCtx.NumSignatures
+	LastNumSignatures        uint64         // signatures processed in the last persisted bank
 
 	// Blockhash context - required because appendvec writes are not fsynced
 	LastRecentBlockhashes *sealevel.SysvarRecentBlockhashes // 150 entries, newest first
@@ -197,7 +198,7 @@ type ResumeState struct {
 	LamportsPerSignature uint64
 	// PrevLamportsPerSignature for reconstructing FeeRateGovernor
 	PrevLamportsPerSignature uint64
-	// NumSignatures is the total signature count at end of parent slot
+	// NumSignatures is the number of signatures processed in the parent bank.
 	NumSignatures uint64
 
 	// Blockhash context - required because appendvec writes are not fsynced
@@ -445,19 +446,28 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 }
 
 func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, error) {
+	phaseStart := time.Now()
 	err := resolveAddrTableLookups(accountsDb, block)
+	metrics.GlobalBlockReplay.AccountLoader.AddressTableLookups.AddTimingSince(phaseStart)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	phaseStart = time.Now()
 	dedupedAccts := extractAndDedupeBlockAccts(block)
+	metrics.GlobalBlockReplay.AccountLoader.DedupeBlockAccounts.AddTimingSince(phaseStart)
 	ctx := context.Background()
-	slotAccts, err := getAccountsBatchShared(ctx, accountsDb, block.Slot, dedupedAccts)
+	phaseStart = time.Now()
+	slotAccts, batchStats, err := getAccountsBatchSharedWithStats(ctx, accountsDb, block.Slot, dedupedAccts)
+	metrics.GlobalBlockReplay.AccountLoader.SourceBatch.AddTimingSince(phaseStart)
+	recordAccountLoaderBatchStats(&metrics.GlobalBlockReplay.AccountLoader, batchStats)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	phaseStart = time.Now()
 	numAccts := uint64(len(slotAccts))
+	metrics.GlobalBlockReplay.AccountLoader.ParentAccounts = numAccts
 	parentAccts := accounts.NewMemAccountsWithLen(numAccts)
 	for _, acct := range slotAccts {
 		if err = parentAccts.SetAccountWithoutLock(acct.Key, acct); err != nil {
@@ -468,7 +478,9 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 	// accts is a branch-local overlay over the pristine parent snapshot; execution
 	// copy-on-writes, so parentAccts stays pristine for LtHash "before" values.
 	accts := accounts.NewOverlayAccounts(parentAccts)
+	metrics.GlobalBlockReplay.AccountLoader.ParentMapBuild.AddTimingSince(phaseStart)
 
+	phaseStart = time.Now()
 	block.FeeRateGovernor = sealevel.NewFeeRateGovernorDerived(block.PrevFeeRateGovernor, block.PrevNumSignatures)
 	if block.FeeRateGovernor.PrevLamportsPerSignature == 0 {
 		block.FeeRateGovernor.PrevLamportsPerSignature = block.InitialPreviousLamportsPerSignature
@@ -724,7 +736,36 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 		}
 	}
 
+	metrics.GlobalBlockReplay.AccountLoader.SysvarUpdates.AddTimingSince(phaseStart)
 	return accts, parentAccts, nil
+}
+
+func recordAccountLoaderBatchStats(dst *metrics.AccountLoader, src accountsdb.BatchReadStats) {
+	dst.RequestedKeys = src.RequestedKeys
+	dst.DurableKeys = src.DurableKeys
+	dst.WorkingSetHits = src.WorkingSetHits
+	dst.InProgressHits = src.InProgressHits
+	dst.CacheHits = src.CacheHits
+	dst.IndexHits = src.IndexHits
+	dst.IndexMisses = src.IndexMisses
+	dst.UniqueAppendVecs = src.UniqueAppendVecs
+	dst.AppendVecChunks = src.AppendVecChunks
+	dst.AppendVecAccounts = src.AppendVecAccounts
+	dst.OpenFailures = src.OpenFailures
+	dst.ReadFailures = src.ReadFailures
+	dst.RetryAccounts = src.RetryAccounts
+	dst.CommonCacheAdmissions = src.CommonCacheAdmissions
+	dst.CommonCacheAdmissionsSkipped = src.CommonCacheAdmissionsSkipped
+	dst.VoteCacheAdmissions = src.VoteCacheAdmissions
+	dst.DecodedAccountObjects = src.DecodedAccountObjects
+	dst.DecodedAccountBytes = src.DecodedAccountBytes
+	dst.PlaceholderObjects = src.PlaceholderObjects
+	dst.WorkingSetLookup.AddTiming(time.Duration(src.WorkingSetLookupNanoseconds))
+	dst.InProgressLookup.AddTiming(time.Duration(src.InProgressNanoseconds))
+	dst.CacheLookup.AddTiming(time.Duration(src.CacheLookupNanoseconds))
+	dst.IndexLookup.AddTiming(time.Duration(src.IndexLookupNanoseconds))
+	dst.ReadPlanning.AddTiming(time.Duration(src.ReadPlanningNanoseconds))
+	dst.AppendVecRead.AddTiming(time.Duration(src.AppendVecReadNanoseconds))
 }
 
 // setupInitialVoteAcctsAndStakeAccts populates the vote and stake caches at startup.
@@ -2404,7 +2445,7 @@ func ReplayBlocks(
 
 		// post-epoch boundary rewards distribution
 		if partitionedEpochRewardsEnabled && partitionedRewardsInfo != nil && currentSlot >= partitionedRewardsInfo.FirstStakingRewardSlot && partitionedRewardsInfo.NumRewardPartitionsRemaining > 0 {
-			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
+			distributedAccts, parentDistributedAccts := distributePartitionedEpochRewardsForSlot(acctsDb, lastSlotCtx, replayCtx, partitionedRewardsInfo, currentSlot, block.BlockHeight)
 			block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, distributedAccts...)
 			block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parentDistributedAccts...)
 		}
@@ -3024,11 +3065,55 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	return slotCtx
 }
 
-func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
+type blockTransactionExecutionPlan struct {
+	execute             []bool
+	processedTxCount    uint64
+	processedSignatures uint64
+	duplicateTxCount    uint64
+}
+
+// planBlockTransactionExecution mirrors Agave's AlreadyProcessed check for
+// transactions presented to one bank.  The status cache is keyed by the
+// domain-separated BLAKE3 hash of the serialized message (not by the wire
+// signature), and rejected duplicates contribute neither fees nor signatures
+// to the bank hash.
+func planBlockTransactionExecution(transactions []*solana.Transaction) (blockTransactionExecutionPlan, error) {
+	plan := blockTransactionExecutionPlan{execute: make([]bool, len(transactions))}
+	seen := make(map[[32]byte]struct{}, len(transactions))
+	for idx, tx := range transactions {
+		if tx == nil {
+			return blockTransactionExecutionPlan{}, fmt.Errorf("transaction %d is nil", idx)
+		}
+		message, err := tx.Message.MarshalBinary()
+		if err != nil {
+			return blockTransactionExecutionPlan{}, fmt.Errorf("serialize transaction %d message: %w", idx, err)
+		}
+
+		hasher := blake3.New()
+		_, _ = hasher.Write([]byte("solana-tx-message-v1"))
+		_, _ = hasher.Write(message)
+		var messageHash [32]byte
+		copy(messageHash[:], hasher.Sum(nil))
+		if _, duplicate := seen[messageHash]; duplicate {
+			plan.duplicateTxCount++
+			continue
+		}
+		seen[messageHash] = struct{}{}
+		plan.execute[idx] = true
+		plan.processedTxCount++
+		plan.processedSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
+	}
+	return plan, nil
+}
+
+func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, executionPlan blockTransactionExecutionPlan, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
 	// process & execute each transaction in turn
 	for idx, tx := range block.Transactions {
+		if !executionPlan.execute[idx] {
+			continue
+		}
 		var txMeta *rpc.TransactionMeta
 		if block.TxMetas != nil {
 			txMeta = block.TxMetas[idx]
@@ -3144,7 +3229,7 @@ func lightbringerEntryExecutionBatches(transactions []*solana.Transaction, entry
 	return batches
 }
 
-func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, txParallelism int, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
+func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, rblock *b.Block, executionPlan blockTransactionExecutionPlan, txParallelism int, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	txFeeInfos := make([]*fees.TxFeeInfo, len(block.Transactions))
 	txComputeUnitsConsumed := make([]uint64, len(block.Transactions))
@@ -3166,6 +3251,10 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 			go func() {
 				defer wg.Done()
 				for idx := range do {
+					if !executionPlan.execute[idx] {
+						done <- idx
+						continue
+					}
 					tx := block.Transactions[idx]
 					var txMeta *rpc.TransactionMeta
 					if idx < len(rblock.TxMetas) {
@@ -3226,9 +3315,17 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		for _, entry := range rblock.Entries {
 			batches := lightbringerEntryExecutionBatches(rblock.Transactions, entry, relaxIntraBatchAccountLocks)
 			for _, batch := range batches {
-				batchWg.Add(len(batch))
+				executable := 0
 				for _, txIdx := range batch {
-					do <- txIdx
+					if executionPlan.execute[txIdx] {
+						executable++
+					}
+				}
+				batchWg.Add(executable)
+				for _, txIdx := range batch {
+					if executionPlan.execute[txIdx] {
+						do <- txIdx
+					}
 				}
 				batchWg.Wait()
 			}
@@ -3241,6 +3338,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 	var totalComputeUnitsConsumed uint64
 	for idx, txFeeInfo := range txFeeInfos {
+		if !executionPlan.execute[idx] {
+			continue
+		}
 		totalComputeUnitsConsumed += txComputeUnitsConsumed[idx]
 		if txFeeInfo == nil {
 			// This happens when IsTransactionAgeValid returns false (blockhash not found)
@@ -3390,6 +3490,18 @@ func ProcessBlock(
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail)
 	slotCtx.TraceCtx = ctx
+	executionPlan, err := planBlockTransactionExecution(block.Transactions)
+	if err != nil {
+		return nil, fmt.Errorf("plan transaction execution for slot %d: %w", block.Slot, err)
+	}
+	if executionPlan.duplicateTxCount > 0 {
+		mlog.Log.Warnf("slot %d: rejected %d duplicate transaction messages as AlreadyProcessed", block.Slot, executionPlan.duplicateTxCount)
+	}
+	// Bank.signature_count is the number of signatures on transactions that
+	// were actually processed in this bank. Keep block.NumSignatures as the
+	// ingress count for diagnostics; SlotCtx carries the consensus count used by
+	// the bank hash and by the next slot's fee governor.
+	slotCtx.NumSignatures = executionPlan.processedSignatures
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
 	start = time.Now()
@@ -3398,9 +3510,9 @@ func ProcessBlock(
 	txLoopRegion := trace.StartRegion(ctx, "TxLoop")
 	shouldVerifySignatures := !block.TransactionSignaturesVerified()
 	if txParallelism > 0 {
-		txFeeAccumulator, totalComputeUnitsConsumed = parallelTxLoop(slotCtx, &sigverifyWg, plannerBlock, block, txParallelism, dbgOpts, shouldVerifySignatures)
+		txFeeAccumulator, totalComputeUnitsConsumed = parallelTxLoop(slotCtx, &sigverifyWg, plannerBlock, block, executionPlan, txParallelism, dbgOpts, shouldVerifySignatures)
 	} else {
-		txFeeAccumulator, totalComputeUnitsConsumed = sequentialTxLoop(slotCtx, &sigverifyWg, block, dbgOpts, shouldVerifySignatures)
+		txFeeAccumulator, totalComputeUnitsConsumed = sequentialTxLoop(slotCtx, &sigverifyWg, block, executionPlan, dbgOpts, shouldVerifySignatures)
 	}
 	slotCtx.TotalComputeUnitsConsumed = totalComputeUnitsConsumed
 	txLoopRegion.End()
@@ -3453,7 +3565,7 @@ func ProcessBlock(
 
 	start = time.Now()
 	setReplayStage("bankhash")
-	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 	if alpenglowClock {
 		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
@@ -3514,7 +3626,7 @@ func ProcessBlock(
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
 	}
 
-	global.IncrTransactionCount(uint64(len(block.Transactions)))
+	global.IncrTransactionCount(executionPlan.processedTxCount)
 	setReplayStage("done")
 	return slotCtx, err
 }

@@ -5,9 +5,22 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
+
+type rewardAccountReader struct {
+	acct *accounts.Account
+}
+
+func (r rewardAccountReader) GetAccount(_ uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	if r.acct != nil && r.acct.Key == pubkey {
+		return r.acct.Clone(), nil
+	}
+	return nil, accountsdb.ErrNoAccount
+}
 
 func TestRewardEpochDelegatedStakesAddress(t *testing.T) {
 	require.Equal(
@@ -57,4 +70,32 @@ func TestCoalesceEpochAccountUpdatesKeepsOriginalParentAndFinalValue(t *testing.
 	require.Equal(t, uint64(120), updated[0].Lamports)
 	require.Equal(t, uint64(100), parents[0].Lamports)
 	require.Equal(t, other, updated[1].Key)
+}
+
+func TestEpochRewardAccountLoaderPrefersStagedThenSpeculativeParent(t *testing.T) {
+	stagedKey := solana.NewWallet().PublicKey()
+	parentKey := solana.NewWallet().PublicKey()
+	staged := &accounts.Account{Key: stagedKey, Lamports: 90}
+	parent := &accounts.Account{Key: parentKey, Lamports: 70}
+	parentCtx := &sealevel.SlotCtx{
+		Slot:         41,
+		UnrootedRead: rewardAccountReader{acct: parent},
+	}
+
+	loader := epochRewardAccountLoader(nil, 42, parentCtx, []*accounts.Account{
+		{Key: stagedKey, Lamports: 95},
+		staged,
+	})
+
+	loadedStaged, err := loader(stagedKey)
+	require.NoError(t, err)
+	require.Equal(t, staged.Key, loadedStaged.Key)
+	require.Equal(t, staged.Lamports, loadedStaged.Lamports, "latest same-bank staged write must win")
+	loadedStaged.Lamports++
+	require.Equal(t, uint64(90), staged.Lamports, "loader must not expose retained staged state")
+
+	loadedParent, err := loader(parentKey)
+	require.NoError(t, err)
+	require.Equal(t, parent.Key, loadedParent.Key)
+	require.Equal(t, parent.Lamports, loadedParent.Lamports, "next reward partition must read the speculative parent bank")
 }

@@ -303,10 +303,10 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 		}
 
 		var updated, parents []*accounts.Account
-		var voteRewardsDistributed uint64
-		partitionedRewardsInfo, updated, parents, voteRewardsDistributed = beginPartitionedEpochRewardsDistribution(
+		var epochRewardsCapitalizationIncrease uint64
+		partitionedRewardsInfo, updated, parents, epochRewardsCapitalizationIncrease = beginPartitionedEpochRewardsDistribution(
 			acctsDb, prevSlotCtx, &stakeHistory, replayCtx, epochSchedule,
-			block, f, newEpoch, block.Slot, rpcc, dbgOpts, mode,
+			block, f, newEpoch, block.Slot, rpcc, dbgOpts, mode, block.EpochUpdatedAccts,
 		)
 		block.EpochUpdatedAccts = append(block.EpochUpdatedAccts, updated...)
 		block.ParentEpochUpdatedAccts = append(block.ParentEpochUpdatedAccts, parents...)
@@ -314,7 +314,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 		if alpenglowClockFeatureActive(f) {
 			updated, parent, err := stageEpochInflationAccount(
 				acctsDb, prevSlotCtx.Slot, block.Slot, replayCtx, epochSchedule, f,
-				newEpoch, epochStartCapitalization, voteRewardsDistributed,
+				newEpoch, epochStartCapitalization, epochRewardsCapitalizationIncrease,
 			)
 			if err != nil {
 				panic(err)

@@ -50,6 +50,13 @@ func TestNewEpochInflationStateUsesVotingRewards(t *testing.T) {
 	require.Equal(t, uint64(54000), withVotingRewards.SlotsPerEpoch)
 }
 
+func TestCapitalizingEpochRewardsIncludesVotingAndStakingRewards(t *testing.T) {
+	require.Equal(t, uint64(11_079_554_932_262), capitalizingEpochRewards(
+		10_515_249_682_157,
+		564_305_250_105,
+	))
+}
+
 func TestStageEpochInflationAccountRollsStateAndCapitalization(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "accounts"), 0o755))

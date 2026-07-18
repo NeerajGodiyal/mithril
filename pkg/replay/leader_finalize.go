@@ -112,6 +112,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	slotCtx.Blockhash = block.Blockhash
 	slotCtx.Epoch = block.Epoch
 	slotCtx.FeeRateGovernor = block.FeeRateGovernor
+	slotCtx.NumSignatures = block.NumSignatures
 
 	if _, err := slotCtx.GetAccount(sealevel.SysvarClockAddr); err != nil {
 		if err := PrepareLeaderSlotSysvars(slotCtx, block, in.EpochSchedule, in.AlpenglowClock); err != nil {

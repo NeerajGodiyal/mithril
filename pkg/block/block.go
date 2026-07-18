@@ -23,8 +23,8 @@ type Block struct {
 	HasEahWorkaround                    bool
 	ParentBankhash                      [32]byte
 	AcctsLtHash                         *lthash.LtHash
-	NumSignatures                       uint64
-	PrevNumSignatures                   uint64
+	NumSignatures                       uint64 // signatures carried by this block; replay excludes AlreadyProcessed transactions
+	PrevNumSignatures                   uint64 // signatures processed in the parent bank (fee-governor input)
 	InitialPreviousLamportsPerSignature uint64
 	Blockhash                           [32]byte
 	AlpenglowBlockID                    [32]byte // Turbine Merkle-root block id used by Alpenglow/Votor.

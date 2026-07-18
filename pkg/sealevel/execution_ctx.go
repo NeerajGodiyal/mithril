@@ -79,7 +79,7 @@ type SlotCtx struct {
 	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
 	ModifiedAccts   map[solana.PublicKey]bool
 	WritableAccts   map[solana.PublicKey]bool
-	NumSignatures   uint64
+	NumSignatures   uint64 // signatures processed in this bank (resets for every child bank)
 	Blockhash       [32]byte
 	LastBlockhash   [32]byte
 	SlotBank        SlotBank

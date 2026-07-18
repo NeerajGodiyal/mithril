@@ -244,7 +244,20 @@ type idxAndRewardNew struct {
 	voterPk solana.PublicKey
 }
 
-func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]*atomic.Uint64, slot uint64) ([]*accounts.Account, []*accounts.Account, uint64) {
+// RewardAccountLoader resolves the account state on which a reward mutation
+// must build. In rooted-durable replay this is the speculative parent/epoch
+// staging overlay rather than AccountsDB, which intentionally contains only
+// finalized state.
+type RewardAccountLoader func(solana.PublicKey) (*accounts.Account, error)
+
+func loadRewardAccount(acctsDb *accountsdb.AccountsDb, slot uint64, loader RewardAccountLoader, pubkey solana.PublicKey) (*accounts.Account, error) {
+	if loader != nil {
+		return loader(pubkey)
+	}
+	return acctsDb.GetAccount(slot, pubkey)
+}
+
+func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards map[solana.PublicKey]*atomic.Uint64, slot uint64, loader RewardAccountLoader) ([]*accounts.Account, []*accounts.Account, uint64) {
 	var totalVotingRewards atomic.Uint64
 
 	updatedAccts := make([]*accounts.Account, len(validatorRewards))
@@ -261,10 +274,13 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 		voterPk := r.voterPk
 		idx := r.idx
 
-		voteAcct, err := acctsDb.GetAccount(slot, voterPk)
+		voteAcct, err := loadRewardAccount(acctsDb, slot, loader, voterPk)
 		if err != nil {
 			return
 		}
+		// Loaders may return a retained speculative-overlay value. Reward
+		// distribution owns its mutation, so never modify that parent in place.
+		voteAcct = voteAcct.Clone()
 		parentUpdatedAccts[idx] = voteAcct.Clone()
 
 		voteAcct.Lamports, err = safemath.CheckedAddU64(voteAcct.Lamports, uint64(reward))
@@ -299,7 +315,7 @@ func DistributeVotingRewards(acctsDb *accountsdb.AccountsDb, validatorRewards ma
 	return updatedAccts, parentUpdatedAccts, totalVotingRewards.Load()
 }
 
-func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir string, spoolSlot uint64, partitionIdx uint64, currentSlot uint64) ([]*accounts.Account, []*accounts.Account, uint64, uint64) {
+func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir string, spoolSlot uint64, partitionIdx uint64, currentSlot uint64, loader RewardAccountLoader) ([]*accounts.Account, []*accounts.Account, uint64, uint64) {
 	reader, err := NewPartitionReader(spoolDir, spoolSlot, uint32(partitionIdx))
 	if err != nil {
 		panic(fmt.Sprintf("unable to open partition %d spool for distribution: %s", partitionIdx, err))
@@ -341,7 +357,7 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 		// Burned rewards advance the EpochRewards sysvar but do NOT increase
 		// capitalization.
 
-		stakeAcct, err := acctsDb.GetAccount(currentSlot, rec.StakePubkey)
+		stakeAcct, err := loadRewardAccount(acctsDb, currentSlot, loader, rec.StakePubkey)
 		if err != nil {
 			if errors.Is(err, accountsdb.ErrNoAccount) {
 				// AccountNotFound — matches Agave DistributionError::AccountNotFound
@@ -352,6 +368,8 @@ func DistributeStakingRewardsFromSpool(acctsDb *accountsdb.AccountsDb, spoolDir 
 			// Storage/IO error — hard fail, do not burn
 			panic(fmt.Sprintf("spool distribution: GetAccount failed for %s in slot %d: %v", rec.StakePubkey, currentSlot, err))
 		}
+		// See DistributeVotingRewards: the speculative parent is immutable.
+		stakeAcct = stakeAcct.Clone()
 		parentAccts[idx] = stakeAcct.Clone()
 
 		stakeState, err := sealevel.UnmarshalStakeState(stakeAcct.Data)
@@ -748,12 +766,13 @@ func CalculateNumRewardPartitions(numStakingRewards uint64) uint64 {
 
 // StreamingRewardsResult holds the results from streaming rewards calculation.
 type StreamingRewardsResult struct {
-	SpoolDir         string // Base directory for per-partition spool files
-	SpoolSlot        uint64 // Slot for spool file naming
-	TotalPoints      wide.Uint128
-	ValidatorRewards map[solana.PublicKey]*atomic.Uint64
-	NumStakeRewards  uint64
-	NumPartitions    uint64
+	SpoolDir           string // Base directory for per-partition spool files
+	SpoolSlot          uint64 // Slot for spool file naming
+	TotalPoints        wide.Uint128
+	TotalStakerRewards uint64
+	ValidatorRewards   map[solana.PublicKey]*atomic.Uint64
+	NumStakeRewards    uint64
+	NumPartitions      uint64
 }
 
 // spoolWriteRequest is sent to the single-writer goroutine for spool writes.
@@ -1108,11 +1127,12 @@ func CalculateRewardsStreaming(
 	}
 
 	return &StreamingRewardsResult{
-		SpoolDir:         spoolDir,
-		SpoolSlot:        slot,
-		TotalPoints:      reportedPoints,
-		ValidatorRewards: validatorRewards,
-		NumStakeRewards:  actualRewardCount,
-		NumPartitions:    numPartitions,
+		SpoolDir:           spoolDir,
+		SpoolSlot:          slot,
+		TotalPoints:        reportedPoints,
+		TotalStakerRewards: phase2TotalStakerRewards,
+		ValidatorRewards:   validatorRewards,
+		NumStakeRewards:    actualRewardCount,
+		NumPartitions:      numPartitions,
 	}, nil
 }

@@ -29,6 +29,6 @@ func TestNewLeaderSlotCtxInheritsAcctsLtHashAndFeatures(t *testing.T) {
 	require.True(t, slotCtx.Features.IsActive(features.AccountsLtHash))
 	require.True(t, slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash))
 	require.True(t, slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize))
-	require.Equal(t, uint64(42), slotCtx.NumSignatures)
+	require.Equal(t, uint64(0), slotCtx.NumSignatures)
 	require.Equal(t, uint64(0), slotCtx.Epoch) // slot 100 with default schedule
 }

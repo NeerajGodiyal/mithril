@@ -19,9 +19,52 @@ func (t *Timing) AddTimingSince(start time.Time) {
 	t.AddTiming(time.Since(start))
 }
 
+// AccountLoader is the per-slot decomposition of LoadBlockAccounts. Counters
+// describe logical loader work; allocation counters cover objects/data created
+// directly by the batch loader rather than runtime or Pebble internals.
+type AccountLoader struct {
+	AddressTableLookups Timing
+	DedupeBlockAccounts Timing
+	SourceBatch         Timing
+	ParentMapBuild      Timing
+	SysvarUpdates       Timing
+
+	WorkingSetLookup Timing
+	InProgressLookup Timing
+	CacheLookup      Timing
+	IndexLookup      Timing
+	ReadPlanning     Timing
+	AppendVecRead    Timing
+
+	RequestedKeys  uint64
+	DurableKeys    uint64
+	ParentAccounts uint64
+
+	WorkingSetHits    uint64
+	InProgressHits    uint64
+	CacheHits         uint64
+	IndexHits         uint64
+	IndexMisses       uint64
+	UniqueAppendVecs  uint64
+	AppendVecChunks   uint64
+	AppendVecAccounts uint64
+	OpenFailures      uint64
+	ReadFailures      uint64
+	RetryAccounts     uint64
+
+	CommonCacheAdmissions        uint64
+	CommonCacheAdmissionsSkipped uint64
+	VoteCacheAdmissions          uint64
+
+	DecodedAccountObjects uint64
+	DecodedAccountBytes   uint64
+	PlaceholderObjects    uint64
+}
+
 // Metrics for replaying a single block
 type BlockReplay struct {
-	Slot uint64
+	Slot          uint64
+	AccountLoader AccountLoader
 
 	// Block-level latencies.
 	PreprocessBlock     Timing
@@ -101,13 +144,13 @@ func (c *Counter) Get() uint64 {
 // surfaced through the standard metrics endpoint; latency uses the same
 // Timing type as block replay so dashboards can reuse existing rendering.
 type Simulate struct {
-	TotalCalls           Counter
-	SanitizeFailures     Counter
-	AddressLookupFails   Counter
-	NonceFallbackHits    Counter
-	Errors               Counter
-	Successes            Counter
-	HandlerLatency       Timing
+	TotalCalls         Counter
+	SanitizeFailures   Counter
+	AddressLookupFails Counter
+	NonceFallbackHits  Counter
+	Errors             Counter
+	Successes          Counter
+	HandlerLatency     Timing
 }
 
 var GlobalSimulate = Simulate{}
