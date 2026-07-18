@@ -269,6 +269,9 @@ func (execCtx *ExecutionCtx) ProcessInstruction(instrData []byte, instructionAcc
 }
 
 func (execCtx *ExecutionCtx) AddModifiedVoteState(pubkey solana.PublicKey, state *VoteStateVersions) {
+	if execCtx.ModifiedVoteStates == nil {
+		execCtx.ModifiedVoteStates = make(map[solana.PublicKey]*VoteStateVersions, 1)
+	}
 	execCtx.ModifiedVoteStates[pubkey] = state
 }
 

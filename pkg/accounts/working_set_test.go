@@ -15,6 +15,55 @@ func wsAcct(key byte, lamports uint64) *Account {
 
 func wsKey(b byte) [32]byte { return [32]byte{b} }
 
+func TestWorkingSetLookupBatchPreservesOrderAndMisses(t *testing.T) {
+	w := NewWorkingSet()
+	first := wsAcct(1, 100)
+	latest := wsAcct(1, 700)
+	second := wsAcct(2, 200)
+	w.Add(5, []*Account{first, second})
+	w.Add(7, []*Account{latest})
+
+	keys := []solana.PublicKey{{1}, {9}, {2}, {1}}
+	out := make([]*Account, len(keys))
+	w.LookupBatch(keys, out)
+
+	assert.Same(t, latest, out[0])
+	assert.Nil(t, out[1])
+	assert.Same(t, second, out[2])
+	assert.Same(t, latest, out[3])
+}
+
+func BenchmarkWorkingSetLookupBlock(b *testing.B) {
+	const keyCount = 30_000
+	w := NewWorkingSet()
+	keys := make([]solana.PublicKey, keyCount)
+	delta := make([]*Account, keyCount/2)
+	for i := range keys {
+		keys[i][0] = byte(i)
+		keys[i][1] = byte(i >> 8)
+		keys[i][2] = byte(i >> 16)
+		if i < len(delta) {
+			delta[i] = &Account{Key: keys[i], Lamports: uint64(i + 1)}
+		}
+	}
+	w.Add(1, delta)
+	out := make([]*Account, len(keys))
+
+	b.Run("per-key-lock", func(b *testing.B) {
+		for range b.N {
+			for _, key := range keys {
+				_, _ = w.Lookup([32]byte(key))
+			}
+		}
+	})
+	b.Run("single-batch-lock", func(b *testing.B) {
+		for range b.N {
+			clear(out)
+			w.LookupBatch(keys, out)
+		}
+	})
+}
+
 // EvictFrom restores the exact prior value via the undo journal.
 func TestWorkingSetUndoRestoresExactPriorValue(t *testing.T) {
 	w := NewWorkingSet()

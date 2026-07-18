@@ -1,6 +1,10 @@
 package accounts
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/gagliardetto/solana-go"
+)
 
 // WorkingSet is the canonical timeline's mutable suffix: confirmed-but-unrooted
 // slot writes buffered in RAM over the durable rooted store. Reads hit the
@@ -95,6 +99,26 @@ func (w *WorkingSet) Lookup(pubkey [32]byte) (*Account, bool) {
 		return e.acct, true
 	}
 	return nil, false
+}
+
+// LookupBatch fills out with the newest unrooted value for every matching
+// pubkey. Misses are left nil. The returned accounts are retained immutable
+// WorkingSet values; callers must copy-on-write before mutation.
+//
+// A block may contain tens of thousands of unique keys. Holding one read lock
+// for the whole lookup avoids two atomic lock operations per key while still
+// giving the caller a coherent view of the speculative suffix.
+func (w *WorkingSet) LookupBatch(pubkeys []solana.PublicKey, out []*Account) {
+	if len(pubkeys) != len(out) {
+		panic("working set batch lookup length mismatch")
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for i, pubkey := range pubkeys {
+		if e, ok := w.flat[[32]byte(pubkey)]; ok {
+			out[i] = e.acct
+		}
+	}
 }
 
 // SlotDelta is one held slot's account writes, returned for durable promotion.

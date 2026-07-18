@@ -48,17 +48,16 @@ var (
 	TxErrSanitizeFailure                   = errors.New("TxErrSanitizeFailure")
 )
 
-func programIndices(tx *solana.Transaction, instrIdx int) []uint64 {
-	idx := uint64(tx.Message.Instructions[instrIdx].ProgramIDIndex)
-	return []uint64{idx}
-}
-
 const (
 	maxStackCapacity      = 5
 	maxInstrTraceCapacity = 64
 )
 
-func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, log *sealevel.LogRecorder) *sealevel.ExecutionCtx {
+type discardLogger struct{}
+
+func (discardLogger) Log(string) {}
+
+func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, log sealevel.Logger) *sealevel.ExecutionCtx {
 	txCtx := sealevel.NewTransactionCtx(*transactionAccts, maxStackCapacity, maxInstrTraceCapacity)
 	execCtx := &sealevel.ExecutionCtx{Log: log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(uint64(computeBudgetLimits.ComputeUnitLimit)), PrevLamportsPerSignature: slotCtx.FeeRateGovernor.PrevLamportsPerSignature}
 
@@ -66,23 +65,43 @@ func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.Transactio
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.SlotCtx = slotCtx
 	execCtx.TransactionContext.ComputeBudgetLimits = computeBudgetLimits
-	execCtx.ModifiedVoteStates = make(map[solana.PublicKey]*sealevel.VoteStateVersions, 8)
 	return execCtx
 }
 
-func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
+type txAccountKeyInfo struct {
+	firstIndex  uint64
+	isProgramID bool
+}
+
+func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]sealevel.Instruction, [][]sealevel.InstructionAccount, []*solana.AccountMeta, error) {
 	instrs := make([]sealevel.Instruction, 0, len(tx.Message.Instructions))
-	acctMetasPerInstr := make([][]sealevel.AccountMeta, 0, len(tx.Message.Instructions))
+	instructionAcctsPerInstr := make([][]sealevel.InstructionAccount, 0, len(tx.Message.Instructions))
+
+	// AccountMetaList is relatively expensive and used to be rebuilt once per
+	// instruction by ResolveInstructionAccounts, then once more by the account
+	// loader. Build it once and share it with both parsing and loading.
+	txAcctMetas, err := tx.AccountMetaList()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	keyInfo := make(map[solana.PublicKey]txAccountKeyInfo, len(txAcctMetas))
+	for idx, acctMeta := range txAcctMetas {
+		if _, exists := keyInfo[acctMeta.PublicKey]; !exists {
+			keyInfo[acctMeta.PublicKey] = txAccountKeyInfo{firstIndex: uint64(idx)}
+		}
+	}
 
 	// "write-demote" program IDs unless the upgradeable loader is present
 	// in the transaction.
-	programIDs, err := tx.GetProgramIDs()
-	if err != nil {
-		return nil, nil, err
-	}
-	programIDSet := make(map[solana.PublicKey]struct{}, len(programIDs))
-	for _, pid := range programIDs {
-		programIDSet[pid] = struct{}{}
+	for _, compiledInstr := range tx.Message.Instructions {
+		if int(compiledInstr.ProgramIDIndex) >= len(tx.Message.AccountKeys) {
+			return nil, nil, nil, TxErrSanitizeFailure
+		}
+		pid := tx.Message.AccountKeys[compiledInstr.ProgramIDIndex]
+		info := keyInfo[pid]
+		info.isProgramID = true
+		keyInfo[pid] = info
 	}
 	upgradeableLoaderPresent := false
 	for _, key := range tx.Message.AccountKeys {
@@ -96,44 +115,66 @@ func instrsAndAcctMetasFromTx(tx *solana.Transaction, f *features.Features) ([]s
 	for _, compiledInstr := range tx.Message.Instructions {
 		programId, err := tx.ResolveProgramIDIndex(compiledInstr.ProgramIDIndex)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
-		ams, err := compiledInstr.ResolveInstructionAccounts(&tx.Message)
-		if err != nil {
-			return nil, nil, err
-		}
+		acctMetas := make([]sealevel.AccountMeta, len(compiledInstr.Accounts))
+		instructionAccts := make([]sealevel.InstructionAccount, len(compiledInstr.Accounts))
+		for instrAcctIdx, acctIdx := range compiledInstr.Accounts {
+			if int(acctIdx) >= len(txAcctMetas) {
+				return nil, nil, nil, TxErrSanitizeFailure
+			}
 
-		acctMetas := make([]sealevel.AccountMeta, 0, len(ams))
-		for _, am := range ams {
+			am := txAcctMetas[acctIdx]
+			info := keyInfo[am.PublicKey]
 			acctMeta := sealevel.AccountMeta{
 				Pubkey:     am.PublicKey,
 				IsSigner:   am.IsSigner,
-				IsWritable: isWritableForInstr(am, programIDSet, demoteProgramIDs, f),
+				IsWritable: isWritableForInstr(am, info.isProgramID, demoteProgramIDs, f),
 			}
-			acctMetas = append(acctMetas, acctMeta)
+			acctMetas[instrAcctIdx] = acctMeta
+
+			idxInCallee := uint64(instrAcctIdx)
+			for previousIdx := 0; previousIdx < instrAcctIdx; previousIdx++ {
+				if instructionAccts[previousIdx].IndexInTransaction == info.firstIndex {
+					idxInCallee = uint64(previousIdx)
+					break
+				}
+			}
+			instructionAccts[instrAcctIdx] = sealevel.InstructionAccount{
+				IndexInTransaction: info.firstIndex,
+				IndexInCaller:      info.firstIndex,
+				IndexInCallee:      idxInCallee,
+				IsSigner:           acctMeta.IsSigner,
+				IsWritable:         acctMeta.IsWritable,
+			}
 		}
 
 		instr := sealevel.Instruction{Accounts: acctMetas, ProgramId: programId, Data: compiledInstr.Data}
 		instrs = append(instrs, instr)
-		acctMetasPerInstr = append(acctMetasPerInstr, acctMetas)
+		instructionAcctsPerInstr = append(instructionAcctsPerInstr, instructionAccts)
 	}
 
-	return instrs, acctMetasPerInstr, nil
+	return instrs, instructionAcctsPerInstr, txAcctMetas, nil
 }
 
-func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instrIdx uint16) error {
-	instructionsSysvarIdx, err := execCtx.TransactionContext.IndexOfAccount(sealevel.SysvarInstructionsAddr)
-	if err == nil {
-		instructionsAcct, err := execCtx.TransactionContext.AccountAtIndex(instructionsSysvarIdx)
-		if err != nil {
-			return err
+func instructionsSysvarAccountIndex(tx *solana.Transaction) int {
+	for idx, pubkey := range tx.Message.AccountKeys {
+		if pubkey == sealevel.SysvarInstructionsAddr {
+			return idx
 		}
-
-		lastIndex := len(instructionsAcct.Data) - 2
-		binary.LittleEndian.PutUint16(instructionsAcct.Data[lastIndex:], instrIdx)
-		//mlog.Log.Debugf("found instructions sysvar pubkey at instr idx %d", instrIdx)
 	}
+	return -1
+}
+
+func fixupInstructionsSysvarAcct(execCtx *sealevel.ExecutionCtx, instructionsSysvarIdx int, instrIdx uint16) error {
+	instructionsAcct, err := execCtx.TransactionContext.AccountAtIndex(uint64(instructionsSysvarIdx))
+	if err != nil {
+		return err
+	}
+
+	lastIndex := len(instructionsAcct.Data) - 2
+	binary.LittleEndian.PutUint16(instructionsAcct.Data[lastIndex:], instrIdx)
 	return nil
 }
 
@@ -146,16 +187,14 @@ func isWritable(am *solana.AccountMeta, f *features.Features) bool {
 	return sealevel.IsWritable(&acctMeta, f)
 }
 
-func isWritableForInstr(am *solana.AccountMeta, programIDSet map[solana.PublicKey]struct{}, demoteProgramIDs bool, f *features.Features) bool {
+func isWritableForInstr(am *solana.AccountMeta, isProgramID bool, demoteProgramIDs bool, f *features.Features) bool {
 	// writability checks (native programs, sysvars, reserved keys, etc.)
 	if !isWritable(am, f) {
 		return false
 	}
 
-	if demoteProgramIDs {
-		if _, isProgramID := programIDSet[am.PublicKey]; isProgramID {
-			return false
-		}
+	if demoteProgramIDs && isProgramID {
+		return false
 	}
 
 	return true
@@ -461,7 +500,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		enqueueSigverify(sigverifySnapshot, sigverifyWg)
 	}
 
-	if len(tx.Signatures) > 0 && dbgOpts.IsDebugTx(tx.Signatures[0]) {
+	debugTx := len(tx.Signatures) > 0 && dbgOpts != nil && dbgOpts.IsDebugTx(tx.Signatures[0])
+	captureTx := len(tx.Signatures) > 0 && txCaptureActive()
+	if debugTx {
 		mlog.Log.Infof("Turning on debug logs while executing tx %s", tx.Signatures[0])
 		mlog.Log.EnableInfLogging()
 		defer mlog.Log.DisableInfLogging()
@@ -473,6 +514,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		Transaction: tx,
 		Arena:       arena,
 		TxMeta:      txMeta,
+		LeanResult:  true,
+		// On-chain metadata and the trailing verifier are the only replay
+		// consumers of pre-balances. Ordinary production transactions skip it.
+		CapturePreBalances: txMeta != nil || captureTx,
+		RecordLogs:         debugTx,
 	}
 	output := LoadAndExecuteTransaction(input)
 
@@ -485,7 +531,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	if txMeta != nil && output.PreBalances != nil && execCtx != nil {
 		for count := uint64(0); count < uint64(len(tx.Message.AccountKeys)); count++ {
 			txAcct := execCtx.TransactionContext.Accounts.Accounts[count]
-			if dbgOpts.IsDebugTx(tx.Signatures[0]) {
+			if debugTx {
 				// Avoid calling util.PrettyPrintAcct when not debug logging.
 				////mlog.Log.Debugf("pre-balance account used in tx=%s: %s", tx.Signatures[0], util.PrettyPrintAcct(txAcct))
 			}
@@ -508,7 +554,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		// Post-balances are never compared for failed txs (mirrors the
 		// RPC-mode checks, which only compare post on success). Capture is a
 		// replay-side observation; the execution context is not modified.
-		if txCaptureActive() && len(tx.Signatures) > 0 {
+		if captureTx {
 			var fee uint64
 			if output.FeeInfo != nil {
 				fee = output.FeeInfo.TotalFee
@@ -520,7 +566,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 				SkipMask: txComparabilityMask(execCtx, len(output.PreBalances)),
 			})
 		}
-		if dbgOpts.IsDebugTx(tx.Signatures[0]) && execCtx != nil {
+		if debugTx && execCtx != nil {
 			if logRecorder, ok := execCtx.Log.(*sealevel.LogRecorder); ok {
 				for _, l := range logRecorder.Logs {
 					mlog.Log.Debugf("%s", l)
@@ -559,8 +605,6 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	// Successful execution path
-	processedTx := output.ProcessingResult.ProcessedTransaction
-	executedTx := processedTx.Executed
 	txFeeInfo := output.FeeInfo
 
 	// Fee divergence check
@@ -571,9 +615,11 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	// Debug logging
-	if dbgOpts.IsDebugTx(tx.Signatures[0]) {
-		for _, l := range executedTx.ExecutionDetails.LogMessages {
-			mlog.Log.Debugf("%s", l)
+	if debugTx && execCtx != nil {
+		if logRecorder, ok := execCtx.Log.(*sealevel.LogRecorder); ok {
+			for _, l := range logRecorder.Logs {
+				mlog.Log.Debugf("%s", l)
+			}
 		}
 	}
 
@@ -623,7 +669,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// Trailing-verifier capture (successful tx): fee + status + pre AND post
 	// balances, with the native/dummy comparability mask. Read-only walk;
 	// the execution context is not modified.
-	if txCaptureActive() && len(tx.Signatures) > 0 {
+	if captureTx {
 		n := len(tx.Message.AccountKeys)
 		post := make([]uint64, n)
 		for count := 0; count < n; count++ {

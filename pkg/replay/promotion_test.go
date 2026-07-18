@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -39,6 +40,10 @@ func (d *sharedAccountDurable) GetAccountsBatch(_ context.Context, _ uint64, pks
 		out[i] = d.acct
 	}
 	return out, nil
+}
+
+func (d *sharedAccountDurable) GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+	return d.GetAccountsBatch(ctx, slot, pks)
 }
 
 func (d *fakeDurable) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -304,6 +309,64 @@ func TestUnrootedTailReadsDoNotMutateDurableCache(t *testing.T) {
 	batch[0].Data[1] = 8
 	assert.Equal(t, uint64(51), durable.acct.Lamports)
 	assert.Equal(t, []byte{1, 2, 3}, durable.acct.Data)
+}
+
+func TestUnrootedTailSharedBatchBorrowsImmutableParents(t *testing.T) {
+	durable := &sharedAccountDurable{acct: &accounts.Account{
+		Key:      testKey(2),
+		Lamports: 200,
+		Data:     []byte{2, 0, 0},
+	}}
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
+	held := testAccount(1, 100)
+	held.Data = []byte{1, 0, 0}
+	tail.Add(5, []*accounts.Account{held}, testHashBytes(5))
+
+	out, err := tail.GetAccountsBatchShared(context.Background(), 6, []solana.PublicKey{held.Key, durable.acct.Key})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Same(t, held, out[0], "WorkingSet parent should not be deep-cloned")
+	assert.Same(t, durable.acct, out[1], "durable cached parent should not be deep-cloned")
+
+	owned, err := tail.GetAccountsBatch(context.Background(), 6, []solana.PublicKey{held.Key, durable.acct.Key})
+	require.NoError(t, err)
+	assert.NotSame(t, held, owned[0], "public mutable read must still clone")
+	assert.NotSame(t, durable.acct, owned[1], "public mutable read must still clone")
+}
+
+func BenchmarkUnrootedTailBlockParentBatch(b *testing.B) {
+	const accountCount = 30_000
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	keys := make([]solana.PublicKey, accountCount)
+	delta := make([]*accounts.Account, accountCount)
+	for i := range keys {
+		keys[i][0] = byte(i)
+		keys[i][1] = byte(i >> 8)
+		keys[i][2] = byte(i >> 16)
+		delta[i] = &accounts.Account{Key: keys[i], Lamports: uint64(i + 1), Data: make([]byte, 128)}
+	}
+	tail.Add(5, delta, testHashBytes(5))
+
+	b.Run("former-owned-clones", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			out, err := tail.GetAccountsBatch(context.Background(), 6, keys)
+			if err != nil {
+				b.Fatal(err)
+			}
+			runtime.KeepAlive(out)
+		}
+	})
+	b.Run("immutable-borrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			out, err := tail.GetAccountsBatchShared(context.Background(), 6, keys)
+			if err != nil {
+				b.Fatal(err)
+			}
+			runtime.KeepAlive(out)
+		}
+	})
 }
 
 // OverCap trips only when held slots exceed the cap (backpressure on stalled rooting).

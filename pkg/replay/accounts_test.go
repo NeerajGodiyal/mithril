@@ -45,7 +45,7 @@ func TestLoadAndValidateTxAcctsSimd186_FabricatesDefaultForMissingAccount(t *tes
 	require.NotPanics(t, func() {
 		txAccts, _, err := loadAndValidateTxAcctsSimd186(
 			slotCtx,
-			nil, // acctMetasPerInstr — no instructions
+			nil, // derive transaction account metadata
 			tx,
 			nil, // instrs — no instructions
 			instrsAcct,
@@ -124,11 +124,10 @@ func TestLoadAndValidateTxAcctsSimd186_ProgramRejectsFabricatedDefault(t *testin
 	instrs := []sealevel.Instruction{
 		{ProgramId: missingProgram, Data: nil, Accounts: nil},
 	}
-	acctMetasPerInstr := [][]sealevel.AccountMeta{nil}
 	instrsAcct := &accounts.Account{Key: sealevel.SysvarInstructionsAddr}
 
 	_, _, err := loadAndValidateTxAcctsSimd186(
-		slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, math.MaxUint32,
+		slotCtx, nil, tx, instrs, instrsAcct, math.MaxUint32,
 	)
 	require.Error(t, err, "fabricated default with lamports=0 must be rejected as a program")
 	assert.Equal(t, TxErrProgramAccountNotFound, err)

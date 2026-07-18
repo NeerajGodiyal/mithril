@@ -282,13 +282,7 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 		return nil, ErrNoAccount
 	}
 	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
-	cachedAcct, hasAcct := accountsDb.VoteAcctCache.Get(pubkey)
-	if hasAcct {
-		r.End()
-		return cachedAcct, nil
-	}
-
-	cachedAcct, hasAcct = accountsDb.CommonAcctsCache.Get(pubkey)
+	cachedAcct, hasAcct := accountsDb.getCachedAccount(pubkey)
 	if hasAcct {
 		r.End()
 		return cachedAcct, nil
@@ -315,14 +309,24 @@ func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.Public
 		}
 	}
 
-	owner := solana.PublicKeyFromBytes(acct.Owner[:])
-	if owner == addresses.VoteProgramAddr {
+	accountsDb.cacheReadAccount(pubkey, acct)
+
+	return acct, nil
+}
+
+func (accountsDb *AccountsDb) getCachedAccount(pubkey solana.PublicKey) (*accounts.Account, bool) {
+	if acct, ok := accountsDb.VoteAcctCache.Get(pubkey); ok {
+		return acct, true
+	}
+	return accountsDb.CommonAcctsCache.Get(pubkey)
+}
+
+func (accountsDb *AccountsDb) cacheReadAccount(pubkey solana.PublicKey, acct *accounts.Account) {
+	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
-
-	return acct, nil
 }
 
 // readIndexedAccount performs one index-fetch + file-read attempt.

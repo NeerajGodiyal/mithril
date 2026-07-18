@@ -60,10 +60,13 @@ func recordTxAcctCowClone(acct *accounts.Account) {
 	TxAcctsClonedBytes.Add(uint64(len(acct.Data)))
 }
 
-func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, []*solana.AccountMeta, error) {
-	txAcctMetas, err := tx.AccountMetaList()
-	if err != nil {
-		return nil, nil, err
+func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, txAcctMetas []*solana.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, []*solana.AccountMeta, error) {
+	if txAcctMetas == nil {
+		var err error
+		txAcctMetas, err = tx.AccountMetaList()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var programIdIdxs []uint64
@@ -71,7 +74,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 
 	for instrIdx, instr := range tx.Message.Instructions {
 		programIdIdxs = append(programIdIdxs, uint64(instr.ProgramIDIndex))
-		ias := acctMetasPerInstr[instrIdx]
+		ias := instrs[instrIdx].Accounts
 		for _, ia := range ias {
 			instructionAcctPubkeys[ia.Pubkey] = struct{}{}
 		}
@@ -83,6 +86,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sea
 	var loadedBytesAccumulator uint32
 	var loadedAcctCount uint64
 	var loadedAcctBytes uint64
+	var err error
 
 	for idx, acctMeta := range txAcctMetas {
 		var acct *accounts.Account
@@ -269,7 +273,15 @@ func isLoaderAcct(owner solana.PublicKey) bool {
 		owner == addresses.LoaderV4Addr
 }
 
-func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr [][]sealevel.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, []*solana.AccountMeta, error) {
+func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*solana.AccountMeta, tx *solana.Transaction, instrs []sealevel.Instruction, instrsAcct *accounts.Account, loadedAcctBytesLimit uint32) (*sealevel.TransactionAccounts, []*solana.AccountMeta, error) {
+	if txAcctMetas == nil {
+		var err error
+		txAcctMetas, err = tx.AccountMetaList()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	acctKeys := tx.Message.AccountKeys
 	accumulator := NewLoadedAcctSizeAccumulatorSimd186(slotCtx,
 		uint64(loadedAcctBytesLimit),
@@ -315,11 +327,6 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		}
 	}
 
-	txAcctMetas, err := tx.AccountMetaList()
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// Use boolean mask for O(1) program index lookup
 	isProgramIdx := make([]bool, len(acctKeys))
 	instructionAcctPubkeys := make(map[solana.PublicKey]struct{}, len(acctKeys))
@@ -329,7 +336,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, acctMetasPerInstr 
 		if i >= 0 && i < len(isProgramIdx) {
 			isProgramIdx[i] = true
 		}
-		ias := acctMetasPerInstr[instrIdx]
+		ias := instrs[instrIdx].Accounts
 		for _, ia := range ias {
 			instructionAcctPubkeys[ia.Pubkey] = struct{}{}
 		}

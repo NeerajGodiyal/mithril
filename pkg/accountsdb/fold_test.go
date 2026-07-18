@@ -15,7 +15,7 @@ import (
 
 // newFoldTestDb scaffolds an on-disk AccountsDb with both sidecars present
 // (largest_file_id + bootstrap_high_file_id), matching a snapshot-built store.
-func newFoldTestDb(t *testing.T) (*AccountsDb, string) {
+func newFoldTestDb(t testing.TB) (*AccountsDb, string) {
 	t.Helper()
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "accounts"), 0o755))

@@ -187,6 +187,7 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
 		SlotCtx:     b.slotCtx,
 		Transaction: tx,
+		LeanResult:  true,
 	})
 	if output.ProcessingResult.TransactionError != nil {
 		return ForgeDroppedExecution, costmodel.ExceedNone

@@ -28,6 +28,11 @@ func TestApplySuccessfulTransactionCommitsTransfer(t *testing.T) {
 		Transaction: tx,
 	})
 	require.Nil(t, output.ProcessingResult.TransactionError)
+	require.NotNil(t, output.ProcessingResult.ProcessedTransaction)
+	require.NotNil(t, output.ProcessingResult.ProcessedTransaction.Executed)
+	require.Len(t, output.PreBalances, len(tx.Message.AccountKeys))
+	require.NotEmpty(t, output.ExecutionResult.AccountUpdates)
+	require.Len(t, output.ProcessingResult.ProcessedTransaction.Executed.LoadedTransaction.Accounts, len(tx.Message.AccountKeys))
 
 	payerBefore, err := slotCtx.GetAccount(txfixture.PayerPubkey())
 	require.NoError(t, err)
@@ -43,6 +48,94 @@ func TestApplySuccessfulTransactionCommitsTransfer(t *testing.T) {
 
 	assert.Less(t, payerAfter.Lamports, payerBefore.Lamports)
 	assert.Greater(t, destAfter.Lamports, destBefore.Lamports)
+}
+
+func TestApplySuccessfulTransactionCommitsLeanResult(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(t, err)
+
+	output := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
+		SlotCtx:     slotCtx,
+		Transaction: tx,
+		LeanResult:  true,
+	})
+	require.Nil(t, output.ProcessingResult.TransactionError)
+	assert.Nil(t, output.ProcessingResult.ProcessedTransaction)
+	require.NotNil(t, output.ExecutionResult)
+	assert.Nil(t, output.ExecutionResult.AccountUpdates)
+	assert.Nil(t, output.ExecutionResult.ModifiedVoteAccounts)
+	assert.Nil(t, output.PreBalances)
+	assert.IsType(t, discardLogger{}, output.ExecCtx.Log)
+	assert.Nil(t, output.ExecCtx.ModifiedVoteStates)
+	assert.ElementsMatch(t,
+		[]solana.PublicKey{txfixture.PayerPubkey(), txfixture.DestPubkey()},
+		output.ExecutionResult.WritableAccounts,
+	)
+	assert.Len(t, output.ExecutionResult.WritableAccounts, len(output.ExecutionResult.WritableAccountSet), "lean writable list must be deduplicated")
+
+	destBefore, err := slotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	require.NoError(t, ApplySuccessfulTransaction(slotCtx, output))
+	destAfter, err := slotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	assert.Greater(t, destAfter.Lamports, destBefore.Lamports)
+}
+
+func TestLeanResultCanCaptureDiagnostics(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(t, err)
+
+	output := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
+		SlotCtx:            slotCtx,
+		Transaction:        tx,
+		LeanResult:         true,
+		CapturePreBalances: true,
+		RecordLogs:         true,
+	})
+	require.Nil(t, output.ProcessingResult.TransactionError)
+	require.Len(t, output.PreBalances, len(tx.Message.AccountKeys))
+	assert.Equal(t, uint64(10_000_000_000), output.PreBalances[0])
+	assert.IsType(t, &sealevel.LogRecorder{}, output.ExecCtx.Log)
+	assert.Nil(t, output.ProcessingResult.ProcessedTransaction)
+}
+
+func BenchmarkLoadAndExecuteTransferResultMode(b *testing.B) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(b, err)
+
+	for _, bench := range []struct {
+		name        string
+		lean        bool
+		preBalances bool
+	}{
+		{name: "rich"},
+		{name: "lean", lean: true},
+		{name: "lean-with-pre-balances", lean: true, preBalances: true},
+	} {
+		b.Run(bench.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				output := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
+					SlotCtx:            slotCtx,
+					Transaction:        tx,
+					LeanResult:         bench.lean,
+					CapturePreBalances: bench.preBalances,
+				})
+				if output.ProcessingResult.TransactionError != nil {
+					b.Fatal(output.ProcessingResult.TransactionError)
+				}
+			}
+		})
+	}
 }
 
 func TestApplySuccessfulTransactionRejectsFailedOutput(t *testing.T) {

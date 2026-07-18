@@ -452,7 +452,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 	dedupedAccts := extractAndDedupeBlockAccts(block)
 	ctx := context.Background()
-	slotAccts, err := accountsDb.GetAccountsBatch(ctx, block.Slot, dedupedAccts)
+	slotAccts, err := getAccountsBatchShared(ctx, accountsDb, block.Slot, dedupedAccts)
 	if err != nil {
 		return nil, nil, err
 	}

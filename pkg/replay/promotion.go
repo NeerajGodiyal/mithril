@@ -42,6 +42,20 @@ type blockAccountSource interface {
 	GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error)
 }
 
+// sharedBlockAccountSource is the read-only fast path used solely to build a
+// block's immutable parent snapshot. Public reads retain their owned-copy
+// semantics; implementations may return cache/WorkingSet-backed pointers here.
+type sharedBlockAccountSource interface {
+	GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error)
+}
+
+func getAccountsBatchShared(ctx context.Context, source blockAccountSource, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
+	if shared, ok := source.(sharedBlockAccountSource); ok {
+		return shared.GetAccountsBatchShared(ctx, slot, pks)
+	}
+	return source.GetAccountsBatch(ctx, slot, pks)
+}
+
 // unrootedState is the in-RAM speculative-state engine the replay loop drives in
 // rooted-durable mode: reads resolve speculative→durable, commits buffer in RAM,
 // rooted slots promote to disk. Implemented by unrootedTail (linear) and forkTail
@@ -112,36 +126,44 @@ func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accoun
 // GetAccountsBatch returns one entry per requested key, in order, preferring the
 // unrooted value and falling through to a single durable batch for the misses.
 func (t *unrootedTail) GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
-	return batchOverDurable(ctx, slot, pks, t.durable, func(pk solana.PublicKey) (*accounts.Account, bool) {
-		a, ok := t.overlay.Lookup([32]byte(pk))
-		if !ok {
-			return nil, false
+	out, err := t.GetAccountsBatchShared(ctx, slot, pks)
+	if err != nil {
+		return nil, err
+	}
+	for i, acct := range out {
+		if acct != nil {
+			out[i] = acct.Clone()
 		}
-		// The block loader treats batch results as its owned parent snapshot.
-		// Do not let that snapshot alias state retained for later promotion.
-		return a.Clone(), true
-	})
+	}
+	return out, nil
 }
 
-// batchOverDurable resolves each key via the speculative lookup, falling through to a
-// single durable batch for the misses, preserving order and placeholder semantics.
-func batchOverDurable(ctx context.Context, slot uint64, pks []solana.PublicKey, durable blockAccountSource, lookup func(solana.PublicKey) (*accounts.Account, bool)) ([]*accounts.Account, error) {
+// GetAccountsBatchShared resolves each key through one WorkingSet read lock,
+// then falls through to one durable batch for the misses. Results are borrowed
+// immutable values for the block parent snapshot; execution copy-on-writes on
+// first mutation.
+func (t *unrootedTail) GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
 	if len(pks) == 0 {
 		return nil, nil
 	}
 	out := make([]*accounts.Account, len(pks))
-	var misses []solana.PublicKey
-	var missIdx []int
-	for i, pk := range pks {
-		if a, ok := lookup(pk); ok {
-			out[i] = a
-		} else {
-			misses = append(misses, pk)
-			missIdx = append(missIdx, i)
+	t.overlay.LookupBatch(pks, out)
+	missCount := 0
+	for _, acct := range out {
+		if acct == nil {
+			missCount++
 		}
 	}
-	if len(misses) > 0 {
-		loaded, err := durable.GetAccountsBatch(ctx, slot, misses)
+	if missCount > 0 {
+		misses := make([]solana.PublicKey, 0, missCount)
+		missIdx := make([]int, 0, missCount)
+		for i, acct := range out {
+			if acct == nil {
+				misses = append(misses, pks[i])
+				missIdx = append(missIdx, i)
+			}
+		}
+		loaded, err := getAccountsBatchShared(ctx, t.durable, slot, misses)
 		if err != nil {
 			return nil, err
 		}
@@ -151,12 +173,6 @@ func batchOverDurable(ctx context.Context, slot uint64, pks []solana.PublicKey, 
 			return nil, fmt.Errorf("durable GetAccountsBatch returned %d accounts for %d keys at slot %d", len(loaded), len(misses), slot)
 		}
 		for j, a := range loaded {
-			if a != nil {
-				// Durable batch results may likewise be cache-backed. The block
-				// loader owns and mutates its returned parent snapshot, so detach it
-				// from the durable read cache at this boundary.
-				a = a.Clone()
-			}
 			out[missIdx[j]] = a
 		}
 	}
@@ -220,10 +236,11 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 //
 // Safety notes:
 // - While a fold is in flight the chunk's overlay layers are retained (reads
-//   stay correct: overlay wins over durable) and are immutable — tail reads
-//   return deep copies, Add only appends new slots, and the fork-switch unwind
-//   DRAINS the promoter before evicting (block.go), so EvictFrom can never race
-//   the worker's reads.
+//   stay correct: overlay wins over durable) and are immutable. Mutable tail
+//   reads clone; the block-parent fast path only borrows values and transaction
+//   execution copy-on-writes them. Add only appends new slots, and the
+//   fork-switch unwind DRAINS the promoter before evicting (block.go), so
+//   EvictFrom can never race the worker's reads.
 // - One job in flight at a time; the next chunk builds only after apply, so
 //   the alpenglow promotion gate re-checks every span it folds.
 // - A completed-but-unapplied fold on exit is identical to the supported
@@ -234,8 +251,8 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 //   landed is a harmless superset (second flush is a no-op).
 
 // foldJob is an immutable snapshot of one K-slot fold chunk. Account values
-// reference retained WorkingSet layers, whose read boundary returns deep copies;
-// the layers are not removed until this job completes and applies.
+// reference immutable retained WorkingSet layers; the layers are not removed
+// until this job completes and applies.
 type foldJob struct {
 	chunk       []accounts.SlotDelta
 	through     uint64

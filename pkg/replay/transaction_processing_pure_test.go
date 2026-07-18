@@ -4,12 +4,57 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPrecomputedInstructionAccountsMatchLegacyResolution(t *testing.T) {
+	payer := testPubkey(1)
+	destination := testPubkey(2)
+	tx := &solana.Transaction{
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures:       1,
+				NumReadonlyUnsignedAccounts: 1,
+			},
+			// Include a duplicate key and duplicate instruction references. The
+			// old resolver selected the first transaction index for a pubkey.
+			AccountKeys: []solana.PublicKey{payer, destination, destination, addresses.SystemProgramAddr},
+			Instructions: []solana.CompiledInstruction{{
+				ProgramIDIndex: 3,
+				Accounts:       []uint16{0, 2, 2},
+			}},
+		},
+	}
+
+	feats := features.NewFeaturesDefault()
+	instrs, precomputed, _, err := instrsAndAcctMetasFromTx(tx, feats)
+	require.NoError(t, err)
+	require.Len(t, instrs, 1)
+	require.Len(t, precomputed, 1)
+
+	txAccts := sealevel.NewTransactionAccounts([]accounts.Account{
+		{Key: payer},
+		{Key: destination},
+		{Key: destination},
+		{Key: addresses.SystemProgramAddr},
+	})
+	legacy := sealevel.InstructionAcctsFromAccountMetas(instrs[0].Accounts, *txAccts)
+	assert.Equal(t, legacy, precomputed[0])
+}
+
+func TestInstructionsSysvarAccountIndex(t *testing.T) {
+	tx := &solana.Transaction{Message: solana.Message{AccountKeys: []solana.PublicKey{testPubkey(1)}}}
+	assert.Equal(t, -1, instructionsSysvarAccountIndex(tx))
+
+	tx.Message.AccountKeys = append(tx.Message.AccountKeys, sealevel.SysvarInstructionsAddr, sealevel.SysvarInstructionsAddr)
+	assert.Equal(t, 1, instructionsSysvarAccountIndex(tx), "the first duplicate matches TransactionCtx.IndexOfAccount semantics")
+}
 
 // TestLoadAndExecuteTransaction_RejectsUnsignedTx confirms the sanitize
 // guard at the entry of LoadAndExecuteTransaction returns a clean

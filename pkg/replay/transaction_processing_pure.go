@@ -32,6 +32,16 @@ type LoadAndExecuteTransactionInput struct {
 	// RecordInnerInstructions enables CPI recording. The simulate handler
 	// sets this when the RPC request asks for innerInstructions.
 	RecordInnerInstructions bool
+	// LeanResult skips response-only result materialization. Validator replay
+	// and block production only consume ExecCtx, FeeInfo, and writable account
+	// metadata; RPC simulation leaves this false to retain the rich result.
+	LeanResult bool
+	// CapturePreBalances retains pre-fee balances in lean mode. Rich mode
+	// always captures them for RPC compatibility.
+	CapturePreBalances bool
+	// RecordLogs retains execution logs in lean mode. Rich mode always records
+	// them for RPC compatibility.
+	RecordLogs bool
 }
 
 // LoadAndExecuteTransaction is a pure function that loads and executes a transaction.
@@ -87,7 +97,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Parse instructions and account metas
 	start := time.Now()
-	instrs, acctMetasPerInstr, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
+	instrs, instructionAcctsPerInstr, txAcctMetas, err := instrsAndAcctMetasFromTx(tx, slotCtx.Features)
 	if err != nil {
 		return LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{
@@ -131,14 +141,17 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Load and validate accounts
 	start = time.Now()
-	instrsAcct := sealevel.MakeInstructionsSysvarAccount(instrs)
+	instructionsSysvarIdx := instructionsSysvarAccountIndex(tx)
+	var instrsAcct *accounts.Account
+	if instructionsSysvarIdx >= 0 {
+		instrsAcct = sealevel.MakeInstructionsSysvarAccount(instrs)
+	}
 	var transactionAccts *sealevel.TransactionAccounts
-	var txAcctMetas []*solana.AccountMeta
 
 	if slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize) {
-		transactionAccts, txAcctMetas, err = loadAndValidateTxAcctsSimd186(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAcctsSimd186(slotCtx, txAcctMetas, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	} else {
-		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, acctMetasPerInstr, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
+		transactionAccts, txAcctMetas, err = loadAndValidateTxAccts(slotCtx, txAcctMetas, tx, instrs, instrsAcct, computeBudgetLimits.LoadedAccountBytes)
 	}
 
 	// Base output fields for all paths after parsing
@@ -174,8 +187,13 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	metrics.GlobalBlockReplay.AccountsFromTx.AddTimingSince(start)
 
 	// Create execution context
-	var log sealevel.LogRecorder
-	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, &log)
+	var logRecorder *sealevel.LogRecorder
+	var logger sealevel.Logger = discardLogger{}
+	if !input.LeanResult || input.RecordLogs {
+		logRecorder = new(sealevel.LogRecorder)
+		logger = logRecorder
+	}
+	execCtx := newExecCtx(slotCtx, transactionAccts, computeBudgetLimits, logger)
 	execCtx.TransactionContext.AllInstructions = instrs
 	execCtx.TransactionContext.Signature = tx.Signatures[0]
 	execCtx.TransactionContext.BorrowedAccountArena = input.Arena
@@ -183,10 +201,13 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	execCtx.RecordInnerInstructions = input.RecordInnerInstructions
 
 	// Capture pre-balance lamports (before fee deduction)
-	preBalances := make([]uint64, len(tx.Message.AccountKeys))
-	for i := range tx.Message.AccountKeys {
-		acct := execCtx.TransactionContext.Accounts.Accounts[i]
-		preBalances[i] = acct.Lamports
+	var preBalances []uint64
+	if !input.LeanResult || input.CapturePreBalances {
+		preBalances = make([]uint64, len(tx.Message.AccountKeys))
+		for i := range tx.Message.AccountKeys {
+			acct := execCtx.TransactionContext.Accounts.Accounts[i]
+			preBalances[i] = acct.Lamports
+		}
 	}
 
 	// Snapshot accounts so the simulate response can decode pre-state
@@ -252,23 +273,20 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Execute all instructions
 	var instrErr error
-	writablePubkeys := make([]solana.PublicKey, 0, 64)
-
 	start = time.Now()
 	for instrIdx, instr := range tx.Message.Instructions {
 		execCtx.SetCurrentTopLevelInstr(uint8(instrIdx))
-		ixStart := time.Now()
-		err = fixupInstructionsSysvarAcct(execCtx, uint16(instrIdx))
-		if err != nil {
-			instrErr = err
-			break
+		if instructionsSysvarIdx >= 0 {
+			ixStart := time.Now()
+			err = fixupInstructionsSysvarAcct(execCtx, instructionsSysvarIdx, uint16(instrIdx))
+			if err != nil {
+				instrErr = err
+				break
+			}
+			metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
 		}
-		metrics.GlobalBlockReplay.FixupInstructionsSysvarAccount.AddTimingSince(ixStart)
 
-		ixStart = time.Now()
-		acctMetas := acctMetasPerInstr[instrIdx]
-		instructionAccts := sealevel.InstructionAcctsFromAccountMetas(acctMetas, *transactionAccts)
-		metrics.GlobalBlockReplay.InstructionAccountsFromAccountMetas.AddTimingSince(ixStart)
+		instructionAccts := instructionAcctsPerInstr[instrIdx]
 
 		programId := tx.Message.AccountKeys[instr.ProgramIDIndex]
 		migratingCus, isMigrating := migration.IsMigratingProgramAndGetCUs(programId)
@@ -281,13 +299,9 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 			execCtx.ComputeMeter.Disable()
 		}
 
-		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices(tx, instrIdx))
+		programIndices := [1]uint64{uint64(instr.ProgramIDIndex)}
+		err = execCtx.ProcessInstruction(instr.Data, instructionAccts, programIndices[:])
 		if err == nil {
-			for _, am := range acctMetas {
-				if am.IsWritable {
-					writablePubkeys = append(writablePubkeys, am.Pubkey)
-				}
-			}
 			if isMigrating {
 				execCtx.ComputeMeter.Enable()
 			}
@@ -333,9 +347,13 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	}
 
 	// Success path: collect all writable accounts
+	writablePubkeys := make([]solana.PublicKey, 0, len(txAcctMetas))
 	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
 	for _, txAcctMeta := range txAcctMetas {
 		if isWritable(txAcctMeta, &execCtx.Features) {
+			if _, exists := writablePubkeySet[txAcctMeta.PublicKey]; exists {
+				continue
+			}
 			writablePubkeys = append(writablePubkeys, txAcctMeta.PublicKey)
 			writablePubkeySet[txAcctMeta.PublicKey] = struct{}{}
 		}
@@ -343,8 +361,27 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 
 	// Add payer to writable sets
 	payerAcct := execCtx.TransactionContext.Accounts.Accounts[0]
-	writablePubkeys = append(writablePubkeys, payerAcct.Key)
-	writablePubkeySet[payerAcct.Key] = struct{}{}
+	if _, exists := writablePubkeySet[payerAcct.Key]; !exists {
+		writablePubkeys = append(writablePubkeys, payerAcct.Key)
+		writablePubkeySet[payerAcct.Key] = struct{}{}
+	}
+
+	// Replay and block production commit directly from ExecCtx. Avoid building
+	// response-only account copies and nested processed-transaction structures.
+	if input.LeanResult {
+		return LoadAndExecuteTransactionOutput{
+			ExecutionResult: &TransactionExecutionResult{
+				WritableAccounts:   writablePubkeys,
+				WritableAccountSet: writablePubkeySet,
+			},
+			ExecCtx:             execCtx,
+			PreBalances:         preBalances,
+			PreAccountSnapshots: preAccountSnapshots,
+			FeeInfo:             txFeeInfo,
+			Instrs:              instrs,
+			ComputeBudgetLimits: computeBudgetLimits,
+		}
+	}
 
 	// Collect modified accounts for simulation output
 	accountUpdates := collectAccountUpdates(execCtx)
@@ -405,7 +442,7 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	// Build execution details
 	executionDetails := TransactionExecutionDetails{
 		Status:               nil,
-		LogMessages:          log.Logs,
+		LogMessages:          logRecorder.Logs,
 		InnerInstructions:    AssembleInnerInstructions(execCtx),
 		ReturnData:           returnData,
 		ExecutedUnits:        execCtx.ComputeMeter.Used(),

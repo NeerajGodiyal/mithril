@@ -14,10 +14,11 @@ import (
 // This structure contains the complete result of transaction processing, including whether
 // the transaction was successfully processed or encountered an error.
 type LoadAndExecuteTransactionOutput struct {
-	// Result of processing the transaction. Contains either ProcessedTransaction or TransactionError
+	// Result of processing the transaction. Rich mode contains either a
+	// ProcessedTransaction or TransactionError; lean success leaves both nil.
 	ProcessingResult TransactionProcessingResult
 	// ExecutionResult contains all the state changes from executing the transaction
-	// This is only populated if ProcessingResult contains a ProcessedTransaction
+	// and is populated on successful rich and lean execution.
 	ExecutionResult *TransactionExecutionResult
 
 	// ExecCtx is the execution context after processing. Available when accounts were
@@ -41,7 +42,8 @@ type LoadAndExecuteTransactionOutput struct {
 
 // TransactionProcessingResult represents the result of processing a transaction
 type TransactionProcessingResult struct {
-	// ProcessedTransaction contains the execution result if successful
+	// ProcessedTransaction contains the rich execution result if successful.
+	// Lean-result callers use ExecCtx and ExecutionResult instead.
 	ProcessedTransaction *ProcessedTransaction
 	// TransactionError contains the error if processing failed
 	TransactionError *TransactionError
