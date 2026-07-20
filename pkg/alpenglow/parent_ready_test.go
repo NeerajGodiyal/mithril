@@ -51,6 +51,45 @@ func TestParentReadyChoosesLowestBlockLikeAgave(t *testing.T) {
 	}
 }
 
+func TestParentReadyRestoreRejectsNonEarlierParent(t *testing.T) {
+	root := BlockID{Slot: 3, Hash: parentReadyHash(3)}
+	tracker := NewParentReadyTracker(root)
+	if tracker.Restore(4, BlockID{Slot: 4, Hash: parentReadyHash(4)}) {
+		t.Fatal("self-parenting restore was accepted")
+	}
+	if tracker.Restore(4, BlockID{Slot: 5, Hash: parentReadyHash(5)}) {
+		t.Fatal("future-parent restore was accepted")
+	}
+	if tracker.Root() != root.Slot {
+		t.Fatalf("rejected restore changed root to %d", tracker.Root())
+	}
+}
+
+func TestParentReadyRestoreRejectsUnboundedGap(t *testing.T) {
+	root := BlockID{Slot: 1, Hash: parentReadyHash(1)}
+	tracker := NewParentReadyTracker(root)
+	if tracker.Restore(maxParentReadyRestoreGap+2, root) {
+		t.Fatal("restore accepted an unbounded skipped-slot allocation")
+	}
+}
+
+func TestParentReadyUnrelatedInvalidationDoesNotSuppressBootstrapRestore(t *testing.T) {
+	root := BlockID{Slot: 3, Hash: parentReadyHash(3)}
+	tracker := NewParentReadyTracker(root)
+	unrelated := BlockID{Slot: 5, Hash: parentReadyHash(5)}
+	tracker.InvalidateBlock(unrelated)
+	parent := BlockID{Slot: 4, Hash: parentReadyHash(4)}
+	if !tracker.Restore(6, parent) {
+		t.Fatal("unrelated invalid tombstone suppressed a safe bootstrap restore")
+	}
+
+	tracker = NewParentReadyTracker(root)
+	tracker.InvalidateBlock(parent)
+	if tracker.Restore(6, parent) {
+		t.Fatal("bootstrap restore reactivated its invalid parent")
+	}
+}
+
 func TestParentReadyGenesisAllowedAtRoot(t *testing.T) {
 	root := BlockID{Slot: 100, Hash: parentReadyHash(1)}
 	tracker := NewParentReadyTracker(root)
@@ -66,6 +105,45 @@ func TestParentReadyGenesisAllowedAtRoot(t *testing.T) {
 	}
 	if !tracker.HasNotarFallbackOrStronger(genesis) {
 		t.Fatal("genesis certificate at root was not retained")
+	}
+}
+
+func TestParentReadyInvalidatesLowestSiblingAndSelectsSurvivor(t *testing.T) {
+	tracker := NewParentReadyTracker(BlockID{Slot: 0, Hash: parentReadyHash(9)})
+	low := BlockID{Slot: 3, Hash: parentReadyHash(1)}
+	high := BlockID{Slot: 3, Hash: parentReadyHash(2)}
+	for _, block := range []BlockID{low, high} {
+		if _, err := tracker.AddNotarFallbackOrStronger(block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := tracker.BlockProductionParent(4); got.Kind != BlockProductionParentReady || got.Parent != low {
+		t.Fatalf("pre-invalidation parent = %+v, want %v", got, low)
+	}
+	events := tracker.InvalidateBlock(low)
+	if len(events) != 1 || events[0].Kind != ConsensusEventParentReady || events[0].Slot != 4 || events[0].Block != high {
+		t.Fatalf("corrected parent-ready events = %+v, want surviving sibling %v", events, high)
+	}
+	if got := tracker.BlockProductionParent(4); got.Kind != BlockProductionParentReady || got.Parent != high {
+		t.Fatalf("post-invalidation parent = %+v, want %v", got, high)
+	}
+	if tracker.HasNotarFallbackOrStronger(low) {
+		t.Fatal("invalid sibling remained active as notar-fallback-or-stronger")
+	}
+	if tracker.Restore(4, low) {
+		t.Fatal("restore reactivated an invalid parent")
+	}
+}
+
+func TestParentReadyInvalidOnlyParentBecomesNotReady(t *testing.T) {
+	tracker := NewParentReadyTracker(BlockID{Slot: 0, Hash: parentReadyHash(9)})
+	block := BlockID{Slot: 3, Hash: parentReadyHash(1)}
+	if _, err := tracker.AddNotarFallbackOrStronger(block); err != nil {
+		t.Fatal(err)
+	}
+	tracker.InvalidateBlock(block)
+	if got := tracker.BlockProductionParent(4); got.Kind != BlockProductionParentNotReady {
+		t.Fatalf("only invalid parent left production state %+v, want NotReady", got)
 	}
 }
 

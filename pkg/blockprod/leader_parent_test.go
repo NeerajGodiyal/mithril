@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
@@ -35,7 +36,7 @@ func TestLeaderLoopWaitsForParentBlockID(t *testing.T) {
 			return solana.PublicKey{}, false
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: parentSlot, ParentBankhash: solana.Hash{9}}
+			return coherentTestParentContext(parentSlot, solana.Hash{9})
 		},
 		ParentBlockID: func(uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(parentSlot)
@@ -92,4 +93,36 @@ func TestLeaderProductionFailsClosedDuringPartitionedRewards(t *testing.T) {
 	err := loop.startSlotLocked(9)
 	require.ErrorIs(t, err, errEpochRewardsProductionUnsupported)
 	require.Nil(t, loop.activeBank)
+}
+
+func TestLeaderProductionRequiresCompleteTransactionStatuses(t *testing.T) {
+	incomplete, err := replay.NewTransactionStatusCacheFromSnapshot(nil)
+	require.NoError(t, err)
+	tests := []struct {
+		name     string
+		statuses *replay.TransactionStatusView
+	}{
+		{name: "missing"},
+		{name: "incomplete", statuses: incomplete.View()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			global.SetReplayFrontier(8)
+			loop := NewLeaderLoop(LeaderLoopConfig{
+				Identity: txfixture.PayerPrivateKey(),
+				ParentContext: func(uint64) ParentContext {
+					return ParentContext{
+						ParentSlot:          8,
+						ParentBankhash:      solana.Hash{1},
+						TransactionStatuses: tt.statuses,
+					}
+				},
+			})
+
+			err := loop.startSlotLocked(9)
+			require.ErrorIs(t, err, errParentNotReady)
+			require.ErrorContains(t, err, "complete transaction-status view missing")
+			require.Nil(t, loop.activeBank)
+		})
+	}
 }

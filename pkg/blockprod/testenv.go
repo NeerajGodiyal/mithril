@@ -8,6 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
@@ -22,9 +23,10 @@ type TestEnv struct {
 }
 
 type TestEnvConfig struct {
-	Limits    costmodel.Limits
-	EntryHash solana.Hash
-	Sink      BatchSink
+	Limits              costmodel.Limits
+	EntryHash           solana.Hash
+	Sink                BatchSink
+	TransactionStatuses *replay.TransactionStatusView
 }
 
 func NewTestEnv(cfg TestEnvConfig) *TestEnv {
@@ -35,6 +37,12 @@ func NewTestEnv(cfg TestEnvConfig) *TestEnv {
 	entryHash := cfg.EntryHash
 	if entryHash == (solana.Hash{}) {
 		entryHash = solana.Hash{0xab}
+	}
+	statuses := cfg.TransactionStatuses
+	if statuses == nil {
+		// Isolated banks have a known-empty ancestor lineage. Live leader banks
+		// receive replay's pinned, complete view through ParentContext instead.
+		statuses = replay.NewTransactionStatusCache().View()
 	}
 
 	feats := features.NewFeaturesDefault()
@@ -63,12 +71,13 @@ func NewTestEnv(cfg TestEnvConfig) *TestEnv {
 	sealevel.SysvarCache.Rent.Sysvar = &rent
 
 	bank := NewWorkingBank(BankConfig{
-		SlotCtx:   slotCtx,
-		Slot:      slotCtx.Slot,
-		Leader:    txfixture.PayerPubkey(),
-		Limits:    limits,
-		EntryHash: entryHash,
-		Sink:      cfg.Sink,
+		SlotCtx:             slotCtx,
+		Slot:                slotCtx.Slot,
+		Leader:              txfixture.PayerPubkey(),
+		Limits:              limits,
+		EntryHash:           entryHash,
+		Sink:                cfg.Sink,
+		TransactionStatuses: statuses,
 	})
 	controller := NewController()
 	controller.SetWorkingBank(bank)

@@ -53,7 +53,12 @@ type BlockSourceOpts struct {
 	GossipClient                 *gossip.Client
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
-	AlpenglowFirstShredSink      func(slot uint64)
+	AlpenglowInvalidBlockSink    func(alpenglow.BlockID, string) error
+	// AlpenglowCandidateValidator prevents objectively invalid assembled blocks
+	// from polluting the early ancestry tracker. Replay independently validates
+	// again at the consensus boundary before observing or executing the block.
+	AlpenglowCandidateValidator func(*b.Block) error
+	AlpenglowFirstShredSink     func(slot uint64)
 	// Cert-driven repair feed: certified-but-unobserved blocks the repair loop
 	// steers turbine toward, and the skip oracle that cancels shred state for
 	// certificate-skipped slots.
@@ -145,6 +150,7 @@ const (
 type fetchResult struct {
 	slot                 uint64
 	block                *b.Block
+	candidateObserved    bool // live ingest already validated and published candidate ancestry
 	err                  error
 	skipped              bool   // true if SlotSkipped error
 	absentOK             bool   // true if a secondary confirmed-RPC probe verified the slot is absent
@@ -182,6 +188,7 @@ const (
 	blockSourceStopReasonStalled
 	blockSourceStopReasonUnexpectedLiveEnd
 	blockSourceStopReasonAlpenglowConflict
+	blockSourceStopReasonInvalidAlpenglowCertificate
 	blockSourceStopReasonHistoryUnavailable
 )
 
@@ -269,13 +276,23 @@ type BlockSourceStats struct {
 }
 
 type BlockSource struct {
-	rpcClients  []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
-	streamChan  chan *b.Block
-	startSlot   uint64
-	endSlot     uint64
-	currentSlot uint64
-	blockDir    string
-	sourceType  BlockSourceType
+	rpcClients []*rpcclient.RpcClient // All RPC clients for block fetching (index 0 = primary)
+	streamChan chan *b.Block
+	// replayEmissionWg covers the unlocked channel-send window. Add happens
+	// under reorderMu before selection is published; invalid-block quarantine
+	// raises its gate, crosses reorderMu, then waits before its final drain.
+	replayEmissionWg sync.WaitGroup
+	// Test-only scheduling hook, deliberately invoked after reorderMu is
+	// released and before streamChan send.
+	beforeReplayBlockSend func(*b.Block)
+	// Test-only scheduling hook invoked after early candidate validation and
+	// before a live block acquires its staging/reorder commit lock.
+	beforeLiveBlockCommit func(*b.Block)
+	startSlot             uint64
+	endSlot               uint64
+	currentSlot           uint64
+	blockDir              string
+	sourceType            BlockSourceType
 
 	// RPC failover tracking
 	activeRpcIdx       atomic.Int32  // Currently active RPC index (0 = primary)
@@ -318,11 +335,18 @@ type BlockSource struct {
 	emittedAlpenglowBlockIDOrder   []uint64
 	rejectedAlpenglowMu            sync.RWMutex
 	rejectedAlpenglowBlockIDs      map[uint64]map[solana.Hash]struct{}
+	// invalidAlpenglowBlockIDs contains identities rejected by deterministic
+	// block validation. Unlike speculative branch tombstones, these may never
+	// be cleared by a certificate naming the same objectively-invalid block.
+	invalidAlpenglowBlockIDs       map[uint64]map[solana.Hash]struct{}
 	rejectedAlpenglowSkipRanges    []alpenglowSlotRange
 	authoritativeAlpenglowBlockIDs map[uint64]solana.Hash
-	alpenglowParentSwitchCh        chan AlpenglowParentSwitch
-	pendingAlpenglowParentSwitch   *AlpenglowParentSwitch // guarded by reorderMu
-	maxPending                     int
+	// While non-zero, ordered emission is held at and above this slot while
+	// replay atomically quarantines an invalid emitted suffix.
+	alpenglowQuarantineFrom      atomic.Uint64
+	alpenglowParentSwitchCh      chan AlpenglowParentSwitch
+	pendingAlpenglowParentSwitch *AlpenglowParentSwitch // guarded by reorderMu
+	maxPending                   int
 
 	// Slot state tracking (prevents duplicates)
 	slotStateMu   sync.Mutex
@@ -441,6 +465,8 @@ type BlockSource struct {
 	lastReorderGapSlot          atomic.Uint64 // backoff: repeated warns for the same waiting slot slow down
 	alpenglowDecisionSource     func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
 	alpenglowCandidateBlockSink func(alpenglow.ReplayBlockObservation)
+	alpenglowCandidateValidator func(*b.Block) error
+	alpenglowInvalidBlockSink   func(alpenglow.BlockID, string) error
 	alpenglowFirstShredSink     func(slot uint64)
 	alpenglowWantedBlocksFn     func(afterSlot uint64, max int) []alpenglow.WantedBlock
 	alpenglowSkipCertifiedFn    func(slot uint64) bool
@@ -701,6 +727,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		liveDeliveryPending:            make(map[uint64]int),
 		emittedAlpenglowBlockIDs:       make(map[uint64]solana.Hash),
 		rejectedAlpenglowBlockIDs:      make(map[uint64]map[solana.Hash]struct{}),
+		invalidAlpenglowBlockIDs:       make(map[uint64]map[solana.Hash]struct{}),
 		authoritativeAlpenglowBlockIDs: make(map[uint64]solana.Hash),
 		alpenglowParentSwitchCh:        make(chan AlpenglowParentSwitch, 1),
 		nextSlotToSend:                 opts.StartSlot,
@@ -731,6 +758,8 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		gossipClient:                   opts.GossipClient,
 		alpenglowDecisionSource:        opts.AlpenglowDecisionSource,
 		alpenglowCandidateBlockSink:    opts.AlpenglowCandidateBlockSink,
+		alpenglowCandidateValidator:    opts.AlpenglowCandidateValidator,
+		alpenglowInvalidBlockSink:      opts.AlpenglowInvalidBlockSink,
 		alpenglowFirstShredSink:        opts.AlpenglowFirstShredSink,
 		alpenglowFooterCertSink:        opts.AlpenglowFooterCertSink,
 		alpenglowWantedBlocksFn:        opts.AlpenglowWantedBlocks,
@@ -815,6 +844,11 @@ func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash
 	if !bs.turbineAlpenglowBlockIDHints || slot == 0 || blockID == (solana.Hash{}) {
 		return
 	}
+	if bs.isInvalidAlpenglowBlockID(slot, blockID) {
+		mlog.Log.Warnf("ALPENGLOW repair hint refused: block %s at slot %d is objectively invalid",
+			blockID, slot)
+		return
+	}
 	// Certificate-derived block-ID hints are authoritative and may legitimately
 	// revive an identity rejected by an earlier speculative branch selection.
 	bs.allowRejectedAlpenglowBlockID(slot, blockID)
@@ -855,16 +889,53 @@ func (bs *BlockSource) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash
 	}
 }
 
-func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) {
-	if bs.alpenglowCandidateBlockSink == nil || !bs.turbineAlpenglowBlockIDHints {
-		return
+func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) bool {
+	if !bs.turbineAlpenglowBlockIDHints {
+		return true
 	}
 	if blk == nil || !blk.HasAlpenglowBlockID {
-		return
+		return true
 	}
+	id := solana.Hash(blk.AlpenglowBlockID)
 	parentSlot := blk.SourceParentSlot
 	if parentSlot == 0 {
 		parentSlot = blk.ParentSlot
+	}
+	if bs.alpenglowCandidateValidator != nil {
+		if err := bs.alpenglowCandidateValidator(blk); err != nil {
+			// Only live Alpenglow candidates can be safely quarantined in place.
+			// RPC/file/local inputs remain fail-closed at replay prevalidation.
+			if !blk.FromLiveStream {
+				return true
+			}
+			bs.markInvalidAlpenglowBlockID(blk.Slot, id)
+			bs.rejectInvalidTurbineBlockState(blk.Slot, id)
+			if bs.alpenglowInvalidBlockSink != nil {
+				if sinkErr := bs.alpenglowInvalidBlockSink(alpenglow.BlockID{Slot: blk.Slot, Hash: id}, err.Error()); sinkErr != nil {
+					bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, blk.Slot)
+					mlog.Log.Errorf("ALPENGLOW SAFETY: invalid assembly at slot %d conflicts with consensus: %v", blk.Slot, sinkErr)
+				}
+			}
+			mlog.Log.Warnf("ALPENGLOW invalid assembly rejected before candidate observation: block %s at slot %d: %v", id, blk.Slot, err)
+			return false
+		}
+	}
+	if blk.HasAlpenglowParentBlockID && bs.isInvalidAlpenglowBlockID(parentSlot, solana.Hash(blk.AlpenglowParentBlockID)) {
+		bs.markInvalidAlpenglowBlockID(blk.Slot, id)
+		bs.rejectInvalidTurbineBlockState(blk.Slot, id)
+		reason := fmt.Sprintf("exact parent %s at slot %d is objectively invalid", solana.Hash(blk.AlpenglowParentBlockID), parentSlot)
+		if bs.alpenglowInvalidBlockSink != nil {
+			if sinkErr := bs.alpenglowInvalidBlockSink(alpenglow.BlockID{Slot: blk.Slot, Hash: id}, reason); sinkErr != nil {
+				bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, blk.Slot)
+				mlog.Log.Errorf("ALPENGLOW SAFETY: invalid descendant at slot %d conflicts with consensus: %v", blk.Slot, sinkErr)
+			}
+		}
+		mlog.Log.Warnf("ALPENGLOW invalid descendant rejected before candidate observation: block %s at slot %d names invalid parent %s at slot %d",
+			id, blk.Slot, solana.Hash(blk.AlpenglowParentBlockID), parentSlot)
+		return false
+	}
+	if bs.alpenglowCandidateBlockSink == nil {
+		return true
 	}
 	// ParentHash stays in the alpenglow block-id domain (zero = unknown); the PoH
 	// LastBlockhash never matches the tracker's cert-keyed blocks.
@@ -882,6 +953,7 @@ func (bs *BlockSource) observeAlpenglowCandidateBlock(blk *b.Block) {
 		Source:     bs.liveShredStreamName(),
 		At:         time.Now(),
 	})
+	return true
 }
 
 func (bs *BlockSource) usesLiveShredStream() bool {
@@ -1269,17 +1341,32 @@ func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
 	if bs.applyAlpenglowCertifiedSkipLocked() {
 		return false
 	}
-	// Buffered-candidate block steering needs an active near-tip Turbine stream.
-	if !bs.liveStreamActive.Load() || !bs.isNearTip.Load() {
-		return false
-	}
-
 	waitingSlot := bs.nextSlotToSend
 	if waitingSlot == 0 {
 		return false
 	}
 	decision, ok := bs.alpenglowDecisionSource(waitingSlot - 1)
 	if !ok || decision.Slot != waitingSlot {
+		return false
+	}
+	if decision.Kind == alpenglow.ChainDecisionKindConflict {
+		mlog.Log.Errorf("ALPENGLOW SAFETY: consensus conflict at slot %d: %s", waitingSlot, decision.Reason)
+		bs.setStopReason(blockSourceStopReasonAlpenglowConflict, waitingSlot)
+		delete(bs.reorderBuffer, waitingSlot)
+		return false
+	}
+	// Objective-invalid contents outrank identity hints. A decisive decision
+	// naming one is a safety contradiction in every source mode, including
+	// repair catchup; fallback wanted-block hints are filtered separately.
+	if decision.Kind == alpenglow.ChainDecisionKindBlock && bs.isInvalidAlpenglowBlockID(waitingSlot, decision.Block.Hash) {
+		mlog.Log.Errorf("ALPENGLOW SAFETY: decisive certificate names objectively invalid block %s at slot %d — refusing to re-authorize it",
+			decision.Block.Hash, waitingSlot)
+		bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, waitingSlot)
+		delete(bs.reorderBuffer, waitingSlot)
+		return false
+	}
+	// Buffered-candidate steering otherwise needs active near-tip Turbine.
+	if !bs.liveStreamActive.Load() || !bs.isNearTip.Load() {
 		return false
 	}
 
@@ -1322,16 +1409,6 @@ func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
 		mlog.Log.Warnf("ALPENGLOW consensus decision: discarded non-canonical turbine block for slot %d (got=%s want=%s)",
 			waitingSlot, solana.Hash(blk.AlpenglowBlockID), decision.Block.Hash)
 		return true
-	case alpenglow.ChainDecisionKindConflict:
-		// Two blocks certified for one slot (equivocation) is a consensus safety
-		// violation. Fail closed: drop the buffered candidate so no fork is emitted,
-		// and record a fatal stop reason. The candidate never resolves, so the
-		// scheduler stalls on it and replay halts (setStopReason's CAS keeps this
-		// conflict reason over the later "stalled").
-		mlog.Log.Warnf("ALPENGLOW SAFETY: consensus conflict (equivocation) at slot %d (%s) — halting replay", waitingSlot, decision.Reason)
-		delete(bs.reorderBuffer, waitingSlot)
-		bs.setStopReason(blockSourceStopReasonAlpenglowConflict, waitingSlot)
-		return false
 	default:
 		return false
 	}
@@ -1374,9 +1451,13 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	// gap deadlocks the emitter — the proof of the skip is buffered one
 	// slot ahead of it, waiting on the skip to resolve. The engine dedupes,
 	// so the emission-time observations remain unchanged.
-	bs.observeAlpenglowCandidateBlock(blk)
+	validCandidate := bs.observeAlpenglowCandidateBlock(blk)
 	if bs.alpenglowFooterCertSink != nil && len(blk.AlpenglowFinalCert) > 0 {
 		bs.alpenglowFooterCertSink(blk.AlpenglowFinalCert)
+	}
+	if !validCandidate {
+		bs.finishLiveDelivery(blk.Slot)
+		return true
 	}
 
 	if !bs.shouldDecodeLiveSlot(blk.Slot) {
@@ -1391,7 +1472,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 		// RPC fetch still races it.
 		if bs.catchupRescueCovers(blk.Slot) && !bs.isNearTip.Load() {
 			select {
-			case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
+			case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, candidateObserved: true, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
 				return true
 			case <-bs.stopChan:
 				bs.finishLiveDelivery(blk.Slot)
@@ -1429,7 +1510,7 @@ func (bs *BlockSource) ingestLiveShredBlock(blk *b.Block) bool {
 	}
 
 	select {
-	case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
+	case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, candidateObserved: true, rpcIdx: -1, liveStreamGeneration: bs.liveResultGeneration.Load()}:
 		return true
 	case <-bs.stopChan:
 		bs.finishLiveDelivery(blk.Slot)
@@ -2534,11 +2615,33 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			bs.reorderMu.Lock()
 			goto emitConsecutive
 		}
-		if result.block != nil {
-			bs.observeAlpenglowCandidateBlock(result.block)
+		if result.block != nil && !result.candidateObserved {
+			if !bs.observeAlpenglowCandidateBlock(result.block) {
+				bs.slotStateMu.Lock()
+				delete(bs.slotState, result.slot)
+				delete(bs.inflightStart, result.slot)
+				bs.slotStateMu.Unlock()
+				bs.clearSlotErrors(result.slot)
+				continue
+			}
+		}
+		if result.block != nil && result.block.FromLiveStream && bs.beforeLiveBlockCommit != nil {
+			bs.beforeLiveBlockCommit(result.block)
 		}
 
 		bs.reorderMu.Lock()
+		if result.block != nil && result.block.FromLiveStream {
+			if reason, invalid := bs.invalidAlpenglowCandidateReason(result.block); invalid {
+				bs.reorderMu.Unlock()
+				bs.rejectInvalidAlpenglowCandidate(result.block, reason)
+				bs.slotStateMu.Lock()
+				delete(bs.slotState, result.slot)
+				delete(bs.inflightStart, result.slot)
+				bs.slotStateMu.Unlock()
+				bs.clearSlotErrors(result.slot)
+				continue
+			}
+		}
 
 		if result.slot < bs.nextSlotToSend {
 			// A late alternate child may arrive only after the source already
@@ -2758,6 +2861,11 @@ func (bs *BlockSource) emitOrderedBlocks() {
 	emitConsecutive:
 		// Emit consecutive blocks
 		for {
+			if quarantineFrom := bs.alpenglowQuarantineFrom.Load(); quarantineFrom != 0 && bs.nextSlotToSend >= quarantineFrom {
+				// Replay is rewinding an invalid emitted suffix. Hold the frontier
+				// until quarantine has drained every already-emitted descendant.
+				break
+			}
 			if bs.applyAlpenglowDecisionLocked() {
 				continue
 			}
@@ -2845,7 +2953,11 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				delete(bs.reorderBuffer, bs.nextSlotToSend)
 				bs.lastEmittedBlockSlot = blk.Slot
 				bs.recordEmittedAlpenglowBlockIDLocked(blk)
+				bs.replayEmissionWg.Add(1)
 				bs.reorderMu.Unlock()
+				if bs.beforeReplayBlockSend != nil {
+					bs.beforeReplayBlockSend(blk)
+				}
 
 				repairingSlot := bs.isLiveRepairSlot(blk.Slot)
 				if bs.usesLiveShredStream() {
@@ -2872,6 +2984,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				}
 
 				if !bs.emitReplayBlock(blk) {
+					bs.replayEmissionWg.Done()
 					return
 				}
 				// Update progress timestamp for stall detection
@@ -2889,6 +3002,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 
 				bs.reorderMu.Lock()
 				bs.nextSlotToSend++
+				bs.replayEmissionWg.Done()
 			} else if bs.skippedSlots[bs.nextSlotToSend] {
 				if bs.shouldDiscardSkippedSlotAfterHandoff(bs.nextSlotToSend) {
 					delete(bs.skippedSlots, bs.nextSlotToSend)
@@ -2905,6 +3019,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 				delete(bs.liveSynthesizedSkips, skippedSlot)
 				delete(bs.alpenglowCertifiedSkips, skippedSlot)
 				bs.nextSlotToSend++
+				bs.replayEmissionWg.Add(1)
 				bs.reorderMu.Unlock()
 
 				// Emit a minimal block with IsSkipped=true for logging
@@ -2921,8 +3036,10 @@ func (bs *BlockSource) emitOrderedBlocks() {
 					}
 				}
 				if !bs.emitReplayBlock(skipBlock) {
+					bs.replayEmissionWg.Done()
 					return
 				}
+				bs.replayEmissionWg.Done()
 
 				// Update progress - skipped slots count as progress
 				bs.lastProgress.Store(time.Now().Unix())
@@ -3140,7 +3257,7 @@ func (bs *BlockSource) scheduler() {
 
 	for {
 		// Check for shutdown
-		if bs.stopped.Load() {
+		if bs.stopped.Load() || bs.stopReasonEnum() != blockSourceStopReasonNone {
 			return
 		}
 
@@ -3610,6 +3727,8 @@ func (bs *BlockSource) StopReason() string {
 		return fmt.Sprintf("scheduler terminated unexpectedly in live mode at slot %d (endSlot=%d)", stopSlot, endSlot)
 	case blockSourceStopReasonAlpenglowConflict:
 		return fmt.Sprintf("halted on Alpenglow consensus conflict (equivocation) at slot %d", stopSlot)
+	case blockSourceStopReasonInvalidAlpenglowCertificate:
+		return fmt.Sprintf("halted because an Alpenglow certificate named an objectively invalid block at slot %d", stopSlot)
 	case blockSourceStopReasonHistoryUnavailable:
 		return fmt.Sprintf("RPC history unavailable for slot %d — the endpoint's ledger retention has pruned it. Options: (1) use an RPC endpoint that retains older blocks, (2) raise block.repair_catchup_max_gap_slots so the gap fills via turbine repair instead (peers serve repair from their blockstores), or (3) re-bootstrap from a fresher snapshot (--bootstrap new-snapshot)", stopSlot)
 	default:

@@ -15,18 +15,19 @@ type BankSource interface {
 
 // Stats tracks IOD forge sink outcomes.
 type Stats struct {
-	InPackets          uint64
-	InBytes            uint64
-	Accepted           uint64
-	DroppedNoBank      uint64
-	DroppedVote        uint64
-	DroppedParse       uint64
-	DroppedCost        uint64
-	DroppedExecution   uint64
-	DroppedBlockCost   uint64
-	DroppedAccountCost uint64
-	DroppedAllocCost   uint64
-	DroppedBatchBytes  uint64
+	InPackets               uint64
+	InBytes                 uint64
+	Accepted                uint64
+	DroppedNoBank           uint64
+	DroppedVote             uint64
+	DroppedParse            uint64
+	DroppedCost             uint64
+	DroppedExecution        uint64
+	DroppedAlreadyProcessed uint64
+	DroppedBlockCost        uint64
+	DroppedAccountCost      uint64
+	DroppedAllocCost        uint64
+	DroppedBatchBytes       uint64
 }
 
 // Sink is an immediate-or-drop forge stage wired after sigverify.
@@ -76,6 +77,8 @@ func (s *Sink) Receive(pkt packet.Packet) {
 		s.recordCostDrop(reason)
 	case blockprod.ForgeDroppedExecution:
 		s.stats.DroppedExecution++
+	case blockprod.ForgeDroppedAlreadyProcessed:
+		s.stats.DroppedAlreadyProcessed++
 	default:
 		s.stats.DroppedNoBank++
 	}

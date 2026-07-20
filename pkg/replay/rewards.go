@@ -467,6 +467,13 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 	if streamErr != nil {
 		panic(fmt.Sprintf("streaming rewards calculation failed: %s", streamErr))
 	}
+	// An active EpochRewards sysvar must always have at least one partition so
+	// the distribution loop has a block on which to deactivate it. The reward
+	// calculator follows Agave and returns one empty partition for zero rewards;
+	// keep this check before any reward-account mutation as a fail-closed guard.
+	if streamResult.NumPartitions == 0 {
+		panic("streaming rewards calculation returned zero partitions")
+	}
 
 	partitionedRewardsInfo.SpoolDir = streamResult.SpoolDir
 	partitionedRewardsInfo.SpoolSlot = streamResult.SpoolSlot
@@ -529,8 +536,10 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, pa
 	epochRewards.Distribute(distributedLamports + burnedLamports)
 	partitionedEpochRewardsInfo.NumRewardPartitionsRemaining--
 
+	distributionComplete := false
 	if partitionedEpochRewardsInfo.NumRewardPartitionsRemaining == 0 {
 		epochRewards.Active = false
+		distributionComplete = true
 		rewards.CleanupPartitionedSpoolFiles(partitionedEpochRewardsInfo.SpoolDir, partitionedEpochRewardsInfo.SpoolSlot, epochRewards.NumPartitions)
 	}
 
@@ -548,6 +557,10 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, pa
 
 	distributedAccts = append(distributedAccts, epochRewardsAcct.Clone())
 	epochCtx.Capitalization += distributedLamports
+
+	if distributionComplete {
+		mlog.Log.Infof("epoch rewards distribution complete: slot=%d partitions=%d active=%t sysvar_distributed_rewards=%d sysvar_total_rewards=%d", currentSlot, epochRewards.NumPartitions, epochRewards.Active, epochRewards.DistributedRewards, epochRewards.TotalRewards)
+	}
 
 	if burnedLamports > 0 {
 		mlog.Log.Warnf("partition %d: distributed=%d burned=%d", partitionIdx, distributedLamports, burnedLamports)

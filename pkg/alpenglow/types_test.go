@@ -78,6 +78,33 @@ func TestCertificateValidateBasicChecksStakeWhenPresent(t *testing.T) {
 	}
 }
 
+func TestCertificateValidateBasicRequiresCanonicalBlockHash(t *testing.T) {
+	hash := testHash(4)
+	tests := []struct {
+		name string
+		cert Certificate
+		ok   bool
+	}{
+		{name: "notarize", cert: Certificate{Type: CertificateNotarize, Slot: 42, BlockHash: hash}, ok: true},
+		{name: "notarize missing block", cert: Certificate{Type: CertificateNotarize, Slot: 42}},
+		{name: "finalize", cert: Certificate{Type: CertificateFinalize, Slot: 42}, ok: true},
+		{name: "finalize with block", cert: Certificate{Type: CertificateFinalize, Slot: 42, BlockHash: hash}},
+		{name: "skip", cert: Certificate{Type: CertificateSkip, Slot: 42}, ok: true},
+		{name: "skip with block", cert: Certificate{Type: CertificateSkip, Slot: 42, BlockHash: hash}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cert.ValidateBasic()
+			if tt.ok && err != nil {
+				t.Fatalf("ValidateBasic() error = %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("ValidateBasic() accepted a non-canonical certificate")
+			}
+		})
+	}
+}
+
 func TestVoteBlockOnlyForBlockVotes(t *testing.T) {
 	blockHash := testHash(2)
 	vote := NewNotarizationVote(42, blockHash)
@@ -91,5 +118,38 @@ func TestVoteBlockOnlyForBlockVotes(t *testing.T) {
 
 	if _, ok := NewSkipVote(42).Block(); ok {
 		t.Fatalf("skip vote should not have block")
+	}
+}
+
+func TestVoteValidateBasicRequiresCanonicalBlockHash(t *testing.T) {
+	hash := testHash(3)
+	tests := []struct {
+		name string
+		vote Vote
+		ok   bool
+	}{
+		{name: "notarize", vote: NewNotarizationVote(42, hash), ok: true},
+		{name: "notarize missing block", vote: NewNotarizationVote(42, solana.Hash{})},
+		{name: "notarize fallback", vote: NewNotarizationFallbackVote(42, hash), ok: true},
+		{name: "notarize fallback missing block", vote: NewNotarizationFallbackVote(42, solana.Hash{})},
+		{name: "genesis", vote: NewGenesisVote(42, hash), ok: true},
+		{name: "genesis missing block", vote: NewGenesisVote(42, solana.Hash{})},
+		{name: "finalize", vote: NewFinalizationVote(42), ok: true},
+		{name: "finalize with block", vote: Vote{Type: VoteTypeFinalize, Slot: 42, BlockHash: hash}},
+		{name: "skip", vote: NewSkipVote(42), ok: true},
+		{name: "skip with block", vote: Vote{Type: VoteTypeSkip, Slot: 42, BlockHash: hash}},
+		{name: "skip fallback", vote: NewSkipFallbackVote(42), ok: true},
+		{name: "skip fallback with block", vote: Vote{Type: VoteTypeSkipFallback, Slot: 42, BlockHash: hash}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.vote.ValidateBasic()
+			if tt.ok && err != nil {
+				t.Fatalf("ValidateBasic() error = %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("ValidateBasic() accepted a non-canonical vote")
+			}
+		})
 	}
 }

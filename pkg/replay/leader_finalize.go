@@ -237,12 +237,17 @@ func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx) error {
 }
 
 func compileLeaderAccounts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
-	writable := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(rentAccts)+8)
+	adhRemoved := accountsDeltaHashRemoved(slotCtx)
+	var writable []*accounts.Account
+	var seenWritable map[solana.PublicKey]struct{}
+	if !adhRemoved {
+		writable = make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(rentAccts)+8)
+		seenWritable = make(map[solana.PublicKey]struct{})
+	}
 	modified := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(rentAccts)+8)
-	seenWritable := make(map[solana.PublicKey]struct{})
 	seenModified := make(map[solana.PublicKey]struct{})
 	addWritable := func(acct *accounts.Account) {
-		if acct == nil {
+		if adhRemoved || acct == nil {
 			return
 		}
 		if _, ok := seenWritable[acct.Key]; ok {
@@ -261,14 +266,18 @@ func compileLeaderAccounts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts 
 		seenModified[acct.Key] = struct{}{}
 		modified = append(modified, acct)
 	}
-	for key := range slotCtx.WritableAccts {
-		acct, _ := slotCtx.GetAccount(key)
-		addWritable(acct)
+	if !adhRemoved {
+		for key := range slotCtx.WritableAccts {
+			acct, _ := slotCtx.GetAccount(key)
+			addWritable(acct)
+		}
 	}
 	for key := range slotCtx.ModifiedAccts {
 		acct, _ := slotCtx.GetAccount(key)
 		addModified(acct)
-		addWritable(acct)
+		if !adhRemoved {
+			addWritable(acct)
+		}
 	}
 	for _, acct := range block.EpochUpdatedAccts {
 		if acct == nil {
@@ -278,11 +287,15 @@ func compileLeaderAccounts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts 
 		if err != nil {
 			current = acct
 		}
-		addWritable(current)
+		if !adhRemoved {
+			addWritable(current)
+		}
 		addModified(current)
 	}
 	for _, acct := range rentAccts {
-		addWritable(acct)
+		if !adhRemoved {
+			addWritable(acct)
+		}
 		addModified(acct)
 	}
 	return writable, modified

@@ -14,9 +14,17 @@ func (bs *BlockSource) bufferLiveStreamBlock(blk *b.Block) {
 	if blk == nil {
 		return
 	}
+	if bs.beforeLiveBlockCommit != nil {
+		bs.beforeLiveBlockCommit(blk)
+	}
 
 	var evicted []uint64
 	bs.liveStagingMu.Lock()
+	if reason, invalid := bs.invalidAlpenglowCandidateReason(blk); invalid {
+		bs.liveStagingMu.Unlock()
+		bs.rejectInvalidAlpenglowCandidate(blk, reason)
+		return
+	}
 	if _, exists := bs.liveStagingBuffer[blk.Slot]; exists {
 		bs.liveStagingMu.Unlock()
 		return
@@ -468,7 +476,7 @@ func (bs *BlockSource) enqueueLiveBlocks(blocks []*b.Block) {
 		bs.trackLiveDelivery(blk.Slot)
 
 		select {
-		case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, rpcIdx: -1, liveStreamGeneration: generation}:
+		case bs.resultQueue <- fetchResult{slot: blk.Slot, block: blk, candidateObserved: true, rpcIdx: -1, liveStreamGeneration: generation}:
 		case <-bs.stopChan:
 			bs.finishLiveDelivery(blk.Slot)
 			return

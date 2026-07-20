@@ -2,6 +2,7 @@ package replay
 
 import (
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/state"
 )
 
 // ConsensusOpts selects replay's protocol semantics and optionally carries the
@@ -10,4 +11,9 @@ import (
 type ConsensusOpts struct {
 	Alpenglow bool
 	Engine    consensusengine.Engine
+
+	// TransactionStatusCheckpointAfterCommit performs advisory sidecar
+	// retention after AccountsDB has durably selected a checkpoint reference.
+	// Replay logs and ignores its error because the account fold is committed.
+	TransactionStatusCheckpointAfterCommit func(*state.TransactionStatusCheckpointRef) error
 }

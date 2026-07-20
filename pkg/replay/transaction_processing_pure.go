@@ -33,8 +33,9 @@ type LoadAndExecuteTransactionInput struct {
 	// sets this when the RPC request asks for innerInstructions.
 	RecordInnerInstructions bool
 	// LeanResult skips response-only result materialization. Validator replay
-	// and block production only consume ExecCtx, FeeInfo, and writable account
-	// metadata; RPC simulation leaves this false to retain the rich result.
+	// and block production consume ExecCtx and FeeInfo directly. ADH-disabled
+	// banks also skip writable-account result materialization; RPC simulation
+	// leaves this false to retain the rich result.
 	LeanResult bool
 	// CapturePreBalances retains pre-fee balances in lean mode. Rich mode
 	// always captures them for RPC compatibility.
@@ -346,7 +347,25 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		return out
 	}
 
-	// Success path: collect all writable accounts
+	// ADH-disabled validator replay commits directly from the transaction
+	// context's touched accounts. It does not consume the response-shaped
+	// writable slice/set, so avoid materializing either on this hot path.
+	// ApplySuccessfulTransaction and ProcessTransaction re-derive effective
+	// writability from AcctMetas only for vote/stake cache bookkeeping, which
+	// must retain the legacy all-writable semantics.
+	if input.LeanResult && accountsDeltaHashRemoved(slotCtx) {
+		return LoadAndExecuteTransactionOutput{
+			ExecCtx:             execCtx,
+			PreBalances:         preBalances,
+			PreAccountSnapshots: preAccountSnapshots,
+			FeeInfo:             txFeeInfo,
+			Instrs:              instrs,
+			ComputeBudgetLimits: computeBudgetLimits,
+		}
+	}
+
+	// Rich results and legacy ADH-enabled lean results still need the complete
+	// writable account list.
 	writablePubkeys := make([]solana.PublicKey, 0, len(txAcctMetas))
 	writablePubkeySet := make(map[solana.PublicKey]struct{}, len(txAcctMetas))
 	for _, txAcctMeta := range txAcctMetas {

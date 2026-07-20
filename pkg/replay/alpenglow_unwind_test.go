@@ -21,7 +21,10 @@ import (
 // (configureInitialBlockFromResume or the ReplayBlocks seed path), (3) restore
 // it on the in-loop unwind, and (4) bump the count below.
 func TestResumeContextFieldTripwire(t *testing.T) {
-	const wired = 22 // fields consciously wired through resume + unwind
+	// TransactionStatusCheckpoint is the one durability-only field: startup and
+	// rewind consume it before ResumeState is built. It intentionally does not
+	// enter bank execution state, but remains part of this conscious field count.
+	const wired = 24 // 23 execution fields + 1 durability-only checkpoint ref
 	if n := reflect.TypeOf(state.ResumeContext{}).NumField(); n != wired {
 		t.Fatalf("state.ResumeContext has %d fields but %d are wired through the resume/unwind restoration path — wire the new field(s) end-to-end, then update this count", n, wired)
 	}
@@ -47,34 +50,37 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 	lastBH[2] = 0xCC
 	alpenglowID := make([]byte, 32)
 	alpenglowID[4] = 0xAE
+	alpenglowChainedRoot := make([]byte, 32)
+	alpenglowChainedRoot[5] = 0xAF
 	entryBH := make([]byte, 32)
 	entryBH[3] = 0xDD
 	clock := []byte{9, 8, 7, 6}
 	txc := uint64(123456)
 
 	rc := &state.ResumeContext{
-		Slot:                    900,
-		Bankhash:                base58.Encode(bankhash),
-		AlpenglowBlockID:        base58.Encode(alpenglowID),
-		BlockHeight:             880,
-		Epoch:                   2,
-		AcctsLtHash:             base64.StdEncoding.EncodeToString(lt),
-		LamportsPerSignature:    5000,
-		PrevLamportsPerSig:      4500,
-		NumSignatures:           777,
-		RecentBlockhashes:       []state.BlockhashEntry{{Blockhash: base58.Encode(entryBH), LamportsPerSignature: 5000}},
-		EvictedBlockhash:        base58.Encode(evicted),
-		Blockhash:               base58.Encode(lastBH),
-		SlotHashes:              []state.SlotHashEntry{{Slot: 899, Hash: base58.Encode(entryBH)}},
-		Clock:                   base64.StdEncoding.EncodeToString(clock),
-		Capitalization:          42_000_000,
-		SlotsPerYear:            78840000,
-		InflationInitial:        0.08,
-		InflationTerminal:       0.015,
-		InflationTaper:          0.15,
-		InflationFoundation:     0.05,
-		InflationFoundationTerm: 7,
-		TransactionCount:        &txc,
+		Slot:                       900,
+		Bankhash:                   base58.Encode(bankhash),
+		AlpenglowBlockID:           base58.Encode(alpenglowID),
+		AlpenglowChainedMerkleRoot: base58.Encode(alpenglowChainedRoot),
+		BlockHeight:                880,
+		Epoch:                      2,
+		AcctsLtHash:                base64.StdEncoding.EncodeToString(lt),
+		LamportsPerSignature:       5000,
+		PrevLamportsPerSig:         4500,
+		NumSignatures:              777,
+		RecentBlockhashes:          []state.BlockhashEntry{{Blockhash: base58.Encode(entryBH), LamportsPerSignature: 5000}},
+		EvictedBlockhash:           base58.Encode(evicted),
+		Blockhash:                  base58.Encode(lastBH),
+		SlotHashes:                 []state.SlotHashEntry{{Slot: 899, Hash: base58.Encode(entryBH)}},
+		Clock:                      base64.StdEncoding.EncodeToString(clock),
+		Capitalization:             42_000_000,
+		SlotsPerYear:               78840000,
+		InflationInitial:           0.08,
+		InflationTerminal:          0.015,
+		InflationTaper:             0.15,
+		InflationFoundation:        0.05,
+		InflationFoundationTerm:    7,
+		TransactionCount:           &txc,
 	}
 
 	rs, err := ResumeStateFromRootedContext(rc, map[uint64]string{2: "c3Rha2Vz"})
@@ -85,6 +91,8 @@ func TestResumeStateFromRootedContextRoundTrip(t *testing.T) {
 	assert.Equal(t, bankhash, rs.ParentBankhash)
 	assert.True(t, rs.HasParentAlpenglowBlockID)
 	assert.Equal(t, alpenglowID, rs.ParentAlpenglowBlockID[:])
+	assert.True(t, rs.HasParentAlpenglowChainedMerkleRoot)
+	assert.Equal(t, alpenglowChainedRoot, rs.ParentAlpenglowChainedMerkleRoot[:])
 	require.NotNil(t, rs.AcctsLtHash)
 	assert.Equal(t, lt, rs.AcctsLtHash.Hash(), "lt-hash restored byte-exact")
 	assert.Equal(t, uint64(5000), rs.LamportsPerSignature)

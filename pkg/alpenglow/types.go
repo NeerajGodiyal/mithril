@@ -141,6 +141,13 @@ func (v Vote) ValidateBasic() error {
 	if !v.Type.Valid() {
 		return fmt.Errorf("invalid vote type %q", v.Type)
 	}
+	_, hasBlock := v.Block()
+	if hasBlock && v.BlockHash.IsZero() {
+		return fmt.Errorf("%s vote has no block hash", v.Type)
+	}
+	if !hasBlock && !v.BlockHash.IsZero() {
+		return fmt.Errorf("%s vote carries a non-canonical block hash", v.Type)
+	}
 	return nil
 }
 
@@ -265,6 +272,12 @@ func (c Certificate) Block() (BlockID, bool) {
 func (c Certificate) ValidateBasic() error {
 	if !c.Type.Valid() {
 		return fmt.Errorf("invalid certificate type %q", c.Type)
+	}
+	if c.Type.HasBlock() && c.BlockHash.IsZero() {
+		return fmt.Errorf("%s certificate has no block hash", c.Type)
+	}
+	if !c.Type.HasBlock() && !c.BlockHash.IsZero() {
+		return fmt.Errorf("%s certificate carries a non-canonical block hash", c.Type)
 	}
 	if c.TotalStake == 0 && c.IncludedStake != 0 {
 		return fmt.Errorf("certificate has included stake but no total stake")

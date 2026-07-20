@@ -55,7 +55,7 @@ func TestLeaderLoopActivatesAndFinishesSlot(t *testing.T) {
 			return solana.PublicKey{}, false
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 41, ParentBankhash: solana.Hash{1}}
+			return coherentTestParentContext(41, solana.Hash{1})
 		},
 		ParentBlockID: func(uint64) (solana.Hash, bool) { return solana.Hash{1}, true },
 		PollInterval:  5 * time.Millisecond,
@@ -100,7 +100,7 @@ func TestLeaderLoopDoesNotBackfillMissedSlotsAheadOfReplay(t *testing.T) {
 			return solana.PublicKey{}, false
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 44, ParentBankhash: solana.Hash{1}}
+			return coherentTestParentContext(44, solana.Hash{1})
 		},
 		ParentBlockID: func(uint64) (solana.Hash, bool) { return solana.Hash{1}, true },
 		PollInterval:  5 * time.Millisecond,

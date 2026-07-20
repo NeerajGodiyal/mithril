@@ -14,6 +14,10 @@ const (
 	// MAX_NOTAR_FALLBACK_BLOCKS in Agave. Reaching this bound is treated as
 	// invalid consensus input instead of panicking the process.
 	maxNotarFallbackBlocks = 7
+	// Persisted ParentReady is a startup hint, not authority to allocate an
+	// unbounded skipped-slot graph. Keep reconstruction inside the same window
+	// in which Alpenglow votes are admissible.
+	maxParentReadyRestoreGap = AgaveVoteVerificationWindow
 )
 
 type BlockProductionParentKind uint8
@@ -46,18 +50,42 @@ type parentReadyStatus struct {
 type ParentReadyTracker struct {
 	root                   uint64
 	highestWithParentReady uint64
-	slots                  map[uint64]*parentReadyStatus
+	// liveUpdates makes persisted restoration bootstrap-only. Restore replaces
+	// the tracker graph, so doing it after a live certificate, skip, or
+	// invalidation would orphan retained certificate dedupe state.
+	liveUpdates          bool
+	slots                map[uint64]*parentReadyStatus
+	invalidBlocks        map[BlockID]struct{}
+	certifiedBlocks      map[BlockID]struct{}
+	certifiedBlockCounts map[uint64]int
 }
 
 func NewParentReadyTracker(root BlockID) *ParentReadyTracker {
-	t := &ParentReadyTracker{slots: make(map[uint64]*parentReadyStatus)}
+	t := &ParentReadyTracker{
+		slots:                make(map[uint64]*parentReadyStatus),
+		invalidBlocks:        make(map[BlockID]struct{}),
+		certifiedBlocks:      make(map[BlockID]struct{}),
+		certifiedBlockCounts: make(map[uint64]int),
+	}
 	t.Restore(root.Slot+1, root)
 	return t
 }
 
 // Restore installs a restart/checkpoint parent-ready boundary. parent must be
 // earlier than slot; skipped slots between the two are reconstructed.
-func (t *ParentReadyTracker) Restore(slot uint64, parent BlockID) {
+func (t *ParentReadyTracker) Restore(slot uint64, parent BlockID) bool {
+	if parent.Slot >= slot {
+		return false
+	}
+	if slot-parent.Slot > maxParentReadyRestoreGap {
+		return false
+	}
+	if t.liveUpdates {
+		return false
+	}
+	if _, invalid := t.invalidBlocks[parent]; invalid {
+		return false
+	}
 	if t.slots == nil {
 		t.slots = make(map[uint64]*parentReadyStatus)
 	}
@@ -71,6 +99,7 @@ func (t *ParentReadyTracker) Restore(slot uint64, parent BlockID) {
 		st.parentsReady = []BlockID{parent}
 	}
 	t.status(slot).parentsReady = []BlockID{parent}
+	return true
 }
 
 func (t *ParentReadyTracker) SetRoot(root uint64) {
@@ -81,6 +110,21 @@ func (t *ParentReadyTracker) SetRoot(root uint64) {
 	for slot := range t.slots {
 		if slot < root {
 			delete(t.slots, slot)
+		}
+	}
+	for block := range t.invalidBlocks {
+		if block.Slot < root {
+			delete(t.invalidBlocks, block)
+		}
+	}
+	for block := range t.certifiedBlocks {
+		if block.Slot < root {
+			delete(t.certifiedBlocks, block)
+		}
+	}
+	for slot := range t.certifiedBlockCounts {
+		if slot < root {
+			delete(t.certifiedBlockCounts, slot)
 		}
 	}
 }
@@ -104,12 +148,27 @@ func (t *ParentReadyTracker) AddGenesis(block BlockID) ([]ConsensusEvent, error)
 }
 
 func (t *ParentReadyTracker) addNotarFallbackOrStronger(block BlockID) ([]ConsensusEvent, error) {
+	t.liveUpdates = true
+	if t.certifiedBlocks == nil {
+		t.certifiedBlocks = make(map[BlockID]struct{})
+	}
+	if t.certifiedBlockCounts == nil {
+		t.certifiedBlockCounts = make(map[uint64]int)
+	}
+	if _, certified := t.certifiedBlocks[block]; certified {
+		return nil, nil
+	}
+	if t.certifiedBlockCounts[block.Slot] >= maxNotarFallbackBlocks {
+		return nil, fmt.Errorf("alpenglow parent-ready: slot %d exceeds %d notarize-fallback blocks", block.Slot, maxNotarFallbackBlocks)
+	}
+	t.certifiedBlocks[block] = struct{}{}
+	t.certifiedBlockCounts[block.Slot]++
+	if _, invalid := t.invalidBlocks[block]; invalid {
+		return nil, nil
+	}
 	status := t.status(block.Slot)
 	if containsBlock(status.notarFallbacks, block) {
 		return nil, nil
-	}
-	if len(status.notarFallbacks) >= maxNotarFallbackBlocks {
-		return nil, fmt.Errorf("alpenglow parent-ready: slot %d exceeds %d notarize-fallback blocks", block.Slot, maxNotarFallbackBlocks)
 	}
 	status.notarFallbacks = append(status.notarFallbacks, block)
 
@@ -133,10 +192,52 @@ func (t *ParentReadyTracker) addNotarFallbackOrStronger(block BlockID) ([]Consen
 	return events, nil
 }
 
+// InvalidateBlock permanently removes an objectively invalid identity from
+// active parent selection. Previously emitted ParentReady observations remain
+// historical facts, but a surviving sibling is re-emitted as the corrected
+// active parent for every affected leader window.
+func (t *ParentReadyTracker) InvalidateBlock(block BlockID) []ConsensusEvent {
+	if t.invalidBlocks == nil {
+		t.invalidBlocks = make(map[BlockID]struct{})
+	}
+	if _, exists := t.invalidBlocks[block]; exists {
+		return nil
+	}
+	t.invalidBlocks[block] = struct{}{}
+
+	var corrected []ConsensusEvent
+	_, affected := t.certifiedBlocks[block]
+	for slot, status := range t.slots {
+		var removedNotar, removedParent bool
+		status.notarFallbacks, removedNotar = removeBlock(status.notarFallbacks, block)
+		status.parentsReady, removedParent = removeBlock(status.parentsReady, block)
+		affected = affected || removedNotar || removedParent
+		if !removedParent || !isLeaderWindowStart(slot) {
+			continue
+		}
+		parents := t.Parents(slot)
+		if len(parents) == 0 {
+			continue
+		}
+		corrected = append(corrected, ConsensusEvent{
+			Kind:  ConsensusEventParentReady,
+			Slot:  slot,
+			Block: parents[0],
+		})
+	}
+	if affected {
+		t.liveUpdates = true
+	}
+	t.recomputeHighestWithParentReady()
+	sort.Slice(corrected, func(i, j int) bool { return corrected[i].Slot < corrected[j].Slot })
+	return corrected
+}
+
 func (t *ParentReadyTracker) AddSkip(slot uint64) []ConsensusEvent {
 	if slot <= t.root {
 		return nil
 	}
+	t.liveUpdates = true
 	t.status(slot).skip = true
 
 	future := []uint64{slot + 1}
@@ -193,7 +294,12 @@ func (t *ParentReadyTracker) Parents(slot uint64) []BlockID {
 	if status == nil {
 		return nil
 	}
-	parents := append([]BlockID(nil), status.parentsReady...)
+	parents := make([]BlockID, 0, len(status.parentsReady))
+	for _, parent := range status.parentsReady {
+		if _, invalid := t.invalidBlocks[parent]; !invalid {
+			parents = append(parents, parent)
+		}
+	}
 	sort.Slice(parents, func(i, j int) bool { return blockLess(parents[i], parents[j]) })
 	return parents
 }
@@ -216,6 +322,28 @@ func (t *ParentReadyTracker) status(slot uint64) *parentReadyStatus {
 		t.slots[slot] = status
 	}
 	return status
+}
+
+func (t *ParentReadyTracker) recomputeHighestWithParentReady() {
+	t.highestWithParentReady = 0
+	for slot := range t.slots {
+		if len(t.Parents(slot)) > 0 && slot > t.highestWithParentReady {
+			t.highestWithParentReady = slot
+		}
+	}
+}
+
+func removeBlock(blocks []BlockID, block BlockID) ([]BlockID, bool) {
+	kept := blocks[:0]
+	removed := false
+	for _, candidate := range blocks {
+		if candidate == block {
+			removed = true
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept, removed
 }
 
 func isLeaderWindowStart(slot uint64) bool { return slot%LeaderWindowSlots == 0 }

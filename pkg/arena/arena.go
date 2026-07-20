@@ -59,6 +59,6 @@ func (a *Arena[T]) AllocN(n uint64) ([]T, bool) {
 }
 
 func (a *Arena[T]) Reset() {
-	clear(a.pool)
+	clear(a.pool[:atomic.LoadUint64(&a.index)])
 	a.index = 0
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/cockroachdb/pebble"
 	"github.com/panjf2000/ants/v2"
 )
@@ -44,6 +45,12 @@ func CleanAccountsDbDir(accountsDbDir string) {
 	// List of all files/directories that may be left from a previous incomplete run
 	artifacts := []string{
 		"accounts",
+		txstatus.SnapshotSeedFileName,
+		// Rooted-durable replay writes immutable transaction-status sidecars
+		// beside AccountsDB. A snapshot rebuild replaces their chain lineage,
+		// so retaining them would waste space and make stale diagnostics look
+		// actionable.
+		"transaction-status-checkpoints",
 		"mithril_db",
 		"mithril_db_log_shards",
 		"bankhash_db",
@@ -57,6 +64,13 @@ func CleanAccountsDbDir(accountsDbDir string) {
 			mlog.Log.Errorf("failed to remove %s: %v", path, err)
 		}
 	}
+	partials, _ := filepath.Glob(filepath.Join(accountsDbDir, ".snapshot-status-cache-*.partial"))
+	for _, partial := range partials {
+		if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
+			mlog.Log.Errorf("failed to remove stale status-cache partial %s: %v", partial, err)
+		}
+	}
+
 }
 
 // CleanSnapshotDownloadDir removes old snapshot files based on retention settings.
@@ -317,7 +331,10 @@ func BuildAccountsDbPaths(
 
 	// Process snapshots sequentially for better performance (less lock contention)
 	// Full snapshot first
-	err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{progress: dp})
+	err = readTar(ctx, wg, snapshotFile, pools.appendVecCopying, readTarOptions{
+		progress:        dp,
+		statusCachePath: retainedStatusCachePath(accountsDbDir),
+	})
 
 	// Wait for ALL worker tasks from full snapshot to complete before starting incremental
 	wg.Wait()
@@ -338,7 +355,7 @@ func BuildAccountsDbPaths(
 	// Process incremental snapshot (if provided)
 	if incrementalSnapshotFile != "" {
 		err = readTar(ctx, wg, incrementalSnapshotFile, pools.appendVecCopying,
-			readTarOptions{isIncremental: true})
+			readTarOptions{isIncremental: true, statusCachePath: retainedStatusCachePath(accountsDbDir)})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -429,6 +446,9 @@ type readTarOptions struct {
 	progress *progress.DualProgress
 	// True if the tar file is incremental or false if it's a full snapshot.
 	isIncremental bool
+	// Atomically retain the raw snapshots/status_cache member here. A
+	// successfully consumed incremental archive replaces the full seed.
+	statusCachePath string
 }
 
 func readTar(
@@ -440,6 +460,8 @@ func readTar(
 ) error {
 	dp := options.progress
 	savePath := options.savePath
+	statusCache := newStatusCacheCandidate(options.statusCachePath)
+	defer statusCache.cleanup()
 	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, options.savePath)
 	if err != nil {
 		return err
@@ -479,6 +501,18 @@ func readTar(
 			return err
 		}
 
+		if handled, tarBytesRead, captureErr := statusCache.capture(header, tarReader); handled {
+			if captureErr != nil {
+				cleanupPartial("status cache error")
+				return captureErr
+			}
+			statsd.Count(statsd.SnapshotTarBytesRead, tarBytesRead, nil)
+			if dp != nil {
+				dp.Extract.Add(tarBytesRead)
+			}
+			continue
+		}
+
 		if !isAppendVec(header.Name) {
 			continue
 		}
@@ -505,6 +539,11 @@ func readTar(
 			cleanupPartial("pool error")
 			return err
 		}
+	}
+
+	if err := statusCache.commit(); err != nil {
+		cleanupPartial("status cache commit error")
+		return err
 	}
 
 	// Successfully processed the entire tar — finalize by renaming from .partial

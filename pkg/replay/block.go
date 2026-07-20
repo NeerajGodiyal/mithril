@@ -47,7 +47,6 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/panjf2000/ants/v2"
-	"github.com/zeebo/blake3"
 )
 
 // SlotCtxSetter is implemented by types that accept a SlotCtx update (e.g. RpcServer).
@@ -192,6 +191,11 @@ type ResumeState struct {
 	// be validated before the first post-resume block is emitted.
 	ParentAlpenglowBlockID    solana.Hash
 	HasParentAlpenglowBlockID bool
+	// ParentAlpenglowChainedMerkleRoot is the last data-shred Merkle root of
+	// ParentSlot. It must be restored with the block ID so the first producer
+	// bank after restart chains its shreds to the same parent generation.
+	ParentAlpenglowChainedMerkleRoot    solana.Hash
+	HasParentAlpenglowChainedMerkleRoot bool
 	// AcctsLtHash is the cumulative LtHash at the end of the parent slot
 	AcctsLtHash *lthash.LtHash
 	// LamportsPerSignature for reconstructing FeeRateGovernor
@@ -443,6 +447,23 @@ func cacheConstantSysvars(acctsDb *accountsdb.AccountsDb) {
 		sealevel.SysvarCache.EpochRewards.Sysvar = &rewards
 		sealevel.SysvarCache.EpochRewards.Acct = acct
 	}
+}
+
+// validatePartitionedRewardsResume decides whether replay can safely continue
+// without the in-memory partition spool bookkeeping created at an epoch
+// boundary. EpochRewards.Active is persisted as bank state; the fixed rewards
+// calendar window is only an upper bound and cannot answer this question.
+func validatePartitionedRewardsResume(slot uint64, epochRewards *sealevel.SysvarEpochRewards) error {
+	if epochRewards == nil {
+		return fmt.Errorf("cannot resume replay at slot %d: persisted EpochRewards sysvar is unavailable", slot)
+	}
+	if !epochRewards.Active {
+		return nil
+	}
+	return fmt.Errorf(
+		"cannot resume replay at slot %d: persisted EpochRewards is still active (distribution_starting_block_height=%d num_partitions=%d), but partition spool progress is not restored",
+		slot, epochRewards.DistributionStartingBlockHeight, epochRewards.NumPartitions,
+	)
 }
 
 func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, error) {
@@ -1389,6 +1410,30 @@ func ReplayBlocks(
 		result.Error = err
 		return result
 	}
+	expectedStatusRoot := mithrilState.ManifestParentSlot
+	var statusParentBlockID solana.Hash
+	var hasStatusParentBlockID bool
+	var statusCheckpoint *state.TransactionStatusCheckpointRef
+	if resumeState != nil {
+		expectedStatusRoot = resumeState.ParentSlot
+		statusParentBlockID = resumeState.ParentAlpenglowBlockID
+		hasStatusParentBlockID = resumeState.HasParentAlpenglowBlockID
+		if rootedCtx := mithrilState.LastRootedContext; rootedCtx != nil && rootedCtx.Slot == expectedStatusRoot {
+			statusCheckpoint = rootedCtx.TransactionStatusCheckpoint
+		}
+	}
+	transactionStatuses, err := loadTransactionStatusCacheForReplay(
+		acctsDbPath,
+		expectedStatusRoot,
+		mithrilState.ManifestParentSlot,
+		statusCheckpoint,
+		statusParentBlockID,
+		hasStatusParentBlockID,
+	)
+	if err != nil {
+		result.Error = fmt.Errorf("initialize transaction AlreadyProcessed status cache: %w", err)
+		return result
+	}
 
 	// Seed the running transaction count. On resume, the checkpoint carries the
 	// exact count as of the last rooted slot; on a fresh start use the snapshot
@@ -1409,6 +1454,36 @@ func ReplayBlocks(
 	if alpenglowMode {
 		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
 	}
+	var initialLtHash *lthash.LtHash
+	var initialNumSignatures uint64
+	var initialLastBlockhash solana.Hash
+	if resumeState != nil {
+		initialLtHash = resumeState.AcctsLtHash
+		initialNumSignatures = resumeState.NumSignatures
+		initialLastBlockhash = solana.Hash(resumeState.LastBlockhash)
+	} else {
+		if encoded := mithrilState.ManifestAcctsLtHash; encoded != "" {
+			raw, decodeErr := base64.StdEncoding.DecodeString(encoded)
+			if decodeErr != nil {
+				result.Error = fmt.Errorf("decode manifest accounts lt hash for initial chain tip: %w", decodeErr)
+				return result
+			}
+			initialLtHash = new(lthash.LtHash)
+			initialLtHash.InitWithHash(raw)
+		}
+		initialNumSignatures = mithrilState.ManifestSignatureCount
+		if len(mithrilState.ManifestRecentBlockhashes) > 0 {
+			if raw, decodeErr := base58.DecodeFromString(mithrilState.ManifestRecentBlockhashes[0].Blockhash); decodeErr == nil {
+				initialLastBlockhash = solana.Hash(raw)
+			}
+		}
+	}
+	// Resume checkpoints persist the Alpenglow block ID and chained root, but
+	// producer activation remains fail-closed until the first executable replay
+	// block publishes a fully coherent parent. Restoring only those hashes here
+	// would mix them with sysvar/fee state that is restored while configuring the
+	// first block (and may never run across an initial certified-skip span).
+	InitChainTip(initialLtHash, replayCtx.CurrentFeatures, initialNumSignatures, initialLastBlockhash, transactionStatuses.View())
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
 	// Load epoch stakes - persisted stakes on resume, state file on fresh start
@@ -1583,6 +1658,22 @@ func ReplayBlocks(
 	var applyFoldOutcome func(res *foldResult) // assigned below, used by the exit drain
 	if acctsDb.RootedDurable {
 		unrootedTailState = newUnrootedTail(acctsDb, acctsDb, unrootedTailHaltCap, FoldBatchSlots, filepath.Join(acctsDb.AcctsDir, ".."))
+		var checkpointAfterCommit func(*state.TransactionStatusCheckpointRef) error
+		if consensusOpts != nil {
+			checkpointAfterCommit = consensusOpts.TransactionStatusCheckpointAfterCommit
+		}
+		if hookErr := unrootedTailState.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+			// Snapshot runs here on the replay loop during fold-job construction;
+			// only its immutable bytes cross to the async worker.
+			Snapshot: transactionStatuses.SnapshotThrough,
+			Install: func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error) {
+				return PrepareTransactionStatusCheckpoint(acctsDbPath, through, payload)
+			},
+			AfterCommit: checkpointAfterCommit,
+		}); hookErr != nil {
+			result.Error = fmt.Errorf("configure durable transaction status checkpoints: %w", hookErr)
+			return result
+		}
 		// Folds run on a worker goroutine so replay never stalls on the
 		// segment write + fsync; the loop builds jobs and applies completions.
 		promoter = newAsyncPromoter(acctsDb)
@@ -1646,6 +1737,10 @@ func ReplayBlocks(
 		mithrilState.LastRootedSlot = promotedThrough
 		mithrilState.LastRootedBankhash = rootedCtx.Bankhash
 		mithrilState.LastRootedContext = rootedCtx
+		if transactionStatuses.Root(promotedThrough) {
+			mlog.Log.Infof("transaction status cache reconstructed complete %d-root coverage through durable slot %d",
+				maxTransactionStatusRoots, promotedThrough)
+		}
 		for slot := range alpenglowFooterFinalized {
 			if slot <= promotedThrough {
 				delete(alpenglowFooterFinalized, slot)
@@ -1877,8 +1972,12 @@ func ReplayBlocks(
 		}
 		// Candidate observations (block-id + parent link) feed the tracker's
 		// ancestry and duplicate accounting before emission.
+		opts.AlpenglowCandidateValidator = validateBlockTransactionMessages
 		if co, ok := consensusEngine.(consensusengine.AlpenglowCandidateBlockObserver); ok {
 			opts.AlpenglowCandidateBlockSink = co.ObserveAlpenglowCandidateBlock
+		}
+		if invalid, ok := consensusEngine.(consensusengine.AlpenglowInvalidBlockObserver); ok {
+			opts.AlpenglowInvalidBlockSink = invalid.ObserveObjectivelyInvalidAlpenglowBlock
 		}
 		if firstShred, ok := consensusEngine.(consensusengine.AlpenglowFirstShredObserver); ok {
 			opts.AlpenglowFirstShredSink = firstShred.ObserveAlpenglowFirstShred
@@ -2012,6 +2111,13 @@ func ReplayBlocks(
 			switchFallbackReasons[fallbackReason]++
 			result.Error = sw
 			mlog.Log.Warnf("%v — in-RAM unwind unavailable (%s); re-replaying from the rooted checkpoint", sw, fallbackReason)
+			return false
+		}
+		if statusErr := transactionStatuses.Unwind(sw.Slot); statusErr != nil {
+			windowSwitchFallback++
+			switchFallbackReasons["status-root"]++
+			result.Error = fmt.Errorf("%w: transaction status unwind refused: %v", sw, statusErr)
+			mlog.Log.Warnf("%v", result.Error)
 			return false
 		}
 
@@ -2165,6 +2271,35 @@ func ReplayBlocks(
 				mlog.Log.Warnf("replay: discarding stale block source emission for slot %d; already executed through slot %d",
 					block.Slot, anchorSlot)
 				continue
+			}
+
+			// An in-flight source send can race the first quarantine drain. Exact
+			// emitted suffix IDs are hard-tombstoned before that send, so discard
+			// any leaked descendant before it reaches consensus observation.
+			if blockStream.IsObjectivelyInvalidAlpenglowBlock(block) {
+				mlog.Log.Warnf("replay: discarding quarantined Alpenglow block %s at slot %d before consensus observation",
+					solana.Hash(block.AlpenglowBlockID), block.Slot)
+				continue
+			}
+
+			if !block.IsSkipped {
+				if validationErr := validatePreConsensusTransactionStatuses(
+					transactionStatuses, block, currentExecutedAnchorSlot(),
+				); validationErr != nil {
+					if !IsAlreadyProcessedTransactionError(validationErr) {
+						result.Error = fmt.Errorf("pre-consensus block validation failed at slot %d: %w", block.Slot, validationErr)
+						mlog.Log.Errorf("%v", result.Error)
+						break
+					}
+					if quarantineErr := blockStream.QuarantineInvalidAlpenglowBlock(block); quarantineErr != nil {
+						result.Error = fmt.Errorf("pre-consensus block validation failed at slot %d and the source could not quarantine it (%v): %w",
+							block.Slot, quarantineErr, validationErr)
+						mlog.Log.Errorf("%v", result.Error)
+						break
+					}
+					mlog.Log.Warnf("replay: %v; exact Alpenglow candidate quarantined before ObserveBlock/voting", validationErr)
+					continue
+				}
 			}
 
 			// Alpenglow: feed the observed block to the consensus engine. This is a
@@ -2422,22 +2557,20 @@ func ReplayBlocks(
 				parentFeaturesActivatedInFirstSlot = nil
 			}
 		} else if lastSlotCtx == nil && partitionedEpochRewardsEnabled {
-			// First block being processed - check if we're in rewards period
-			// (uses lastSlotCtx == nil to detect first block, handles skipped startSlot)
-			if rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule) {
-				mlog.Log.Errorf("=======================================================")
-				mlog.Log.Errorf("RESUME DURING REWARDS PERIOD NOT YET SUPPORTED")
-				mlog.Log.Errorf("=======================================================")
-				mlog.Log.Errorf("You stopped during the epoch reward distribution period")
-				mlog.Log.Errorf("(first ~243 slots after epoch boundary).")
-				mlog.Log.Errorf("")
-				mlog.Log.Errorf("This will be supported in a future release.")
-				mlog.Log.Errorf("")
-				mlog.Log.Errorf("Workaround: Delete AccountsDB and restart from snapshot:")
-				mlog.Log.Errorf("  rm -rf <accountsdb_dir>")
-				mlog.Log.Errorf("  Set bootstrap.mode = 'new-snapshot' in config.toml")
-				mlog.Log.Errorf("=======================================================")
-				os.Exit(1)
+			// First block being processed (including a start preceded by certified
+			// skips). The fixed 243-slot calendar envelope is only an upper bound:
+			// small clusters often finish all partitions in the first distribution
+			// block. EpochRewards.Active is the persisted bank truth. Refusing every
+			// restart in the envelope therefore rejects perfectly valid rooted
+			// checkpoints after distribution has completed.
+			withinRewardsEnvelope := rewards.IsWithinRewardsPeriod(block.Epoch, currentSlot, epochSchedule)
+			if err := validatePartitionedRewardsResume(currentSlot, sealevel.SysvarCache.EpochRewards.Sysvar); err != nil {
+				result.Error = err
+				mlog.Log.Errorf("%v", err)
+				break
+			}
+			if withinRewardsEnvelope {
+				mlog.Log.Infof("partitioned rewards resume: slot %d is inside the calendar envelope, but the persisted EpochRewards sysvar is inactive; distribution already completed", currentSlot)
 			}
 		}
 
@@ -2457,7 +2590,7 @@ func ReplayBlocks(
 		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
 
 		alpenglowClock := alpenglowMode
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, alpenglowClock)
+		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, transactionStatuses, alpenglowClock)
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -2465,10 +2598,20 @@ func ReplayBlocks(
 			global.ClearPendingStakePubkeys()
 			break
 		}
+		statuses := transactionStatuses.View()
+		identity := ChainTipIdentity{}
+		if alpenglowMode {
+			identity = ChainTipIdentity{
+				AlpenglowBlockID:              solana.Hash(block.AlpenglowBlockID),
+				HasAlpenglowBlockID:           block.HasAlpenglowBlockID,
+				AlpenglowChainedMerkleRoot:    solana.Hash(block.AlpenglowLastChainedRoot),
+				HasAlpenglowChainedMerkleRoot: block.HasAlpenglowLastChainedRoot,
+			}
+		}
 		if unrootedTailState != nil {
-			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features, unrootedTailState)
+			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features, statuses, identity, unrootedTailState)
 		} else {
-			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features)
+			UpdateChainTipFromSlotCtx(lastSlotCtx, block.Features, statuses, identity)
 		}
 		if alpenglowMode && block.HasAlpenglowBlockID {
 			global.SetAlpenglowBlockID(block.Slot, solana.Hash(block.AlpenglowBlockID))
@@ -2559,6 +2702,9 @@ func ReplayBlocks(
 			}
 			if block.HasAlpenglowBlockID {
 				resumeCtx.AlpenglowBlockID = solana.Hash(block.AlpenglowBlockID).String()
+			}
+			if block.HasAlpenglowLastChainedRoot {
+				resumeCtx.AlpenglowChainedMerkleRoot = solana.Hash(block.AlpenglowLastChainedRoot).String()
 			}
 			if lastSlotCtx.AcctsLtHash != nil {
 				resumeCtx.AcctsLtHash = base64.StdEncoding.EncodeToString(lastSlotCtx.AcctsLtHash.Hash())
@@ -2945,15 +3091,19 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 }
 
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
-	writableAccts := make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
-	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
-	alreadyAdded := make(map[solana.PublicKey]bool, len(slotCtx.WritableAccts))
-
-	for pk := range slotCtx.WritableAccts {
-		acct, _ := slotCtx.GetAccount(pk)
-		writableAccts = append(writableAccts, acct)
-		alreadyAdded[pk] = true
+	adhRemoved := accountsDeltaHashRemoved(slotCtx)
+	var writableAccts []*accounts.Account
+	var alreadyAdded map[solana.PublicKey]bool
+	if !adhRemoved {
+		writableAccts = make([]*accounts.Account, 0, len(slotCtx.WritableAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
+		alreadyAdded = make(map[solana.PublicKey]bool, len(slotCtx.WritableAccts))
+		for pk := range slotCtx.WritableAccts {
+			acct, _ := slotCtx.GetAccount(pk)
+			writableAccts = append(writableAccts, acct)
+			alreadyAdded[pk] = true
+		}
 	}
+	modifiedAccts := make([]*accounts.Account, 0, len(slotCtx.ModifiedAccts)+len(block.UpdatedAccts)+len(rentAccts)+4)
 
 	for pk := range slotCtx.ModifiedAccts {
 		acct, err := slotCtx.GetAccount(pk)
@@ -2967,7 +3117,11 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 		if eua == nil {
 			continue
 		}
-		if _, exists := alreadyAdded[eua.Key]; exists {
+		alreadyPresent := slotCtx.ModifiedAccts[eua.Key]
+		if !adhRemoved {
+			alreadyPresent = alreadyAdded[eua.Key]
+		}
+		if alreadyPresent {
 			continue
 		}
 		acct, err := slotCtx.GetAccount(eua.Key)
@@ -2977,15 +3131,21 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 				panic(fmt.Sprintf("unable to fetch %s from neither SlotCtx nor accountsdb for inclusion in bankhash in slot %d", eua.Key, slotCtx.Slot))
 			}
 		}
-		writableAccts = append(writableAccts, acct)
+		if !adhRemoved {
+			writableAccts = append(writableAccts, acct)
+		}
 		modifiedAccts = append(modifiedAccts, acct)
 	}
 
-	writableAccts = append(writableAccts, rentAccts...)
+	if !adhRemoved {
+		writableAccts = append(writableAccts, rentAccts...)
+	}
 	modifiedAccts = append(modifiedAccts, rentAccts...)
 
 	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
-	writableAccts = append(writableAccts, sysvarAccts...)
+	if !adhRemoved {
+		writableAccts = append(writableAccts, sysvarAccts...)
+	}
 	modifiedAccts = append(modifiedAccts, sysvarAccts...)
 
 	return writableAccts, modifiedAccts
@@ -3069,41 +3229,79 @@ type blockTransactionExecutionPlan struct {
 	execute             []bool
 	processedTxCount    uint64
 	processedSignatures uint64
-	duplicateTxCount    uint64
 }
 
 // planBlockTransactionExecution mirrors Agave's AlreadyProcessed check for
-// transactions presented to one bank.  The status cache is keyed by the
-// domain-separated BLAKE3 hash of the serialized message (not by the wire
-// signature), and rejected duplicates contribute neither fees nor signatures
-// to the bank hash.
-func planBlockTransactionExecution(transactions []*solana.Transaction) (blockTransactionExecutionPlan, error) {
+// transactions presented to one bank. A duplicate message makes the whole
+// block invalid; replay must never silently filter it and compute a bank hash
+// over different contents than the producer committed.
+func planBlockTransactionExecution(slot uint64, transactions []*solana.Transaction) (blockTransactionExecutionPlan, error) {
 	plan := blockTransactionExecutionPlan{execute: make([]bool, len(transactions))}
-	seen := make(map[[32]byte]struct{}, len(transactions))
+	seen := make(map[[32]byte]int, len(transactions))
+	var duplicates *DuplicateTransactionMessagesError
 	for idx, tx := range transactions {
 		if tx == nil {
 			return blockTransactionExecutionPlan{}, fmt.Errorf("transaction %d is nil", idx)
 		}
-		message, err := tx.Message.MarshalBinary()
+		messageHash, err := TransactionMessageHash(tx)
 		if err != nil {
-			return blockTransactionExecutionPlan{}, fmt.Errorf("serialize transaction %d message: %w", idx, err)
+			return blockTransactionExecutionPlan{}, fmt.Errorf("hash transaction %d message: %w", idx, err)
 		}
-
-		hasher := blake3.New()
-		_, _ = hasher.Write([]byte("solana-tx-message-v1"))
-		_, _ = hasher.Write(message)
-		var messageHash [32]byte
-		copy(messageHash[:], hasher.Sum(nil))
-		if _, duplicate := seen[messageHash]; duplicate {
-			plan.duplicateTxCount++
+		if firstIndex, duplicate := seen[messageHash]; duplicate {
+			if duplicates == nil {
+				duplicates = &DuplicateTransactionMessagesError{Slot: slot}
+			}
+			duplicates.DuplicateCount++
+			if len(duplicates.Occurrences) < maxDuplicateTransactionOccurrences {
+				duplicates.Occurrences = append(duplicates.Occurrences, DuplicateTransactionOccurrence{
+					Index: idx, FirstIndex: firstIndex,
+				})
+			}
 			continue
 		}
-		seen[messageHash] = struct{}{}
+		seen[messageHash] = idx
 		plan.execute[idx] = true
 		plan.processedTxCount++
 		plan.processedSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
 	}
+	if duplicates != nil {
+		return plan, duplicates
+	}
 	return plan, nil
+}
+
+func validateBlockTransactionMessages(block *b.Block) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	_, err := planBlockTransactionExecution(block.Slot, block.Transactions)
+	return err
+}
+
+// validatePreConsensusTransactionStatuses validates the candidate's immutable
+// ingress lineage without mutating it before consensus observation. Turbine
+// and Lightbringer populate SourceParentSlot during assembly, while ParentSlot
+// is intentionally filled later by configureBlock. Sources without ingress
+// parent metadata use their existing replay parent or the selected execution
+// anchor. ProcessBlock validates the configured ParentSlot again before commit.
+func validatePreConsensusTransactionStatuses(
+	statuses *TransactionStatusCache,
+	block *b.Block,
+	selectedParentSlot uint64,
+) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	candidate := *block
+	switch {
+	case block.SourceParentSlot != 0:
+		candidate.ParentSlot = block.SourceParentSlot
+	case block.ParentSlot != 0:
+		candidate.ParentSlot = block.ParentSlot
+	default:
+		candidate.ParentSlot = selectedParentSlot
+	}
+	return statuses.ValidateBlock(&candidate)
 }
 
 func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, executionPlan blockTransactionExecutionPlan, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
@@ -3409,8 +3607,19 @@ func ProcessBlock(
 	// durable is off. When set, block reads resolve through it and commits
 	// buffer into it.
 	tail unrootedState,
+	transactionStatuses *TransactionStatusCache,
 	alpenglowClock bool,
 ) (*sealevel.SlotCtx, error) {
+	if block == nil {
+		return nil, errors.New("validate transaction messages: nil block")
+	}
+	if err := transactionStatuses.ValidateBlock(block); err != nil {
+		return nil, fmt.Errorf("validate transaction statuses for slot %d: %w", block.Slot, err)
+	}
+	executionPlan, err := planBlockTransactionExecution(block.Slot, block.Transactions)
+	if err != nil {
+		return nil, fmt.Errorf("validate transaction messages for slot %d: %w", block.Slot, err)
+	}
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
 	trace.Log(ctx, "slot", fmt.Sprintf("%d", block.Slot))
@@ -3490,17 +3699,6 @@ func ProcessBlock(
 
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail)
 	slotCtx.TraceCtx = ctx
-	executionPlan, err := planBlockTransactionExecution(block.Transactions)
-	if err != nil {
-		return nil, fmt.Errorf("plan transaction execution for slot %d: %w", block.Slot, err)
-	}
-	if executionPlan.duplicateTxCount > 0 {
-		mlog.Log.Warnf("slot %d: rejected %d duplicate transaction messages as AlreadyProcessed", block.Slot, executionPlan.duplicateTxCount)
-	}
-	// Bank.signature_count is the number of signatures on transactions that
-	// were actually processed in this bank. Keep block.NumSignatures as the
-	// ingress count for diagnostics; SlotCtx carries the consensus count used by
-	// the bank hash and by the next slot's fee governor.
 	slotCtx.NumSignatures = executionPlan.processedSignatures
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
@@ -3624,6 +3822,12 @@ func ProcessBlock(
 		afterStoreAccounts()
 	} else if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
+	}
+	if err != nil {
+		return slotCtx, err
+	}
+	if statusErr := transactionStatuses.CommitBlock(block); statusErr != nil {
+		return nil, fmt.Errorf("commit transaction statuses for slot %d after bank state commit: %w", block.Slot, statusErr)
 	}
 
 	global.IncrTransactionCount(executionPlan.processedTxCount)

@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,162 @@ type slowCommitter struct {
 	fakeCommitter
 	mu    sync.Mutex
 	delay time.Duration
+}
+
+func TestFoldJobSnapshotsStatusOnLoopAndReferenceRidesManifest(t *testing.T) {
+	rootDir := t.TempDir()
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5, 6, 7)
+	originalCtx := tail.contexts[6]
+	scratch := []byte("immutable-status-at-six")
+	snapshotCalled := false
+	installCalled := false
+	afterCommitCalled := false
+	hooks := TransactionStatusCheckpointHooks{
+		Snapshot: func(through uint64) ([]byte, error) {
+			require.Equal(t, uint64(6), through)
+			snapshotCalled = true
+			return scratch, nil
+		},
+		Install: func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error) {
+			require.True(t, snapshotCalled, "worker install ran before loop snapshot")
+			require.Equal(t, []byte("immutable-status-at-six"), payload, "fold job did not own an immutable payload copy")
+			installCalled = true
+			return PrepareTransactionStatusCheckpoint(rootDir, through, payload)
+		},
+		AfterCommit: func(selected *state.TransactionStatusCheckpointRef) error {
+			require.True(t, installCalled)
+			require.Equal(t, []uint64{5, 6}, fc.committed, "retention ran before CommitBatch completed")
+			require.NotNil(t, selected)
+			require.Equal(t, uint64(6), selected.Root)
+			afterCommitCalled = true
+			return nil
+		},
+	}
+	require.NoError(t, tail.SetTransactionStatusCheckpointHooks(hooks))
+
+	job, err := tail.buildFoldJob(7, false)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.True(t, snapshotCalled, "status capture must finish on the replay loop during job construction")
+	require.False(t, installCalled, "sidecar I/O belongs to the fold worker")
+	require.Nil(t, originalCtx.TransactionStatusCheckpoint, "building a job mutated the tail's retained context")
+
+	// If a snapshotter later reuses its scratch storage, the worker still sees
+	// the byte-exact payload captured when this job was built.
+	scratch[0] = 'X'
+	require.NoError(t, runFoldJob(fc, job))
+	require.True(t, installCalled)
+	require.True(t, afterCommitCalled)
+	require.NotNil(t, job.ctx.TransactionStatusCheckpoint)
+
+	var manifestCtx state.ResumeContext
+	require.NoError(t, json.Unmarshal(fc.ctxs[6], &manifestCtx))
+	require.Equal(t, job.ctx.TransactionStatusCheckpoint, manifestCtx.TransactionStatusCheckpoint)
+	require.Equal(t, uint64(6), manifestCtx.TransactionStatusCheckpoint.Root)
+	payload, err := ReadTransactionStatusCheckpoint(rootDir, manifestCtx.TransactionStatusCheckpoint)
+	require.NoError(t, err)
+	require.Equal(t, []byte("immutable-status-at-six"), payload)
+}
+
+func TestFoldJobCheckpointFailuresCannotReachCommitBatch(t *testing.T) {
+	t.Run("snapshot failure refuses job", func(t *testing.T) {
+		fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+		tail := asyncTestTail(fc, 5, 6)
+		require.NoError(t, tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+			Snapshot: func(uint64) ([]byte, error) { return nil, errors.New("snapshot boom") },
+			Install: func(uint64, []byte) (*state.TransactionStatusCheckpointRef, error) {
+				t.Fatal("install must not run")
+				return nil, nil
+			},
+		}))
+
+		job, err := tail.buildFoldJob(6, false)
+		require.ErrorContains(t, err, "snapshot boom")
+		require.Nil(t, job)
+		require.Empty(t, fc.throughs)
+		require.Equal(t, 2, tail.overlay.HeldSlots())
+	})
+
+	t.Run("install failure refuses account manifest", func(t *testing.T) {
+		fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+		tail := asyncTestTail(fc, 5, 6)
+		require.NoError(t, tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+			Snapshot: func(uint64) ([]byte, error) { return []byte("captured"), nil },
+			Install: func(uint64, []byte) (*state.TransactionStatusCheckpointRef, error) {
+				return nil, errors.New("fsync boom")
+			},
+		}))
+
+		job, err := tail.buildFoldJob(6, false)
+		require.NoError(t, err)
+		require.ErrorContains(t, runFoldJob(fc, job), "fsync boom")
+		require.Empty(t, fc.throughs, "CommitBatch ran after checkpoint installation failed")
+		require.Equal(t, 2, tail.overlay.HeldSlots(), "failed fold changed the speculative tail")
+	})
+
+	t.Run("commit failure does not run retention", func(t *testing.T) {
+		rootDir := t.TempDir()
+		fc := &fakeCommitter{durable: accounts.NewMemAccounts(), failOn: 5}
+		tail := asyncTestTail(fc, 5, 6)
+		afterCommitCalled := false
+		require.NoError(t, tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+			Snapshot: func(uint64) ([]byte, error) { return []byte("captured"), nil },
+			Install: func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error) {
+				return PrepareTransactionStatusCheckpoint(rootDir, through, payload)
+			},
+			AfterCommit: func(*state.TransactionStatusCheckpointRef) error {
+				afterCommitCalled = true
+				return nil
+			},
+		}))
+
+		job, err := tail.buildFoldJob(6, false)
+		require.NoError(t, err)
+		require.ErrorContains(t, runFoldJob(fc, job), "commit boom")
+		require.False(t, afterCommitCalled)
+		require.Empty(t, fc.throughs)
+	})
+}
+
+func TestForcedFoldCarriesStatusCheckpointReference(t *testing.T) {
+	rootDir := t.TempDir()
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5)
+	afterCommitCalled := false
+	require.NoError(t, tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+		Snapshot: func(through uint64) ([]byte, error) {
+			require.Equal(t, uint64(5), through)
+			return []byte("forced-partial-status"), nil
+		},
+		Install: func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error) {
+			return PrepareTransactionStatusCheckpoint(rootDir, through, payload)
+		},
+		AfterCommit: func(selected *state.TransactionStatusCheckpointRef) error {
+			require.Equal(t, []uint64{5}, fc.committed, "forced-fold retention ran before CommitBatch completed")
+			require.NotNil(t, selected)
+			afterCommitCalled = true
+			return errors.New("advisory gc boom")
+		},
+	}))
+
+	promoted, rootedCtx, err := tail.flush(5)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), promoted)
+	require.NotNil(t, rootedCtx)
+	require.NotNil(t, rootedCtx.TransactionStatusCheckpoint)
+	require.True(t, afterCommitCalled)
+	var manifestCtx state.ResumeContext
+	require.NoError(t, json.Unmarshal(fc.ctxs[5], &manifestCtx))
+	require.Equal(t, rootedCtx.TransactionStatusCheckpoint, manifestCtx.TransactionStatusCheckpoint)
+}
+
+func TestCheckpointAfterCommitRequiresDurabilityHooks(t *testing.T) {
+	tail := asyncTestTail(&fakeCommitter{durable: accounts.NewMemAccounts()}, 5)
+	err := tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+		AfterCommit: func(*state.TransactionStatusCheckpointRef) error { return nil },
+	})
+	require.ErrorContains(t, err, "requires Snapshot and Install")
 }
 
 func (c *slowCommitter) CommitBatch(deltas []accounts.SlotDelta, throughSlot uint64, bankhashes map[uint64][32]byte, resumeCtx []byte) (accountsdb.BatchCommitResult, error) {

@@ -117,7 +117,11 @@ func BuildAccountsDbAuto(
 		dp.Start()
 	}
 
-	err = readTar(ctx, wg, fullSnapshotFile, pools.appendVecCopying, readTarOptions{savePath: fullSavePath, progress: dp})
+	err = readTar(ctx, wg, fullSnapshotFile, pools.appendVecCopying, readTarOptions{
+		savePath:        fullSavePath,
+		progress:        dp,
+		statusCachePath: retainedStatusCachePath(accountsDbDir),
+	})
 	if err != nil {
 		if dp != nil {
 			dp.Interrupt(err)
@@ -220,7 +224,11 @@ func BuildAccountsDbAuto(
 			}
 		}
 
-		err = readTar(ctx, wg, incrementalSnapshotPath, pools.appendVecCopying, readTarOptions{savePath: incrSavePath, isIncremental: true})
+		err = readTar(ctx, wg, incrementalSnapshotPath, pools.appendVecCopying, readTarOptions{
+			savePath:        incrSavePath,
+			isIncremental:   true,
+			statusCachePath: retainedStatusCachePath(accountsDbDir),
+		})
 		wg.Wait()
 		// Check if we should retry
 		if err == nil {

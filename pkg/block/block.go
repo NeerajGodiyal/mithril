@@ -23,7 +23,7 @@ type Block struct {
 	HasEahWorkaround                    bool
 	ParentBankhash                      [32]byte
 	AcctsLtHash                         *lthash.LtHash
-	NumSignatures                       uint64 // signatures carried by this block; replay excludes AlreadyProcessed transactions
+	NumSignatures                       uint64 // signatures carried by this block; replay rejects duplicate transaction messages
 	PrevNumSignatures                   uint64 // signatures processed in the parent bank (fee-governor input)
 	InitialPreviousLamportsPerSignature uint64
 	Blockhash                           [32]byte

@@ -95,6 +95,12 @@ func DecodeSlotHashes(entries []state.SlotHashEntry) sealevel.SysvarSlotHashes {
 // captured at promotion (as of the last rooted slot); the next block is the slot
 // after the last rooted slot, whose parent is the last rooted slot.
 func ResumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint64]string) (*ResumeState, error) {
+	if rc == nil {
+		return nil, fmt.Errorf("rooted resume context is nil")
+	}
+	if (rc.AlpenglowBlockID == "") != (rc.AlpenglowChainedMerkleRoot == "") {
+		return nil, fmt.Errorf("rooted Alpenglow identity is incomplete: block id and chained merkle root must be present together")
+	}
 	parentBankhash, err := base58.Decode(rc.Bankhash)
 	if err != nil {
 		return nil, fmt.Errorf("decode rooted bankhash: %w", err)
@@ -129,6 +135,14 @@ func ResumeStateFromRootedContext(rc *state.ResumeContext, epochStakes map[uint6
 		}
 		rs.ParentAlpenglowBlockID = blockID
 		rs.HasParentAlpenglowBlockID = true
+	}
+	if rc.AlpenglowChainedMerkleRoot != "" {
+		chainedRoot, err := solana.HashFromBase58(rc.AlpenglowChainedMerkleRoot)
+		if err != nil {
+			return nil, fmt.Errorf("decode rooted alpenglow_chained_merkle_root: %w", err)
+		}
+		rs.ParentAlpenglowChainedMerkleRoot = chainedRoot
+		rs.HasParentAlpenglowChainedMerkleRoot = true
 	}
 	if rc.TransactionCount != nil {
 		txc := *rc.TransactionCount // deep copy: contexts must not share pointers

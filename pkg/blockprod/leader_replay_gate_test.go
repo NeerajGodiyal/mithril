@@ -45,7 +45,7 @@ func TestLeaderWindowAcceptsVerifiedOlderParentReady(t *testing.T) {
 			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentReady, Parent: selected, ReadyAt: time.Now()}
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: selected.Slot, ParentBankhash: solana.Hash{5}}
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})
@@ -83,7 +83,7 @@ func TestLeaderWindowUsesParentReadyDeadlineInsteadOfLiveSlot(t *testing.T) {
 			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentReady, Parent: selected, ReadyAt: readyAt}
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: selected.Slot, ParentBankhash: solana.Hash{5}}
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})
@@ -98,6 +98,65 @@ func TestLeaderWindowUsesParentReadyDeadlineInsteadOfLiveSlot(t *testing.T) {
 	loop.tick()
 	assert.NotNil(t, loop.activeBank)
 	assert.Equal(t, leaderSlot, loop.activeSlot)
+}
+
+func TestLeaderWindowReservesObservedFinalizationAndFanoutBudget(t *testing.T) {
+	const leaderSlot = uint64(212)
+	readyAt := time.Unix(1_700_000_000, 0)
+	loop := NewLeaderLoop(LeaderLoopConfig{SlotDuration: AlpenglowSlotDuration})
+	loop.productionWindow = leaderProductionWindow{
+		active:    true,
+		startSlot: leaderSlot,
+		endSlot:   leaderSlot + alpenglow.LeaderWindowSlots - 1,
+		nextSlot:  leaderSlot,
+		readyAt:   readyAt,
+	}
+
+	// The incident trace's slowest successful finalize+footer path consumed
+	// about 55ms after the freeze cutoff. The old 25ms reserve completed 30ms
+	// late; the new cutoff leaves another 20ms for scheduler/fanout jitter.
+	const observedWorstFinalization = 55 * time.Millisecond
+	for offset := uint64(0); offset < alpenglow.LeaderWindowSlots; offset++ {
+		slot := leaderSlot + offset
+		protocolDeadline := loop.productionWindowProtocolDeadlineLocked(slot)
+		freezeAt := loop.productionWindowDeadlineLocked(slot)
+		require.Equal(t, readyAt.Add(time.Duration(offset+1)*AlpenglowSlotDuration), protocolDeadline)
+		require.Equal(t, leaderBlockCompletionReserve, protocolDeadline.Sub(freezeAt))
+		require.Equal(t, 20*time.Millisecond, protocolDeadline.Sub(freezeAt.Add(observedWorstFinalization)))
+	}
+}
+
+func TestLeaderProductionTimingStopsAtNetworkCompletion(t *testing.T) {
+	const leaderSlot = uint64(212)
+	readyAt := time.Unix(1_700_000_000, 0)
+	loop := NewLeaderLoop(LeaderLoopConfig{SlotDuration: AlpenglowSlotDuration})
+	loop.productionWindow = leaderProductionWindow{
+		active:    true,
+		startSlot: leaderSlot,
+		endSlot:   leaderSlot + alpenglow.LeaderWindowSlots - 1,
+		nextSlot:  leaderSlot,
+		readyAt:   readyAt,
+	}
+
+	finalizationStartedAt := readyAt.Add(125 * time.Millisecond)
+	networkCompletedAt := readyAt.Add(190 * time.Millisecond)
+	require.Equal(t,
+		" window_elapsed_ms=190 finalization_ms=65 deadline_margin_ms=10",
+		loop.productionTimingDetailLocked(leaderSlot, finalizationStartedAt, networkCompletedAt))
+
+	// A blocked local handoff after the final shred must not be charged to the
+	// protocol deadline or finalization path.
+	localHandoffCompletedAt := networkCompletedAt.Add(40 * time.Millisecond)
+	require.Equal(t,
+		" window_elapsed_ms=230 finalization_ms=105 deadline_margin_ms=-30",
+		loop.productionTimingDetailLocked(leaderSlot, finalizationStartedAt, localHandoffCompletedAt),
+		"this is the contaminated value that recording after OnBlock would report")
+}
+
+func TestLeaderProductionTimingRequiresActiveWindow(t *testing.T) {
+	loop := NewLeaderLoop(LeaderLoopConfig{SlotDuration: AlpenglowSlotDuration})
+	now := time.Unix(1_700_000_000, 0)
+	require.Empty(t, loop.productionTimingDetailLocked(212, now, now))
 }
 
 func TestLeaderWindowStartsNextSlotDespiteLiveSlotJump(t *testing.T) {
@@ -122,7 +181,7 @@ func TestLeaderWindowStartsNextSlotDespiteLiveSlotJump(t *testing.T) {
 			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentReady, Parent: selected, ReadyAt: readyAt}
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: leaderSlot, ParentBankhash: solana.Hash{8}}
+			return coherentTestParentContext(leaderSlot, solana.Hash{8})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})
@@ -151,7 +210,7 @@ func TestLeaderWindowRejectsParentReadyForkMismatch(t *testing.T) {
 			return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentReady, Parent: selected}
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: selected.Slot, ParentBankhash: solana.Hash{5}}
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})
@@ -244,7 +303,7 @@ func TestLeaderLoopDoesNotAttemptLeaderUntilOtherParentReplayed(t *testing.T) {
 			}
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 44, ParentBankhash: solana.Hash{2}}
+			return coherentTestParentContext(44, solana.Hash{2})
 		},
 		ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(parentSlot)
@@ -276,7 +335,7 @@ func TestLeaderLoopNeverBackfillsMissedLeaderSlot(t *testing.T) {
 			return self, slot == 45
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 44, ParentBankhash: solana.Hash{3}}
+			return coherentTestParentContext(44, solana.Hash{3})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})
@@ -327,7 +386,7 @@ func TestLeaderAfterSkippedSlotsUsesActualReplayedParent(t *testing.T) {
 			return self, slot == leaderSlot
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: actualParent, ParentBankhash: solana.Hash{3}}
+			return coherentTestParentContext(actualParent, solana.Hash{3})
 		},
 		ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(parentSlot)
@@ -357,7 +416,7 @@ func TestLeaderRestartsWhenReplayParentChangesBeforeFreeze(t *testing.T) {
 			return self, slot == leaderSlot
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: leaderSlot - 1, ParentBankhash: parentHash}
+			return coherentTestParentContext(leaderSlot-1, parentHash)
 		},
 		ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(parentSlot)
@@ -389,7 +448,7 @@ func TestLeaderAbortsWhenOwnSlotAlreadyResolved(t *testing.T) {
 			return self, slot == leaderSlot
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: leaderSlot - 1, ParentBankhash: solana.Hash{3}}
+			return coherentTestParentContext(leaderSlot-1, solana.Hash{3})
 		},
 		ParentBlockID: global.AlpenglowBlockID,
 	})

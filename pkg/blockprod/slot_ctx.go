@@ -8,21 +8,30 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
 
 // ParentContext carries the parent bank metadata needed to commit a leader slot.
 type ParentContext struct {
-	ParentSlot          uint64
-	ParentBankhash      solana.Hash
-	ParentLastEntryHash solana.Hash
-	EpochRewardsActive  bool
-	PrevNumSigs         uint64 // signatures processed in the parent bank; fee-governor input only
-	PrevFeeGovernor     *sealevel.FeeRateGovernor
-	AcctsLtHash         *lthash.LtHash
-	Features            *features.Features
-	UnrootedRead        sealevel.AccountReader
+	// ReplayGeneration binds every field below to one atomic replay-tip
+	// publication. It changes on replay advance, reset, and fork switch.
+	ReplayGeneration           uint64
+	ParentSlot                 uint64
+	ParentBankhash             solana.Hash
+	ParentBlockID              solana.Hash
+	HasParentBlockID           bool
+	ParentChainedMerkleRoot    solana.Hash
+	HasParentChainedMerkleRoot bool
+	ParentLastEntryHash        solana.Hash
+	EpochRewardsActive         bool
+	PrevNumSigs                uint64 // signatures processed in the parent bank; fee-governor input only
+	PrevFeeGovernor            *sealevel.FeeRateGovernor
+	AcctsLtHash                *lthash.LtHash
+	Features                   *features.Features
+	UnrootedRead               sealevel.AccountReader
+	TransactionStatuses        *replay.TransactionStatusView
 }
 
 // NewLeaderSlotCtx builds a forge-ready slot context at the chain tip.

@@ -102,7 +102,11 @@ func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *
 		return shreds[i].Index < shreds[j].Index
 	})
 
-	var entries []Entry
+	type decodedEntryBatch struct {
+		start   uint32
+		entries []Entry
+	}
+	var entryBatches []decodedEntryBatch
 	var parentInfo *AlpenglowParentInfo
 	var blockFooter *BlockFooter
 	var batchBytes []byte
@@ -140,7 +144,10 @@ func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("decode entry batch ending at shred %d: %w", shred.Index, err)
 		}
-		entries = append(entries, batchEntries...)
+		entryBatches = append(entryBatches, decodedEntryBatch{
+			start:   batchStart,
+			entries: batchEntries,
+		})
 		// Decoded transactions retain slices into the batch buffer for instruction data.
 		// Keep the backing array alive instead of reusing and overwriting it.
 		batchBytes = nil
@@ -148,6 +155,18 @@ func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *
 	}
 	if len(batchBytes) != 0 {
 		return nil, nil, nil, fmt.Errorf("slot ended with %d undecoded entry bytes", len(batchBytes))
+	}
+	var entries []Entry
+	for _, batch := range entryBatches {
+		// An Alpenglow UpdateParent abandons the optimistic prefix. The producer
+		// re-injects that prefix after the marker against the selected parent, so
+		// replaying both sides would manufacture same-bank AlreadyProcessed
+		// duplicates. Keep all shreds for block-id verification, but expose only
+		// entry batches at or after the selected replay boundary.
+		if parentInfo != nil && parentInfo.FromUpdateParent && batch.start < parentInfo.ReplayFECSetIndex {
+			continue
+		}
+		entries = append(entries, batch.entries...)
 	}
 	return entries, parentInfo, blockFooter, nil
 }
@@ -187,8 +206,8 @@ func decodeAlpenglowMarker(data []byte, batchStart uint32) (*AlpenglowParentInfo
 	}
 	variant := data[10]
 	innerLen := int(binary.LittleEndian.Uint16(data[11:13]))
-	if len(data) < 13+innerLen {
-		return nil, nil, false, fmt.Errorf("marker payload length %d exceeds remaining %d", innerLen, len(data)-13)
+	if len(data) != 13+innerLen {
+		return nil, nil, false, fmt.Errorf("marker payload length %d does not match remaining %d", innerLen, len(data)-13)
 	}
 	inner := data[13 : 13+innerLen]
 	if len(inner) < 1 {
@@ -235,8 +254,8 @@ func decodeAlpenglowMarker(data []byte, batchStart uint32) (*AlpenglowParentInfo
 }
 
 func decodeVersionedParentInfo(data []byte) (uint64, solana.Hash, error) {
-	if len(data) < 41 {
-		return 0, solana.Hash{}, fmt.Errorf("payload length %d too short", len(data))
+	if len(data) != 41 {
+		return 0, solana.Hash{}, fmt.Errorf("payload length %d, want 41", len(data))
 	}
 	if data[0] != versionedParentInfoV1 {
 		return 0, solana.Hash{}, fmt.Errorf("unsupported version tag %d", data[0])
@@ -255,7 +274,7 @@ func mergeAlpenglowParentInfo(current *AlpenglowParentInfo, next *AlpenglowParen
 		copied := *next
 		return &copied, nil
 	}
-	if current.ParentSlot == next.ParentSlot && current.ParentBlockID == next.ParentBlockID && current.FromUpdateParent == next.FromUpdateParent {
+	if current.ParentSlot == next.ParentSlot && current.ParentBlockID == next.ParentBlockID && current.ReplayFECSetIndex == next.ReplayFECSetIndex && current.FromUpdateParent == next.FromUpdateParent {
 		return current, nil
 	}
 	switch {

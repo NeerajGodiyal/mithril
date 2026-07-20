@@ -593,12 +593,29 @@ func TestDecodeAlpenglowParentMarkers(t *testing.T) {
 		t.Fatalf("update-parent at batch start 0 = marker=%+v ok=%t err=%v, want ignored", marker, ok, err)
 	}
 
+	markerWithTrailingByte := append(testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID), 0)
+	if _, _, err := decodeAlpenglowParentMarker(markerWithTrailingByte, dataShredsPerFECBlock); err == nil {
+		t.Fatal("update-parent marker with trailing wrapper byte unexpectedly decoded")
+	}
+	parentWithTrailingByte := testAlpenglowParentMarkerBytes(blockMarkerVariantUpdateParent, 40, updateParentID)
+	innerLen := binary.LittleEndian.Uint16(parentWithTrailingByte[11:13])
+	binary.LittleEndian.PutUint16(parentWithTrailingByte[11:13], innerLen+1)
+	parentWithTrailingByte = append(parentWithTrailingByte, 0)
+	if _, _, err := decodeAlpenglowParentMarker(parentWithTrailingByte, dataShredsPerFECBlock); err == nil {
+		t.Fatal("update-parent V1 payload with trailing byte unexpectedly decoded")
+	}
+
 	merged, err := mergeAlpenglowParentInfo(header, update)
 	if err != nil {
 		t.Fatalf("mergeAlpenglowParentInfo returned error: %v", err)
 	}
 	if merged == nil || !merged.FromUpdateParent || merged.ParentSlot != update.ParentSlot || merged.ParentBlockID != update.ParentBlockID {
 		t.Fatalf("merged parent marker = %+v, want update-parent", merged)
+	}
+	laterBoundary := *update
+	laterBoundary.ReplayFECSetIndex += dataShredsPerFECBlock
+	if _, err := mergeAlpenglowParentInfo(update, &laterBoundary); err == nil {
+		t.Fatal("same update-parent at a different FEC boundary unexpectedly merged")
 	}
 }
 

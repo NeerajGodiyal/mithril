@@ -57,10 +57,31 @@ type VerifiedVote struct {
 	Local   bool
 }
 
+// VoteAdmissionDisposition is the pool's atomic verdict for a verified vote.
+// Callers must use this value instead of probing pool state after
+// AddVerifiedVote returns: finality pruning can otherwise race that second
+// lookup and make a successfully classified local vote appear to have been
+// rejected for an unrelated reason.
+type VoteAdmissionDisposition string
+
+const (
+	VoteAdmissionAccepted            VoteAdmissionDisposition = "accepted"
+	VoteAdmissionExactDuplicate      VoteAdmissionDisposition = "exact-duplicate"
+	VoteAdmissionRooted              VoteAdmissionDisposition = "rooted"
+	VoteAdmissionTooFarAhead         VoteAdmissionDisposition = "too-far-ahead"
+	VoteAdmissionTrackedSlotCapacity VoteAdmissionDisposition = "tracked-slot-capacity"
+	VoteAdmissionVoteCapacity        VoteAdmissionDisposition = "vote-capacity"
+	VoteAdmissionConflict            VoteAdmissionDisposition = "conflict"
+)
+
 type ConsensusUpdate struct {
 	Certificates []Certificate
 	Events       []ConsensusEvent
 	VoteAccepted bool
+	// VoteAdmission is set by AddVerifiedVote for every non-error outcome.
+	// VoteAccepted remains true only when this call inserted a new vote; an
+	// exact duplicate is classified explicitly but keeps VoteAccepted false.
+	VoteAdmission VoteAdmissionDisposition
 }
 
 type VoteEvidence struct {
@@ -107,8 +128,14 @@ type slotConsensusState struct {
 	tallies        map[consensusTallyKey]*consensusTally
 	byRank         map[uint16]map[VoteType][]solana.Hash
 	localFirstVote *Vote
+	localFirstRank uint16
 	safeNotarSent  map[solana.Hash]struct{}
 	safeSkipSent   bool
+}
+
+type localFirstVoteProvenance struct {
+	Vote Vote
+	Rank uint16
 }
 
 // ConsensusPool is the verified-message Alpenglow bean counter. It mirrors
@@ -125,10 +152,16 @@ type ConsensusPool struct {
 	completed map[CertificateKey]Certificate
 	// finalized records the strongest certificate observed for each block.
 	// A bool loses the slow->fast upgrade Agave emits to downstream consumers.
-	finalized   map[BlockID]CertificateType
-	parentReady *ParentReadyTracker
-	evidence    []VoteEvidence
-	conflicts   map[uint64]string
+	finalized     map[BlockID]CertificateType
+	parentReady   *ParentReadyTracker
+	invalidBlocks map[BlockID]struct{}
+	// localFirstVotes preserves the validator's durable round-one choice across
+	// restart without pretending that an execution-unproven block vote was
+	// admitted to the verified tally. A later vote for the slot applies this
+	// provenance before evaluating SafeToNotar/SafeToSkip.
+	localFirstVotes map[uint64]localFirstVoteProvenance
+	evidence        []VoteEvidence
+	conflicts       map[uint64]string
 	// Intrawindow SafeToNotar events require parent certification and block
 	// availability checks in the consensus service. Keep them pending here,
 	// matching Agave, instead of issuing an unsafe immediate event.
@@ -159,13 +192,15 @@ func NewConsensusPool(cfg ConsensusPoolConfig) *ConsensusPool {
 		cfg.FinalizedRetainSlots = defaults.FinalizedRetainSlots
 	}
 	return &ConsensusPool{
-		cfg:         cfg,
-		root:        cfg.RootBlock,
-		slots:       make(map[uint64]*slotConsensusState),
-		completed:   make(map[CertificateKey]Certificate),
-		finalized:   make(map[BlockID]CertificateType),
-		parentReady: NewParentReadyTracker(cfg.RootBlock),
-		conflicts:   make(map[uint64]string),
+		cfg:             cfg,
+		root:            cfg.RootBlock,
+		slots:           make(map[uint64]*slotConsensusState),
+		completed:       make(map[CertificateKey]Certificate),
+		finalized:       make(map[BlockID]CertificateType),
+		parentReady:     NewParentReadyTracker(cfg.RootBlock),
+		invalidBlocks:   make(map[BlockID]struct{}),
+		localFirstVotes: make(map[uint64]localFirstVoteProvenance),
+		conflicts:       make(map[uint64]string),
 	}
 }
 
@@ -201,6 +236,11 @@ func (p *ConsensusPool) setRootLocked(root BlockID) {
 			delete(p.slots, slot)
 		}
 	}
+	for slot := range p.localFirstVotes {
+		if slot <= root.Slot {
+			delete(p.localFirstVotes, slot)
+		}
+	}
 	if p.verifiedVotes < 0 {
 		p.verifiedVotes = 0
 	}
@@ -219,7 +259,12 @@ func (p *ConsensusPool) setRootLocked(root BlockID) {
 			delete(p.conflicts, slot)
 		}
 	}
-	p.pendingSafeToNotar = filterBlocksAtOrAbove(p.pendingSafeToNotar, root.Slot)
+	for block := range p.invalidBlocks {
+		if block.Slot < root.Slot {
+			delete(p.invalidBlocks, block)
+		}
+	}
+	p.pendingSafeToNotar = filterBlocksAbove(p.pendingSafeToNotar, root.Slot)
 }
 
 // PruneBehindFinality bounds vote/certificate accounting independently of the
@@ -235,11 +280,47 @@ func (p *ConsensusPool) PruneBehindFinality(finalizedSlot uint64) {
 	p.mu.Unlock()
 }
 
-func (p *ConsensusPool) RestoreParentReady(slot uint64, parent BlockID) {
+func (p *ConsensusPool) RestoreParentReady(slot uint64, parent BlockID) bool {
 	p.mu.Lock()
-	p.parentReady.Restore(slot, parent)
-	p.root = BlockID{Slot: parent.Slot, Hash: parent.Hash}
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	if parent.Slot >= slot {
+		return false
+	}
+	if slot <= p.parentReady.highestWithParentReady {
+		return false
+	}
+	if _, invalid := p.invalidBlocks[parent]; invalid {
+		return false
+	}
+	// A persisted ParentReady edge is a liveness hint, never authority to move
+	// the verified-vote admission root backward or replace its exact identity.
+	if parent.Slot < p.root.Slot || parent.Slot == p.root.Slot && p.root.HasHash() && p.root.Hash != parent.Hash {
+		return false
+	}
+	if !p.parentReady.Restore(slot, parent) {
+		return false
+	}
+	// Use the normal root transition so vote capacity, first-vote provenance,
+	// certificates, conflicts, and invalid tombstones are pruned together.
+	p.setRootLocked(parent)
+	return true
+}
+
+// InvalidateBlock tombstones an objectively invalid identity in every active
+// parent/safe-action surface while retaining verified certificates and votes as
+// safety evidence. Returned events re-publish a surviving preferred parent.
+func (p *ConsensusPool) InvalidateBlock(block BlockID) []ConsensusEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.invalidBlocks == nil {
+		p.invalidBlocks = make(map[BlockID]struct{})
+	}
+	if _, exists := p.invalidBlocks[block]; exists {
+		return nil
+	}
+	p.invalidBlocks[block] = struct{}{}
+	p.pendingSafeToNotar, _ = removeBlock(p.pendingSafeToNotar, block)
+	return p.parentReady.InvalidateBlock(block)
 }
 
 func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error) {
@@ -259,7 +340,7 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 	slot := v.Message.Vote.Slot
 	if slot <= p.root.Slot {
 		p.rejectedVotes++
-		return ConsensusUpdate{}, nil
+		return ConsensusUpdate{VoteAdmission: VoteAdmissionRooted}, nil
 	}
 	anchor := p.liveSlot
 	if p.root.Slot > anchor {
@@ -267,14 +348,28 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 	}
 	if anchor != 0 && slot > anchor+p.cfg.MaxSlotsAhead {
 		p.rejectedVotes++
-		return ConsensusUpdate{}, nil
+		return ConsensusUpdate{VoteAdmission: VoteAdmissionTooFarAhead}, nil
+	}
+	if first, ok := p.localFirstVotes[slot]; ok {
+		if v.Message.Rank == first.Rank && votesConflict(first.Vote, v.Message.Vote) {
+			p.rejectedVotes++
+			return ConsensusUpdate{}, fmt.Errorf("slot %d verified vote conflicts with durable local first vote at rank %d", slot, first.Rank)
+		}
+		if v.Local && voteEstablishesLocalFirst(v.Message.Vote.Type) && (first.Vote != v.Message.Vote || first.Rank != v.Message.Rank) {
+			p.rejectedVotes++
+			return ConsensusUpdate{}, fmt.Errorf("slot %d local first-vote provenance conflicts: have %s rank %d, got %s rank %d", slot, first.Vote.Type, first.Rank, v.Message.Vote.Type, v.Message.Rank)
+		}
 	}
 
 	state := p.slots[slot]
 	if state == nil {
 		if len(p.slots) >= p.cfg.MaxTrackedSlots {
 			p.rejectedVotes++
-			return ConsensusUpdate{}, nil
+			return ConsensusUpdate{VoteAdmission: VoteAdmissionTrackedSlotCapacity}, nil
+		}
+		if p.verifiedVotes >= p.cfg.MaxVerifiedVotes {
+			p.rejectedVotes++
+			return ConsensusUpdate{VoteAdmission: VoteAdmissionVoteCapacity}, nil
 		}
 		state = &slotConsensusState{
 			epoch:         v.Result.Epoch,
@@ -283,15 +378,33 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 			byRank:        make(map[uint16]map[VoteType][]solana.Hash),
 			safeNotarSent: make(map[solana.Hash]struct{}),
 		}
+		if first, ok := p.localFirstVotes[slot]; ok {
+			vote := first.Vote
+			state.localFirstVote = &vote
+			state.localFirstRank = first.Rank
+		}
 		p.slots[slot] = state
 	}
 	if state.epoch != v.Result.Epoch || state.totalStake != v.Result.TotalStake {
 		p.rejectedVotes++
 		return ConsensusUpdate{}, fmt.Errorf("slot %d validator-set mismatch: epoch/total %d/%d, got %d/%d", slot, state.epoch, state.totalStake, v.Result.Epoch, v.Result.TotalStake)
 	}
+	if v.Local && voteEstablishesLocalFirst(v.Message.Vote.Type) && state.localFirstVote != nil && (*state.localFirstVote != v.Message.Vote || state.localFirstRank != v.Message.Rank) {
+		p.rejectedVotes++
+		return ConsensusUpdate{}, fmt.Errorf("slot %d local first-vote provenance conflicts: have %s rank %d, got %s rank %d", slot, state.localFirstVote.Type, state.localFirstRank, v.Message.Vote.Type, v.Message.Rank)
+	}
+	if hasExactVoteLocked(state, v.Message) {
+		p.duplicateVotes++
+		return p.exactDuplicateUpdateLocked(slot, state, v), nil
+	}
+	if evidence, conflict := conflictingVoteEvidence(state.byRank[v.Message.Rank], v.Message); conflict {
+		p.recordEvidenceLocked(evidence)
+		p.rejectedVotes++
+		return ConsensusUpdate{VoteAdmission: VoteAdmissionConflict}, nil
+	}
 	if p.verifiedVotes >= p.cfg.MaxVerifiedVotes {
 		p.rejectedVotes++
-		return ConsensusUpdate{}, nil
+		return ConsensusUpdate{VoteAdmission: VoteAdmissionVoteCapacity}, nil
 	}
 
 	accepted, duplicate, err := p.acceptVoteLocked(state, v)
@@ -301,21 +414,23 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 	}
 	if duplicate {
 		p.duplicateVotes++
-		return ConsensusUpdate{}, nil
+		return p.exactDuplicateUpdateLocked(slot, state, v), nil
 	}
 	if !accepted {
 		p.rejectedVotes++
-		return ConsensusUpdate{}, nil
+		return ConsensusUpdate{VoteAdmission: VoteAdmissionConflict}, nil
 	}
 
 	p.verifiedVotes++
 	p.verifiedTotal++
-	if v.Local && state.localFirstVote == nil {
+	if v.Local && voteEstablishesLocalFirst(v.Message.Vote.Type) && state.localFirstVote == nil {
 		vote := v.Message.Vote
 		state.localFirstVote = &vote
+		state.localFirstRank = v.Message.Rank
+		p.localFirstVotes[slot] = localFirstVoteProvenance{Vote: vote, Rank: v.Message.Rank}
 	}
 
-	update := ConsensusUpdate{VoteAccepted: true}
+	update := ConsensusUpdate{VoteAccepted: true, VoteAdmission: VoteAdmissionAccepted}
 	update.Events = append(update.Events, p.safeEventsLocked(slot, state)...)
 	certs, events, err := p.assembleCertificatesLocked(slot, state)
 	if err != nil {
@@ -326,10 +441,100 @@ func (p *ConsensusPool) AddVerifiedVote(v VerifiedVote) (ConsensusUpdate, error)
 	return update, nil
 }
 
-// HasVerifiedVote reports whether the exact logical vote is present in the
-// verified pool. The local voter uses this after self-injection so a bounded-
-// pool rejection can never be mistaken for successful admission and followed
-// by persistence or network broadcast.
+func (p *ConsensusPool) exactDuplicateUpdateLocked(slot uint64, state *slotConsensusState, v VerifiedVote) ConsensusUpdate {
+	update := ConsensusUpdate{VoteAdmission: VoteAdmissionExactDuplicate}
+	if v.Local && voteEstablishesLocalFirst(v.Message.Vote.Type) && state.localFirstVote == nil {
+		vote := v.Message.Vote
+		state.localFirstVote = &vote
+		state.localFirstRank = v.Message.Rank
+		p.localFirstVotes[slot] = localFirstVoteProvenance{Vote: vote, Rank: v.Message.Rank}
+		// The tally already existed as a network vote. Installing its local
+		// provenance can make previously accumulated stake actionable without
+		// incrementing stake, capacity, or VoteAccepted.
+		update.Events = append(update.Events, p.safeEventsLocked(slot, state)...)
+	}
+	return update
+}
+
+// RestoreLocalFirstVote records a signed, durable round-one choice without
+// adding it to the verified vote tally. This is deliberately provenance-only:
+// restart restoration must retain the original Notarize/Skip decision even
+// when its block has not replayed successfully in this process, but must not
+// broadcast it or use it to assemble a certificate.
+func (p *ConsensusPool) RestoreLocalFirstVote(vote Vote, rank uint16) (ConsensusUpdate, error) {
+	if err := vote.ValidateBasic(); err != nil {
+		return ConsensusUpdate{}, err
+	}
+	if !voteEstablishesLocalFirst(vote.Type) {
+		return ConsensusUpdate{}, fmt.Errorf("%s vote cannot establish local first-vote provenance", vote.Type)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if vote.Slot <= p.root.Slot {
+		return ConsensusUpdate{}, nil
+	}
+	if existing, ok := p.localFirstVotes[vote.Slot]; ok {
+		if existing.Vote != vote || existing.Rank != rank {
+			return ConsensusUpdate{}, fmt.Errorf("slot %d local first-vote provenance conflicts: have %s rank %d, got %s rank %d", vote.Slot, existing.Vote.Type, existing.Rank, vote.Type, rank)
+		}
+		return ConsensusUpdate{}, nil
+	}
+	state := p.slots[vote.Slot]
+	if state != nil {
+		if conflict, _, ok := conflictingRankVote(state.byRank[rank], vote); ok {
+			return ConsensusUpdate{}, fmt.Errorf("slot %d durable local first vote conflicts with verified %s vote at rank %d", vote.Slot, conflict, rank)
+		}
+	}
+	p.localFirstVotes[vote.Slot] = localFirstVoteProvenance{Vote: vote, Rank: rank}
+	if state == nil {
+		return ConsensusUpdate{}, nil
+	}
+	if state.localFirstVote != nil {
+		if *state.localFirstVote != vote || state.localFirstRank != rank {
+			delete(p.localFirstVotes, vote.Slot)
+			return ConsensusUpdate{}, fmt.Errorf("slot %d local first-vote provenance conflicts: have %s rank %d, got %s rank %d", vote.Slot, state.localFirstVote.Type, state.localFirstRank, vote.Type, rank)
+		}
+		return ConsensusUpdate{}, nil
+	}
+	local := vote
+	state.localFirstVote = &local
+	state.localFirstRank = rank
+	return ConsensusUpdate{Events: p.safeEventsLocked(vote.Slot, state)}, nil
+}
+
+func conflictingRankVote(rankVotes map[VoteType][]solana.Hash, vote Vote) (VoteType, solana.Hash, bool) {
+	for _, hash := range rankVotes[vote.Type] {
+		if hash != vote.BlockHash {
+			return vote.Type, hash, true
+		}
+	}
+	return conflictingVerifiedVote(rankVotes, vote)
+}
+
+func votesConflict(first, candidate Vote) bool {
+	rankVotes := map[VoteType][]solana.Hash{first.Type: {first.BlockHash}}
+	_, _, conflict := conflictingRankVote(rankVotes, candidate)
+	return conflict
+}
+
+func voteEstablishesLocalFirst(voteType VoteType) bool {
+	return voteType == VoteTypeNotarize || voteType == VoteTypeSkip
+}
+
+func hasExactVoteLocked(state *slotConsensusState, message VoteMessage) bool {
+	for _, hash := range state.byRank[message.Rank][message.Vote.Type] {
+		if hash == message.Vote.BlockHash {
+			return true
+		}
+	}
+	return false
+}
+
+// HasVerifiedVote reports whether the exact logical vote is currently retained
+// in the verified pool. It is for diagnostics and tests only; action callers
+// must use AddVerifiedVote's atomic VoteAdmission verdict because finality can
+// prune this state immediately after admission.
 func (p *ConsensusPool) HasVerifiedVote(message VoteMessage) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -425,7 +630,12 @@ func (p *ConsensusPool) HasNotarFallbackOrStronger(block BlockID) bool {
 func (p *ConsensusPool) TakePendingSafeToNotar() []BlockID {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	pending := append([]BlockID(nil), p.pendingSafeToNotar...)
+	pending := make([]BlockID, 0, len(p.pendingSafeToNotar))
+	for _, block := range p.pendingSafeToNotar {
+		if _, invalid := p.invalidBlocks[block]; !invalid && block.Slot > p.root.Slot {
+			pending = append(pending, block)
+		}
+	}
 	p.pendingSafeToNotar = nil
 	return pending
 }
@@ -437,7 +647,10 @@ func (p *ConsensusPool) TakePendingSafeToNotar() []BlockID {
 func (p *ConsensusPool) RequeuePendingSafeToNotar(block BlockID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if block.Slot < p.root.Slot || containsBlock(p.pendingSafeToNotar, block) {
+	if _, invalid := p.invalidBlocks[block]; invalid {
+		return
+	}
+	if block.Slot <= p.root.Slot || containsBlock(p.pendingSafeToNotar, block) {
 		return
 	}
 	p.pendingSafeToNotar = append(p.pendingSafeToNotar, block)
@@ -481,16 +694,8 @@ func (p *ConsensusPool) acceptVoteLocked(state *slotConsensusState, vote Verifie
 		}
 	}
 
-	budget := 1
-	if msg.Vote.Type == VoteTypeNotarizeFallback {
-		budget = 3
-	}
-	if len(rankVotes[msg.Vote.Type]) >= budget {
-		p.recordEvidenceLocked(VoteEvidence{Slot: msg.Vote.Slot, Rank: msg.Rank, VoteType: msg.Vote.Type, Conflicting: msg.Vote.Type, FirstBlockHash: rankVotes[msg.Vote.Type][0], SecondBlockHash: hash})
-		return false, false, nil
-	}
-	if conflict, first, ok := conflictingVerifiedVote(rankVotes, msg.Vote); ok {
-		p.recordEvidenceLocked(VoteEvidence{Slot: msg.Vote.Slot, Rank: msg.Rank, VoteType: msg.Vote.Type, Conflicting: conflict, FirstBlockHash: first, SecondBlockHash: hash})
+	if evidence, conflict := conflictingVoteEvidence(rankVotes, msg); conflict {
+		p.recordEvidenceLocked(evidence)
 		return false, false, nil
 	}
 
@@ -504,6 +709,27 @@ func (p *ConsensusPool) acceptVoteLocked(state *slotConsensusState, vote Verifie
 	tally.stake += vote.Result.Stake
 	rankVotes[msg.Vote.Type] = append(rankVotes[msg.Vote.Type], hash)
 	return true, false, nil
+}
+
+func conflictingVoteEvidence(rankVotes map[VoteType][]solana.Hash, msg VoteMessage) (VoteEvidence, bool) {
+	hashes := rankVotes[msg.Vote.Type]
+	budget := 1
+	if msg.Vote.Type == VoteTypeNotarizeFallback {
+		budget = 3
+	}
+	if len(hashes) >= budget {
+		return VoteEvidence{
+			Slot: msg.Vote.Slot, Rank: msg.Rank, VoteType: msg.Vote.Type, Conflicting: msg.Vote.Type,
+			FirstBlockHash: hashes[0], SecondBlockHash: msg.Vote.BlockHash,
+		}, true
+	}
+	if conflict, first, ok := conflictingVerifiedVote(rankVotes, msg.Vote); ok {
+		return VoteEvidence{
+			Slot: msg.Vote.Slot, Rank: msg.Rank, VoteType: msg.Vote.Type, Conflicting: conflict,
+			FirstBlockHash: first, SecondBlockHash: msg.Vote.BlockHash,
+		}, true
+	}
+	return VoteEvidence{}, false
 }
 
 func conflictingVerifiedVote(rankVotes map[VoteType][]solana.Hash, vote Vote) (VoteType, solana.Hash, bool) {
@@ -576,6 +802,10 @@ func (p *ConsensusPool) safeEventsLocked(slot uint64, state *slotConsensusState)
 		if tally.stake > topNotar {
 			topNotar = tally.stake
 		}
+		block := BlockID{Slot: slot, Hash: key.block}
+		if _, invalid := p.invalidBlocks[block]; invalid {
+			continue
+		}
 		if _, sent := state.safeNotarSent[key.block]; sent {
 			continue
 		}
@@ -585,7 +815,6 @@ func (p *ConsensusPool) safeEventsLocked(slot uint64, state *slotConsensusState)
 		if fractionMeets(40, tally.stake, state.totalStake) ||
 			(fractionMeets(20, tally.stake, state.totalStake) && fractionMeets(60, tally.stake+skipStake, state.totalStake)) {
 			state.safeNotarSent[key.block] = struct{}{}
-			block := BlockID{Slot: slot, Hash: key.block}
 			if slot == 1 || isLeaderWindowStart(slot) {
 				events = append(events, ConsensusEvent{Kind: ConsensusEventSafeToNotar, Slot: slot, Block: block})
 			} else if !containsBlock(p.pendingSafeToNotar, block) {
@@ -658,6 +887,12 @@ func (p *ConsensusPool) assembleCertificatesLocked(slot uint64, state *slotConse
 	var certificates []Certificate
 	var events []ConsensusEvent
 	for _, key := range orderedKeys {
+		if key.Type.HasBlock() {
+			block := BlockID{Slot: key.Slot, Hash: key.BlockHash}
+			if _, invalid := p.invalidBlocks[block]; invalid {
+				continue
+			}
+		}
 		target := targets[key]
 		if _, exists := p.completed[key]; exists {
 			continue
@@ -711,12 +946,14 @@ func (p *ConsensusPool) insertCertificateLocked(cert Certificate) ([]ConsensusEv
 	switch cert.Type {
 	case CertificateNotarize:
 		block, _ := cert.Block()
-		events = append(events, ConsensusEvent{Kind: ConsensusEventBlockNotarized, Slot: cert.Slot, Block: block, CertificateType: cert.Type})
-		parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
-		if err != nil {
-			return nil, false, err
+		if _, invalid := p.invalidBlocks[block]; !invalid {
+			events = append(events, ConsensusEvent{Kind: ConsensusEventBlockNotarized, Slot: cert.Slot, Block: block, CertificateType: cert.Type})
+			parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
+			if err != nil {
+				return nil, false, err
+			}
+			events = append(events, parentEvents...)
 		}
-		events = append(events, parentEvents...)
 		finalized, err := p.maybeSlowFinalizeLocked(cert.Slot)
 		if err != nil {
 			return nil, false, err
@@ -724,11 +961,13 @@ func (p *ConsensusPool) insertCertificateLocked(cert Certificate) ([]ConsensusEv
 		events = append(events, finalized...)
 	case CertificateNotarizeFallback:
 		block, _ := cert.Block()
-		parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
-		if err != nil {
-			return nil, false, err
+		if _, invalid := p.invalidBlocks[block]; !invalid {
+			parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
+			if err != nil {
+				return nil, false, err
+			}
+			events = append(events, parentEvents...)
 		}
-		events = append(events, parentEvents...)
 	case CertificateFinalize:
 		finalized, err := p.maybeSlowFinalizeLocked(cert.Slot)
 		if err != nil {
@@ -737,24 +976,28 @@ func (p *ConsensusPool) insertCertificateLocked(cert Certificate) ([]ConsensusEv
 		events = append(events, finalized...)
 	case CertificateFinalizeFast:
 		block, _ := cert.Block()
-		parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
-		if err != nil {
-			return nil, false, err
-		}
-		events = append(events, parentEvents...)
-		if _, conflicted := p.conflicts[cert.Slot]; !conflicted && p.finalized[block] != CertificateFinalizeFast {
-			p.finalized[block] = CertificateFinalizeFast
-			events = append(events, ConsensusEvent{Kind: ConsensusEventFinalized, Slot: cert.Slot, Block: block, Fast: true, CertificateType: cert.Type})
+		if _, invalid := p.invalidBlocks[block]; !invalid {
+			parentEvents, err := p.parentReady.AddNotarFallbackOrStronger(block)
+			if err != nil {
+				return nil, false, err
+			}
+			events = append(events, parentEvents...)
+			if _, conflicted := p.conflicts[cert.Slot]; !conflicted && p.finalized[block] != CertificateFinalizeFast {
+				p.finalized[block] = CertificateFinalizeFast
+				events = append(events, ConsensusEvent{Kind: ConsensusEventFinalized, Slot: cert.Slot, Block: block, Fast: true, CertificateType: cert.Type})
+			}
 		}
 	case CertificateSkip:
 		events = append(events, p.parentReady.AddSkip(cert.Slot)...)
 	case CertificateGenesis:
 		block, _ := cert.Block()
-		parentEvents, err := p.parentReady.AddGenesis(block)
-		if err != nil {
-			return nil, false, err
+		if _, invalid := p.invalidBlocks[block]; !invalid {
+			parentEvents, err := p.parentReady.AddGenesis(block)
+			if err != nil {
+				return nil, false, err
+			}
+			events = append(events, parentEvents...)
 		}
-		events = append(events, parentEvents...)
 	}
 	inserted = true
 	return events, true, nil
@@ -791,6 +1034,9 @@ func (p *ConsensusPool) maybeSlowFinalizeLocked(slot uint64) ([]ConsensusEvent, 
 		return nil, nil
 	}
 	block := notarized[0]
+	if _, invalid := p.invalidBlocks[block]; invalid {
+		return nil, nil
+	}
 	if _, finalized := p.finalized[block]; finalized {
 		return nil, nil
 	}
@@ -819,10 +1065,10 @@ func certificateAssemblyPriority(certType CertificateType) int {
 	}
 }
 
-func filterBlocksAtOrAbove(blocks []BlockID, root uint64) []BlockID {
+func filterBlocksAbove(blocks []BlockID, root uint64) []BlockID {
 	kept := blocks[:0]
 	for _, block := range blocks {
-		if block.Slot >= root {
+		if block.Slot > root {
 			kept = append(kept, block)
 		}
 	}

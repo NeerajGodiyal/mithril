@@ -38,15 +38,22 @@ type WorkingBank struct {
 	numSigs   uint64
 	entryHash solana.Hash
 	accepting bool
+	// ancestorStatuses is the immutable transaction-status lineage pinned when
+	// this bank's replay parent was selected.
+	ancestorStatuses *replay.TransactionStatusView
+	// seenMessages is the bank-local AlreadyProcessed status set. The TPU's
+	// signature LRU is only an ingress optimization and is not authoritative.
+	seenMessages map[[32]byte]struct{}
 }
 
 type BankConfig struct {
-	SlotCtx   *sealevel.SlotCtx
-	Slot      uint64
-	Leader    solana.PublicKey
-	Limits    costmodel.Limits
-	EntryHash solana.Hash
-	Sink      BatchSink
+	SlotCtx             *sealevel.SlotCtx
+	Slot                uint64
+	Leader              solana.PublicKey
+	Limits              costmodel.Limits
+	EntryHash           solana.Hash
+	Sink                BatchSink
+	TransactionStatuses *replay.TransactionStatusView
 }
 
 func NewWorkingBank(cfg BankConfig) *WorkingBank {
@@ -59,14 +66,16 @@ func NewWorkingBank(cfg BankConfig) *WorkingBank {
 		sink = NopBatchSink{}
 	}
 	return &WorkingBank{
-		slotCtx:   cfg.SlotCtx,
-		slot:      cfg.Slot,
-		leader:    cfg.Leader,
-		costs:     costmodel.NewCostTracker(limits),
-		entries:   NewEntryBuilder(limits, cfg.EntryHash),
-		sink:      sink,
-		entryHash: cfg.EntryHash,
-		accepting: true,
+		slotCtx:          cfg.SlotCtx,
+		slot:             cfg.Slot,
+		leader:           cfg.Leader,
+		costs:            costmodel.NewCostTracker(limits),
+		entries:          NewEntryBuilder(limits, cfg.EntryHash),
+		sink:             sink,
+		entryHash:        cfg.EntryHash,
+		accepting:        true,
+		ancestorStatuses: cfg.TransactionStatuses,
+		seenMessages:     make(map[[32]byte]struct{}),
 	}
 }
 
@@ -124,6 +133,7 @@ const (
 	ForgeDroppedParse
 	ForgeDroppedCost
 	ForgeDroppedExecution
+	ForgeDroppedAlreadyProcessed
 )
 
 func (r ForgeResult) String() string {
@@ -140,6 +150,8 @@ func (r ForgeResult) String() string {
 		return "dropped_cost"
 	case ForgeDroppedExecution:
 		return "dropped_execution"
+	case ForgeDroppedAlreadyProcessed:
+		return "dropped_already_processed"
 	default:
 		return "unknown"
 	}
@@ -162,21 +174,48 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if tx.IsVote() {
 		return ForgeDroppedVote, costmodel.ExceedNone
 	}
-
-	feats := b.slotCtx.Features
-	if feats == nil {
-		f := features.NewFeaturesDefault()
-		feats = f
-	}
-	cost, err := costmodel.EstimateTransactionCost(tx, feats)
+	messageHash, err := replay.TransactionMessageHash(tx)
 	if err != nil {
 		return ForgeDroppedParse, costmodel.ExceedNone
 	}
-	cost.WireSize = wireSize
+	ancestorAlreadyProcessed := false
+	var ancestorStatusErr error
+	if b.ancestorStatuses == nil {
+		ancestorStatusErr = &replay.IncompleteTransactionStatusCoverageError{}
+	} else {
+		// The view is immutable and internally synchronizes its lazy per-blockhash
+		// index. Do that potentially large one-time lookup outside the bank lock.
+		ancestorAlreadyProcessed, ancestorStatusErr = b.ancestorStatuses.ContainsMessage(tx.Message.RecentBlockhash, messageHash)
+	}
+
+	var cost costmodel.TransactionCost
+	if !ancestorAlreadyProcessed && ancestorStatusErr == nil {
+		feats := b.slotCtx.Features
+		if feats == nil {
+			f := features.NewFeaturesDefault()
+			feats = f
+		}
+		cost, err = costmodel.EstimateTransactionCost(tx, feats)
+		if err != nil {
+			return ForgeDroppedParse, costmodel.ExceedNone
+		}
+		cost.WireSize = wireSize
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.accepting {
+		return ForgeDroppedNoLeader, costmodel.ExceedNone
+	}
+	if _, alreadyProcessed := b.seenMessages[messageHash]; alreadyProcessed {
+		return ForgeDroppedAlreadyProcessed, costmodel.ExceedNone
+	}
+	if ancestorAlreadyProcessed {
+		return ForgeDroppedAlreadyProcessed, costmodel.ExceedNone
+	}
+	if ancestorStatusErr != nil {
+		// A live leader is never constructed with incomplete coverage. Preserve a
+		// fail-closed result for isolated callers that bypass LeaderLoop.
 		return ForgeDroppedNoLeader, costmodel.ExceedNone
 	}
 
@@ -195,6 +234,10 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if err := replay.ApplySuccessfulTransaction(b.slotCtx, output); err != nil {
 		return ForgeDroppedExecution, costmodel.ExceedNone
 	}
+	if b.seenMessages == nil {
+		b.seenMessages = make(map[[32]byte]struct{})
+	}
+	b.seenMessages[messageHash] = struct{}{}
 	if output.FeeInfo != nil {
 		b.txFees.Add(output.FeeInfo)
 	}

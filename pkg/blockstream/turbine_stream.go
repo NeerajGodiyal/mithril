@@ -149,6 +149,11 @@ func (bs *BlockSource) serviceAlpenglowWantedBlocks(nudged map[uint64]time.Time,
 
 	for _, w := range bs.alpenglowWantedBlocksFn(after, alpenglowRepairMaxWanted) {
 		slot := w.Block.Slot
+		if bs.isInvalidAlpenglowBlockID(slot, w.Block.Hash) {
+			// Fallback certificates are repair leads, not authority to revive
+			// deterministic-invalid contents or evict a valid sibling.
+			continue
+		}
 		if last, ok := nudged[slot]; ok && now.Sub(last) < alpenglowRepairNudgePause {
 			continue
 		}
@@ -232,7 +237,27 @@ func (bs *BlockSource) attachAlpenglowBlockIDHintsToReceiver(receiver *turbine.U
 	}
 	bs.alpenglowMu.Unlock()
 
+	invalid := make([]struct {
+		slot    uint64
+		blockID solana.Hash
+	}, 0)
+	bs.rejectedAlpenglowMu.RLock()
+	for slot, ids := range bs.invalidAlpenglowBlockIDs {
+		for blockID := range ids {
+			invalid = append(invalid, struct {
+				slot    uint64
+				blockID solana.Hash
+			}{slot: slot, blockID: blockID})
+		}
+	}
+	bs.rejectedAlpenglowMu.RUnlock()
+	for _, entry := range invalid {
+		receiver.RejectAlpenglowBlockIDAndDiscardSlot(entry.slot, entry.blockID)
+	}
 	for _, entry := range known {
+		if bs.isInvalidAlpenglowBlockID(entry.slot, entry.blockID) {
+			continue
+		}
 		receiver.SetKnownAlpenglowBlockID(entry.slot, entry.blockID)
 	}
 }
@@ -258,6 +283,15 @@ func (bs *BlockSource) discardTurbineSlotState(slot uint64) {
 	bs.alpenglowMu.Unlock()
 	if receiver != nil {
 		receiver.ResetSlotAndDiscardSpool(slot)
+	}
+}
+
+func (bs *BlockSource) rejectInvalidTurbineBlockState(slot uint64, blockID solana.Hash) {
+	bs.alpenglowMu.Lock()
+	receiver := bs.activeTurbineReceiver
+	bs.alpenglowMu.Unlock()
+	if receiver != nil {
+		receiver.RejectAlpenglowBlockIDAndDiscardSlot(slot, blockID)
 	}
 }
 
@@ -308,7 +342,6 @@ func (bs *BlockSource) runTurbineStream() {
 		}
 
 		receiver := turbine.NewUDPReceiver(bs.turbineBindAddr)
-		bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
 		receiver.SetLeaderForSlot(bs.leaderForSlot)
 		receiver.SetFirstShredSink(bs.alpenglowFirstShredSink)
 		if bs.shredSpoolDir != "" {
@@ -321,6 +354,10 @@ func (bs *BlockSource) runTurbineStream() {
 				}
 			}
 		}
+		// Apply hard invalid identities only after the spool is attached, so
+		// RejectAlpenglowBlockIDAndDiscardSlot removes adopted poisoned files
+		// before hydration can reconstruct them.
+		bs.attachAlpenglowBlockIDHintsToReceiver(receiver)
 		if gossipClient != nil {
 			if err := receiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err == nil {
 				receiver.SetRepairRequestRate(bs.repairMaxRequestsPerSecond)

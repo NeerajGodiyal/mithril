@@ -18,7 +18,9 @@ type LoadAndExecuteTransactionOutput struct {
 	// ProcessedTransaction or TransactionError; lean success leaves both nil.
 	ProcessingResult TransactionProcessingResult
 	// ExecutionResult contains all the state changes from executing the transaction
-	// and is populated on successful rich and lean execution.
+	// and is populated on successful rich execution and legacy ADH-enabled lean
+	// execution. ADH-disabled lean execution commits directly from ExecCtx and
+	// leaves this nil.
 	ExecutionResult *TransactionExecutionResult
 
 	// ExecCtx is the execution context after processing. Available when accounts were
@@ -43,7 +45,7 @@ type LoadAndExecuteTransactionOutput struct {
 // TransactionProcessingResult represents the result of processing a transaction
 type TransactionProcessingResult struct {
 	// ProcessedTransaction contains the rich execution result if successful.
-	// Lean-result callers use ExecCtx and ExecutionResult instead.
+	// Lean-result callers use ExecCtx and, when required, ExecutionResult instead.
 	ProcessedTransaction *ProcessedTransaction
 	// TransactionError contains the error if processing failed
 	TransactionError *TransactionError

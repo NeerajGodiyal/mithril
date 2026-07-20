@@ -251,6 +251,25 @@ func (r *UDPReceiver) ResetSlotAndDiscardSpool(slot uint64) {
 	}
 }
 
+// RejectAlpenglowBlockIDAndDiscardSlot atomically rejects one objective-invalid
+// block identity, unpins it as an assembler hint, and drops its current memory
+// and spool packets. A different sibling identity remains eligible.
+func (r *UDPReceiver) RejectAlpenglowBlockIDAndDiscardSlot(slot uint64, blockID solana.Hash) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.slotResetMu.Lock()
+	defer r.slotResetMu.Unlock()
+	if r.repairClient != nil {
+		r.repairClient.cancelSlotRequests(slot)
+	}
+	r.assembler.RejectAlpenglowBlockID(slot, blockID)
+	r.assembler.ResetSlot(slot)
+	if r.spool != nil {
+		r.spool.DiscardSlot(slot)
+	}
+}
+
 // ShredEdges reports the monotonic shred frontier from the assembler: highest
 // slot with any accepted shred, and highest slot that became full.
 func (r *UDPReceiver) ShredEdges() (latestShredSlot, highestFullSlot uint64) {

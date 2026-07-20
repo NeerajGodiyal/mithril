@@ -45,6 +45,7 @@ type SlotAssembler struct {
 	slots                map[uint64]*slotState
 	completedSlots       map[uint64]struct{}
 	knownBlockIDs        map[uint64]solana.Hash
+	rejectedBlockIDs     map[uint64]map[solana.Hash]struct{}
 	priorityRepairSlots  map[uint64]struct{}
 	priorityRepairOrder  []uint64
 	encoders             map[fecLayout]reedsolomon.Encoder
@@ -132,6 +133,7 @@ func NewSlotAssembler() *SlotAssembler {
 		slots:               make(map[uint64]*slotState),
 		completedSlots:      make(map[uint64]struct{}),
 		knownBlockIDs:       make(map[uint64]solana.Hash),
+		rejectedBlockIDs:    make(map[uint64]map[solana.Hash]struct{}),
 		priorityRepairSlots: make(map[uint64]struct{}),
 		partialShredObs:     make(map[uint64]PartialShredObservation),
 		encoders:            make(map[fecLayout]reedsolomon.Encoder),
@@ -300,7 +302,34 @@ func (a *SlotAssembler) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Has
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if _, rejected := a.rejectedBlockIDs[slot][blockID]; rejected {
+		return
+	}
 	a.knownBlockIDs[slot] = blockID
+}
+
+// RejectAlpenglowBlockID permanently rejects one objectively invalid identity
+// for the assembler's bounded retention window. If ordinary assembly had
+// learned that identity as the slot hint, unpin it so a different sibling can
+// assemble; a distinct certificate-derived hint remains intact.
+func (a *SlotAssembler) RejectAlpenglowBlockID(slot uint64, blockID solana.Hash) {
+	if slot == 0 || blockID == (solana.Hash{}) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.rejectedBlockIDs == nil {
+		a.rejectedBlockIDs = make(map[uint64]map[solana.Hash]struct{})
+	}
+	ids := a.rejectedBlockIDs[slot]
+	if ids == nil {
+		ids = make(map[solana.Hash]struct{})
+		a.rejectedBlockIDs[slot] = ids
+	}
+	ids[blockID] = struct{}{}
+	if a.knownBlockIDs[slot] == blockID {
+		delete(a.knownBlockIDs, slot)
+	}
 }
 
 func (a *SlotAssembler) ResetSlot(slot uint64) {
@@ -428,6 +457,11 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 		for slot := range a.knownBlockIDs {
 			if slot < minSlot {
 				delete(a.knownBlockIDs, slot)
+			}
+		}
+		for slot := range a.rejectedBlockIDs {
+			if slot < minSlot {
+				delete(a.rejectedBlockIDs, slot)
 			}
 		}
 		for slot := range a.partialShredObs {
@@ -758,11 +792,15 @@ func (a *SlotAssembler) acceptAlpenglowBlockIDLocked(blk *block.Block) bool {
 	if blk == nil || !blk.HasAlpenglowBlockID {
 		return true
 	}
+	blockID := solana.Hash(blk.AlpenglowBlockID)
+	if _, rejected := a.rejectedBlockIDs[blk.Slot][blockID]; rejected {
+		return false
+	}
 	known, ok := a.knownBlockIDs[blk.Slot]
 	if !ok || known == (solana.Hash{}) {
 		return true
 	}
-	return solana.Hash(blk.AlpenglowBlockID) == known
+	return blockID == known
 }
 
 func (a *SlotAssembler) trackBlockIDLocked(blk *block.Block) {
@@ -770,6 +808,9 @@ func (a *SlotAssembler) trackBlockIDLocked(blk *block.Block) {
 		return
 	}
 	blockID := solana.Hash(blk.AlpenglowBlockID)
+	if _, rejected := a.rejectedBlockIDs[blk.Slot][blockID]; rejected {
+		return
+	}
 	if known, ok := a.knownBlockIDs[blk.Slot]; ok && known != (solana.Hash{}) && known != blockID {
 		return
 	}
@@ -1274,6 +1315,9 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 	effectiveParentBlockID := parentBlockID
 	effectiveParentKnown := parentKnown
 	if parentInfo != nil {
+		if parentInfo.FromUpdateParent && s.slot%defaultBroadcastLeaderSlots != 0 {
+			return nil, fmt.Errorf("slot %d alpenglow update-parent marker is not in the first slot of its leader window", s.slot)
+		}
 		if parentInfo.ParentSlot >= s.slot {
 			return nil, fmt.Errorf("slot %d alpenglow parent marker points to non-ancestor slot %d", s.slot, parentInfo.ParentSlot)
 		}

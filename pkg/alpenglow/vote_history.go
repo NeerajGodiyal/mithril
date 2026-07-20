@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 
 	"github.com/gagliardetto/solana-go"
@@ -203,7 +205,7 @@ func (h *VoteHistory) AddBlockNotarized(block BlockID) {
 // AddParentReady returns true for the first ParentReady observation at slot.
 func (h *VoteHistory) AddParentReady(slot uint64, parent BlockID) bool {
 	h.ensureMaps()
-	if slot < h.Root {
+	if slot < h.Root || parent.Slot >= slot || slot-parent.Slot > maxParentReadyRestoreGap || !parent.HasHash() {
 		return false
 	}
 	first := len(h.ParentReadyBySlot[slot]) == 0
@@ -215,11 +217,20 @@ func (h *VoteHistory) AddParentReady(slot uint64, parent BlockID) bool {
 }
 
 func (h *VoteHistory) HighestParentReady() (uint64, BlockID, bool) {
+	return h.HighestParentReadyMatching(nil)
+}
+
+// HighestParentReadyMatching selects the latest persisted ParentReady edge
+// accepted by eligible. A nil predicate accepts every historical edge.
+func (h *VoteHistory) HighestParentReadyMatching(eligible func(BlockID) bool) (uint64, BlockID, bool) {
 	var bestSlot uint64
 	var best BlockID
 	found := false
 	for slot, parents := range h.ParentReadyBySlot {
 		for parent := range parents {
+			if eligible != nil && !eligible(parent) {
+				continue
+			}
 			if !found || slot > bestSlot || (slot == bestSlot && blockLess(parent, best)) {
 				bestSlot, best, found = slot, parent, true
 			}
@@ -275,7 +286,19 @@ func slotHashSetContains(m map[uint64]map[solana.Hash]bool, block BlockID) bool 
 	return m[block.Slot][block.Hash]
 }
 
-func (h *VoteHistory) preparePersistedViews() {
+func (h *VoteHistory) preparePersistedViews() error {
+	for block, present := range h.NotarizedBlocks {
+		if !present {
+			return fmt.Errorf("vote-history notarized block %s has false membership", block)
+		}
+	}
+	for slot, parents := range h.ParentReadyBySlot {
+		for parent, present := range parents {
+			if !present {
+				return fmt.Errorf("vote-history ParentReady slot %d parent %s has false membership", slot, parent)
+			}
+		}
+	}
 	h.PersistedNotarized = h.PersistedNotarized[:0]
 	for block := range h.NotarizedBlocks {
 		h.PersistedNotarized = append(h.PersistedNotarized, block)
@@ -295,6 +318,7 @@ func (h *VoteHistory) preparePersistedViews() {
 		sort.Slice(parents, func(i, j int) bool { return blockLess(parents[i], parents[j]) })
 		h.PersistedParentReady = append(h.PersistedParentReady, persistedParentReady{Slot: slot, Parents: parents})
 	}
+	return nil
 }
 
 func (h *VoteHistory) restorePersistedViews() {
@@ -312,13 +336,93 @@ func (h *VoteHistory) restorePersistedViews() {
 	h.PersistedParentReady = nil
 }
 
+// validatePersistedState makes VotesCast the canonical anti-equivocation
+// record and rejects signed files whose redundant acceleration maps disagree.
+// It also bounds restart-only graph reconstruction before Restore can allocate
+// one status per skipped slot.
+func (h *VoteHistory) validatePersistedState() error {
+	h.ensureMaps()
+	rebuilt := NewVoteHistory(h.NodePubkey, h.Root)
+	slots := make([]uint64, 0, len(h.VotesCast))
+	for slot := range h.VotesCast {
+		slots = append(slots, slot)
+	}
+	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
+	for _, slot := range slots {
+		if slot < h.Root {
+			return fmt.Errorf("vote-history slot %d is behind root %d", slot, h.Root)
+		}
+		for index, vote := range h.VotesCast[slot] {
+			if vote.Slot != slot {
+				return fmt.Errorf("vote-history slot key %d contains vote[%d] for slot %d", slot, index, vote.Slot)
+			}
+			if err := rebuilt.AddVote(vote); err != nil {
+				return fmt.Errorf("vote-history vote[%d] at slot %d: %w", index, slot, err)
+			}
+		}
+	}
+	if !reflect.DeepEqual(h.Voted, rebuilt.Voted) {
+		return fmt.Errorf("vote-history voted map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.VotedNotar, rebuilt.VotedNotar) {
+		return fmt.Errorf("vote-history notarize map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.VotedNotarFallback, rebuilt.VotedNotarFallback) {
+		return fmt.Errorf("vote-history notarize-fallback map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.VotedSkipFallback, rebuilt.VotedSkipFallback) {
+		return fmt.Errorf("vote-history skip-fallback map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.Skipped, rebuilt.Skipped) {
+		return fmt.Errorf("vote-history skipped map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.ItsOver, rebuilt.ItsOver) {
+		return fmt.Errorf("vote-history finalization map disagrees with votes_cast")
+	}
+	if !reflect.DeepEqual(h.VotesCast, rebuilt.VotesCast) {
+		return fmt.Errorf("vote-history votes_cast contains non-canonical empty entries")
+	}
+
+	seenNotarized := make(map[BlockID]struct{}, len(h.PersistedNotarized))
+	for _, block := range h.PersistedNotarized {
+		if !block.HasHash() || block.Slot < h.Root {
+			return fmt.Errorf("vote-history has invalid notarized block %s at root %d", block, h.Root)
+		}
+		if _, duplicate := seenNotarized[block]; duplicate {
+			return fmt.Errorf("vote-history repeats notarized block %s", block)
+		}
+		seenNotarized[block] = struct{}{}
+	}
+	seenReadySlots := make(map[uint64]struct{}, len(h.PersistedParentReady))
+	for _, ready := range h.PersistedParentReady {
+		if ready.Slot < h.Root || len(ready.Parents) == 0 {
+			return fmt.Errorf("vote-history has invalid ParentReady slot %d at root %d", ready.Slot, h.Root)
+		}
+		if _, duplicate := seenReadySlots[ready.Slot]; duplicate {
+			return fmt.Errorf("vote-history repeats ParentReady slot %d", ready.Slot)
+		}
+		seenReadySlots[ready.Slot] = struct{}{}
+		seenParents := make(map[BlockID]struct{}, len(ready.Parents))
+		for _, parent := range ready.Parents {
+			if !parent.HasHash() || parent.Slot >= ready.Slot || ready.Slot-parent.Slot > maxParentReadyRestoreGap {
+				return fmt.Errorf("vote-history ParentReady slot %d has invalid parent %s", ready.Slot, parent)
+			}
+			if _, duplicate := seenParents[parent]; duplicate {
+				return fmt.Errorf("vote-history ParentReady slot %d repeats parent %s", ready.Slot, parent)
+			}
+			seenParents[parent] = struct{}{}
+		}
+	}
+	return nil
+}
+
 func VoteHistoryFilename(dir string, node solana.PublicKey) string {
 	return filepath.Join(dir, fmt.Sprintf("vote_history-%s.mithril.json", node))
 }
 
 // SaveVoteHistory signs the exact serialized history with the validator
-// identity and atomically replaces the previous file before any vote is sent
-// to the network.
+// identity and atomically replaces the previous file before a vote can be
+// admitted to consensus or sent to the network.
 func SaveVoteHistory(dir string, h *VoteHistory, identity ed25519.PrivateKey) error {
 	if h == nil {
 		return fmt.Errorf("save vote history: nil history")
@@ -331,10 +435,17 @@ func SaveVoteHistory(dir string, h *VoteHistory, identity ed25519.PrivateKey) er
 		return fmt.Errorf("save vote history: identity %s does not match history %s", node, h.NodePubkey)
 	}
 	h.Version = voteHistoryVersion
-	h.preparePersistedViews()
+	if err := h.preparePersistedViews(); err != nil {
+		return fmt.Errorf("save vote history: %w", err)
+	}
+	defer func() {
+		h.PersistedNotarized = nil
+		h.PersistedParentReady = nil
+	}()
+	if err := h.validatePersistedState(); err != nil {
+		return fmt.Errorf("save vote history: %w", err)
+	}
 	data, err := json.Marshal(h)
-	h.PersistedNotarized = nil
-	h.PersistedParentReady = nil
 	if err != nil {
 		return fmt.Errorf("serialize vote history: %w", err)
 	}
@@ -348,16 +459,116 @@ func SaveVoteHistory(dir string, h *VoteHistory, identity ed25519.PrivateKey) er
 	if err != nil {
 		return fmt.Errorf("serialize saved vote history: %w", err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create vote-history directory: %w", err)
+	if err := ensureDurableVoteHistoryDirectory(dir); err != nil {
+		return err
 	}
 	filename := VoteHistoryFilename(dir, node)
-	temporary := filename + ".new"
-	if err := os.WriteFile(temporary, encoded, 0o600); err != nil {
-		return fmt.Errorf("write vote history: %w", err)
+	return persistVoteHistoryFile(dir, filename, encoded)
+}
+
+// ensureDurableVoteHistoryDirectory creates each missing path component and
+// syncs its parent before proceeding. This makes first-time initialization as
+// durable as later atomic file replacement, including nested HistoryDir paths.
+func ensureDurableVoteHistoryDirectory(dir string) error {
+	current := filepath.Clean(dir)
+	var missing []string
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("create vote-history directory: %s is not a directory", current)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect vote-history directory %s: %w", current, err)
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("create vote-history directory: no existing ancestor for %s", dir)
+		}
+		current = parent
 	}
-	if err := os.Rename(temporary, filename); err != nil {
+	for i := len(missing) - 1; i >= 0; i-- {
+		path := missing[i]
+		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create vote-history directory %s: %w", path, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("inspect created vote-history directory %s: %w", path, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("create vote-history directory: %s is not a directory", path)
+		}
+		if err := syncVoteHistoryDirectory(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("persist vote-history directory %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// persistVoteHistoryFile makes the signed vote record durable before its
+// caller can publish a vote. The temporary file lives beside the destination
+// so rename is atomic. Syncing both the file and directory is required: rename
+// alone does not guarantee that either the bytes or the new directory entry
+// survives a crash.
+func persistVoteHistoryFile(dir, filename string, encoded []byte) error {
+	temporary, err := os.CreateTemp(dir, "."+filepath.Base(filename)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temporary vote history: %w", err)
+	}
+	temporaryName := temporary.Name()
+	closed := false
+	renamed := false
+	defer func() {
+		if !closed {
+			_ = temporary.Close()
+		}
+		if !renamed {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+
+	n, err := temporary.Write(encoded)
+	if err != nil {
+		return fmt.Errorf("write temporary vote history: %w", err)
+	}
+	if n != len(encoded) {
+		return fmt.Errorf("write temporary vote history: %w", io.ErrShortWrite)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync temporary vote history: %w", err)
+	}
+	closeErr := temporary.Close()
+	closed = true
+	if closeErr != nil {
+		return fmt.Errorf("close temporary vote history: %w", closeErr)
+	}
+	if err := os.Rename(temporaryName, filename); err != nil {
 		return fmt.Errorf("replace vote history: %w", err)
+	}
+	renamed = true
+
+	if err := syncVoteHistoryDirectory(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncVoteHistoryDirectory(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open vote-history directory %s for sync: %w", dir, err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync vote-history directory %s: %w", dir, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close vote-history directory %s: %w", dir, closeErr)
 	}
 	return nil
 }
@@ -387,6 +598,9 @@ func LoadVoteHistory(dir string, node solana.PublicKey) (*VoteHistory, error) {
 	}
 	if h.Version != voteHistoryVersion || h.NodePubkey != node {
 		return nil, fmt.Errorf("vote history identity/version mismatch")
+	}
+	if err := h.validatePersistedState(); err != nil {
+		return nil, fmt.Errorf("validate vote history: %w", err)
 	}
 	h.restorePersistedViews()
 	return &h, nil

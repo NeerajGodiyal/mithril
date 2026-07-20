@@ -241,28 +241,46 @@ type ReplayDivergenceRecord struct {
 	RecordedAt  string `json:"recorded_at"`
 }
 
+// TransactionStatusCheckpointRef identifies an immutable, content-addressed
+// transaction-status checkpoint stored beside AccountsDB. The checkpoint bytes
+// deliberately do not ride in ResumeContext: a real 300-root status window is
+// tens of megabytes, while every retained fold manifest needs only this small
+// reference in order to recover or rewind safely.
+//
+// The fold manifest carrying this reference is the commit selector. A sidecar
+// may be prepared before that manifest is durable, but it is not current until
+// a committed manifest references it.
+type TransactionStatusCheckpointRef struct {
+	Version uint32 `json:"version"`
+	Root    uint64 `json:"root"`
+	File    string `json:"file"`
+	Size    uint64 `json:"size"`
+	SHA256  string `json:"sha256"`
+}
+
 type ResumeContext struct {
-	Slot                    uint64           `json:"slot"`
-	Bankhash                string           `json:"bankhash"`                     // base58
-	AlpenglowBlockID        string           `json:"alpenglow_block_id,omitempty"` // double-merkle identity of Slot
-	BlockHeight             uint64           `json:"block_height"`
-	Epoch                   uint64           `json:"epoch"`
-	AcctsLtHash             string           `json:"accts_lt_hash"` // base64
-	LamportsPerSignature    uint64           `json:"lamports_per_sig"`
-	PrevLamportsPerSig      uint64           `json:"prev_lamports_per_sig"`
-	NumSignatures           uint64           `json:"num_signatures"`
-	RecentBlockhashes       []BlockhashEntry `json:"recent_blockhashes"`
-	EvictedBlockhash        string           `json:"evicted_blockhash"` // base58
-	Blockhash               string           `json:"blockhash"`         // base58
-	SlotHashes              []SlotHashEntry  `json:"slot_hashes"`
-	Clock                   string           `json:"clock"` // base64 of the Clock sysvar account data as of the last rooted slot
-	Capitalization          uint64           `json:"capitalization"`
-	SlotsPerYear            float64          `json:"slots_per_year"`
-	InflationInitial        float64          `json:"inflation_initial"`
-	InflationTerminal       float64          `json:"inflation_terminal"`
-	InflationTaper          float64          `json:"inflation_taper"`
-	InflationFoundation     float64          `json:"inflation_foundation"`
-	InflationFoundationTerm float64          `json:"inflation_foundation_term"`
+	Slot                       uint64           `json:"slot"`
+	Bankhash                   string           `json:"bankhash"`                                // base58
+	AlpenglowBlockID           string           `json:"alpenglow_block_id,omitempty"`            // double-merkle identity of Slot
+	AlpenglowChainedMerkleRoot string           `json:"alpenglow_chained_merkle_root,omitempty"` // last data-shred root of Slot
+	BlockHeight                uint64           `json:"block_height"`
+	Epoch                      uint64           `json:"epoch"`
+	AcctsLtHash                string           `json:"accts_lt_hash"` // base64
+	LamportsPerSignature       uint64           `json:"lamports_per_sig"`
+	PrevLamportsPerSig         uint64           `json:"prev_lamports_per_sig"`
+	NumSignatures              uint64           `json:"num_signatures"`
+	RecentBlockhashes          []BlockhashEntry `json:"recent_blockhashes"`
+	EvictedBlockhash           string           `json:"evicted_blockhash"` // base58
+	Blockhash                  string           `json:"blockhash"`         // base58
+	SlotHashes                 []SlotHashEntry  `json:"slot_hashes"`
+	Clock                      string           `json:"clock"` // base64 of the Clock sysvar account data as of the last rooted slot
+	Capitalization             uint64           `json:"capitalization"`
+	SlotsPerYear               float64          `json:"slots_per_year"`
+	InflationInitial           float64          `json:"inflation_initial"`
+	InflationTerminal          float64          `json:"inflation_terminal"`
+	InflationTaper             float64          `json:"inflation_taper"`
+	InflationFoundation        float64          `json:"inflation_foundation"`
+	InflationFoundationTerm    float64          `json:"inflation_foundation_term"`
 	// TransactionCount is the running chain transaction count as of this slot, so
 	// resume and the in-loop fork-switch unwind restore it exactly (getEpochInfo
 	// and future bank metadata must not carry a discarded fork's transactions).
@@ -270,6 +288,10 @@ type ResumeContext struct {
 	// (callers fall back to the snapshot-manifest count and flag the count as
 	// approximate); non-nil is exact even when the value is zero (dev genesis).
 	TransactionCount *uint64 `json:"transaction_count,omitempty"`
+	// TransactionStatusCheckpoint is durability metadata, not execution state.
+	// Startup and rewind consume it before replay; ResumeState intentionally does
+	// not copy it into the bank execution context.
+	TransactionStatusCheckpoint *TransactionStatusCheckpointRef `json:"transaction_status_checkpoint,omitempty"`
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.

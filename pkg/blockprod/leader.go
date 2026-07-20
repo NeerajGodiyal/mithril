@@ -26,10 +26,13 @@ const (
 	// It also bounds the footer nanosecond clock and ParentReady-derived block
 	// deadlines; keeping those clocks identical prevents late/missed slots.
 	AlpenglowSlotDuration = 200 * time.Millisecond
-	// Leave enough time for the Go finalizer, footer shredding, and UDP fanout
-	// to complete before Votor's per-slot deadline. Agave currently reserves
-	// 6ms; Mithril's finalizer benefits from a wider margin.
-	leaderBlockCompletionReserve = 25 * time.Millisecond
+	// Leave enough time for the Go finalizer, footer shredding, and synchronous
+	// UDP fanout to complete before Votor's per-slot deadline. A two-hour live
+	// trace measured 29-55ms from the old 25ms cutoff through completion: 328 of
+	// 340 blocks finished after their protocol deadline and later leaders
+	// discarded 52 of 85 locally produced windows. Keep 20ms above that
+	// observed worst case for scheduler and network jitter.
+	leaderBlockCompletionReserve = 75 * time.Millisecond
 )
 
 var errParentNotReady = errors.New("parent not ready")
@@ -125,27 +128,29 @@ type LeaderLoop struct {
 	parentContext    func(uint64) ParentContext
 	productionParent func(uint64) alpenglow.BlockProductionParent
 	onBlock          func(*b.Block)
+	commitLeaderSlot func(replay.CommitLeaderInput) (*sealevel.SlotCtx, error)
 
 	currentSlot   func() uint64
 	leaderForSlot func(uint64) (solana.PublicKey, bool)
-	parentBlockID func(uint64) (solana.Hash, bool)
 
 	pollInterval time.Duration
 	slotDuration time.Duration
 	now          func() time.Time
 
-	mu                  sync.Mutex
-	activeSlot          uint64
-	activeBank          *WorkingBank
-	activeSess          *turbine.BroadcastSession
-	activeSink          *ShredSink
-	parentCtx           ParentContext
-	activeParentID      solana.Hash
-	finishedLeaderSlots map[uint64]struct{}
-	pendingFailures     map[uint64]leaderSlotFailure
-	missedScanNext      uint64
-	missedScanStarted   bool
-	productionWindow    leaderProductionWindow
+	mu                      sync.Mutex
+	activeSlot              uint64
+	activeBank              *WorkingBank
+	activeSess              *turbine.BroadcastSession
+	activeSink              *ShredSink
+	parentCtx               ParentContext
+	activeParentID          solana.Hash
+	activeParentChainedRoot solana.Hash
+	activeParentGeneration  uint64
+	finishedLeaderSlots     map[uint64]struct{}
+	pendingFailures         map[uint64]leaderSlotFailure
+	missedScanNext          uint64
+	missedScanStarted       bool
+	productionWindow        leaderProductionWindow
 }
 
 type leaderProductionWindow struct {
@@ -170,11 +175,13 @@ type LeaderLoopConfig struct {
 	OnBlock          func(*b.Block)
 	CurrentSlot      func() uint64
 	LeaderForSlot    func(uint64) (solana.PublicKey, bool)
-	ParentBlockID    func(parentSlot uint64) (solana.Hash, bool)
-	RewardCerts      RewardCertBuilder
-	PollInterval     time.Duration
-	SlotDuration     time.Duration
-	Now              func() time.Time
+	// ParentBlockID is retained for source compatibility and ignored. Parent
+	// identity is supplied atomically by ParentContext.
+	ParentBlockID func(parentSlot uint64) (solana.Hash, bool)
+	RewardCerts   RewardCertBuilder
+	PollInterval  time.Duration
+	SlotDuration  time.Duration
+	Now           func() time.Time
 }
 
 func NewLeaderLoop(cfg LeaderLoopConfig) *LeaderLoop {
@@ -204,7 +211,6 @@ func NewLeaderLoop(cfg LeaderLoopConfig) *LeaderLoop {
 		onBlock:             cfg.OnBlock,
 		currentSlot:         cfg.CurrentSlot,
 		leaderForSlot:       cfg.LeaderForSlot,
-		parentBlockID:       cfg.ParentBlockID,
 		rewardCerts:         cfg.RewardCerts,
 		pollInterval:        cfg.PollInterval,
 		slotDuration:        cfg.SlotDuration,
@@ -377,16 +383,37 @@ func (l *LeaderLoop) productionWindowTargetLocked(wallSlot uint64, now time.Time
 }
 
 func (l *LeaderLoop) productionWindowDeadlineLocked(slot uint64) time.Time {
-	if !l.productionWindow.active || slot < l.productionWindow.startSlot {
+	deadline := l.productionWindowProtocolDeadlineLocked(slot)
+	if deadline.IsZero() {
 		return time.Time{}
 	}
-	index := slot - l.productionWindow.startSlot + 1
-	deadline := l.productionWindow.readyAt.Add(time.Duration(index) * l.slotDuration)
 	reserve := leaderBlockCompletionReserve
 	if reserve >= l.slotDuration {
 		reserve = l.slotDuration / 4
 	}
 	return deadline.Add(-reserve)
+}
+
+func (l *LeaderLoop) productionWindowProtocolDeadlineLocked(slot uint64) time.Time {
+	if !l.productionWindow.active || slot < l.productionWindow.startSlot {
+		return time.Time{}
+	}
+	index := slot - l.productionWindow.startSlot + 1
+	return l.productionWindow.readyAt.Add(time.Duration(index) * l.slotDuration)
+}
+
+// productionTimingDetailLocked measures protocol completion at the point the
+// last shred has been handed to the network. Local replay handoff happens after
+// this timestamp and must not make an on-time block look late.
+func (l *LeaderLoop) productionTimingDetailLocked(slot uint64, finalizationStartedAt, networkCompletedAt time.Time) string {
+	if !l.productionWindow.active || slot < l.productionWindow.startSlot {
+		return ""
+	}
+	protocolDeadline := l.productionWindowProtocolDeadlineLocked(slot)
+	return fmt.Sprintf(" window_elapsed_ms=%d finalization_ms=%d deadline_margin_ms=%d",
+		networkCompletedAt.Sub(l.productionWindow.readyAt).Milliseconds(),
+		networkCompletedAt.Sub(finalizationStartedAt).Milliseconds(),
+		protocolDeadline.Sub(networkCompletedAt).Milliseconds())
 }
 
 func (l *LeaderLoop) failProductionWindowLocked(slot uint64, reason, detail string) {
@@ -416,6 +443,21 @@ func activeLeaderFailureDetail(reason string) string {
 	default:
 		return "selected replay parent changed before the block froze"
 	}
+}
+
+func sameReplayParentSnapshot(want, got ParentContext) bool {
+	if want.ReplayGeneration == 0 || got.ReplayGeneration != want.ReplayGeneration {
+		return false
+	}
+	if got.ParentSlot != want.ParentSlot || got.ParentBankhash != want.ParentBankhash {
+		return false
+	}
+	if got.HasParentBlockID != want.HasParentBlockID ||
+		(got.HasParentBlockID && got.ParentBlockID != want.ParentBlockID) {
+		return false
+	}
+	return got.HasParentChainedMerkleRoot == want.HasParentChainedMerkleRoot &&
+		(!got.HasParentChainedMerkleRoot || got.ParentChainedMerkleRoot == want.ParentChainedMerkleRoot)
 }
 
 func (l *LeaderLoop) activeParentStillCanonicalLocked() (bool, string) {
@@ -450,8 +492,11 @@ func (l *LeaderLoop) activeParentStillCanonicalLocked() (bool, string) {
 	if frontier < requiredFrontier {
 		return false, leaderReasonReplayNotReady
 	}
+	if l.activeParentGeneration == 0 || l.parentCtx.ReplayGeneration != l.activeParentGeneration {
+		return false, leaderReasonParentChangedBeforeFreeze
+	}
 	current := l.parentContext(l.activeSlot)
-	if current.ParentSlot != l.parentCtx.ParentSlot || current.ParentBankhash != l.parentCtx.ParentBankhash {
+	if !sameReplayParentSnapshot(l.parentCtx, current) {
 		return false, leaderReasonParentChangedBeforeFreeze
 	}
 	return true, ""
@@ -469,6 +514,8 @@ func (l *LeaderLoop) abortActiveSlotLocked() {
 	l.activeSink = nil
 	l.activeSlot = 0
 	l.activeParentID = solana.Hash{}
+	l.activeParentChainedRoot = solana.Hash{}
+	l.activeParentGeneration = 0
 }
 
 func leaderFailureReason(err error) string {
@@ -657,7 +704,13 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 	if l.activeBank == nil {
 		return
 	}
+	finalizationStartedAt := l.now()
 	slot := l.activeSlot
+	if canonical, reason := l.activeParentStillCanonicalLocked(); !canonical {
+		l.failProductionWindowLocked(slot, reason, activeLeaderFailureDetail(reason))
+		l.abortActiveSlotLocked()
+		return
+	}
 
 	// Detach first so no new TPU packet can obtain this bank. Freeze then waits
 	// for any packet that already did, closing the footer/entry race.
@@ -708,13 +761,15 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 	producedBlock.HasAlpenglowFooter = true
 	producedBlock.AlpenglowShredVersion = l.shredVersion
 	if slot > 0 {
-		if parentID, ok := global.AlpenglowBlockID(producedBlock.ParentSlot); ok {
-			producedBlock.AlpenglowParentBlockID = parentID
-			producedBlock.HasAlpenglowParentBlockID = true
-		}
+		producedBlock.AlpenglowParentBlockID = l.activeParentID
+		producedBlock.HasAlpenglowParentBlockID = true
 	}
 
-	if _, err := replay.CommitLeaderSlot(replay.CommitLeaderInput{
+	commitLeaderSlot := replay.CommitLeaderSlot
+	if l.commitLeaderSlot != nil {
+		commitLeaderSlot = l.commitLeaderSlot
+	}
+	if _, err := commitLeaderSlot(replay.CommitLeaderInput{
 		AcctsDb:                 l.accountsDb,
 		SlotCtx:                 l.activeBank.SlotCtx(),
 		Block:                   producedBlock,
@@ -730,6 +785,11 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		return
 	}
 
+	if canonical, reason := l.activeParentStillCanonicalLocked(); !canonical {
+		l.failProductionWindowLocked(slot, reason, activeLeaderFailureDetail(reason))
+		l.abortActiveSlotLocked()
+		return
+	}
 	footerBankhash := solana.HashFromBytes(l.activeBank.SlotCtx().FinalBankhash)
 	if err := l.activeSess.BroadcastFooter(footerBankhash, producerTimeNanos, footerRewards.Skip, footerRewards.Notar); err != nil {
 		l.failProductionWindowLocked(slot, leaderReasonFooterBroadcastFailed, err.Error())
@@ -741,14 +801,17 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		l.abortActiveSlotLocked()
 		return
 	}
+	// BroadcastEndingTickLast synchronously hands the final shred batch to the
+	// packet broadcaster. Capture protocol timing now, before local bookkeeping
+	// and OnBlock backpressure can delay the leader loop.
+	networkCompletedAt := l.now()
+	timingDetail := l.productionTimingDetailLocked(slot, finalizationStartedAt, networkCompletedAt)
 	if slot > 0 {
 		parentSlot := producedBlock.ParentSlot
-		if parentID, ok := global.AlpenglowBlockID(parentSlot); ok {
-			blockID := l.activeSess.BlockID(parentSlot, parentID)
-			producedBlock.AlpenglowBlockID = blockID
-			producedBlock.HasAlpenglowBlockID = true
-			global.SetAlpenglowBlockID(slot, blockID)
-		}
+		blockID := l.activeSess.BlockID(parentSlot, l.activeParentID)
+		producedBlock.AlpenglowBlockID = blockID
+		producedBlock.HasAlpenglowBlockID = true
+		global.SetAlpenglowBlockID(slot, blockID)
 	}
 	if chained := l.activeSess.ChainedMerkleRoot(); chained != (solana.Hash{}) {
 		producedBlock.AlpenglowLastChainedRoot = chained
@@ -756,15 +819,11 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		global.SetAlpenglowChainedMerkleRoot(slot, chained)
 	}
 	if l.onBlock != nil {
+		handoffStartedAt := l.now()
 		l.onBlock(producedBlock)
-	}
-	timingDetail := ""
-	if l.productionWindow.active && slot >= l.productionWindow.startSlot {
-		index := slot - l.productionWindow.startSlot + 1
-		protocolDeadline := l.productionWindow.readyAt.Add(time.Duration(index) * l.slotDuration)
-		completedAt := l.now()
-		timingDetail = fmt.Sprintf(" window_elapsed_ms=%d deadline_margin_ms=%d",
-			completedAt.Sub(l.productionWindow.readyAt).Milliseconds(), protocolDeadline.Sub(completedAt).Milliseconds())
+		if timingDetail != "" {
+			timingDetail += fmt.Sprintf(" local_handoff_ms=%d", l.now().Sub(handoffStartedAt).Milliseconds())
+		}
 	}
 	l.recordLeaderSlotOutcomeLocked(slot, leaderOutcomeBroadcast, leaderReasonComplete,
 		fmt.Sprintf("block=%s parent_slot=%d txns=%d%s", solana.Hash(producedBlock.AlpenglowBlockID).String(), producedBlock.ParentSlot, len(producedBlock.Transactions), timingDetail))
@@ -805,30 +864,28 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 	if parentCtx.EpochRewardsActive {
 		return errEpochRewardsProductionUnsupported
 	}
-	l.parentCtx = parentCtx
-
-	parentID := solana.Hash{}
-	if l.parentBlockID != nil {
-		var ok bool
-		parentID, ok = l.parentBlockID(parentSlot)
-		if !ok {
-			return fmt.Errorf("%w: alpenglow block id missing for parent slot %d", errParentNotReady, parentSlot)
-		}
-	} else if slot > 0 {
-		return fmt.Errorf("%w: no parent block id lookup configured", errParentNotReady)
+	if slot > 0 && (parentCtx.TransactionStatuses == nil || !parentCtx.TransactionStatuses.CoverageComplete()) {
+		return fmt.Errorf("%w: complete transaction-status view missing for replay parent slot %d", errParentNotReady, parentSlot)
 	}
+	if slot > 0 && parentCtx.PrevFeeGovernor == nil {
+		return fmt.Errorf("%w: parent fee rate governor missing for replay parent slot %d", errParentNotReady, parentSlot)
+	}
+	if slot > 0 && parentCtx.ReplayGeneration == 0 {
+		return fmt.Errorf("%w: replay generation missing for parent slot %d", errParentNotReady, parentSlot)
+	}
+	if slot > 0 && !parentCtx.HasParentBlockID {
+		return fmt.Errorf("%w: alpenglow block id missing for parent slot %d", errParentNotReady, parentSlot)
+	}
+	if slot > 0 && !parentCtx.HasParentChainedMerkleRoot {
+		return fmt.Errorf("%w: chained merkle root missing for parent slot %d", errParentNotReady, parentSlot)
+	}
+
+	parentID := parentCtx.ParentBlockID
 	if parentReadyRequired && parentID != selectedParent.Hash {
 		return fmt.Errorf("%w: replay parent block id %s does not match ParentReady block id %s", errParentNotReady, parentID, selectedParent.Hash)
 	}
 
-	parentChainedRoot := solana.Hash{}
-	if slot > 0 {
-		var ok bool
-		parentChainedRoot, ok = global.AlpenglowChainedMerkleRoot(parentSlot)
-		if !ok {
-			return fmt.Errorf("%w: chained merkle root missing for parent slot %d", errParentNotReady, parentSlot)
-		}
-	}
+	parentChainedRoot := parentCtx.ParentChainedMerkleRoot
 
 	session := turbine.NewBroadcastSession(turbine.BroadcastSessionConfig{
 		Leader:                  l.identity,
@@ -861,24 +918,36 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 	}
 	sink := NewShredSink(session)
 	bank := NewWorkingBank(BankConfig{
-		SlotCtx:   slotCtx,
-		Slot:      slot,
-		Leader:    l.identity.PublicKey(),
-		Limits:    costmodel.DefaultLimits(),
-		EntryHash: startEntryHash,
-		Sink:      sink,
+		SlotCtx:             slotCtx,
+		Slot:                slot,
+		Leader:              l.identity.PublicKey(),
+		Limits:              costmodel.DefaultLimits(),
+		EntryHash:           startEntryHash,
+		Sink:                sink,
+		TransactionStatuses: parentCtx.TransactionStatuses,
 	})
+	if slot > 0 && !sameReplayParentSnapshot(parentCtx, l.parentContext(slot)) {
+		bank.Close()
+		return fmt.Errorf("%w: replay parent changed while opening leader slot %d", errParentNotReady, slot)
+	}
 	// Publish the working bank only after all local preparation and the header
 	// broadcast succeed; failures before this point cannot admit TPU traffic.
 	if err := session.BroadcastHeader(parentID); err != nil {
 		bank.Close()
 		return fmt.Errorf("broadcast header parent_block_id=%s: %w", parentID, err)
 	}
+	if slot > 0 && !sameReplayParentSnapshot(parentCtx, l.parentContext(slot)) {
+		bank.Close()
+		return fmt.Errorf("%w: replay parent changed while broadcasting leader header for slot %d", errParentNotReady, slot)
+	}
+	l.parentCtx = parentCtx
 	l.activeSlot = slot
 	l.activeBank = bank
 	l.activeSess = session
 	l.activeSink = sink
 	l.activeParentID = parentID
+	l.activeParentChainedRoot = parentChainedRoot
+	l.activeParentGeneration = parentCtx.ReplayGeneration
 	if l.controller != nil {
 		l.controller.SetWorkingBank(bank)
 	}

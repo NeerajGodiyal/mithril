@@ -187,6 +187,10 @@ func isWritable(am *solana.AccountMeta, f *features.Features) bool {
 	return sealevel.IsWritable(&acctMeta, f)
 }
 
+func accountsDeltaHashRemoved(slotCtx *sealevel.SlotCtx) bool {
+	return slotCtx != nil && slotCtx.Features != nil && slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash)
+}
+
 func isWritableForInstr(am *solana.AccountMeta, isProgramID bool, demoteProgramIDs bool, f *features.Features) bool {
 	// writability checks (native programs, sysvars, reserved keys, etc.)
 	if !isWritable(am, f) {
@@ -275,6 +279,27 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 	slotCtx.VoteTimestamps[acct.Key] = timestamp
 }
 
+func recordStakeAndVoteAccount(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, acct *accounts.Account, modifiedVoteAccts bool) {
+	if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr {
+		if global.VoteCacheItem(acct.Key) != nil {
+			global.DeleteVoteCacheItem(acct.Key)
+			markVoteStakeDirty(slotCtx.Slot) // global cache mutated — gates in-loop unwind
+		}
+	} else if modifiedVoteAccts {
+		recordVoteTimestampAndSlot(slotCtx, acct)
+		newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
+		if wasModified {
+			global.PutVoteCacheItem(acct.Key, newVersionedVoteState)
+		}
+		markVoteStakeDirty(slotCtx.Slot)
+	}
+
+	if acct.Owner == a.StakeProgramAddr {
+		recordStakeDelegation(slotCtx.Slot, acct)
+		markVoteStakeDirty(slotCtx.Slot)
+	}
+}
+
 func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, writablePubkeySet map[solana.PublicKey]struct{}) {
 	modifiedVoteAccts := execCtx.TransactionContext.ModifiedVoteAccts
 
@@ -282,25 +307,42 @@ func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Exe
 		if _, isWritable := writablePubkeySet[acct.Key]; !isWritable {
 			continue
 		}
+		recordStakeAndVoteAccount(slotCtx, execCtx, acct, modifiedVoteAccts)
+	}
+}
 
-		if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr {
-			if global.VoteCacheItem(acct.Key) != nil {
-				global.DeleteVoteCacheItem(acct.Key)
-				markVoteStakeDirty(slotCtx.Slot) // global cache mutated — gates in-loop unwind
-			}
-		} else if modifiedVoteAccts {
-			recordVoteTimestampAndSlot(slotCtx, acct)
-			newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
-			if wasModified {
-				global.PutVoteCacheItem(acct.Key, newVersionedVoteState)
-			}
-			markVoteStakeDirty(slotCtx.Slot)
-		}
+// transactionAccountIsWritable reproduces the writable-set union used by the
+// materialized result without allocating a map. The payer is always included,
+// and duplicate pubkeys inherit writability from any matching account meta.
+func transactionAccountIsWritable(execCtx *sealevel.ExecutionCtx, accountIdx int) bool {
+	txAccts := &execCtx.TransactionContext.Accounts
+	if accountIdx < 0 || accountIdx >= len(txAccts.Accounts) || txAccts.Accounts[accountIdx] == nil {
+		return false
+	}
 
-		if acct.Owner == a.StakeProgramAddr {
-			recordStakeDelegation(slotCtx.Slot, acct)
-			markVoteStakeDirty(slotCtx.Slot)
+	key := txAccts.Accounts[accountIdx].Key
+	if len(txAccts.Accounts) > 0 && txAccts.Accounts[0] != nil && key == txAccts.Accounts[0].Key {
+		return true
+	}
+
+	for metaIdx, meta := range txAccts.AcctMetas {
+		if meta == nil || meta.Pubkey != key || metaIdx >= len(txAccts.Accounts) {
+			continue
 		}
+		if sealevel.IsWritable(meta, &execCtx.Features) {
+			return true
+		}
+	}
+	return false
+}
+
+func recordStakeAndVoteAccountsFromMetas(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
+	modifiedVoteAccts := execCtx.TransactionContext.ModifiedVoteAccts
+	for idx, acct := range execCtx.TransactionContext.Accounts.Accounts {
+		if !transactionAccountIsWritable(execCtx, idx) {
+			continue
+		}
+		recordStakeAndVoteAccount(slotCtx, execCtx, acct, modifiedVoteAccts)
 	}
 }
 
@@ -695,15 +737,9 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	// Apply state changes to slotCtx
 	start = time.Now()
-	writablePubkeys := output.ExecutionResult.WritableAccounts
-	writablePubkeySet := output.ExecutionResult.WritableAccountSet
-
-	for _, pk := range writablePubkeys {
-		slotCtx.RecordWritableAcct(pk)
+	if err := applySuccessfulTransactionState(slotCtx, execCtx, output.ExecutionResult); err != nil {
+		panic(fmt.Sprintf("unable to apply successful transaction %s in slot %d: %v", tx.Signatures[0], slotCtx.Slot, err))
 	}
-
-	handleModifiedAccounts(slotCtx, execCtx)
-	recordStakeAndVoteAccounts(slotCtx, execCtx, writablePubkeySet)
 	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
 
 	return txFeeInfo, processTransactionComputeUnits(execCtx), nil

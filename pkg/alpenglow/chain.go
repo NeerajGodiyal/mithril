@@ -121,6 +121,12 @@ type ChainTracker struct {
 	finalizedBySlot map[uint64]BlockID
 	indirectSkips   map[uint64]chainIndirectSkip
 	conflicts       map[uint64]chainConflict
+	// invalidBlocks contains exact block identities rejected by deterministic
+	// execution-independent validation (for example duplicate transaction
+	// messages). It is deliberately separate from certificate conflicts: a
+	// fallback-only certificate for an invalid block is not by itself a safety
+	// violation, but the identity must never be repaired, selected, or extended.
+	invalidBlocks map[BlockID]string
 	// prunedBeforeSlot is the durable AccountsDB boundary. Consensus input
 	// below it is historical and must not regrow decision state after pruning.
 	prunedBeforeSlot uint64
@@ -189,7 +195,128 @@ func NewChainTrackerWithConfig(cfg ChainConfig) *ChainTracker {
 		indirectSkips:   make(map[uint64]chainIndirectSkip),
 		finalizedBySlot: make(map[uint64]BlockID),
 		conflicts:       make(map[uint64]chainConflict),
+		invalidBlocks:   make(map[BlockID]string),
 	}
+}
+
+// ObserveObjectivelyInvalidBlock hard-rejects an exact block identity and every
+// already-observed descendant whose exact parent link reaches it. Validation
+// failure alone is not a consensus safety fault: a fallback-only certificate is
+// merely a repair lead. Any decisive certificate or finalized ancestry involving
+// the invalid identity is contradictory evidence and permanently conflicts.
+func (t *ChainTracker) ObserveObjectivelyInvalidBlock(block BlockID, reason string) error {
+	if block.IsZero() || !block.HasHash() {
+		return fmt.Errorf("objectively invalid block has no exact identity")
+	}
+	if reason == "" {
+		reason = "deterministic block validation failed"
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if block.Slot < t.prunedBeforeSlot {
+		return nil
+	}
+	versionBefore := t.decisionVersion
+	firstUnsafe, changed := t.markObjectivelyInvalidBlockLocked(block, reason)
+	if changed && t.decisionVersion == versionBefore {
+		t.bumpDecisionLocked()
+	}
+	if !firstUnsafe.IsZero() {
+		conflict := t.conflicts[firstUnsafe.Slot]
+		return fmt.Errorf("objectively invalid chain conflicts at slot %d: %s", firstUnsafe.Slot, conflict.reason)
+	}
+	return nil
+}
+
+// markObjectivelyInvalidBlockLocked performs the ancestry cascade while t.mu is
+// held. It returns the earliest invalid identity carrying decisive safety
+// evidence and whether this call added any tombstone.
+func (t *ChainTracker) markObjectivelyInvalidBlockLocked(block BlockID, reason string) (BlockID, bool) {
+	changed := false
+	firstUnsafe := BlockID{}
+	queue := []BlockID{block}
+	seen := make(map[BlockID]struct{})
+	for len(queue) > 0 {
+		invalid := queue[0]
+		queue = queue[1:]
+		if _, done := seen[invalid]; done {
+			continue
+		}
+		seen[invalid] = struct{}{}
+		invalidReason := reason
+		if invalid != block {
+			invalidReason = fmt.Sprintf("descends from objectively invalid block %s: %s", block, reason)
+		}
+		if _, exists := t.invalidBlocks[invalid]; !exists {
+			t.invalidBlocks[invalid] = invalidReason
+			changed = true
+		}
+		if evidence := t.invalidBlockSafetyEvidenceLocked(invalid); evidence != "" {
+			t.recordConflictLocked(invalid.Slot, fmt.Sprintf("objectively invalid block %s has %s", invalid, evidence))
+			if firstUnsafe.IsZero() || invalid.Slot < firstUnsafe.Slot {
+				firstUnsafe = invalid
+			}
+		}
+		// A bounded scan is sufficient: ChainTracker already retains only its
+		// consensus window, and it handles both parent-first and child-first arrival.
+		for child, state := range t.blocks {
+			if state == nil || !state.observed || state.parentSlot != invalid.Slot || state.parentHash != invalid.Hash {
+				continue
+			}
+			queue = append(queue, child)
+		}
+	}
+	return firstUnsafe, changed
+}
+
+// IsObjectivelyInvalidBlock reports whether block, or its exact observed
+// ancestry, has been rejected by deterministic validation.
+func (t *ChainTracker) IsObjectivelyInvalidBlock(block BlockID) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.isObjectivelyInvalidBlockLocked(block)
+}
+
+// ObjectivelyInvalidBlocks returns the retained invalid identities, including
+// descendants discovered through exact observed parent links. Callers use this
+// snapshot to mirror the tracker's tombstones into active non-consensus caches.
+func (t *ChainTracker) ObjectivelyInvalidBlocks() []BlockID {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	blocks := make([]BlockID, 0, len(t.invalidBlocks))
+	for block := range t.invalidBlocks {
+		blocks = append(blocks, block)
+	}
+	sort.Slice(blocks, func(i, j int) bool { return blockLess(blocks[i], blocks[j]) })
+	return blocks
+}
+
+func (t *ChainTracker) isObjectivelyInvalidBlockLocked(block BlockID) bool {
+	_, invalid := t.invalidBlocks[block]
+	return invalid
+}
+
+func (t *ChainTracker) invalidBlockSafetyEvidenceLocked(block BlockID) string {
+	if _, ok := t.directFinalized[block]; ok {
+		return "direct finality"
+	}
+	if _, ok := t.chainFinalized[block]; ok {
+		return "finalized ancestry"
+	}
+	if finalized, ok := t.finalizedBySlot[block.Slot]; ok && finalized == block {
+		return "finalized slot selection"
+	}
+	state := t.blocks[block]
+	if state == nil {
+		return ""
+	}
+	for _, certType := range []CertificateType{CertificateGenesis, CertificateFinalizeFast, CertificateNotarize} {
+		if _, ok := state.certificates[certType]; ok {
+			return fmt.Sprintf("decisive %s certificate", certType)
+		}
+	}
+	return ""
 }
 
 func (t *ChainTracker) ObserveCertificate(cert Certificate) (ChainCertificateUpdate, error) {
@@ -327,6 +454,23 @@ func (t *ChainTracker) ObserveReplayBlock(obs ReplayBlockObservation) ChainRepla
 	}
 	parentChanged := state.parentSlot != prevParentSlot || state.parentHash != prevParentHash
 
+	invalidReason, invalid := t.invalidBlocks[obs.Block]
+	if !invalid && state.parentSlot != 0 && !state.parentHash.IsZero() {
+		parent := BlockID{Slot: state.parentSlot, Hash: state.parentHash}
+		if parentReason, parentInvalid := t.invalidBlocks[parent]; parentInvalid {
+			invalid = true
+			invalidReason = fmt.Sprintf("exact parent %s is objectively invalid: %s", parent, parentReason)
+		}
+	}
+	if invalid {
+		versionBefore := t.decisionVersion
+		t.markObjectivelyInvalidBlockLocked(obs.Block, invalidReason)
+		if parentChanged && t.decisionVersion == versionBefore {
+			t.bumpDecisionLocked()
+		}
+		return t.replayBlockUpdateLocked(wasObserved, conflictsBefore, obs.Block.Slot)
+	}
+
 	derived := false
 	if certType, finalized := t.directFinalized[obs.Block]; finalized {
 		// The cert may have arrived before this observation supplied the parent
@@ -456,6 +600,10 @@ func (t *ChainTracker) applyTrustedBlockCertificateLocked(cert Certificate) {
 	}
 	t.blockSlots[block.Slot][block.Hash] = block
 
+	if _, invalid := t.invalidBlocks[block]; invalid && cert.Type != CertificateNotarizeFallback {
+		t.recordConflictLocked(block.Slot, fmt.Sprintf("objectively invalid block %s has decisive %s certificate", block, cert.Type))
+		return
+	}
 	t.refreshConflictLocked(block.Slot)
 }
 
@@ -473,6 +621,10 @@ func (t *ChainTracker) ensureBlockStateLocked(block BlockID) *chainBlockState {
 
 func (t *ChainTracker) markDirectFinalizedLocked(block BlockID, certType CertificateType) {
 	if block.IsZero() || !block.HasHash() {
+		return
+	}
+	if _, invalid := t.invalidBlocks[block]; invalid {
+		t.recordConflictLocked(block.Slot, fmt.Sprintf("objectively invalid block %s selected by %s finality", block, certType))
 		return
 	}
 	if existing, ok := t.directFinalized[block]; ok && existing == certType {
@@ -509,6 +661,10 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID, certType
 		if t.prunedBeforeSlot != 0 && block.Slot <= t.prunedBeforeSlot {
 			return
 		}
+		if _, invalid := t.invalidBlocks[block]; invalid {
+			t.recordConflictLocked(block.Slot, fmt.Sprintf("objectively invalid block %s selected by finalized ancestry", block))
+			return
+		}
 		state := t.blocks[block]
 		if state == nil || !state.observed || state.parentSlot == 0 || state.parentSlot >= block.Slot {
 			return
@@ -527,11 +683,16 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID, certType
 			// (notarize/fast-finalize/genesis — provably the slot's one block,
 			// Lemmas 21(i)/24). A fallback-only cert could be an equivocation twin.
 			slotBlocks := t.blockSlots[state.parentSlot]
-			if len(slotBlocks) != 1 {
-				return
-			}
+			var validParents int
 			for _, id := range slotBlocks {
+				if _, invalid := t.invalidBlocks[id]; invalid {
+					continue
+				}
 				parent = id
+				validParents++
+			}
+			if validParents != 1 {
+				return
 			}
 			st := t.blocks[parent]
 			if st == nil {
@@ -542,6 +703,9 @@ func (t *ChainTracker) markChainFinalizedAncestorsLocked(block BlockID, certType
 			default:
 				return
 			}
+		} else if _, invalid := t.invalidBlocks[parent]; invalid {
+			t.recordConflictLocked(parent.Slot, fmt.Sprintf("finalized block %s names objectively invalid parent %s", block, parent))
+			return
 		} else if _, known := t.blocks[parent]; !known {
 			// The finalized child's header names its parent hash EXACTLY, but no
 			// cert or replay observation tracks that block yet (e.g. replay
@@ -596,6 +760,9 @@ func (t *ChainTracker) FinalizedBlockAt(slot uint64) (BlockID, bool) {
 	var found BlockID
 	matches := 0
 	if fin, ok := t.finalizedBySlot[slot]; ok {
+		if _, invalid := t.invalidBlocks[fin]; invalid {
+			return BlockID{}, false
+		}
 		found = fin
 		matches = 1
 	}
@@ -645,6 +812,9 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 	// slot; Agave roots the finalized bank and its exact BankForks ancestors. A
 	// different directly-finalized block would already have recorded a conflict.
 	if fin, ok := t.finalizedBySlot[slot]; ok {
+		if _, invalid := t.invalidBlocks[fin]; invalid {
+			return BlockID{}, "", false
+		}
 		var certType CertificateType
 		if state := t.blocks[fin]; state != nil {
 			certType = strongestBlockCertificateType(state.certificates)
@@ -659,6 +829,9 @@ func (t *ChainTracker) CertifiedBlockAt(slot uint64) (BlockID, CertificateType, 
 	// tracker's decision version advances — which on a healthy cluster is
 	// nearly every block.
 	for _, block := range t.blockSlots[slot] {
+		if _, invalid := t.invalidBlocks[block]; invalid {
+			continue
+		}
 		state := t.blocks[block]
 		if state == nil {
 			continue
@@ -699,7 +872,7 @@ func (t *ChainTracker) SkipCertifiedAt(slot uint64) bool {
 	if _, conflicted := t.conflicts[slot]; conflicted {
 		return false
 	}
-	if _, selected := t.finalizedBySlot[slot]; selected {
+	if selected, ok := t.finalizedBySlot[slot]; ok && !t.isObjectivelyInvalidBlockLocked(selected) {
 		return false
 	}
 	if _, ok := t.skipCerts[slot]; ok {
@@ -790,12 +963,12 @@ func (t *ChainTracker) WantedBlocks(afterSlot uint64, max int) []WantedBlock {
 		// The finalized block first (may be cert-less — absent from the
 		// certified-candidates scan below).
 		if fin, ok := t.finalizedBySlot[slot]; ok {
-			if state := t.blocks[fin]; state != nil && !state.observed {
+			if state := t.blocks[fin]; state != nil && !state.observed && !t.isObjectivelyInvalidBlockLocked(fin) {
 				w := WantedBlock{Block: fin, Strongest: strongestBlockCertificateType(state.certificates), Finalized: true}
 				best, bestPri = &w, wantedPriority(w.Strongest, true)
 			}
 		}
-		for _, cand := range t.blockCandidatesLocked(slot) {
+		for _, cand := range t.selectableBlockCandidatesLocked(slot) {
 			if cand.Observed {
 				continue
 			}
@@ -864,6 +1037,11 @@ func (t *ChainTracker) pruneBeforeSlotLocked(slot uint64) {
 			delete(t.chainFinalized, id)
 		}
 	}
+	for id := range t.invalidBlocks {
+		if id.Slot < slot {
+			delete(t.invalidBlocks, id)
+		}
+	}
 	for s := range t.finalizedBySlot {
 		if s < slot {
 			delete(t.finalizedBySlot, s)
@@ -899,6 +1077,9 @@ func (t *ChainTracker) deriveIndirectSkipsLocked(block BlockID, certType Certifi
 	if state == nil || !state.observed || state.parentSlot == 0 || state.parentSlot >= block.Slot {
 		return
 	}
+	if t.isObjectivelyInvalidBlockLocked(block) {
+		return
+	}
 	for slot := state.parentSlot + 1; slot < block.Slot; slot++ {
 		if slot < t.prunedBeforeSlot {
 			continue
@@ -927,6 +1108,13 @@ func (t *ChainTracker) nextDecisionLocked(anchorSlot uint64) (ChainDecision, boo
 	// bank's exact BankForks ancestry; its parent-ready tracker permits that
 	// ancestry block and a skip certificate to coexist.
 	if block, ok := t.finalizedBySlot[slot]; ok {
+		if reason, invalid := t.invalidBlocks[block]; invalid {
+			return ChainDecision{
+				Slot:   slot,
+				Kind:   ChainDecisionKindConflict,
+				Reason: fmt.Sprintf("finality selected objectively invalid block %s: %s", block, reason),
+			}, true
+		}
 		decision := ChainDecision{
 			Slot:   slot,
 			Kind:   ChainDecisionKindBlock,
@@ -962,7 +1150,7 @@ func (t *ChainTracker) nextDecisionLocked(anchorSlot uint64) (ChainDecision, boo
 	// A block decision needs decisive strength: a notarize/fast-finalize/genesis cert
 	// (unique per slot: Lemmas 21(i)/24) or membership in a finalized chain. Fallback
 	// certs alone are ambiguous (up to 7 blocks per slot can carry one) — wait.
-	candidates := t.blockCandidatesLocked(slot)
+	candidates := t.selectableBlockCandidatesLocked(slot)
 	var decisive []ChainBlockCandidate
 	for _, c := range candidates {
 		switch c.CertificateType {
@@ -1002,6 +1190,9 @@ func (t *ChainTracker) nextDecisionLocked(anchorSlot uint64) (ChainDecision, boo
 // finalizedLocked reports whether the block is finalized directly (fast/slow/genesis
 // certificate) or by ancestry of a finalized block.
 func (t *ChainTracker) finalizedLocked(block BlockID) bool {
+	if t.isObjectivelyInvalidBlockLocked(block) {
+		return false
+	}
 	if _, ok := t.directFinalized[block]; ok {
 		return true
 	}
@@ -1029,6 +1220,22 @@ func (t *ChainTracker) blockCandidatesLocked(slot uint64) []ChainBlockCandidate 
 		})
 	}
 	return candidates
+}
+
+// selectableBlockCandidatesLocked is the execution/repair view of certified
+// candidates. blockCandidatesLocked deliberately retains objectively invalid
+// identities because their verified certificates remain safety evidence and
+// count toward the protocol's per-slot certificate bound.
+func (t *ChainTracker) selectableBlockCandidatesLocked(slot uint64) []ChainBlockCandidate {
+	candidates := t.blockCandidatesLocked(slot)
+	selectable := candidates[:0]
+	for _, candidate := range candidates {
+		if t.isObjectivelyInvalidBlockLocked(candidate.Block) {
+			continue
+		}
+		selectable = append(selectable, candidate)
+	}
+	return selectable
 }
 
 func strongestBlockCertificateType(certs map[CertificateType]Certificate) CertificateType {

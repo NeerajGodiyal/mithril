@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/gagliardetto/solana-go"
 )
+
+var ErrObjectivelyInvalidAlpenglowBlock = errors.New("objectively invalid Alpenglow block")
+
+var errLocalVoteStale = errors.New("local vote is at or below the consensus action floor")
 
 const (
 	maxRecentAlpenglowBlockIDs   = 8192
@@ -79,6 +85,10 @@ type AlpenglowFinalityIndex interface {
 
 type AlpenglowCandidateBlockObserver interface {
 	ObserveAlpenglowCandidateBlock(obs alpenglow.ReplayBlockObservation)
+}
+
+type AlpenglowInvalidBlockObserver interface {
+	ObserveObjectivelyInvalidAlpenglowBlock(block alpenglow.BlockID, reason string) error
 }
 
 type AlpenglowFirstShredObserver interface {
@@ -187,7 +197,9 @@ func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 		shredVersion:            cfg.AlpenglowShredVersion,
 		identity:                append(ed25519.PrivateKey(nil), cfg.AlpenglowIdentity...),
 		recentBlockIDs:          make(map[uint64]solana.Hash),
+		invalidBlockIDs:         make(map[alpenglow.BlockID]struct{}),
 		observedReplayBlocks:    make(map[uint64]alpenglow.ReplayBlockObservation),
+		executedReplayBlocks:    make(map[alpenglow.BlockID]alpenglow.BlockID),
 		validatorSets:           make(map[uint64]alpenglow.ValidatorSet),
 	}
 	// CertPool remains the bounded, lazy BLS batch-verification front end. Its
@@ -215,20 +227,31 @@ type AlpenglowObserverEngine struct {
 	voter                   *alpenglowVoter
 	observedReplayMu        sync.Mutex
 	observedReplayBlocks    map[uint64]alpenglow.ReplayBlockObservation
-	validatorSetsMu         sync.RWMutex
-	validatorSets           map[uint64]alpenglow.ValidatorSet
-	blockIDSinkMu           sync.RWMutex
-	blockIDSink             AlpenglowBlockIDSink
-	recentBlockIDs          map[uint64]solana.Hash
-	recentBlockIDOrder      []uint64
-	epochLookupMu           sync.RWMutex
-	epochForSlot            func(slot uint64) uint64
-	pendingCertsMu          sync.Mutex
-	pendingCerts            map[uint64][]pendingCertificate // deferred until their epoch's stakes install
-	certVerifyLogMu         sync.Mutex
-	certVerifyDropCount     uint64
-	certVerifyDetailCount   uint64
-	lastCertVerifyLog       time.Time
+	// executedReplayBlocks retains a bounded exact-identity proof from
+	// OnReplayResult. Voting may be enabled after replay has already succeeded;
+	// those durable votes must still be restorable without treating ObserveBlock
+	// (which runs before execution) as proof.
+	// The value is the exact replay parent needed to resolve deferred
+	// intrawindow SafeToNotar actions without trusting arrival order.
+	executedReplayBlocks map[alpenglow.BlockID]alpenglow.BlockID
+	validatorSetsMu      sync.RWMutex
+	validatorSets        map[uint64]alpenglow.ValidatorSet
+	blockIDSinkMu        sync.RWMutex
+	blockIDSink          AlpenglowBlockIDSink
+	recentBlockIDs       map[uint64]solana.Hash
+	recentBlockIDOrder   []uint64
+	invalidBlockIDs      map[alpenglow.BlockID]struct{}
+	// beforeBlockIDPublication is a deterministic test seam for the race
+	// between decisive lookup and the publication lock. Production leaves it nil.
+	beforeBlockIDPublication func()
+	epochLookupMu            sync.RWMutex
+	epochForSlot             func(slot uint64) uint64
+	pendingCertsMu           sync.Mutex
+	pendingCerts             map[uint64][]pendingCertificate // deferred until their epoch's stakes install
+	certVerifyLogMu          sync.Mutex
+	certVerifyDropCount      uint64
+	certVerifyDetailCount    uint64
+	lastCertVerifyLog        time.Time
 	// Votor messages are redundantly broadcast by many QUIC peers. Collapse
 	// identical in-flight certificate work and retain only successful logical
 	// verifications. Vote verification is owned by CertPool's bounded batch path.
@@ -248,8 +271,12 @@ type AlpenglowObserverEngine struct {
 	liveClockAt              time.Time
 	// Pool transitions and downstream chain delivery are one ordered stream.
 	poolOutputMu sync.Mutex
-	safetyMu     sync.RWMutex
-	safetyErr    error
+	// invalidActionMu linearizes new block-target votes against objective
+	// invalidation. Voters hold a read lock through persistence/broadcast;
+	// invalidation takes the write lock before changing chain/pool state.
+	invalidActionMu sync.RWMutex
+	safetyMu        sync.RWMutex
+	safetyErr       error
 }
 
 // SetVotorMessageHook registers an additional consumer for inbound Votor
@@ -301,37 +328,57 @@ func (e *AlpenglowObserverEngine) EnableVoting(cfg VotingConfig) error {
 	if err := e.safetyError(); err != nil {
 		return err
 	}
+	e.validatorSetsMu.RLock()
 	e.voterMu.Lock()
 	if e.voter != nil {
 		e.voterMu.Unlock()
+		e.validatorSetsMu.RUnlock()
 		return fmt.Errorf("Alpenglow voting is already enabled")
 	}
 	root := alpenglow.BlockID{Slot: e.ensurePool().Snapshot().RootSlot}
 	if block, ok := e.ensureChain().FinalizedBlockAt(root.Slot); ok {
 		root = block
 	}
-	voter, err := newAlpenglowVoter(e, cfg, root)
+	voter, err := newAlpenglowVoterUnstarted(e, cfg, root)
 	if err != nil {
 		e.voterMu.Unlock()
+		e.validatorSetsMu.RUnlock()
 		return err
 	}
+	// Successful replay may predate EnableVoting. Seed only exact identities
+	// retained from OnReplayResult; ObserveBlock alone is pre-execution.
+	floor := voter.admissionFloor()
+	e.observedReplayMu.Lock()
+	for block := range e.executedReplayBlocks {
+		if block.Slot > floor {
+			retainExecutedBlockID(voter.executedBlocks, block, true)
+		}
+	}
+	e.observedReplayMu.Unlock()
 	// Resume the furthest persisted ParentReady boundary before accepting new
 	// events, matching Agave's initial_parent_ready selection.
-	if slot, parent, ok := voter.history.HighestParentReady(); ok && slot > root.Slot {
-		e.ensurePool().RestoreParentReady(slot, parent)
+	if slot, parent, ok := voter.history.HighestParentReadyMatching(func(parent alpenglow.BlockID) bool {
+		return !e.ensureChain().IsObjectivelyInvalidBlock(parent)
+	}); ok && slot > root.Slot {
+		if !e.ensurePool().RestoreParentReady(slot, parent) {
+			mlog.Log.FileOnlyf("ALPENGLOW voting: ignored persisted ParentReady slot=%d parent=%s because newer root/live tracker state is authoritative", slot, parent)
+		}
 	}
-	e.voter = voter
-	e.voterMu.Unlock()
 
-	e.validatorSetsMu.RLock()
 	sets := make([]alpenglow.ValidatorSet, 0, len(e.validatorSets))
 	for _, set := range e.validatorSets {
 		sets = append(sets, cloneValidatorSet(set))
 	}
-	e.validatorSetsMu.RUnlock()
+	sort.Slice(sets, func(i, j int) bool { return sets[i].Epoch < sets[j].Epoch })
 	for _, set := range sets {
+		// Publish signing eligibility before exposing the voter pointer. The
+		// queued event then performs logging and durable vote restoration first
+		// in FIFO order, ahead of any externally enqueued consensus event.
+		voter.sets[set.Epoch] = cloneValidatorSet(set)
 		if err := voter.enqueue(voterEvent{kind: voterEventValidatorSet, set: set}); err != nil {
-			e.removeAndCloseVoter(voter)
+			e.voterMu.Unlock()
+			e.validatorSetsMu.RUnlock()
+			_ = voter.close()
 			return err
 		}
 	}
@@ -341,21 +388,24 @@ func (e *AlpenglowObserverEngine) EnableVoting(cfg VotingConfig) error {
 			Slot:  slot,
 			Block: parent,
 		}}); err != nil {
-			e.removeAndCloseVoter(voter)
+			e.voterMu.Unlock()
+			e.validatorSetsMu.RUnlock()
+			_ = voter.close()
 			return err
 		}
 	}
+	e.voter = voter
+	// Start while voterMu is still held: Close cannot observe and close an
+	// unstarted voter, while the loop can safely wait for this short lock hold.
+	voter.start()
+	e.voterMu.Unlock()
+	e.validatorSetsMu.RUnlock()
+	if err := e.drainPendingSafeToNotar(); err != nil {
+		e.latchSafetyError(err)
+		return err
+	}
 	mlog.Log.Infof("ALPENGLOW voting engine enabled for identity %s vote account %s (history=%s)", voter.node, voter.voteAccount, cfg.HistoryDir)
 	return nil
-}
-
-func (e *AlpenglowObserverEngine) removeAndCloseVoter(voter *alpenglowVoter) {
-	e.voterMu.Lock()
-	if e.voter == voter {
-		e.voter = nil
-	}
-	e.voterMu.Unlock()
-	_ = voter.close()
 }
 
 func (e *AlpenglowObserverEngine) enqueueVoter(event voterEvent) error {
@@ -439,19 +489,31 @@ func (e *AlpenglowObserverEngine) ObserveBlock(_ context.Context, obs BlockObser
 			Source:     obs.Source,
 			At:         obs.At,
 		}
+		if blockID.HasHash() {
+			e.observeChainReplayBlock(replayObs)
+			if err := e.safetyError(); err != nil {
+				return err
+			}
+			if e.ensureChain().IsObjectivelyInvalidBlock(blockID) {
+				// Live assembly validates before this boundary. This defensive path
+				// covers alternate callers and an exact child observed after its
+				// parent was tombstoned: never stage it for OnReplayResult/voting.
+				if err := e.ObserveObjectivelyInvalidAlpenglowBlock(blockID, "descends from objectively invalid parent"); err != nil {
+					return err
+				}
+				return fmt.Errorf("%w: %s descends from a rejected parent", ErrObjectivelyInvalidAlpenglowBlock, blockID)
+			}
+		}
 		e.ensureObserver().ObserveReplayBlock(replayObs)
 		e.observedReplayMu.Lock()
 		e.observedReplayBlocks[blockID.Slot] = replayObs
 		// Replay is sequential and only needs the current speculative horizon.
 		for slot := range e.observedReplayBlocks {
-			if slot+maxRecentAlpenglowBlockIDs < blockID.Slot {
+			if blockID.Slot > maxRecentAlpenglowBlockIDs && slot < blockID.Slot-maxRecentAlpenglowBlockIDs {
 				delete(e.observedReplayBlocks, slot)
 			}
 		}
 		e.observedReplayMu.Unlock()
-		if blockID.HasHash() {
-			e.observeChainReplayBlock(replayObs)
-		}
 	}
 	return e.safetyError()
 }
@@ -479,9 +541,33 @@ func (e *AlpenglowObserverEngine) OnReplayResult(_ context.Context, result SlotR
 		e.observedReplayMu.Lock()
 		obs, observed := e.observedReplayBlocks[result.Slot]
 		delete(e.observedReplayBlocks, result.Slot)
+		var replayProofErr error
+		if observed {
+			if e.executedReplayBlocks == nil {
+				e.executedReplayBlocks = make(map[alpenglow.BlockID]alpenglow.BlockID)
+			}
+			parent := alpenglow.BlockID{Slot: obs.ParentSlot, Hash: obs.ParentHash}
+			if err := retainExecutedReplayParent(e.executedReplayBlocks, obs.Block, parent); err != nil {
+				replayProofErr = fmt.Errorf("successful replay ancestry for %s: %w", obs.Block, err)
+			} else {
+				for block := range e.executedReplayBlocks {
+					if result.Slot > maxRecentAlpenglowBlockIDs && block.Slot < result.Slot-maxRecentAlpenglowBlockIDs {
+						delete(e.executedReplayBlocks, block)
+					}
+				}
+			}
+		}
 		e.observedReplayMu.Unlock()
+		if replayProofErr != nil {
+			e.latchSafetyError(replayProofErr)
+			return replayProofErr
+		}
 		if observed {
 			if err := e.enqueueVoter(voterEvent{kind: voterEventBlock, block: obs}); err != nil {
+				e.latchSafetyError(err)
+				return err
+			}
+			if err := e.drainPendingSafeToNotar(); err != nil {
 				e.latchSafetyError(err)
 				return err
 			}
@@ -524,23 +610,18 @@ func (e *AlpenglowObserverEngine) Snapshot() Snapshot {
 
 func (e *AlpenglowObserverEngine) SetAlpenglowBlockIDSink(sink AlpenglowBlockIDSink) {
 	e.blockIDSinkMu.Lock()
+	defer e.blockIDSinkMu.Unlock()
 	e.blockIDSink = sink
-	recent := make([]struct {
-		slot    uint64
-		blockID solana.Hash
-	}, 0, len(e.recentBlockIDs))
-	if sink != nil {
-		for slot, blockID := range e.recentBlockIDs {
-			recent = append(recent, struct {
-				slot    uint64
-				blockID solana.Hash
-			}{slot: slot, blockID: blockID})
-		}
+	if sink == nil {
+		return
 	}
-	e.blockIDSinkMu.Unlock()
-
-	for _, entry := range recent {
-		sink(entry.slot, entry.blockID)
+	for slot, blockID := range e.recentBlockIDs {
+		block := alpenglow.BlockID{Slot: slot, Hash: blockID}
+		_, invalid := e.invalidBlockIDs[block]
+		if invalid || e.ensureChain().IsObjectivelyInvalidBlock(block) {
+			continue
+		}
+		sink(slot, blockID)
 	}
 }
 
@@ -606,6 +687,12 @@ func sameCertificateProof(wire, verified alpenglow.Certificate) bool {
 // Votor QUIC whose exact signature and bitmap have passed BLS verification.
 // Footer certificates and locally assembled certificates never enter here.
 func (e *AlpenglowObserverEngine) noteNetworkCertificate(cert alpenglow.Certificate) {
+	// Landing observations are telemetry only. Once consensus has latched a
+	// safety fault, do not retain proofs or enqueue work behind the stopped
+	// voting loop.
+	if e.safetyError() != nil {
+		return
+	}
 	e.voterMu.RLock()
 	voter := e.voter
 	e.voterMu.RUnlock()
@@ -654,25 +741,36 @@ func (e *AlpenglowObserverEngine) noteNetworkCertificate(cert alpenglow.Certific
 }
 
 func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote) {
-	if e.safetyError() != nil {
-		return
+	_, _ = e.acceptVerifiedVoteResult(vote)
+}
+
+// acceptVerifiedVoteResult returns the pool's verdict from the same critical
+// section that admitted the vote. In particular, local callers must not issue
+// a second HasVerifiedVote query: finality pruning can erase an accepted vote
+// between those two operations and turn harmless lag into a false safety fault.
+func (e *AlpenglowObserverEngine) acceptVerifiedVoteResult(vote alpenglow.VerifiedVote) (alpenglow.VoteAdmissionDisposition, error) {
+	if err := e.safetyError(); err != nil {
+		return "", err
 	}
 	e.poolOutputMu.Lock()
 	defer e.poolOutputMu.Unlock()
-	if e.safetyError() != nil {
-		return
+	if err := e.safetyError(); err != nil {
+		return "", err
+	}
+	if vote.Local && vote.Message.Vote.Slot <= e.alpenglowVoteActionFloor() {
+		return alpenglow.VoteAdmissionRooted, nil
 	}
 	update, err := e.ensurePool().AddVerifiedVote(vote)
 	if err != nil {
 		fault := fmt.Errorf("consensus pool rejected verified %s vote at slot %d rank %d: %w", vote.Message.Vote.Type, vote.Message.Vote.Slot, vote.Message.Rank, err)
 		e.latchSafetyError(fault)
 		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
-		return
+		return "", fault
 	}
 	if err := e.handleConsensusUpdate(update); err != nil {
 		e.latchSafetyError(err)
 		mlog.Log.Errorf("ALPENGLOW SAFETY: consensus-pool vote output rejected downstream: %v", err)
-		return
+		return update.VoteAdmission, err
 	}
 	if len(update.Certificates) > 0 {
 		e.voterMu.RLock()
@@ -680,13 +778,14 @@ func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote
 		e.voterMu.RUnlock()
 		if voter != nil {
 			if err := voter.broadcastCertificates(update.Certificates); err != nil {
-				e.latchSafetyError(fmt.Errorf("broadcast locally assembled certificates: %w", err))
-				return
+				fault := fmt.Errorf("broadcast locally assembled certificates: %w", err)
+				e.latchSafetyError(fault)
+				return update.VoteAdmission, fault
 			}
 		}
 	}
 	if !update.VoteAccepted {
-		return
+		return update.VoteAdmission, nil
 	}
 	if !vote.Local {
 		e.noteAlpenglowLiveSlot(vote.Message.Vote.Slot)
@@ -695,9 +794,25 @@ func (e *AlpenglowObserverEngine) acceptVerifiedVote(vote alpenglow.VerifiedVote
 		fault := fmt.Errorf("observer rejected pool-accepted %s vote at slot %d: %w", vote.Message.Vote.Type, vote.Message.Vote.Slot, err)
 		e.latchSafetyError(fault)
 		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
-		return
+		return update.VoteAdmission, fault
 	}
 	e.deliverVerifiedVotorMessage(alpenglow.Message{Vote: &vote.Message})
+	return update.VoteAdmission, nil
+}
+
+// restoreLocalFirstVoteProvenance reattaches the signed history's round-one
+// choice without admitting or broadcasting an execution-unproven vote.
+func (e *AlpenglowObserverEngine) restoreLocalFirstVoteProvenance(vote alpenglow.Vote, rank uint16) error {
+	if err := e.safetyError(); err != nil {
+		return err
+	}
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+	update, err := e.ensurePool().RestoreLocalFirstVote(vote, rank)
+	if err != nil {
+		return err
+	}
+	return e.handleConsensusUpdate(update)
 }
 
 func (e *AlpenglowObserverEngine) injectLocalVote(message alpenglow.VoteMessage, result alpenglow.VoteVerifyResult) error {
@@ -719,14 +834,30 @@ func (e *AlpenglowObserverEngine) injectLocalVote(message alpenglow.VoteMessage,
 	if verifiedResult != result {
 		return fmt.Errorf("self-verified vote metadata mismatch: got %+v want %+v", verifiedResult, result)
 	}
-	e.acceptVerifiedVote(alpenglow.VerifiedVote{Message: message, Result: verifiedResult, Local: true})
-	if err := e.safetyError(); err != nil {
+	admission, err := e.acceptVerifiedVoteResult(alpenglow.VerifiedVote{Message: message, Result: verifiedResult, Local: true})
+	if err != nil {
 		return err
 	}
-	if !e.ensurePool().HasVerifiedVote(message) {
-		return fmt.Errorf("verified consensus pool did not accept local %s vote at slot %d rank %d", message.Vote.Type, message.Vote.Slot, message.Rank)
+	switch admission {
+	case alpenglow.VoteAdmissionAccepted, alpenglow.VoteAdmissionExactDuplicate:
+		return nil
+	case alpenglow.VoteAdmissionRooted:
+		return fmt.Errorf("%w: %s vote at slot %d rank %d", errLocalVoteStale, message.Vote.Type, message.Vote.Slot, message.Rank)
+	default:
+		return fmt.Errorf("verified consensus pool rejected local %s vote at slot %d rank %d: %s", message.Vote.Type, message.Vote.Slot, message.Rank, admission)
 	}
-	return nil
+}
+
+// alpenglowVoteActionFloor is the highest slot on which this validator must
+// not initiate a new vote. The pool root is its strict admission boundary;
+// direct finality is included because the pool deliberately retains a short
+// reward-accounting tail behind finality where network votes remain useful.
+func (e *AlpenglowObserverEngine) alpenglowVoteActionFloor() uint64 {
+	floor := e.ensurePool().Snapshot().RootSlot
+	if finalized := e.ensureChain().Snapshot().LatestDirectFinalizedBlock.Slot; finalized > floor {
+		floor = finalized
+	}
+	return floor
 }
 
 func (e *AlpenglowObserverEngine) acceptVerifiedCertificate(verified alpenglow.Certificate) (alpenglow.ConsensusUpdate, bool) {
@@ -785,6 +916,15 @@ func (e *AlpenglowObserverEngine) handleConsensusUpdate(update alpenglow.Consens
 		e.observeVotorBlockID(alpenglow.NewCertificateMessage(cert))
 	}
 	for _, event := range update.Events {
+		if event.Block.HasHash() && e.ensureChain().IsObjectivelyInvalidBlock(event.Block) {
+			if event.Kind == alpenglow.ConsensusEventFinalized {
+				return fmt.Errorf("consensus pool finalized objectively invalid block %s", event.Block)
+			}
+			// ParentReady, SafeToNotar, and notarization notifications are
+			// active-action hints. Verified votes/certificates remain retained
+			// above as safety evidence, but the voter must never act on this ID.
+			continue
+		}
 		switch event.Kind {
 		case alpenglow.ConsensusEventFinalized:
 			if err := e.ensureChain().ObserveFinalized(event.Block, event.CertificateType); err != nil {
@@ -800,7 +940,56 @@ func (e *AlpenglowObserverEngine) handleConsensusUpdate(update alpenglow.Consens
 			return fmt.Errorf("deliver %s event to voting engine: %w", event.Kind, err)
 		}
 	}
+	if err := e.drainPendingSafeToNotarLocked(); err != nil {
+		return err
+	}
 	return e.safetyError()
+}
+
+// drainPendingSafeToNotar resolves the pool/service handoff for intrawindow
+// fallback actions. The pool knows the stake threshold, while the engine is the
+// authority for exact successful execution and replay-derived ancestry.
+func (e *AlpenglowObserverEngine) drainPendingSafeToNotar() error {
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+	return e.drainPendingSafeToNotarLocked()
+}
+
+// drainPendingSafeToNotarLocked requires poolOutputMu. A candidate remains
+// pending until voting is active, its exact identity replayed successfully,
+// and that replay's exact parent has fallback-or-stronger certification.
+func (e *AlpenglowObserverEngine) drainPendingSafeToNotarLocked() error {
+	e.voterMu.RLock()
+	defer e.voterMu.RUnlock()
+	if e.voter == nil {
+		return nil
+	}
+	pending := e.ensurePool().TakePendingSafeToNotar()
+	for index, block := range pending {
+		if block.Slot <= e.alpenglowVoteActionFloor() || e.ensureChain().IsObjectivelyInvalidBlock(block) {
+			continue
+		}
+		e.observedReplayMu.Lock()
+		parent, executed := e.executedReplayBlocks[block]
+		e.observedReplayMu.Unlock()
+		if !executed || !parent.HasHash() || e.ensureChain().IsObjectivelyInvalidBlock(parent) ||
+			!e.ensurePool().HasNotarFallbackOrStronger(parent) {
+			e.ensurePool().RequeuePendingSafeToNotar(block)
+			continue
+		}
+		event := voterEvent{kind: voterEventConsensus, consensus: alpenglow.ConsensusEvent{
+			Kind:  alpenglow.ConsensusEventSafeToNotar,
+			Slot:  block.Slot,
+			Block: block,
+		}}
+		if err := e.voter.enqueue(event); err != nil {
+			for _, unsent := range pending[index:] {
+				e.ensurePool().RequeuePendingSafeToNotar(unsent)
+			}
+			return fmt.Errorf("deliver deferred SafeToNotar for %s: %w", block, err)
+		}
+	}
+	return nil
 }
 
 func (e *AlpenglowObserverEngine) deliverVerifiedVotorMessage(msg alpenglow.Message) {
@@ -936,18 +1125,28 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 		// the shred assembler. Publish only a decisive block identity.
 		return
 	}
+	if hook := e.beforeBlockIDPublication; hook != nil {
+		hook()
+	}
 
 	e.blockIDSinkMu.Lock()
+	defer e.blockIDSinkMu.Unlock()
+	// The decisive query above intentionally runs without the publication lock.
+	// Recheck both the authoritative tracker and its mirrored engine tombstone
+	// here so invalidation linearizes before cache insertion and before the
+	// external sink observes the identity.
+	_, invalid := e.invalidBlockIDs[blockID]
+	if invalid || e.ensureChain().IsObjectivelyInvalidBlock(blockID) {
+		return
+	}
 	if e.recentBlockIDs == nil {
 		e.recentBlockIDs = make(map[uint64]solana.Hash)
 	}
 	if existing, exists := e.recentBlockIDs[blockID.Slot]; !exists {
 		e.recentBlockIDOrder = append(e.recentBlockIDOrder, blockID.Slot)
 	} else if existing == blockID.Hash {
-		sink := e.blockIDSink
-		e.blockIDSinkMu.Unlock()
-		if sink != nil {
-			sink(blockID.Slot, blockID.Hash)
+		if e.blockIDSink != nil {
+			e.blockIDSink(blockID.Slot, blockID.Hash)
 		}
 		return
 	}
@@ -957,10 +1156,8 @@ func (e *AlpenglowObserverEngine) observeVotorBlockID(msg alpenglow.Message) {
 		e.recentBlockIDOrder = e.recentBlockIDOrder[1:]
 		delete(e.recentBlockIDs, old)
 	}
-	sink := e.blockIDSink
-	e.blockIDSinkMu.Unlock()
-	if sink != nil {
-		sink(blockID.Slot, blockID.Hash)
+	if e.blockIDSink != nil {
+		e.blockIDSink(blockID.Slot, blockID.Hash)
 	}
 }
 
@@ -988,6 +1185,63 @@ func (e *AlpenglowObserverEngine) ObserveAlpenglowCandidateBlock(obs alpenglow.R
 		return
 	}
 	e.observeChainReplayBlock(obs)
+	if e.safetyError() == nil && e.ensureChain().IsObjectivelyInvalidBlock(obs.Block) {
+		_ = e.ObserveObjectivelyInvalidAlpenglowBlock(obs.Block, "descends from objectively invalid parent")
+	}
+}
+
+// ObserveObjectivelyInvalidAlpenglowBlock retracts an exact candidate before
+// voting/parent selection. Fallback-only evidence is nonfatal, while decisive
+// certification or finalized ancestry latches the engine's safety fault.
+func (e *AlpenglowObserverEngine) ObserveObjectivelyInvalidAlpenglowBlock(block alpenglow.BlockID, reason string) error {
+	e.invalidActionMu.Lock()
+	defer e.invalidActionMu.Unlock()
+	e.poolOutputMu.Lock()
+	defer e.poolOutputMu.Unlock()
+
+	// Serialize the chain tombstone, cascaded descendants, cache eviction, and
+	// publication recheck. A publication that acquired this lock first precedes
+	// invalidation; every later publication sees the tombstone and is suppressed.
+	e.blockIDSinkMu.Lock()
+	if e.invalidBlockIDs == nil {
+		e.invalidBlockIDs = make(map[alpenglow.BlockID]struct{})
+	}
+	e.invalidBlockIDs[block] = struct{}{}
+	err := e.ensureChain().ObserveObjectivelyInvalidBlock(block, reason)
+	invalidBlocks := e.ensureChain().ObjectivelyInvalidBlocks()
+	for _, invalid := range invalidBlocks {
+		e.invalidBlockIDs[invalid] = struct{}{}
+		if e.recentBlockIDs[invalid.Slot] == invalid.Hash {
+			delete(e.recentBlockIDs, invalid.Slot)
+		}
+	}
+	kept := e.recentBlockIDOrder[:0]
+	for _, slot := range e.recentBlockIDOrder {
+		if _, exists := e.recentBlockIDs[slot]; exists {
+			kept = append(kept, slot)
+		}
+	}
+	e.recentBlockIDOrder = kept
+	e.blockIDSinkMu.Unlock()
+
+	var corrected []alpenglow.ConsensusEvent
+	for _, invalid := range invalidBlocks {
+		corrected = append(corrected, e.ensurePool().InvalidateBlock(invalid)...)
+	}
+
+	if err != nil {
+		fault := fmt.Errorf("objectively invalid Alpenglow block %s: %w", block, err)
+		e.latchSafetyError(fault)
+		mlog.Log.Errorf("ALPENGLOW SAFETY: %v", fault)
+		return fault
+	}
+	if len(corrected) > 0 {
+		if err := e.handleConsensusUpdate(alpenglow.ConsensusUpdate{Events: corrected}); err != nil {
+			e.latchSafetyError(err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *AlpenglowObserverEngine) observeChainReplayBlock(obs alpenglow.ReplayBlockObservation) {
@@ -1001,22 +1255,56 @@ func (e *AlpenglowObserverEngine) observeChainReplayBlock(obs alpenglow.ReplayBl
 }
 
 func (e *AlpenglowObserverEngine) SetAlpenglowValidatorSet(set alpenglow.ValidatorSet) error {
+	set = cloneValidatorSet(set)
+	e.validatorSetsMu.Lock()
+	if existing, ok := e.validatorSets[set.Epoch]; ok {
+		if !validatorSetsEqual(existing, set) {
+			e.validatorSetsMu.Unlock()
+			return fmt.Errorf("Alpenglow validator set for epoch %d is immutable", set.Epoch)
+		}
+		e.validatorSetsMu.Unlock()
+		return nil
+	}
+
+	// Block both pointer removal and local signing while the verifier opens the
+	// epoch. Network verification may complete immediately afterward, but every
+	// voter action then observes the same set rather than silently dropping a
+	// one-shot SafeTo/BlockNotarized event.
+	e.voterMu.RLock()
+	voter := e.voter
+	if voter != nil {
+		voter.setsMu.Lock()
+	}
 	if err := e.ensureVerifier().SetValidatorSet(set); err != nil {
+		if voter != nil {
+			voter.setsMu.Unlock()
+		}
+		e.voterMu.RUnlock()
+		e.validatorSetsMu.Unlock()
 		return err
 	}
-	e.validatorSetsMu.Lock()
 	e.validatorSets[set.Epoch] = cloneValidatorSet(set)
-	e.validatorSetsMu.Unlock()
-	mlog.Log.FileOnlyf("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)", set.Epoch, len(set.Validators), set.TotalStake)
-	if e.certPool != nil {
-		e.certPool.OnValidatorSetInstalled(set.Epoch)
+	if voter != nil {
+		voter.sets[set.Epoch] = cloneValidatorSet(set)
+		voter.setsMu.Unlock()
 	}
-	// Install the set in the voter before replaying deferred network material.
-	// That keeps both consensus events and landing-proof events ordered behind
-	// the rank map they need.
-	if err := e.enqueueVoter(voterEvent{kind: voterEventValidatorSet, set: cloneValidatorSet(set)}); err != nil {
+	mlog.Log.FileOnlyf("ALPENGLOW observer: installed validator set for epoch %d (validators=%d total_stake=%d)", set.Epoch, len(set.Validators), set.TotalStake)
+	// Queue history restoration before either deferred vote front end flushes.
+	// Concurrent live ingress is already safe because the direct voter map
+	// installation above is the publication barrier.
+	var enqueueErr error
+	if voter != nil {
+		enqueueErr = voter.enqueue(voterEvent{kind: voterEventValidatorSet, set: cloneValidatorSet(set)})
+	}
+	e.voterMu.RUnlock()
+	e.validatorSetsMu.Unlock()
+	if enqueueErr != nil {
+		err := enqueueErr
 		e.latchSafetyError(err)
 		return err
+	}
+	if e.certPool != nil {
+		e.certPool.OnValidatorSetInstalled(set.Epoch)
 	}
 	e.replayPendingCertsForEpoch(set.Epoch)
 	return nil
@@ -1036,6 +1324,8 @@ func (e *AlpenglowObserverEngine) SetAlpenglowRoot(block alpenglow.BlockID) {
 	// Otherwise old certificates received immediately after startup could regrow
 	// historical chain state or consume the raw-vote pool before replay advances.
 	e.ensureChain().PruneBeforeSlot(block.Slot)
+	e.pruneInvalidBlockIDsBefore(block.Slot)
+	e.pruneExecutedReplayBlocksAtOrBelow(block.Slot)
 	if e.certPool != nil {
 		e.certPool.ObserveFloor(block.Slot)
 	}
@@ -1048,7 +1338,14 @@ func (e *AlpenglowObserverEngine) AlpenglowBlockProductionParent(slot uint64) al
 	if e.safetyError() != nil {
 		return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
 	}
-	return e.ensurePool().BlockProductionParent(slot)
+	parent := e.ensurePool().BlockProductionParent(slot)
+	if parent.Kind == alpenglow.BlockProductionParentReady && e.ensureChain().IsObjectivelyInvalidBlock(parent.Parent) {
+		// ParentReady may legally contain a fallback-only block. Objective
+		// invalidity is stronger than that liveness hint, so wait for a valid
+		// parent instead of extending it.
+		return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+	}
+	return parent
 }
 
 // FlushAlpenglowRewardVotes makes the lazy verifier publish all valid plain
@@ -1110,12 +1407,99 @@ func (e *AlpenglowObserverEngine) PruneAlpenglowBefore(slot uint64) {
 	}
 	e.ensurePool().SetRoot(root)
 	chain.PruneBeforeSlot(slot)
+	e.pruneInvalidBlockIDsBefore(slot)
+	e.pruneExecutedReplayBlocksAtOrBelow(slot)
 	if e.certPool != nil {
 		e.certPool.ObserveFloor(slot)
 	}
 	if err := e.enqueueVoter(voterEvent{kind: voterEventRoot, root: root}); err != nil {
 		e.latchSafetyError(err)
 	}
+}
+
+func (e *AlpenglowObserverEngine) pruneInvalidBlockIDsBefore(slot uint64) {
+	e.blockIDSinkMu.Lock()
+	for block := range e.invalidBlockIDs {
+		if block.Slot < slot {
+			delete(e.invalidBlockIDs, block)
+		}
+	}
+	e.blockIDSinkMu.Unlock()
+}
+
+func (e *AlpenglowObserverEngine) pruneExecutedReplayBlocksAtOrBelow(slot uint64) {
+	e.observedReplayMu.Lock()
+	for block := range e.executedReplayBlocks {
+		if block.Slot <= slot {
+			delete(e.executedReplayBlocks, block)
+		}
+	}
+	e.observedReplayMu.Unlock()
+}
+
+// retainExecutedReplayParent merges successful replay ancestry monotonically.
+// A later source may know only the parent slot; it must not erase an exact
+// parent hash already proven for the same block. Conversely, contradictory
+// exact ancestry is a safety fault rather than evidence that can be replaced.
+func retainExecutedReplayParent(blocks map[alpenglow.BlockID]alpenglow.BlockID, block, parent alpenglow.BlockID) error {
+	existing, exists := blocks[block]
+	if !exists {
+		retainExecutedBlockID(blocks, block, parent)
+		return nil
+	}
+	if existing.Slot != parent.Slot {
+		return fmt.Errorf("conflicting parent slots %d and %d", existing.Slot, parent.Slot)
+	}
+	if existing.HasHash() {
+		if parent.HasHash() && existing.Hash != parent.Hash {
+			return fmt.Errorf("conflicting exact parents %s and %s", existing, parent)
+		}
+		return nil
+	}
+	if parent.HasHash() {
+		blocks[block] = parent
+	}
+	return nil
+}
+
+// retainExecutedBlockID bounds exact execution proofs by cardinality as well
+// as slot horizon. Consensus normally permits only a handful of same-slot
+// candidates; deterministic oldest-first eviction prevents a pathological
+// sequence of successful fork replays from retaining unbounded identities.
+func retainExecutedBlockID[T any](blocks map[alpenglow.BlockID]T, block alpenglow.BlockID, value T) {
+	if _, exists := blocks[block]; exists {
+		blocks[block] = value
+		return
+	}
+	if len(blocks) < maxRecentAlpenglowBlockIDs {
+		blocks[block] = value
+		return
+	}
+	var oldest alpenglow.BlockID
+	first := true
+	for candidate := range blocks {
+		if first || candidate.Slot < oldest.Slot || candidate.Slot == oldest.Slot && bytes.Compare(candidate.Hash[:], oldest.Hash[:]) < 0 {
+			oldest = candidate
+			first = false
+		}
+	}
+	if block.Slot < oldest.Slot || block.Slot == oldest.Slot && bytes.Compare(block.Hash[:], oldest.Hash[:]) <= 0 {
+		return
+	}
+	delete(blocks, oldest)
+	blocks[block] = value
+}
+
+func validatorSetsEqual(a, b alpenglow.ValidatorSet) bool {
+	if a.Epoch != b.Epoch || a.TotalStake != b.TotalStake || len(a.Validators) != len(b.Validators) {
+		return false
+	}
+	for i := range a.Validators {
+		if a.Validators[i] != b.Validators[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *AlpenglowObserverEngine) latchSafetyError(err error) {

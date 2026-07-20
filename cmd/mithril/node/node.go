@@ -1536,6 +1536,16 @@ func runLive(c *cobra.Command, args []string) {
 		if alpenglowMode {
 			foldRecovery = mustRecoverFoldState(accountsDb)
 			foldRecovered = true
+			if foldRecovery.RewindInProgress {
+				if mithrilState == nil {
+					klog.Fatalf("interrupted durable rewind has no state context to reconcile; re-bootstrap with --bootstrap snapshot")
+				}
+				completeInterruptedRewind(accountsPath, accountsDb, mithrilState)
+				foldRecovery = mustRecoverFoldState(accountsDb)
+			}
+			if err := adoptRecoveredManifestContextBeforeIntegrity(accountsPath, mithrilState, foldRecovery); err != nil {
+				klog.Fatalf("fold manifest checkpoint at durable slot %d is invalid: %v; re-bootstrap with --bootstrap snapshot", foldRecovery.DurableThrough, err)
+			}
 		}
 		// Run integrity check if we have a state file (warn only, don't fail - user chose force mode)
 		if hasValidState {
@@ -1799,6 +1809,13 @@ func runLive(c *cobra.Command, args []string) {
 			if alpenglowMode {
 				foldRecovery = mustRecoverFoldState(accountsDb)
 				foldRecovered = true
+				if foldRecovery.RewindInProgress {
+					completeInterruptedRewind(accountsPath, accountsDb, mithrilState)
+					foldRecovery = mustRecoverFoldState(accountsDb)
+				}
+				if err := adoptRecoveredManifestContextBeforeIntegrity(accountsPath, mithrilState, foldRecovery); err != nil {
+					klog.Fatalf("fold manifest checkpoint at durable slot %d is invalid: %v; re-bootstrap with --bootstrap snapshot", foldRecovery.DurableThrough, err)
+				}
 			}
 
 			// Validate state file matches AccountsDB (detect Ctrl+Z / kill -9 corruption)
@@ -2113,24 +2130,38 @@ postBootstrap:
 			// Complete it uniformly — regardless of whether the crash landed before
 			// or after the atomic meta rollback — by rewinding to the highest
 			// retained boundary below the parked suffix, then adopt that boundary.
-			completeInterruptedRewind(accountsDb, mithrilState)
+			completeInterruptedRewind(accountsPath, accountsDb, mithrilState)
 		case rec.DurableThrough > mithrilState.LastRootedSlot:
 			// Store is ahead of the (stale) state file: adopt the manifest-carried
 			// watermark + resume context.
-			var ctx state.ResumeContext
-			if len(rec.ResumeCtx) == 0 {
-				klog.Fatalf("store is durably folded through slot %d but state file says %d and the fold manifest carries no resume context; re-bootstrap with --bootstrap snapshot",
-					rec.DurableThrough, mithrilState.LastRootedSlot)
-			}
-			if jerr := json.Unmarshal(rec.ResumeCtx, &ctx); jerr != nil {
-				klog.Fatalf("fold manifest resume context for slot %d is unreadable: %v; re-bootstrap with --bootstrap snapshot", rec.DurableThrough, jerr)
+			ctx, cerr := decodeAndValidateDurableResumeContext(accountsPath, rec.DurableThrough, rec.ResumeCtx)
+			if cerr != nil {
+				klog.Fatalf("store is durably folded through slot %d but its manifest checkpoint is unusable: %v; re-bootstrap with --bootstrap snapshot", rec.DurableThrough, cerr)
 			}
 			mlog.Log.Infof("fold recovery advanced rooted watermark R from %d to %d (manifest-carried context)", mithrilState.LastRootedSlot, rec.DurableThrough)
 			mithrilState.LastRootedSlot = rec.DurableThrough
 			mithrilState.LastRootedBankhash = ctx.Bankhash
-			mithrilState.LastRootedContext = &ctx
+			mithrilState.LastRootedContext = ctx
 			if mithrilState.LastSlot < rec.DurableThrough {
 				mithrilState.LastSlot = rec.DurableThrough
+			}
+		case rec.DurableThrough == mithrilState.LastRootedSlot && rec.DurableThrough > 0 && len(rec.ResumeCtx) > 0:
+			// The fold manifest is the commit authority even when the state file
+			// happens to carry the same numeric watermark. A hard kill can leave a
+			// stale context-at-R; adopting it would combine the right accounts with
+			// the wrong transaction-status lineage.
+			ctx, cerr := decodeAndValidateDurableResumeContext(accountsPath, rec.DurableThrough, rec.ResumeCtx)
+			if cerr != nil {
+				klog.Fatalf("fold manifest checkpoint at durable slot %d is unusable: %v; re-bootstrap with --bootstrap snapshot", rec.DurableThrough, cerr)
+			}
+			mithrilState.LastRootedBankhash = ctx.Bankhash
+			mithrilState.LastRootedContext = ctx
+		case rec.DurableThrough == mithrilState.LastRootedSlot && rec.BatchSeq > 0:
+			// The head fold manifest may already have been compacted outside the
+			// rewind horizon. In that case the state-file reference is the only
+			// surviving selector and must itself be complete and hash-valid.
+			if err := validateDurableResumeContext(accountsPath, rec.DurableThrough, mithrilState.LastRootedContext); err != nil {
+				klog.Fatalf("durable slot %d has no usable manifest context and its state-file checkpoint is invalid: %v; re-bootstrap with --bootstrap snapshot", rec.DurableThrough, err)
 			}
 		case rec.DurableThrough < mithrilState.LastRootedSlot:
 			// State file claims MORE durable progress than the store holds: the
@@ -2151,12 +2182,24 @@ postBootstrap:
 		if mithrilState == nil {
 			klog.Fatalf("--rewind-to-slot=%d: no state file to reconcile (fresh bootstrap has nothing to rewind)", rewindToSlot)
 		}
+		points, perr := accountsDb.ListRewindPoints()
+		if perr != nil {
+			klog.Fatalf("--rewind-to-slot=%d: cannot list retained fold boundaries: %v", rewindToSlot, perr)
+		}
+		validPoints, rejected := validTransactionStatusRewindPoints(accountsPath, accountsDb, points, compactCfg.RewindHorizonBatches)
+		if reason, bad := rejected[uint64(rewindToSlot)]; bad {
+			klog.Fatalf("--rewind-to-slot=%d rejected before changing AccountsDB: transaction-status checkpoint is invalid: %v\navailable checkpoint-valid fold boundaries: %s",
+				rewindToSlot, reason, formatRewindPoints(validPoints))
+		}
+		if !hasRewindPoint(validPoints, uint64(rewindToSlot)) {
+			klog.Fatalf("--rewind-to-slot=%d is not a checkpoint-valid retained fold boundary\navailable checkpoint-valid fold boundaries: %s",
+				rewindToSlot, formatRewindPoints(validPoints))
+		}
 		res, rerr := accountsDb.RewindToBatchBoundary(uint64(rewindToSlot))
 		if rerr != nil {
-			points, _ := accountsDb.ListRewindPoints()
-			klog.Fatalf("--rewind-to-slot=%d failed: %v\navailable fold boundaries: %s", rewindToSlot, rerr, formatRewindPoints(points))
+			klog.Fatalf("--rewind-to-slot=%d failed: %v\navailable checkpoint-valid fold boundaries: %s", rewindToSlot, rerr, formatRewindPoints(validPoints))
 		}
-		if err := adoptRewindResult(mithrilState, res); err != nil {
+		if err := adoptRewindResult(accountsPath, mithrilState, res); err != nil {
 			klog.Fatalf("--rewind-to-slot=%d: %v; re-bootstrap with --bootstrap snapshot", rewindToSlot, err)
 		}
 		mlog.Log.Warnf("rewound durable state to fold boundary at slot %d (%d batches / %d keys undone); replay resumes from slot %d",
@@ -2174,6 +2217,27 @@ postBootstrap:
 			}
 			klog.Fatalf("rooted-durable resume needs a context-at-R matching LastRootedSlot=%d (have context-slot=%d); re-bootstrap with --bootstrap snapshot",
 				mithrilState.LastRootedSlot, ctxSlot)
+		}
+		if mithrilState.LastRootedSlot > mithrilState.SnapshotSlot {
+			if err := validateDurableResumeContext(accountsPath, mithrilState.LastRootedSlot, mithrilState.LastRootedContext); err != nil {
+				klog.Fatalf("rooted-durable resume checkpoint at slot %d is invalid: %v; re-bootstrap with --bootstrap snapshot",
+					mithrilState.LastRootedSlot, err)
+			}
+		}
+	}
+
+	// Startup is the one point at which replay/folds are certainly quiescent.
+	// Bound sidecar retention immediately, including after a crash before the
+	// next fold's post-commit cleanup could run.
+	if alpenglowMode {
+		var currentRef *state.TransactionStatusCheckpointRef
+		if mithrilState != nil && mithrilState.LastRootedContext != nil {
+			currentRef = mithrilState.LastRootedContext.TransactionStatusCheckpoint
+		}
+		if removed, gerr := cleanupRetainedTransactionStatusCheckpoints(accountsPath, accountsDb, compactCfg.RewindHorizonBatches, currentRef); gerr != nil {
+			mlog.Log.Warnf("transaction-status checkpoint startup cleanup failed: %v", gerr)
+		} else if len(removed) > 0 {
+			mlog.Log.Infof("transaction-status checkpoint startup cleanup removed %d unreferenced file(s)", len(removed))
 		}
 	}
 
@@ -2445,15 +2509,21 @@ postBootstrap:
 					return blockprod.ParentContext{}
 				}
 				return blockprod.ParentContext{
-					ParentSlot:          tip.Slot,
-					ParentBankhash:      tip.Bankhash,
-					ParentLastEntryHash: tip.LastEntryHash,
-					EpochRewardsActive:  tip.EpochRewardsActive,
-					PrevNumSigs:         tip.PrevNumSigs,
-					PrevFeeGovernor:     tip.PrevFeeGovernor,
-					AcctsLtHash:         tip.AcctsLtHash,
-					Features:            tip.Features,
-					UnrootedRead:        tip.UnrootedRead,
+					ReplayGeneration:           tip.Generation,
+					ParentSlot:                 tip.Slot,
+					ParentBankhash:             tip.Bankhash,
+					ParentBlockID:              tip.AlpenglowBlockID,
+					HasParentBlockID:           tip.HasAlpenglowBlockID,
+					ParentChainedMerkleRoot:    tip.AlpenglowChainedMerkleRoot,
+					HasParentChainedMerkleRoot: tip.HasAlpenglowChainedMerkleRoot,
+					ParentLastEntryHash:        tip.LastEntryHash,
+					EpochRewardsActive:         tip.EpochRewardsActive,
+					PrevNumSigs:                tip.PrevNumSigs,
+					PrevFeeGovernor:            tip.PrevFeeGovernor,
+					AcctsLtHash:                tip.AcctsLtHash,
+					Features:                   tip.Features,
+					UnrootedRead:               tip.UnrootedRead,
+					TransactionStatuses:        tip.TransactionStatuses,
 				}
 			},
 			ProductionParent: consensusEngine.AlpenglowBlockProductionParent,
@@ -2464,13 +2534,7 @@ postBootstrap:
 				return global.WallClockSlot()
 			},
 			LeaderForSlot: global.LeaderForSlot,
-			ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
-				if parentSlot == 0 {
-					return solana.Hash{}, true
-				}
-				return global.AlpenglowBlockID(parentSlot)
-			},
-			RewardCerts: rewardBuilder,
+			RewardCerts:   rewardBuilder,
 			OnBlock: func(produced *block.Block) {
 				select {
 				case localBlocks <- produced:
@@ -2521,6 +2585,18 @@ postBootstrap:
 		Alpenglow: alpenglowMode,
 		Engine:    consensusEngine,
 	}
+	if alpenglowMode {
+		consensusOpts.TransactionStatusCheckpointAfterCommit = func(selected *state.TransactionStatusCheckpointRef) error {
+			removed, err := cleanupRetainedTransactionStatusCheckpoints(
+				accountsPath, accountsDb, compactCfg.RewindHorizonBatches, selected,
+			)
+			if err == nil && len(removed) > 0 {
+				mlog.Log.FileOnlyf("transaction-status checkpoint retention removed %d file(s) outside the %d-batch rewind horizon",
+					len(removed), compactCfg.RewindHorizonBatches)
+			}
+			return err
+		}
+	}
 
 	var slotCtxSetter replay.SlotCtxSetter
 	if rpcServer != nil {
@@ -2552,7 +2628,7 @@ postBootstrap:
 	if alpenglowMode {
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
 
 	if result.Error != nil {
 		if result.LastPersistedSlot == 0 {
@@ -3574,10 +3650,272 @@ func mustRecoverFoldState(accountsDb *accountsdb.AccountsDb) accountsdb.Recovery
 	return rec
 }
 
+// adoptRecoveredManifestContextBeforeIntegrity runs before the legacy
+// state-vs-bankhash check. A committed fold manifest is the authority when its
+// root is equal to or ahead of the stale state file; otherwise a first-fold
+// hard kill can be misclassified as corruption before normal reconciliation.
+func adoptRecoveredManifestContextBeforeIntegrity(accountsDbPath string, s *state.MithrilState, rec accountsdb.RecoveryResult) error {
+	if s == nil || rec.RewindInProgress || rec.DurableThrough == 0 || rec.DurableThrough < s.LastRootedSlot {
+		return nil
+	}
+	if len(rec.ResumeCtx) == 0 {
+		if rec.DurableThrough > s.LastRootedSlot {
+			return fmt.Errorf("store advanced from rooted slot %d to %d but the committed fold context is unavailable", s.LastRootedSlot, rec.DurableThrough)
+		}
+		return nil // equal-root head manifest may have aged out; state is checked later.
+	}
+	ctx, err := decodeAndValidateDurableResumeContext(accountsDbPath, rec.DurableThrough, rec.ResumeCtx)
+	if err != nil {
+		return err
+	}
+	oldRoot := s.LastRootedSlot
+	s.LastRootedBankhash = ctx.Bankhash
+	s.LastRootedContext = ctx
+	s.LastRootedSlot = rec.DurableThrough
+	if s.LastSlot < rec.DurableThrough {
+		s.LastSlot = rec.DurableThrough
+	}
+	if rec.DurableThrough > oldRoot {
+		mlog.Log.Infof("fold recovery advanced rooted watermark R from %d to %d before state integrity validation", oldRoot, rec.DurableThrough)
+	}
+	return nil
+}
+
+func decodeAndValidateDurableResumeContext(accountsDbPath string, expectedRoot uint64, encoded []byte) (*state.ResumeContext, error) {
+	if len(encoded) == 0 {
+		return nil, fmt.Errorf("fold manifest at slot %d carries no resume context", expectedRoot)
+	}
+	var ctx state.ResumeContext
+	if err := json.Unmarshal(encoded, &ctx); err != nil {
+		return nil, fmt.Errorf("decode resume context at slot %d: %w", expectedRoot, err)
+	}
+	if err := validateDurableResumeContext(accountsDbPath, expectedRoot, &ctx); err != nil {
+		return nil, err
+	}
+	return &ctx, nil
+}
+
+// validateDurableResumeContext verifies both selectors: the small manifest
+// reference and the immutable sidecar bytes. Decoding the status snapshot is
+// intentional here; a matching SHA alone cannot prove complete coverage or a
+// tip aligned with the account-state boundary.
+func validateDurableResumeContext(accountsDbPath string, expectedRoot uint64, ctx *state.ResumeContext) error {
+	if ctx == nil {
+		return fmt.Errorf("resume context at slot %d is missing", expectedRoot)
+	}
+	if ctx.Slot != expectedRoot {
+		return fmt.Errorf("resume context at durable boundary %d names slot %d", expectedRoot, ctx.Slot)
+	}
+	ref := ctx.TransactionStatusCheckpoint
+	if err := replay.ValidateTransactionStatusCheckpointRef(ref, expectedRoot); err != nil {
+		return err
+	}
+	payload, err := replay.ReadTransactionStatusCheckpoint(accountsDbPath, ref)
+	if err != nil {
+		return err
+	}
+	cache, err := replay.NewTransactionStatusCacheFromSnapshot(payload)
+	if err != nil {
+		return fmt.Errorf("decode transaction status checkpoint at slot %d: %w", expectedRoot, err)
+	}
+	if !cache.CoverageComplete() {
+		return fmt.Errorf("transaction status checkpoint at slot %d has incomplete retained-root coverage", expectedRoot)
+	}
+	if rooted := cache.RootedThrough(); rooted != expectedRoot {
+		return fmt.Errorf("transaction status checkpoint rooted through slot %d, want %d", rooted, expectedRoot)
+	}
+	if tip, ok := cache.TipSlot(); !ok || tip != expectedRoot {
+		if !ok {
+			return fmt.Errorf("transaction status checkpoint at slot %d has no selected tip", expectedRoot)
+		}
+		return fmt.Errorf("transaction status checkpoint tip is slot %d, want %d", tip, expectedRoot)
+	}
+	if ctx.AlpenglowBlockID == "" {
+		return fmt.Errorf("resume context at post-snapshot durable slot %d has no Alpenglow block id", expectedRoot)
+	}
+	blockID, err := solana.HashFromBase58(ctx.AlpenglowBlockID)
+	if err != nil {
+		return fmt.Errorf("decode resume context Alpenglow block id at slot %d: %w", expectedRoot, err)
+	}
+	if err := cache.BindTipBlockID(expectedRoot, blockID); err != nil {
+		return fmt.Errorf("transaction status checkpoint lineage at slot %d: %w", expectedRoot, err)
+	}
+	if ctx.AlpenglowChainedMerkleRoot == "" {
+		return fmt.Errorf("resume context at post-snapshot durable slot %d has no Alpenglow chained merkle root", expectedRoot)
+	}
+	if _, err := solana.HashFromBase58(ctx.AlpenglowChainedMerkleRoot); err != nil {
+		return fmt.Errorf("decode resume context Alpenglow chained merkle root at slot %d: %w", expectedRoot, err)
+	}
+	return nil
+}
+
+func hasRewindPoint(points []accountsdb.RewindPoint, slot uint64) bool {
+	for _, point := range points {
+		if point.ThroughSlot == slot {
+			return true
+		}
+	}
+	return false
+}
+
+func rewindPointManifest(accountsDb *accountsdb.AccountsDb, point accountsdb.RewindPoint) (*accountsdb.SegmentManifest, error) {
+	headers, err := accountsdb.ListFoldManifests(accountsDb.AcctsDir)
+	if err != nil {
+		return nil, fmt.Errorf("list fold manifests: %w", err)
+	}
+	for _, header := range headers {
+		if header.BatchSeq != point.BatchSeq || header.ThroughSlot != point.ThroughSlot {
+			continue
+		}
+		manifest, err := accountsdb.ReadSegmentManifest(header.Path)
+		if err != nil {
+			return nil, fmt.Errorf("read fold manifest for boundary %d: %w", point.ThroughSlot, err)
+		}
+		return manifest, nil
+	}
+	return nil, fmt.Errorf("fold manifest for boundary %d (batch %d) is missing", point.ThroughSlot, point.BatchSeq)
+}
+
+func validateTransactionStatusRewindPoint(accountsDbPath string, accountsDb *accountsdb.AccountsDb, point accountsdb.RewindPoint) error {
+	manifest, err := rewindPointManifest(accountsDb, point)
+	if err != nil {
+		return err
+	}
+	_, err = decodeAndValidateDurableResumeContext(accountsDbPath, point.ThroughSlot, manifest.ResumeCtx)
+	return err
+}
+
+// validTransactionStatusRewindPoints filters operator-visible boundaries. A
+// corrupt historical sidecar reduces the usable rewind horizon; it never gets
+// selected and discovered only after AccountsDB has already been changed.
+func rewindPointsWithinHorizon(points []accountsdb.RewindPoint, horizon uint64) []accountsdb.RewindPoint {
+	retainCount := horizon + 1 // H suffix batches plus the boundary below them.
+	if retainCount == 0 || uint64(len(points)) <= retainCount {
+		return points
+	}
+	return points[len(points)-int(retainCount):]
+}
+
+func validTransactionStatusRewindPoints(accountsDbPath string, accountsDb *accountsdb.AccountsDb, points []accountsdb.RewindPoint, horizon uint64) ([]accountsdb.RewindPoint, map[uint64]error) {
+	points = rewindPointsWithinHorizon(points, horizon)
+	valid := make([]accountsdb.RewindPoint, 0, len(points))
+	rejected := make(map[uint64]error)
+	for _, point := range points {
+		if err := validateTransactionStatusRewindPoint(accountsDbPath, accountsDb, point); err != nil {
+			rejected[point.ThroughSlot] = err
+			continue
+		}
+		valid = append(valid, point)
+	}
+	return valid, rejected
+}
+
+func addTransactionStatusCheckpointRef(keep map[string]*state.TransactionStatusCheckpointRef, expectedRoot uint64, ref *state.TransactionStatusCheckpointRef) error {
+	if err := replay.ValidateTransactionStatusCheckpointRef(ref, expectedRoot); err != nil {
+		return err
+	}
+	copyRef := *ref
+	keep[copyRef.File] = &copyRef
+	return nil
+}
+
+func addTransactionStatusManifestRef(keep map[string]*state.TransactionStatusCheckpointRef, manifest *accountsdb.SegmentManifest) error {
+	if manifest == nil {
+		return errors.New("nil fold manifest")
+	}
+	if len(manifest.ResumeCtx) == 0 {
+		return fmt.Errorf("fold manifest through slot %d carries no resume context", manifest.ThroughSlot)
+	}
+	var ctx state.ResumeContext
+	if err := json.Unmarshal(manifest.ResumeCtx, &ctx); err != nil {
+		return fmt.Errorf("decode fold manifest context through slot %d: %w", manifest.ThroughSlot, err)
+	}
+	if ctx.Slot != manifest.ThroughSlot {
+		return fmt.Errorf("fold manifest through slot %d carries context for slot %d", manifest.ThroughSlot, ctx.Slot)
+	}
+	return addTransactionStatusCheckpointRef(keep, manifest.ThroughSlot, ctx.TransactionStatusCheckpoint)
+}
+
+// retainedTransactionStatusCheckpointRefs mirrors AccountsDB rewind pinning:
+// H suffix batches require H+1 boundary checkpoints (the H committed batches
+// plus their rewind target). Parked manifests are retained unconditionally so
+// an interrupted rewind never loses the status side of its target selection.
+// This collector validates references structurally but deliberately does not
+// reread tens of megabytes per boundary on every fold; rewind selection and
+// startup head adoption perform full size/SHA/decode validation.
+func retainedTransactionStatusCheckpointRefs(accountsDb *accountsdb.AccountsDb, horizon uint64, current *state.TransactionStatusCheckpointRef) ([]*state.TransactionStatusCheckpointRef, error) {
+	if accountsDb == nil {
+		return nil, errors.New("collect transaction status checkpoints: AccountsDB is nil")
+	}
+	keep := make(map[string]*state.TransactionStatusCheckpointRef)
+	if current != nil {
+		if err := addTransactionStatusCheckpointRef(keep, current.Root, current); err != nil {
+			return nil, fmt.Errorf("current transaction status checkpoint: %w", err)
+		}
+	}
+
+	headers, err := accountsdb.ListFoldManifests(accountsDb.AcctsDir)
+	if err != nil {
+		return nil, fmt.Errorf("list retained fold manifests: %w", err)
+	}
+	retainCount := horizon + 1
+	if retainCount == 0 { // uint64 overflow is defensive; configuration is tiny.
+		retainCount = ^uint64(0)
+	}
+	start := 0
+	if uint64(len(headers)) > retainCount {
+		start = len(headers) - int(retainCount)
+	}
+	for _, header := range headers[start:] {
+		manifest, err := accountsdb.ReadSegmentManifest(header.Path)
+		if err != nil {
+			return nil, fmt.Errorf("read in-horizon fold manifest %s: %w", header.Path, err)
+		}
+		if err := addTransactionStatusManifestRef(keep, manifest); err != nil {
+			return nil, fmt.Errorf("in-horizon fold boundary %d is not rewind-safe: %w", manifest.ThroughSlot, err)
+		}
+	}
+
+	// Parked manifests remain in the AccountsDB segment directory only while a
+	// rewind is incomplete. Completed forensic manifests live under rewound/
+	// and are no longer actionable, so they do not pin sidecars forever.
+	entries, err := os.ReadDir(accountsDb.AcctsDir)
+	if err != nil {
+		return nil, fmt.Errorf("scan parked fold manifests: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".manifest.rewound") {
+			continue
+		}
+		path := filepath.Join(accountsDb.AcctsDir, entry.Name())
+		manifest, err := accountsdb.ReadSegmentManifest(path)
+		if err != nil {
+			return nil, fmt.Errorf("read parked fold manifest %s: %w", path, err)
+		}
+		if err := addTransactionStatusManifestRef(keep, manifest); err != nil {
+			return nil, fmt.Errorf("parked fold boundary %d is not resumable: %w", manifest.ThroughSlot, err)
+		}
+	}
+
+	refs := make([]*state.TransactionStatusCheckpointRef, 0, len(keep))
+	for _, ref := range keep {
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+func cleanupRetainedTransactionStatusCheckpoints(accountsDbPath string, accountsDb *accountsdb.AccountsDb, horizon uint64, current *state.TransactionStatusCheckpointRef) ([]string, error) {
+	keep, err := retainedTransactionStatusCheckpointRefs(accountsDb, horizon, current)
+	if err != nil {
+		return nil, err
+	}
+	return replay.CleanupTransactionStatusCheckpoints(accountsDbPath, keep)
+}
+
 // formatRewindPoints renders the retained fold boundaries for operator messages.
 func formatRewindPoints(points []accountsdb.RewindPoint) string {
 	if len(points) == 0 {
-		return "(none retained — horizon empty or store never folded)"
+		return "(none checkpoint-valid within the configured rewind horizon)"
 	}
 	slots := make([]string, 0, len(points))
 	for _, p := range points {
@@ -3589,23 +3927,20 @@ func formatRewindPoints(points []accountsdb.RewindPoint) string {
 // adoptRewindResult reconciles the in-memory state with a completed store
 // rewind: the manifest-carried context at the boundary becomes the rooted
 // checkpoint and everything above it is forgotten (replay re-executes it).
-func adoptRewindResult(s *state.MithrilState, res accountsdb.RewindResult) error {
+func adoptRewindResult(accountsDbPath string, s *state.MithrilState, res accountsdb.RewindResult) error {
 	if len(res.ResumeCtx) == 0 {
 		if res.NewThrough == s.LastRootedSlot && s.LastRootedContext != nil && s.LastRootedContext.Slot == res.NewThrough {
-			return nil // no-op rewind to the current boundary; state already consistent
+			return validateDurableResumeContext(accountsDbPath, res.NewThrough, s.LastRootedContext)
 		}
 		return fmt.Errorf("rewound to slot %d but its fold manifest carries no resume context", res.NewThrough)
 	}
-	var rctx state.ResumeContext
-	if err := json.Unmarshal(res.ResumeCtx, &rctx); err != nil {
-		return fmt.Errorf("resume context at rewound boundary %d is unreadable: %w", res.NewThrough, err)
-	}
-	if rctx.Slot != res.NewThrough {
-		return fmt.Errorf("resume context at rewound boundary %d names slot %d", res.NewThrough, rctx.Slot)
+	rctx, err := decodeAndValidateDurableResumeContext(accountsDbPath, res.NewThrough, res.ResumeCtx)
+	if err != nil {
+		return fmt.Errorf("resume context at rewound boundary %d is unusable: %w", res.NewThrough, err)
 	}
 	s.LastRootedSlot = res.NewThrough
 	s.LastRootedBankhash = rctx.Bankhash
-	s.LastRootedContext = &rctx
+	s.LastRootedContext = rctx
 	if s.LastSlot > res.NewThrough {
 		s.LastSlot = res.NewThrough
 	}
@@ -3619,20 +3954,24 @@ func adoptRewindResult(s *state.MithrilState, res accountsdb.RewindResult) error
 // or after it (a no-op that just finalizes the leftovers) — and adopts that
 // boundary as the rooted checkpoint. Fatals only when nothing is left to finish
 // the rewind with.
-func completeInterruptedRewind(accountsDb *accountsdb.AccountsDb, mithrilState *state.MithrilState) {
+func completeInterruptedRewind(accountsDbPath string, accountsDb *accountsdb.AccountsDb, mithrilState *state.MithrilState) {
 	points, err := accountsDb.ListRewindPoints()
 	if err != nil || len(points) == 0 {
 		klog.Fatalf("interrupted rewind detected but no retained fold boundary remains to complete it; re-bootstrap with --bootstrap snapshot")
 	}
 	// The rewind parks every batch above its target, so the highest still-present
 	// (non-parked) boundary IS the target.
-	target := points[len(points)-1].ThroughSlot
+	targetPoint := points[len(points)-1]
+	target := targetPoint.ThroughSlot
+	if err := validateTransactionStatusRewindPoint(accountsDbPath, accountsDb, targetPoint); err != nil {
+		klog.Fatalf("interrupted rewind target at slot %d has an invalid transaction-status checkpoint: %v; re-bootstrap with --bootstrap snapshot", target, err)
+	}
 	oldRooted := mithrilState.LastRootedSlot
 	res, rerr := accountsDb.RewindToBatchBoundary(target)
 	if rerr != nil {
 		klog.Fatalf("could not complete interrupted rewind to slot %d: %v; re-run --rewind-to-slot=%d", target, rerr, target)
 	}
-	if aerr := adoptRewindResult(mithrilState, res); aerr != nil {
+	if aerr := adoptRewindResult(accountsDbPath, mithrilState, res); aerr != nil {
 		klog.Fatalf("interrupted rewind at slot %d: %v; re-run --rewind-to-slot=%d", res.NewThrough, aerr, target)
 	}
 	mlog.Log.Warnf("completed interrupted rewind: durable state at fold boundary %d (state file said %d)", res.NewThrough, oldRooted)
@@ -3642,20 +3981,28 @@ func completeInterruptedRewind(accountsDb *accountsdb.AccountsDb, mithrilState *
 // boundary strictly below divSlot and adopts that boundary's context as the
 // rooted checkpoint. Returns false (caller halts) when no boundary below the
 // divergence is retained or the rewind/reconcile fails.
-func rewindStoreBelowDivergence(accountsDb *accountsdb.AccountsDb, s *state.MithrilState, divSlot uint64) bool {
+func rewindStoreBelowDivergence(accountsDbPath string, accountsDb *accountsdb.AccountsDb, s *state.MithrilState, divSlot uint64, rewindHorizon uint64) bool {
 	points, err := accountsDb.ListRewindPoints()
 	if err != nil {
 		mlog.Log.Errorf("fork switch: cannot list rewind boundaries: %v; halting", err)
 		return false
 	}
+	points = rewindPointsWithinHorizon(points, rewindHorizon)
 	target, found := uint64(0), false
-	for _, p := range points { // ascending; keep the newest boundary below divSlot
-		if p.ThroughSlot < divSlot {
-			target, found = p.ThroughSlot, true
+	for index := len(points) - 1; index >= 0; index-- {
+		point := points[index]
+		if point.ThroughSlot >= divSlot {
+			continue
 		}
+		if verr := validateTransactionStatusRewindPoint(accountsDbPath, accountsDb, point); verr != nil {
+			mlog.Log.Warnf("fork switch: skipping rewind boundary %d because its transaction-status checkpoint is invalid: %v", point.ThroughSlot, verr)
+			continue
+		}
+		target, found = point.ThroughSlot, true
+		break
 	}
 	if !found {
-		mlog.Log.Errorf("fork switch: divergence at slot %d is at/below the durable watermark %d and no fold boundary below it is retained (rewind horizon exceeded) — re-bootstrap with --bootstrap snapshot; halting",
+		mlog.Log.Errorf("fork switch: superseded slot %d is at/below the durable watermark %d and no fold boundary below it is retained (rewind horizon exceeded) — re-bootstrap with --bootstrap snapshot; halting",
 			divSlot, s.LastRootedSlot)
 		return false
 	}
@@ -3665,11 +4012,11 @@ func rewindStoreBelowDivergence(accountsDb *accountsdb.AccountsDb, s *state.Mith
 		mlog.Log.Errorf("fork switch: rewind to boundary %d failed: %v; halting", target, err)
 		return false
 	}
-	if err := adoptRewindResult(s, res); err != nil {
+	if err := adoptRewindResult(accountsDbPath, s, res); err != nil {
 		mlog.Log.Errorf("fork switch: %v; halting", err)
 		return false
 	}
-	mlog.Log.Warnf("fork switch: divergence at slot %d was already folded (R=%d); rewound durable state to boundary %d (%d batches / %d keys undone)",
+	mlog.Log.Warnf("fork switch: superseded slot %d was already folded (R=%d); rewound durable state to boundary %d (%d batches / %d keys undone)",
 		divSlot, oldRooted, res.NewThrough, res.UndoneBatches, res.UndoneKeys)
 	return true
 }
@@ -3709,6 +4056,7 @@ func runReplayWithRecovery(
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,
+	rewindHorizon uint64,
 	replayStartTime time.Time, // Start time for resume context
 ) *replay.ReplayResult {
 	var result *replay.ReplayResult
@@ -3823,12 +4171,12 @@ func runReplayWithRecovery(
 		return result
 	}
 
-	// Fork-aware dump-then-repair: on a confirmed divergence (bankhash vs confirmed
-	// leaf) or an Alpenglow finality mismatch (executed block-id vs certificate), the
-	// RAM tail (run-local) is already gone; re-replay the confirmed chain from the
-	// durable rooted checkpoint — repair then fetches the certified version. Any
-	// REPEATED divergence = deterministic replay divergence -> fail closed. The retry
-	// budget resets when the rooted watermark advances (progress).
+	// Fork-aware dump-then-repair: when an Alpenglow branch switch cannot unwind
+	// safely in RAM, or execution disagrees with finality, re-replay the selected
+	// chain from the durable rooted checkpoint. A branch switch is normal
+	// speculative-fork resolution, not an execution or bank-hash divergence.
+	// Repeating the same selection after replay means recovery did not converge and
+	// fails closed. The retry budget resets when the rooted watermark advances.
 	seenDiv := make(map[string]bool)
 	attempt := 0
 	var prevRooted uint64
@@ -3841,6 +4189,7 @@ func runReplayWithRecovery(
 		}
 		var divSlot uint64
 		var key string
+		var recoveryReason string
 		var certSwitch *replay.CertifiedSwitch
 		var finMismatch *replay.AlpenglowFinalityMismatch
 		switch {
@@ -3852,6 +4201,16 @@ func runReplayWithRecovery(
 			divSlot = certSwitch.Slot
 			key = fmt.Sprintf("sw:%d/%x/%x/%v/%v/%d/%x", certSwitch.Slot, certSwitch.Executed, certSwitch.Certified,
 				certSwitch.Skip, certSwitch.ParentLinked, certSwitch.ChildSlot, certSwitch.ChildID)
+			switch {
+			case certSwitch.ParentLinked:
+				recoveryReason = fmt.Sprintf("parent-linked branch switch at slot %d (child %s at slot %d links to parent %s at slot %d)",
+					certSwitch.Slot, certSwitch.ChildID, certSwitch.ChildSlot, certSwitch.ParentID, certSwitch.ParentSlot)
+			case certSwitch.Skip:
+				recoveryReason = fmt.Sprintf("skip certificate replaced the locally executed block at slot %d", certSwitch.Slot)
+			default:
+				recoveryReason = fmt.Sprintf("certificate selected a different block identity at slot %d (executed=%s selected=%s)",
+					certSwitch.Slot, certSwitch.Executed, certSwitch.Certified)
+			}
 		case errors.As(result.Error, &finMismatch):
 			if finMismatch.Conflict {
 				// Conflict-shaped (equivocation evidence, not a wrong local block):
@@ -3860,13 +4219,19 @@ func runReplayWithRecovery(
 			} else {
 				divSlot = finMismatch.Slot
 				key = fmt.Sprintf("ag:%d/%x/%x", finMismatch.Slot, finMismatch.Executed, finMismatch.Finalized)
+				recoveryReason = fmt.Sprintf("confirmed finality mismatch at slot %d (executed=%s finalized=%s)",
+					finMismatch.Slot, finMismatch.Executed, finMismatch.Finalized)
 			}
 		}
-		if key == "" { // neither divergence type: not a fork-switch error
+		if key == "" { // neither retryable branch-switch/finality-mismatch type
 			break
 		}
 		if seenDiv[key] {
-			mlog.Log.Errorf("fork switch: repeated divergence at slot %d - deterministic replay divergence, halting", divSlot)
+			if certSwitch != nil {
+				mlog.Log.Errorf("fork switch: repeated branch selection at slot %d after re-replay — recovery did not converge; halting", divSlot)
+			} else {
+				mlog.Log.Errorf("fork switch: repeated finality mismatch at slot %d — deterministic replay divergence; halting", divSlot)
+			}
 			break
 		}
 		seenDiv[key] = true
@@ -3881,7 +4246,7 @@ func runReplayWithRecovery(
 		// (this is exactly why durable state deliberately lags and undo pointers
 		// are retained for a horizon). Beyond the horizon -> fail closed.
 		if divSlot <= mithrilState.LastRootedSlot {
-			if !rewindStoreBelowDivergence(accountsDb, mithrilState, divSlot) {
+			if !rewindStoreBelowDivergence(accountsDbPath, accountsDb, mithrilState, divSlot, rewindHorizon) {
 				break
 			}
 		}
@@ -3922,8 +4287,8 @@ func runReplayWithRecovery(
 			mlog.Log.Errorf("fork switch: cannot rebuild resume context: %v; halting", err)
 			break
 		}
-		mlog.Log.Warnf("fork switch: confirmed divergence at slot %d; re-replaying the confirmed chain from rooted slot %d (attempt %d/%d)",
-			divSlot, retryStart-1, attempt, maxForkSwitchRetries)
+		mlog.Log.Warnf("fork switch: %s; re-replaying the selected chain from rooted slot %d (attempt %d/%d)",
+			recoveryReason, retryStart-1, attempt, maxForkSwitchRetries)
 		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
 	}
 	return result

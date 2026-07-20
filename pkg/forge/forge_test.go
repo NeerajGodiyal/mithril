@@ -32,6 +32,21 @@ func TestSinkAcceptsTransfer(t *testing.T) {
 	assert.Equal(t, uint64(1), stats.InPackets)
 }
 
+func TestSinkCountsAlreadyProcessed(t *testing.T) {
+	env := blockprod.NewTestEnv(blockprod.TestEnvConfig{})
+	defer env.Close()
+
+	sink := NewSink(env.Controller)
+	wire := txfixture.MustSignedTransferWire(0)
+	sink.Receive(packet.Owned(wire))
+	sink.Receive(packet.Owned(wire))
+
+	stats := sink.Stats()
+	assert.Equal(t, uint64(2), stats.InPackets)
+	assert.Equal(t, uint64(1), stats.Accepted)
+	assert.Equal(t, uint64(1), stats.DroppedAlreadyProcessed)
+}
+
 func TestSinkDropsOnBlockCostLimit(t *testing.T) {
 	limits := costmodel.DefaultLimits()
 	limits.BlockCost = 1

@@ -3,6 +3,7 @@ package blockprod
 import (
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
@@ -26,7 +27,7 @@ func TestLeaderLoopHoldsSlotUntilWallAdvances(t *testing.T) {
 			return leader, s == 42 || s == 43
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 41, ParentBankhash: solana.Hash{1}}
+			return coherentTestParentContext(41, solana.Hash{1})
 		},
 		ParentBlockID: func(parentSlot uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(parentSlot)
@@ -50,6 +51,41 @@ func TestLeaderLoopHoldsSlotUntilWallAdvances(t *testing.T) {
 	assert.Nil(t, loop.activeBank, "slot 43 must wait until locally produced slot 42 passes replay")
 }
 
+func TestLeaderLoopPinsParentTransactionStatusesIntoWorkingBank(t *testing.T) {
+	const slot = uint64(142)
+	const parentSlot = slot - 1
+	global.SetReplayFrontier(parentSlot)
+	global.SetAlpenglowBlockID(parentSlot, solana.Hash{7})
+	global.SetAlpenglowChainedMerkleRoot(parentSlot, solana.Hash{8})
+
+	wire := txfixture.MustSignedTransferWire(0)
+	ancestor := mustBankTestTransaction(t, wire)
+	statuses := mustAncestorTransactionStatusView(t, ancestor)
+	controller := NewController()
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: &captureBroadcaster{},
+		CurrentSlot: func() uint64 { return slot },
+		LeaderForSlot: func(candidate uint64) (solana.PublicKey, bool) {
+			return txfixture.PayerPubkey(), candidate == slot
+		},
+		ParentContext: func(uint64) ParentContext {
+			ctx := coherentTestParentContext(parentSlot, solana.Hash{1})
+			ctx.TransactionStatuses = statuses
+			return ctx
+		},
+		ParentBlockID: global.AlpenglowBlockID,
+	})
+
+	loop.tick()
+	bank := controller.WorkingBank()
+	require.NotNil(t, bank)
+	result, reason := bank.ForgeTransaction(ancestor, len(wire))
+	require.Equal(t, ForgeDroppedAlreadyProcessed, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+}
+
 func TestLeaderLoopDoesNotRestartFinishedWallSlot(t *testing.T) {
 	leader := txfixture.PayerPubkey()
 	var wallSlot uint64 = 42
@@ -66,7 +102,7 @@ func TestLeaderLoopDoesNotRestartFinishedWallSlot(t *testing.T) {
 			return leader, s == 42
 		},
 		ParentContext: func(uint64) ParentContext {
-			return ParentContext{ParentSlot: 41, ParentBankhash: solana.Hash{1}}
+			return coherentTestParentContext(41, solana.Hash{1})
 		},
 		ParentBlockID: func(uint64) (solana.Hash, bool) {
 			return global.AlpenglowBlockID(41)

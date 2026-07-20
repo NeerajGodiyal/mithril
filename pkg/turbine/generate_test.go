@@ -243,6 +243,124 @@ func TestMakeShredsFromAlpenglowBlock(t *testing.T) {
 	require.True(t, last.LastInSlot())
 }
 
+func TestDecodeEntriesUsesUpdateParentReplayBoundary(t *testing.T) {
+	leader := testShredLeader(t)
+	headerParentID := solana.Hash{0x11}
+	updateParentID := solana.Hash{0x22}
+	bankHash := solana.Hash{0x33}
+	sharedTx := mustParseTransferTx(t, 100)
+	otherTx := mustParseTransferTx(t, 101)
+	preComponent, err := NewEntryBatch([]Entry{{
+		NumHashes: 1,
+		Hash:      solana.Hash{0xa1},
+		Txns:      []solana.Transaction{sharedTx},
+	}})
+	require.NoError(t, err)
+	postComponent, err := NewEntryBatch([]Entry{{
+		NumHashes: 1,
+		Hash:      solana.Hash{0xa2},
+		Txns:      []solana.Transaction{sharedTx, otherTx},
+	}})
+	require.NoError(t, err)
+	tickComponent, err := NewEntryBatch([]Entry{{
+		NumHashes: 1,
+		Hash:      solana.Hash{0xfe},
+	}})
+	require.NoError(t, err)
+
+	components := []struct {
+		name         string
+		component    BlockComponent
+		isLastInSlot bool
+	}{
+		{name: "header", component: NewBlockHeader(99, headerParentID)},
+		{name: "optimistic-prefix", component: preComponent},
+		{name: "update-parent", component: NewUpdateParent(98, updateParentID)},
+		{name: "replayed-suffix", component: postComponent},
+		{name: "footer", component: NewBlockFooter(BlockFooter{BankHash: bankHash})},
+		{name: "ending-tick", component: tickComponent, isLastInSlot: true},
+	}
+
+	makeDataShreds := func(slot uint64) ([]*Shred, uint32) {
+		gen := ShredGenerator{
+			Slot:          slot,
+			ParentSlot:    99,
+			Version:       7,
+			ReferenceTick: 63,
+		}
+		var (
+			chainedRoot        = solana.Hash{5}
+			nextData    uint32 = 0
+			nextCode    uint32 = 0
+			updateStart uint32
+			dataShreds  []*Shred
+		)
+		for _, component := range components {
+			payload, err := MarshalBlockComponent(component.component)
+			require.NoError(t, err, "component %s", component.name)
+			if component.name == "update-parent" {
+				updateStart = nextData
+			}
+			packets, root, newData, newCode, err := gen.MakeShredsFromData(
+				leader,
+				payload,
+				component.isLastInSlot,
+				chainedRoot,
+				nextData,
+				nextCode,
+			)
+			require.NoError(t, err, "component %s", component.name)
+			chainedRoot = root
+			nextData = newData
+			nextCode = newCode
+			for _, packet := range packets {
+				shred, err := ParseShred(packet)
+				require.NoError(t, err)
+				if shred.Type == ShredTypeData {
+					dataShreds = append(dataShreds, shred)
+				}
+			}
+		}
+		return dataShreds, updateStart
+	}
+
+	allDataShreds, updateStart := makeDataShreds(100)
+	require.NotZero(t, updateStart)
+	require.Zero(t, updateStart%dataShredsPerFECBlock)
+
+	entries, parentInfo, footer, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(allDataShreds)
+	require.NoError(t, err)
+	require.NotNil(t, parentInfo)
+	require.True(t, parentInfo.FromUpdateParent)
+	require.Equal(t, uint64(98), parentInfo.ParentSlot)
+	require.Equal(t, updateParentID, parentInfo.ParentBlockID)
+	require.Equal(t, updateStart, parentInfo.ReplayFECSetIndex)
+	require.NotNil(t, footer)
+	require.Equal(t, bankHash, footer.BankHash)
+
+	var replayTxs []solana.Transaction
+	for _, entry := range entries {
+		replayTxs = append(replayTxs, entry.Txns...)
+	}
+	require.Len(t, replayTxs, 2)
+	require.Equal(t, sharedTx.Signatures[0], replayTxs[0].Signatures[0])
+	require.Equal(t, otherTx.Signatures[0], replayTxs[1].Signatures[0])
+	require.NotEqual(t, replayTxs[0].Signatures[0], replayTxs[1].Signatures[0])
+
+	nonFirstShreds, _ := makeDataShreds(101)
+	state := &slotState{
+		slot:       101,
+		parentSlot: 99,
+		shredVer:   7,
+		shreds:     make(map[uint32]*Shred, len(nonFirstShreds)),
+	}
+	for _, shred := range nonFirstShreds {
+		state.shreds[shred.Index] = shred
+	}
+	_, err = state.block(headerParentID, true)
+	require.ErrorContains(t, err, "update-parent marker is not in the first slot of its leader window")
+}
+
 func decodeEntryBatchFromDataShreds(shreds []*Shred) ([]Entry, error) {
 	return DecodeEntriesFromDataShreds(shreds)
 }

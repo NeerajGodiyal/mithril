@@ -1,0 +1,156 @@
+package txstatus
+
+import (
+	"encoding/binary"
+	"os"
+	"testing"
+)
+
+func TestDecodeAgaveSnapshot(t *testing.T) {
+	var hashA, hashB [32]byte
+	for i := range hashA {
+		hashA[i] = byte(i + 1)
+		hashB[i] = byte(200 + i)
+	}
+	key := func(seed byte) [CachedKeySize]byte {
+		var out [CachedKeySize]byte
+		for i := range out {
+			out[i] = seed + byte(i)
+		}
+		return out
+	}
+
+	ok := encU32(0)
+	duplicateInstruction := append(append(encU32(1), encU32(29)...), byte(7))
+	customInstruction := append(append(append(append(encU32(1), encU32(8)...), byte(2)), encU32(25)...), encU32(0xdecafbad)...)
+	borshInstruction := append(append(append(append(encU32(1), encU32(8)...), byte(3)), encU32(44)...), encString("io")...)
+	unitError := append(encU32(1), encU32(6)...)
+
+	data := encU64(2)
+	data = append(data, encU64(42)...)
+	data = append(data, 1)
+	data = append(data, encU64(2)...)
+	data = appendStatus(data, hashA, 3, []encodedKey{
+		{key(1), ok},
+		{key(2), duplicateInstruction},
+		{key(3), customInstruction},
+		{key(4), borshInstruction},
+	})
+	data = appendStatus(data, hashB, MaxCachedKeyIndex, []encodedKey{{key(5), unitError}})
+	data = append(data, encU64(45)...)
+	data = append(data, 0)
+	data = append(data, encU64(0)...)
+
+	deltas, err := DecodeAgaveSnapshot(data)
+	if err != nil {
+		t.Fatalf("DecodeAgaveSnapshot: %v", err)
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("decoded %d deltas, want 2", len(deltas))
+	}
+	if deltas[0].Slot != 42 || !deltas[0].IsRoot || len(deltas[0].Statuses) != 2 {
+		t.Fatalf("unexpected first delta: %+v", deltas[0])
+	}
+	if deltas[0].Statuses[0].RecentBlockhash != hashA || deltas[0].Statuses[0].KeyIndex != 3 || len(deltas[0].Statuses[0].Keys) != 4 {
+		t.Fatalf("unexpected first status: %+v", deltas[0].Statuses[0])
+	}
+	if got := deltas[0].Statuses[0].Keys[3]; got != key(4) {
+		t.Fatalf("decoded key %x, want %x", got, key(4))
+	}
+	if deltas[1].Slot != 45 || deltas[1].IsRoot || len(deltas[1].Statuses) != 0 {
+		t.Fatalf("unexpected second delta: %+v", deltas[1])
+	}
+}
+
+func TestDecodeAgaveSnapshotRejectsMalformed(t *testing.T) {
+	var hash [32]byte
+	var key [CachedKeySize]byte
+	validStatus := func(keyIndex uint64, result []byte) []byte {
+		return appendStatus(nil, hash, keyIndex, []encodedKey{{key, result}})
+	}
+	validSlot := func(root byte, status []byte) []byte {
+		data := append(encU64(1), encU64(9)...)
+		data = append(data, root)
+		data = append(data, encU64(1)...)
+		return append(data, status...)
+	}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"invalid root bool", validSlot(2, validStatus(0, encU32(0)))},
+		{"invalid key index", validSlot(1, validStatus(MaxCachedKeyIndex+1, encU32(0)))},
+		{"unknown result", validSlot(1, validStatus(0, encU32(2)))},
+		{"unknown transaction error", validSlot(1, validStatus(0, append(encU32(1), encU32(39)...)))},
+		{"unknown instruction error", validSlot(1, validStatus(0, append(append(append(encU32(1), encU32(8)...), 0), encU32(54)...)))},
+		{"truncated", validSlot(1, validStatus(0, []byte{0, 0}))},
+		{"trailing bytes", append(validSlot(1, validStatus(0, encU32(0))), 1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeAgaveSnapshot(tt.data); err == nil {
+				t.Fatal("expected decode error")
+			}
+		})
+	}
+}
+
+// TestDecodeAgaveSnapshotExternalFixture is skipped in normal test runs. It
+// lets CI or an operator validate the decoder against a status_cache extracted
+// from a real Agave archive without checking a multi-megabyte fixture into git.
+func TestDecodeAgaveSnapshotExternalFixture(t *testing.T) {
+	path := os.Getenv("MITHRIL_AGAVE_STATUS_CACHE_FIXTURE")
+	if path == "" {
+		t.Skip("MITHRIL_AGAVE_STATUS_CACHE_FIXTURE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	deltas, err := DecodeAgaveSnapshot(data)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(deltas) == 0 {
+		t.Fatal("fixture contained no slot deltas")
+	}
+	keyCount := 0
+	for _, delta := range deltas {
+		for _, status := range delta.Statuses {
+			keyCount += len(status.Keys)
+		}
+	}
+	if keyCount == 0 {
+		t.Fatal("fixture contained no cached keys")
+	}
+	t.Logf("decoded %d slot deltas and %d cached keys", len(deltas), keyCount)
+}
+
+type encodedKey struct {
+	key    [CachedKeySize]byte
+	result []byte
+}
+
+func appendStatus(dst []byte, hash [32]byte, keyIndex uint64, keys []encodedKey) []byte {
+	dst = append(dst, hash[:]...)
+	dst = append(dst, encU64(keyIndex)...)
+	dst = append(dst, encU64(uint64(len(keys)))...)
+	for _, key := range keys {
+		dst = append(dst, key.key[:]...)
+		dst = append(dst, key.result...)
+	}
+	return dst
+}
+
+func encString(s string) []byte {
+	return append(encU64(uint64(len(s))), []byte(s)...)
+}
+
+func encU32(v uint32) []byte {
+	return binary.LittleEndian.AppendUint32(nil, v)
+}
+
+func encU64(v uint64) []byte {
+	return binary.LittleEndian.AppendUint64(nil, v)
+}

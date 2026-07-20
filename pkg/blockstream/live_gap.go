@@ -260,6 +260,11 @@ func (bs *BlockSource) pruneRejectedAlpenglowLocked(tip uint64) {
 			delete(bs.rejectedAlpenglowBlockIDs, slot)
 		}
 	}
+	for slot := range bs.invalidAlpenglowBlockIDs {
+		if slot < floor {
+			delete(bs.invalidAlpenglowBlockIDs, slot)
+		}
+	}
 	for slot := range bs.authoritativeAlpenglowBlockIDs {
 		if slot < floor {
 			delete(bs.authoritativeAlpenglowBlockIDs, slot)
@@ -284,6 +289,10 @@ func (bs *BlockSource) isRejectedAlpenglowBlock(blk *b.Block) bool {
 	}
 	id := solana.Hash(blk.AlpenglowBlockID)
 	bs.rejectedAlpenglowMu.RLock()
+	if _, invalid := bs.invalidAlpenglowBlockIDs[blk.Slot][id]; invalid {
+		bs.rejectedAlpenglowMu.RUnlock()
+		return true
+	}
 	if allowed, ok := bs.authoritativeAlpenglowBlockIDs[blk.Slot]; ok && allowed == id {
 		bs.rejectedAlpenglowMu.RUnlock()
 		return false
@@ -299,6 +308,218 @@ func (bs *BlockSource) isRejectedAlpenglowBlock(blk *b.Block) bool {
 	}
 	bs.rejectedAlpenglowMu.RUnlock()
 	return rejected
+}
+
+func (bs *BlockSource) isInvalidAlpenglowBlockID(slot uint64, id solana.Hash) bool {
+	if slot == 0 || id == (solana.Hash{}) {
+		return false
+	}
+	bs.rejectedAlpenglowMu.RLock()
+	_, invalid := bs.invalidAlpenglowBlockIDs[slot][id]
+	bs.rejectedAlpenglowMu.RUnlock()
+	return invalid
+}
+func (bs *BlockSource) invalidAlpenglowCandidateReason(blk *b.Block) (string, bool) {
+	if blk == nil || !bs.turbineAlpenglowBlockIDHints || !blk.FromLiveStream || !blk.HasAlpenglowBlockID {
+		return "", false
+	}
+	id := solana.Hash(blk.AlpenglowBlockID)
+	parentSlot := blk.SourceParentSlot
+	if parentSlot == 0 {
+		parentSlot = blk.ParentSlot
+	}
+
+	bs.rejectedAlpenglowMu.RLock()
+	_, selfInvalid := bs.invalidAlpenglowBlockIDs[blk.Slot][id]
+	parentInvalid := false
+	if blk.HasAlpenglowParentBlockID {
+		_, parentInvalid = bs.invalidAlpenglowBlockIDs[parentSlot][solana.Hash(blk.AlpenglowParentBlockID)]
+	}
+	bs.rejectedAlpenglowMu.RUnlock()
+
+	if selfInvalid {
+		return fmt.Sprintf("block %s at slot %d is objectively invalid", id, blk.Slot), true
+	}
+	if parentInvalid {
+		return fmt.Sprintf("exact parent %s at slot %d is objectively invalid", solana.Hash(blk.AlpenglowParentBlockID), parentSlot), true
+	}
+	return "", false
+}
+
+func (bs *BlockSource) rejectInvalidAlpenglowCandidate(blk *b.Block, reason string) {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		return
+	}
+	id := solana.Hash(blk.AlpenglowBlockID)
+	bs.markInvalidAlpenglowBlockID(blk.Slot, id)
+	bs.rejectInvalidTurbineBlockState(blk.Slot, id)
+	if bs.alpenglowInvalidBlockSink != nil {
+		if err := bs.alpenglowInvalidBlockSink(alpenglow.BlockID{Slot: blk.Slot, Hash: id}, reason); err != nil {
+			bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, blk.Slot)
+			mlog.Log.Errorf("ALPENGLOW SAFETY: invalid descendant at slot %d conflicts with consensus: %v", blk.Slot, err)
+		}
+	}
+	mlog.Log.Warnf("ALPENGLOW invalid candidate rejected at commit: block %s at slot %d (%s)", id, blk.Slot, reason)
+}
+
+// IsObjectivelyInvalidAlpenglowBlock reports whether deterministic replay
+// validation quarantined this exact block identity. Replay checks this after
+// every source receive as a backstop against an in-flight send racing a
+// stream-channel drain.
+func (bs *BlockSource) IsObjectivelyInvalidAlpenglowBlock(blk *b.Block) bool {
+	if blk == nil || !blk.HasAlpenglowBlockID {
+		return false
+	}
+	return bs.isInvalidAlpenglowBlockID(blk.Slot, solana.Hash(blk.AlpenglowBlockID))
+}
+
+func (bs *BlockSource) markInvalidAlpenglowBlockID(slot uint64, id solana.Hash) bool {
+	changed := bs.markInvalidAlpenglowBlockIDOnly(slot, id)
+	for _, descendant := range bs.removeBufferedInvalidAlpenglowDescendants(alpenglow.BlockID{Slot: slot, Hash: id}) {
+		bs.markInvalidAlpenglowBlockIDOnly(descendant.Slot, descendant.Hash)
+		bs.rejectInvalidTurbineBlockState(descendant.Slot, descendant.Hash)
+		bs.slotStateMu.Lock()
+		delete(bs.slotState, descendant.Slot)
+		delete(bs.inflightStart, descendant.Slot)
+		bs.slotStateMu.Unlock()
+		bs.clearSlotErrors(descendant.Slot)
+		if bs.alpenglowInvalidBlockSink != nil {
+			reason := fmt.Sprintf("descends from objectively invalid block %s at slot %d", id, slot)
+			if err := bs.alpenglowInvalidBlockSink(descendant, reason); err != nil {
+				bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, descendant.Slot)
+				mlog.Log.Errorf("ALPENGLOW SAFETY: buffered invalid descendant %s conflicts with consensus: %v", descendant, err)
+			}
+		}
+	}
+	return changed
+}
+
+func (bs *BlockSource) markInvalidAlpenglowBlockIDOnly(slot uint64, id solana.Hash) bool {
+	if slot == 0 || id == (solana.Hash{}) {
+		return false
+	}
+	bs.reorderMu.Lock()
+	emittedTip := bs.lastEmittedBlockSlot
+	bs.reorderMu.Unlock()
+	bs.rejectedAlpenglowMu.Lock()
+	if bs.invalidAlpenglowBlockIDs == nil {
+		bs.invalidAlpenglowBlockIDs = make(map[uint64]map[solana.Hash]struct{})
+	}
+	ids := bs.invalidAlpenglowBlockIDs[slot]
+	if ids == nil {
+		ids = make(map[solana.Hash]struct{})
+		bs.invalidAlpenglowBlockIDs[slot] = ids
+	}
+	_, existed := ids[id]
+	ids[id] = struct{}{}
+	if bs.authoritativeAlpenglowBlockIDs[slot] == id {
+		delete(bs.authoritativeAlpenglowBlockIDs, slot)
+	}
+	bs.pruneRejectedAlpenglowLocked(emittedTip)
+	bs.rejectedAlpenglowMu.Unlock()
+
+	// Ordinary assembly learns block IDs into the same hint cache used for
+	// receiver restarts. Unpin only this invalid identity; a distinct certified
+	// sibling remains authoritative.
+	bs.alpenglowMu.Lock()
+	if bs.knownAlpenglowBlockIDs[slot] == id {
+		delete(bs.knownAlpenglowBlockIDs, slot)
+		kept := bs.knownAlpenglowBlockIDOrder[:0]
+		for _, knownSlot := range bs.knownAlpenglowBlockIDOrder {
+			if knownSlot != slot {
+				kept = append(kept, knownSlot)
+			}
+		}
+		bs.knownAlpenglowBlockIDOrder = kept
+	}
+	bs.alpenglowMu.Unlock()
+	return !existed
+}
+func (bs *BlockSource) removeBufferedInvalidAlpenglowDescendants(root alpenglow.BlockID) []alpenglow.BlockID {
+	if root.IsZero() || !root.HasHash() {
+		return nil
+	}
+
+	var candidates []*b.Block
+	bs.reorderMu.Lock()
+	for _, blk := range bs.reorderBuffer {
+		candidates = append(candidates, blk)
+	}
+	bs.reorderMu.Unlock()
+	bs.liveStagingMu.Lock()
+	for _, blk := range bs.liveStagingBuffer {
+		candidates = append(candidates, blk)
+	}
+	bs.liveStagingMu.Unlock()
+
+	invalid := map[alpenglow.BlockID]struct{}{root: {}}
+	descendants := make(map[alpenglow.BlockID]struct{})
+	for {
+		advanced := false
+		for _, blk := range candidates {
+			if blk == nil || !blk.FromLiveStream || !blk.HasAlpenglowBlockID || !blk.HasAlpenglowParentBlockID {
+				continue
+			}
+			child := alpenglow.BlockID{Slot: blk.Slot, Hash: solana.Hash(blk.AlpenglowBlockID)}
+			if _, known := invalid[child]; known {
+				continue
+			}
+			parentSlot := blk.SourceParentSlot
+			if parentSlot == 0 {
+				parentSlot = blk.ParentSlot
+			}
+			parent := alpenglow.BlockID{Slot: parentSlot, Hash: solana.Hash(blk.AlpenglowParentBlockID)}
+			if _, parentInvalid := invalid[parent]; !parentInvalid {
+				continue
+			}
+			invalid[child] = struct{}{}
+			descendants[child] = struct{}{}
+			advanced = true
+		}
+		if !advanced {
+			break
+		}
+	}
+	if len(descendants) == 0 {
+		return nil
+	}
+
+	bs.reorderMu.Lock()
+	for slot, blk := range bs.reorderBuffer {
+		if blk == nil || !blk.HasAlpenglowBlockID {
+			continue
+		}
+		id := alpenglow.BlockID{Slot: slot, Hash: solana.Hash(blk.AlpenglowBlockID)}
+		if _, invalid := descendants[id]; invalid {
+			delete(bs.reorderBuffer, slot)
+		}
+	}
+	bs.reorderMu.Unlock()
+
+	bs.liveStagingMu.Lock()
+	for slot, blk := range bs.liveStagingBuffer {
+		if blk == nil || !blk.HasAlpenglowBlockID {
+			continue
+		}
+		id := alpenglow.BlockID{Slot: slot, Hash: solana.Hash(blk.AlpenglowBlockID)}
+		if _, invalid := descendants[id]; invalid {
+			delete(bs.liveStagingBuffer, slot)
+		}
+	}
+	order := bs.liveStagingOrder[:0]
+	for _, slot := range bs.liveStagingOrder {
+		if _, retained := bs.liveStagingBuffer[slot]; retained {
+			order = append(order, slot)
+		}
+	}
+	bs.liveStagingOrder = order
+	bs.liveStagingMu.Unlock()
+
+	out := make([]alpenglow.BlockID, 0, len(descendants))
+	for id := range descendants {
+		out = append(out, id)
+	}
+	return out
 }
 
 func (bs *BlockSource) allowRejectedAlpenglowBlockID(slot uint64, id solana.Hash) {

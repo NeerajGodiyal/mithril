@@ -2240,3 +2240,28 @@ func TestStopReasonDistinguishesFiniteCompletionFromUnexpectedLiveEnd(t *testing
 		t.Fatalf("expected unexpected live stop reason, got %q", got)
 	}
 }
+
+func TestSchedulerExitsOnExternallySetTerminalStopReason(t *testing.T) {
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  100,
+		EndSlot:    200,
+	})
+	defer bs.Stop()
+
+	// Candidate validation and consensus callbacks run outside the scheduler.
+	// Once either records a terminal reason, Start must enter its ordinary
+	// teardown path instead of waiting for the unrelated stall timeout.
+	bs.setStopReason(blockSourceStopReasonInvalidAlpenglowCertificate, 123)
+	done := make(chan struct{})
+	go func() {
+		bs.scheduler()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler ignored externally recorded terminal stop reason")
+	}
+}

@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -13,6 +14,69 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAlpenglowVoterLoopFailureClosesAdmission(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	require.NoError(t, err)
+	voter := &alpenglowVoter{
+		engine:  engine,
+		history: alpenglow.NewVoteHistory(solana.PublicKey{}, 0),
+		events:  make(chan voterEvent, 64),
+		done:    make(chan struct{}),
+	}
+	voter.start()
+	require.NoError(t, voter.enqueue(voterEvent{
+		kind: voterEventConsensus,
+		consensus: alpenglow.ConsensusEvent{
+			Kind:   alpenglow.ConsensusEventConflict,
+			Slot:   42,
+			Reason: "test safety fault",
+		},
+	}))
+
+	select {
+	case <-voter.done:
+	case <-time.After(time.Second):
+		t.Fatal("voter loop exited on a safety fault without closing admission")
+	}
+	voter.wg.Wait()
+	require.Error(t, engine.AlpenglowSafetyError())
+	for range 32 {
+		require.ErrorContains(t, voter.enqueue(voterEvent{kind: voterEventFirstShred, slot: 43}), "closed")
+	}
+	require.Empty(t, voter.events, "closed voter retained events without a consumer")
+}
+
+func TestNetworkCertificateLandingIgnoredAfterSafetyFault(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	require.NoError(t, err)
+	voter := &alpenglowVoter{
+		events: make(chan voterEvent, 1),
+		done:   make(chan struct{}),
+	}
+	engine.voterMu.Lock()
+	engine.voter = voter
+	engine.voterMu.Unlock()
+	t.Cleanup(func() {
+		engine.voterMu.Lock()
+		engine.voter = nil
+		engine.voterMu.Unlock()
+	})
+
+	engine.latchSafetyError(errors.New("test safety fault"))
+	engine.noteNetworkCertificate(alpenglow.Certificate{
+		Type:      alpenglow.CertificateSkip,
+		Slot:      42,
+		Signature: []byte{1},
+		Bitmap:    []byte{2},
+	})
+
+	require.Empty(t, voter.events)
+	engine.networkProofsMu.Lock()
+	require.Empty(t, engine.networkProofs)
+	require.Empty(t, engine.networkProofOrder)
+	engine.networkProofsMu.Unlock()
+}
 
 func TestEngineVotingWiringCastsOnlyAfterSuccessfulReplay(t *testing.T) {
 	identity := voterTestKey(51)

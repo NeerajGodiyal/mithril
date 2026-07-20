@@ -112,6 +112,7 @@ type alpenglowVoter struct {
 	broadcaster     *alpenglow.VotorBroadcaster
 	events          chan voterEvent
 	done            chan struct{}
+	startOnce       sync.Once
 	closeOnce       sync.Once
 	wg              sync.WaitGroup
 	setsMu          sync.RWMutex
@@ -120,6 +121,7 @@ type alpenglowVoter struct {
 	pending         map[uint64][]pendingVotorBlock
 	receivedShred   map[uint64]bool
 	timeoutsSet     map[uint64]bool
+	executedBlocks  map[alpenglow.BlockID]bool
 	highestFinal    uint64
 	lastFinalizedAt time.Time
 	votingStarted   bool
@@ -132,9 +134,23 @@ type alpenglowVoter struct {
 	landed          map[alpenglow.VoteMessageKey]struct{}
 	stats           VotingStats
 	lastStatsLog    time.Time
+	// beforeVoteGuard is a deterministic test seam for invalidation races. It
+	// is nil in production.
+	beforeVoteGuard func(alpenglow.BlockID)
+	// beforeLocalVoteInject is a deterministic test seam for the interval after
+	// durable history persistence and before atomic consensus-pool admission.
+	beforeLocalVoteInject func(alpenglow.Vote)
 }
 
 func newAlpenglowVoter(engine *AlpenglowObserverEngine, cfg VotingConfig, root alpenglow.BlockID) (*alpenglowVoter, error) {
+	return newAlpenglowVoterWithStart(engine, cfg, root, true)
+}
+
+func newAlpenglowVoterUnstarted(engine *AlpenglowObserverEngine, cfg VotingConfig, root alpenglow.BlockID) (*alpenglowVoter, error) {
+	return newAlpenglowVoterWithStart(engine, cfg, root, false)
+}
+
+func newAlpenglowVoterWithStart(engine *AlpenglowObserverEngine, cfg VotingConfig, root alpenglow.BlockID, start bool) (*alpenglowVoter, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("enable Alpenglow voting: nil consensus engine")
 	}
@@ -198,6 +214,7 @@ func newAlpenglowVoter(engine *AlpenglowObserverEngine, cfg VotingConfig, root a
 		pending:         make(map[uint64][]pendingVotorBlock),
 		receivedShred:   make(map[uint64]bool),
 		timeoutsSet:     make(map[uint64]bool),
+		executedBlocks:  make(map[alpenglow.BlockID]bool),
 		highestFinal:    root.Slot,
 		lastFinalizedAt: time.Now(),
 		lastWarn:        make(map[uint64]time.Time),
@@ -219,12 +236,28 @@ func newAlpenglowVoter(engine *AlpenglowObserverEngine, cfg VotingConfig, root a
 		return nil, err
 	}
 	v.broadcaster = broadcaster
-	v.wg.Add(1)
-	go v.loop()
+	if start {
+		v.start()
+	}
 	return v, nil
 }
 
+func (v *alpenglowVoter) start() {
+	v.startOnce.Do(func() {
+		v.wg.Add(1)
+		go v.loop()
+	})
+}
+
 func (v *alpenglowVoter) enqueue(event voterEvent) error {
+	// Once the loop has exited there is no consumer. Check closure before the
+	// send select so a buffered events channel cannot randomly win against an
+	// already-closed done channel and retain work forever.
+	select {
+	case <-v.done:
+		return fmt.Errorf("Alpenglow voter is closed")
+	default:
+	}
 	select {
 	case <-v.done:
 		return fmt.Errorf("Alpenglow voter is closed")
@@ -236,7 +269,12 @@ func (v *alpenglowVoter) enqueue(event voterEvent) error {
 }
 
 func (v *alpenglowVoter) loop() {
-	defer v.wg.Done()
+	defer func() {
+		// A safety error exits the loop without an external Close call. Publish
+		// that terminal state so producers stop enqueueing behind a dead consumer.
+		v.closeOnce.Do(func() { close(v.done) })
+		v.wg.Done()
+	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -261,10 +299,22 @@ func (v *alpenglowVoter) loop() {
 }
 
 func (v *alpenglowVoter) handle(event voterEvent) error {
-	root := v.history.Root
+	floor := v.admissionFloor()
+	if event.kind == voterEventBlock && v.engine.ensureChain().IsObjectivelyInvalidBlock(event.block.Block) {
+		return nil
+	}
+	if event.kind == voterEventConsensus && event.consensus.Block.HasHash() &&
+		v.engine.ensureChain().IsObjectivelyInvalidBlock(event.consensus.Block) {
+		if event.consensus.Kind == alpenglow.ConsensusEventFinalized {
+			return fmt.Errorf("finalized event targets objectively invalid block %s", event.consensus.Block)
+		}
+		// The event may have been queued before validation failed. Preserve any
+		// already-durable history, but never add or act on the stale edge now.
+		return nil
+	}
 	switch event.kind {
 	case voterEventFirstShred:
-		if event.slot > root {
+		if event.slot > floor {
 			v.receivedShred[event.slot] = true
 		}
 		return nil
@@ -278,39 +328,33 @@ func (v *alpenglowVoter) handle(event voterEvent) error {
 		}
 		return v.checkPending()
 	case voterEventRoot:
-		if event.root.Slot <= root {
+		advanced := event.root.Slot > v.history.Root
+		if advanced {
+			v.history.SetRoot(event.root.Slot)
+			v.pruneLandedBefore(v.history.Root)
+		}
+		v.pruneVolatileAtOrBelow(v.admissionFloor())
+		if !advanced {
 			return nil
 		}
-		v.history.SetRoot(event.root.Slot)
-		for slot := range v.pending {
-			if slot < event.root.Slot {
-				delete(v.pending, slot)
-			}
-		}
-		for slot := range v.receivedShred {
-			if slot < event.root.Slot {
-				delete(v.receivedShred, slot)
-			}
-		}
-		for slot := range v.timeoutsSet {
-			if slot < event.root.Slot {
-				delete(v.timeoutsSet, slot)
-			}
-		}
-		v.landingMu.Lock()
-		for vote := range v.landed {
-			if vote.Slot < event.root.Slot {
-				delete(v.landed, vote)
-			}
-		}
-		v.landingMu.Unlock()
 		return v.saveHistory()
 	case voterEventNetworkCertificate:
 		v.recordNetworkCertificate(event.certificate)
 		return nil
 	case voterEventBlock:
-		if event.block.Block.Slot <= root {
+		if event.block.Block.Slot <= floor {
 			return nil
+		}
+		if !event.block.Block.HasHash() {
+			return fmt.Errorf("replayed live block at slot %d has no Alpenglow block id", event.block.Block.Slot)
+		}
+		retainExecutedBlockID(v.executedBlocks, event.block.Block, true)
+		// Block-target votes are deliberately not re-published merely because
+		// they exist in history: invalid-block tombstones are process-local.
+		// Successful replay of the exact identity re-establishes the positive
+		// validity boundary needed to restore them safely.
+		if _, err := v.restoreVotesForBlock(event.block.Block); err != nil {
+			return err
 		}
 		if err := v.votingGateError(event.block.Block.Slot); err != nil {
 			// Do not retain historical catch-up blocks. Once voting opens,
@@ -318,9 +362,6 @@ func (v *alpenglowVoter) handle(event voterEvent) error {
 			// without bound. Join at the next live ParentReady boundary.
 			v.warnVoteSkipped(event.block.Block.Slot, err)
 			return nil
-		}
-		if !event.block.Block.HasHash() {
-			return fmt.Errorf("replayed live block at slot %d has no Alpenglow block id", event.block.Block.Slot)
 		}
 		v.markVotingStarted(event.block.Block.Slot, "replay")
 		v.receivedShred[event.block.Block.Slot] = true
@@ -332,7 +373,7 @@ func (v *alpenglowVoter) handle(event voterEvent) error {
 		if voted {
 			return v.checkPending()
 		}
-		if !v.history.VotedAt(event.block.Block.Slot) {
+		if !v.history.VotedAt(event.block.Block.Slot) && event.block.Block.Slot > v.admissionFloor() {
 			candidate := pendingVotorBlock{block: event.block.Block, parent: parent}
 			if !pendingContains(v.pending[event.block.Block.Slot], candidate) {
 				v.pending[event.block.Block.Slot] = append(v.pending[event.block.Block.Slot], candidate)
@@ -340,12 +381,12 @@ func (v *alpenglowVoter) handle(event voterEvent) error {
 		}
 		return nil
 	case voterEventCrashedLeaderTimeout:
-		if event.slot <= root || v.history.VotedAt(event.slot) || v.receivedShred[event.slot] {
+		if event.slot <= floor || v.history.VotedAt(event.slot) || v.receivedShred[event.slot] {
 			return nil
 		}
 		return v.trySkipWindow(event.slot)
 	case voterEventBlockTimeout:
-		if event.slot <= root || v.history.VotedAt(event.slot) {
+		if event.slot <= floor || v.history.VotedAt(event.slot) {
 			return nil
 		}
 		return v.trySkipWindow(event.slot)
@@ -357,7 +398,21 @@ func (v *alpenglowVoter) handle(event voterEvent) error {
 }
 
 func (v *alpenglowVoter) handleConsensus(event alpenglow.ConsensusEvent) error {
-	if event.Slot <= v.history.Root && event.Kind != alpenglow.ConsensusEventConflict {
+	if event.Kind == alpenglow.ConsensusEventConflict {
+		return fmt.Errorf("consensus conflict at slot %d: %s", event.Slot, event.Reason)
+	}
+	if event.Kind == alpenglow.ConsensusEventFinalized {
+		if event.Slot > v.highestFinal {
+			v.highestFinal = event.Slot
+		}
+		v.lastFinalizedAt = time.Now()
+		v.standstillSlot = nil
+		v.refreshQueue = nil
+		v.refreshCursor = 0
+		v.pruneVolatileAtOrBelow(v.admissionFloor())
+		return nil
+	}
+	if event.Slot <= v.admissionFloor() {
 		return nil
 	}
 	switch event.Kind {
@@ -391,21 +446,72 @@ func (v *alpenglowVoter) handleConsensus(event alpenglow.ConsensusEvent) error {
 		}
 		_, err := v.cast(alpenglow.NewSkipFallbackVote(event.Slot), false)
 		return err
-	case alpenglow.ConsensusEventFinalized:
-		if event.Slot > v.highestFinal {
-			v.highestFinal = event.Slot
-		}
-		v.lastFinalizedAt = time.Now()
-		v.standstillSlot = nil
-		v.refreshQueue = nil
-		v.refreshCursor = 0
-	case alpenglow.ConsensusEventConflict:
-		return fmt.Errorf("consensus conflict at slot %d: %s", event.Slot, event.Reason)
 	}
 	return nil
 }
 
+func (v *alpenglowVoter) admissionFloor() uint64 {
+	floor := v.history.Root
+	if v.highestFinal > floor {
+		floor = v.highestFinal
+	}
+	if engineFloor := v.engine.alpenglowVoteActionFloor(); engineFloor > floor {
+		floor = engineFloor
+	}
+	return floor
+}
+
+func (v *alpenglowVoter) pruneVolatileAtOrBelow(floor uint64) {
+	for slot := range v.pending {
+		if slot <= floor {
+			delete(v.pending, slot)
+		}
+	}
+	for slot := range v.receivedShred {
+		if slot <= floor {
+			delete(v.receivedShred, slot)
+		}
+	}
+	for slot := range v.timeoutsSet {
+		if slot <= floor {
+			delete(v.timeoutsSet, slot)
+		}
+	}
+	for block := range v.executedBlocks {
+		if block.Slot <= floor {
+			delete(v.executedBlocks, block)
+		}
+	}
+	for slot := range v.lastWarn {
+		if slot <= floor {
+			delete(v.lastWarn, slot)
+		}
+	}
+	for vote := range v.restored {
+		if vote.Slot <= floor {
+			delete(v.restored, vote)
+		}
+	}
+}
+
+func (v *alpenglowVoter) pruneLandedBefore(root uint64) {
+	v.landingMu.Lock()
+	for vote := range v.landed {
+		if vote.Slot < root {
+			delete(v.landed, vote)
+		}
+	}
+	v.landingMu.Unlock()
+}
+
 func (v *alpenglowVoter) tryNotar(block, parent alpenglow.BlockID) (bool, error) {
+	if block.Slot <= v.admissionFloor() {
+		return false, nil
+	}
+	if v.engine.ensureChain().IsObjectivelyInvalidBlock(block) ||
+		v.engine.ensureChain().IsObjectivelyInvalidBlock(parent) {
+		return false, nil
+	}
 	if v.history.VotedAt(block.Slot) {
 		return false, nil
 	}
@@ -432,6 +538,12 @@ func (v *alpenglowVoter) tryNotar(block, parent alpenglow.BlockID) (bool, error)
 }
 
 func (v *alpenglowVoter) tryFinal(block alpenglow.BlockID) (bool, error) {
+	if block.Slot <= v.admissionFloor() {
+		return false, nil
+	}
+	if v.engine.ensureChain().IsObjectivelyInvalidBlock(block) {
+		return false, nil
+	}
 	if !v.history.IsBlockNotarized(block) || v.history.IsOver(block.Slot) || v.history.BadWindow(block.Slot) {
 		return false, nil
 	}
@@ -439,18 +551,25 @@ func (v *alpenglowVoter) tryFinal(block alpenglow.BlockID) (bool, error) {
 	if !ok || hash != block.Hash {
 		return false, nil
 	}
-	return v.cast(alpenglow.NewFinalizationVote(block.Slot), false)
+	return v.castTarget(alpenglow.NewFinalizationVote(block.Slot), false, block, true)
 }
 
 func (v *alpenglowVoter) trySkipWindow(slot uint64) error {
+	floor := v.admissionFloor()
+	if slot <= floor {
+		return nil
+	}
 	start := slot - slot%alpenglow.LeaderWindowSlots
-	if start < v.history.Root {
-		start = v.history.Root
+	if start <= floor {
+		start = floor + 1
 	}
 	if start < 1 {
 		start = 1
 	}
 	end := slot - slot%alpenglow.LeaderWindowSlots + alpenglow.LeaderWindowSlots - 1
+	if start > end {
+		return nil
+	}
 	for s := start; s <= end; s++ {
 		if v.history.VotedAt(s) {
 			continue
@@ -463,8 +582,13 @@ func (v *alpenglowVoter) trySkipWindow(slot uint64) error {
 }
 
 func (v *alpenglowVoter) checkPending() error {
+	floor := v.admissionFloor()
 	slots := make([]uint64, 0, len(v.pending))
 	for slot := range v.pending {
+		if slot <= floor || v.history.VotedAt(slot) {
+			delete(v.pending, slot)
+			continue
+		}
 		slots = append(slots, slot)
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
@@ -481,8 +605,43 @@ func (v *alpenglowVoter) checkPending() error {
 }
 
 func (v *alpenglowVoter) cast(vote alpenglow.Vote, restoring bool) (bool, error) {
+	guardedBlock, hasGuard := v.voteGuard(vote)
+	return v.castTarget(vote, restoring, guardedBlock, hasGuard)
+}
+
+func (v *alpenglowVoter) voteGuard(vote alpenglow.Vote) (alpenglow.BlockID, bool) {
+	if block, ok := vote.Block(); ok {
+		return block, true
+	}
+	if vote.Type == alpenglow.VoteTypeFinalize {
+		if hash, ok := v.history.NotarizedVote(vote.Slot); ok {
+			return alpenglow.BlockID{Slot: vote.Slot, Hash: hash}, true
+		}
+	}
+	return alpenglow.BlockID{}, false
+}
+
+func (v *alpenglowVoter) castTarget(vote alpenglow.Vote, restoring bool, guardedBlock alpenglow.BlockID, hasGuard bool) (bool, error) {
 	if !restoring {
+		if vote.Slot <= v.admissionFloor() {
+			return false, nil
+		}
 		if err := v.history.ValidateVote(vote); err != nil {
+			return false, nil
+		}
+	}
+	if hasGuard {
+		// Finalize is slot-scoped on the wire, so tryFinal/voteGuard supply its
+		// notarized block explicitly. Other block-target votes carry the guard.
+		if !restoring && v.beforeVoteGuard != nil {
+			v.beforeVoteGuard(guardedBlock)
+		}
+		// Hold through signing, durable history, pool admission, and broadcast.
+		// Objective invalidation takes the write side before changing the chain,
+		// so a new or restored vote is wholly before it or sees the tombstone.
+		v.engine.invalidActionMu.RLock()
+		defer v.engine.invalidActionMu.RUnlock()
+		if v.engine.ensureChain().IsObjectivelyInvalidBlock(guardedBlock) {
 			return false, nil
 		}
 	}
@@ -498,19 +657,39 @@ func (v *alpenglowVoter) cast(vote alpenglow.Vote, restoring bool) (bool, error)
 		return false, nil
 	}
 	if !restoring {
+		// Finality can advance while the BLS signature is computed. Avoid a
+		// durable stale record when that race is already visible here; if it
+		// advances later, atomic admission below classifies it benignly.
+		if vote.Slot <= v.admissionFloor() {
+			return false, nil
+		}
 		if err := v.history.AddVote(vote); err != nil {
 			return false, fmt.Errorf("record %s vote at slot %d: %w", vote.Type, vote.Slot, err)
 		}
+		// Pool admission may synchronously assemble and publish a certificate.
+		// Persist the anti-equivocation record first so no externally visible
+		// proof can survive a crash without its signed local history.
+		if err := v.saveHistory(); err != nil {
+			return false, err
+		}
+		if v.beforeLocalVoteInject != nil {
+			v.beforeLocalVoteInject(vote)
+		}
 	}
 	if err := v.engine.injectLocalVote(message, result); err != nil {
+		if errors.Is(err, errLocalVoteStale) {
+			v.warnVoteSkipped(vote.Slot, err)
+			return false, nil
+		}
 		return false, fmt.Errorf("inject local %s vote at slot %d: %w", vote.Type, vote.Slot, err)
 	}
 	if restoring {
+		if err := v.broadcaster.Enqueue(alpenglow.Message{Vote: &message}); err != nil {
+			return false, fmt.Errorf("rebroadcast restored %s vote at slot %d: %w", vote.Type, vote.Slot, err)
+		}
 		v.restored[message.Key()] = true
+		mlog.Log.FileOnlyf("ALPENGLOW voting: restored and rebroadcast %s vote slot=%d rank=%d block=%s", vote.Type, vote.Slot, message.Rank, vote.BlockHash)
 		return true, nil
-	}
-	if err := v.saveHistory(); err != nil {
-		return false, err
 	}
 	if err := v.broadcaster.Enqueue(alpenglow.Message{Vote: &message}); err != nil {
 		return false, fmt.Errorf("broadcast persisted %s vote at slot %d: %w", vote.Type, vote.Slot, err)
@@ -560,6 +739,9 @@ func (v *alpenglowVoter) sign(vote alpenglow.Vote, respectVotingGate bool) (alpe
 }
 
 func (v *alpenglowVoter) votingGateError(slot uint64) error {
+	if floor := v.admissionFloor(); slot <= floor {
+		return fmt.Errorf("%w: slot %d is at or below consensus action floor %d", errVoterNotReady, slot, floor)
+	}
 	if slot < v.waitToVoteSlot {
 		return fmt.Errorf("%w: waiting for startup watermark slot %d", errVoterNotReady, v.waitToVoteSlot)
 	}
@@ -594,18 +776,39 @@ func (v *alpenglowVoter) validatorSet(slot uint64) (alpenglow.ValidatorSet, bool
 }
 
 func (v *alpenglowVoter) restoreVotesForEpoch(epoch uint64) error {
-	poolRoot := v.engine.ensurePool().Snapshot().RootSlot
+	floor := v.admissionFloor()
 	for _, vote := range v.history.VotesAfter(v.history.Root - minU64(v.history.Root, 1)) {
-		// Mithril's consensus pool treats the durable root as already decided
-		// and rejects votes at or below it. Keep the history entry for safety,
-		// but only re-inject votes that can still contribute above the root.
-		if vote.Slot <= poolRoot {
+		// Keep every signed history entry for anti-equivocation, but do not
+		// restore votes that finality or the pool admission root has retired.
+		if vote.Slot <= floor {
 			continue
 		}
 		if v.epochForSlot(vote.Slot) != epoch {
 			continue
 		}
-		if _, err := v.cast(vote, true); err != nil {
+		if vote.Type == alpenglow.VoteTypeNotarize || vote.Type == alpenglow.VoteTypeSkip {
+			// Provenance is not a tally, but it still represents a vote this
+			// configured authorized voter could have signed in the slot's epoch.
+			// Do not let an unrelated/corrupt history seed local safety state.
+			message, _, err := v.sign(vote, false)
+			if err != nil {
+				if errors.Is(err, errVoterNotEligible) {
+					return nil
+				}
+				return err
+			}
+			if err := v.engine.restoreLocalFirstVoteProvenance(vote, message.Rank); err != nil {
+				return err
+			}
+		}
+		guard, guarded := v.voteGuard(vote)
+		if vote.Type == alpenglow.VoteTypeFinalize && !guarded {
+			continue
+		}
+		if guarded && !v.executedBlocks[guard] {
+			continue
+		}
+		if _, err := v.castTarget(vote, true, guard, guarded); err != nil {
 			if errors.Is(err, errVoterNotEligible) {
 				return nil
 			}
@@ -615,7 +818,36 @@ func (v *alpenglowVoter) restoreVotesForEpoch(epoch uint64) error {
 	return nil
 }
 
+// restoreVotesForBlock re-publishes durable block-target votes only after this
+// process has successfully replayed the exact block. This closes the
+// persist-before-admission crash window without trusting process-local invalid
+// block state across a restart.
+func (v *alpenglowVoter) restoreVotesForBlock(block alpenglow.BlockID) (bool, error) {
+	if block.Slot <= v.admissionFloor() {
+		return false, nil
+	}
+	restoredAny := false
+	for _, vote := range v.history.VotesCast[block.Slot] {
+		guard, guarded := v.voteGuard(vote)
+		if !guarded || guard != block {
+			continue
+		}
+		restored, err := v.castTarget(vote, true, guard, true)
+		if err != nil {
+			return restoredAny, err
+		}
+		restoredAny = restoredAny || restored
+	}
+	if v.history.VotedAt(block.Slot) {
+		delete(v.pending, block.Slot)
+	}
+	return restoredAny, nil
+}
+
 func (v *alpenglowVoter) setTimeouts(slot uint64) {
+	if slot <= v.admissionFloor() {
+		return
+	}
 	if v.timeoutsSet[slot] {
 		return
 	}
@@ -683,11 +915,25 @@ func (v *alpenglowVoter) handleStandstill() error {
 	if len(v.refreshQueue) == 0 {
 		return nil
 	}
-	for sent := 0; sent < votorRefreshPerSecond; sent++ {
+	inspectLimit := len(v.refreshQueue)
+	for sent, inspected := 0, 0; sent < votorRefreshPerSecond && inspected < inspectLimit && len(v.refreshQueue) > 0; inspected++ {
 		message := v.refreshQueue[v.refreshCursor]
-		if err := v.broadcaster.Enqueue(message); err != nil {
+		queued, err := v.enqueueRefreshMessage(message)
+		if err != nil {
 			return err
 		}
+		if !queued {
+			v.refreshQueue = append(v.refreshQueue[:v.refreshCursor], v.refreshQueue[v.refreshCursor+1:]...)
+			if len(v.refreshQueue) == 0 {
+				v.refreshCursor = 0
+				break
+			}
+			if v.refreshCursor >= len(v.refreshQueue) {
+				v.refreshCursor = 0
+			}
+			continue
+		}
+		sent++
 		v.refreshCursor = (v.refreshCursor + 1) % len(v.refreshQueue)
 		if v.refreshCursor == 0 {
 			break
@@ -698,22 +944,64 @@ func (v *alpenglowVoter) handleStandstill() error {
 
 func (v *alpenglowVoter) buildRefreshQueue() []alpenglow.Message {
 	queue := make([]alpenglow.Message, 0)
+	floor := v.admissionFloor()
 	for _, vote := range v.history.VotesAfter(v.highestFinal) {
+		if vote.Slot <= floor {
+			continue
+		}
+		if guard, guarded := v.voteGuard(vote); guarded &&
+			(!v.executedBlocks[guard] || v.engine.ensureChain().IsObjectivelyInvalidBlock(guard)) {
+			continue
+		}
 		message, _, err := v.sign(vote, true)
 		if err == nil {
 			queue = append(queue, alpenglow.Message{Vote: &message})
 		}
 	}
 	for _, certificate := range v.engine.ensurePool().CertificatesAtOrAfter(v.highestFinal) {
+		if block, guarded := certificate.Block(); guarded && v.engine.ensureChain().IsObjectivelyInvalidBlock(block) {
+			continue
+		}
 		cert := certificate
 		queue = append(queue, alpenglow.Message{Certificate: &cert})
 	}
 	return queue
 }
 
+func (v *alpenglowVoter) enqueueRefreshMessage(message alpenglow.Message) (bool, error) {
+	if message.Vote != nil && message.Vote.Vote.Slot <= v.admissionFloor() {
+		return false, nil
+	}
+	guard, guarded, needsExecution := v.refreshMessageGuard(message)
+	if !guarded {
+		return true, v.broadcaster.Enqueue(message)
+	}
+	v.engine.invalidActionMu.RLock()
+	defer v.engine.invalidActionMu.RUnlock()
+	if v.engine.ensureChain().IsObjectivelyInvalidBlock(guard) || needsExecution && !v.executedBlocks[guard] {
+		return false, nil
+	}
+	return true, v.broadcaster.Enqueue(message)
+}
+
+func (v *alpenglowVoter) refreshMessageGuard(message alpenglow.Message) (alpenglow.BlockID, bool, bool) {
+	if message.Vote != nil {
+		block, guarded := v.voteGuard(message.Vote.Vote)
+		return block, guarded, guarded
+	}
+	if message.Certificate != nil {
+		block, guarded := message.Certificate.Block()
+		return block, guarded, false
+	}
+	return alpenglow.BlockID{}, false, false
+}
+
 func (v *alpenglowVoter) broadcastCertificates(certificates []alpenglow.Certificate) error {
 	for _, certificate := range certificates {
 		if !v.isIdentityStaked(certificate.Slot) {
+			continue
+		}
+		if block, guarded := certificate.Block(); guarded && v.engine.ensureChain().IsObjectivelyInvalidBlock(block) {
 			continue
 		}
 		cert := certificate
@@ -739,7 +1027,7 @@ func (v *alpenglowVoter) isIdentityStaked(slot uint64) bool {
 
 func (v *alpenglowVoter) saveHistory() error {
 	if err := alpenglow.SaveVoteHistory(v.historyDir, v.history, v.identity); err != nil {
-		return fmt.Errorf("persist vote history before broadcast: %w", err)
+		return fmt.Errorf("persist vote history before consensus publication: %w", err)
 	}
 	return nil
 }

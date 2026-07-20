@@ -759,7 +759,11 @@ func CalculateNumRewardPartitions(numStakingRewards uint64) uint64 {
 	slotsInEpoch := uint64(432000)
 	unclamped := (numEligible + (target - 1)) / target
 	cap := slotsInEpoch / 10
-	numRewardPartitions := min(unclamped, cap)
+	// Agave always schedules at least one distribution block, including when
+	// there are no eligible stake rewards. The empty partition is what advances
+	// EpochRewards from active to inactive on the next block; returning zero here
+	// would persist an active sysvar that no distribution slot can ever finish.
+	numRewardPartitions := max(uint64(1), min(unclamped, cap))
 
 	return numRewardPartitions
 }
