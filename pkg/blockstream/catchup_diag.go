@@ -151,7 +151,7 @@ func (bs *BlockSource) collectStallDiagnostics() StallDiagnostics {
 	// RPC health snapshot
 	diag.ActiveRpcIdx = bs.activeRpcIdx.Load()
 	if int(diag.ActiveRpcIdx) < len(bs.rpcClients) {
-		diag.ActiveRpcURL = bs.rpcClients[diag.ActiveRpcIdx].Endpoint()
+		diag.ActiveRpcURL = bs.rpcClients[diag.ActiveRpcIdx].EndpointForDisplay()
 	}
 	diag.FailoverCount = bs.failoverCount.Load()
 	diag.LastFailoverTime = time.Unix(bs.lastFailoverTime.Load(), 0)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/config"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/rpc"
 	"github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/snapshot"
@@ -675,9 +676,9 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", err)
+		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
-	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, rpcclient.SanitizeEndpointForDisplay(preferredRPC))
 
 	// Step 2: Fetch cluster nodes
 	mlog.Log.Infof("Discovering RPC nodes from cluster...")
@@ -797,10 +798,10 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
 	if err != nil {
-		return nil, fmt.Errorf("error getting reference slot: %w", err)
+		return nil, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
 	if snapCfg.Verbose {
-		mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+		mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, rpcclient.SanitizeEndpointForDisplay(preferredRPC))
 	}
 
 	// Step 2: Fetch cluster nodes
@@ -991,9 +992,9 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
 	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", err)
+		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
-	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, preferredRPC)
+	mlog.Log.Infof("Reference slot: %d (from %s)", referenceSlot, rpcclient.SanitizeEndpointForDisplay(preferredRPC))
 
 	// Step 2: Fetch cluster nodes
 	mlog.Log.Infof("Discovering RPC nodes from cluster...")

@@ -2,9 +2,11 @@ package statsd
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/internal/mcpwire"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -110,6 +112,8 @@ var (
 	SlotReplayDurationMs                        = Metric{"slot_replay_duration_ms"}
 	TxsPerBlock                                 = Metric{"txs_per_block"}
 	SnapshotTarBytesRead                        = Metric{"snapshot_tar_bytes_read"}
+	SnapshotBootstrapActive                     = Metric{"snapshot_bootstrap_active"}
+	SnapshotBootstrapStartedAt                  = Metric{"snapshot_bootstrap_started_timestamp_seconds"}
 	SlotReplays                                 = Metric{"slot_replays"}
 	BlockProductionLeaderSlots                  = Metric{"block_production_leader_slots_total"}
 	BlockProductionLeaderSlotTerminals          = Metric{"block_production_leader_slot_terminals_total"}
@@ -252,6 +256,8 @@ var MetricToType = map[Metric]metricType{
 	TestCount: CountT,
 
 	SnapshotWorkerPoolUtilization: GaugeT,
+	SnapshotBootstrapActive:       GaugeT,
+	SnapshotBootstrapStartedAt:    GaugeT,
 	TasksSetIfSlotHigherQueueSize: GaugeT,
 	Epoch:                         GaugeT,
 	Slot:                          GaugeT,
@@ -358,6 +364,8 @@ var MetricToLabels = map[Metric][]string{
 	TurbineReplayAdmission:                      {},
 
 	SnapshotWorkerPoolUtilization: {"task"},
+	SnapshotBootstrapActive:       {},
+	SnapshotBootstrapStartedAt:    {},
 	TasksSetIfSlotHigherQueueSize: {},
 	Epoch:                         {},
 	Slot:                          {},
@@ -376,10 +384,9 @@ var turbinePipelineDurationBuckets = []float64{
 	3.200, 6.400, 12.800, 30.000, 60.000,
 }
 
-// MetricToBuckets gives duration histograms explicit seconds-based buckets.
-// The generic Timing metrics predate unit-specific naming and retain the
-// Prometheus defaults for compatibility.
+// MetricToBuckets gives duration histograms unit-specific buckets.
 var MetricToBuckets = map[Metric][]float64{
+	SlotReplayDurationMs:                        {1, 2, 5, 10, 20, 50, 100, 200, 400, 800, 1600, 3200, 6400, 10000},
 	BlockProductionParentReadyAge:               blockProductionDurationBuckets,
 	BlockProductionStartCutoffLate:              blockProductionDurationBuckets,
 	BlockProductionStartDecisionTickDeliveryLag: blockProductionDurationBuckets,
@@ -419,24 +426,52 @@ type Prometheusmetrics struct {
 var metricsCollection *Prometheusmetrics
 var metricsServerStarted bool
 
+const metricsListenAddr = ":9090"
+
+const (
+	mithrilEndpointHeader  = mcpwire.EndpointHeader
+	mithrilMetricsEndpoint = mcpwire.MetricsEndpoint
+)
+
 func init() {
 	initializeStatsdMetrics()
 }
 
+func newMetricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	metrics := promhttp.Handler()
+	mux.Handle("/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(mithrilEndpointHeader, mithrilMetricsEndpoint)
+		metrics.ServeHTTP(w, r)
+	}))
+	return mux
+}
+
 // StartMetricsServer starts the Prometheus metrics HTTP server.
-// Call this after printing the banner to avoid error messages appearing before it.
-func StartMetricsServer() {
+// It binds before returning so callers can report a port collision without
+// mistaking another process on port 9090 for this node's metrics endpoint.
+func StartMetricsServer() error {
 	if metricsServerStarted {
-		return
+		return nil
+	}
+	if err := startMetricsServer(metricsListenAddr); err != nil {
+		return err
 	}
 	metricsServerStarted = true
-	http.Handle("/metrics", promhttp.Handler())
+	return nil
+}
+
+func startMetricsServer(addr string) error {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
 	go func() {
-		addr := ":9090"
-		if err := http.ListenAndServe(addr, nil); err != nil {
+		if err := http.Serve(listener, newMetricsHandler()); err != nil {
 			mlog.Log.Errorf("Prometheus metrics server failed: %v", err)
 		}
 	}()
+	return nil
 }
 
 func initializeStatsdMetrics() Prometheusmetrics {
@@ -490,6 +525,15 @@ func Gauge(m Metric, value float64, labels []string) error {
 	}
 	metricsCollection.gauges[m].WithLabelValues(labels...).Set(value)
 	return nil
+}
+
+// BeginSnapshotBootstrap exposes the node-owned bootstrap lifetime. The
+// returned function clears only the active flag; the timestamp remains as the
+// most recent start for post-run evidence.
+func BeginSnapshotBootstrap() func() {
+	_ = Gauge(SnapshotBootstrapStartedAt, float64(time.Now().Unix()), nil)
+	_ = Gauge(SnapshotBootstrapActive, 1, nil)
+	return func() { _ = Gauge(SnapshotBootstrapActive, 0, nil) }
 }
 
 // Create timing function for readability, but under the hood its implemented via distribution
