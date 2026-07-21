@@ -1,6 +1,9 @@
 package statsd
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -9,6 +12,45 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestMetricsHandlerExposesOnlyMetrics(t *testing.T) {
+	previousDefault := http.DefaultServeMux
+	http.DefaultServeMux = http.NewServeMux()
+	http.DefaultServeMux.HandleFunc("/debug/pprof/", func(http.ResponseWriter, *http.Request) {})
+	http.DefaultServeMux.HandleFunc("/setcpuprofilerate", func(http.ResponseWriter, *http.Request) {})
+	t.Cleanup(func() { http.DefaultServeMux = previousDefault })
+
+	handler := newMetricsHandler()
+
+	metrics := httptest.NewRecorder()
+	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", metrics.Code)
+	}
+	if got := metrics.Header().Get(mithrilEndpointHeader); got != mithrilMetricsEndpoint {
+		t.Fatalf("GET /metrics identity = %q, want %q", got, mithrilMetricsEndpoint)
+	}
+
+	for _, path := range []string{"/debug/pprof/", "/setcpuprofilerate"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404", path, response.Code)
+		}
+	}
+}
+
+func TestMetricsServerRejectsOccupiedAddress(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve address: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := startMetricsServer(listener.Addr().String()); err == nil {
+		t.Fatal("startMetricsServer() error = nil, want occupied-address error")
+	}
+}
 
 func TestInitializeStatsdMetrics(t *testing.T) {
 	//metricsCollection := InitializeStatsdMetrics()
@@ -84,6 +126,31 @@ func TestGaugeWithoutLabelValues(t *testing.T) {
 	m := &dto.Metric{}
 	metric.Write(m)
 	assert.Equal(t, m.GetGauge().GetValue(), val, "Gauge value should be 20")
+}
+
+func TestBeginSnapshotBootstrap(t *testing.T) {
+	before := time.Now().Unix()
+	finish := BeginSnapshotBootstrap()
+	after := time.Now().Unix()
+	t.Cleanup(finish)
+
+	readGauge := func(metric Metric) float64 {
+		m := &dto.Metric{}
+		if err := metricsCollection.gauges[metric].WithLabelValues().Write(m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetGauge().GetValue()
+	}
+	if got := readGauge(SnapshotBootstrapActive); got != 1 {
+		t.Fatalf("bootstrap active = %v, want 1", got)
+	}
+	if got := int64(readGauge(SnapshotBootstrapStartedAt)); got < before || got > after {
+		t.Fatalf("bootstrap start = %d, want [%d,%d]", got, before, after)
+	}
+	finish()
+	if got := readGauge(SnapshotBootstrapActive); got != 0 {
+		t.Fatalf("bootstrap active after finish = %v, want 0", got)
+	}
 }
 
 func TestTimingWithLabelValues(t *testing.T) {
@@ -237,6 +304,30 @@ func TestBlockProductionMetricLabelsStayBounded(t *testing.T) {
 	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickDeliveryLag])
 	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickWork])
 	assert.Equal(t, []string{"result"}, MetricToLabels[BlockProductionStartAttempt])
+}
+
+func TestSlotReplayDurationUsesMillisecondBuckets(t *testing.T) {
+	histogramVec := metricsCollection.histograms[SlotReplayDurationMs]
+	metric, err := histogramVec.GetMetricWithLabelValues()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := &dto.Metric{}
+	if err := metric.(prometheus.Metric).Write(encoded); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[float64]bool{50: false, 400: false, 800: false, 10000: false}
+	for _, bucket := range encoded.GetHistogram().GetBucket() {
+		if _, ok := want[bucket.GetUpperBound()]; ok {
+			want[bucket.GetUpperBound()] = true
+		}
+	}
+	for upperBound, found := range want {
+		if !found {
+			t.Errorf("slot replay histogram is missing %gms bucket", upperBound)
+		}
+	}
 }
 
 func TestBlockReplayMetrics(t *testing.T) {

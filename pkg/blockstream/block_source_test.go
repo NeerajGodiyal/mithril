@@ -1,6 +1,7 @@
 package blockstream
 
 import (
+	"errors"
 	"math"
 	"net"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
 	"github.com/gagliardetto/solana-go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -196,6 +198,35 @@ func TestInjectLocalBlockReplacesProvisionalSkip(t *testing.T) {
 
 	close(bs.resultQueue)
 	<-emitterDone
+}
+
+func TestRPCDiagnosticsSanitizeEndpointAndErrors(t *testing.T) {
+	const primary = "https://primary-user:primary-password@primary.example.com:8899/private?api-key=PRIMARY_SECRET"
+	const backup = "https://backup-user:backup-password@backup.example.com:8899/tenant/BACKUP_SECRET"
+	bs := NewBlockSource(&BlockSourceOpts{
+		RpcClient:          rpcclient.NewRpcClient(primary),
+		BackupRpcEndpoints: []string{backup},
+		StartSlot:          42,
+		EndSlot:            43,
+	})
+	bs.activeRpcIdx.Store(1)
+	bs.trackSlotError(42, errors.New("fetch failed via "+primary+" token=ERROR_SECRET"), 0, 7)
+
+	diag := bs.collectStallDiagnostics()
+	if got, want := diag.ActiveRpcURL, "https://backup.example.com:8899"; got != want {
+		t.Fatalf("active RPC diagnostic = %q, want %q", got, want)
+	}
+	if diag.WaitingSlotErrors == nil {
+		t.Fatal("waiting-slot error diagnostic is missing")
+	}
+	for _, secret := range []string{
+		"primary-user", "primary-password", "private", "PRIMARY_SECRET",
+		"backup-user", "backup-password", "BACKUP_SECRET", "ERROR_SECRET",
+	} {
+		if strings.Contains(diag.ActiveRpcURL, secret) || strings.Contains(diag.WaitingSlotErrors.lastError, secret) {
+			t.Fatalf("secret %q leaked in diagnostics: endpoint=%q error=%q", secret, diag.ActiveRpcURL, diag.WaitingSlotErrors.lastError)
+		}
+	}
 }
 
 func TestLightbringerBlockConnectsLocked(t *testing.T) {
