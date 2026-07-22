@@ -1,17 +1,15 @@
 # Mithril
 
-Mithril is a Solana full node client written in Golang with the goal of serving as a "verifying full node" with lower hardware requirements than that of Solana validators and RPC nodes. This project is being developed upon the foundations of [Radiance](https://github.com/firedancer-io/radiance), which was built by Richard Patel (@ripatel) with contributions from @leoluk.
+Mithril is a Solana validator client (Alpenglow), and Solana full node client (Alpenglow & pre-Alpenglow) written in Golang. 
 
-This project is under active development. We are completing an audit with [Runtime Verification](https://runtimeverification.com/) and expect a more polished, feature-rich release midway through Q1 2026.
+Mithril was originally built for the purpose of serving as a "verifying full node" with lower hardware requirements than that of Solana validators and RPC nodes. Now that Mithril has begun its journey as a validator implementation, we still aim for Mithril to be deployable on accessible server platforms. This project is being developed upon the foundations of [Radiance](https://github.com/firedancer-io/radiance), which was built by Richard Patel (@ripatel) with contributions from @leoluk.
 
 While Mithril is already functional and runs reliably for many use cases, it is not yet considered production-ready. Users should expect occasional bugs, incomplete features, and ongoing changes as development progresses. Please use with appropriate caution and follow the **alpha** branch for the latest stable updates.
 
 ### Release Channels
 
-- **alpha** (recommended): Latest tagged alpha release. Tested for mainnet and suitable for public use.
-- **dev** (cutting-edge): New features land here first and may be less stable.
-
-Use **alpha** for reliability; use **dev** if you want the newest changes and can tolerate breakage.
+- **alpenglow-dev**: Alpenglow validator and full node
+- **dev**: pre-Alpenglow full node
 
 ---
 
@@ -20,6 +18,11 @@ Use **alpha** for reliability; use **dev** if you want the newest changes and ca
 The `run` command starts Mithril as a live full node - it bootstraps from a Solana snapshot and continuously verifies new blocks as they are produced.
 
 This branch supports two protocol paths. `network.cluster = "alpenglow"` (the default) uses native turbine, certificate-driven fork choice, speculative replay, and rooted-durable storage. `mainnet-beta`, `testnet`, and `devnet` retain Mithril's established verifying-only RPC replay and per-slot AccountsDB persistence. Validator/block-production mode is deliberately available only on Alpenglow; the classic clusters remain verifying nodes.
+
+Mithril in its `alpenglow-dev` branch can be run via a command of the following form:
+```
+./mithril run   --bootstrap new-snapshot   --cluster alpenglow   --accounts-path /mnt/mithril-ag-accounts   --ledger-path /mnt/mithril-ag-ledger   --block-source turbine   --turbine-bind-addr 0.0.0.0:8025   --turbine-gossip-entrypoint 74.50.90.234:9000   --turbine-gossip-bind-addr 0.0.0.0:8020   --turbine-advertised-ip X.Y.X.Y  --consensus-mode validator   --alpenglow-observer-bind-addr 0.0.0.0:8010   --tpu-quic-bind-addr 0.0.0.0:8011   --validator-advertised-ip X.Y.X.Y   --identity-keypair ./validator-keypair.json   --vote-account-keypair ./vote-account-keypair.json   --rpc https://rpc.ag.validator1.net
+```
 
 ### Nix (NixOS / nix-darwin / Home Manager)
 
