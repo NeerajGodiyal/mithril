@@ -2,6 +2,7 @@ package alpenglow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 )
@@ -110,28 +111,69 @@ func TestParentReadyGenesisAllowedAtRoot(t *testing.T) {
 
 func TestParentReadyInvalidatesLowestSiblingAndSelectsSurvivor(t *testing.T) {
 	tracker := NewParentReadyTracker(BlockID{Slot: 0, Hash: parentReadyHash(9)})
+	now := time.Unix(1_700_000_000, 0)
+	tracker.now = func() time.Time { return now }
 	low := BlockID{Slot: 3, Hash: parentReadyHash(1)}
 	high := BlockID{Slot: 3, Hash: parentReadyHash(2)}
-	for _, block := range []BlockID{low, high} {
-		if _, err := tracker.AddNotarFallbackOrStronger(block); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := tracker.AddNotarFallbackOrStronger(low); err != nil {
+		t.Fatal(err)
 	}
-	if got := tracker.BlockProductionParent(4); got.Kind != BlockProductionParentReady || got.Parent != low {
-		t.Fatalf("pre-invalidation parent = %+v, want %v", got, low)
+	initialReadyAt := now
+	now = now.Add(50 * time.Millisecond)
+	if _, err := tracker.AddNotarFallbackOrStronger(high); err != nil {
+		t.Fatal(err)
 	}
+	before := tracker.BlockProductionParent(4)
+	if before.Kind != BlockProductionParentReady || before.Parent != low {
+		t.Fatalf("pre-invalidation parent = %+v, want %v", before, low)
+	}
+	if !before.ReadyAt.Equal(initialReadyAt) {
+		t.Fatalf("nonpreferred sibling moved timer to %v, want %v", before.ReadyAt, initialReadyAt)
+	}
+	now = now.Add(50 * time.Millisecond)
 	events := tracker.InvalidateBlock(low)
 	if len(events) != 1 || events[0].Kind != ConsensusEventParentReady || events[0].Slot != 4 || events[0].Block != high {
 		t.Fatalf("corrected parent-ready events = %+v, want surviving sibling %v", events, high)
 	}
-	if got := tracker.BlockProductionParent(4); got.Kind != BlockProductionParentReady || got.Parent != high {
-		t.Fatalf("post-invalidation parent = %+v, want %v", got, high)
+	after := tracker.BlockProductionParent(4)
+	if after.Kind != BlockProductionParentReady || after.Parent != high {
+		t.Fatalf("post-invalidation parent = %+v, want %v", after, high)
+	}
+	if !after.ReadyAt.Equal(before.ReadyAt) {
+		t.Fatalf("corrected parent moved timer to %v, want original %v", after.ReadyAt, before.ReadyAt)
 	}
 	if tracker.HasNotarFallbackOrStronger(low) {
 		t.Fatal("invalid sibling remained active as notar-fallback-or-stronger")
 	}
 	if tracker.Restore(4, low) {
 		t.Fatal("restore reactivated an invalid parent")
+	}
+}
+
+func TestParentReadyInvalidatingNonpreferredSiblingKeepsTimer(t *testing.T) {
+	tracker := NewParentReadyTracker(BlockID{Slot: 0, Hash: parentReadyHash(9)})
+	now := time.Unix(1_700_000_000, 0)
+	tracker.now = func() time.Time { return now }
+	low := BlockID{Slot: 3, Hash: parentReadyHash(1)}
+	high := BlockID{Slot: 3, Hash: parentReadyHash(2)}
+	if _, err := tracker.AddNotarFallbackOrStronger(low); err != nil {
+		t.Fatal(err)
+	}
+	readyAt := tracker.BlockProductionParent(4).ReadyAt
+	now = now.Add(50 * time.Millisecond)
+	if _, err := tracker.AddNotarFallbackOrStronger(high); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(50 * time.Millisecond)
+	if events := tracker.InvalidateBlock(high); len(events) != 0 {
+		t.Fatalf("nonpreferred invalidation emitted corrected ParentReady: %+v", events)
+	}
+	parent := tracker.BlockProductionParent(4)
+	if parent.Kind != BlockProductionParentReady || parent.Parent != low {
+		t.Fatalf("parent after nonpreferred invalidation = %+v, want %v", parent, low)
+	}
+	if !parent.ReadyAt.Equal(readyAt) {
+		t.Fatalf("nonpreferred invalidation moved timer to %v, want %v", parent.ReadyAt, readyAt)
 	}
 }
 

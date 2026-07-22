@@ -31,9 +31,9 @@ const (
 type BlockProductionParent struct {
 	Kind   BlockProductionParentKind
 	Parent BlockID
-	// ReadyAt is the local monotonic instant at which Votor most recently made
-	// this window producible. Agave starts every per-slot block deadline from
-	// the ParentReady event, not from a separately extrapolated wall slot.
+	// ReadyAt is the local monotonic instant at which Votor first made this
+	// window producible. Later candidates and corrected parents for the same
+	// window must not extend its production deadline.
 	ReadyAt time.Time
 }
 
@@ -50,6 +50,7 @@ type parentReadyStatus struct {
 type ParentReadyTracker struct {
 	root                   uint64
 	highestWithParentReady uint64
+	now                    func() time.Time
 	// liveUpdates makes persisted restoration bootstrap-only. Restore replaces
 	// the tracker graph, so doing it after a live certificate, skip, or
 	// invalidation would orphan retained certificate dedupe state.
@@ -62,6 +63,7 @@ type ParentReadyTracker struct {
 
 func NewParentReadyTracker(root BlockID) *ParentReadyTracker {
 	t := &ParentReadyTracker{
+		now:                  time.Now,
 		slots:                make(map[uint64]*parentReadyStatus),
 		invalidBlocks:        make(map[BlockID]struct{}),
 		certifiedBlocks:      make(map[BlockID]struct{}),
@@ -69,6 +71,13 @@ func NewParentReadyTracker(root BlockID) *ParentReadyTracker {
 	}
 	t.Restore(root.Slot+1, root)
 	return t
+}
+
+func (t *ParentReadyTracker) clockNow() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 // Restore installs a restart/checkpoint parent-ready boundary. parent must be
@@ -178,7 +187,9 @@ func (t *ParentReadyTracker) addNotarFallbackOrStronger(block BlockID) ([]Consen
 		if !containsBlock(status.parentsReady, block) {
 			status.parentsReady = append(status.parentsReady, block)
 			if isLeaderWindowStart(slot) {
-				status.readyAt = time.Now()
+				if status.readyAt.IsZero() {
+					status.readyAt = t.clockNow()
+				}
 				events = append(events, ConsensusEvent{Kind: ConsensusEventParentReady, Slot: slot, Block: block})
 			}
 			if slot > t.highestWithParentReady {
@@ -203,6 +214,13 @@ func (t *ParentReadyTracker) InvalidateBlock(block BlockID) []ConsensusEvent {
 	if _, exists := t.invalidBlocks[block]; exists {
 		return nil
 	}
+	previousParents := make(map[uint64]BlockID)
+	for slot := range t.slots {
+		parents := t.Parents(slot)
+		if len(parents) != 0 {
+			previousParents[slot] = parents[0]
+		}
+	}
 	t.invalidBlocks[block] = struct{}{}
 
 	var corrected []ConsensusEvent
@@ -212,7 +230,7 @@ func (t *ParentReadyTracker) InvalidateBlock(block BlockID) []ConsensusEvent {
 		status.notarFallbacks, removedNotar = removeBlock(status.notarFallbacks, block)
 		status.parentsReady, removedParent = removeBlock(status.parentsReady, block)
 		affected = affected || removedNotar || removedParent
-		if !removedParent || !isLeaderWindowStart(slot) {
+		if !removedParent || !isLeaderWindowStart(slot) || previousParents[slot] != block {
 			continue
 		}
 		parents := t.Parents(slot)
@@ -273,7 +291,9 @@ func (t *ParentReadyTracker) AddSkip(slot uint64) []ConsensusEvent {
 			}
 			status.parentsReady = append(status.parentsReady, parent)
 			if isLeaderWindowStart(next) {
-				status.readyAt = time.Now()
+				if status.readyAt.IsZero() {
+					status.readyAt = t.clockNow()
+				}
 				events = append(events, ConsensusEvent{Kind: ConsensusEventParentReady, Slot: next, Block: parent})
 			}
 		}

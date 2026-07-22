@@ -114,6 +114,99 @@ func TestTimingWithoutLabelValues(t *testing.T) {
 	assert.Equal(t, uint64(m.GetHistogram().GetSampleSum()), val, "Histogram sample sum should be 30")
 }
 
+func TestDurationRecordsSecondsInCustomBuckets(t *testing.T) {
+	duration := 125 * time.Millisecond
+	histogramVec := metricsCollection.histograms[BlockProductionParentReadyAge]
+	metric, err := histogramVec.GetMetricWithLabelValues("initial")
+	assert.NoError(t, err)
+	mcollector := metric.(prometheus.Metric)
+	before := &dto.Metric{}
+	assert.NoError(t, mcollector.Write(before))
+
+	assert.NoError(t, Duration(BlockProductionParentReadyAge, duration, []string{"initial"}))
+	after := &dto.Metric{}
+	assert.NoError(t, mcollector.Write(after))
+
+	assert.Equal(t, before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
+	assert.InDelta(t, duration.Seconds(), after.GetHistogram().GetSampleSum()-before.GetHistogram().GetSampleSum(), 1e-12)
+	criticalBucketCount := func(metric *dto.Metric) (uint64, bool) {
+		for _, bucket := range metric.GetHistogram().GetBucket() {
+			if bucket.GetUpperBound() == duration.Seconds() {
+				return bucket.GetCumulativeCount(), true
+			}
+		}
+		return 0, false
+	}
+	beforeCount, beforeFound := criticalBucketCount(before)
+	afterCount, afterFound := criticalBucketCount(after)
+	assert.True(t, beforeFound && afterFound, "missing the 125ms leader cutoff bucket")
+	assert.Equal(t, beforeCount+1, afterCount)
+}
+
+func TestDurationRejectsNegativeDurationWithoutObservation(t *testing.T) {
+	histogram := metricsCollection.histograms[BlockProductionParentReadyAge]
+	metric, err := histogram.GetMetricWithLabelValues("initial")
+	assert.NoError(t, err)
+	before := &dto.Metric{}
+	assert.NoError(t, metric.(prometheus.Metric).Write(before))
+
+	err = Duration(BlockProductionParentReadyAge, -time.Millisecond, []string{"initial"})
+	assert.ErrorContains(t, err, "cannot observe negative duration")
+
+	after := &dto.Metric{}
+	assert.NoError(t, metric.(prometheus.Metric).Write(after))
+	assert.Equal(t, before.GetHistogram().GetSampleCount(), after.GetHistogram().GetSampleCount())
+	assert.Equal(t, before.GetHistogram().GetSampleSum(), after.GetHistogram().GetSampleSum())
+}
+
+func TestDurationRejectsMissingWrongAndBadLabelMetrics(t *testing.T) {
+	tests := []struct {
+		name   string
+		metric Metric
+		labels []string
+		want   string
+	}{
+		{
+			name:   "missing metric",
+			metric: Metric{"missing_duration_metric_seconds"},
+			want:   "is not registered",
+		},
+		{
+			name:   "wrong metric type",
+			metric: SlotReplays,
+			want:   "non-histogram type",
+		},
+		{
+			name:   "legacy unit histogram",
+			metric: PreprocessBlock,
+			want:   "is not registered for duration observations",
+		},
+		{
+			name:   "bad label count",
+			metric: BlockProductionStartAttempt,
+			want:   "labels:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Duration(tt.metric, time.Millisecond, tt.labels)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestBlockProductionMetricLabelsStayBounded(t *testing.T) {
+	assert.Equal(t, []string{"outcome", "reason"}, MetricToLabels[BlockProductionLeaderSlots])
+	assert.Equal(t, []string{"outcome", "terminal", "cause"}, MetricToLabels[BlockProductionLeaderSlotTerminals])
+	assert.Equal(t, []string{"activation", "status"}, MetricToLabels[BlockProductionParentReady])
+	assert.Equal(t, []string{"activation"}, MetricToLabels[BlockProductionParentReadyAge])
+	assert.Equal(t, []string{"phase"}, MetricToLabels[BlockProductionStartCutoffLate])
+	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickDeliveryLag])
+	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickWork])
+	assert.Equal(t, []string{"result"}, MetricToLabels[BlockProductionStartAttempt])
+}
+
 func TestBlockReplayMetrics(t *testing.T) {
 
 	// Instantiate mithrilmetrics.BlockReplay

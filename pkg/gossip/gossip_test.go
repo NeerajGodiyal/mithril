@@ -245,6 +245,60 @@ func TestClientLearnsAlpenglowEndpointFromSignedContact(t *testing.T) {
 	}
 }
 
+func TestClientLearnsServiceEndpointsFromEntrypointContactWithoutPullPeer(t *testing.T) {
+	_, localIdentity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey local: %v", err)
+	}
+	entrypoint := &net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9000}
+	client, err := NewClient(Config{
+		Entrypoint:   entrypoint.String(),
+		BindAddr:     "0.0.0.0:0",
+		ShredVersion: 4321,
+		Identity:     localIdentity,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, entrypointIdentity, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey entrypoint: %v", err)
+	}
+	entrypointPubkey := Pubkey(entrypointIdentity.Public().(ed25519.PublicKey))
+	tvu := &net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9001}
+	repair := &net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9008}
+	alpenglow := &net.UDPAddr{IP: net.ParseIP("203.0.113.20"), Port: 9002}
+	contact, err := NewContactInfo(entrypointPubkey, 4321, entrypoint, tvu)
+	if err != nil {
+		t.Fatalf("NewContactInfo: %v", err)
+	}
+	if err := contact.SetSocket(socketTagServeRepair, repair); err != nil {
+		t.Fatalf("SetSocket serve repair: %v", err)
+	}
+	if err := contact.SetAlpenglowAddr(alpenglow); err != nil {
+		t.Fatalf("SetAlpenglowAddr: %v", err)
+	}
+
+	client.handleContactRecord(contactRecordFromInfo(t, contact, entrypointIdentity), 4321)
+
+	if got := len(client.currentPeers()); got != 0 {
+		t.Fatalf("entrypoint entered pull-peer table: %d", got)
+	}
+	gotTVU, ok := client.LookupTVU(solana.PublicKey(entrypointPubkey))
+	if !ok || gotTVU.String() != tvu.String() {
+		t.Fatalf("LookupTVU = %v, %t; want %v", gotTVU, ok, tvu)
+	}
+	gotAlpenglow, ok := client.LookupAlpenglow(solana.PublicKey(entrypointPubkey))
+	if !ok || gotAlpenglow.String() != alpenglow.String() {
+		t.Fatalf("LookupAlpenglow = %v, %t; want %v", gotAlpenglow, ok, alpenglow)
+	}
+	repairPeers := client.RepairPeers()
+	if len(repairPeers) != 1 || repairPeers[0].Pubkey != entrypointPubkey || repairPeers[0].Addr.String() != repair.String() {
+		t.Fatalf("RepairPeers = %+v; want %s at %s", repairPeers, solana.PublicKey(entrypointPubkey), repair)
+	}
+}
+
 func TestClientIgnoresEchoedAndStaleOwnContactRecords(t *testing.T) {
 	_, identity, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

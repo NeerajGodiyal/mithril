@@ -82,7 +82,7 @@ func NewTurbineBroadcaster(cfg TurbineBroadcasterConfig) (*TurbineBroadcaster, e
 		leaderForSlot: cfg.LeaderForSlot,
 		leaderSlots:   leaderSlots,
 		useChaCha8:    cfg.UseChaCha8,
-		dedupAddrs:    true,
+		dedupAddrs:    cfg.DedupAddrs,
 	}, nil
 }
 

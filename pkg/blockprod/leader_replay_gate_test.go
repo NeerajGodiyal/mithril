@@ -12,6 +12,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type callbackBroadcaster struct {
+	onBroadcast func()
+	count       int
+}
+
+func (b *callbackBroadcaster) Broadcast(_ [][]byte) error {
+	b.count++
+	if b.onBroadcast != nil {
+		b.onBroadcast()
+	}
+	return nil
+}
+
 func TestLeaderWindowRequiresVerifiedParentReady(t *testing.T) {
 	const leaderSlot = uint64(212)
 	global.SetReplayFrontier(leaderSlot - 1)
@@ -98,6 +111,714 @@ func TestLeaderWindowUsesParentReadyDeadlineInsteadOfLiveSlot(t *testing.T) {
 	loop.tick()
 	assert.NotNil(t, loop.activeBank)
 	assert.Equal(t, leaderSlot, loop.activeSlot)
+}
+
+func TestLeaderWindowStartsFromParentReadyBeforeLiveClockBoundary(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const nextStart = uint64(212)
+	const currentStart = nextStart - alpenglow.LeaderWindowSlots
+	selected := alpenglow.BlockID{Slot: currentStart, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt
+	parentReady := false
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  NewController(),
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: &captureBroadcaster{},
+		CurrentSlot: func() uint64 { return currentStart },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			switch {
+			case slot >= currentStart && slot < nextStart:
+				return other, true
+			case slot >= nextStart && slot < nextStart+alpenglow.LeaderWindowSlots:
+				return self, true
+			default:
+				return solana.PublicKey{}, false
+			}
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot != nextStart || !parentReady {
+				return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+			}
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+
+	loop.tick()
+	require.Nil(t, loop.activeBank)
+	require.False(t, loop.productionWindow.active)
+	require.NotContains(t, loop.pendingFailures, nextStart)
+
+	// Verified ParentReady is authoritative throughout the immediately preceding
+	// window, not only when its coarse live-slot estimate reaches the final slot.
+	parentReady = true
+	now = readyAt.Add(5 * time.Millisecond)
+	loop.tick()
+
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, nextStart, loop.activeSlot)
+	require.True(t, loop.productionWindow.active)
+	require.Equal(t, nextStart, loop.productionWindow.startSlot)
+	require.Equal(t, nextStart, loop.productionWindow.nextSlot)
+	require.Equal(t, readyAt, loop.productionWindow.readyAt)
+}
+
+func TestLeaderWindowEarlyParentReadyWaitsForReplay(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const nextStart = uint64(212)
+	selected := alpenglow.BlockID{Slot: nextStart - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot - 1)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  NewController(),
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: &captureBroadcaster{},
+		CurrentSlot: func() uint64 { return nextStart - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == nextStart-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= nextStart && slot < nextStart+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot != nextStart {
+				return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+			}
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+
+	loop.tick()
+	require.Nil(t, loop.activeBank)
+	require.True(t, loop.productionWindow.active)
+	require.Contains(t, loop.pendingFailures, nextStart)
+	require.Equal(t, leaderReasonReplayNotReady, loop.pendingFailures[nextStart].reason)
+
+	global.SetReplayFrontier(selected.Slot)
+	now = readyAt.Add(10 * time.Millisecond)
+	loop.tick()
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, nextStart, loop.activeSlot)
+	require.NotContains(t, loop.pendingFailures, nextStart)
+}
+
+func TestLeaderWindowRefreshesCorrectedParentReadyWhileWaitingForReplay(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const nextStart = uint64(212)
+	parentA := alpenglow.BlockID{Slot: nextStart - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	parentB := alpenglow.BlockID{Slot: parentA.Slot, Hash: solana.Hash{6}}
+	readyAtA := time.Unix(1_700_000_000, 0)
+	readyAtB := readyAtA.Add(100 * time.Millisecond)
+	now := readyAtA
+	parent := alpenglow.BlockProductionParent{
+		Kind:    alpenglow.BlockProductionParentReady,
+		Parent:  parentA,
+		ReadyAt: readyAtA,
+	}
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(parentA.Slot - 1)
+	global.SetAlpenglowBlockID(parentA.Slot, parentA.Hash)
+	global.SetAlpenglowChainedMerkleRoot(parentA.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  NewController(),
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: &captureBroadcaster{},
+		CurrentSlot: func() uint64 { return nextStart - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == nextStart-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= nextStart && slot < nextStart+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot != nextStart {
+				return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+			}
+			return parent
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(parent.Parent.Slot, solana.Hash{5})
+		},
+	})
+	defer func() {
+		loop.mu.Lock()
+		defer loop.mu.Unlock()
+		loop.abortActiveSlotLocked()
+	}()
+
+	loop.tick()
+	require.Nil(t, loop.activeBank)
+	require.True(t, loop.productionWindow.active)
+	require.Equal(t, parentA, loop.productionWindow.parent)
+	require.Equal(t, readyAtA, loop.productionWindow.readyAt)
+	require.Equal(t, leaderReasonReplayNotReady, loop.pendingFailures[nextStart].reason)
+
+	// Invalidating A selects B, but the window keeps its original one-shot timer.
+	// Even a provider that reports a newer timestamp for B must not extend the
+	// protocol budget.
+	parent = alpenglow.BlockProductionParent{
+		Kind:    alpenglow.BlockProductionParentReady,
+		Parent:  parentB,
+		ReadyAt: readyAtB,
+	}
+	global.SetAlpenglowBlockID(parentB.Slot, parentB.Hash)
+	global.SetReplayFrontier(parentB.Slot)
+	now = readyAtA.Add(110 * time.Millisecond)
+	loop.tick()
+
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, nextStart, loop.activeSlot)
+	require.Equal(t, parentB, loop.productionWindow.parent)
+	require.Equal(t, readyAtA, loop.productionWindow.readyAt)
+	require.Equal(t, parentB.Hash, loop.parentCtx.ParentBlockID)
+	require.NotContains(t, loop.pendingFailures, nextStart)
+}
+
+func TestLeaderWindowDoesNotExtendTimerWithoutParentChange(t *testing.T) {
+	const leaderSlot = uint64(212)
+	parent := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt.Add(130 * time.Millisecond)
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  parent,
+				ReadyAt: readyAt.Add(100 * time.Millisecond),
+			}
+		},
+	})
+	loop.productionWindow = leaderProductionWindow{
+		active:    true,
+		startSlot: leaderSlot,
+		endSlot:   leaderSlot + alpenglow.LeaderWindowSlots - 1,
+		nextSlot:  leaderSlot,
+		parent:    parent,
+		readyAt:   readyAt,
+	}
+
+	// A later notification for the same selected parent is not a sad-leader
+	// handover and must not buy the producer another 125ms.
+	target, ok := loop.productionWindowTargetLocked(leaderSlot - 1)
+	require.False(t, ok)
+	require.Zero(t, target)
+	require.False(t, loop.productionWindow.active)
+	for slot := leaderSlot; slot < leaderSlot+alpenglow.LeaderWindowSlots; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "slot %d was not closed with its original expired timer", slot)
+	}
+}
+
+func TestLeaderWindowEarlyParentReadyHonorsExactDeadline(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const nextStart = uint64(212)
+	selected := alpenglow.BlockID{Slot: nextStart - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt.Add(AlpenglowSlotDuration - leaderBlockCompletionReserve)
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Identity:    txfixture.PayerPrivateKey(),
+		CurrentSlot: func() uint64 { return nextStart - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == nextStart-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= nextStart && slot < nextStart+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot != nextStart {
+				return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+			}
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+	})
+
+	loop.tick()
+	require.Nil(t, loop.activeBank)
+	require.False(t, loop.productionWindow.active)
+	for slot := nextStart; slot < nextStart+alpenglow.LeaderWindowSlots; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "slot %d was not closed with its expired window", slot)
+	}
+}
+
+func TestLeaderWindowRechecksCutoffAfterReplayGate(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const leaderSlot = uint64(212)
+	selected := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	cutoff := readyAt.Add(AlpenglowSlotDuration - leaderBlockCompletionReserve)
+	now := cutoff.Add(-time.Nanosecond)
+	parentCalls := 0
+	parentContextCalls := 0
+	broadcaster := &callbackBroadcaster{}
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  NewController(),
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: broadcaster,
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == leaderSlot-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= leaderSlot && slot < leaderSlot+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot != leaderSlot {
+				return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentNotReady}
+			}
+			parentCalls++
+			if parentCalls == 3 {
+				now = cutoff
+			}
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			parentContextCalls++
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+
+	loop.tick()
+	require.Equal(t, cutoff, now)
+	require.Equal(t, 3, parentCalls)
+	require.Zero(t, parentContextCalls, "cutoff must be rechecked before allocating parent context")
+	require.Zero(t, broadcaster.count)
+	require.Nil(t, loop.activeBank)
+	require.Nil(t, loop.controller.WorkingBank())
+	require.False(t, loop.productionWindow.active)
+	for slot := leaderSlot; slot < leaderSlot+alpenglow.LeaderWindowSlots; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "slot %d was not closed with its expired window", slot)
+	}
+}
+
+func TestLeaderWindowRejectsCutoffCrossedDuringLocalSetup(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const leaderSlot = uint64(212)
+	selected := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	cutoff := readyAt.Add(AlpenglowSlotDuration - leaderBlockCompletionReserve)
+	now := cutoff.Add(-time.Nanosecond)
+	parentContextCalls := 0
+	broadcaster := &callbackBroadcaster{}
+	controller := NewController()
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: broadcaster,
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == leaderSlot-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= leaderSlot && slot < leaderSlot+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			parentContextCalls++
+			if parentContextCalls == 2 {
+				now = cutoff
+			}
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+
+	loop.tick()
+	require.Equal(t, cutoff, now)
+	require.Equal(t, 2, parentContextCalls)
+	require.Zero(t, broadcaster.count, "a bank that crossed the cutoff during setup must not broadcast a header")
+	require.Nil(t, loop.activeBank)
+	require.Nil(t, controller.WorkingBank())
+	require.False(t, loop.productionWindow.active)
+	for slot := leaderSlot; slot < leaderSlot+alpenglow.LeaderWindowSlots; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "slot %d was not closed with its expired window", slot)
+	}
+}
+
+func TestLeaderWindowRejectsParentChangeDuringLocalSetup(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const leaderSlot = uint64(212)
+	parentA := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	parentB := alpenglow.BlockID{Slot: parentA.Slot, Hash: solana.Hash{6}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt.Add(10 * time.Millisecond)
+	parent := parentA
+	contextParent := parentA
+	parentContextCalls := 0
+	controller := NewController()
+	broadcaster := &callbackBroadcaster{}
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(parentA.Slot)
+	global.SetAlpenglowBlockID(parentA.Slot, parentA.Hash)
+	global.SetAlpenglowChainedMerkleRoot(parentA.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: broadcaster,
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == leaderSlot-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= leaderSlot && slot < leaderSlot+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  parent,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			parentContextCalls++
+			snapshot := coherentTestParentContext(contextParent.Slot, solana.Hash{5})
+			if parentContextCalls == 2 {
+				parent = parentB
+			}
+			return snapshot
+		},
+	})
+	defer func() {
+		loop.mu.Lock()
+		defer loop.mu.Unlock()
+		loop.abortActiveSlotLocked()
+	}()
+
+	loop.tick()
+	require.Equal(t, 2, parentContextCalls)
+	require.Zero(t, broadcaster.count, "a changed ParentReady must stop the stale header")
+	require.Nil(t, loop.activeBank)
+	require.Nil(t, controller.WorkingBank())
+	require.True(t, loop.productionWindow.active)
+	require.Equal(t, leaderReasonParentChangedBeforeFreeze, loop.pendingFailures[leaderSlot].reason)
+
+	global.SetAlpenglowBlockID(parentB.Slot, parentB.Hash)
+	contextParent = parentB
+	loop.tick()
+
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, parentB, loop.productionWindow.parent)
+	require.Equal(t, readyAt, loop.productionWindow.readyAt)
+	require.NotNil(t, controller.WorkingBank())
+}
+
+func TestLeaderWindowRejectsCutoffCrossedDuringHeaderBroadcast(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const leaderSlot = uint64(212)
+	selected := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	cutoff := readyAt.Add(AlpenglowSlotDuration - leaderBlockCompletionReserve)
+	now := cutoff.Add(-time.Nanosecond)
+	controller := NewController()
+	broadcaster := &callbackBroadcaster{onBroadcast: func() { now = cutoff }}
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: broadcaster,
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == leaderSlot-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= leaderSlot && slot < leaderSlot+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+
+	loop.tick()
+	require.Equal(t, cutoff, now)
+	require.Positive(t, broadcaster.count, "the synchronous header send should be the operation that crosses the cutoff")
+	require.Nil(t, loop.activeBank)
+	require.Nil(t, controller.WorkingBank(), "a late header must never expose a TPU working bank")
+	require.False(t, loop.productionWindow.active)
+	for slot := leaderSlot; slot < leaderSlot+alpenglow.LeaderWindowSlots; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "slot %d was not closed with its expired window", slot)
+	}
+}
+
+func TestLeaderWindowRejectsParentChangeDuringHeaderBroadcast(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const leaderSlot = uint64(212)
+	parentA := alpenglow.BlockID{Slot: leaderSlot - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	parentB := alpenglow.BlockID{Slot: parentA.Slot, Hash: solana.Hash{6}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt.Add(10 * time.Millisecond)
+	parent := parentA
+	contextParent := parentA
+	controller := NewController()
+	broadcaster := &callbackBroadcaster{onBroadcast: func() { parent = parentB }}
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	global.SetReplayFrontier(parentA.Slot)
+	global.SetAlpenglowBlockID(parentA.Slot, parentA.Hash)
+	global.SetAlpenglowChainedMerkleRoot(parentA.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: broadcaster,
+		CurrentSlot: func() uint64 { return leaderSlot - 1 },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == leaderSlot-alpenglow.LeaderWindowSlots {
+				return other, true
+			}
+			if slot >= leaderSlot && slot < leaderSlot+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(uint64) alpenglow.BlockProductionParent {
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  parent,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(contextParent.Slot, solana.Hash{5})
+		},
+	})
+	defer func() {
+		loop.mu.Lock()
+		defer loop.mu.Unlock()
+		loop.abortActiveSlotLocked()
+	}()
+
+	loop.tick()
+	require.Positive(t, broadcaster.count, "header broadcast must trigger the parent switch")
+	require.Nil(t, loop.activeBank)
+	require.Nil(t, controller.WorkingBank(), "an obsolete-parent bank must never reach TPU")
+	require.True(t, loop.productionWindow.active)
+	require.Equal(t, parentA, loop.productionWindow.parent)
+	require.Equal(t, leaderReasonParentChangedBeforeFreeze, loop.pendingFailures[leaderSlot].reason)
+
+	global.SetAlpenglowBlockID(parentB.Slot, parentB.Hash)
+	contextParent = parentB
+	loop.tick()
+
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, parentB, loop.productionWindow.parent)
+	require.Equal(t, readyAt, loop.productionWindow.readyAt)
+	require.Equal(t, parentB.Hash, loop.parentCtx.ParentBlockID)
+	require.NotNil(t, controller.WorkingBank())
+}
+
+func TestLeaderWindowLookaheadIsBoundedToNextWindow(t *testing.T) {
+	const futureStart = uint64(212)
+	var parentQueries []uint64
+	self := txfixture.PayerPubkey()
+	other := solana.NewWallet().PublicKey()
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Identity:    txfixture.PayerPrivateKey(),
+		CurrentSlot: func() uint64 { return futureStart - alpenglow.LeaderWindowSlots - 1 },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot == futureStart {
+				return self, true
+			}
+			return other, true
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			parentQueries = append(parentQueries, slot)
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  alpenglow.BlockID{Slot: slot - 1, Hash: solana.Hash{1}},
+				ReadyAt: time.Now(),
+			}
+		},
+	})
+
+	loop.tick()
+	require.Nil(t, loop.activeBank)
+	require.Empty(t, parentQueries)
+	require.False(t, loop.productionWindow.active)
+}
+
+func TestLeaderWindowRecheckStartsAdjacentReadyWindowWithoutPollDelay(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+
+	const currentStart = uint64(212)
+	const nextStart = currentStart + alpenglow.LeaderWindowSlots
+	selected := alpenglow.BlockID{Slot: currentStart - alpenglow.LeaderWindowSlots, Hash: solana.Hash{3}}
+	readyAt := time.Unix(1_700_000_000, 0)
+	now := readyAt.Add(10 * time.Millisecond)
+	currentParentCalls := 0
+	controller := NewController()
+	self := txfixture.PayerPubkey()
+	global.SetReplayFrontier(selected.Slot)
+	global.SetAlpenglowBlockID(selected.Slot, selected.Hash)
+	global.SetAlpenglowChainedMerkleRoot(selected.Slot, solana.Hash{4})
+
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Controller:  controller,
+		Identity:    txfixture.PayerPrivateKey(),
+		Broadcaster: &captureBroadcaster{},
+		CurrentSlot: func() uint64 { return currentStart },
+		Now:         func() time.Time { return now },
+		LeaderForSlot: func(slot uint64) (solana.PublicKey, bool) {
+			if slot >= currentStart && slot < nextStart+alpenglow.LeaderWindowSlots {
+				return self, true
+			}
+			return solana.PublicKey{}, false
+		},
+		ProductionParent: func(slot uint64) alpenglow.BlockProductionParent {
+			if slot == currentStart {
+				currentParentCalls++
+				if currentParentCalls >= 3 {
+					return alpenglow.BlockProductionParent{Kind: alpenglow.BlockProductionParentMissedWindow}
+				}
+			}
+			return alpenglow.BlockProductionParent{
+				Kind:    alpenglow.BlockProductionParentReady,
+				Parent:  selected,
+				ReadyAt: readyAt,
+			}
+		},
+		ParentContext: func(uint64) ParentContext {
+			return coherentTestParentContext(selected.Slot, solana.Hash{5})
+		},
+	})
+	defer func() {
+		loop.mu.Lock()
+		defer loop.mu.Unlock()
+		loop.abortActiveSlotLocked()
+	}()
+
+	loop.tick()
+
+	require.GreaterOrEqual(t, currentParentCalls, 3)
+	for slot := currentStart; slot < nextStart; slot++ {
+		require.Truef(t, loop.isLeaderSlotFinished(slot), "stale slot %d was not closed", slot)
+	}
+	require.NotNil(t, loop.activeBank)
+	require.Equal(t, nextStart, loop.activeSlot)
+	require.Equal(t, nextStart, loop.productionWindow.startSlot)
+	require.NotNil(t, controller.WorkingBank())
 }
 
 func TestLeaderWindowReservesObservedFinalizationAndFanoutBudget(t *testing.T) {

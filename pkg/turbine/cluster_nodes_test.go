@@ -63,6 +63,64 @@ func TestBroadcastClusterNodesDeterministicRoot(t *testing.T) {
 	require.Equal(t, addr1.String(), addr2.String())
 }
 
+func TestBroadcastClusterNodesEqualStakePubkeysDescendLikeAgave(t *testing.T) {
+	self := solana.PublicKey{1}
+	lowPubkey := solana.PublicKey{2}
+	highPubkey := solana.PublicKey{3}
+	peers := []gossip.TVUPeer{
+		{Pubkey: gossip.Pubkey(lowPubkey), TVUAddr: &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8001}},
+		{Pubkey: gossip.Pubkey(highPubkey), TVUAddr: &net.UDPAddr{IP: net.ParseIP("203.0.113.2"), Port: 8001}},
+	}
+
+	nodes := NewBroadcastClusterNodes(ClusterNodesConfig{
+		Self:       self,
+		TVUPeers:   peers,
+		Stakes:     map[solana.PublicKey]uint64{lowPubkey: 100, highPubkey: 100},
+		UseChaCha8: true,
+	})
+
+	require.Len(t, nodes.nodes, 3)
+	require.Equal(t, highPubkey, nodes.nodes[0].pubkey)
+	require.Equal(t, lowPubkey, nodes.nodes[1].pubkey)
+	require.Equal(t, self, nodes.nodes[2].pubkey)
+}
+
+func TestTurbineBroadcasterHonorsDedupAddrs(t *testing.T) {
+	self := solana.PublicKey{1}
+	peerA := solana.PublicKey{2}
+	peerB := solana.PublicKey{3}
+	peers := &mutableTVUPeers{peers: []gossip.TVUPeer{
+		{Pubkey: gossip.Pubkey(peerA), TVUAddr: &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8001}},
+		{Pubkey: gossip.Pubkey(peerB), TVUAddr: &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 8002}},
+	}}
+	stakes := func(uint64) map[solana.PublicKey]uint64 {
+		return map[solana.PublicKey]uint64{peerA: 100, peerB: 50}
+	}
+	countRoutable := func(nodes *ClusterNodes) int {
+		count := 0
+		for _, node := range nodes.nodes {
+			if node.tvuAddr != nil {
+				count++
+			}
+		}
+		return count
+	}
+
+	development, err := NewTurbineBroadcaster(TurbineBroadcasterConfig{
+		Self: self, Peers: peers, Stakes: stakes, DedupAddrs: false,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, development.Close()) })
+	require.Equal(t, 2, countRoutable(development.clusterNodesForSlot(10)))
+
+	publicCluster, err := NewTurbineBroadcaster(TurbineBroadcasterConfig{
+		Self: self, Peers: peers, Stakes: stakes, DedupAddrs: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, publicCluster.Close()) })
+	require.Equal(t, 1, countRoutable(publicCluster.clusterNodesForSlot(10)))
+}
+
 func TestTurbineBroadcasterRefreshesPeersEachSlot(t *testing.T) {
 	self := solana.PublicKey{1}
 	peer := solana.PublicKey{2}

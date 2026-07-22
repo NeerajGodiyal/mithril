@@ -643,10 +643,12 @@ func (c *Client) handleContactRecord(record contactRecord, shredVersion uint16) 
 		c.observeOwnContactRecord(record)
 		return
 	}
-	if sameEndpointUDPAddr(record.GossipAddr, c.entrypoint) {
-		return
+	// The entrypoint is commonly a validator itself. Do not add its gossip
+	// socket to the rotating pull-peer table, but retain the service endpoints
+	// from its signed ContactInfo so Turbine, repair, and Votor can route to it.
+	if !sameEndpointUDPAddr(record.GossipAddr, c.entrypoint) {
+		c.recordPeerEndpoint(record.GossipAddr)
 	}
-	c.recordPeerEndpoint(record.GossipAddr)
 	c.recordRepairPeerRecord(record)
 	c.recordTVUPeerRecord(record)
 	c.recordAlpenglowPeerRecord(record)

@@ -171,7 +171,10 @@ func buildClusterNodes(cfg ClusterNodesConfig) []clusterNode {
 			return nodes[i].stake > nodes[j].stake
 		}
 		if cmp := bytes.Compare(nodes[i].pubkey[:], nodes[j].pubkey[:]); cmp != 0 {
-			return cmp < 0
+			// Agave orders (stake, pubkey) descending. Equal-stake identities
+			// must therefore use descending pubkey order as well: node indices
+			// feed the deterministic weighted shuffle and select the Turbine root.
+			return cmp > 0
 		}
 		// Agave: NodeId::ContactInfo > NodeId::Pubkey for the same pubkey.
 		return nodes[i].hasContact && !nodes[j].hasContact

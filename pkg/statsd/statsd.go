@@ -3,6 +3,7 @@ package statsd
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -78,15 +79,22 @@ var (
 	GetProgramDataUncachedAccounts   = Metric{"get_program_data_uncached_accounts"}
 	GetProgramDataUncachedMarshal    = Metric{"get_program_data_uncached_marshal"}
 
-	TaskIndexEntryCommitterLatency = Metric{"tasks_index_entry_committer_latency"}
-	TaskSetIfSlotHigherLatency     = Metric{"tasks_set_if_slot_higher_latency"}
-	TasksIndexEntryBuilderLatency  = Metric{"tasks_index_entry_builder_latency"}
-	TasksAppendVecCopyingLatency   = Metric{"tasks_append_vec_copying_latency"}
-	SlotReplayDurationMs           = Metric{"slot_replay_duration_ms"}
-	TxsPerBlock                    = Metric{"txs_per_block"}
-	SnapshotTarBytesRead           = Metric{"snapshot_tar_bytes_read"}
-	SlotReplays                    = Metric{"slot_replays"}
-	BlockProductionLeaderSlots     = Metric{"block_production_leader_slots_total"}
+	TaskIndexEntryCommitterLatency              = Metric{"tasks_index_entry_committer_latency"}
+	TaskSetIfSlotHigherLatency                  = Metric{"tasks_set_if_slot_higher_latency"}
+	TasksIndexEntryBuilderLatency               = Metric{"tasks_index_entry_builder_latency"}
+	TasksAppendVecCopyingLatency                = Metric{"tasks_append_vec_copying_latency"}
+	SlotReplayDurationMs                        = Metric{"slot_replay_duration_ms"}
+	TxsPerBlock                                 = Metric{"txs_per_block"}
+	SnapshotTarBytesRead                        = Metric{"snapshot_tar_bytes_read"}
+	SlotReplays                                 = Metric{"slot_replays"}
+	BlockProductionLeaderSlots                  = Metric{"block_production_leader_slots_total"}
+	BlockProductionLeaderSlotTerminals          = Metric{"block_production_leader_slot_terminals_total"}
+	BlockProductionParentReady                  = Metric{"block_production_parent_ready_activations_total"}
+	BlockProductionParentReadyAge               = Metric{"block_production_parent_ready_age_seconds"}
+	BlockProductionStartCutoffLate              = Metric{"block_production_start_cutoff_lateness_seconds"}
+	BlockProductionStartDecisionTickDeliveryLag = Metric{"block_production_start_decision_tick_delivery_lag_seconds"}
+	BlockProductionStartDecisionTickWork        = Metric{"block_production_start_decision_tick_work_seconds"}
+	BlockProductionStartAttempt                 = Metric{"block_production_start_attempt_seconds"}
 
 	SnapshotWorkerPoolUtilization = Metric{"snapshot_worker_pool_utilization"}
 	TasksSetIfSlotHigherQueueSize = Metric{"tasks_set_if_slot_higher_queue_size"}
@@ -160,9 +168,17 @@ var MetricToType = map[Metric]metricType{
 	SlotReplayDurationMs: TimingT,
 	TxsPerBlock:          TimingT,
 
-	SnapshotTarBytesRead:       CountT,
-	SlotReplays:                CountT,
-	BlockProductionLeaderSlots: CountT,
+	SnapshotTarBytesRead:               CountT,
+	SlotReplays:                        CountT,
+	BlockProductionLeaderSlots:         CountT,
+	BlockProductionLeaderSlotTerminals: CountT,
+	BlockProductionParentReady:         CountT,
+
+	BlockProductionParentReadyAge:               TimingT,
+	BlockProductionStartCutoffLate:              TimingT,
+	BlockProductionStartDecisionTickDeliveryLag: TimingT,
+	BlockProductionStartDecisionTickWork:        TimingT,
+	BlockProductionStartAttempt:                 TimingT,
 
 	TestCount: CountT,
 
@@ -226,11 +242,19 @@ var MetricToLabels = map[Metric][]string{
 	TasksIndexEntryBuilderLatency:  {},
 	TasksAppendVecCopyingLatency:   {},
 
-	SlotReplayDurationMs:       {},
-	TxsPerBlock:                {},
-	SnapshotTarBytesRead:       {},
-	SlotReplays:                {},
-	BlockProductionLeaderSlots: {"outcome", "reason"},
+	SlotReplayDurationMs:               {},
+	TxsPerBlock:                        {},
+	SnapshotTarBytesRead:               {},
+	SlotReplays:                        {},
+	BlockProductionLeaderSlots:         {"outcome", "reason"},
+	BlockProductionLeaderSlotTerminals: {"outcome", "terminal", "cause"},
+	BlockProductionParentReady:         {"activation", "status"},
+
+	BlockProductionParentReadyAge:               {"activation"},
+	BlockProductionStartCutoffLate:              {"phase"},
+	BlockProductionStartDecisionTickDeliveryLag: {"outcome"},
+	BlockProductionStartDecisionTickWork:        {"outcome"},
+	BlockProductionStartAttempt:                 {"result"},
 
 	SnapshotWorkerPoolUtilization: {"task"},
 	TasksSetIfSlotHigherQueueSize: {},
@@ -238,6 +262,22 @@ var MetricToLabels = map[Metric][]string{
 	Slot:                          {},
 
 	TestCount: {"test"}, // used for testing purposes, not a real metric
+}
+
+var blockProductionDurationBuckets = []float64{
+	0.0005, 0.001, 0.0025, 0.005, 0.010, 0.025, 0.050, 0.075,
+	0.100, 0.125, 0.150, 0.200, 0.400, 0.800, 1.600, 3.200,
+}
+
+// MetricToBuckets gives duration histograms explicit seconds-based buckets.
+// The generic Timing metrics predate unit-specific naming and retain the
+// Prometheus defaults for compatibility.
+var MetricToBuckets = map[Metric][]float64{
+	BlockProductionParentReadyAge:               blockProductionDurationBuckets,
+	BlockProductionStartCutoffLate:              blockProductionDurationBuckets,
+	BlockProductionStartDecisionTickDeliveryLag: blockProductionDurationBuckets,
+	BlockProductionStartDecisionTickWork:        blockProductionDurationBuckets,
+	BlockProductionStartAttempt:                 blockProductionDurationBuckets,
 }
 
 type Prometheusmetrics struct {
@@ -280,10 +320,14 @@ func initializeStatsdMetrics() Prometheusmetrics {
 
 		switch t {
 		case TimingT:
-			hv := promauto.NewHistogramVec(prometheus.HistogramOpts{
+			opts := prometheus.HistogramOpts{
 				Name: m.name,
 				Help: fmt.Sprintf("Histogram for %s", m.name),
-			}, labelNames)
+			}
+			if buckets := MetricToBuckets[m]; len(buckets) != 0 {
+				opts.Buckets = buckets
+			}
+			hv := promauto.NewHistogramVec(opts, labelNames)
 			metricsCollection.histograms[m] = hv
 		case CountT:
 			cv := promauto.NewCounterVec(prometheus.CounterOpts{
@@ -324,6 +368,37 @@ func Timing(m Metric, nanos uint64, labels []string) error {
 		labels = []string{}
 	}
 	metricsCollection.histograms[m].WithLabelValues(labels...).Observe(float64(nanos))
+	return nil
+}
+
+// Duration records a duration in seconds. Use it with metrics whose names end
+// in _seconds and whose buckets are declared in MetricToBuckets.
+func Duration(m Metric, duration time.Duration, labels []string) error {
+	if duration < 0 {
+		return fmt.Errorf("duration metric %s cannot observe negative duration %s", m, duration)
+	}
+	metricType, registered := MetricToType[m]
+	if !registered {
+		return fmt.Errorf("duration metric %s is not registered", m)
+	}
+	if metricType != TimingT {
+		return fmt.Errorf("duration metric %s has non-histogram type %d", m, metricType)
+	}
+	if _, ok := MetricToBuckets[m]; !ok {
+		return fmt.Errorf("metric %s is not registered for duration observations", m)
+	}
+	histogram, ok := metricsCollection.histograms[m]
+	if !ok || histogram == nil {
+		return fmt.Errorf("duration metric %s has no initialized histogram", m)
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	observer, err := histogram.GetMetricWithLabelValues(labels...)
+	if err != nil {
+		return fmt.Errorf("duration metric %s labels: %w", m, err)
+	}
+	observer.Observe(duration.Seconds())
 	return nil
 }
 

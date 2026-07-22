@@ -2448,6 +2448,9 @@ postBootstrap:
 			EpochForSlot:  epochSchedule.GetEpoch,
 			LeaderForSlot: global.LeaderForSlot,
 			UseChaCha8:    true,
+			// Agave treats custom/development clusters as non-deduplicating so
+			// every validator derives the same deterministic Turbine node list.
+			DedupAddrs: false,
 		})
 		if err != nil {
 			klog.Fatalf("validator turbine broadcaster: %v", err)

@@ -36,6 +36,7 @@ const (
 )
 
 var errParentNotReady = errors.New("parent not ready")
+var errProductionStartCutoffElapsed = errors.New("production start cutoff elapsed")
 var errEpochTransitionProductionUnsupported = errors.New("leader production across an epoch transition is not supported")
 var errEpochRewardsProductionUnsupported = errors.New("leader production during partitioned epoch rewards is not supported")
 
@@ -67,6 +68,10 @@ const (
 	leaderReasonEndingTickBroadcastFailed = "ending_tick_broadcast_failed"
 	leaderReasonWindowDeadlineElapsed     = "window_deadline_elapsed"
 	leaderReasonPreviousSlotMissed        = "previous_slot_missed"
+
+	// A terminal describes how an outcome became final. The cause preserves
+	// the earlier gate failure that may have prevented production from starting.
+	leaderTerminalDeadlineElapsed = "deadline_elapsed"
 )
 
 type leaderSlotFailure struct {
@@ -133,9 +138,11 @@ type LeaderLoop struct {
 	currentSlot   func() uint64
 	leaderForSlot func(uint64) (solana.PublicKey, bool)
 
-	pollInterval time.Duration
-	slotDuration time.Duration
-	now          func() time.Time
+	pollInterval    time.Duration
+	slotDuration    time.Duration
+	now             func() time.Time
+	tickStartedAt   time.Time
+	tickDeliveryLag time.Duration
 
 	mu                      sync.Mutex
 	activeSlot              uint64
@@ -158,6 +165,7 @@ type leaderProductionWindow struct {
 	startSlot uint64
 	endSlot   uint64
 	nextSlot  uint64
+	parent    alpenglow.BlockID
 	readyAt   time.Time
 }
 
@@ -229,19 +237,31 @@ func (l *LeaderLoop) Run(stop <-chan struct{}) {
 		case <-stop:
 			l.finishActiveSlot()
 			return
-		case <-ticker.C:
-			l.tick()
+		case scheduledAt := <-ticker.C:
+			l.tickScheduled(scheduledAt)
 		}
 	}
 }
 
 func (l *LeaderLoop) tick() {
+	l.tickScheduled(l.now())
+}
+
+func (l *LeaderLoop) tickScheduled(scheduledAt time.Time) {
 	if l.currentSlot == nil || l.leaderForSlot == nil {
 		return
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.tickStartedAt = l.now()
+	l.tickDeliveryLag = 0
+	if !scheduledAt.IsZero() {
+		l.tickDeliveryLag = l.tickStartedAt.Sub(scheduledAt)
+		if l.tickDeliveryLag < 0 {
+			l.tickDeliveryLag = 0
+		}
+	}
 
 	for {
 		wallSlot := l.currentSlot()
@@ -253,16 +273,11 @@ func (l *LeaderLoop) tick() {
 				l.abortActiveSlotLocked()
 				if reason == leaderReasonAlreadyResolved || reason == leaderReasonParentReadyMissedWindow {
 					l.failProductionWindowLocked(l.productionWindow.nextSlot, reason, activeLeaderFailureDetail(reason))
-				} else if reason == leaderReasonParentChangedBeforeFreeze && l.productionWindow.active {
-					// Agave resets the window timer on a sad leader handover to a
-					// newly selected ParentReady parent.
-					parent := l.productionParent(l.productionWindow.startSlot)
-					if parent.Kind == alpenglow.BlockProductionParentReady && !parent.ReadyAt.IsZero() {
-						l.productionWindow.readyAt = parent.ReadyAt
-					}
 				}
+				// The no-bank path refreshes a corrected ParentReady parent.
 				continue
 			}
+			now = l.now()
 			if l.productionWindow.active {
 				if now.Before(l.productionWindowDeadlineLocked(l.activeSlot)) {
 					return
@@ -283,7 +298,7 @@ func (l *LeaderLoop) tick() {
 		targetSlot := wallSlot
 		if l.productionParent != nil {
 			var ok bool
-			targetSlot, ok = l.productionWindowTargetLocked(wallSlot, now)
+			targetSlot, ok = l.productionWindowTargetLocked(wallSlot)
 			if !ok {
 				return
 			}
@@ -305,51 +320,122 @@ func (l *LeaderLoop) tick() {
 			return
 		}
 
-		if err := l.startSlotLocked(targetSlot); err != nil {
-			if errors.Is(err, errEpochTransitionProductionUnsupported) || errors.Is(err, errEpochRewardsProductionUnsupported) {
-				l.failProductionWindowLocked(targetSlot, leaderFailureReason(err), err.Error())
+		// Replay and consensus lookups can consume the final milliseconds of the
+		// production budget. Refresh ParentReady and enforce its cutoff again at
+		// the last boundary before allocating a working bank.
+		if l.productionParent != nil {
+			rechecked, ok := l.productionWindowTargetLocked(wallSlot)
+			if !ok {
+				return
+			}
+			if rechecked != targetSlot {
+				if l.isLeaderSlotFinishedLocked(targetSlot) {
+					continue
+				}
+				return
+			}
+		}
+
+		startedAt := l.now()
+		err := l.startSlotLocked(targetSlot)
+		startDuration := l.now().Sub(startedAt)
+		if startDuration < 0 {
+			startDuration = 0
+		}
+		result := "success"
+		if err != nil {
+			result = "error"
+		}
+		_ = statsd.Duration(statsd.BlockProductionStartAttempt, startDuration, []string{result})
+		if err != nil {
+			detail := fmt.Sprintf("%s; start_slot_ms=%d", err.Error(), startDuration.Milliseconds())
+			if errors.Is(err, errProductionStartCutoffElapsed) {
+				now := l.now()
+				l.expireProductionWindowLocked(targetSlot, now, detail)
 				continue
 			}
-			l.rememberLeaderSlotFailureLocked(targetSlot, leaderFailureReason(err), err.Error())
+			if errors.Is(err, errEpochTransitionProductionUnsupported) || errors.Is(err, errEpochRewardsProductionUnsupported) {
+				l.failProductionWindowLocked(targetSlot, leaderFailureReason(err), detail)
+				continue
+			}
+			l.rememberLeaderSlotFailureLocked(targetSlot, leaderFailureReason(err), detail)
 			return
 		}
 		delete(l.pendingFailures, targetSlot)
+		openedAt := l.now()
+		l.recordTickTimingLocked(openedAt, "opened")
+		mlog.Log.InfofPrecise("ALPENGLOW block production: opened local leader slot=%d parent_slot=%d replay_frontier=%d live_slot=%d start_slot_ms=%d%s",
+			targetSlot, l.parentCtx.ParentSlot, global.ReplayFrontier(), wallSlot,
+			startDuration.Milliseconds(), l.productionStartTimingDetailLocked(targetSlot, openedAt))
 
 		return
 	}
 }
 
-func (l *LeaderLoop) productionWindowTargetLocked(wallSlot uint64, now time.Time) (uint64, bool) {
+func (l *LeaderLoop) productionWindowTargetLocked(wallSlot uint64) (uint64, bool) {
 	if l.productionWindow.active {
 		target := l.productionWindow.nextSlot
 		if target > l.productionWindow.endSlot {
 			l.productionWindow = leaderProductionWindow{}
-			return 0, false
+			return l.productionWindowTargetLocked(wallSlot)
 		}
-		if !now.Before(l.productionWindowDeadlineLocked(target)) {
-			failure, ok := l.pendingFailures[target]
-			if !ok {
-				failure = leaderSlotFailure{
-					reason: leaderReasonWindowDeadlineElapsed,
-					detail: "ParentReady-based block deadline elapsed before production started",
+		parentUsable := true
+		parent := l.productionParent(target)
+		if parent.Kind == alpenglow.BlockProductionParentMissedWindow {
+			l.failProductionWindowLocked(target, leaderReasonParentReadyMissedWindow,
+				"Votor certified a later slot before local production started")
+			return l.productionWindowTargetLocked(wallSlot)
+		}
+		if target == l.productionWindow.startSlot {
+			switch {
+			case parent.Kind == alpenglow.BlockProductionParentReady &&
+				!parent.Parent.IsZero() && parent.Parent.HasHash() &&
+				parent.Parent.Slot < l.productionWindow.startSlot && !parent.ReadyAt.IsZero():
+				if parent.Parent != l.productionWindow.parent {
+					l.productionWindow.parent = parent.Parent
+					// Votor's slot timer is one-shot. A corrected parent changes
+					// identity without buying the window a fresh production budget.
+					parent.ReadyAt = l.productionWindow.readyAt
+					l.recordParentReadyActivationLocked(parent, "handover", wallSlot, l.now())
 				}
-			} else {
-				failure.detail = fmt.Sprintf("%s; ParentReady-based block deadline elapsed", failure.detail)
+			case parent.Kind == alpenglow.BlockProductionParentReady:
+				parentUsable = false
+				detail := "verified ParentReady is invalid while the first slot waits to start"
+				if parent.ReadyAt.IsZero() {
+					detail = "verified ParentReady has no live timer origin"
+				}
+				l.rememberLeaderSlotFailureLocked(target, leaderReasonParentReadyInvalid, detail)
+			default:
+				parentUsable = false
+				l.rememberLeaderSlotFailureLocked(target, leaderReasonParentReadyNotReady,
+					"verified ParentReady became unavailable before the first slot started")
 			}
-			l.failProductionWindowLocked(target, failure.reason, failure.detail)
+		}
+		now := l.now()
+		if !now.Before(l.productionWindowDeadlineLocked(target)) {
+			l.expireProductionWindowLocked(target, now, "")
+			return l.productionWindowTargetLocked(wallSlot)
+		}
+		if !parentUsable {
 			return 0, false
 		}
 		return target, true
 	}
 
-	startSlot := wallSlot - wallSlot%alpenglow.LeaderWindowSlots
-	leader, ok := l.leaderForSlot(startSlot)
-	if !ok || leader != l.identity.PublicKey() || l.isLeaderSlotFinishedLocked(startSlot) {
+	startSlot, parent, ok := l.inactiveProductionWindowCandidateLocked(wallSlot)
+	if !ok {
 		return 0, false
 	}
-	parent := l.productionParent(startSlot)
+	// Candidate selection and consensus-pool lookup can contend with certificate
+	// admission. Refresh the monotonic clock before applying the 125ms cutoff.
+	now := l.now()
 	switch parent.Kind {
 	case alpenglow.BlockProductionParentReady:
+		if parent.Parent.IsZero() || !parent.Parent.HasHash() || parent.Parent.Slot >= startSlot {
+			l.rememberLeaderSlotFailureLocked(startSlot, leaderReasonParentReadyInvalid,
+				"verified ParentReady contains an invalid production parent")
+			return 0, false
+		}
 		readyAt := parent.ReadyAt
 		if readyAt.IsZero() {
 			l.rememberLeaderSlotFailureLocked(startSlot, leaderReasonParentReadyNotReady, "verified ParentReady has no live timer origin")
@@ -360,11 +446,13 @@ func (l *LeaderLoop) productionWindowTargetLocked(wallSlot uint64, now time.Time
 			startSlot: startSlot,
 			endSlot:   startSlot + alpenglow.LeaderWindowSlots - 1,
 			nextSlot:  startSlot,
+			parent:    parent.Parent,
 			readyAt:   readyAt,
 		}
-		if !now.Before(l.productionWindowDeadlineLocked(startSlot)) {
-			l.failProductionWindowLocked(startSlot, leaderReasonWindowDeadlineElapsed, "ParentReady arrived too late to complete the first block")
-			return 0, false
+		onTime := l.recordParentReadyActivationLocked(parent, "initial", wallSlot, now)
+		if !onTime {
+			l.expireProductionWindowLocked(startSlot, now, "ParentReady arrived too late to complete the first block")
+			return l.productionWindowTargetLocked(wallSlot)
 		}
 		return startSlot, true
 	case alpenglow.BlockProductionParentMissedWindow:
@@ -375,11 +463,157 @@ func (l *LeaderLoop) productionWindowTargetLocked(wallSlot uint64, now time.Time
 			nextSlot:  startSlot,
 		}
 		l.failProductionWindowLocked(startSlot, leaderReasonParentReadyMissedWindow, "Votor certified a later window before local production started")
-		return 0, false
+		return l.productionWindowTargetLocked(wallSlot)
 	default:
 		l.rememberLeaderSlotFailureLocked(startSlot, leaderReasonParentReadyNotReady, "waiting for verified ParentReady")
 		return 0, false
 	}
+}
+
+func (l *LeaderLoop) inactiveProductionWindowCandidateLocked(wallSlot uint64) (uint64, alpenglow.BlockProductionParent, bool) {
+	if l.leaderForSlot == nil || l.productionParent == nil {
+		return 0, alpenglow.BlockProductionParent{}, false
+	}
+	current := wallSlot - wallSlot%alpenglow.LeaderWindowSlots
+	currentLeader, ok := l.leaderForSlot(current)
+	if !ok {
+		return 0, alpenglow.BlockProductionParent{}, false
+	}
+	self := l.identity.PublicKey()
+	if currentLeader == self {
+		if !l.isLeaderSlotFinishedLocked(current) {
+			return current, l.productionParent(current), true
+		}
+		if !l.allProductionWindowSlotsFinishedLocked(current) {
+			return 0, alpenglow.BlockProductionParent{}, false
+		}
+	}
+
+	// ParentReady is the production clock authority, but the coarse live clock
+	// can still report the certified parent's slot for another 200ms. Inspect
+	// only the immediately following window; never scan arbitrary future slots.
+	if current > ^uint64(0)-alpenglow.LeaderWindowSlots {
+		return 0, alpenglow.BlockProductionParent{}, false
+	}
+	next := current + alpenglow.LeaderWindowSlots
+	nextLeader, ok := l.leaderForSlot(next)
+	if !ok || nextLeader != self || l.isLeaderSlotFinishedLocked(next) {
+		return 0, alpenglow.BlockProductionParent{}, false
+	}
+	parent := l.productionParent(next)
+	if parent.Kind != alpenglow.BlockProductionParentReady || parent.ReadyAt.IsZero() {
+		return 0, alpenglow.BlockProductionParent{}, false
+	}
+	return next, parent, true
+}
+
+func (l *LeaderLoop) allProductionWindowSlotsFinishedLocked(start uint64) bool {
+	if start > ^uint64(0)-(alpenglow.LeaderWindowSlots-1) {
+		return false
+	}
+	for offset := uint64(0); offset < alpenglow.LeaderWindowSlots; offset++ {
+		if !l.isLeaderSlotFinishedLocked(start + offset) {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *LeaderLoop) recordParentReadyActivationLocked(parent alpenglow.BlockProductionParent, activation string, wallSlot uint64, now time.Time) bool {
+	readyAge := now.Sub(parent.ReadyAt)
+	if readyAge >= 0 {
+		_ = statsd.Duration(statsd.BlockProductionParentReadyAge, readyAge, []string{activation})
+	}
+	status := "on_time"
+	if !now.Before(l.productionWindowDeadlineLocked(l.productionWindow.startSlot)) {
+		status = "late"
+	}
+	_ = statsd.Count(statsd.BlockProductionParentReady, 1, []string{activation, status})
+	mlog.Log.InfofPrecise("ALPENGLOW block production: parent-ready activation=%s parent=%s replay_frontier=%d live_slot=%d%s",
+		activation, parent.Parent.String(), global.ReplayFrontier(), wallSlot,
+		l.productionStartTimingDetailLocked(l.productionWindow.startSlot, now))
+	return status == "on_time"
+}
+
+func (l *LeaderLoop) tickWorkElapsedLocked(now time.Time) time.Duration {
+	if l.tickStartedAt.IsZero() {
+		return 0
+	}
+	elapsed := now.Sub(l.tickStartedAt)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func (l *LeaderLoop) recordTickTimingLocked(now time.Time, outcome string) {
+	_ = statsd.Duration(statsd.BlockProductionStartDecisionTickDeliveryLag, l.tickDeliveryLag, []string{outcome})
+	_ = statsd.Duration(statsd.BlockProductionStartDecisionTickWork, l.tickWorkElapsedLocked(now), []string{outcome})
+}
+
+func (l *LeaderLoop) productionStartTimingDetailLocked(slot uint64, now time.Time) string {
+	if !l.productionWindow.active || slot < l.productionWindow.startSlot {
+		return ""
+	}
+	deadline := l.productionWindowDeadlineLocked(slot)
+	lateness := now.Sub(deadline)
+	if lateness < 0 {
+		lateness = 0
+	}
+	return fmt.Sprintf(" window_start=%d slot_index=%d ready_age_ms=%d start_margin_ms=%d cutoff_lateness_ms=%d tick_delivery_lag_ms=%d tick_work_ms=%d",
+		l.productionWindow.startSlot,
+		slot-l.productionWindow.startSlot,
+		now.Sub(l.productionWindow.readyAt).Milliseconds(),
+		deadline.Sub(now).Milliseconds(),
+		lateness.Milliseconds(),
+		l.tickDeliveryLag.Milliseconds(),
+		l.tickWorkElapsedLocked(now).Milliseconds())
+}
+
+func (l *LeaderLoop) recordStartCutoffLatenessLocked(slot uint64, now time.Time) {
+	lateness := now.Sub(l.productionWindowDeadlineLocked(slot))
+	if lateness < 0 {
+		return
+	}
+	phase := "intra_window"
+	if slot == l.productionWindow.startSlot {
+		phase = "first_slot"
+	}
+	_ = statsd.Duration(statsd.BlockProductionStartCutoffLate, lateness, []string{phase})
+}
+
+func (l *LeaderLoop) expireProductionWindowLocked(slot uint64, now time.Time, context string) {
+	timingDetail := l.productionStartTimingDetailLocked(slot, now)
+	l.recordStartCutoffLatenessLocked(slot, now)
+	l.recordTickTimingLocked(now, "cutoff_elapsed")
+
+	failure, attempted := l.pendingFailures[slot]
+	if !attempted {
+		failure.reason = leaderReasonWindowDeadlineElapsed
+	}
+	appendDetail := func(detail string) {
+		if detail == "" {
+			return
+		}
+		if failure.detail != "" {
+			failure.detail += "; "
+		}
+		failure.detail += detail
+	}
+	appendDetail(context)
+	appendDetail("ParentReady-based block deadline elapsed before production started" + timingDetail)
+	l.failProductionWindowWithTerminalLocked(slot, leaderTerminalDeadlineElapsed, failure.reason, failure.detail)
+}
+
+func (l *LeaderLoop) productionStartCutoffErrorLocked(slot uint64) error {
+	if !l.productionWindow.active || slot < l.productionWindow.startSlot || slot > l.productionWindow.endSlot {
+		return nil
+	}
+	deadline := l.productionWindowDeadlineLocked(slot)
+	if deadline.IsZero() || l.now().Before(deadline) {
+		return nil
+	}
+	return fmt.Errorf("%w for slot %d", errProductionStartCutoffElapsed, slot)
 }
 
 func (l *LeaderLoop) productionWindowDeadlineLocked(slot uint64) time.Time {
@@ -417,14 +651,20 @@ func (l *LeaderLoop) productionTimingDetailLocked(slot uint64, finalizationStart
 }
 
 func (l *LeaderLoop) failProductionWindowLocked(slot uint64, reason, detail string) {
+	l.failProductionWindowWithTerminalLocked(slot, reason, reason, detail)
+}
+
+func (l *LeaderLoop) failProductionWindowWithTerminalLocked(slot uint64, terminal, cause, detail string) {
 	if !l.productionWindow.active {
-		l.recordLeaderSlotOutcomeLocked(slot, leaderOutcomeMissed, reason, detail)
+		l.recordLeaderSlotOutcomeWithTerminalLocked(slot, leaderOutcomeMissed, cause, terminal, cause, detail)
 		return
 	}
 	end := l.productionWindow.endSlot
-	l.recordLeaderSlotOutcomeLocked(slot, leaderOutcomeMissed, reason, detail)
-	for remaining := slot + 1; remaining <= end; remaining++ {
-		l.recordLeaderSlotOutcomeLocked(remaining, leaderOutcomeMissed, leaderReasonPreviousSlotMissed,
+	l.recordLeaderSlotOutcomeWithTerminalLocked(slot, leaderOutcomeMissed, cause, terminal, cause, detail)
+	for remaining := slot; remaining < end; {
+		remaining++
+		l.recordLeaderSlotOutcomeWithTerminalLocked(remaining, leaderOutcomeMissed, leaderReasonPreviousSlotMissed,
+			leaderReasonPreviousSlotMissed, cause,
 			fmt.Sprintf("cannot chain local slot %d after missed slot %d", remaining, slot))
 	}
 	l.productionWindow = leaderProductionWindow{}
@@ -473,20 +713,23 @@ func (l *LeaderLoop) activeParentStillCanonicalLocked() (bool, string) {
 	}
 
 	requiredFrontier := l.activeSlot - 1
-	if l.activeSlot%alpenglow.LeaderWindowSlots == 0 && l.productionParent != nil {
+	if l.productionWindow.active && l.productionParent != nil {
 		parent := l.productionParent(l.activeSlot)
-		switch parent.Kind {
-		case alpenglow.BlockProductionParentReady:
-			if parent.Parent.Slot != l.parentCtx.ParentSlot || parent.Parent.Hash != l.activeParentID {
-				return false, leaderReasonParentChangedBeforeFreeze
-			}
-			requiredFrontier = parent.Parent.Slot
-		case alpenglow.BlockProductionParentMissedWindow:
+		if parent.Kind == alpenglow.BlockProductionParentMissedWindow {
 			// Agave abandons the working bank once highest ParentReady moves beyond
-			// its window: the cluster has already selected a later outcome.
+			// the bank slot: the cluster has already selected a later outcome.
 			return false, leaderReasonParentReadyMissedWindow
-		default:
-			return false, leaderReasonParentReadyNotReady
+		}
+		if l.activeSlot == l.productionWindow.startSlot {
+			switch parent.Kind {
+			case alpenglow.BlockProductionParentReady:
+				if parent.Parent.Slot != l.parentCtx.ParentSlot || parent.Parent.Hash != l.activeParentID {
+					return false, leaderReasonParentChangedBeforeFreeze
+				}
+				requiredFrontier = parent.Parent.Slot
+			default:
+				return false, leaderReasonParentReadyNotReady
+			}
 		}
 	}
 	if frontier < requiredFrontier {
@@ -522,6 +765,9 @@ func leaderFailureReason(err error) string {
 	if err == nil {
 		return leaderReasonLiveClockAdvanced
 	}
+	if errors.Is(err, errProductionStartCutoffElapsed) {
+		return leaderReasonWindowDeadlineElapsed
+	}
 	if errors.Is(err, errEpochTransitionProductionUnsupported) {
 		return leaderReasonEpochTransition
 	}
@@ -532,6 +778,8 @@ func leaderFailureReason(err error) string {
 	switch {
 	case strings.Contains(detail, "already resolved leader slot"):
 		return leaderReasonAlreadyResolved
+	case strings.Contains(detail, "ParentReady parent changed while"):
+		return leaderReasonParentChangedBeforeFreeze
 	case strings.Contains(detail, "ParentReady arrived after"):
 		return leaderReasonParentReadyMissedWindow
 	case strings.Contains(detail, "no verified ParentReady"):
@@ -591,7 +839,7 @@ func (l *LeaderLoop) reportExpiredLeaderSlotsLocked(wallSlot uint64) {
 		// expired.
 		if l.productionParent != nil {
 			currentWindowStart := wallSlot - wallSlot%alpenglow.LeaderWindowSlots
-			if slot >= currentWindowStart && slot < currentWindowStart+alpenglow.LeaderWindowSlots {
+			if slot >= currentWindowStart && slot-currentWindowStart < alpenglow.LeaderWindowSlots {
 				return
 			}
 			if l.productionWindow.active && slot >= l.productionWindow.startSlot && slot <= l.productionWindow.endSlot {
@@ -614,26 +862,38 @@ func (l *LeaderLoop) reportExpiredLeaderSlotsLocked(wallSlot uint64) {
 				detail: "live clock advanced before block production started",
 			}
 		}
-		l.recordLeaderSlotOutcomeLocked(slot, leaderOutcomeMissed, failure.reason, failure.detail)
+		l.recordLeaderSlotOutcomeWithTerminalLocked(slot, leaderOutcomeMissed, failure.reason,
+			leaderReasonLiveClockAdvanced, failure.reason, failure.detail)
 	}
 }
 
 func (l *LeaderLoop) recordLeaderSlotOutcomeLocked(slot uint64, outcome, reason, detail string) {
+	l.recordLeaderSlotOutcomeWithTerminalLocked(slot, outcome, reason, reason, reason, detail)
+}
+
+func (l *LeaderLoop) recordLeaderSlotOutcomeWithTerminalLocked(slot uint64, outcome, reason, terminal, cause, detail string) {
 	if slot == 0 || l.isLeaderSlotFinishedLocked(slot) {
 		return
 	}
 	if reason == "" {
 		reason = leaderReasonParentContextNotReady
 	}
+	if terminal == "" {
+		terminal = reason
+	}
+	if cause == "" {
+		cause = reason
+	}
 	_ = statsd.Count(statsd.BlockProductionLeaderSlots, 1, []string{outcome, reason})
+	_ = statsd.Count(statsd.BlockProductionLeaderSlotTerminals, 1, []string{outcome, terminal, cause})
 	liveSlot := uint64(0)
 	if l.currentSlot != nil {
 		liveSlot = l.currentSlot()
 	}
 	if outcome == leaderOutcomeBroadcast {
-		mlog.Log.Infof("ALPENGLOW block production: broadcast local leader slot=%d reason=%s replay_frontier=%d live_slot=%d %s", slot, reason, global.ReplayFrontier(), liveSlot, detail)
+		mlog.Log.Infof("ALPENGLOW block production: broadcast local leader slot=%d terminal=%s cause=%s reason=%s replay_frontier=%d live_slot=%d %s", slot, terminal, cause, reason, global.ReplayFrontier(), liveSlot, detail)
 	} else {
-		mlog.Log.Warnf("ALPENGLOW block production: missed local leader slot=%d reason=%s replay_frontier=%d live_slot=%d detail=%s", slot, reason, global.ReplayFrontier(), liveSlot, detail)
+		mlog.Log.Warnf("ALPENGLOW block production: missed local leader slot=%d terminal=%s cause=%s reason=%s replay_frontier=%d live_slot=%d detail=%s", slot, terminal, cause, reason, global.ReplayFrontier(), liveSlot, detail)
 	}
 	l.markLeaderSlotFinished(slot)
 	delete(l.pendingFailures, slot)
@@ -827,18 +1087,52 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 	}
 	l.recordLeaderSlotOutcomeLocked(slot, leaderOutcomeBroadcast, leaderReasonComplete,
 		fmt.Sprintf("block=%s parent_slot=%d txns=%d%s", solana.Hash(producedBlock.AlpenglowBlockID).String(), producedBlock.ParentSlot, len(producedBlock.Transactions), timingDetail))
-	if l.productionWindow.active && l.productionWindow.nextSlot == slot {
-		l.productionWindow.nextSlot++
-		if l.productionWindow.nextSlot > l.productionWindow.endSlot {
-			l.productionWindow = leaderProductionWindow{}
-		}
-	}
+	l.advanceProductionWindowLocked(slot)
 	l.abortActiveSlotLocked()
+}
+
+func (l *LeaderLoop) advanceProductionWindowLocked(slot uint64) {
+	if !l.productionWindow.active || l.productionWindow.nextSlot != slot {
+		return
+	}
+	if slot == l.productionWindow.endSlot {
+		l.productionWindow = leaderProductionWindow{}
+		return
+	}
+	l.productionWindow.nextSlot = slot + 1
+}
+
+func (l *LeaderLoop) revalidateProductionParentForStartLocked(slot uint64, selectedParent alpenglow.BlockID) error {
+	if l.productionParent == nil || slot == 0 || slot%alpenglow.LeaderWindowSlots != 0 {
+		return nil
+	}
+	parent := l.productionParent(slot)
+	switch parent.Kind {
+	case alpenglow.BlockProductionParentReady:
+		if parent.Parent.IsZero() || !parent.Parent.HasHash() || parent.Parent.Slot >= slot ||
+			parent.ReadyAt.IsZero() {
+			return fmt.Errorf("%w: invalid ParentReady value while opening leader window %d", errParentNotReady, slot)
+		}
+		if parent.Parent != selectedParent {
+			return fmt.Errorf("%w: ParentReady parent changed while opening leader slot %d", errParentNotReady, slot)
+		}
+		return nil
+	case alpenglow.BlockProductionParentMissedWindow:
+		return fmt.Errorf("%w: ParentReady arrived after leader window %d", errParentNotReady, slot)
+	default:
+		return fmt.Errorf("%w: no verified ParentReady for leader window %d", errParentNotReady, slot)
+	}
 }
 
 func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 	selectedParent, parentReadyRequired, err := l.resolveProductionParent(slot)
 	if err != nil {
+		return err
+	}
+	if parentReadyRequired && l.productionWindow.active && slot == l.productionWindow.startSlot && selectedParent != l.productionWindow.parent {
+		return fmt.Errorf("%w: ParentReady parent changed while opening leader slot %d", errParentNotReady, slot)
+	}
+	if err := l.productionStartCutoffErrorLocked(slot); err != nil {
 		return err
 	}
 	parentCtx := ParentContext{}
@@ -930,6 +1224,16 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 		bank.Close()
 		return fmt.Errorf("%w: replay parent changed while opening leader slot %d", errParentNotReady, slot)
 	}
+	if parentReadyRequired {
+		if err := l.revalidateProductionParentForStartLocked(slot, selectedParent); err != nil {
+			bank.Close()
+			return err
+		}
+	}
+	if err := l.productionStartCutoffErrorLocked(slot); err != nil {
+		bank.Close()
+		return err
+	}
 	// Publish the working bank only after all local preparation and the header
 	// broadcast succeed; failures before this point cannot admit TPU traffic.
 	if err := session.BroadcastHeader(parentID); err != nil {
@@ -939,6 +1243,16 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 	if slot > 0 && !sameReplayParentSnapshot(parentCtx, l.parentContext(slot)) {
 		bank.Close()
 		return fmt.Errorf("%w: replay parent changed while broadcasting leader header for slot %d", errParentNotReady, slot)
+	}
+	if parentReadyRequired {
+		if err := l.revalidateProductionParentForStartLocked(slot, selectedParent); err != nil {
+			bank.Close()
+			return err
+		}
+	}
+	if err := l.productionStartCutoffErrorLocked(slot); err != nil {
+		bank.Close()
+		return err
 	}
 	l.parentCtx = parentCtx
 	l.activeSlot = slot
