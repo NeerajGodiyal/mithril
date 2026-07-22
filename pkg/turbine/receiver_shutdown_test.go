@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/fixtures"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 )
 
 // Receiver shutdown must JOIN the hydrator before closing the blocks
@@ -54,5 +55,60 @@ func TestReceiverShutdownJoinsHydrator(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("round %d: Run did not return after cancel (hydrator join deadlock)", round)
 		}
+	}
+}
+
+func TestReceiverShutdownJoinsInFlightCompletionBeforeClosingSpool(t *testing.T) {
+	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
+	const slot = 102815960
+	dir := t.TempDir()
+	seed, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+	for _, packet := range rawShreds {
+		seed.Append(slot, packet)
+	}
+	seed.Close()
+
+	spool, err := OpenShredSpool(dir, 0)
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+	receiver := NewUDPReceiver("127.0.0.1:0")
+	receiver.SetShredSpool(spool)
+	receiver.SetHydrationWindow(slot, slot+8)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	receiver.assembler.verifyTransactions = func(context.Context, *block.Block) error {
+		close(started)
+		<-release
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- receiver.Run(ctx) }()
+	if rerr := <-receiver.Ready(); rerr != nil {
+		cancel()
+		t.Fatalf("receiver not ready: %v", rerr)
+	}
+	waitSignal(t, started, "hydrated completion verifier")
+	cancel()
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("Run returned before completion worker joined: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after verifier release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not join completion worker after release")
 	}
 }

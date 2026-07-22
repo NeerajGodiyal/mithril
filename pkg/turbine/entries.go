@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
-	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
@@ -35,6 +35,10 @@ type AlpenglowParentInfo struct {
 	ParentBlockID     solana.Hash
 	ReplayFECSetIndex uint32
 	FromUpdateParent  bool
+}
+
+type entryDecodeTimings struct {
+	transactionParse time.Duration
 }
 
 func (e *Entry) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -95,6 +99,10 @@ func DecodeEntriesAndAlpenglowParentInfoFromDataShreds(shreds []*Shred) ([]Entry
 // DecodeEntriesAndAlpenglowMarkersFromDataShreds decodes both transaction
 // entry batches and Alpenglow header/update/footer marker batches.
 func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *AlpenglowParentInfo, *BlockFooter, error) {
+	return decodeEntriesAndAlpenglowMarkersFromDataShreds(shreds, nil)
+}
+
+func decodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred, timings *entryDecodeTimings) ([]Entry, *AlpenglowParentInfo, *BlockFooter, error) {
 	if len(shreds) == 0 {
 		return nil, nil, nil, nil
 	}
@@ -140,7 +148,11 @@ func DecodeEntriesAndAlpenglowMarkersFromDataShreds(shreds []*Shred) ([]Entry, *
 			haveBatch = false
 			continue
 		}
+		parseStart := time.Now()
 		batchEntries, err := decodeEntryBatch(batchBytes)
+		if timings != nil {
+			timings.transactionParse += time.Since(parseStart)
+		}
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("decode entry batch ending at shred %d: %w", shred.Index, err)
 		}
@@ -334,23 +346,4 @@ func BlockFromEntries(slot uint64, parentSlot uint64, entries []Entry) *block.Bl
 		blk.Blockhash = entries[len(entries)-1].Hash
 	}
 	return blk
-}
-
-func validateBlockTransactions(blk *block.Block) error {
-	if blk == nil {
-		return nil
-	}
-	for txIdx, tx := range blk.Transactions {
-		if tx == nil {
-			return fmt.Errorf("slot %d transaction %d is nil", blk.Slot, txIdx)
-		}
-		if err := txverify.VerifyTransaction(tx); err != nil {
-			txSig := "<missing>"
-			if len(tx.Signatures) > 0 {
-				txSig = tx.Signatures[0].String()
-			}
-			return fmt.Errorf("slot %d transaction %d %s version=%d failed signature verification: %w", blk.Slot, txIdx, txSig, tx.Message.GetVersion(), err)
-		}
-	}
-	return nil
 }

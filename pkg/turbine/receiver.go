@@ -25,11 +25,12 @@ type UDPReceiver struct {
 	// hydration. Otherwise a hydrator can read a soon-to-be-discarded file,
 	// lose the race with ResetSlot, and feed its stale packets straight back
 	// into the newly-cleared assembler state.
-	slotResetMu   sync.RWMutex
-	leaderForSlot LeaderForSlotFunc
-	repairClient  *repairClient
-	sigCache      shredSigCache
-	blocks        chan *block.Block
+	slotResetMu    sync.RWMutex
+	completionPool *slotCompletionPool
+	leaderForSlot  LeaderForSlotFunc
+	repairClient   *repairClient
+	sigCache       shredSigCache
+	blocks         chan *block.Block
 	// Count queued deliveries rather than storing a boolean. A rejected
 	// Alpenglow variant can reset a slot and assemble its replacement while
 	// the first delivery is still crossing Blocks(); acknowledging the first
@@ -489,6 +490,13 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		gossip.BoostUDPReceiveBuffer(repairConn, gossip.TurbineUDPReceiveBufferBytes, "turbine repair receiver")
 	}
 	r.signalReady(nil)
+	completionPool := newSlotCompletionPool(r.assembler, &r.slotResetMu, r.startPendingBlock, defaultSlotCompletionWorkers(), slotCompletionQueueDepth)
+	r.completionPool = completionPool
+	completionDone := make(chan struct{})
+	go func() {
+		defer close(completionDone)
+		r.consumeCompletionResults(runCtx, completionPool.results)
+	}()
 
 	go func() {
 		<-runCtx.Done()
@@ -500,6 +508,7 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 	if repairConn != nil {
 		go r.repairClient.run(runCtx, repairConn, r.assembler)
 	}
+	var hydratorDone chan struct{}
 	if r.spool != nil {
 		// Flush buffered slot-file tails and close the completeness journal
 		// when this receiver dies: the next receiver over the SAME spool
@@ -507,17 +516,10 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 		// restart) can only see what reached disk — and it truncate-rewrites
 		// the journal on open, so ours must be closed first.
 		defer r.spool.Close()
-		hydratorDone := make(chan struct{})
+		hydratorDone = make(chan struct{})
 		go func() {
 			defer close(hydratorDone)
 			r.hydrateLoop(runCtx)
-		}()
-		// LIFO: this join runs BEFORE spool.Close and the channel close.
-		// runCancel unblocks an emit in flight (emitAssembled selects on
-		// runCtx), then the wait guarantees no send can follow the close.
-		defer func() {
-			runCancel()
-			<-hydratorDone
 		}()
 	}
 
@@ -539,6 +541,15 @@ func (r *UDPReceiver) Run(ctx context.Context) error {
 	for i := 1; i < readers; i++ {
 		<-readErr
 	}
+	if hydratorDone != nil {
+		<-hydratorDone
+	}
+	// No submitters remain. Drain queued work while the spool hook and result
+	// consumer are alive, then close results and join it before channel close.
+	completionPool.closeAndWait()
+	<-completionDone
+	r.completionPool = nil
+
 	if firstErr != nil && ctx.Err() == nil {
 		return firstErr
 	}
@@ -642,7 +653,7 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 			return true
 		}
 	}
-	blk, err := r.assembler.AddShredFrom(shred, fromRepair)
+	work, err := r.assembler.addShredFrom(shred, fromRepair)
 	r.slotResetMu.RUnlock()
 	if err != nil {
 		if errors.Is(err, ErrDuplicateShred) {
@@ -655,13 +666,73 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 		}
 		return true
 	}
-	if blk == nil {
+	return r.submitCompletion(ctx, work, false)
+}
+
+func (r *UDPReceiver) submitCompletion(ctx context.Context, work *slotCompletionWork, hydrated bool) bool {
+	if work == nil {
+		return true
+	}
+	if pool := r.completionPool; pool != nil {
+		return pool.enqueue(ctx, work, hydrated)
+	}
+
+	// Direct processPacket callers outside Run retain synchronous behavior.
+	processed := r.assembler.processCompletion(ctx, work)
+	if processed.canceled {
+		r.assembler.abortCompletion(work)
+		return false
+	}
+	r.slotResetMu.RLock()
+	blk, err := r.assembler.finalizeCompletion(work, processed)
+	pending := false
+	if blk != nil && err == nil {
+		r.startPendingBlock(blk.Slot)
+		pending = true
+	}
+	r.slotResetMu.RUnlock()
+	return r.handleCompletionResult(ctx, slotCompletionResult{
+		block:    blk,
+		err:      err,
+		hydrated: hydrated,
+		pending:  pending,
+	})
+}
+
+func (r *UDPReceiver) consumeCompletionResults(ctx context.Context, results <-chan slotCompletionResult) {
+	for result := range results {
+		if ctx.Err() != nil {
+			if result.pending && result.block != nil {
+				r.finishPendingBlock(result.block.Slot)
+			}
+			continue
+		}
+		r.handleCompletionResult(ctx, result)
+	}
+}
+
+func (r *UDPReceiver) handleCompletionResult(ctx context.Context, result slotCompletionResult) bool {
+	if result.err != nil {
+		r.assemblyErrors.Add(1)
+		select {
+		case r.errs <- result.err:
+		default:
+		}
+		return true
+	}
+	if result.block == nil {
 		return true
 	}
 	if r.repairClient != nil {
-		r.repairClient.cancelSlotRequests(blk.Slot)
+		r.repairClient.cancelSlotRequests(result.block.Slot)
 	}
-	return r.emitAssembled(ctx, blk)
+	if result.hydrated {
+		r.hydratedFromDisk.Add(1)
+	}
+	if result.pending {
+		return r.emitPendingAssembled(ctx, result.block)
+	}
+	return r.emitAssembled(ctx, result.block)
 }
 
 // skipAssemblyForSpool implements the catchup RAM policy: with a hydration
@@ -679,9 +750,13 @@ func (r *UDPReceiver) skipAssemblyForSpool(slot uint64) bool {
 }
 
 func (r *UDPReceiver) emitAssembled(ctx context.Context, blk *block.Block) bool {
+	r.startPendingBlock(blk.Slot)
+	return r.emitPendingAssembled(ctx, blk)
+}
+
+func (r *UDPReceiver) emitPendingAssembled(ctx context.Context, blk *block.Block) bool {
 	r.blocksEmitted.Add(1)
 	r.lastBlockSlot.Store(blk.Slot)
-	r.startPendingBlock(blk.Slot)
 	select {
 	case r.blocks <- blk:
 		return true
@@ -733,7 +808,7 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 				continue
 			}
 			hydrated[slot] = true
-			var assembled *block.Block
+			var work *slotCompletionWork
 			for _, pkt := range packets {
 				shred, perr := ParseShred(pkt)
 				if perr != nil {
@@ -742,24 +817,17 @@ func (r *UDPReceiver) hydrateLoop(ctx context.Context) {
 				if r.repairClient != nil {
 					r.repairClient.satisfyDataShred(shred)
 				}
-				blk, aerr := r.assembler.AddShredFrom(shred, false)
-				if aerr != nil || blk == nil {
+				candidate, aerr := r.assembler.addShredFrom(shred, false)
+				if aerr != nil || candidate == nil {
 					continue
 				}
-				assembled = blk
+				work = candidate
 				break
 			}
-			complete := r.assembler.SlotCompleted(slot)
 			r.slotResetMu.RUnlock()
-			if complete && r.repairClient != nil {
-				r.repairClient.cancelSlotRequests(slot)
-			}
-			if assembled != nil && !r.emitAssembled(ctx, assembled) {
-				return
-			}
 			r.hydratedSlots.Add(1)
-			if complete {
-				r.hydratedFromDisk.Add(1)
+			if !r.submitCompletion(ctx, work, true) {
+				return
 			}
 			select {
 			case <-ctx.Done():

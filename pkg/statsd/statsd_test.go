@@ -196,6 +196,38 @@ func TestDurationRejectsMissingWrongAndBadLabelMetrics(t *testing.T) {
 	}
 }
 
+func TestTurbinePipelineDurationMetricsUseSecondsAndBoundedSchema(t *testing.T) {
+	metrics := []Metric{
+		TurbineShredCollection,
+		TurbineBlockCompletionQueueDelay,
+		TurbineBlockDecode,
+		TurbineTransactionParse,
+		TurbineTransactionSigverify,
+		TurbineReplayAdmission,
+	}
+	duration := 25 * time.Millisecond
+	for _, metric := range metrics {
+		t.Run(metric.String(), func(t *testing.T) {
+			assert.Equal(t, []string{}, MetricToLabels[metric])
+			assert.Equal(t, TimingT, MetricToType[metric])
+			buckets, ok := MetricToBuckets[metric]
+			assert.True(t, ok)
+			assert.Equal(t, turbinePipelineDurationBuckets, buckets)
+
+			histogram, err := metricsCollection.histograms[metric].GetMetricWithLabelValues()
+			assert.NoError(t, err)
+			before := &dto.Metric{}
+			assert.NoError(t, histogram.(prometheus.Metric).Write(before))
+			assert.NoError(t, Duration(metric, duration, nil))
+			after := &dto.Metric{}
+			assert.NoError(t, histogram.(prometheus.Metric).Write(after))
+
+			assert.Equal(t, before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
+			assert.InDelta(t, duration.Seconds(), after.GetHistogram().GetSampleSum()-before.GetHistogram().GetSampleSum(), 1e-12)
+		})
+	}
+}
+
 func TestBlockProductionMetricLabelsStayBounded(t *testing.T) {
 	assert.Equal(t, []string{"outcome", "reason"}, MetricToLabels[BlockProductionLeaderSlots])
 	assert.Equal(t, []string{"outcome", "terminal", "cause"}, MetricToLabels[BlockProductionLeaderSlotTerminals])

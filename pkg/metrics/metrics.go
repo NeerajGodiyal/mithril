@@ -61,10 +61,22 @@ type AccountLoader struct {
 	PlaceholderObjects    uint64
 }
 
+// TurbineIngress is the exact per-slot pre-replay pipeline decomposition.
+// It is written to replay_timings.jsonl without high-cardinality metric labels.
+type TurbineIngress struct {
+	ShredCollection      Timing
+	CompletionQueueDelay Timing
+	BlockDecode          Timing
+	TransactionParse     Timing
+	TransactionSigverify Timing
+	ReplayAdmission      Timing
+}
+
 // Metrics for replaying a single block
 type BlockReplay struct {
-	Slot          uint64
-	AccountLoader AccountLoader
+	Slot           uint64
+	AccountLoader  AccountLoader
+	TurbineIngress TurbineIngress
 
 	// Block-level latencies.
 	PreprocessBlock     Timing

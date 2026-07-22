@@ -1,6 +1,7 @@
 package turbine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/gagliardetto/solana-go"
 	"github.com/klauspost/reedsolomon"
 )
@@ -46,6 +48,8 @@ type SlotAssembler struct {
 	completedSlots       map[uint64]struct{}
 	knownBlockIDs        map[uint64]solana.Hash
 	rejectedBlockIDs     map[uint64]map[solana.Hash]struct{}
+	protectedKnownIDs    map[uint64]struct{}
+	protectedBlockIDs    map[uint64]struct{}
 	priorityRepairSlots  map[uint64]struct{}
 	priorityRepairOrder  []uint64
 	encoders             map[fecLayout]reedsolomon.Encoder
@@ -65,6 +69,9 @@ type SlotAssembler struct {
 	// onComplete fires when a slot fully assembles (all data shreds
 	// 0..lastIndex held) — the completeness signal the shred spool journals.
 	onComplete func(slot uint64, lastIndex uint32, shreds uint32)
+	// Configured before ingestion; tests may replace it with a blocking probe.
+	// Production uses the process-wide bounded transaction verifier.
+	verifyTransactions func(context.Context, *block.Block) error
 }
 
 type SlotRepairRequest struct {
@@ -96,7 +103,10 @@ type slotState struct {
 	// Observability: when the slot's first shred was accepted, and how many of
 	// its shreds arrived via repair rather than turbine.
 	firstShredAt   time.Time
+	fullAt         time.Time
 	repairedShreds int
+	// completing makes the immutable full state a single-owner generation token.
+	completing bool
 	// Assembly failures for this slot (mixed variants/signatures, FEC layout
 	// conflicts, ...). A slot frozen below completion while repair responses
 	// flow is usually poisoned state — the latest error names the poison.
@@ -107,6 +117,31 @@ type slotState struct {
 func (s *slotState) noteError(err error) {
 	s.errCount++
 	s.lastErr = err.Error()
+}
+
+type slotCompletionWork struct {
+	state              *slotState
+	queuedAt           time.Time
+	observeCollection  bool
+	reportNonCanonical bool
+	verifyTransactions func(context.Context, *block.Block) error
+}
+
+type processedSlotCompletion struct {
+	block             *block.Block
+	parentInfo        *AlpenglowParentInfo
+	roots             []solana.Hash
+	err               error
+	canceled          bool
+	completionReadyAt time.Time
+	timings           block.TurbineIngressTimings
+}
+
+type slotCompletionResult struct {
+	block    *block.Block
+	err      error
+	hydrated bool
+	pending  bool
 }
 
 type fecLayout struct {
@@ -134,9 +169,12 @@ func NewSlotAssembler() *SlotAssembler {
 		completedSlots:      make(map[uint64]struct{}),
 		knownBlockIDs:       make(map[uint64]solana.Hash),
 		rejectedBlockIDs:    make(map[uint64]map[solana.Hash]struct{}),
+		protectedKnownIDs:   make(map[uint64]struct{}),
+		protectedBlockIDs:   make(map[uint64]struct{}),
 		priorityRepairSlots: make(map[uint64]struct{}),
 		partialShredObs:     make(map[uint64]PartialShredObservation),
 		encoders:            make(map[fecLayout]reedsolomon.Encoder),
+		verifyTransactions:  validateBlockTransactionsContext,
 	}
 }
 
@@ -189,12 +227,23 @@ func (a *SlotAssembler) AddShred(shred *Shred) (*block.Block, error) {
 // AddShredFrom ingests a shred, recording whether it arrived via repair (for
 // per-slot observability) rather than turbine.
 func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Block, error) {
+	work, err := a.addShredFrom(shred, fromRepair)
+	if err != nil || work == nil {
+		return nil, err
+	}
+	processed := a.processCompletion(context.Background(), work)
+	return a.finalizeCompletion(work, processed)
+}
+
+// addShredFrom owns only mutable shred/FEC state. Once a slot first becomes
+// reconstructable it returns a single immutable completion token; decoding,
+// parsing, and signature verification must happen after this method unlocks.
+func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotCompletionWork, error) {
 	if shred == nil {
 		return nil, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-
 	if shred.Slot > a.maxObservedSlot {
 		a.maxObservedSlot = shred.Slot
 	}
@@ -209,6 +258,10 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	}
 
 	state := a.slotState(shred.Slot, shred.Version)
+	if state.completing {
+		a.ignoredOldShreds++
+		return nil, nil
+	}
 	var err error
 	switch shred.Type {
 	case ShredTypeData:
@@ -234,6 +287,9 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 		state.noteError(err)
 		return nil, err
 	}
+	if state.firstShredAt.IsZero() {
+		state.firstShredAt = time.Now()
+	}
 
 	recovered, err := a.recoverFEC(state, shred.FECSetIndex)
 	if err != nil {
@@ -243,6 +299,7 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	for _, recoveredShred := range recovered {
 		err := state.addDataShred(recoveredShred)
 		if err != nil && !errors.Is(err, ErrDuplicateShred) {
+			state.noteError(err)
 			return nil, err
 		}
 		if err == nil {
@@ -253,40 +310,188 @@ func (a *SlotAssembler) AddShredFrom(shred *Shred, fromRepair bool) (*block.Bloc
 	if !state.complete() {
 		return nil, nil
 	}
+	return a.claimCompletionLocked(state, false), nil
+}
 
-	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
-	blk, err := state.block(parentBlockID, parentKnown)
-	if err != nil {
-		// The slot can hold every shred yet still fail to decode (for example,
-		// after hydrating a crash-torn cache record). Keep that deterministic
-		// failure on the live state so catchup diagnostics and self-healing see
-		// the actual cause instead of reporting "assembly errors: 0" forever.
-		state.noteError(err)
-		return nil, err
+func (a *SlotAssembler) claimCompletionLocked(state *slotState, reportNonCanonical bool) *slotCompletionWork {
+	if state == nil || state.completing || !state.complete() {
+		return nil
 	}
-	if !a.acceptAlpenglowBlockIDLocked(blk) {
-		a.trackNonCanonicalBlockIDLocked(blk)
-		a.recordPartialObsLocked(state) // shreds DID arrive; useful if the slot ends up skipped
-		delete(a.slots, shred.Slot)
+	now := time.Now()
+	observeCollection := state.fullAt.IsZero()
+	if observeCollection {
+		state.fullAt = now
+		if state.slot > a.highestFullSlot {
+			a.highestFullSlot = state.slot
+		}
+	}
+	state.completing = true
+	verifyTransactions := a.verifyTransactions
+	if verifyTransactions == nil {
+		verifyTransactions = validateBlockTransactionsContext
+	}
+	return &slotCompletionWork{
+		state:              state,
+		queuedAt:           now,
+		observeCollection:  observeCollection,
+		reportNonCanonical: reportNonCanonical,
+		verifyTransactions: verifyTransactions,
+	}
+}
+
+// abortCompletion releases a token that could not be handed to a completion
+// worker (normally only receiver shutdown). Pointer identity prevents an old
+// token from changing replacement state installed by ResetSlot.
+func (a *SlotAssembler) abortCompletion(work *slotCompletionWork) {
+	if work == nil || work.state == nil {
+		return
+	}
+	a.mu.Lock()
+	if a.slots[work.state.slot] == work.state && work.state.completing {
+		work.state.completing = false
+	}
+	a.mu.Unlock()
+}
+
+func (a *SlotAssembler) processCompletion(ctx context.Context, work *slotCompletionWork) processedSlotCompletion {
+	if work == nil || work.state == nil {
+		return processedSlotCompletion{}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return processedSlotCompletion{canceled: true}
+	}
+	startedAt := time.Now()
+	timings := block.TurbineIngressTimings{CompletionQueueDelay: startedAt.Sub(work.queuedAt)}
+	_ = statsd.Duration(statsd.TurbineBlockCompletionQueueDelay, timings.CompletionQueueDelay, nil)
+	if !work.state.firstShredAt.IsZero() && !work.state.fullAt.IsZero() {
+		timings.ShredCollection = work.state.fullAt.Sub(work.state.firstShredAt)
+		if work.observeCollection {
+			_ = statsd.Duration(statsd.TurbineShredCollection, timings.ShredCollection, nil)
+		}
+	}
+
+	decodeStartedAt := time.Now()
+	var decodeTimings entryDecodeTimings
+	blk, parentInfo, roots, err := work.state.decodeBlock(&decodeTimings)
+	decodeTotal := time.Since(decodeStartedAt)
+	decodeOnly := decodeTotal - decodeTimings.transactionParse
+	if decodeOnly < 0 {
+		decodeOnly = 0
+	}
+	timings.BlockDecode = decodeOnly
+	timings.TransactionParse = decodeTimings.transactionParse
+	_ = statsd.Duration(statsd.TurbineBlockDecode, timings.BlockDecode, nil)
+	_ = statsd.Duration(statsd.TurbineTransactionParse, timings.TransactionParse, nil)
+	processed := processedSlotCompletion{block: blk, parentInfo: parentInfo, roots: roots, err: err, timings: timings}
+	if err != nil {
+		return processed
+	}
+	if ctx.Err() != nil {
+		processed.canceled = true
+		return processed
+	}
+
+	sigverifyStartedAt := time.Now()
+	processed.err = work.verifyTransactions(ctx, blk)
+	processed.timings.TransactionSigverify = time.Since(sigverifyStartedAt)
+	_ = statsd.Duration(statsd.TurbineTransactionSigverify, processed.timings.TransactionSigverify, nil)
+	if ctx.Err() != nil {
+		processed.canceled = true
+		processed.err = nil
+		return processed
+	}
+	if processed.err == nil {
+		blk.MarkTransactionSignaturesVerified()
+		processed.completionReadyAt = time.Now()
+	}
+	return processed
+}
+
+func (a *SlotAssembler) finalizeCompletion(work *slotCompletionWork, processed processedSlotCompletion) (*block.Block, error) {
+	if work == nil || work.state == nil {
+		return nil, processed.err
+	}
+	state := work.state
+	a.mu.Lock()
+	if a.slots[state.slot] != state || !state.completing {
+		a.mu.Unlock()
 		return nil, nil
 	}
-	delete(a.slots, shred.Slot)
-	a.completedSlots[shred.Slot] = struct{}{}
-	if a.onComplete != nil {
-		a.onComplete(shred.Slot, state.lastIndex, uint32(state.lastIndex)+1)
+	if processed.err != nil {
+		// Retain a deterministic decode/verification failure on the live full
+		// state so catchup diagnostics report poison instead of a missing slot.
+		state.noteError(processed.err)
+		state.completing = false
+		a.mu.Unlock()
+		return nil, processed.err
 	}
+
+	blk := processed.block
+	a.attachAlpenglowIdentityLocked(blk, state, processed.parentInfo, processed.roots)
+	if !a.acceptAlpenglowBlockIDLocked(blk) {
+		a.trackNonCanonicalBlockIDLocked(blk)
+		a.recordPartialObsLocked(state)
+		delete(a.slots, state.slot)
+		a.mu.Unlock()
+		if work.reportNonCanonical {
+			return nil, ErrNonCanonicalAlpenglowBlockID
+		}
+		return nil, nil
+	}
+
+	delete(a.slots, state.slot)
+	a.completedSlots[state.slot] = struct{}{}
 	a.trackBlockIDLocked(blk)
-	// Shred-path observability: stamp when the slot's shreds started arriving
-	// and when it became full ("full" = reconstructable, Agave is_full sense).
 	if !state.firstShredAt.IsZero() {
 		blk.ShredFirstNanos = state.firstShredAt.UnixNano()
 	}
-	blk.ShredFullNanos = time.Now().UnixNano()
-	blk.RepairedShreds = state.repairedShreds
-	if shred.Slot > a.highestFullSlot {
-		a.highestFullSlot = shred.Slot
+	if !state.fullAt.IsZero() {
+		blk.ShredFullNanos = state.fullAt.UnixNano()
 	}
+	blk.RepairedShreds = state.repairedShreds
+	onComplete := a.onComplete
+	lastIndex := state.lastIndex
+	a.mu.Unlock()
+
+	// The spool callback can take its own lock and perform journal I/O. Keep it
+	// outside the global assembler mutex, but finish it before block delivery.
+	if onComplete != nil {
+		onComplete(state.slot, lastIndex, lastIndex+1)
+	}
+	blk.MarkTurbineIngressTimings(processed.timings)
+	admissionStart := processed.completionReadyAt
+	if admissionStart.IsZero() {
+		admissionStart = time.Now()
+	}
+	blk.MarkTurbineReplayAdmissionStart(admissionStart)
 	return blk, nil
+}
+
+func (a *SlotAssembler) attachAlpenglowIdentityLocked(blk *block.Block, state *slotState, parentInfo *AlpenglowParentInfo, roots []solana.Hash) {
+	if blk == nil || state == nil {
+		return
+	}
+	parentSlot := state.parentSlot
+	parentBlockID, parentKnown := a.knownBlockIDs[parentSlot]
+	if parentInfo != nil {
+		parentSlot = parentInfo.ParentSlot
+		parentBlockID = parentInfo.ParentBlockID
+		parentKnown = true
+	}
+	blk.SourceParentSlot = parentSlot
+	if parentKnown && parentBlockID != (solana.Hash{}) {
+		blk.AlpenglowParentBlockID = parentBlockID
+		blk.HasAlpenglowParentBlockID = true
+	}
+	if parentKnown && len(roots) > 0 {
+		blk.AlpenglowBlockID = DoubleMerkleBlockID(parentSlot, parentBlockID, roots)
+		blk.HasAlpenglowBlockID = true
+		blk.AlpenglowLastChainedRoot = roots[len(roots)-1]
+		blk.HasAlpenglowLastChainedRoot = true
+	}
 }
 
 // ShredEdges reports the monotonic shred frontier: the highest slot any
@@ -379,12 +584,11 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 		return state
 	}
 	state = &slotState{
-		slot:         slot,
-		shreds:       make(map[uint32]*Shred),
-		fecSets:      make(map[uint32]*fecState),
-		shredVer:     version,
-		lastIndex:    ^uint32(0),
-		firstShredAt: time.Now(),
+		slot:      slot,
+		shreds:    make(map[uint32]*Shred),
+		fecSets:   make(map[uint32]*fecState),
+		shredVer:  version,
+		lastIndex: ^uint32(0),
 	}
 	a.slots[slot] = state
 	return state
@@ -437,7 +641,7 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 			minSlot = a.retentionFloor // repair catchup: keep the whole window behind the edge
 		}
 		for slot, state := range a.slots {
-			if slot < minSlot {
+			if slot < minSlot && !state.completing {
 				a.recordPartialObsLocked(state)
 				delete(a.slots, slot)
 				a.evictedSlots++
@@ -454,13 +658,23 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 				delete(a.completedSlots, slot)
 			}
 		}
+		clear(a.protectedKnownIDs)
+		clear(a.protectedBlockIDs)
+		for _, state := range a.slots {
+			if !state.completing {
+				continue
+			}
+			a.protectedKnownIDs[state.slot] = struct{}{}
+			a.protectedBlockIDs[state.slot] = struct{}{}
+			a.protectedKnownIDs[state.parentSlot] = struct{}{}
+		}
 		for slot := range a.knownBlockIDs {
-			if slot < minSlot {
+			if _, protected := a.protectedKnownIDs[slot]; slot < minSlot && !protected {
 				delete(a.knownBlockIDs, slot)
 			}
 		}
 		for slot := range a.rejectedBlockIDs {
-			if slot < minSlot {
+			if _, protected := a.protectedBlockIDs[slot]; slot < minSlot && !protected {
 				delete(a.rejectedBlockIDs, slot)
 			}
 		}
@@ -497,6 +711,9 @@ func (a *SlotAssembler) capEvictionCandidateLocked() (uint64, bool) {
 	var highest uint64
 	found := false
 	for slot := range a.slots {
+		if a.slots[slot].completing {
+			continue
+		}
 		if a.retentionFloor > 0 && slot == a.retentionFloor {
 			continue
 		}
@@ -513,6 +730,9 @@ func (a *SlotAssembler) capEvictionCandidateLocked() (uint64, bool) {
 	}
 
 	for slot := range a.slots {
+		if a.slots[slot].completing {
+			continue
+		}
 		if a.retentionFloor > 0 && slot == a.retentionFloor {
 			continue
 		}
@@ -762,30 +982,14 @@ func (s *slotState) addCodingShred(shred *Shred) error {
 
 func (a *SlotAssembler) CompleteSlot(slot uint64) (*block.Block, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	state := a.slots[slot]
-	if state == nil || !state.complete() {
+	work := a.claimCompletionLocked(state, true)
+	a.mu.Unlock()
+	if work == nil {
 		return nil, ErrSlotIncomplete
 	}
-	parentBlockID, parentKnown := a.knownBlockIDs[state.parentSlot]
-	blk, err := state.block(parentBlockID, parentKnown)
-	if err != nil {
-		state.noteError(err)
-		return nil, err
-	}
-	if !a.acceptAlpenglowBlockIDLocked(blk) {
-		a.trackNonCanonicalBlockIDLocked(blk)
-		delete(a.slots, slot)
-		return nil, ErrNonCanonicalAlpenglowBlockID
-	}
-	delete(a.slots, slot)
-	a.completedSlots[slot] = struct{}{}
-	if a.onComplete != nil {
-		a.onComplete(slot, state.lastIndex, uint32(state.lastIndex)+1)
-	}
-	a.trackBlockIDLocked(blk)
-	return blk, nil
+	processed := a.processCompletion(context.Background(), work)
+	return a.finalizeCompletion(work, processed)
 }
 
 func (a *SlotAssembler) acceptAlpenglowBlockIDLocked(blk *block.Block) bool {
@@ -1306,46 +1510,27 @@ func (s *slotState) orderedShreds() []*Shred {
 	return out
 }
 
-func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
-	entries, parentInfo, footer, err := DecodeEntriesAndAlpenglowMarkersFromDataShreds(s.orderedShreds())
+// decodeBlock performs every immutable, CPU-heavy completion step except
+// transaction signature verification. Parent/child identity hints are applied
+// later under the assembler lock so hints learned while this runs still win.
+func (s *slotState) decodeBlock(timings *entryDecodeTimings) (*block.Block, *AlpenglowParentInfo, []solana.Hash, error) {
+	entries, parentInfo, footer, err := decodeEntriesAndAlpenglowMarkersFromDataShreds(s.orderedShreds(), timings)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	effectiveParentSlot := s.parentSlot
-	effectiveParentBlockID := parentBlockID
-	effectiveParentKnown := parentKnown
 	if parentInfo != nil {
 		if parentInfo.FromUpdateParent && s.slot%defaultBroadcastLeaderSlots != 0 {
-			return nil, fmt.Errorf("slot %d alpenglow update-parent marker is not in the first slot of its leader window", s.slot)
+			return nil, nil, nil, fmt.Errorf("slot %d alpenglow update-parent marker is not in the first slot of its leader window", s.slot)
 		}
 		if parentInfo.ParentSlot >= s.slot {
-			return nil, fmt.Errorf("slot %d alpenglow parent marker points to non-ancestor slot %d", s.slot, parentInfo.ParentSlot)
+			return nil, nil, nil, fmt.Errorf("slot %d alpenglow parent marker points to non-ancestor slot %d", s.slot, parentInfo.ParentSlot)
 		}
 		effectiveParentSlot = parentInfo.ParentSlot
-		effectiveParentBlockID = parentInfo.ParentBlockID
-		effectiveParentKnown = true
 	}
 
 	blk := BlockFromEntries(s.slot, effectiveParentSlot, entries)
 	blk.AlpenglowShredVersion = s.shredVer
-	if effectiveParentKnown && effectiveParentBlockID != (solana.Hash{}) {
-		blk.AlpenglowParentBlockID = effectiveParentBlockID
-		blk.HasAlpenglowParentBlockID = true
-	}
-	if blockID, ok, err := s.alpenglowBlockID(effectiveParentSlot, effectiveParentBlockID, effectiveParentKnown); err != nil {
-		return nil, err
-	} else if ok {
-		blk.AlpenglowBlockID = blockID
-		blk.HasAlpenglowBlockID = true
-		roots, err := s.fecSetMerkleRoots()
-		if err != nil {
-			return nil, err
-		}
-		if len(roots) > 0 {
-			blk.AlpenglowLastChainedRoot = roots[len(roots)-1]
-			blk.HasAlpenglowLastChainedRoot = true
-		}
-	}
 	if footer != nil {
 		blk.HasAlpenglowFooter = true
 		blk.SkipRewardCert = append([]byte(nil), footer.SkipRewardCert...)
@@ -1358,15 +1543,80 @@ func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.B
 			blk.HasExpectedBankhash = true
 		}
 	}
+	roots, err := s.optionalFECSetMerkleRoots()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return blk, parentInfo, roots, nil
+}
+
+// block is retained as the synchronous construction helper used by focused
+// generator tests. Production assembly uses decodeBlock plus final-time hint
+// resolution in finalizeCompletion.
+func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
+	blk, parentInfo, roots, err := s.decodeBlock(nil)
+	if err != nil {
+		return nil, err
+	}
+	parentSlot := s.parentSlot
+	if parentInfo != nil {
+		parentSlot = parentInfo.ParentSlot
+		parentBlockID = parentInfo.ParentBlockID
+		parentKnown = true
+	}
+	if parentKnown && parentBlockID != (solana.Hash{}) {
+		blk.AlpenglowParentBlockID = parentBlockID
+		blk.HasAlpenglowParentBlockID = true
+	}
+	if parentKnown && len(roots) > 0 {
+		blk.AlpenglowBlockID = DoubleMerkleBlockID(parentSlot, parentBlockID, roots)
+		blk.HasAlpenglowBlockID = true
+		blk.AlpenglowLastChainedRoot = roots[len(roots)-1]
+		blk.HasAlpenglowLastChainedRoot = true
+	}
 	if err := validateBlockTransactions(blk); err != nil {
 		return nil, err
 	}
-	// Replay consumes this exact in-memory block and can trust the assembler's
-	// completed verification instead of marshaling and verifying every signed
-	// message a second time. The marker is private/non-serialized, so blocks
-	// crossing any file or JSON boundary safely fall back to replay verification.
 	blk.MarkTransactionSignaturesVerified()
 	return blk, nil
+}
+
+// optionalFECSetMerkleRoots accepts a fully legacy slot with no Merkle roots,
+// but rejects a partially rooted Alpenglow slot. That lets decode run before a
+// parent hint is known without weakening mixed/missing-root validation.
+func (s *slotState) optionalFECSetMerkleRoots() ([]solana.Hash, error) {
+	if !s.haveLast || len(s.fecSets) == 0 {
+		return nil, nil
+	}
+	fecSetCount := s.lastIndex/dataShredsPerFECBlock + 1
+	roots := make([]solana.Hash, fecSetCount)
+	haveRoot := make([]bool, fecSetCount)
+	anyRoot := false
+	for fecSetNumber := uint32(0); fecSetNumber < fecSetCount; fecSetNumber++ {
+		fecSetIndex := fecSetNumber * dataShredsPerFECBlock
+		fec := s.fecSets[fecSetIndex]
+		if fec == nil {
+			return nil, fmt.Errorf("slot %d alpenglow block id: missing FEC set %d", s.slot, fecSetIndex)
+		}
+		root, ok, err := fec.merkleRoot()
+		if err != nil {
+			return nil, fmt.Errorf("slot %d fec_set=%d alpenglow block id: %w", s.slot, fecSetIndex, err)
+		}
+		if ok {
+			roots[fecSetNumber] = root
+			haveRoot[fecSetNumber] = true
+			anyRoot = true
+		}
+	}
+	if !anyRoot {
+		return nil, nil
+	}
+	for fecSetNumber, ok := range haveRoot {
+		if !ok {
+			return nil, fmt.Errorf("slot %d fec_set=%d alpenglow block id: missing Merkle root", s.slot, uint32(fecSetNumber)*dataShredsPerFECBlock)
+		}
+	}
+	return roots, nil
 }
 
 func (s *slotState) alpenglowBlockID(parentSlot uint64, parentBlockID solana.Hash, parentKnown bool) (solana.Hash, bool, error) {

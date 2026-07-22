@@ -1,6 +1,8 @@
 package block
 
 import (
+	"time"
+
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
@@ -8,6 +10,17 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
+
+// TurbineIngressTimings is the per-slot decomposition carried only by a
+// trusted in-memory Turbine block. Durations never serialize with Block.
+type TurbineIngressTimings struct {
+	ShredCollection      time.Duration
+	CompletionQueueDelay time.Duration
+	BlockDecode          time.Duration
+	TransactionParse     time.Duration
+	TransactionSigverify time.Duration
+	ReplayAdmission      time.Duration
+}
 
 type Block struct {
 	Slot                                uint64
@@ -60,12 +73,18 @@ type Block struct {
 	// marker set only by an in-process source after it has verified every
 	// transaction signature. It must not be accepted from JSON/file input.
 	transactionSignaturesVerified bool
-	SkipRewardCert                []byte
-	NotarRewardCert               []byte
-	BlockFinalCert                []byte
-	FooterProducerTimeNanos       uint64
-	HasAlpenglowFooter            bool
-	AlpenglowShredVersion         uint16
+	// turbineReplayAdmissionStart is deliberately private and monotonic. It
+	// exists only on the exact in-memory block handed from Turbine to replay,
+	// so serialized/RPC blocks cannot inject or preserve an admission clock.
+	turbineReplayAdmissionStart time.Time
+	turbineIngressTimings       TurbineIngressTimings
+	hasTurbineIngressTimings    bool
+	SkipRewardCert              []byte
+	NotarRewardCert             []byte
+	BlockFinalCert              []byte
+	FooterProducerTimeNanos     uint64
+	HasAlpenglowFooter          bool
+	AlpenglowShredVersion       uint16
 
 	// Shred-path observability (zero when the block did not come from shreds —
 	// RPC/file blocks must not fabricate these). "Full" follows Agave's
@@ -94,6 +113,55 @@ func (b *Block) TransactionSignaturesVerified() bool {
 	return b != nil && b.transactionSignaturesVerified
 }
 
+// MarkTurbineReplayAdmissionStart starts the interval from successful
+// assembler validation to replay taking ownership of this exact block.
+func (b *Block) MarkTurbineReplayAdmissionStart(at time.Time) {
+	if b != nil {
+		b.turbineReplayAdmissionStart = at
+	}
+}
+
+// TurbineReplayAdmissionStart returns the in-process admission clock. The
+// bool is false for RPC/file/local-production blocks and after serialization.
+func (b *Block) TurbineReplayAdmissionStart() (time.Time, bool) {
+	if b == nil || b.turbineReplayAdmissionStart.IsZero() {
+		return time.Time{}, false
+	}
+	return b.turbineReplayAdmissionStart, true
+}
+
+// MarkTurbineIngressTimings attaches phase durations to the trusted in-memory
+// block. It does not start or end the replay-admission interval.
+func (b *Block) MarkTurbineIngressTimings(timings TurbineIngressTimings) {
+	if b != nil {
+		b.turbineIngressTimings = timings
+		b.hasTurbineIngressTimings = true
+	}
+}
+
+// TurbineIngressTimings reports trusted per-slot phase durations. Serialized,
+// RPC, file, and local-production blocks return false.
+func (b *Block) TurbineIngressTimings() (TurbineIngressTimings, bool) {
+	if b == nil || !b.hasTurbineIngressTimings {
+		return TurbineIngressTimings{}, false
+	}
+	return b.turbineIngressTimings, true
+}
+
+// CompleteTurbineReplayAdmission ends the admission interval once. Using the
+// stored time.Time preserves its monotonic clock across the in-process queues.
+func (b *Block) CompleteTurbineReplayAdmission(at time.Time) (TurbineIngressTimings, bool) {
+	if b == nil || b.turbineReplayAdmissionStart.IsZero() || !b.hasTurbineIngressTimings {
+		return TurbineIngressTimings{}, false
+	}
+	duration := at.Sub(b.turbineReplayAdmissionStart)
+	if duration < 0 {
+		return TurbineIngressTimings{}, false
+	}
+	b.turbineIngressTimings.ReplayAdmission = duration
+	b.turbineReplayAdmissionStart = time.Time{}
+	return b.turbineIngressTimings, true
+}
 func (b *Block) FixupTxVersions() {
 	if len(b.Versions) == 0 {
 		return

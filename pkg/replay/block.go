@@ -2144,6 +2144,10 @@ func ReplayBlocks(
 	}
 
 	for {
+		// The collector is per replay attempt. Discarded candidates, skipped
+		// slots, and typed-recovery exits must never leak timings into the next
+		// successfully written slot (including a later ReplayBlocks invocation).
+		metrics.GlobalBlockReplay = metrics.BlockReplay{}
 		if ctx.Err() != nil {
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			result.WasCancelled = true
@@ -2151,10 +2155,11 @@ func ReplayBlocks(
 		}
 
 		var (
-			block        *b.Block
-			parentSwitch *blockstream.AlpenglowParentSwitch
-			waitTime     time.Duration
-			neededAt     time.Time // when replay asked the source for this slot
+			block          *b.Block
+			parentSwitch   *blockstream.AlpenglowParentSwitch
+			ingressTimings *b.TurbineIngressTimings
+			waitTime       time.Duration
+			neededAt       time.Time // when replay asked the source for this slot
 		)
 
 		{
@@ -2189,6 +2194,11 @@ func ReplayBlocks(
 
 			neededAt = time.Now()
 			block, parentSwitch = blockStream.NextBlockOrAlpenglowParentSwitch(ctx)
+			if ingress, ok := block.CompleteTurbineReplayAdmission(time.Now()); ok {
+				_ = statsd.Duration(statsd.TurbineReplayAdmission, ingress.ReplayAdmission, nil)
+				ingressTimings = &ingress
+			}
+
 			waitTime = time.Since(neededAt)
 
 			if stallDone != nil {
@@ -2425,6 +2435,15 @@ func ReplayBlocks(
 			mlog.Log.Infof("context cancelled, stopping replay: %v", ctx.Err())
 			result.WasCancelled = true
 			break
+		}
+		if ingressTimings != nil {
+			record := &metrics.GlobalBlockReplay.TurbineIngress
+			record.ShredCollection.AddTiming(ingressTimings.ShredCollection)
+			record.CompletionQueueDelay.AddTiming(ingressTimings.CompletionQueueDelay)
+			record.BlockDecode.AddTiming(ingressTimings.BlockDecode)
+			record.TransactionParse.AddTiming(ingressTimings.TransactionParse)
+			record.TransactionSigverify.AddTiming(ingressTimings.TransactionSigverify)
+			record.ReplayAdmission.AddTiming(ingressTimings.ReplayAdmission)
 		}
 		start := time.Now()
 

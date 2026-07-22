@@ -95,6 +95,12 @@ var (
 	BlockProductionStartDecisionTickDeliveryLag = Metric{"block_production_start_decision_tick_delivery_lag_seconds"}
 	BlockProductionStartDecisionTickWork        = Metric{"block_production_start_decision_tick_work_seconds"}
 	BlockProductionStartAttempt                 = Metric{"block_production_start_attempt_seconds"}
+	TurbineShredCollection                      = Metric{"turbine_shred_collection_duration_seconds"}
+	TurbineBlockCompletionQueueDelay            = Metric{"turbine_block_completion_queue_delay_seconds"}
+	TurbineBlockDecode                          = Metric{"turbine_block_decode_duration_seconds"}
+	TurbineTransactionParse                     = Metric{"turbine_transaction_parse_duration_seconds"}
+	TurbineTransactionSigverify                 = Metric{"turbine_transaction_sigverify_duration_seconds"}
+	TurbineReplayAdmission                      = Metric{"turbine_replay_admission_duration_seconds"}
 
 	SnapshotWorkerPoolUtilization = Metric{"snapshot_worker_pool_utilization"}
 	TasksSetIfSlotHigherQueueSize = Metric{"tasks_set_if_slot_higher_queue_size"}
@@ -179,6 +185,12 @@ var MetricToType = map[Metric]metricType{
 	BlockProductionStartDecisionTickDeliveryLag: TimingT,
 	BlockProductionStartDecisionTickWork:        TimingT,
 	BlockProductionStartAttempt:                 TimingT,
+	TurbineShredCollection:                      TimingT,
+	TurbineBlockCompletionQueueDelay:            TimingT,
+	TurbineBlockDecode:                          TimingT,
+	TurbineTransactionParse:                     TimingT,
+	TurbineTransactionSigverify:                 TimingT,
+	TurbineReplayAdmission:                      TimingT,
 
 	TestCount: CountT,
 
@@ -255,6 +267,12 @@ var MetricToLabels = map[Metric][]string{
 	BlockProductionStartDecisionTickDeliveryLag: {"outcome"},
 	BlockProductionStartDecisionTickWork:        {"outcome"},
 	BlockProductionStartAttempt:                 {"result"},
+	TurbineShredCollection:                      {},
+	TurbineBlockCompletionQueueDelay:            {},
+	TurbineBlockDecode:                          {},
+	TurbineTransactionParse:                     {},
+	TurbineTransactionSigverify:                 {},
+	TurbineReplayAdmission:                      {},
 
 	SnapshotWorkerPoolUtilization: {"task"},
 	TasksSetIfSlotHigherQueueSize: {},
@@ -269,6 +287,12 @@ var blockProductionDurationBuckets = []float64{
 	0.100, 0.125, 0.150, 0.200, 0.400, 0.800, 1.600, 3.200,
 }
 
+var turbinePipelineDurationBuckets = []float64{
+	0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005,
+	0.010, 0.025, 0.050, 0.100, 0.200, 0.400, 0.800, 1.600,
+	3.200, 6.400, 12.800, 30.000, 60.000,
+}
+
 // MetricToBuckets gives duration histograms explicit seconds-based buckets.
 // The generic Timing metrics predate unit-specific naming and retain the
 // Prometheus defaults for compatibility.
@@ -278,6 +302,12 @@ var MetricToBuckets = map[Metric][]float64{
 	BlockProductionStartDecisionTickDeliveryLag: blockProductionDurationBuckets,
 	BlockProductionStartDecisionTickWork:        blockProductionDurationBuckets,
 	BlockProductionStartAttempt:                 blockProductionDurationBuckets,
+	TurbineShredCollection:                      turbinePipelineDurationBuckets,
+	TurbineBlockCompletionQueueDelay:            turbinePipelineDurationBuckets,
+	TurbineBlockDecode:                          turbinePipelineDurationBuckets,
+	TurbineTransactionParse:                     turbinePipelineDurationBuckets,
+	TurbineTransactionSigverify:                 turbinePipelineDurationBuckets,
+	TurbineReplayAdmission:                      turbinePipelineDurationBuckets,
 }
 
 type Prometheusmetrics struct {
