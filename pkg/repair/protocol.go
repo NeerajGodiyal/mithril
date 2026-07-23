@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
+	narya "github.com/Overclock-Validator/narya/ed25519"
 )
 
 const (
@@ -73,7 +74,7 @@ func DecodePing(packet []byte) (Ping, bool) {
 	copy(ping.From[:], packet[4:36])
 	copy(ping.Token[:], packet[36:68])
 	copy(ping.Signature[:], packet[68:132])
-	if !ed25519.Verify(ed25519.PublicKey(ping.From[:]), ping.Token[:], ping.Signature[:]) {
+	if !narya.VerifyStrict(ping.From[:], ping.Token[:], ping.Signature[:]) {
 		return Ping{}, false
 	}
 	return ping, true
@@ -143,7 +144,7 @@ func VerifySignedRequest(packet []byte, sender gossip.Pubkey) bool {
 	signable := make([]byte, 0, len(packet)-repairSignatureSize)
 	signable = append(signable, packet[:repairSignatureOffset]...)
 	signable = append(signable, packet[repairSignatureOffset+repairSignatureSize:]...)
-	return ed25519.Verify(ed25519.PublicKey(sender[:]), signable, packet[repairSignatureOffset:repairSignatureOffset+repairSignatureSize])
+	return narya.VerifyStrict(sender[:], signable, packet[repairSignatureOffset:repairSignatureOffset+repairSignatureSize])
 }
 
 func hashPingToken(token [32]byte) gossip.Hash {

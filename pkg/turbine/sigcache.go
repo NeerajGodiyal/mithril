@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	narya "github.com/Overclock-Validator/narya/ed25519"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -64,7 +65,7 @@ func (c *shredSigCache) verifyShred(s *Shred, leader solana.PublicKey) error {
 	c.mu.Unlock()
 
 	c.verifies.Add(1)
-	if !leader.Verify(root[:], s.Signature) {
+	if !narya.VerifyStrict(leader[:], root[:], s.Signature[:]) {
 		return fmt.Errorf("%w: slot %d shred %d", ErrInvalidSignature, s.Slot, s.Index)
 	}
 	c.mu.Lock()
