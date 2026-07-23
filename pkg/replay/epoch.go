@@ -46,6 +46,33 @@ func requireDurableEpochBoundaryParent(boundarySlot, parentSlot, durableSlot uin
 		boundarySlot, parentSlot, durableSlot)
 }
 
+// epochTransitionTargetEpochs returns every epoch whose metadata must be ready
+// when crossing a boundary. The epoch being entered and the epoch whose leader
+// schedule is selected at that slot are usually different, but some epoch
+// schedules make them the same.
+func epochTransitionTargetEpochs(newEpoch, leaderScheduleEpoch uint64) []uint64 {
+	epochs := []uint64{newEpoch}
+	if leaderScheduleEpoch != newEpoch {
+		epochs = append(epochs, leaderScheduleEpoch)
+	}
+	return epochs
+}
+
+func prepareEpochTransitionLeaderSchedules(newEpoch, leaderScheduleEpoch uint64, epochSchedule *sealevel.SysvarEpochSchedule, logsDir string) error {
+	for _, targetEpoch := range epochTransitionTargetEpochs(newEpoch, leaderScheduleEpoch) {
+		var err error
+		if len(global.EpochStakesVoteAccts(targetEpoch)) > 0 {
+			_, err = PrepareLeaderScheduleLocal(targetEpoch, epochSchedule, logsDir)
+		} else {
+			_, err = PrepareLeaderScheduleLocalFromVoteCache(targetEpoch, epochSchedule, logsDir)
+		}
+		if err != nil {
+			return fmt.Errorf("prepare leader schedule for epoch %d at epoch transition: %w", targetEpoch, err)
+		}
+	}
+	return nil
+}
+
 // newReplayCtx creates a new ReplayCtx, preferring values from resumeState if available.
 // This ensures resume uses fresh values instead of potentially stale manifest data.
 func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*ReplayCtx, error) {
@@ -241,13 +268,7 @@ func handleEpochTransition(acctsDb *accountsdb.AccountsDb, partitionedEpochRewar
 	t2 := time.Now()
 
 	if global.ManageLeaderSchedule() {
-		if len(global.EpochStakesVoteAccts(newEpoch)) > 0 {
-			_, err = PrepareLeaderScheduleLocal(newEpoch, epochSchedule, "")
-		} else {
-			_, err = PrepareLeaderScheduleLocalFromVoteCache(newEpoch, epochSchedule, "")
-		}
-
-		if err != nil {
+		if err = prepareEpochTransitionLeaderSchedules(newEpoch, leaderScheduleEpoch, epochSchedule, ""); err != nil {
 			panic(err)
 		}
 

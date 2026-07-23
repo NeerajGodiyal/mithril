@@ -53,6 +53,15 @@ func installAlpenglowValidatorSet(consensusEngine consensusengine.Engine, epoch 
 	}
 }
 
+// installEpochTransitionAlpenglowValidatorSets installs the validator sets
+// needed both to execute the newly entered epoch and to verify the future epoch
+// whose leader schedule was prepared at the boundary.
+func installEpochTransitionAlpenglowValidatorSets(consensusEngine consensusengine.Engine, newEpoch, leaderScheduleEpoch uint64) {
+	for _, targetEpoch := range epochTransitionTargetEpochs(newEpoch, leaderScheduleEpoch) {
+		installAlpenglowValidatorSet(consensusEngine, targetEpoch)
+	}
+}
+
 // installCachedAlpenglowValidatorSets installs validator sets for every cached
 // epoch (so certs spanning an epoch boundary verify), plus the current epoch.
 func installCachedAlpenglowValidatorSets(consensusEngine consensusengine.Engine, currentEpoch uint64) {

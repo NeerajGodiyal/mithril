@@ -2560,9 +2560,14 @@ func ReplayBlocks(
 				}
 			}
 
-			// Alpenglow: reinstall the BLS validator set for the new epoch.
+			// Alpenglow: install both the newly entered epoch and the future
+			// leader-schedule epoch prepared at this boundary.
 			if consensusEngine != nil {
-				installAlpenglowValidatorSet(consensusEngine, currentEpoch)
+				installEpochTransitionAlpenglowValidatorSets(
+					consensusEngine,
+					currentEpoch,
+					epochSchedule.LeaderScheduleEpoch(block.Slot),
+				)
 			}
 
 			if len(newlyActivatedFeatures) != 0 {
