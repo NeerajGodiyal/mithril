@@ -1,12 +1,15 @@
 package block
 
 import (
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
@@ -20,6 +23,25 @@ type TurbineIngressTimings struct {
 	TransactionParse     time.Duration
 	TransactionSigverify time.Duration
 	ReplayAdmission      time.Duration
+}
+
+var transactionDerivedStateInitMu sync.Mutex
+
+// transactionDerivedState is shared by shallow in-memory Block copies and is
+// never serialized. Its mutex makes repeated preparation safe when status-cache
+// validation of the same immutable block overlaps.
+type transactionDerivedState struct {
+	mu                 sync.Mutex
+	signaturesVerified bool
+	messageIdentities  *PreparedTransactionMessageIdentities
+}
+
+// PreparedTransactionMessageIdentities is an opaque, immutable set of message
+// identities bound to one ordered transaction slice.
+type PreparedTransactionMessageIdentities struct {
+	transactions []*solana.Transaction
+	versions     []solana.MessageVersion
+	identities   []txstatus.TransactionMessageIdentity
 }
 
 type Block struct {
@@ -69,10 +91,9 @@ type Block struct {
 	FromLiveStream                      bool
 	FromLocalProduction                 bool
 	IsSkipped                           bool // True for slots that were skipped by the leader
-	// transactionSignaturesVerified is deliberately private: it is a trust
-	// marker set only by an in-process source after it has verified every
-	// transaction signature. It must not be accepted from JSON/file input.
-	transactionSignaturesVerified bool
+	// transactionDerivedState contains only trusted, nonserialized data derived
+	// from this exact in-memory block (and is shared by its shallow copies).
+	transactionDerivedState *transactionDerivedState
 	// turbineReplayAdmissionStart is deliberately private and monotonic. It
 	// exists only on the exact in-memory block handed from Turbine to replay,
 	// so serialized/RPC blocks cannot inject or preserve an admission clock.
@@ -101,16 +122,93 @@ type Block struct {
 // transaction data. Signature-preserving transformations such as resolving
 // address-table lookups remain safe.
 func (b *Block) MarkTransactionSignaturesVerified() {
-	if b != nil {
-		b.transactionSignaturesVerified = true
+	if b == nil {
+		return
 	}
+	state := b.transactionState()
+	state.mu.Lock()
+	state.signaturesVerified = true
+	state.mu.Unlock()
 }
 
 // TransactionSignaturesVerified reports whether this exact in-memory block
 // crossed a trusted transaction-signature verification boundary. The marker is
 // intentionally not serialized; replay re-verifies after any serialization.
 func (b *Block) TransactionSignaturesVerified() bool {
-	return b != nil && b.transactionSignaturesVerified
+	if b == nil {
+		return false
+	}
+	state := b.transactionState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.signaturesVerified
+}
+
+// PrepareTransactionMessageIdentities serializes and hashes every transaction
+// message at most once for an immutable in-memory block. The returned opaque
+// handle exposes identities only by value, so callers cannot mutate the cache.
+//
+// As with MarkTransactionSignaturesVerified, callers must not mutate signed
+// message contents after preparation. Address-table resolution is safe because
+// it does not change the canonical serialized message.
+func (b *Block) PrepareTransactionMessageIdentities() (*PreparedTransactionMessageIdentities, error) {
+	if b == nil {
+		return nil, fmt.Errorf("nil block")
+	}
+	state := b.transactionState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.messageIdentities.matches(b.Transactions) {
+		return state.messageIdentities, nil
+	}
+	if state.messageIdentities != nil {
+		state.messageIdentities = nil
+		state.signaturesVerified = false
+	}
+
+	prepared := &PreparedTransactionMessageIdentities{
+		transactions: append([]*solana.Transaction(nil), b.Transactions...),
+		versions:     make([]solana.MessageVersion, len(b.Transactions)),
+		identities:   make([]txstatus.TransactionMessageIdentity, len(b.Transactions)),
+	}
+	for index, tx := range b.Transactions {
+		if tx == nil {
+			state.signaturesVerified = false
+			return nil, fmt.Errorf("transaction %d is nil", index)
+		}
+		identity, err := txstatus.IdentityForTransaction(tx)
+		if err != nil {
+			state.signaturesVerified = false
+			return nil, fmt.Errorf("transaction %d message identity: %w", index, err)
+		}
+		prepared.versions[index] = tx.Message.GetVersion()
+		prepared.identities[index] = identity
+	}
+	state.messageIdentities = prepared
+	return prepared, nil
+}
+
+func (cache *PreparedTransactionMessageIdentities) matches(transactions []*solana.Transaction) bool {
+	if cache == nil || len(cache.transactions) != len(transactions) ||
+		len(cache.versions) != len(transactions) || len(cache.identities) != len(transactions) {
+		return false
+	}
+	for index, tx := range transactions {
+		if tx == nil || cache.transactions[index] != tx ||
+			cache.versions[index] != tx.Message.GetVersion() ||
+			cache.identities[index].RecentBlockhash != tx.Message.RecentBlockhash {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Block) invalidateTransactionDerivedState() {
+	state := b.transactionState()
+	state.mu.Lock()
+	state.messageIdentities = nil
+	state.signaturesVerified = false
+	state.mu.Unlock()
 }
 
 // MarkTurbineReplayAdmissionStart starts the interval from successful
@@ -163,9 +261,10 @@ func (b *Block) CompleteTurbineReplayAdmission(at time.Time) (TurbineIngressTimi
 	return b.turbineIngressTimings, true
 }
 func (b *Block) FixupTxVersions() {
-	if len(b.Versions) == 0 {
+	if b == nil || len(b.Versions) == 0 {
 		return
 	}
+	b.invalidateTransactionDerivedState()
 	for idx, tx := range b.Transactions {
 		tx.Message.SetVersion(solana.MessageVersion(b.Versions[idx]))
 	}

@@ -1,5 +1,5 @@
-// Package txstatus contains transaction-status cache interchange types that
-// are shared by snapshot ingestion, replay, and block production.
+// Package txstatus contains transaction-status identities and interchange
+// types shared by snapshot ingestion, replay, and block production.
 package txstatus
 
 import (

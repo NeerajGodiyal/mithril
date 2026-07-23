@@ -3250,6 +3250,7 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 }
 
 type blockTransactionExecutionPlan struct {
+	messageIdentities   *b.PreparedTransactionMessageIdentities
 	execute             []bool
 	processedTxCount    uint64
 	processedSignatures uint64
@@ -3259,21 +3260,25 @@ type blockTransactionExecutionPlan struct {
 // transactions presented to one bank. A duplicate message makes the whole
 // block invalid; replay must never silently filter it and compute a bank hash
 // over different contents than the producer committed.
-func planBlockTransactionExecution(slot uint64, transactions []*solana.Transaction) (blockTransactionExecutionPlan, error) {
-	plan := blockTransactionExecutionPlan{execute: make([]bool, len(transactions))}
-	seen := make(map[[32]byte]int, len(transactions))
+func planBlockTransactionExecution(block *b.Block) (blockTransactionExecutionPlan, error) {
+	if block == nil {
+		return blockTransactionExecutionPlan{}, errors.New("nil block")
+	}
+	identities, err := block.PrepareTransactionMessageIdentities()
+	if err != nil {
+		return blockTransactionExecutionPlan{}, err
+	}
+	plan := blockTransactionExecutionPlan{
+		messageIdentities: identities,
+		execute:           make([]bool, identities.Len()),
+	}
+	seen := make(map[[32]byte]int, len(block.Transactions))
 	var duplicates *DuplicateTransactionMessagesError
-	for idx, tx := range transactions {
-		if tx == nil {
-			return blockTransactionExecutionPlan{}, fmt.Errorf("transaction %d is nil", idx)
-		}
-		messageHash, err := TransactionMessageHash(tx)
-		if err != nil {
-			return blockTransactionExecutionPlan{}, fmt.Errorf("hash transaction %d message: %w", idx, err)
-		}
+	for idx, tx := range block.Transactions {
+		messageHash := identities.Identity(idx).MessageHash
 		if firstIndex, duplicate := seen[messageHash]; duplicate {
 			if duplicates == nil {
-				duplicates = &DuplicateTransactionMessagesError{Slot: slot}
+				duplicates = &DuplicateTransactionMessagesError{Slot: block.Slot}
 			}
 			duplicates.DuplicateCount++
 			if len(duplicates.Occurrences) < maxDuplicateTransactionOccurrences {
@@ -3298,7 +3303,7 @@ func validateBlockTransactionMessages(block *b.Block) error {
 	if block == nil {
 		return errors.New("nil block")
 	}
-	_, err := planBlockTransactionExecution(block.Slot, block.Transactions)
+	_, err := planBlockTransactionExecution(block)
 	return err
 }
 
@@ -3316,6 +3321,10 @@ func validatePreConsensusTransactionStatuses(
 	if block == nil {
 		return errors.New("nil block")
 	}
+	plan, err := planBlockTransactionExecution(block)
+	if err != nil {
+		return err
+	}
 	candidate := *block
 	switch {
 	case block.SourceParentSlot != 0:
@@ -3325,7 +3334,7 @@ func validatePreConsensusTransactionStatuses(
 	default:
 		candidate.ParentSlot = selectedParentSlot
 	}
-	return statuses.ValidateBlock(&candidate)
+	return statuses.validateBlockWithPlan(&candidate, plan)
 }
 
 func sequentialTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, block *b.Block, executionPlan blockTransactionExecutionPlan, dbgOpts *DebugOptions, shouldVerifySignatures bool) (fees.TxFeeInfoAccumulator, uint64) {
@@ -3637,12 +3646,12 @@ func ProcessBlock(
 	if block == nil {
 		return nil, errors.New("validate transaction messages: nil block")
 	}
-	if err := transactionStatuses.ValidateBlock(block); err != nil {
-		return nil, fmt.Errorf("validate transaction statuses for slot %d: %w", block.Slot, err)
-	}
-	executionPlan, err := planBlockTransactionExecution(block.Slot, block.Transactions)
+	executionPlan, err := planBlockTransactionExecution(block)
 	if err != nil {
 		return nil, fmt.Errorf("validate transaction messages for slot %d: %w", block.Slot, err)
+	}
+	if err := transactionStatuses.validateBlockWithPlan(block, executionPlan); err != nil {
+		return nil, fmt.Errorf("validate transaction statuses for slot %d: %w", block.Slot, err)
 	}
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -3850,7 +3859,7 @@ func ProcessBlock(
 	if err != nil {
 		return slotCtx, err
 	}
-	if statusErr := transactionStatuses.CommitBlock(block); statusErr != nil {
+	if statusErr := transactionStatuses.commitBlockWithPlan(block, executionPlan); statusErr != nil {
 		return nil, fmt.Errorf("commit transaction statuses for slot %d after bank state commit: %w", block.Slot, statusErr)
 	}
 
