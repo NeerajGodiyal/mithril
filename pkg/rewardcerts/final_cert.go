@@ -102,7 +102,32 @@ func ValidateBlockFinalCertificate(
 		return nil, fmt.Errorf("configure validator set: %w", err)
 	}
 	verifier.SetShredVersion(shredVersion)
+	return validateDecodedBlockFinalCertificate(fc, validatorSet, verifier)
+}
 
+// ValidateDecodedBlockFinalCertificateWithVerifier verifies an already
+// strictly-decoded footer certificate with immutable validator material
+// installed in verifier. Exact aggregate-signature verification is retained.
+func ValidateDecodedBlockFinalCertificateWithVerifier(
+	fc FinalCertificate,
+	epoch uint64,
+	verifier *alpenglow.CertificateVerifier,
+) (*ValidatedFinalCert, error) {
+	if verifier == nil {
+		return nil, fmt.Errorf("missing certificate verifier")
+	}
+	validatorSet, ok := verifier.ValidatorSetForEpoch(epoch)
+	if !ok {
+		return nil, fmt.Errorf("certificate verifier has no validator set for epoch %d", epoch)
+	}
+	return validateDecodedBlockFinalCertificate(fc, validatorSet, verifier)
+}
+
+func validateDecodedBlockFinalCertificate(
+	fc FinalCertificate,
+	validatorSet alpenglow.ValidatorSet,
+	verifier *alpenglow.CertificateVerifier,
+) (*ValidatedFinalCert, error) {
 	signers := make(map[solana.PublicKey]struct{})
 	if fc.NotarAggregate != nil {
 		notarSig, err := decompressRewardCertSignature(fc.NotarAggregate.Signature)

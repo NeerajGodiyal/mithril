@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,11 +99,11 @@ func TestGetAccountsBatchStatsAndSmallBatchAdmissions(t *testing.T) {
 	assert.Equal(t, uint64(1), second.IndexMisses, "negative entries are deliberately not cached yet")
 }
 
-func TestLargeBatchDoesNotFloodCommonCache(t *testing.T) {
+func TestLargeBatchSelectivelyAdmitsReusableAccounts(t *testing.T) {
 	db, _ := newFoldTestDb(t)
 	defer db.CloseDb()
 
-	count := commonAccountCacheCapacity + 1
+	count := commonAccountImmediateAdmissionLimit + 1
 	delta := make([]*accounts.Account, count)
 	keys := make([]solana.PublicKey, count)
 	for i := range keys {
@@ -109,19 +112,142 @@ func TestLargeBatchDoesNotFloodCommonCache(t *testing.T) {
 	}
 	_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 100, Delta: delta}}, 100, nil, nil)
 	require.NoError(t, err)
+	hotKey := solana.PublicKey{}
+	hotKey[len(hotKey)-1] = 0xfe
+	hot := &accounts.Account{Key: hotKey, Lamports: 99, Owner: [32]byte{7}}
+	require.True(t, db.CommonAcctsCache.Set(hot.Key, hot))
 
 	_, first, err := db.GetAccountsBatchSharedWithStats(context.Background(), 100, keys)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(count), first.IndexHits)
 	assert.Equal(t, uint64(count), first.CommonCacheAdmissionsSkipped)
 	assert.Zero(t, first.CommonCacheAdmissions)
-	assert.False(t, db.CommonAcctsCache.Has(keys[0]))
-	assert.False(t, db.CommonAcctsCache.Has(keys[len(keys)-1]))
+	assert.True(t, db.CommonAcctsCache.Has(hot.Key), "one-shot scan must preserve established heat")
 
 	_, second, err := db.GetAccountsBatchSharedWithStats(context.Background(), 100, keys)
 	require.NoError(t, err)
-	assert.Zero(t, second.CacheHits, "one-shot scan must not churn cache or masquerade as reusable heat")
+	assert.Zero(t, second.CacheHits, "the second observation performs the selective admission")
 	assert.Equal(t, uint64(count), second.IndexHits)
+	assert.Equal(t, uint64(count), second.CommonCacheAdmissions)
+
+	_, third, err := db.GetAccountsBatchSharedWithStats(context.Background(), 100, keys)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(count), third.CacheHits, "reusable large-batch accounts must become cache hits")
+	assert.Zero(t, third.IndexHits)
+	assert.True(t, db.CommonAcctsCache.Has(hot.Key))
+}
+
+func TestGetAccountsBatchIteratorExactMatchOrderAndInputImmutability(t *testing.T) {
+	db, _ := newFoldTestDb(t)
+	defer db.CloseDb()
+
+	const count = batchIndexIteratorThreshold*2 + 17
+	delta := make([]*accounts.Account, count)
+	keys := make([]solana.PublicKey, count)
+	for i := range keys {
+		binary.BigEndian.PutUint64(keys[i][:8], uint64(2*i+2))
+		delta[i] = &accounts.Account{Key: keys[i], Lamports: uint64(i + 1), Owner: [32]byte{7}}
+	}
+	_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 100, Delta: delta}}, 100, nil, nil)
+	require.NoError(t, err)
+	for _, key := range keys {
+		db.CommonAcctsCache.Delete(key)
+	}
+
+	request := make([]solana.PublicKey, 0, count+4)
+	for i := range keys {
+		requestIdx := (i * 257) % count
+		request = append(request, keys[requestIdx])
+	}
+	between := solana.PublicKey{}
+	binary.BigEndian.PutUint64(between[:8], 3) // strictly between stored keys 2 and 4
+	request = append(request, between, keys[0], keys[count/2], keys[count/2])
+	original := append([]solana.PublicKey(nil), request...)
+
+	out, err := db.GetAccountsBatch(context.Background(), 100, request)
+	require.NoError(t, err)
+	assert.Equal(t, original, request, "resolver must sort only its local index list")
+	require.Len(t, out, len(request))
+	for i := 0; i < count; i++ {
+		requestIdx := (i * 257) % count
+		assert.Equal(t, uint64(requestIdx+1), out[i].Lamports)
+	}
+	assert.Equal(t, between, out[count].Key)
+	assert.Zero(t, out[count].Lamports, "SeekGE must not return the next stored key for an interior miss")
+	assert.Equal(t, keys[0], out[count+1].Key)
+	assert.Equal(t, out[count+2].Lamports, out[count+3].Lamports)
+}
+
+func TestGetAccountsBatchRejectsCancelledContextAndMalformedIndex(t *testing.T) {
+	db, _ := newFoldTestDb(t)
+	defer db.CloseDb()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := db.GetAccountsBatch(ctx, 100, []solana.PublicKey{{1}})
+	assert.ErrorIs(t, err, context.Canceled)
+
+	key := solana.PublicKey{2}
+	require.NoError(t, db.Index.Set(key[:], []byte{1, 2, 3}, pebble.NoSync))
+	_, err = db.GetAccountsBatch(context.Background(), 100, []solana.PublicKey{key})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal index entry")
+}
+
+func TestBatchCacheAdmissionCannotOverwriteNewerFold(t *testing.T) {
+	db, _ := newFoldTestDb(t)
+	defer db.CloseDb()
+
+	old := foldAcct(1, 10, []byte{1})
+	_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 100, Delta: []*accounts.Account{old}}}, 100, nil, nil)
+	require.NoError(t, err)
+	db.CommonAcctsCache.Delete(old.Key)
+
+	readComplete := make(chan struct{})
+	resumeAdmission := make(chan struct{})
+	var once sync.Once
+	db.batchHooks.beforeCacheAdmission = func(pk solana.PublicKey) {
+		if pk != old.Key {
+			return
+		}
+		once.Do(func() {
+			close(readComplete)
+			<-resumeAdmission
+		})
+	}
+
+	type batchResult struct {
+		out []*accounts.Account
+		err error
+	}
+	done := make(chan batchResult, 1)
+	go func() {
+		out, err := db.GetAccountsBatch(context.Background(), 100, []solana.PublicKey{old.Key})
+		done <- batchResult{out: out, err: err}
+	}()
+
+	select {
+	case <-readComplete:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old batch did not reach cache admission hook")
+	}
+	updated := foldAcct(1, 20, []byte{2})
+	_, err = db.CommitBatch([]accounts.SlotDelta{{Slot: 101, Delta: []*accounts.Account{updated}}}, 101, nil, nil)
+	require.NoError(t, err)
+	close(resumeAdmission)
+	result := <-done
+	require.NoError(t, result.err)
+	require.Len(t, result.out, 1)
+	assert.Equal(t, uint64(10), result.out[0].Lamports, "in-flight snapshot remains internally old")
+	db.batchHooks.beforeCacheAdmission = nil
+
+	got, err := db.GetAccount(101, old.Key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(20), got.Lamports)
+	assert.Equal(t, []byte{2}, got.Data)
+	if cached, ok := db.CommonAcctsCache.Get(old.Key); ok {
+		assert.Equal(t, uint64(20), cached.Lamports, "stale batch must never win cache publication")
+	}
 }
 
 func TestRefreshReadCachesIsScanResistantAndCoherent(t *testing.T) {
@@ -234,6 +360,17 @@ func BenchmarkGetAccountsBatchColdFoldSegment(b *testing.B) {
 			db.VoteAcctCache.Delete(key)
 		}
 	}
+	resetAdmission := func() {
+		db.readCacheEpochMu.Lock()
+		db.commonAdmission = newCommonCacheAdmission()
+		db.readCacheEpochMu.Unlock()
+	}
+	mustRead := func() {
+		out, err := db.GetAccountsBatch(context.Background(), 100, keys)
+		if err != nil || len(out) != len(keys) {
+			b.Fatalf("batch: len=%d err=%v", len(out), err)
+		}
+	}
 
 	b.Run("former-goroutine-per-account", func(b *testing.B) {
 		b.ReportAllocs()
@@ -248,18 +385,142 @@ func BenchmarkGetAccountsBatchColdFoldSegment(b *testing.B) {
 		}
 	})
 
-	b.Run("bounded-grouped-read", func(b *testing.B) {
+	b.Run("one-shot-cold", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			b.StopTimer()
 			evict()
+			resetAdmission()
 			b.StartTimer()
-			out, err := db.GetAccountsBatch(context.Background(), 100, keys)
-			if err != nil || len(out) != len(keys) {
-				b.Fatalf("grouped batch: len=%d err=%v", len(out), err)
-			}
+			mustRead()
 		}
 	})
+
+	b.Run("second-observation-admit", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			b.StopTimer()
+			evict()
+			resetAdmission()
+			mustRead()
+			b.StartTimer()
+			mustRead()
+		}
+	})
+
+	b.Run("third-observation-cache-hit", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			b.StopTimer()
+			evict()
+			resetAdmission()
+			mustRead()
+			mustRead()
+			b.StartTimer()
+			mustRead()
+		}
+	})
+
+	b.Run("three-block-amortized", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(3, "blocks/op")
+		for range b.N {
+			b.StopTimer()
+			evict()
+			resetAdmission()
+			b.StartTimer()
+			mustRead()
+			mustRead()
+			mustRead()
+		}
+	})
+}
+
+func BenchmarkResolveBatchAccountLocations(b *testing.B) {
+	db, _ := newFoldTestDb(b)
+	defer db.CloseDb()
+
+	const accountCount = 1 << 16
+	storedKeys := make([]solana.PublicKey, accountCount)
+	indexBatch := db.Index.NewBatch()
+	var entryBuf [24]byte
+	for i := range storedKeys {
+		binary.BigEndian.PutUint64(storedKeys[i][:8], uint64(i+1))
+		entry := AccountIndexEntry{Slot: 100, FileId: 1, Offset: uint64(i)}
+		entry.Marshal(&entryBuf)
+		require.NoError(b, indexBatch.Set(storedKeys[i][:], entryBuf[:], nil))
+	}
+	require.NoError(b, indexBatch.Commit(pebble.NoSync))
+	require.NoError(b, indexBatch.Close())
+	require.NoError(b, db.Index.Flush())
+
+	run := func(b *testing.B, request []solana.PublicKey, pointGets, auto bool, workers int) {
+		b.Helper()
+		b.ReportAllocs()
+		b.ReportMetric(float64(len(request)), "keys/op")
+		validated := false
+		for range b.N {
+			cold := make([]int, len(request))
+			for i := range cold {
+				cold[i] = i
+			}
+			out := make([]*accounts.Account, len(request))
+			snapshot := db.Index.NewSnapshot()
+			var locations []batchAccountLocation
+			var found []bool
+			var err error
+			if pointGets {
+				locations, found, err = resolveBatchAccountLocationsPointGets(
+					context.Background(), snapshot, request, cold, out,
+				)
+			} else if auto {
+				locations, found, err = resolveBatchAccountLocations(
+					context.Background(), snapshot, request, cold, out,
+				)
+			} else {
+				locations, found, err = resolveBatchAccountLocationsIterators(
+					context.Background(), snapshot, request, cold, out, workers,
+				)
+			}
+			closeErr := snapshot.Close()
+			if err != nil || closeErr != nil || len(locations) != len(request) ||
+				len(found) != len(request) || !found[0] || !found[len(found)-1] {
+				b.Fatalf("resolve: locations=%d found=%d err=%v close=%v", len(locations), len(found), err, closeErr)
+			}
+			if !validated {
+				b.StopTimer()
+				for i, ok := range found {
+					if !ok {
+						b.Fatalf("resolver missed interior result %d", i)
+					}
+				}
+				validated = true
+				b.StartTimer()
+			}
+		}
+	}
+
+	for _, size := range []int{1, 2, 4, 8, 16, 64, 256, 1024, 8192, 65536} {
+		request := make([]solana.PublicKey, size)
+		for i := range request {
+			// Spread every request across the fixture's full keyspace. Since 4051
+			// is odd, the full-size case remains a complete permutation.
+			request[i] = storedKeys[(i*4051)&(accountCount-1)]
+		}
+		b.Run(fmt.Sprintf("%06d-keys", size), func(b *testing.B) {
+			b.Run("point", func(b *testing.B) {
+				run(b, request, true, false, 0)
+			})
+			b.Run("auto", func(b *testing.B) {
+				run(b, request, false, true, 0)
+			})
+			for _, workers := range []int{1, 2, 4, 8, 16, 32} {
+				b.Run(fmt.Sprintf("iterator-%02d", workers), func(b *testing.B) {
+					run(b, request, false, false, workers)
+				})
+			}
+		})
+	}
 }
 
 func BenchmarkCommonCacheBulkAdmission(b *testing.B) {
@@ -273,11 +534,11 @@ func BenchmarkCommonCacheBulkAdmission(b *testing.B) {
 		accts[i] = &accounts.Account{Key: key, Lamports: uint64(i + 1), Owner: [32]byte{7}}
 	}
 
-	b.Run("flood-5k-cache", func(b *testing.B) {
+	b.Run("accepted-publication", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			for _, acct := range accts {
-				db.cacheBatchReadAccount(acct.Key, acct, true)
+				db.cacheBatchReadAccount(acct.Key, acct, true, 0)
 			}
 		}
 	})
@@ -285,7 +546,7 @@ func BenchmarkCommonCacheBulkAdmission(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			for _, acct := range accts {
-				db.cacheBatchReadAccount(acct.Key, acct, false)
+				db.cacheBatchReadAccount(acct.Key, acct, false, 0)
 			}
 		}
 	})

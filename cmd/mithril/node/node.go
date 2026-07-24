@@ -420,6 +420,7 @@ func init() {
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 	Run.Flags().IntVar(&accountsdb.ProgramCacheMaxMB, "program-cache-max-mb", accountsdb.DefaultProgramCacheMaxMB, "Maximum approximate SBPF program cache size in MiB")
+	Run.Flags().IntVar(&accountsdb.CommonAccountCacheMaxMB, "common-account-cache-max-mb", accountsdb.DefaultCommonAccountCacheMaxMB, "Approximate retained decoded account cache weight budget in MiB")
 	Run.Flags().Int64Var(&rewindToSlot, "rewind-to-slot", 0, "Rewind durable account state to the fold batch boundary at this slot before replaying (must be a retained boundary; run once to list boundaries on mismatch)")
 
 	// [tuning.pprof] section flags
@@ -978,6 +979,10 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	accountsdb.ProgramCacheMaxMB = getInt("program-cache-max-mb", "tuning.program_cache_max_mb")
 	if accountsdb.ProgramCacheMaxMB <= 0 {
 		return fmt.Errorf("tuning.program_cache_max_mb must be > 0")
+	}
+	accountsdb.CommonAccountCacheMaxMB = getInt("common-account-cache-max-mb", "tuning.common_account_cache_max_mb")
+	if accountsdb.CommonAccountCacheMaxMB <= 0 {
+		return fmt.Errorf("tuning.common_account_cache_max_mb must be > 0")
 	}
 
 	return nil

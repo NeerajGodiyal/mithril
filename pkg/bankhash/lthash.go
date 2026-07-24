@@ -6,9 +6,11 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 )
@@ -47,16 +49,36 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 	// than once (e.g. both rent-collected and modified, or a sysvar collected via
 	// multiple paths) would otherwise have its delta counted multiple times,
 	// corrupting the cumulative LtHash.
+	recordMetrics := slotCtx.Replay
+	var dedupeStart time.Time
+	if recordMetrics {
+		metrics.GlobalBlockReplay.LtHashInputAccounts = uint64(len(modifiedAccts))
+		metrics.GlobalBlockReplay.LtHashUniqueAccounts = 0
+		metrics.GlobalBlockReplay.LtHashUnchangedAccounts = 0
+		metrics.GlobalBlockReplay.LtHashCreatedAccounts = 0
+		metrics.GlobalBlockReplay.LtHashDeletedAccounts = 0
+		metrics.GlobalBlockReplay.LtHashOldDataBytes = 0
+		metrics.GlobalBlockReplay.LtHashNewDataBytes = 0
+		dedupeStart = time.Now()
+	}
 	modifiedAccts = dedupeModifiedAccts(modifiedAccts)
+	if recordMetrics {
+		metrics.GlobalBlockReplay.LtHashDedupe.AddTimingSince(dedupeStart)
+		metrics.GlobalBlockReplay.LtHashUniqueAccounts = uint64(len(modifiedAccts))
+	}
 	if len(modifiedAccts) == 0 {
 		return &lthash.LtHash{}
 	}
 
 	numWorkers := min(32, len(modifiedAccts))
-
-	hashes := make([]*lthash.LtHash, len(modifiedAccts))
+	partials := make([]lthash.LtHash, numWorkers)
+	workerStats := make([]ltHashWorkerStats, numWorkers)
 	chunkSize := (len(modifiedAccts) + numWorkers - 1) / numWorkers
 
+	var workerStart time.Time
+	if recordMetrics {
+		workerStart = time.Now()
+	}
 	var wg sync.WaitGroup
 	for i := range numWorkers {
 		wg.Add(1)
@@ -64,21 +86,62 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 			defer wg.Done()
 			start := workerID * chunkSize
 			end := min(start+chunkSize, len(modifiedAccts))
+			var partial lthash.LtHash
+			var stats ltHashWorkerStats
+
+			// Reuse one 2 KiB hash and one BLAKE3 hasher for every old/new
+			// account value owned by this worker.
+			var scratch lthash.LtHash
+			var hasher lthash.AccountHasher
 
 			for j := start; j < end; j++ {
-				acct := modifiedAccts[j]
-				hashes[j] = calculateSingleDeltaLtHash(slotCtx, acct)
+				accumulateSingleDeltaLtHash(slotCtx, modifiedAccts[j], &partial, &scratch, &hasher, &stats)
 			}
+			partials[workerID] = partial
+			workerStats[workerID] = stats
 		}(i)
 	}
 	wg.Wait()
+	if recordMetrics {
+		metrics.GlobalBlockReplay.LtHashWorkerCompute.AddTimingSince(workerStart)
+	}
 
+	var reduceStart time.Time
+	if recordMetrics {
+		reduceStart = time.Now()
+	}
 	var deltaHash lthash.LtHash
-	for _, h := range hashes {
-		deltaHash.Add(h)
+	var totals ltHashWorkerStats
+	for i := range partials {
+		deltaHash.Add(&partials[i])
+		totals.add(workerStats[i])
+	}
+	if recordMetrics {
+		metrics.GlobalBlockReplay.LtHashPartialReduce.AddTimingSince(reduceStart)
+		metrics.GlobalBlockReplay.LtHashUnchangedAccounts = totals.unchangedAccounts
+		metrics.GlobalBlockReplay.LtHashCreatedAccounts = totals.createdAccounts
+		metrics.GlobalBlockReplay.LtHashDeletedAccounts = totals.deletedAccounts
+		metrics.GlobalBlockReplay.LtHashOldDataBytes = totals.oldDataBytes
+		metrics.GlobalBlockReplay.LtHashNewDataBytes = totals.newDataBytes
 	}
 
 	return &deltaHash
+}
+
+type ltHashWorkerStats struct {
+	unchangedAccounts uint64
+	createdAccounts   uint64
+	deletedAccounts   uint64
+	oldDataBytes      uint64
+	newDataBytes      uint64
+}
+
+func (stats *ltHashWorkerStats) add(other ltHashWorkerStats) {
+	stats.unchangedAccounts += other.unchangedAccounts
+	stats.createdAccounts += other.createdAccounts
+	stats.deletedAccounts += other.deletedAccounts
+	stats.oldDataBytes += other.oldDataBytes
+	stats.newDataBytes += other.newDataBytes
 }
 
 // dedupeModifiedAccts collapses duplicate keys, keeping each key's last
@@ -86,7 +149,13 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 // dropped. Without this, a key appearing twice would have its LtHash delta
 // applied twice.
 func dedupeModifiedAccts(modifiedAccts []*accounts.Account) []*accounts.Account {
-	if len(modifiedAccts) < 2 {
+	if len(modifiedAccts) == 0 {
+		return modifiedAccts
+	}
+	if len(modifiedAccts) == 1 {
+		if modifiedAccts[0] == nil {
+			return nil
+		}
 		return modifiedAccts
 	}
 
@@ -107,35 +176,60 @@ func dedupeModifiedAccts(modifiedAccts []*accounts.Account) []*accounts.Account 
 	return unique
 }
 
-func calculateSingleDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAcct *accounts.Account) *lthash.LtHash {
+func accumulateSingleDeltaLtHash(
+	slotCtx *sealevel.SlotCtx,
+	modifiedAcct *accounts.Account,
+	deltaLtHash *lthash.LtHash,
+	scratch *lthash.LtHash,
+	hasher *lthash.AccountHasher,
+	stats *ltHashWorkerStats,
+) {
 	previousAcct, err := slotCtx.GetParentAccount(modifiedAcct.Key)
 	if err != nil {
 		panic(fmt.Sprintf("couldn't find parent acct for %s for slot %d", modifiedAcct.Key, slotCtx.Slot))
 	}
 
-	var deltaLtHash lthash.LtHash
-
-	if previousAcct.Lamports != 0 {
-		if acctsEqual(modifiedAcct, previousAcct) {
-			return &deltaLtHash
+	// Zero-lamport accounts do not contribute, regardless of their other
+	// fields. This also handles the zero-to-zero no-op without hashing.
+	if previousAcct.Lamports == 0 {
+		if modifiedAcct.Lamports == 0 {
+			stats.unchangedAccounts++
+			return
 		}
 
-		var oldLtHash lthash.LtHash
-		oldLtHash.InitWithAcct(previousAcct)
-		deltaLtHash.Sub(&oldLtHash)
+		stats.createdAccounts++
+		stats.newDataBytes += uint64(len(modifiedAcct.Data))
+		hasher.HashInto(scratch, modifiedAcct)
+		deltaLtHash.Add(scratch)
+		return
 	}
 
-	var newLtHash lthash.LtHash
-	newLtHash.InitWithAcct(modifiedAcct)
-	deltaLtHash.Add(&newLtHash)
+	if modifiedAcct.Lamports == 0 {
+		stats.deletedAccounts++
+		stats.oldDataBytes += uint64(len(previousAcct.Data))
+		hasher.HashInto(scratch, previousAcct)
+		deltaLtHash.Sub(scratch)
+		return
+	}
 
-	return &deltaLtHash
+	// Rent epoch is deliberately absent: it is not an input to the accounts
+	// LtHash. A rent-epoch-only write therefore has an exact zero delta.
+	if acctsLtHashEqual(modifiedAcct, previousAcct) {
+		stats.unchangedAccounts++
+		return
+	}
+
+	stats.oldDataBytes += uint64(len(previousAcct.Data))
+	stats.newDataBytes += uint64(len(modifiedAcct.Data))
+	hasher.HashInto(scratch, previousAcct)
+	deltaLtHash.Sub(scratch)
+	hasher.HashInto(scratch, modifiedAcct)
+	deltaLtHash.Add(scratch)
 }
 
-func acctsEqual(a *accounts.Account, b *accounts.Account) bool {
+func acctsLtHashEqual(a *accounts.Account, b *accounts.Account) bool {
 	return a.Lamports == b.Lamports &&
 		a.Executable == b.Executable &&
-		a.RentEpoch == b.RentEpoch &&
 		a.Owner == b.Owner &&
 		bytes.Equal(a.Data, b.Data)
 }

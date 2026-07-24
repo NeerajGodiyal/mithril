@@ -778,15 +778,20 @@ func recordAccountLoaderBatchStats(dst *metrics.AccountLoader, src accountsdb.Ba
 	dst.CommonCacheAdmissions = src.CommonCacheAdmissions
 	dst.CommonCacheAdmissionsSkipped = src.CommonCacheAdmissionsSkipped
 	dst.VoteCacheAdmissions = src.VoteCacheAdmissions
+	dst.VoteCacheAdmissionsSkipped = src.VoteCacheAdmissionsSkipped
+	dst.CachePublicationEpochRejects = src.CachePublicationEpochRejects
 	dst.DecodedAccountObjects = src.DecodedAccountObjects
 	dst.DecodedAccountBytes = src.DecodedAccountBytes
 	dst.PlaceholderObjects = src.PlaceholderObjects
 	dst.WorkingSetLookup.AddTiming(time.Duration(src.WorkingSetLookupNanoseconds))
 	dst.InProgressLookup.AddTiming(time.Duration(src.InProgressNanoseconds))
+	dst.AppendVecPinWait.AddTiming(time.Duration(src.AppendVecPinWaitNanoseconds))
 	dst.CacheLookup.AddTiming(time.Duration(src.CacheLookupNanoseconds))
+	dst.AdmissionFilter.AddTiming(time.Duration(src.AdmissionFilterNanoseconds))
 	dst.IndexLookup.AddTiming(time.Duration(src.IndexLookupNanoseconds))
 	dst.ReadPlanning.AddTiming(time.Duration(src.ReadPlanningNanoseconds))
 	dst.AppendVecRead.AddTiming(time.Duration(src.AppendVecReadNanoseconds))
+	dst.CachePublication.AddTiming(time.Duration(src.CachePublicationNanoseconds))
 }
 
 // setupInitialVoteAcctsAndStakeAccts populates the vote and stake caches at startup.
@@ -2611,10 +2616,12 @@ func ReplayBlocks(
 			block.EpochUpdatedAccts, block.ParentEpochUpdatedAccts,
 		)
 
-		metrics.GlobalBlockReplay.PreprocessBlock.AddTimingSince(start)
-
+		processBlockStart := time.Now()
+		metrics.GlobalBlockReplay.PreprocessBlock.AddTiming(processBlockStart.Sub(start))
 		alpenglowClock := alpenglowMode
 		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, transactionStatuses, alpenglowClock)
+		processBlockEnd := time.Now()
+		metrics.GlobalBlockReplay.ProcessBlock.AddTiming(processBlockEnd.Sub(processBlockStart))
 		if err != nil {
 			mlog.Log.Errorf("error encountered during block replay: %s\n", err)
 			result.Error = err
@@ -2622,7 +2629,11 @@ func ReplayBlocks(
 			global.ClearPendingStakePubkeys()
 			break
 		}
+		postProcessBlockStart := processBlockEnd
+		statusViewStart := time.Now()
 		statuses := transactionStatuses.View()
+		metrics.GlobalBlockReplay.TransactionStatusView.AddTimingSince(statusViewStart)
+		chainTipStart := time.Now()
 		identity := ChainTipIdentity{}
 		if alpenglowMode {
 			identity = ChainTipIdentity{
@@ -2643,6 +2654,7 @@ func ReplayBlocks(
 		if alpenglowMode && block.HasAlpenglowLastChainedRoot {
 			global.SetAlpenglowChainedMerkleRoot(block.Slot, solana.Hash(block.AlpenglowLastChainedRoot))
 		}
+		metrics.GlobalBlockReplay.ChainTipUpdate.AddTimingSince(chainTipStart)
 
 		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
 		// stalled), halt rather than grow RAM unbounded; resume re-replays from the last rooted slot.
@@ -2704,6 +2716,7 @@ func ReplayBlocks(
 		// no pointers into the global SysvarCache) and retain it in the tail until
 		// promotion, so resume restarts from the last rooted slot not the lost in-RAM replayed tip.
 		if unrootedTailState != nil && lastSlotCtx != nil {
+			resumeContextStart := time.Now()
 			txCountAtSlot := global.TransactionCount() // ProcessBlock already added this block's txs
 			resumeCtx := &state.ResumeContext{
 				Slot:                    block.Slot,
@@ -2743,6 +2756,7 @@ func ReplayBlocks(
 				resumeCtx.PrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 			}
 			unrootedTailState.SetContext(block.Slot, resumeCtx)
+			metrics.GlobalBlockReplay.ResumeContext.AddTimingSince(resumeContextStart)
 		}
 
 		// Clear ManifestEpochStakes after first replayed slot past snapshot
@@ -2799,7 +2813,12 @@ func ReplayBlocks(
 			break
 		}
 
-		slotReplayDuration := time.Since(start)
+		// Stop before per-slot logging, summary generation, and metric export so
+		// PostProcessBlock accounts only for execution-critical state publication.
+		slotReplayEnd := time.Now()
+		metrics.GlobalBlockReplay.PostProcessBlock.AddTiming(slotReplayEnd.Sub(postProcessBlockStart))
+		slotReplayDuration := slotReplayEnd.Sub(start)
+		metrics.GlobalBlockReplay.SlotReplay.AddTiming(slotReplayDuration)
 
 		txnCount := len(block.Transactions)
 		totalCU := lastSlotCtx.TotalComputeUnitsConsumed
@@ -3474,7 +3493,15 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 	if canUseDependencyPlanner(plannerBlock) {
 		do := make(chan int, len(block.Transactions))
 		done := make(chan int, len(block.Transactions))
-		go TopsortPlannerStream(plannerBlock, do, done)
+		plannerDone := make(chan struct{})
+		go func() {
+			defer close(plannerDone)
+			plannerStart := time.Now()
+			topsortPlannerStream(plannerBlock, do, done, func() {
+				metrics.GlobalBlockReplay.DependencyPlannerBuild.AddTimingSince(plannerStart)
+			})
+			metrics.GlobalBlockReplay.DependencyPlannerDispatch.AddTimingSince(plannerStart)
+		}()
 
 		wg := &sync.WaitGroup{}
 		wg.Add(txParallelism)
@@ -3511,7 +3538,10 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 
 		wg.Wait()
 		close(done)
+		<-plannerDone
 	} else if rblock.FromLiveStream {
+		plannerDispatchStart := time.Now()
+		var plannerBuildDuration time.Duration
 		batchWg := &sync.WaitGroup{}
 		workersWg := &sync.WaitGroup{}
 		do := make(chan uint64, txParallelism)
@@ -3544,7 +3574,9 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		relaxIntraBatchAccountLocks := rblock.Features != nil &&
 			rblock.Features.IsActive(features.RelaxIntraBatchAccountLocks)
 		for _, entry := range rblock.Entries {
+			plannerBuildStart := time.Now()
 			batches := lightbringerEntryExecutionBatches(rblock.Transactions, entry, relaxIntraBatchAccountLocks)
+			plannerBuildDuration += time.Since(plannerBuildStart)
 			for _, batch := range batches {
 				executable := 0
 				for _, txIdx := range batch {
@@ -3563,6 +3595,8 @@ func parallelTxLoop(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, bloc
 		}
 		close(do)
 		workersWg.Wait()
+		metrics.GlobalBlockReplay.DependencyPlannerBuild.AddTiming(plannerBuildDuration)
+		metrics.GlobalBlockReplay.DependencyPlannerDispatch.AddTimingSince(plannerDispatchStart)
 	} else {
 		panic("dependency planner unavailable for non-Lightbringer block")
 	}
@@ -3646,12 +3680,17 @@ func ProcessBlock(
 	if block == nil {
 		return nil, errors.New("validate transaction messages: nil block")
 	}
+	executionPlanStart := time.Now()
 	executionPlan, err := planBlockTransactionExecution(block)
+	metrics.GlobalBlockReplay.TransactionExecutionPlan.AddTimingSince(executionPlanStart)
 	if err != nil {
 		return nil, fmt.Errorf("validate transaction messages for slot %d: %w", block.Slot, err)
 	}
-	if err := transactionStatuses.validateBlockWithPlan(block, executionPlan); err != nil {
-		return nil, fmt.Errorf("validate transaction statuses for slot %d: %w", block.Slot, err)
+	statusValidationStart := time.Now()
+	statusValidationErr := transactionStatuses.validateBlockWithPlan(block, executionPlan)
+	metrics.GlobalBlockReplay.TransactionStatusValidation.AddTimingSince(statusValidationStart)
+	if statusValidationErr != nil {
+		return nil, fmt.Errorf("validate transaction statuses for slot %d: %w", block.Slot, statusValidationErr)
 	}
 	ctx, task := trace.NewTask(context.Background(), "ProcessBlock")
 	defer task.End()
@@ -3708,8 +3747,14 @@ func ProcessBlock(
 	}
 
 	var sigverifyWg sync.WaitGroup
-	defer sigverifyWg.Wait()
+	defer func() {
+		sigverifyJoinStart := time.Now()
+		sigverifyWg.Wait()
+		metrics.GlobalBlockReplay.SignatureVerificationJoin.AddTimingSince(sigverifyJoinStart)
+	}()
+	plannerPreparationStart := time.Now()
 	plannerBlock, err := prepareDependencyPlannerBlock(block, txParallelism)
+	metrics.GlobalBlockReplay.DependencyPlannerPreparation.AddTimingSince(plannerPreparationStart)
 	if err != nil {
 		panic(fmt.Sprintf("unable to prepare dependency planner block for slot %d: %v", block.Slot, err))
 	}
@@ -3730,9 +3775,11 @@ func ProcessBlock(
 	}
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
+	slotCtxSetupStart := time.Now()
 	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail)
 	slotCtx.TraceCtx = ctx
 	slotCtx.NumSignatures = executionPlan.processedSignatures
+	metrics.GlobalBlockReplay.SlotCtxSetup.AddTimingSince(slotCtxSetupStart)
 	var txFeeAccumulator fees.TxFeeInfoAccumulator
 	var totalComputeUnitsConsumed uint64
 	start = time.Now()
@@ -3776,22 +3823,33 @@ func ProcessBlock(
 
 	// Alpenglow banks set the Clock timestamp from the block footer after execution.
 	if alpenglowClock {
+		footerClockStart := time.Now()
 		if err := applyAlpenglowFooterClock(slotCtx, block, epochSchedule); err != nil {
+			metrics.GlobalBlockReplay.AlpenglowFooterClock.AddTimingSince(footerClockStart)
 			return nil, fmt.Errorf("apply alpenglow footer clock at slot %d: %w", block.Slot, err)
 		}
 		if err := updateAlpenglowNanosecondClockAccount(slotCtx, block); err != nil {
+			metrics.GlobalBlockReplay.AlpenglowFooterClock.AddTimingSince(footerClockStart)
 			return nil, err
 		}
-		if err := ApplyAlpenglowVoteRewards(slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert, block.AlpenglowShredVersion); err != nil {
-			return nil, err
+		metrics.GlobalBlockReplay.AlpenglowFooterClock.AddTimingSince(footerClockStart)
+		voteRewardsStart := time.Now()
+		voteRewardsErr := ApplyAlpenglowVoteRewards(slotCtx, block, epochSchedule, block.SkipRewardCert, block.NotarRewardCert, block.BlockFinalCert, block.AlpenglowShredVersion)
+		metrics.GlobalBlockReplay.AlpenglowVoteRewards.AddTimingSince(voteRewardsStart)
+		if voteRewardsErr != nil {
+			return nil, voteRewardsErr
 		}
 	}
 
-	start = time.Now()
 	setReplayStage("compile_accounts")
+	start = time.Now()
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
-	if err := ensureParentAccountsForModified(slotCtx); err != nil {
-		return nil, err
+	metrics.GlobalBlockReplay.CompileWritableAndModifiedAccts.AddTimingSince(start)
+	start = time.Now()
+	ensureParentsErr := ensureParentAccountsForModified(slotCtx)
+	metrics.GlobalBlockReplay.EnsureParentAccountsForModified.AddTimingSince(start)
+	if ensureParentsErr != nil {
+		return nil, ensureParentsErr
 	}
 
 	start = time.Now()
@@ -3799,9 +3857,12 @@ func ProcessBlock(
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 	if alpenglowClock {
-		if err := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock); err != nil {
-			writeFooterBankhashMismatchArtifact(err, block, slotCtx, writableAccts, modifiedAccts)
-			return nil, err
+		footerVerificationStart := time.Now()
+		footerVerificationErr := verifyAlpenglowBlockFooter(slotCtx, block, alpenglowClock)
+		metrics.GlobalBlockReplay.AlpenglowFooterVerification.AddTimingSince(footerVerificationStart)
+		if footerVerificationErr != nil {
+			writeFooterBankhashMismatchArtifact(footerVerificationErr, block, slotCtx, writableAccts, modifiedAccts)
+			return nil, footerVerificationErr
 		}
 	}
 
@@ -3812,14 +3873,13 @@ func ProcessBlock(
 	// Enter critical commit window - panics here may leave AccountsDB inconsistent
 	commitSlot.Store(slotCtx.Slot)
 	commitInProgress.Store(true)
-	start = time.Now()
+	blockUpdateStart := time.Now()
 	setReplayStage("store_accounts")
 	persistedSlot := slotCtx.Slot
 	persistedBankhash := append([]byte(nil), slotCtx.FinalBankhash...)
 	persistedBlockSlot := block.Slot
 	stakeIndexDir := filepath.Join(acctsDb.AcctsDir, "..")
 	afterStoreAccounts := func() {
-		metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(start)
 		if tail != nil {
 			// Rooted-durable: accounts + bankhash are buffered in the overlay and
 			// become durable only on promotion; nothing written here (rooted-only).
@@ -3856,10 +3916,18 @@ func ProcessBlock(
 	} else if len(modifiedAccts) > 0 {
 		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
 	}
+	// In rooted-durable mode the callback above is synchronous, so this includes
+	// the complete critical-path overlay publication. Legacy StoreAccounts only
+	// enqueues here; its asynchronous disk work deliberately belongs to no slot's
+	// replay wall time and must never update a later slot's metrics record.
+	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(blockUpdateStart)
 	if err != nil {
 		return slotCtx, err
 	}
-	if statusErr := transactionStatuses.commitBlockWithPlan(block, executionPlan); statusErr != nil {
+	statusCommitStart := time.Now()
+	statusErr := transactionStatuses.commitBlockWithPlan(block, executionPlan)
+	metrics.GlobalBlockReplay.TransactionStatusCommit.AddTimingSince(statusCommitStart)
+	if statusErr != nil {
 		return nil, fmt.Errorf("commit transaction statuses for slot %d after bank state commit: %w", block.Slot, statusErr)
 	}
 

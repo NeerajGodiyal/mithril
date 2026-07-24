@@ -141,6 +141,8 @@ func (db *AccountsDb) finalizeParkedRewindLeftoversLocked(throughSlot uint64) {
 func (db *AccountsDb) RewindToBatchBoundary(throughSlot uint64) (RewindResult, error) {
 	db.foldMu.Lock()
 	defer db.foldMu.Unlock()
+	db.appendVecReadMu.Lock()
+	defer db.appendVecReadMu.Unlock()
 
 	res := RewindResult{}
 	meta, haveMeta, err := db.readFoldMeta()
@@ -151,6 +153,19 @@ func (db *AccountsDb) RewindToBatchBoundary(throughSlot uint64) (RewindResult, e
 		return res, fmt.Errorf("accountsdb: rewind: store has no fold meta (nothing folded)")
 	}
 	if meta.ThroughSlot == throughSlot {
+		// This also repairs the in-memory publication state after a prior
+		// WAL-less commit succeeded but its explicit Flush reported an error.
+		db.readCacheEpochMu.Lock()
+		db.readCacheEpoch++
+		db.resetReadCachesLocked()
+		db.readCacheEpochMu.Unlock()
+		if db.IndexWALDisabled {
+			if err := db.Index.Flush(); err != nil {
+				return res, err
+			}
+		}
+		db.lastBatchSeq = meta.BatchSeq
+		db.durableThrough.Store(meta.ThroughSlot)
 		res.NewThrough = throughSlot
 		if path, ok := db.manifestPathEither(throughSlot, meta.FileId); ok {
 			if m, rerr := ReadSegmentManifest(path); rerr == nil {
@@ -262,8 +277,15 @@ func (db *AccountsDb) RewindToBatchBoundary(throughSlot uint64) (RewindResult, e
 	}), nil); err != nil {
 		return res, err
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
-		return res, err
+	db.readCacheEpochMu.Lock()
+	commitErr := batch.Commit(pebble.Sync)
+	if commitErr == nil {
+		db.readCacheEpoch++
+		db.resetReadCachesLocked()
+	}
+	db.readCacheEpochMu.Unlock()
+	if commitErr != nil {
+		return res, commitErr
 	}
 	if db.IndexWALDisabled {
 		if err := db.Index.Flush(); err != nil {
@@ -292,8 +314,6 @@ func (db *AccountsDb) RewindToBatchBoundary(throughSlot uint64) (RewindResult, e
 
 	db.lastBatchSeq = seqT
 	db.durableThrough.Store(target.manifest.ThroughSlot)
-	// Read caches may hold folded-then-rewound values; rebuild them.
-	db.InitCaches()
 
 	res.NewThrough = target.manifest.ThroughSlot
 	res.ResumeCtx = target.manifest.ResumeCtx

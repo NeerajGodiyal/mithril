@@ -1,6 +1,7 @@
 package accountsdb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/cockroachdb/pebble"
 	"github.com/gagliardetto/solana-go"
+	"golang.org/x/sync/errgroup"
 )
 
 var systemProgramAddr [32]byte
@@ -24,7 +27,21 @@ var systemProgramAddr [32]byte
 // appendVecReadChunkSize amortizes open/close calls without serializing every
 // read from a large fold segment behind one worker. Chunks are offset-sorted,
 // which also gives the kernel a chance to coalesce nearby appendvec reads.
-const appendVecReadChunkSize = 64
+const (
+	appendVecReadChunkSize = 64
+
+	// Point Gets remain useful for tiny requests and for recent keys high in a
+	// deep LSM. Above this conservative crossover, monotonic snapshot iterators
+	// amortize Pebble's per-key read-state and iterator setup.
+	batchIndexIteratorThreshold = 16
+	batchIndexKeysPerIterator   = 1024
+	batchIndexMinIterators      = 4
+	batchIndexMaxIterators      = 8
+)
+
+type batchReadTestHooks struct {
+	beforeCacheAdmission func(solana.PublicKey)
+}
 
 type batchAccountLocation struct {
 	outputIdx int
@@ -64,6 +81,8 @@ type BatchReadStats struct {
 	CommonCacheAdmissions        uint64
 	CommonCacheAdmissionsSkipped uint64
 	VoteCacheAdmissions          uint64
+	VoteCacheAdmissionsSkipped   uint64
+	CachePublicationEpochRejects uint64
 
 	DecodedAccountObjects uint64
 	DecodedAccountBytes   uint64
@@ -71,23 +90,22 @@ type BatchReadStats struct {
 
 	WorkingSetLookupNanoseconds uint64
 	InProgressNanoseconds       uint64
+	AppendVecPinWaitNanoseconds uint64
 	CacheLookupNanoseconds      uint64
+	AdmissionFilterNanoseconds  uint64
 	IndexLookupNanoseconds      uint64
 	ReadPlanningNanoseconds     uint64
 	AppendVecReadNanoseconds    uint64
+	CachePublicationNanoseconds uint64
 }
 
 type batchChunkReadStats struct {
-	appendVecAccounts            uint64
-	openFailures                 uint64
-	readFailures                 uint64
-	retryAccounts                uint64
-	commonCacheAdmissions        uint64
-	commonCacheAdmissionsSkipped uint64
-	voteCacheAdmissions          uint64
-	decodedAccountObjects        uint64
-	decodedAccountBytes          uint64
-	placeholderObjects           uint64
+	appendVecAccounts     uint64
+	openFailures          uint64
+	readFailures          uint64
+	decodedAccountObjects uint64
+	decodedAccountBytes   uint64
+	placeholderObjects    uint64
 }
 
 func (db *AccountsDb) GetAccountsBatch(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
@@ -115,18 +133,37 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 	if len(pks) == 0 {
 		return nil, stats, nil
 	}
-
+	if err := ctx.Err(); err != nil {
+		return nil, stats, err
+	}
 	phaseStart := time.Now()
+	db.appendVecReadMu.RLock()
+	stats.AppendVecPinWaitNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	appendVecPinned := true
+	defer func() {
+		if appendVecPinned {
+			db.appendVecReadMu.RUnlock()
+		}
+	}()
+
+	phaseStart = time.Now()
 	out := db.getStoreInProgressAccounts(pks)
 	stats.InProgressNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 	phaseStart = time.Now()
 	cold := make([]int, 0, len(pks))
+	var indexSnapshot *pebble.Snapshot
+	var cacheEpoch uint64
+	var admission *commonCacheAdmission
+	var snapshotSetupNanoseconds uint64
+	db.readCacheEpochMu.RLock()
+	cacheEpoch = db.readCacheEpoch
+	admission = db.commonAdmission
 	for i, pk := range pks {
 		if out[i] != nil {
 			stats.InProgressHits++
 			continue
 		}
-		if acct, ok := db.getCachedAccount(pk); ok {
+		if acct, ok := db.getCachedAccountLocked(pk); ok {
 			stats.CacheHits++
 			if acct == nil || acct.Lamports == 0 {
 				stats.PlaceholderObjects++
@@ -137,6 +174,14 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		cold = append(cold, i)
 	}
 	stats.CacheLookupNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	if len(cold) > 0 && db.Index != nil {
+		// The cache probes and snapshot share one publication epoch. A fold
+		// cannot flip the index and refresh caches between these two views.
+		snapshotStart := time.Now()
+		indexSnapshot = db.Index.NewSnapshot()
+		snapshotSetupNanoseconds = uint64(time.Since(snapshotStart).Nanoseconds())
+	}
+	db.readCacheEpochMu.RUnlock()
 	if len(cold) == 0 {
 		return out, stats, nil
 	}
@@ -149,36 +194,18 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		return out, stats, nil
 	}
 
-	// Resolve every cold key's index location with a fixed-size worker pool.
-	// The old implementation launched one goroutine per miss and merely gated
-	// them with a semaphore, creating tens of thousands of goroutine stacks and
-	// scheduler operations on a busy block.
-	locations := make([]batchAccountLocation, len(cold))
-	found := make([]bool, len(cold))
 	phaseStart = time.Now()
-	err := runBatchWorkers(ctx, len(cold), func(job int) error {
-		idx := cold[job]
-		pk := pks[idx]
-		entryBytes, closer, err := db.Index.Get(pk[:])
-		if err != nil {
-			if errors.Is(err, pebble.ErrNotFound) {
-				out[idx] = missingAccount(pk)
-				return nil
-			}
-			return fmt.Errorf("index get %s: %w", pk, err)
-		}
-		entry, decodeErr := UnmarshalAcctIdxEntry(entryBytes)
-		closer.Close()
-		if decodeErr != nil {
-			return fmt.Errorf("unmarshal index entry for %s: %w", pk, decodeErr)
-		}
-		locations[job] = batchAccountLocation{outputIdx: idx, pubkey: pk, entry: *entry}
-		found[job] = true
-		return nil
-	})
-	stats.IndexLookupNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	admitCommon := admission.classifyAndObserve(pks, cold)
+	stats.AdmissionFilterNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	phaseStart = time.Now()
+	locations, found, err := resolveBatchAccountLocations(ctx, indexSnapshot, pks, cold, out)
+	closeErr := indexSnapshot.Close()
+	stats.IndexLookupNanoseconds = snapshotSetupNanoseconds + uint64(time.Since(phaseStart).Nanoseconds())
 	if err != nil {
 		return nil, stats, err
+	}
+	if closeErr != nil {
+		return nil, stats, fmt.Errorf("close account index snapshot: %w", closeErr)
 	}
 
 	phaseStart = time.Now()
@@ -206,13 +233,13 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		}
 	}
 	stats.AppendVecChunks = uint64(len(chunks))
-	stats.ReadPlanningNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
-	admitCommon := len(cold) <= commonAccountCacheCapacity
 	chunkStats := make([]batchChunkReadStats, len(chunks))
+	decodedForCache := make([]*accounts.Account, len(pks))
+	stats.ReadPlanningNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 
 	// Each worker opens an appendvec once per small chunk, instead of once per
-	// account. A stale/unlinked compaction location falls back to the existing
-	// one-account read, which re-fetches the index and retries once.
+	// account. appendVecReadMu pins every resolved source path until all reads
+	// finish, so an error is real I/O/corruption rather than a compaction race.
 	phaseStart = time.Now()
 	err = runBatchWorkers(ctx, len(chunks), func(job int) error {
 		chunk := chunks[job]
@@ -221,8 +248,7 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		file, openErr := os.Open(path)
 		if openErr != nil {
 			jobStats.openFailures++
-			jobStats.retryAccounts += uint64(len(chunk.locations))
-			return db.retryBatchLocations(ctx, slot, out, chunk.locations, jobStats)
+			return fmt.Errorf("open account appendvec %s: %w", path, openErr)
 		}
 		defer file.Close()
 
@@ -233,28 +259,12 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 			acct, readErr := readBatchAccountAt(file, path, location)
 			if readErr != nil {
 				jobStats.readFailures++
-				jobStats.retryAccounts++
-				placeholder, err := db.retryBatchLocation(slot, out, location)
-				if err != nil {
-					return err
-				}
-				if placeholder {
-					jobStats.placeholderObjects++
-				}
-				continue
+				return readErr
 			}
 			jobStats.appendVecAccounts++
 			jobStats.decodedAccountObjects++
 			jobStats.decodedAccountBytes += uint64(len(acct.Data))
-			voteAdmitted, commonAdmitted := db.cacheBatchReadAccount(location.pubkey, acct, admitCommon)
-			switch {
-			case voteAdmitted:
-				jobStats.voteCacheAdmissions++
-			case commonAdmitted:
-				jobStats.commonCacheAdmissions++
-			default:
-				jobStats.commonCacheAdmissionsSkipped++
-			}
+			decodedForCache[location.outputIdx] = acct
 			if acct.Lamports == 0 {
 				jobStats.placeholderObjects++
 			}
@@ -262,23 +272,201 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		}
 		return nil
 	})
-	stats.AppendVecReadNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 	for _, chunkStat := range chunkStats {
 		stats.AppendVecAccounts += chunkStat.appendVecAccounts
 		stats.OpenFailures += chunkStat.openFailures
 		stats.ReadFailures += chunkStat.readFailures
-		stats.RetryAccounts += chunkStat.retryAccounts
-		stats.CommonCacheAdmissions += chunkStat.commonCacheAdmissions
-		stats.CommonCacheAdmissionsSkipped += chunkStat.commonCacheAdmissionsSkipped
-		stats.VoteCacheAdmissions += chunkStat.voteCacheAdmissions
 		stats.DecodedAccountObjects += chunkStat.decodedAccountObjects
 		stats.DecodedAccountBytes += chunkStat.decodedAccountBytes
 		stats.PlaceholderObjects += chunkStat.placeholderObjects
 	}
+	stats.AppendVecReadNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
+	if err != nil {
+		return nil, stats, err
+	}
+
+	// File paths are no longer needed. Let compaction/rewind proceed while the
+	// decoded values pass through the epoch-checked selective cache policy.
+	db.appendVecReadMu.RUnlock()
+	appendVecPinned = false
+	phaseStart = time.Now()
+	publicationJobs := cold[:0]
+	for _, idx := range cold {
+		acct := decodedForCache[idx]
+		if acct == nil {
+			continue
+		}
+		isVote := solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr
+		if !isVote && !admitCommon[idx] {
+			stats.CommonCacheAdmissionsSkipped++
+			continue
+		}
+		publicationJobs = append(publicationJobs, idx)
+	}
+	publicationResults := make([]batchCacheAdmission, len(publicationJobs))
+	err = runBatchWorkers(ctx, len(publicationJobs), func(job int) error {
+		idx := publicationJobs[job]
+		acct := decodedForCache[idx]
+		publicationResults[job] = db.cacheBatchReadAccount(
+			pks[idx], acct, admitCommon[idx], cacheEpoch,
+		)
+		return nil
+	})
+	for _, result := range publicationResults {
+		switch result {
+		case batchCacheVote:
+			stats.VoteCacheAdmissions++
+		case batchCacheCommon:
+			stats.CommonCacheAdmissions++
+		case batchCacheCommonSkipped:
+			stats.CommonCacheAdmissionsSkipped++
+		case batchCacheVoteSkipped:
+			stats.VoteCacheAdmissionsSkipped++
+		case batchCacheEpochRejected:
+			stats.CachePublicationEpochRejects++
+		}
+	}
+	stats.CachePublicationNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
 	if err != nil {
 		return nil, stats, err
 	}
 	return out, stats, nil
+}
+
+func resolveBatchAccountLocations(
+	ctx context.Context,
+	snapshot *pebble.Snapshot,
+	pks []solana.PublicKey,
+	cold []int,
+	out []*accounts.Account,
+) ([]batchAccountLocation, []bool, error) {
+	if len(cold) < batchIndexIteratorThreshold {
+		return resolveBatchAccountLocationsPointGets(ctx, snapshot, pks, cold, out)
+	}
+	return resolveBatchAccountLocationsIterators(
+		ctx,
+		snapshot,
+		pks,
+		cold,
+		out,
+		batchIndexIteratorWorkers(len(cold)),
+	)
+}
+
+func batchIndexIteratorWorkers(keyCount int) int {
+	workers := (keyCount + batchIndexKeysPerIterator - 1) / batchIndexKeysPerIterator
+	workers = max(workers, batchIndexMinIterators)
+	workers = min(workers, batchIndexMaxIterators, runtime.GOMAXPROCS(0))
+	return min(keyCount, max(1, workers))
+}
+
+// resolveBatchAccountLocationsPointGets retains Pebble's specialized point
+// iterator for small batches, where sorting and a full merging iterator cost
+// more than the per-key setup it would amortize.
+func resolveBatchAccountLocationsPointGets(
+	ctx context.Context,
+	snapshot *pebble.Snapshot,
+	pks []solana.PublicKey,
+	cold []int,
+	out []*accounts.Account,
+) ([]batchAccountLocation, []bool, error) {
+	locations := make([]batchAccountLocation, len(cold))
+	found := make([]bool, len(cold))
+	err := runBatchWorkers(ctx, len(cold), func(job int) error {
+		idx := cold[job]
+		entryBytes, closer, err := snapshot.Get(pks[idx][:])
+		if err != nil {
+			if errors.Is(err, pebble.ErrNotFound) {
+				out[idx] = missingAccount(pks[idx])
+				return nil
+			}
+			return fmt.Errorf("index get %s: %w", pks[idx], err)
+		}
+		entry, decodeErr := UnmarshalAcctIdxEntryValue(entryBytes)
+		closeErr := closer.Close()
+		if decodeErr != nil {
+			return fmt.Errorf("unmarshal index entry for %s: %w", pks[idx], decodeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close index value for %s: %w", pks[idx], closeErr)
+		}
+		locations[job] = batchAccountLocation{outputIdx: idx, pubkey: pks[idx], entry: entry}
+		found[job] = true
+		return nil
+	})
+	return locations, found, err
+}
+
+// resolveBatchAccountLocationsIterators sorts the local cold-index slice and
+// assigns contiguous key ranges to worker-local iterators created from one
+// snapshot. Repeated monotonic SeekGE calls let Pebble reuse forward seek state
+// and amortize read-state/iterator setup without scanning sparse key gaps.
+func resolveBatchAccountLocationsIterators(
+	ctx context.Context,
+	snapshot *pebble.Snapshot,
+	pks []solana.PublicKey,
+	cold []int,
+	out []*accounts.Account,
+	workerCount int,
+) ([]batchAccountLocation, []bool, error) {
+	sort.Slice(cold, func(i, j int) bool {
+		return bytes.Compare(pks[cold[i]][:], pks[cold[j]][:]) < 0
+	})
+	locations := make([]batchAccountLocation, len(cold))
+	found := make([]bool, len(cold))
+	workerCount = min(len(cold), max(1, workerCount))
+
+	g, workerCtx := errgroup.WithContext(ctx)
+	for worker := range workerCount {
+		start := len(cold) * worker / workerCount
+		end := len(cold) * (worker + 1) / workerCount
+		g.Go(func() (retErr error) {
+			iter, err := snapshot.NewIterWithContext(workerCtx, &pebble.IterOptions{
+				KeyTypes: pebble.IterKeyTypePointsOnly,
+			})
+			if err != nil {
+				return fmt.Errorf("create account index iterator: %w", err)
+			}
+			defer func() {
+				if closeErr := iter.Close(); retErr == nil && closeErr != nil {
+					retErr = fmt.Errorf("close account index iterator: %w", closeErr)
+				}
+			}()
+
+			for job := start; job < end; job++ {
+				if err := workerCtx.Err(); err != nil {
+					return err
+				}
+				idx := cold[job]
+				if !iter.SeekGE(pks[idx][:]) {
+					if err := iter.Error(); err != nil {
+						return fmt.Errorf("index seek %s: %w", pks[idx], err)
+					}
+					out[idx] = missingAccount(pks[idx])
+					continue
+				}
+				if !bytes.Equal(iter.Key(), pks[idx][:]) {
+					out[idx] = missingAccount(pks[idx])
+					continue
+				}
+				entryBytes, err := iter.ValueAndErr()
+				if err != nil {
+					return fmt.Errorf("read index value for %s: %w", pks[idx], err)
+				}
+				entry, err := UnmarshalAcctIdxEntryValue(entryBytes)
+				if err != nil {
+					return fmt.Errorf("unmarshal index entry for %s: %w", pks[idx], err)
+				}
+				locations[job] = batchAccountLocation{outputIdx: idx, pubkey: pks[idx], entry: entry}
+				found[job] = true
+			}
+			return iter.Error()
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	return locations, found, nil
 }
 
 func readBatchAccountAt(file *os.File, path string, location batchAccountLocation) (*accounts.Account, error) {
@@ -295,32 +483,6 @@ func readBatchAccountAt(file *os.File, path string, location batchAccountLocatio
 	}
 	acct.Slot = location.entry.Slot
 	return acct, nil
-}
-
-func (db *AccountsDb) retryBatchLocations(ctx context.Context, slot uint64, out []*accounts.Account, locations []batchAccountLocation, stats *batchChunkReadStats) error {
-	for _, location := range locations {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		placeholder, err := db.retryBatchLocation(slot, out, location)
-		if err != nil {
-			return err
-		}
-		if placeholder {
-			stats.placeholderObjects++
-		}
-	}
-	return nil
-}
-
-func (db *AccountsDb) retryBatchLocation(slot uint64, out []*accounts.Account, location batchAccountLocation) (bool, error) {
-	acct, err := db.getStoredAccount(slot, location.pubkey)
-	if err != nil && err != ErrNoAccount {
-		return false, err
-	}
-	placeholder := acct == nil || acct.Lamports == 0
-	out[location.outputIdx] = batchAccountOrPlaceholder(location.pubkey, acct)
-	return placeholder, nil
 }
 
 func batchAccountOrPlaceholder(pubkey solana.PublicKey, acct *accounts.Account) *accounts.Account {

@@ -273,19 +273,27 @@ func (db *AccountsDb) CommitBatch(
 		}
 	}
 
-	// (7) The index epoch flip: entries + meta in one batch.
-	fire(db.foldHooks.beforeIndexCommit)
-	if err := db.applyManifestToIndex(manifest); err != nil {
-		return BatchCommitResult{}, err
-	}
-	fire(db.foldHooks.afterIndexCommit)
-
-	// (8) Publish.
+	// Prepare the cache refresh before entering the short publication section.
 	live := make([]*accounts.Account, 0, len(union))
 	for _, k := range keys {
 		live = append(live, union[k].acct)
 	}
-	db.refreshReadCaches(live)
+
+	// (7) The index epoch flip: entries + meta in one batch. Hold the read-cache
+	// publication lock through the refresh so an older batch read can neither
+	// observe a mixed index/cache view nor admit stale bytes after this commit.
+	fire(db.foldHooks.beforeIndexCommit)
+	db.readCacheEpochMu.Lock()
+	if err := db.applyManifestToIndex(manifest); err != nil {
+		db.readCacheEpochMu.Unlock()
+		return BatchCommitResult{}, err
+	}
+	db.readCacheEpoch++
+	db.refreshReadCachesLocked(live)
+	db.readCacheEpochMu.Unlock()
+	fire(db.foldHooks.afterIndexCommit)
+
+	// (8) Publish.
 	db.lastBatchSeq = batchSeq
 	db.durableThrough.Store(throughSlot)
 

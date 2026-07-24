@@ -31,10 +31,13 @@ type AccountLoader struct {
 
 	WorkingSetLookup Timing
 	InProgressLookup Timing
+	AppendVecPinWait Timing
 	CacheLookup      Timing
+	AdmissionFilter  Timing
 	IndexLookup      Timing
 	ReadPlanning     Timing
 	AppendVecRead    Timing
+	CachePublication Timing
 
 	RequestedKeys  uint64
 	DurableKeys    uint64
@@ -55,6 +58,8 @@ type AccountLoader struct {
 	CommonCacheAdmissions        uint64
 	CommonCacheAdmissionsSkipped uint64
 	VoteCacheAdmissions          uint64
+	VoteCacheAdmissionsSkipped   uint64
+	CachePublicationEpochRejects uint64
 
 	DecodedAccountObjects uint64
 	DecodedAccountBytes   uint64
@@ -72,22 +77,86 @@ type TurbineIngress struct {
 	ReplayAdmission      Timing
 }
 
+// VoteRewardDetails decomposes AlpenglowVoteRewards. Certificate timers retain
+// exact BLS verification; validator preparation measures only immutable
+// epoch-material lookup/build work.
+type VoteRewardDetails struct {
+	ValidatorPreparation       Timing
+	SkipCertificateValidation  Timing
+	NotarCertificateValidation Timing
+	FinalCertificateDecode     Timing
+	FinalCertificateValidation Timing
+	StatePreparation           Timing
+	AccountMutation            Timing
+
+	ValidatorCacheHits   uint64
+	ValidatorCacheMisses uint64
+	RewardValidators     uint64
+	FinalSigners         uint64
+	VoteAccountsUpdated  uint64
+}
+
 // Metrics for replaying a single block
 type BlockReplay struct {
 	Slot           uint64
 	AccountLoader  AccountLoader
 	TurbineIngress TurbineIngress
 
-	// Block-level latencies.
-	PreprocessBlock     Timing
-	LoadBlockAccounts   Timing
-	TxLoop              Timing
-	Reward              Timing
-	Rent                Timing
-	RunIncinerator      Timing
-	BlockUpdateAccounts Timing
-	AccountsDeltaHash   Timing
-	BankHash            Timing
+	// Exact slot wall-clock closure: SlotReplay equals the sum of the disjoint
+	// PreprocessBlock, ProcessBlock, and PostProcessBlock intervals. The more
+	// detailed timers below are nested diagnostics and must not be added to that
+	// top-level sum.
+	SlotReplay                   Timing
+	PreprocessBlock              Timing
+	ProcessBlock                 Timing
+	TransactionExecutionPlan     Timing
+	TransactionStatusValidation  Timing
+	DependencyPlannerPreparation Timing
+	LoadBlockAccounts            Timing
+	SlotCtxSetup                 Timing
+	// DependencyPlannerBuild is the graph/batch construction time nested
+	// within TxLoop. DependencyPlannerDispatch is the scheduler's wall-clock
+	// lifetime, including dependency waits, and is also nested within TxLoop.
+	DependencyPlannerBuild          Timing
+	DependencyPlannerDispatch       Timing
+	TxLoop                          Timing
+	Reward                          Timing
+	Rent                            Timing
+	RunIncinerator                  Timing
+	AlpenglowFooterClock            Timing
+	AlpenglowVoteRewards            Timing
+	VoteRewardDetails               VoteRewardDetails
+	CompileWritableAndModifiedAccts Timing
+	EnsureParentAccountsForModified Timing
+	// BlockUpdateAccounts is synchronous critical-path work: rooted-tail
+	// buffering (including its callback) or legacy store enqueue. It excludes
+	// legacy asynchronous disk completion.
+	BlockUpdateAccounts         Timing
+	TransactionStatusCommit     Timing
+	SignatureVerificationJoin   Timing
+	AccountsDeltaHash           Timing
+	LtHashDedupe                Timing
+	LtHashWorkerCompute         Timing
+	LtHashPartialReduce         Timing
+	BankHashFinalize            Timing
+	BankHash                    Timing
+	AlpenglowFooterVerification Timing
+	// PostProcessBlock is caller-side state publication and replay
+	// bookkeeping after ProcessBlock returns. TransactionStatusView,
+	// ChainTipUpdate, and ResumeContext are nested sub-phases; logging, summary
+	// generation, and metric I/O are deliberately excluded.
+	PostProcessBlock      Timing
+	TransactionStatusView Timing
+	ChainTipUpdate        Timing
+	ResumeContext         Timing
+
+	LtHashInputAccounts     uint64
+	LtHashUniqueAccounts    uint64
+	LtHashUnchangedAccounts uint64
+	LtHashCreatedAccounts   uint64
+	LtHashDeletedAccounts   uint64
+	LtHashOldDataBytes      uint64
+	LtHashNewDataBytes      uint64
 
 	// Tx-level latencies summed for all the txs in a block.
 	InstructionsAndAccountMetasFromTx  Timing
@@ -100,9 +169,28 @@ type BlockReplay struct {
 	IxLoop                             Timing
 	PostTxRentStates                   Timing
 	PostBalanceDivergenceCheck         Timing
-	TxUpdateAccounts                   Timing
+	// TxUpdateAccounts is the inclusive successful-transaction publication
+	// total. The TxPublish* fields below are nested children and must not be
+	// added to it. TouchedAccountState intentionally covers the complete scan,
+	// zero-lamport cleanup, MemAccounts.SetAccount, and RecordModifiedAcct loop:
+	// separating those calls requires observer-costly per-account clocks.
+	TxUpdateAccounts                 Timing
+	TxPublishRecordWritableAcct      Timing
+	TxPublishTouchedAccountState     Timing
+	TxPublishStakeVoteBookkeeping    Timing
+	TxPublicationTouchedAccounts     uint64
+	TxPublicationTouchedAccountBytes uint64
 
-	// Async part of tx latency
+	// TxFailedUpdateAccounts is the inclusive publication total for failed
+	// transactions that still charge the payer and may advance a durable nonce.
+	// Preparation, payer, and nonce timers are nested children.
+	TxFailedUpdateAccounts         Timing
+	TxFailedPublicationPreparation Timing
+	TxFailedPayerPublication       Timing
+	TxFailedNoncePublication       Timing
+
+	// Sigverify is summed asynchronous worker time. It overlaps other wall-clock
+	// phases; only SignatureVerificationJoin above is a disjoint blocking phase.
 	Sigverify Timing
 
 	// Ix-level latencies summed across all the instructions in a block.

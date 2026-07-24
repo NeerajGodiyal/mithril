@@ -30,10 +30,18 @@ func (entry *AccountIndexEntry) Unmarshal(in *[24]byte) {
 }
 
 func UnmarshalAcctIdxEntry(data []byte) (*AccountIndexEntry, error) {
-	if len(data) < 24 {
-		return nil, fmt.Errorf("UnmarshalAcctIdxEntry: input had %d < 24 minimum bytes", len(data))
+	out, err := UnmarshalAcctIdxEntryValue(data)
+	if err != nil {
+		return nil, err
 	}
-	out := &AccountIndexEntry{}
+	return &out, nil
+}
+
+func UnmarshalAcctIdxEntryValue(data []byte) (AccountIndexEntry, error) {
+	if len(data) < 24 {
+		return AccountIndexEntry{}, fmt.Errorf("UnmarshalAcctIdxEntry: input had %d < 24 minimum bytes", len(data))
+	}
+	out := AccountIndexEntry{}
 	out.Unmarshal((*[24]byte)(data[:24]))
 	return out, nil
 }

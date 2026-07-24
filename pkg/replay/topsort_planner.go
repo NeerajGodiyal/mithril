@@ -283,7 +283,16 @@ func TopsortPlanner(b *block.Block) [][]int {
 
 // TopsortPlanner outputs ints on out channel which have had their dependencies satisfied and can be run. On completion, return the int to the done channel.
 func TopsortPlannerStream(b *block.Block, out chan int, done chan int) {
+	topsortPlannerStream(b, out, done, nil)
+}
+
+// topsortPlannerStream exposes the graph-build boundary to replay metrics
+// without coupling the generally useful planner to the global collector.
+func topsortPlannerStream(b *block.Block, out chan int, done chan int, onGraphBuilt func()) {
 	adjList, inDegree := blockToDependencyGraph(b)
+	if onGraphBuilt != nil {
+		onGraphBuilt()
+	}
 
 	sent := 0
 	// Output a topological sorting of the transactions

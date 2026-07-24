@@ -399,6 +399,8 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 		effectiveStakes, totalEffectiveStake = filterEpochStakesForVAT(effectiveStakes, voteCache, voteMetadata, minimumBalance)
 		mlog.Log.FileOnlyf("VAT epoch stakes: admitted=%d/%d minimum_vote_balance=%d", len(effectiveStakes), len(scanResult.EffectiveStakes), minimumBalance)
 	}
+	epochStakes := make(map[solana.PublicKey]uint64, len(effectiveStakes))
+	epochVoteAccounts := make(map[solana.PublicKey]*epochstakes.VoteAccount, len(effectiveStakes))
 	for votePk, stake := range effectiveStakes {
 		voteAcct, exists := voteCache[votePk]
 		meta, hasMeta := voteMetadata[votePk]
@@ -414,7 +416,8 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 			if meta.Executable {
 				executable = 1
 			}
-			global.PutEpochStakesEntry(leaderScheduleEpoch, votePk, stake, &epochstakes.VoteAccount{
+			epochStakes[votePk] = stake
+			epochVoteAccounts[votePk] = &epochstakes.VoteAccount{
 				Lamports:            meta.Lamports,
 				NodePubkey:          voteAcct.NodePubkey(),
 				BlsPubkeyCompressed: voteAcct.BlsPubkeyCompressed(),
@@ -423,11 +426,11 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 				Owner:               meta.Owner,
 				Executable:          executable,
 				RentEpoch:           meta.RentEpoch,
-			})
+			}
 		}
 	}
-	global.PutEpochTotalStake(leaderScheduleEpoch, totalEffectiveStake)
+	global.PutEpochStakes(leaderScheduleEpoch, epochStakes, epochVoteAccounts, totalEffectiveStake)
 
-	maps.Copy(b.EpochStakesPerVoteAcct, global.EpochStakes(leaderScheduleEpoch))
+	maps.Copy(b.EpochStakesPerVoteAcct, epochStakes)
 	b.TotalEpochStake = totalEffectiveStake
 }

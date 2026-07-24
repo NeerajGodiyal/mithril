@@ -16,40 +16,59 @@ type LtHash struct {
 	value [numElements]uint16
 }
 
-func (ltHash *LtHash) calculateAcctHash(acct *accounts.Account) []byte {
-	hasher := blake3.New()
+// AccountHasher hashes accounts into reusable LtHash storage. It is intentionally
+// stateful and must not be shared between goroutines.
+//
+// Its zero value is ready to use. Keeping one AccountHasher per worker avoids
+// rebuilding the BLAKE3 state for every old and new account value.
+type AccountHasher struct {
+	hasher      blake3.Hasher
+	initialized bool
+}
+
+func (hasher *AccountHasher) reset() {
+	if hasher.initialized {
+		hasher.hasher.Reset()
+		return
+	}
+
+	hasher.hasher = *blake3.New()
+	hasher.initialized = true
+}
+
+// HashInto replaces dst with the LtHash contribution for acct. Accounts with
+// zero lamports do not contribute to the accounts LtHash.
+func (hasher *AccountHasher) HashInto(dst *LtHash, acct *accounts.Account) {
+	if acct.Lamports == 0 {
+		dst.Reset()
+		return
+	}
+
+	hasher.reset()
 
 	var lamportBytes [8]byte
 	binary.LittleEndian.PutUint64(lamportBytes[:], acct.Lamports)
-	_, _ = hasher.Write(lamportBytes[:])
+	_, _ = hasher.hasher.Write(lamportBytes[:])
 
-	_, _ = hasher.Write(acct.Data)
+	_, _ = hasher.hasher.Write(acct.Data)
 
+	var executableByte [1]byte
 	if acct.Executable {
-		_, _ = hasher.Write([]byte{1})
-	} else {
-		_, _ = hasher.Write([]byte{0})
+		executableByte[0] = 1
 	}
+	_, _ = hasher.hasher.Write(executableByte[:])
 
-	_, _ = hasher.Write(acct.Owner[:])
-	_, _ = hasher.Write(acct.Key[:])
+	_, _ = hasher.hasher.Write(acct.Owner[:])
+	_, _ = hasher.hasher.Write(acct.Key[:])
 
-	var data [2048]byte
-	digest := hasher.Digest()
-	digest.Read(data[:])
-
-	return data[:]
+	// BLAKE3's XOF writes directly into the reusable LtHash. The previous
+	// implementation first allocated a separate 2 KiB output and copied it.
+	_, _ = hasher.hasher.Digest().Read(dst.bytes())
 }
 
 func (ltHash *LtHash) InitWithAcct(acct *accounts.Account) *LtHash {
-	if acct.Lamports == 0 {
-		return &LtHash{}
-	}
-
-	hashData := ltHash.calculateAcctHash(acct)
-
-	bytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
-	copy(bytes, hashData)
+	var hasher AccountHasher
+	hasher.HashInto(ltHash, acct)
 
 	return ltHash
 }
@@ -75,16 +94,24 @@ func (ltHash *LtHash) InitWithHash(data []byte) *LtHash {
 		panic(fmt.Sprintf("wrong len of input data (%d)", len(data)))
 	}
 
-	bytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
-	copy(bytes, data)
+	for i := range numElements {
+		ltHash.value[i] = binary.LittleEndian.Uint16(data[i*2 : (i*2)+2])
+	}
 
 	return ltHash
 }
 
 func (ltHash *LtHash) initRandom() *LtHash {
-	randBytes := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
-	rand.Read(randBytes)
+	rand.Read(ltHash.bytes())
 	return ltHash
+}
+
+func (ltHash *LtHash) bytes() []byte {
+	return unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
+}
+
+func (ltHash *LtHash) Reset() {
+	clear(ltHash.value[:])
 }
 
 func (ltHash *LtHash) Clone() *LtHash {
@@ -125,13 +152,11 @@ func (ltHash *LtHash) Equals(other *LtHash) bool {
 }
 
 func (ltHash *LtHash) Checksum() []byte {
-	data := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
 	hasher := blake3.New()
-	hasher.Write(data)
+	hasher.Write(ltHash.bytes())
 	return hasher.Sum(nil)
 }
 
 func (ltHash *LtHash) Hash() []byte {
-	data := unsafe.Slice((*uint8)(unsafe.Pointer(&ltHash.value[0])), numElements*2)
-	return data
+	return ltHash.bytes()
 }

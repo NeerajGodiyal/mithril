@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"encoding/binary"
 	"math"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
@@ -105,6 +107,183 @@ func TestLeanResultCanCaptureDiagnostics(t *testing.T) {
 	assert.Nil(t, output.ProcessingResult.ProcessedTransaction)
 }
 
+func TestProcessTransactionPublicationMetrics(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		replay    bool
+		removeADH bool
+	}{
+		{name: "replay-rich", replay: true},
+		{name: "replay-lean-without-adh", replay: true, removeADH: true},
+		{name: "block-production-is-not-recorded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousMetrics := metrics.GlobalBlockReplay
+			defer func() { metrics.GlobalBlockReplay = previousMetrics }()
+			slotCtx, cleanup := newCommitTestSlotCtx()
+			defer cleanup()
+			slotCtx.Replay = test.replay
+			if test.removeADH {
+				slotCtx.Features.EnableFeature(features.RemoveAccountsDeltaHash, 0)
+			}
+			tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+			require.NoError(t, err)
+			metrics.GlobalBlockReplay = metrics.BlockReplay{}
+			var sigverify sync.WaitGroup
+			feeInfo, computeUnits, err := ProcessTransaction(slotCtx, &sigverify, tx, nil, nil, nil, false)
+			sigverify.Wait()
+			require.NoError(t, err)
+			require.NotNil(t, feeInfo)
+			assert.NotZero(t, computeUnits)
+
+			got := metrics.GlobalBlockReplay
+			if !test.replay {
+				assert.Zero(t, got.TxUpdateAccounts.Count)
+				assert.Zero(t, got.TxPublishRecordWritableAcct.Count)
+				assert.Zero(t, got.TxPublishTouchedAccountState.Count)
+				assert.Zero(t, got.TxPublishStakeVoteBookkeeping.Count)
+				assert.Zero(t, got.TxPublicationTouchedAccounts)
+				assert.Zero(t, got.TxPublicationTouchedAccountBytes)
+				return
+			}
+			assert.Equal(t, uint64(1), got.TxUpdateAccounts.Count)
+			if test.removeADH {
+				assert.Zero(t, got.TxPublishRecordWritableAcct.Count)
+			} else {
+				assert.Equal(t, uint64(1), got.TxPublishRecordWritableAcct.Count)
+			}
+			assert.Equal(t, uint64(1), got.TxPublishTouchedAccountState.Count)
+			assert.Equal(t, uint64(1), got.TxPublishStakeVoteBookkeeping.Count)
+			assert.Equal(t, uint64(2), got.TxPublicationTouchedAccounts)
+			assert.Zero(t, got.TxPublicationTouchedAccountBytes)
+			children := got.TxPublishRecordWritableAcct.SumNanoseconds +
+				got.TxPublishTouchedAccountState.SumNanoseconds +
+				got.TxPublishStakeVoteBookkeeping.SumNanoseconds
+			assert.LessOrEqual(t, children, got.TxUpdateAccounts.SumNanoseconds)
+		})
+	}
+}
+
+func TestProcessTransactionFailedPublicationMetrics(t *testing.T) {
+	for _, replay := range []bool{true, false} {
+		name := "block-production-is-not-recorded"
+		if replay {
+			name = "replay"
+		}
+		t.Run(name, func(t *testing.T) {
+			previousMetrics := metrics.GlobalBlockReplay
+			defer func() { metrics.GlobalBlockReplay = previousMetrics }()
+			slotCtx, cleanup := newCommitTestSlotCtx()
+			defer cleanup()
+			slotCtx.Replay = replay
+
+			tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(tx.Message.Instructions[0].Data), 12)
+			binary.LittleEndian.PutUint64(tx.Message.Instructions[0].Data[4:], math.MaxUint64)
+			payerBefore, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+			require.NoError(t, err)
+
+			metrics.GlobalBlockReplay = metrics.BlockReplay{}
+			var sigverify sync.WaitGroup
+			feeInfo, _, processErr := ProcessTransaction(slotCtx, &sigverify, tx, nil, nil, nil, false)
+			sigverify.Wait()
+			require.Error(t, processErr)
+			require.NotNil(t, feeInfo)
+			payerAfter, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+			require.NoError(t, err)
+			assert.Less(t, payerAfter.Lamports, payerBefore.Lamports)
+
+			got := metrics.GlobalBlockReplay
+			if !replay {
+				assert.Zero(t, got.TxFailedUpdateAccounts.Count)
+				assert.Zero(t, got.TxFailedPublicationPreparation.Count)
+				assert.Zero(t, got.TxFailedPayerPublication.Count)
+				assert.Zero(t, got.TxFailedNoncePublication.Count)
+				return
+			}
+			assert.Equal(t, uint64(1), got.TxFailedUpdateAccounts.Count)
+			assert.Equal(t, uint64(1), got.TxFailedPublicationPreparation.Count)
+			assert.Equal(t, uint64(1), got.TxFailedPayerPublication.Count)
+			assert.Zero(t, got.TxFailedNoncePublication.Count)
+			children := got.TxFailedPublicationPreparation.SumNanoseconds +
+				got.TxFailedPayerPublication.SumNanoseconds +
+				got.TxFailedNoncePublication.SumNanoseconds
+			assert.LessOrEqual(t, children, got.TxFailedUpdateAccounts.SumNanoseconds)
+			assert.Zero(t, got.TxUpdateAccounts.Count)
+		})
+	}
+}
+
+func TestHandleFailedTxNoncePublicationMetrics(t *testing.T) {
+	previousMetrics := metrics.GlobalBlockReplay
+	defer func() { metrics.GlobalBlockReplay = previousMetrics }()
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+	slotCtx.Replay = true
+
+	previousRecent := sealevel.SysvarCache.RecentBlockHashes.Sysvar
+	emptyRecent := sealevel.SysvarRecentBlockhashes{}
+	sealevel.SysvarCache.RecentBlockHashes.Sysvar = &emptyRecent
+	defer func() { sealevel.SysvarCache.RecentBlockHashes.Sysvar = previousRecent }()
+
+	authority := txfixture.PayerPubkey()
+	nonceKey := solana.PublicKey{0xD5}
+	durableNonce := [32]byte{0xAA}
+	nonceState := sealevel.NonceStateVersions{
+		Type: sealevel.NonceVersionCurrent,
+		Current: sealevel.NonceData{
+			IsInitialized: true,
+			Authority:     authority,
+			DurableNonce:  durableNonce,
+			FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: 5000},
+		},
+	}
+	nonceData, err := nonceState.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, slotCtx.SetAccount(nonceKey, &accounts.Account{
+		Key: nonceKey, Lamports: 1, Owner: addresses.SystemProgramAddr,
+		Data: nonceData, RentEpoch: math.MaxUint64,
+	}))
+	slotCtx.LastBlockhash = [32]byte{0x77}
+
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(t, err)
+	tx.Message.RecentBlockhash = durableNonce
+	instructionData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(instructionData, sealevel.SystemProgramInstrTypeAdvanceNonceAccount)
+	instruction := sealevel.Instruction{
+		ProgramId: addresses.SystemProgramAddr,
+		Accounts: []sealevel.AccountMeta{
+			{Pubkey: nonceKey, IsWritable: true},
+			{Pubkey: authority, IsSigner: true},
+		},
+		Data: instructionData,
+	}
+
+	metrics.GlobalBlockReplay = metrics.BlockReplay{}
+	feeInfo, handleErr := handleFailedTx(
+		slotCtx,
+		tx,
+		[]sealevel.Instruction{instruction},
+		&sealevel.ComputeBudgetLimits{},
+		sealevel.InstrErrInvalidArgument,
+		nil,
+	)
+	require.ErrorIs(t, handleErr, sealevel.InstrErrInvalidArgument)
+	require.NotNil(t, feeInfo)
+	assert.Contains(t, slotCtx.ModifiedAccts, txfixture.PayerPubkey())
+	assert.Contains(t, slotCtx.ModifiedAccts, nonceKey)
+	got := metrics.GlobalBlockReplay
+	assert.Equal(t, uint64(1), got.TxFailedUpdateAccounts.Count)
+	assert.Equal(t, uint64(1), got.TxFailedPublicationPreparation.Count)
+	assert.Equal(t, uint64(1), got.TxFailedPayerPublication.Count)
+	assert.Equal(t, uint64(1), got.TxFailedNoncePublication.Count)
+	children := got.TxFailedPublicationPreparation.SumNanoseconds +
+		got.TxFailedPayerPublication.SumNanoseconds + got.TxFailedNoncePublication.SumNanoseconds
+	assert.LessOrEqual(t, children, got.TxFailedUpdateAccounts.SumNanoseconds)
+}
+
 func BenchmarkLoadAndExecuteTransferResultMode(b *testing.B) {
 	slotCtx, cleanup := newCommitTestSlotCtx()
 	defer cleanup()
@@ -134,6 +313,44 @@ func BenchmarkLoadAndExecuteTransferResultMode(b *testing.B) {
 					b.Fatal(output.ProcessingResult.TransactionError)
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkApplySuccessfulTransactionPublicationMetrics(b *testing.B) {
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		b.Run(name, func(b *testing.B) {
+			previousMetrics := metrics.GlobalBlockReplay
+			defer func() { metrics.GlobalBlockReplay = previousMetrics }()
+			slotCtx, cleanup := newCommitTestSlotCtx()
+			defer cleanup()
+			slotCtx.Replay = enabled
+
+			tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+			require.NoError(b, err)
+			output := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
+				SlotCtx: slotCtx, Transaction: tx,
+			})
+			require.Nil(b, output.ProcessingResult.TransactionError)
+			require.NotNil(b, output.ExecCtx)
+			require.NotNil(b, output.ExecutionResult)
+
+			metrics.GlobalBlockReplay = metrics.BlockReplay{}
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if err := applySuccessfulTransactionState(slotCtx, output.ExecCtx, output.ExecutionResult); err != nil {
+						panic(err)
+					}
+				}
+			})
+			b.StopTimer()
+			b.ReportMetric(2, "touched/op")
 		})
 	}
 }
